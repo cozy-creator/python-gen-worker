@@ -460,7 +460,10 @@ DOWNLOAD/LOAD/UNLOAD enum values.
 | `snapshot` | O resolver | W downloader | required for ADOPT_COMPILE_CACHE |
 
 Every ModelOp is answered by ≥1 `ModelEvent` for the ref (success path emits
-ADOPTED; failure path emits FAILED).
+ADOPTED; failure path emits FAILED). Every terminal result echoes the exact
+`ModelOp.snapshot.digest` in `ModelEvent.snapshot_digest`. A missing or empty
+digest fails closed as `adopt_failed:missing_snapshot_digest` before any
+download, cache seeding, pipeline wrapping, or resident-state mutation.
 
 **ADOPT_COMPILE_CACHE** (hot adoption, #567): `ref` is a compile-cache flavor
 ref — `_system/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
@@ -482,6 +485,9 @@ at most one worker per release at a time, and only when the artifact's
 version key matches the pod (SKU + torch); W enforces the same checks
 defensively. Workers predating this kind ignore it silently (unknown enum, no
 ModelEvent); O treats the absence of a reply as not-adopted, never an error.
+O correlates adoption evidence by `(worker, ref, snapshot_digest)`, never by
+mutable `ref` alone. Thus a late terminal result for digest A cannot certify or
+fail a newer adoption of the same ref at digest B.
 
 ### ModelEvent (W → O)
 The single model-residency channel. Emitted for desired-state outcomes,
@@ -696,7 +702,7 @@ Model-op errors travel as `ModelEvent{FAILED, error}` with a closed-ish
 vocabulary: `oom`, `model_in_use`, `url_expired`, `digest_mismatch`,
 `insufficient_disk`, `download_failed`, `load_failed`, and — for
 ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
-`no_endpoint`, `not_resident`, `model_in_use`, `download`,
+`missing_snapshot_digest`, `no_endpoint`, `not_resident`, `model_in_use`, `download`,
 `artifact_missing`, `artifact_invalid`, `key_mismatch`, `no_target`,
 `warmup`, `no_warmup`, `cache_miss`}.
 

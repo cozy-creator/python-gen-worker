@@ -410,8 +410,10 @@ enum ModelOpKind {
   // ref (`_system/family-<f>#inductor-<sku>-torch<maj.min>`). The worker
   // downloads+verifies+seeds the cache, re-wraps the already-resident modules
   // of endpoints declaring compile family <f>, runs one warmup trace, and
-  // answers ModelEvent{ADOPTED, duration_ms}. ANY failure => stay eager and
-  // answer ModelEvent{FAILED, error:"adopt_failed:<reason>"}. Sent only to
+  // answers ModelEvent{ADOPTED, duration_ms, snapshot_digest}. ANY failure =>
+  // stay eager and answer ModelEvent{FAILED, error:"adopt_failed:<reason>",
+  // snapshot_digest}. Both terminal results echo the exact ModelOp snapshot
+  // digest; a missing digest fails closed before download or mutation. Sent only to
   // job-idle workers. Workers predating this kind ignore it silently (no
   // ModelEvent), which the orchestrator treats as not-adopted.
   MODEL_OP_KIND_ADOPT_COMPILE_CACHE = 4;
@@ -455,8 +457,11 @@ message ModelEvent {
   // whose successful stream.write delivery has not completed yet.
   uint64 host_ram_capacity_generation = 15;
   // Snapshot identity captured when this operation began. Both fields are
-  // required for exact evidence; empty/zero remains backward-compatible
+  // required for exact residency evidence; empty/zero remains backward-compatible
   // unknown state rather than being relabelled from current desired config.
+  // ADOPTED/FAILED terminal compile-cache results always echo the exact
+  // ModelOp.snapshot.digest (and use generation zero because ModelOp is not a
+  // DesiredResidency transition).
   string snapshot_digest = 16;
   uint64 residency_generation = 17;
 }

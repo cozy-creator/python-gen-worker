@@ -23,6 +23,8 @@ from gen_worker.registry import EndpointSpec
 FAMILY = "flux2-klein-4b"
 CACHE_REF = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 MODEL_REF = "acme/klein-finetune:latest"
+DIGEST_A = "blake3:" + "a" * 64
+DIGEST_B = "blake3:" + "b" * 64
 
 
 class _In(msgspec.Struct):
@@ -103,9 +105,14 @@ def _events(sent, state):
             if m.WhichOneof("msg") == "model_event" and m.model_event.state == state]
 
 
-def _adopt(ex, ref=CACHE_REF):
+def _adopt(ex, ref=CACHE_REF, digest=DIGEST_A):
     asyncio.run(ex.handle_model_op(
-        pb.ModelOp(op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE, ref=ref)))
+        pb.ModelOp(
+            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+            ref=ref,
+            snapshot=pb.Snapshot(digest=digest),
+        )
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +169,7 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
     adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
     assert len(adopted) == 1
     assert adopted[0].ref == CACHE_REF
+    assert adopted[0].snapshot_digest == DIGEST_A
     assert adopted[0].duration_ms >= 0
     # cache_hits/cache_misses/warmup_s are computed internally (gating the
     # cache_miss rollback below) but intentionally not sent on the wire —
@@ -209,6 +217,7 @@ def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
     _adopt(ex)
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    assert failed[-1].snapshot_digest == DIGEST_A
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -341,6 +350,102 @@ def test_adopt_artifact_missing(tmp_path):
     _adopt(ex)
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert failed and failed[-1].error == "adopt_failed:artifact_missing"
+
+
+@pytest.mark.parametrize("digest", [None, "", "   "])
+def test_adopt_missing_digest_fails_before_work_or_identity_inference(
+    tmp_path, monkeypatch, digest,
+):
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    ex.store._resident_identities[CACHE_REF] = ("resident-digest", 42)
+
+    async def _must_not_adopt(*args, **kwargs):  # pragma: no cover
+        pytest.fail("missing digest must fail before adoption work")
+
+    monkeypatch.setattr(ex, "_adopt_compile_cache", _must_not_adopt)
+    kwargs = {
+        "op": pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+        "ref": CACHE_REF,
+    }
+    if digest is not None:
+        kwargs["snapshot"] = pb.Snapshot(digest=digest)
+
+    asyncio.run(ex.handle_model_op(pb.ModelOp(**kwargs)))
+
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:missing_snapshot_digest"
+    assert failed[0].snapshot_digest == ""
+    assert failed[0].residency_generation == 0
+    assert ex.store.resident_identity(CACHE_REF) == ("resident-digest", 42)
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+
+
+def test_adopt_unexpected_failure_echoes_operation_digest(tmp_path, monkeypatch):
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+
+    async def _explode(*args, **kwargs):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(ex, "_adopt_compile_cache", _explode)
+    _adopt(ex, digest=DIGEST_B)
+
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtimeerror"
+    assert failed[0].snapshot_digest == DIGEST_B
+
+
+def test_adopt_same_ref_out_of_order_keeps_each_operation_digest(tmp_path, monkeypatch):
+    """A late result for digest A must remain distinguishable from newer B."""
+    _artifact(tmp_path)
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    monkeypatch.setattr(cc, "apply", lambda *args, **kwargs: True)
+
+    counter = {"hits": 0}
+
+    def _counters():
+        counter["hits"] += 1
+        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
+
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+
+    async def run():
+        a_started = asyncio.Event()
+        release_a = asyncio.Event()
+
+        async def _ensure(ref, snapshot=None, *, binding=None):
+            if snapshot is not None and snapshot.digest == DIGEST_A:
+                a_started.set()
+                await release_a.wait()
+            return tmp_path / "snap"
+
+        ex.store.ensure_local = _ensure  # type: ignore[method-assign]
+        op_a = pb.ModelOp(
+            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+            ref=CACHE_REF,
+            snapshot=pb.Snapshot(digest=DIGEST_A),
+        )
+        op_b = pb.ModelOp(
+            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+            ref=CACHE_REF,
+            snapshot=pb.Snapshot(digest=DIGEST_B),
+        )
+
+        task_a = asyncio.create_task(ex.handle_model_op(op_a))
+        await a_started.wait()
+        await ex.handle_model_op(op_b)
+        release_a.set()
+        await task_a
+
+    asyncio.run(run())
+
+    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
+    assert [event.ref for event in adopted] == [CACHE_REF, CACHE_REF]
+    assert [event.snapshot_digest for event in adopted] == [DIGEST_B, DIGEST_A]
 
 
 def test_old_worker_semantics_unknown_kind_is_silent(tmp_path):

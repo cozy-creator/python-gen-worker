@@ -3202,19 +3202,39 @@ class Executor:
         self.store.bind_loop()
         ref = op.ref
         snap = op.snapshot if op.HasField("snapshot") else None
+        snapshot_digest = snap.digest if snap is not None else ""
+        if not snapshot_digest.strip():
+            # Adoption is one-shot evidence for one immutable artifact.  A
+            # mutable ref (or the resident identity for that ref) cannot
+            # identify which bytes this operation actually used.
+            await self._send(pb.WorkerMessage(
+                model_event=self.store.model_event(
+                    ref,
+                    pb.MODEL_STATE_FAILED,
+                    identity=None,
+                    error="adopt_failed:missing_snapshot_digest",
+                )
+            ))
+            return
         try:
-            await self._adopt_compile_cache(ref, snap)
+            await self._adopt_compile_cache(ref, snap, snapshot_digest)
         except Exception as exc:
             logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
             await self._send(pb.WorkerMessage(
                 model_event=self.store.model_event(
                     ref,
                     pb.MODEL_STATE_FAILED,
+                    identity=(snapshot_digest, 0),
                     error=f"adopt_failed:{type(exc).__name__.lower()}",
                 )
             ))
 
-    async def _adopt_compile_cache(self, ref: str, snap: Optional[pb.Snapshot]) -> None:
+    async def _adopt_compile_cache(
+        self,
+        ref: str,
+        snap: Optional[pb.Snapshot],
+        snapshot_digest: str,
+    ) -> None:
         """Hot adoption (th#567): download+verify a compiled artifact and
         re-wrap the already-resident modules in place — weights untouched, no
         reload, one warmup. Handles BOTH cell kinds on the same rails: an
@@ -3231,6 +3251,7 @@ class Executor:
             await self._send(pb.WorkerMessage(
                 model_event=self.store.model_event(
                     ref, pb.MODEL_STATE_FAILED,
+                    identity=(snapshot_digest, 0),
                     error=f"adopt_failed:{reason}",
                 )
             ))
@@ -3395,7 +3416,10 @@ class Executor:
         # reader for them (pgw#514/P3; see the proto field comments).
         await self._send(pb.WorkerMessage(
             model_event=self.store.model_event(
-                ref, pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms,
+                ref,
+                pb.MODEL_STATE_ADOPTED,
+                identity=(snapshot_digest, 0),
+                duration_ms=duration_ms,
             )
         ))
 
