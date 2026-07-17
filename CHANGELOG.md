@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.36.1 (2026-07-17)
+
+- **gw#567: prompt-corpus / eval-set artifacts drop parquet — jsonl
+  shards.** `convert.dataset.Dataset` and `conversion.prompt_corpus`
+  (training-endpoints) wrote/read `data/train-*.parquet` via pyarrow;
+  no internal consumer needed columnar storage at these row counts.
+  Switched to `data/train-*.jsonl` (one JSON object per row; `bytes`
+  columns base64-wrapped as `{"__bytes_b64__": ...}`). `Dataset.shards()`
+  replaces `parquet_shards()`; `write_jsonl_shard()` is the shared
+  writer. Dropped the `[datasets]` pyarrow extra — no lazy pyarrow
+  import left in this codepath. Pre-launch: no back-compat reader for
+  old parquet corpora, regenerate.
+
 ## 0.36.0 (2026-07-17)
 
 - **gw#564: sm_89 W8A8 inference lane — per-tensor fp8 GEMM + per-channel

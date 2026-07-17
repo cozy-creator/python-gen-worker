@@ -25,7 +25,7 @@ from .clone import (
     run_clone,
 )
 from .component import Component
-from .dataset import Dataset
+from .dataset import Dataset, write_jsonl_shard
 from .hub import CommitFile, CommitResult, HubClient, HubPublishError
 from .ingest import IngestedSource, ingest_civitai, ingest_huggingface
 from .loaded_component import LoadedComponent
@@ -59,6 +59,7 @@ __all__ = [
     "LoadedComponent",
     "FileLayout",
     "Dataset",
+    "write_jsonl_shard",
     "ProducedFlavor",
     "streaming_cast_snapshot",
     "streaming_dtype_cast",
