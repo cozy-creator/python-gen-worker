@@ -149,7 +149,7 @@ class Hello(_message.Message):
     def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., state: _Optional[_Union[StateDelta, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelResidency, _Mapping]]] = ..., in_flight: _Optional[_Iterable[_Union[InFlightJob, _Mapping]]] = ...) -> None: ...
 
 class WorkerResources(_message.Message):
-    __slots__ = ("gpu_count", "vram_total_bytes", "gpu_name", "gpu_sm", "installed_libs", "image_digest", "git_commit", "instance_id", "host_canary")
+    __slots__ = ("gpu_count", "vram_total_bytes", "gpu_name", "gpu_sm", "installed_libs", "image_digest", "git_commit", "instance_id", "host_canary", "torch_version")
     GPU_COUNT_FIELD_NUMBER: _ClassVar[int]
     VRAM_TOTAL_BYTES_FIELD_NUMBER: _ClassVar[int]
     GPU_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -159,6 +159,7 @@ class WorkerResources(_message.Message):
     GIT_COMMIT_FIELD_NUMBER: _ClassVar[int]
     INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]
     HOST_CANARY_FIELD_NUMBER: _ClassVar[int]
+    TORCH_VERSION_FIELD_NUMBER: _ClassVar[int]
     gpu_count: int
     vram_total_bytes: int
     gpu_name: str
@@ -168,7 +169,8 @@ class WorkerResources(_message.Message):
     git_commit: str
     instance_id: str
     host_canary: HostCanary
-    def __init__(self, gpu_count: _Optional[int] = ..., vram_total_bytes: _Optional[int] = ..., gpu_name: _Optional[str] = ..., gpu_sm: _Optional[str] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., instance_id: _Optional[str] = ..., host_canary: _Optional[_Union[HostCanary, _Mapping]] = ...) -> None: ...
+    torch_version: str
+    def __init__(self, gpu_count: _Optional[int] = ..., vram_total_bytes: _Optional[int] = ..., gpu_name: _Optional[str] = ..., gpu_sm: _Optional[str] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., instance_id: _Optional[str] = ..., host_canary: _Optional[_Union[HostCanary, _Mapping]] = ..., torch_version: _Optional[str] = ...) -> None: ...
 
 class HostCanary(_message.Message):
     __slots__ = ("memcpy_gbps", "h2d_gbps", "d2h_gbps", "pinned_alloc_ok", "cpu_single_mbps", "cpu_multi_mbps", "vcpus", "ram_total_gb", "duration_ms")
@@ -443,17 +445,19 @@ class CancelJob(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class ModelOp(_message.Message):
-    __slots__ = ("op", "ref", "snapshot")
+    __slots__ = ("op", "ref", "snapshot", "operation_id")
     OP_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
+    OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
     op: ModelOpKind
     ref: str
     snapshot: Snapshot
-    def __init__(self, op: _Optional[_Union[ModelOpKind, str]] = ..., ref: _Optional[str] = ..., snapshot: _Optional[_Union[Snapshot, _Mapping]] = ...) -> None: ...
+    operation_id: str
+    def __init__(self, op: _Optional[_Union[ModelOpKind, str]] = ..., ref: _Optional[str] = ..., snapshot: _Optional[_Union[Snapshot, _Mapping]] = ..., operation_id: _Optional[str] = ...) -> None: ...
 
 class ModelEvent(_message.Message):
-    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s", "host_ram_required_bytes", "host_ram_available_before_bytes", "host_ram_available_after_bytes", "host_ram_evicted_refs", "host_ram_capacity_generation", "snapshot_digest", "residency_generation")
+    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s", "host_ram_required_bytes", "host_ram_available_before_bytes", "host_ram_available_after_bytes", "host_ram_evicted_refs", "host_ram_capacity_generation", "snapshot_digest", "residency_generation", "operation_id")
     REF_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -471,6 +475,7 @@ class ModelEvent(_message.Message):
     HOST_RAM_CAPACITY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
     RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
     ref: str
     state: ModelState
     vram_bytes: int
@@ -488,7 +493,8 @@ class ModelEvent(_message.Message):
     host_ram_capacity_generation: int
     snapshot_digest: str
     residency_generation: int
-    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ...) -> None: ...
+    operation_id: str
+    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")

@@ -23,6 +23,10 @@ from gen_worker.registry import EndpointSpec
 FAMILY = "flux2-klein-4b"
 CACHE_REF = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 MODEL_REF = "acme/klein-finetune:latest"
+DIGEST_A = "blake3:" + "a" * 64
+DIGEST_B = "blake3:" + "b" * 64
+OP_A = "adopt-operation-a"
+OP_B = "adopt-operation-b"
 
 
 class _In(msgspec.Struct):
@@ -103,9 +107,23 @@ def _events(sent, state):
             if m.WhichOneof("msg") == "model_event" and m.model_event.state == state]
 
 
-def _adopt(ex, ref=CACHE_REF):
+def _assert_failed(sent, error, digest=DIGEST_A, operation_id=OP_A):
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert failed and failed[-1].error == error
+    assert failed[-1].snapshot_digest == digest
+    assert failed[-1].operation_id == operation_id
+    return failed[-1]
+
+
+def _adopt(ex, ref=CACHE_REF, digest=DIGEST_A, operation_id=OP_A):
     asyncio.run(ex.handle_model_op(
-        pb.ModelOp(op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE, ref=ref)))
+        pb.ModelOp(
+            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+            ref=ref,
+            snapshot=pb.Snapshot(digest=digest),
+            operation_id=operation_id,
+        )
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +180,8 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
     adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
     assert len(adopted) == 1
     assert adopted[0].ref == CACHE_REF
+    assert adopted[0].snapshot_digest == DIGEST_A
+    assert adopted[0].operation_id == OP_A
     assert adopted[0].duration_ms >= 0
     # cache_hits/cache_misses/warmup_s are computed internally (gating the
     # cache_miss rollback below) but intentionally not sent on the wire —
@@ -188,8 +208,7 @@ def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "unwrap", lambda obj: unwrapped.append(obj))
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:cache_miss"
+    _assert_failed(sent, "adopt_failed:cache_miss")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
     assert any(isinstance(o, _Pipe) for o in unwrapped)  # rollback ran
 
@@ -207,8 +226,7 @@ def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    _assert_failed(sent, "adopt_failed:key_mismatch")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -238,8 +256,7 @@ def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
     _fake_counters(monkeypatch, hits=5, misses=0)  # counters moved elsewhere: still unprovable
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:no_warmup"
+    _assert_failed(sent, "adopt_failed:no_warmup")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -256,8 +273,7 @@ def test_adopt_prep_mode_drift_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "apply", lambda *a, **k: applied.append(1) or True)
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    _assert_failed(sent, "adopt_failed:key_mismatch")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
     assert not applied  # rejected before the wrap
 
@@ -270,8 +286,7 @@ def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
     monkeypatch.setattr(_Endpoint, "warmup", lambda self: 1 / 0)
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:warmup"
+    _assert_failed(sent, "adopt_failed:warmup")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -287,8 +302,7 @@ def test_adopt_key_mismatch_stays_eager(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    _assert_failed(sent, "adopt_failed:key_mismatch")
 
 
 def test_adopt_refuses_while_jobs_in_flight(tmp_path):
@@ -305,8 +319,7 @@ def test_adopt_refuses_while_jobs_in_flight(tmp_path):
 
     ex.store.ensure_local = _no_download  # type: ignore[method-assign]
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:model_in_use"
+    _assert_failed(sent, "adopt_failed:model_in_use")
     assert calls == []  # refused before any download
 
 
@@ -314,24 +327,21 @@ def test_adopt_no_endpoint_for_family(tmp_path):
     spec = _spec(Compile(shapes=((768, 768),), family="sdxl"))
     ex, sent = _wire_executor(spec, tmp_path)
     _adopt(ex)  # ref names flux2-klein-4b; only sdxl is declared
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:no_endpoint"
+    _assert_failed(sent, "adopt_failed:no_endpoint")
 
 
 def test_adopt_not_resident(tmp_path):
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path, ready=False, resident=False)
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:not_resident"
+    _assert_failed(sent, "adopt_failed:not_resident")
 
 
 def test_adopt_bad_ref(tmp_path):
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
     _adopt(ex, ref="acme/not-a-cache:latest")
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:bad_ref"
+    _assert_failed(sent, "adopt_failed:bad_ref")
 
 
 def test_adopt_artifact_missing(tmp_path):
@@ -339,8 +349,151 @@ def test_adopt_artifact_missing(tmp_path):
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
     _adopt(ex)
+    _assert_failed(sent, "adopt_failed:artifact_missing")
+
+
+@pytest.mark.parametrize(
+    ("digest", "operation_id", "error"),
+    [
+        (None, OP_A, "adopt_failed:missing_snapshot_digest"),
+        ("", OP_A, "adopt_failed:missing_snapshot_digest"),
+        ("   ", OP_A, "adopt_failed:missing_snapshot_digest"),
+        (DIGEST_A, None, "adopt_failed:missing_operation_id"),
+        (DIGEST_A, "", "adopt_failed:missing_operation_id"),
+        (DIGEST_A, "   ", "adopt_failed:missing_operation_id"),
+    ],
+)
+def test_adopt_missing_identity_fails_before_work_or_resident_inference(
+    tmp_path, monkeypatch, digest, operation_id, error,
+):
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    ex.store._resident_identities[CACHE_REF] = ("resident-digest", 42)
+
+    async def _must_not_adopt(*args, **kwargs):  # pragma: no cover
+        pytest.fail("missing digest must fail before adoption work")
+
+    monkeypatch.setattr(ex, "_adopt_compile_cache", _must_not_adopt)
+    kwargs = {
+        "op": pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+        "ref": CACHE_REF,
+    }
+    if digest is not None:
+        kwargs["snapshot"] = pb.Snapshot(digest=digest)
+    if operation_id is not None:
+        kwargs["operation_id"] = operation_id
+
+    asyncio.run(ex.handle_model_op(pb.ModelOp(**kwargs)))
+
     failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:artifact_missing"
+    assert len(failed) == 1
+    assert failed[0].error == error
+    assert failed[0].snapshot_digest == (digest or "")
+    assert failed[0].operation_id == (operation_id or "")
+    assert failed[0].residency_generation == 0
+    assert ex.store.resident_identity(CACHE_REF) == ("resident-digest", 42)
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+
+
+def test_adopt_unexpected_failure_echoes_operation_digest(tmp_path, monkeypatch):
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+
+    async def _explode(*args, **kwargs):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(ex, "_adopt_compile_cache", _explode)
+    _adopt(ex, digest=DIGEST_B)
+
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtimeerror"
+    assert failed[0].snapshot_digest == DIGEST_B
+    assert failed[0].operation_id == OP_A
+
+
+@pytest.mark.parametrize("digest_b", [DIGEST_A, DIGEST_B])
+def test_adopt_serializes_same_ref_ops_across_transport_reconnect(
+    tmp_path, monkeypatch, digest_b,
+):
+    """Old-session A finishes on the new transport before B may mutate."""
+    _artifact(tmp_path)
+    spec = _spec()
+    ex, old_transport = _wire_executor(spec, tmp_path)
+    new_transport: list[pb.WorkerMessage] = []
+    active_transport = {"sent": old_transport}
+
+    async def _send(msg: pb.WorkerMessage) -> None:
+        active_transport["sent"].append(msg)
+
+    ex._send = _send
+    monkeypatch.setattr(cc, "apply", lambda *args, **kwargs: True)
+
+    counter = {"hits": 0}
+
+    def _counters():
+        counter["hits"] += 1
+        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
+
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+
+    async def run():
+        a_started = asyncio.Event()
+        release_a = asyncio.Event()
+        entered = 0
+
+        async def _ensure(ref, snapshot=None, *, binding=None):
+            nonlocal entered
+            entered += 1
+            if entered == 1:
+                a_started.set()
+                await release_a.wait()
+            return tmp_path / "snap"
+
+        ex.store.ensure_local = _ensure  # type: ignore[method-assign]
+        op_a = pb.ModelOp(
+            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+            ref=CACHE_REF,
+            snapshot=pb.Snapshot(digest=DIGEST_A),
+            operation_id=OP_A,
+        )
+        op_b = pb.ModelOp(
+            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+            ref=CACHE_REF,
+            snapshot=pb.Snapshot(digest=digest_b),
+            operation_id=OP_B,
+        )
+
+        task_a = asyncio.create_task(ex.handle_model_op(op_a))
+        await a_started.wait()
+        active_transport["sent"] = new_transport
+        task_b = asyncio.create_task(ex.handle_model_op(op_b))
+        await asyncio.sleep(0)
+        assert entered == 1  # B cannot enter download while A owns the lock.
+        release_a.set()
+        await asyncio.gather(task_a, task_b)
+        assert entered == 2
+
+    asyncio.run(run())
+
+    assert old_transport == []
+    adopted = _events(new_transport, pb.MODEL_STATE_ADOPTED)
+    assert [event.ref for event in adopted] == [CACHE_REF, CACHE_REF]
+    assert [event.snapshot_digest for event in adopted] == [DIGEST_A, digest_b]
+    assert [event.operation_id for event in adopted] == [OP_A, OP_B]
+
+
+def test_ordinary_model_events_never_spoof_an_adoption_operation_id(tmp_path):
+    spec = _spec()
+    ex, _sent = _wire_executor(spec, tmp_path)
+    ordinary = ex.store.model_event(
+        MODEL_REF,
+        pb.MODEL_STATE_IN_RAM,
+        identity=(DIGEST_A, 7),
+    )
+    assert ordinary.snapshot_digest == DIGEST_A
+    assert ordinary.residency_generation == 7
+    assert ordinary.operation_id == ""
 
 
 def test_old_worker_semantics_unknown_kind_is_silent(tmp_path):

@@ -25,7 +25,7 @@ def probe_hardware() -> Dict[str, Any]:
     """Static hardware facts + gate inputs. torch is optional."""
     info: Dict[str, Any] = {
         "gpu_count": 0, "gpu_total_mem": 0, "gpu_free_mem": 0,
-        "gpu_name": "", "gpu_sm": "", "installed_libs": [],
+        "gpu_name": "", "gpu_sm": "", "torch_version": "", "installed_libs": [],
     }
     try:
         import torch
@@ -44,6 +44,7 @@ def probe_hardware() -> Dict[str, Any]:
 
         caps = detect_worker_capabilities()
         info["installed_libs"] = list(caps.installed_libs or [])
+        info["torch_version"] = str(caps.torch_version or "")
         if caps.gpu_sm:
             info["gpu_sm"] = str(int(caps.gpu_sm))
     except Exception:
@@ -145,6 +146,7 @@ class Lifecycle:
             vram_total_bytes=int(hw.get("gpu_total_mem") or 0),
             gpu_name=str(hw.get("gpu_name") or ""),
             gpu_sm=str(hw.get("gpu_sm") or ""),
+            torch_version=str(hw.get("torch_version") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             image_digest=self._settings.worker_image_digest,
             # git_commit intentionally unpopulated (pgw#514/P4): no launcher

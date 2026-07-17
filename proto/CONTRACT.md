@@ -196,6 +196,7 @@ Static per-boot facts. Never re-sent mid-connection.
 | `image_digest` | W env | O resource-profile keying + triage | worker image sha256 |
 | `git_commit` | W env | O triage/display | build provenance |
 | `instance_id` | W env | O provider bookkeeping (e.g. runpod pod retire) | cloud instance id; empty for local |
+| `torch_version` | W runtime probe | O Inductor-cell compatibility filter | full actual `torch.__version__`; O fails closed when absent or major.minor differs from the selected cell |
 
 ### ModelResidency (embedded in Hello)
 
@@ -458,9 +459,14 @@ DOWNLOAD/LOAD/UNLOAD enum values.
 | `op` | O | W model layer | ADOPT_COMPILE_CACHE only |
 | `ref` | O | W | canonical ref |
 | `snapshot` | O resolver | W downloader | required for ADOPT_COMPILE_CACHE |
+| `operation_id` | O adoption controller | W adoption handler | required opaque identity for this one adoption attempt |
 
 Every ModelOp is answered by ≥1 `ModelEvent` for the ref (success path emits
-ADOPTED; failure path emits FAILED).
+ADOPTED; failure path emits FAILED). Every terminal result echoes the exact
+`ModelOp.snapshot.digest` and `ModelOp.operation_id` in the matching ModelEvent.
+A missing/empty operation ID or digest fails closed as
+`adopt_failed:missing_operation_id` or `adopt_failed:missing_snapshot_digest`
+before any download, cache seeding, pipeline wrapping, or resident-state mutation.
 
 **ADOPT_COMPILE_CACHE** (hot adoption, #567): `ref` is a compile-cache flavor
 ref — `_system/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
@@ -482,6 +488,12 @@ at most one worker per release at a time, and only when the artifact's
 version key matches the pod (SKU + torch); W enforces the same checks
 defensively. Workers predating this kind ignore it silently (unknown enum, no
 ModelEvent); O treats the absence of a reply as not-adopted, never an error.
+W serializes the entire adoption operation worker-wide, including download,
+seed, re-wrap, warmup, rollback, and terminal evidence; two commands cannot
+concurrently mutate resident modules. O correlates adoption evidence by active
+worker session plus `(ref, snapshot_digest, operation_id)`, never by mutable
+`ref` alone. Thus a late terminal result from operation A cannot certify or
+fail operation B, including when both commands target the same digest.
 
 ### ModelEvent (W → O)
 The single model-residency channel. Emitted for desired-state outcomes,
@@ -505,6 +517,7 @@ model-ready signals, and the JSON download-event fabric.
 | `host_ram_capacity_generation` | W executor | O capacity fencing | process-monotonic observation generation, fenced within the active Connect stream; the consumer resets its numeric fence on each Hello re-baseline, while a same-process reconnect replays only undelivered satisfying progress; progress clears only the same ref's older failed generation |
 | `snapshot_digest` | W exact materialization operation | O immutable residency identity | digest operated on by this event; empty is unknown and O MUST NOT fill it from the ref's current tag target |
 | `residency_generation` | W desired-state receiver | O per-ref event fence | desired generation captured when the operation began; lower generations and same-generation digest conflicts are stale and do not mutate residency |
+| `operation_id` | W adoption handler | O adoption controller | exact opaque ADOPT_COMPILE_CACHE attempt identity on terminal ADOPTED/FAILED; empty on ordinary residency events |
 
 **State machine per (worker, ref):** `DOWNLOADING → ON_DISK → IN_RAM ⇄ IN_VRAM`,
 demotions emit the new lower tier, `EVICTED` = removed from disk (fully gone).
@@ -696,7 +709,8 @@ Model-op errors travel as `ModelEvent{FAILED, error}` with a closed-ish
 vocabulary: `oom`, `model_in_use`, `url_expired`, `digest_mismatch`,
 `insufficient_disk`, `download_failed`, `load_failed`, and — for
 ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
-`no_endpoint`, `not_resident`, `model_in_use`, `download`,
+`missing_operation_id`, `missing_snapshot_digest`, `no_endpoint`, `not_resident`,
+`model_in_use`, `download`,
 `artifact_missing`, `artifact_invalid`, `key_mismatch`, `no_target`,
 `warmup`, `no_warmup`, `cache_miss`}.
 

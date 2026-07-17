@@ -203,13 +203,15 @@ def test_host_canary_rides_hello_worker_resources(monkeypatch) -> None:
     assert resources.host_canary.memcpy_gbps == 8.5
     assert resources.host_canary.vcpus == 32
     assert resources.host_canary.duration_ms == 900
+    assert resources.torch_version == "2.13.0+cu130"
 
 
 class _FakeLifecycle:
     """Just enough state for build_resources."""
 
     hardware: dict = {"gpu_count": 0, "gpu_total_mem": 0, "gpu_name": "",
-                      "gpu_sm": "", "installed_libs": []}
+                      "gpu_sm": "", "torch_version": "2.13.0+cu130",
+                      "installed_libs": []}
 
     class _settings:  # noqa: D106 - namespace stub
         worker_image_digest = ""
