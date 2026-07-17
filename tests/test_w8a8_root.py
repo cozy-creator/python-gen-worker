@@ -173,7 +173,7 @@ def test_scale_free_root_fp8_never_detects(source_root: Path, tmp_path: Path) ->
 def test_dequant_lane_constructs_correct_weights(
     source_root: Path, w8a8_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(w8a8, "scaled_mm_supported", lambda: False)
+    monkeypatch.setattr(w8a8, "w8a8_gemm_mode", lambda: "")
     pipe = load_from_pretrained(_TinyRootPipeline, w8a8_root)
     assert pipe._cozy_weight_lane == "bf16-resident"
     assert pipeline_weight_lane(pipe) == ""
@@ -196,7 +196,7 @@ def test_swap_puts_block_linears_on_fp8(
 ) -> None:
     """scaled_mm host: worker swap replaces exactly the quantized Linears
     (module surgery is device-agnostic; forward needs the GPU lane below)."""
-    monkeypatch.setattr(w8a8, "scaled_mm_supported", lambda: True)
+    monkeypatch.setattr(w8a8, "w8a8_gemm_mode", lambda: "rowwise")
     pipe = load_from_pretrained(_TinyRootPipeline, w8a8_root)
     assert pipe._cozy_weight_lane == "w8a8"
     assert pipeline_weight_lane(pipe) == "w8a8"
@@ -266,7 +266,7 @@ gpu = pytest.mark.skipif(not _cuda_sm89(), reason="needs CUDA sm_89+ (fp8 tensor
 def test_root_pipeline_serves_on_scaled_mm_lane(
     source_root: Path, w8a8_root: Path,
 ) -> None:
-    w8a8.scaled_mm_supported.cache_clear()
+    w8a8.w8a8_gemm_mode.cache_clear()
     pipe = load_from_pretrained(_TinyRootPipeline, w8a8_root)
     assert pipe._cozy_weight_lane == "w8a8"
     model = pipe.transformer.to("cuda")

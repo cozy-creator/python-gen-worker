@@ -95,7 +95,7 @@ def test_dequant_lane_round_trips_weights(
     source to fp8 rounding, lane stamps bf16-resident."""
     from diffusers import DDPMPipeline, UNet2DModel
 
-    monkeypatch.setattr(w8a8, "scaled_mm_supported", lambda: False)
+    monkeypatch.setattr(w8a8, "w8a8_gemm_mode", lambda: "")
     pipe = load_from_pretrained(DDPMPipeline, w8a8_tree)
     assert pipe._cozy_weight_lane == "bf16-resident"
     assert pipeline_weight_lane(pipe) == ""
@@ -118,7 +118,7 @@ def test_full_dequant_pipeline_runs_on_cpu(
 ) -> None:
     from diffusers import DDPMPipeline
 
-    monkeypatch.setattr(w8a8, "scaled_mm_supported", lambda: False)
+    monkeypatch.setattr(w8a8, "w8a8_gemm_mode", lambda: "")
     # fp32 compute: DDPM's output path numpy-converts (no bf16 support there).
     pipe = load_from_pretrained(DDPMPipeline, w8a8_tree, dtype="fp32")
     out = pipe(batch_size=1, num_inference_steps=2, output_type="np")
@@ -178,9 +178,17 @@ gpu = pytest.mark.skipif(not _cuda_sm89(), reason="needs CUDA sm_89+ (fp8 tensor
 
 
 @gpu
-def test_scaled_mm_probe_true_on_capable_gpu() -> None:
-    w8a8.scaled_mm_supported.cache_clear()
-    assert w8a8.scaled_mm_supported() is True
+def test_gemm_mode_probe_arms_a_branch_on_capable_gpu() -> None:
+    """On real fp8 silicon one branch must win the micro-benchmark gate:
+    rowwise on sm_90+, pertensor on sm_89 (Ada) — '' would mean the gate
+    wrongly demoted a capable card to the dequant lane."""
+    w8a8.w8a8_gemm_mode.cache_clear()
+    mode = w8a8.w8a8_gemm_mode()
+    major, minor = torch.cuda.get_device_capability()
+    if major * 10 + minor >= w8a8.W8A8_ROWWISE_MIN_SM:
+        assert mode == "rowwise"
+    else:
+        assert mode == "pertensor"
 
 
 @gpu
@@ -208,7 +216,7 @@ def test_fp8_scaled_linear_matches_dequant_reference() -> None:
 def test_w8a8_pipeline_serves_on_scaled_mm_lane(w8a8_tree: Path) -> None:
     from diffusers import DDPMPipeline
 
-    w8a8.scaled_mm_supported.cache_clear()
+    w8a8.w8a8_gemm_mode.cache_clear()
     art = detect_w8a8_artifact(w8a8_tree)
     assert art is not None
     # fp16 compute: DDPM's output path numpy-converts (no bf16 support there).

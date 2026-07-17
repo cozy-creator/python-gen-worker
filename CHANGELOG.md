@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.36.0 (2026-07-17)
+
+- **gw#564: sm_89 W8A8 inference lane — per-tensor fp8 GEMM + per-channel
+  epilogue rescale (4090/L40S).** ie#498 measured rowwise-scaled
+  `_scaled_mm` W8A8 as NO-GO on sm_89 (+79% compiled): torch's fast
+  rowwise kernels are CUTLASS sm_90+ and Ada falls to a ~half-rate
+  fallback — a kernel gap, not silicon. `Fp8ScaledLinear` gains a second
+  dispatch branch chosen ONCE at load by SKU: `gemm_mode="pertensor"`
+  runs a scalar-scaled fp8 GEMM (cuBLASLt's Ada fast path, per-TENSOR
+  dynamic activation scale) and applies the SAME per-channel
+  `weight_scale` vector as a post-GEMM column-multiply epilogue (bias
+  after the rescale; fuses under inductor) — mathematically identical to
+  the rowwise lane, ONE weight artifact serves both (no new producer or
+  flavor). The capability probe is replaced by `w8a8_gemm_mode()`:
+  candidates per SKU class arm only when the kernel call succeeds AND a
+  load-time micro-benchmark GEMM beats the bf16 reference (probe-pass ≠
+  profitable, the ie#498 lesson — generalizes the gate for every future
+  SKU); `scaled_mm_supported()` is gone, loader modes are now
+  `rowwise`/`pertensor`/`dequant`. The gw#558 additive LoRA branch rides
+  the epilogue lane unchanged; lane stamp stays `w8a8` for both GEMM
+  branches (cells are per-SKU keyed). Root-layout swaps
+  (`swap_w8a8_linears`) thread `gemm_mode` identically.
+
 ## 0.35.2 (2026-07-17)
 
 - **gw#565: publish `/complete` survives edge-masked 5xx during a long

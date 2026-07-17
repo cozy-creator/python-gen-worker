@@ -77,7 +77,7 @@ def denoiser(w8a8_tree: Path) -> Any:
     forward needs the GPU kernel)."""
     art = detect_w8a8_artifact(w8a8_tree)
     assert art is not None
-    return load_w8a8_denoiser(w8a8_tree, art, mode="scaled_mm")
+    return load_w8a8_denoiser(w8a8_tree, art, mode="rowwise")
 
 
 def _kohya_sd(paths: Dict[str, Any], rank: int, alpha: float,
@@ -402,7 +402,7 @@ def test_dequant_lane_is_branch_capable_plain(w8a8_tree: Path,
     (pre-gw#558 they fell back to peft)."""
     from diffusers import DDPMPipeline
 
-    monkeypatch.setattr(w8a8, "scaled_mm_supported", lambda: False)
+    monkeypatch.setattr(w8a8, "w8a8_gemm_mode", lambda: "")
     from gen_worker.models.loading import load_from_pretrained
 
     pipe = load_from_pretrained(DDPMPipeline, w8a8_tree)
@@ -457,7 +457,7 @@ def test_gpu_forward_matches_dequant_reference_plus_addend(denoiser: Any) -> Non
 def test_gpu_full_pipeline_with_branch_runs(w8a8_tree: Path) -> None:
     from diffusers import DDPMPipeline
 
-    w8a8.scaled_mm_supported.cache_clear()
+    w8a8.w8a8_gemm_mode.cache_clear()
     art = detect_w8a8_artifact(w8a8_tree)
     assert art is not None
     pipe = load_w8a8_pipeline(DDPMPipeline, w8a8_tree, art,

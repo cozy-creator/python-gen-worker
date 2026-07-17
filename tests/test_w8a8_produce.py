@@ -391,7 +391,7 @@ def test_load_from_pretrained_threads_te_flag(
         seen.update(kwargs)
         return real(cls, path, art, **kwargs)
 
-    monkeypatch.setattr(w8a8, "scaled_mm_supported", lambda: False)
+    monkeypatch.setattr(w8a8, "w8a8_gemm_mode", lambda: "")
     monkeypatch.setattr(w8a8, "load_w8a8_pipeline", spy)
     pipe = loading.load_from_pretrained(DDPMPipeline, tree, storage_dtype="fp8+te")
     assert seen.get("fp8_text_encoders") is True

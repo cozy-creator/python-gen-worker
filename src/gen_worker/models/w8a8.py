@@ -18,10 +18,14 @@ gw#534, consumed verbatim by the conversion side):
 Execution: quantized Linears become :class:`Fp8ScaledLinear` —
 ``torch._scaled_mm`` over RESIDENT fp8 weights (no per-layer upcast: the
 whole point, gw#534 measured the cast tax at +44% H100 / +73% B200), dynamic
-per-row activation quant by default, the static scale when present. Hosts
-without usable scaled_mm (pre-sm89 or missing kernels) DEQUANT once at load
-into plain bf16-resident weights — same numerics, no speed win, never a
-refusal.
+activation quant by default, the static scale when present. TWO dispatch
+branches over the ONE artifact, chosen once at load by :func:`w8a8_gemm_mode`
+(gw#564): "rowwise" (scale vectors inside the GEMM — CUTLASS fast, sm_90+)
+and "pertensor" (scalar-scaled cuBLASLt GEMM + per-channel epilogue rescale —
+the Ada/sm_89 fast path; torch's rowwise kernels fall back to ~half rate
+there, ie#498). Hosts where no branch wins the load-time micro-benchmark
+DEQUANT once at load into plain bf16-resident weights — same numerics, no
+speed win, never a refusal.
 """
 
 from __future__ import annotations
@@ -40,6 +44,9 @@ logger = logging.getLogger(__name__)
 W8A8_FLAVOR = "fp8-w8a8"
 # torch._scaled_mm needs fp8 tensor cores (sm_89 Ada +) and 16-aligned dims.
 W8A8_MIN_SM = 89
+# torch's fast ROWWISE-scaled kernels are CUTLASS sm_90+; sm_89 runs rowwise
+# on a ~half-rate fallback (ie#498) and takes the pertensor branch instead.
+W8A8_ROWWISE_MIN_SM = 90
 _FP8_MAX = 448.0
 _DIM_ALIGN = 16
 _MAX_HEADER_BYTES = 100 << 20
@@ -148,33 +155,149 @@ def detect_w8a8_artifact(model_path: Path) -> Optional[W8a8Artifact]:
     return None
 
 
-@functools.lru_cache(maxsize=1)
-def scaled_mm_supported() -> bool:
-    """Live probe: does THIS device run a rowwise-scaled fp8 GEMM? sm gate
-    first (fail-fast on old silicon), then one 16x16 kernel call — torch's
-    scaled-mm backends vary by (torch, cuda, arch), so trusting a version
-    table instead of the device is how mixed fleets break."""
-    try:
-        import torch
-    except ImportError:
-        return False
-    if not torch.cuda.is_available() or not hasattr(torch, "float8_e4m3fn"):
-        return False
-    major, minor = torch.cuda.get_device_capability()
-    if major * 10 + minor < W8A8_MIN_SM:
-        return False
+def _probe_scales(mode: str, m: int, n: int, device: str = "cuda") -> tuple:
+    """(scale_a, scale_b) for one ``torch._scaled_mm`` call in ``mode``:
+    rowwise = [m,1]x[1,n] vectors consumed inside the GEMM; pertensor =
+    scalar [1,1]x[1,1] (the cuBLASLt tensorwise path — per-channel weight
+    scales are applied OUTSIDE as the epilogue rescale, gw#564)."""
+    import torch
+
+    if mode == "rowwise":
+        return (torch.ones(m, 1, device=device),
+                torch.ones(1, n, device=device))
+    return (torch.ones(1, 1, device=device),
+            torch.ones(1, 1, device=device))
+
+
+def _gemm_call_ok(mode: str) -> bool:
+    """One tiny kernel call in ``mode``'s scale shape — torch's scaled-mm
+    backends vary by (torch, cuda, arch), so trusting a version table
+    instead of the device is how mixed fleets break."""
+    import torch
+
     try:
         n = _DIM_ALIGN
         a = torch.randn(n, n, device="cuda").to(torch.float8_e4m3fn)
         b = torch.randn(n, n, device="cuda").to(torch.float8_e4m3fn)
-        sa = torch.ones(n, 1, device="cuda")
-        sb = torch.ones(1, n, device="cuda")
+        sa, sb = _probe_scales(mode, n, n)
         torch._scaled_mm(a, b.t(), scale_a=sa, scale_b=sb,
                          out_dtype=torch.bfloat16)
         return True
-    except Exception as exc:  # noqa: BLE001 — any kernel gap => dequant lane
-        logger.warning("w8a8: scaled_mm probe failed (%s); dequant lane", exc)
+    except Exception as exc:  # noqa: BLE001 — any kernel gap => next candidate
+        logger.warning("w8a8: %s scaled_mm probe failed (%s)", mode, exc)
         return False
+
+
+_BENCH_DIM = 4096      # square GEMM; big enough that tensor-core rate dominates
+_BENCH_WARMUP = 3
+_BENCH_ITERS = 10
+# A candidate arms only when the fp8 GEMM beats the bf16 kernel by a real
+# margin. Genuinely fast paths measure ~1.5-2x here; the sm_89 rowwise
+# fallback measures ~0.5x (ie#498's +79% compiled loss) — 1.10 separates
+# them with headroom against timer noise.
+_BENCH_MIN_SPEEDUP = 1.10
+
+
+def _median_ms(fn: Any) -> float:
+    import torch
+
+    for _ in range(_BENCH_WARMUP):
+        fn()
+    torch.cuda.synchronize()
+    times = []
+    for _ in range(_BENCH_ITERS):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        times.append(start.elapsed_time(end))
+    times.sort()
+    return times[len(times) // 2]
+
+
+def _bench_gemm_pair(mode: str) -> tuple[float, float]:
+    """(fp8_ms, bf16_ms) medians for one representative square GEMM. The
+    activations are PRE-quantized — dynamic-quant overhead fuses away under
+    inductor (verdicts are on compiled arms), so the gate times the KERNEL,
+    which is exactly what ie#498 showed can silently be a half-rate
+    fallback. The pertensor arm includes its per-channel epilogue multiply."""
+    import torch
+
+    m = n = k = _BENCH_DIM
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(n, k, device="cuda", dtype=torch.bfloat16)
+    xq = x.clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+    wq = w.clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+    sa, sb = _probe_scales(mode, m, n)
+    ws_t = torch.full((1, n), 0.01, device="cuda", dtype=torch.bfloat16)
+
+    def fp8_op() -> Any:
+        y = torch._scaled_mm(xq, wq.t(), scale_a=sa, scale_b=sb,
+                             out_dtype=torch.bfloat16)
+        return y * ws_t if mode == "pertensor" else y
+
+    def bf16_op() -> Any:
+        return x @ w.t()
+
+    return _median_ms(fp8_op), _median_ms(bf16_op)
+
+
+def _gemm_profitable(mode: str) -> bool:
+    """Load-time micro-benchmark gate (gw#564): the probe must verify the
+    fast path ENGAGES, not that the call succeeds — ie#498 measured sm_89
+    rowwise probe-pass at ~half the bf16 rate (+79% compiled)."""
+    fp8_ms, bf16_ms = _bench_gemm_pair(mode)
+    speedup = bf16_ms / max(fp8_ms, 1e-9)
+    logger.info(
+        "w8a8 gemm gate: mode=%s fp8=%.3fms bf16=%.3fms speedup=%.2fx "
+        "(min %.2fx)", mode, fp8_ms, bf16_ms, speedup, _BENCH_MIN_SPEEDUP)
+    return speedup >= _BENCH_MIN_SPEEDUP
+
+
+def _choose_gemm_mode(sm: int) -> str:
+    """Candidate branches in preference order for this SKU class; each must
+    both CALL successfully and WIN the micro-benchmark to arm. sm_90+ keeps
+    the shipped rowwise-in-GEMM lane first; sm_89 (Ada: 4090/L40S) prefers
+    the per-tensor cuBLASLt path + epilogue rescale. The non-preferred
+    candidate stays listed so a future stack that flips the kernel story
+    arms the right branch without a code change — the bench decides."""
+    if sm < W8A8_MIN_SM:
+        return ""
+    candidates = (("rowwise", "pertensor") if sm >= W8A8_ROWWISE_MIN_SM
+                  else ("pertensor", "rowwise"))
+    for mode in candidates:
+        if not _gemm_call_ok(mode):
+            continue
+        try:
+            if _gemm_profitable(mode):
+                return mode
+        except Exception as exc:  # noqa: BLE001 — bench failure => next lane
+            logger.warning("w8a8: %s micro-benchmark failed (%s)", mode, exc)
+    logger.warning(
+        "w8a8: no fp8 GEMM branch engages a real win on this device (sm_%d); "
+        "dequant lane", sm)
+    return ""
+
+
+@functools.lru_cache(maxsize=1)
+def w8a8_gemm_mode() -> str:
+    """The fp8 GEMM dispatch for THIS device, chosen once per process:
+    ``"rowwise"`` (scale vectors consumed inside ``_scaled_mm`` — CUTLASS
+    fast kernels, sm_90+), ``"pertensor"`` (scalar-scaled cuBLASLt GEMM +
+    per-channel epilogue rescale — the Ada/sm_89 fast path, gw#564), or
+    ``""`` (dequant lane). Live-probed AND micro-benchmarked: a branch arms
+    only when its kernel call succeeds and beats the bf16 reference —
+    probe-pass ≠ profitable (ie#498)."""
+    try:
+        import torch
+    except ImportError:
+        return ""
+    if not torch.cuda.is_available() or not hasattr(torch, "float8_e4m3fn"):
+        return ""
+    major, minor = torch.cuda.get_device_capability()
+    return _choose_gemm_mode(major * 10 + minor)
 
 
 def _build_module_class() -> type:
@@ -187,10 +310,23 @@ def _build_module_class() -> type:
         """fp8 weights RESIDENT; y = scaled_mm(quant(x), W^T) + bias.
 
         ``weight_scale`` is the [out, 1] dequant multiplier (per-tensor
-        scalars are expanded at load). Activation quant is per-row dynamic
-        (amax/448) unless a static ``input_scale`` was calibrated. NOTE:
-        never ``.to(dtype=...)`` this module — a dtype cast would upcast the
-        fp8 buffer (device moves are fine).
+        scalars are expanded at load). Two GEMM dispatch branches, chosen
+        ONCE at load by SKU (gw#564; ONE weight artifact serves both):
+
+        - ``gemm_mode="rowwise"`` (sm_90+): scale vectors consumed inside
+          ``_scaled_mm`` (per-row dynamic activation scale x per-channel
+          weight scale), bias fused into the GEMM.
+        - ``gemm_mode="pertensor"`` (sm_89 Ada): scalar-scaled GEMM (the
+          cuBLASLt fast path) with the SAME per-channel ``weight_scale``
+          applied as a post-GEMM column-multiply epilogue (one broadcast
+          multiply — fuses under inductor), bias added after the rescale.
+          Activation scale is per-TENSOR dynamic. Mathematically identical
+          to rowwise up to activation-quant granularity + one bf16 rounding.
+
+        Activation quant is DYNAMIC (amax/448) unless a static
+        ``input_scale`` was calibrated. NOTE: never ``.to(dtype=...)`` this
+        module — a dtype cast would upcast the fp8 buffer (device moves are
+        fine).
 
         Optional LoRA side-branch (gw#547): ``lora_a`` [bucket, in] /
         ``lora_b`` [out, bucket] compute-dtype buffers, rank-padded to a
@@ -210,8 +346,12 @@ def _build_module_class() -> type:
 
         def __init__(self, in_features: int, out_features: int, *,
                      bias: bool, compute_dtype: Any,
-                     static_input_scale: bool) -> None:
+                     static_input_scale: bool,
+                     gemm_mode: str = "rowwise") -> None:
             super().__init__()
+            if gemm_mode not in ("rowwise", "pertensor"):
+                raise ValueError(f"invalid gemm_mode {gemm_mode!r}")
+            self.gemm_mode = gemm_mode
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             meta = torch.device("meta")
@@ -239,8 +379,15 @@ def _build_module_class() -> type:
         def forward(self, x: Any) -> Any:
             shape = x.shape
             x2 = x.reshape(-1, self.in_features).contiguous()
+            pertensor = self.gemm_mode == "pertensor"
             if self.input_scale is not None:
-                sa = self.input_scale.expand(x2.shape[0], 1).contiguous()
+                # Static scales are per-tensor scalars already — the
+                # pertensor GEMM consumes [1,1] directly.
+                sa = (self.input_scale if pertensor else
+                      self.input_scale.expand(x2.shape[0], 1).contiguous())
+            elif pertensor:
+                sa = (x2.abs().amax().float()
+                      / _FP8_MAX).clamp(min=1e-12).reshape(1, 1)
             else:
                 sa = (x2.abs().amax(dim=-1, keepdim=True).float()
                       / _FP8_MAX).clamp(min=1e-12)
@@ -251,10 +398,23 @@ def _build_module_class() -> type:
             xq = (x2 * (1.0 / sa).to(x2.dtype)).clamp(
                 -_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
             scaled_mm: Any = torch._scaled_mm
-            y = scaled_mm(
-                xq, self.weight.t(), scale_a=sa, scale_b=self.weight_scale.t(),
-                bias=self.bias, out_dtype=x.dtype,
-            )
+            if pertensor:
+                # Scalar-scaled GEMM (cuBLASLt's Ada fast path, gw#564); the
+                # per-channel weight_scale rides as a post-GEMM column
+                # multiply — bias joins AFTER the rescale, never inside.
+                y = scaled_mm(
+                    xq, self.weight.t(), scale_a=sa,
+                    scale_b=torch.ones_like(sa), out_dtype=x.dtype,
+                )
+                y = y * self.weight_scale.t().to(y.dtype)
+                if self.bias is not None:
+                    y = y + self.bias
+            else:
+                y = scaled_mm(
+                    xq, self.weight.t(), scale_a=sa,
+                    scale_b=self.weight_scale.t(),
+                    bias=self.bias, out_dtype=x.dtype,
+                )
             if self.lora_a is not None:
                 y = y + self._lora_addend(x2)
             return y.reshape(*shape[:-1], self.out_features)
@@ -263,6 +423,7 @@ def _build_module_class() -> type:
             return (f"in_features={self.in_features}, "
                     f"out_features={self.out_features}, "
                     f"bias={self.bias is not None}, "
+                    f"gemm_mode={self.gemm_mode}, "
                     f"static_input_scale={self.input_scale is not None}")
 
     return _Fp8ScaledLinear
@@ -306,16 +467,16 @@ def load_w8a8_denoiser(root: Path, art: W8a8Artifact, *,
                        compute_dtype: Any = None, mode: str = "") -> Any:
     """Materialize the quantized denoiser: skeleton on meta, quantized
     Linears swapped for Fp8ScaledLinear, tensors assigned from the shards.
-    ``mode`` "scaled_mm" | "dequant" (default: probe). Layers whose dims
-    break scaled_mm's 16-alignment are dequantized individually."""
+    ``mode`` "rowwise" | "pertensor" | "dequant" (default: probe). Layers
+    whose dims break scaled_mm's 16-alignment are dequantized individually."""
     import torch
     import torch.nn as nn
     from accelerate import init_empty_weights
     from safetensors.torch import load_file
 
     compute = compute_dtype or torch.bfloat16
-    if mode not in ("scaled_mm", "dequant"):
-        mode = "scaled_mm" if scaled_mm_supported() else "dequant"
+    if mode not in ("rowwise", "pertensor", "dequant"):
+        mode = w8a8_gemm_mode() or "dequant"
 
     cls = _denoiser_class(root, art.component)
     cfg = dict(cls.load_config(str(root / art.component)))
@@ -333,7 +494,7 @@ def load_w8a8_denoiser(root: Path, art: W8a8Artifact, *,
         w = sd[f"{name}.weight"]
         scale = sd[f"{name}.weight_scale"]
         out_f, in_f = int(w.shape[0]), int(w.shape[1])
-        eligible = (mode == "scaled_mm"
+        eligible = (mode != "dequant"
                     and in_f % _DIM_ALIGN == 0 and out_f % _DIM_ALIGN == 0)
         try:
             parent_path, _, leaf = name.rpartition(".")
@@ -346,7 +507,8 @@ def load_w8a8_denoiser(root: Path, art: W8a8Artifact, *,
         if eligible and isinstance(old, nn.Linear):
             has_static = f"{name}.input_scale" in sd
             new = lin_cls(in_f, out_f, bias=old.bias is not None,
-                          compute_dtype=compute, static_input_scale=has_static)
+                          compute_dtype=compute, static_input_scale=has_static,
+                          gemm_mode=mode)
             setattr(parent, leaf, new)
             sd[f"{name}.weight_scale"] = _scale_2d(scale, out_f)
             if has_static:
@@ -398,14 +560,14 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
     import torch
 
     compute = compute_dtype or torch.bfloat16
-    mode = "scaled_mm" if scaled_mm_supported() else "dequant"
+    mode = w8a8_gemm_mode() or "dequant"
     denoiser = load_w8a8_denoiser(
         path, art, compute_dtype=compute, mode=mode)
     kwargs: Dict[str, Any] = dict(components or {})
     kwargs[art.component] = denoiser
     pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
     try:
-        pipe._cozy_weight_lane = "w8a8" if mode == "scaled_mm" else "bf16-resident"
+        pipe._cozy_weight_lane = "w8a8" if mode != "dequant" else "bf16-resident"
     except Exception:
         pass
     if fp8_text_encoders:
@@ -465,15 +627,17 @@ def swap_w8a8_linears(
     *,
     compute_dtype: Any = None,
     key_map: Optional[Any] = None,
+    gemm_mode: str = "rowwise",
 ) -> int:
     """Swap the artifact's quantized Linears in an ALREADY-CONSTRUCTED model
-    onto :class:`Fp8ScaledLinear`, assigning fp8 weight + scale from the
-    artifact shards (whatever the constructing loader materialized there is
-    replaced). ``key_map`` maps an artifact layer name to its module path
-    (identity default; converter-renamed families pass their own — e.g.
-    anima's DiffSynth converter strips ``net.``). Layers whose dims break
-    scaled_mm's 16-alignment, or whose owner is not a plain Linear, keep
-    their dequantized weights. Returns the number of swapped modules."""
+    onto :class:`Fp8ScaledLinear` in ``gemm_mode``, assigning fp8 weight +
+    scale from the artifact shards (whatever the constructing loader
+    materialized there is replaced). ``key_map`` maps an artifact layer name
+    to its module path (identity default; converter-renamed families pass
+    their own — e.g. anima's DiffSynth converter strips ``net.``). Layers
+    whose dims break scaled_mm's 16-alignment, or whose owner is not a plain
+    Linear, keep their dequantized weights. Returns the number of swapped
+    modules."""
     import torch
     import torch.nn as nn
     from safetensors import safe_open
@@ -525,7 +689,8 @@ def swap_w8a8_linears(
             has_static = f"{layer}.input_scale" in where
             dev = old.weight.device
             new = lin_cls(in_f, out_f, bias=old.bias is not None,
-                          compute_dtype=compute, static_input_scale=has_static)
+                          compute_dtype=compute, static_input_scale=has_static,
+                          gemm_mode=gemm_mode)
             new.weight = w.contiguous().to(dev)
             new.weight_scale = _scale_2d(_tensor(f"{layer}.weight_scale"),
                                          out_f).to(dev)
@@ -572,18 +737,19 @@ def load_w8a8_root_pipeline(
     import torch
 
     compute = compute_dtype or torch.bfloat16
-    mode = "scaled_mm" if scaled_mm_supported() else "dequant"
+    mode = w8a8_gemm_mode() or "dequant"
     pipe = cls.from_pretrained(str(path), torch_dtype=compute)
     denoiser = _root_denoiser(pipe)
-    if mode == "scaled_mm":
-        if not swap_w8a8_linears(denoiser, art, compute_dtype=compute):
+    if mode != "dequant":
+        if not swap_w8a8_linears(denoiser, art, compute_dtype=compute,
+                                 gemm_mode=mode):
             raise W8a8SnapshotError(
                 "scaled_mm host but no quantized Linear swapped — artifact "
                 f"keys do not match {type(denoiser).__name__} modules")
     try:
         denoiser._cozy_w8a8_mode = mode
         pipe._cozy_weight_lane = (
-            "w8a8" if mode == "scaled_mm" else "bf16-resident")
+            "w8a8" if mode != "dequant" else "bf16-resident")
     except Exception:
         pass
     logger.info("w8a8 root lane: %s (%d quantized layers, component root)",
@@ -673,6 +839,6 @@ __all__ = [
     "load_w8a8_root_pipeline",
     "quantize_tree_w8a8",
     "sanitize_w8a8_state_dict",
-    "scaled_mm_supported",
+    "w8a8_gemm_mode",
     "swap_w8a8_linears",
 ]
