@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.35.2 (2026-07-17)
+
+- **gw#565: publish `/complete` survives edge-masked 5xx during a long
+  server-side verify.** tensorhub's `/complete` streams the shard back from
+  R2 and hashes it synchronously; on a degraded hub link a 2GB shard verify
+  runs 10+ minutes, the tunnel in front (ngrok) times out first and answers
+  the pod 503 HTML. The bounded inner retry (5 attempts, ~2 min) then
+  RETURNED the 503 and the commit died fatal — while the hub finished the
+  verify anyway (found live, te#89: a gate-PASSED flavor lost at the seal).
+  A returned >=500 now joins the same patient re-POST clock as a severed
+  connection (`_COMPLETE_NETWORK_MAX_WAIT_S`); the idempotent Finalized
+  fast path answers the catch-up POST.
+
 ## 0.35.1 (2026-07-17)
 
 - **gw#562 follow-up: oversize tensors shard alone instead of failing the

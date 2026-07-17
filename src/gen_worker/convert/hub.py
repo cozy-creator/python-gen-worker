@@ -298,6 +298,19 @@ class HubClient:
                     return resp
                 time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
                 continue
+            if resp.status_code >= 500:
+                # gw#565: an edge/tunnel in front of tensorhub (ngrok) times
+                # out DURING the synchronous verify and answers 5xx while the
+                # server is still working. A returned 5xx is the same case as
+                # a severed connection — re-POST on the patient clock; the
+                # sess.Finalized fast path answers the catch-up POST.
+                if time.monotonic() >= deadline:
+                    return resp
+                logger.warning(
+                    "POST %s returned %d (edge-masked verify?); re-POSTing (idempotent complete)",
+                    complete_path, resp.status_code)
+                time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
+                continue
             return resp
 
     def _reopen_upload(self, repo_path: str, revision_id: str, path: str) -> dict[str, Any]:
