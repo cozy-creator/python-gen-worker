@@ -322,3 +322,44 @@ def test_commit_sanitizes_colon_dtype_and_flavor_tokens(fake_hub, tmp_path: Path
     assert body["default_flavor"] == "gguf-ud-q4_k_xl"
     assert body["dtype"] == "gguf-ud-q4_k_xl"
     assert body["tags"] == [{"tag": "prod", "default_flavor": "gguf-ud-q4_k_xl"}]
+
+
+def test_complete_survives_edge_masked_5xx_storm(
+    fake_hub, tmp_path: Path, monkeypatch,
+) -> None:
+    """gw#565 (te#89 live): an edge/tunnel in front of tensorhub answers 5xx
+    while the synchronous shard verify is still running server-side. A 5xx
+    storm LONGER than the bounded inner retry (5 attempts) must join the
+    patient re-POST clock instead of failing the commit — the hub finishes
+    the verify and the catch-up POST lands on the Finalized fast path."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    _FakeHub.state["fail_completes"] = 7  # > _RETRY_ATTEMPTS: inner retry alone loses
+    _FakeHub.state["finalize_calls"] = 1
+
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x06" * 48)
+    result = _client(fake_hub).commit(
+        destination_repo="acme/my-model",
+        files=[CommitFile(path="model.safetensors", local_path=f)],
+    )
+    assert result.revision_id == "rev-1"
+    assert result.uploaded == 1
+    assert list(_FakeHub.state["put_bytes"].values()) == [b"\x06" * 48]
+
+
+def test_complete_5xx_still_fatal_after_patient_deadline(
+    fake_hub, tmp_path: Path, monkeypatch,
+) -> None:
+    """A hub that answers 5xx forever must still fail loudly once the patient
+    clock expires — no infinite re-POST."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    monkeypatch.setattr("gen_worker.convert.hub._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
+    _FakeHub.state["fail_completes"] = 10_000
+
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x07" * 48)
+    with pytest.raises(HubPublishError, match="upload complete failed \\(50"):
+        _client(fake_hub).commit(
+            destination_repo="acme/my-model",
+            files=[CommitFile(path="model.safetensors", local_path=f)],
+        )
