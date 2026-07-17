@@ -243,7 +243,7 @@ def test_bucket_growth_and_compiled_resize_refusal(denoiser: Any) -> None:
 
 
 def test_unresolved_and_misshaped_keys_fail_loud(denoiser: Any) -> None:
-    with pytest.raises(RefCompatibilitySurprise, match="no w8a8-quantized module"):
+    with pytest.raises(RefCompatibilitySurprise, match="no branch-capable Linear"):
         map_adapter({"lora_unet_no_such_block.lora_down.weight": torch.zeros(4, 8)},
                     denoiser, ref="t/x")
     picked = _pick(denoiser, 1)
@@ -395,17 +395,20 @@ def test_residency_refuses_resize_on_compiled_pipe(denoiser: Any) -> None:
     assert not w8a8_lora.branches_active(denoiser)
 
 
-def test_dequant_lane_keeps_peft_path(w8a8_tree: Path,
-                                      monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dequant_lane_is_branch_capable_plain(w8a8_tree: Path,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
     """On hosts without scaled_mm the denoiser is plain bf16 Linears —
-    branch_target must be None so the normal peft path applies."""
+    gw#558: those ride the additive branch too, on the PLAIN base lane
+    (pre-gw#558 they fell back to peft)."""
     from diffusers import DDPMPipeline
 
     monkeypatch.setattr(w8a8, "scaled_mm_supported", lambda: False)
     from gen_worker.models.loading import load_from_pretrained
 
     pipe = load_from_pretrained(DDPMPipeline, w8a8_tree)
-    assert branch_target(pipe) is None
+    den = branch_target(pipe)
+    assert den is pipe.unet
+    assert w8a8_lora.branch_lane(den) == ""
 
 
 # ---------------------------------------------------------------------------
