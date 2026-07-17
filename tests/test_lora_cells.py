@@ -17,7 +17,7 @@ pytest.importorskip("accelerate")
 from gen_worker import compile_cache
 from gen_worker.api.decorators import Compile
 from gen_worker.executor import _cell_lane_matches
-from gen_worker.models import provision, w8a8_lora
+from gen_worker.models import provision
 from gen_worker.models.w8a8 import detect_w8a8_artifact, load_w8a8_denoiser, quantize_tree_w8a8
 from gen_worker.models.w8a8_lora import RANK_BUCKETS, branch_bucket
 
