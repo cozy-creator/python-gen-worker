@@ -255,6 +255,85 @@ def test_no_family_no_mint(_local_env):
 
 
 # ---------------------------------------------------------------------------
+# gw#564: w8a8 fail-closed x local mint. Production's no-delivered-cell
+# refusal (CompiledLaneUnavailableError) must fall through to the LOCAL
+# store/mint path — found live on a 4090 where the raise aborted the mint —
+# and every exit that cannot produce a cell keeps the refusal TYPED.
+# ---------------------------------------------------------------------------
+
+
+class _W8a8Pipe(_Pipe):
+    _cozy_weight_lane = "w8a8"
+
+
+@pytest.fixture()
+def _w8a8_env(_local_env, monkeypatch):
+    """The live-bug trigger: the delivered-artifact leg RAISES the w8a8
+    fail-closed refusal (no cell anywhere) instead of returning False."""
+    from gen_worker.models import provision
+
+    def refuse(*a, **k):
+        raise cc.CompiledLaneUnavailableError("no delivered w8a8 cell")
+
+    monkeypatch.setattr(provision, "enable_compiled", refuse)
+    return _local_env
+
+
+def test_w8a8_delivered_refusal_falls_through_to_mint(_w8a8_env, monkeypatch):
+    pipe, cfg = _W8a8Pipe(), _Cfg()
+    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(lc, "_compile_and_warm", _fake_compile_and_warm)
+    monkeypatch.setattr(cc, "enable", lambda *a, **k: True)
+
+    assert lc.enable_compiled(pipe, cfg) is True
+    target = lc.cell_path("fam", "w8a8")
+    assert target.exists()
+    assert "-w8a8" in target.name  # epilogue/rowwise lanes share the token
+
+
+def test_w8a8_no_toolchain_refusal_stays_typed(_w8a8_env, monkeypatch):
+    monkeypatch.setattr(cc, "toolchain_present", lambda: False)
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="C compiler"):
+        lc.enable_compiled(_W8a8Pipe(), _Cfg())
+
+
+def test_w8a8_mint_failure_refusal_stays_typed(_w8a8_env, monkeypatch):
+    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
+
+    def boom(pipe, cfg, **kw):
+        raise RuntimeError("compile exploded")
+
+    monkeypatch.setattr(lc, "_compile_and_warm", boom)
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="mint failed"):
+        lc.enable_compiled(_W8a8Pipe(), _Cfg())
+    assert not lc.cell_path("fam", "w8a8").exists()
+
+
+def test_w8a8_stored_cell_adopts_after_delivered_refusal(_w8a8_env, monkeypatch):
+    pipe, cfg = _W8a8Pipe(), _Cfg()
+    _make_cell(lc.cell_path("fam", "w8a8"), weight_lane="w8a8")
+    calls = {}
+
+    def fake_enable(p, c, cache_dir=None, artifact=None):
+        calls["artifact"] = artifact
+        return True
+
+    monkeypatch.setattr(cc, "enable", fake_enable)
+    minted = []
+    monkeypatch.setattr(lc, "_mint", lambda *a, **k: minted.append(a))
+
+    assert lc.enable_compiled(pipe, cfg) is True
+    assert calls["artifact"] == lc.cell_path("fam", "w8a8")
+    assert minted == []
+
+
+def test_plain_lane_miss_policy_unchanged(_local_env, monkeypatch):
+    """Plain lanes keep the never-raise eager fallback."""
+    monkeypatch.setattr(cc, "toolchain_present", lambda: False)
+    assert lc.enable_compiled(_Pipe(), _Cfg()) is False
+
+
+# ---------------------------------------------------------------------------
 # trust boundary: no publish path exists, structurally
 # ---------------------------------------------------------------------------
 
