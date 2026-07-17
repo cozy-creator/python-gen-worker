@@ -2096,7 +2096,7 @@ class Executor:
         self, rec: _ClassRecord, spec: EndpointSpec, detail: str,
     ) -> None:
         """Fail loud for every handler requiring the unproven W8A8 setup."""
-        names = self._compile_contract_names(spec, rec) or {spec.name}
+        names = self._required_compile_names(spec, rec) or {spec.name}
         self._mark_compile_names_unavailable(rec, names, "", detail)
 
     def _mark_compile_names_unavailable(
@@ -2192,6 +2192,7 @@ class Executor:
         active_artifacts = active_artifacts or {}
         function_proofs = function_proofs or {}
         contract_names = self._compile_contract_names(spec, rec)
+        required_names = self._required_compile_names(spec, rec)
         seen: set[int] = set()
         for candidate in candidates:
             pipeline = candidate.pipeline
@@ -2258,7 +2259,7 @@ class Executor:
                 name = str(alias.name).strip()
                 if name:
                     compatible_names.add(name)
-            expected_names = compatible_names & contract_names
+            expected_names = compatible_names & required_names
             target.function_names = tuple(sorted(
                 compatible_names & permitted_names))
             mandatory_w8a8 = target.pipeline_weight_lane.startswith("w8a8")
@@ -2827,12 +2828,24 @@ class Executor:
     def _compile_contract_names(
         self, spec: EndpointSpec, rec: _ClassRecord,
     ) -> set[str]:
-        """Handler aliases this instance has an explicit warmup path for."""
+        """Handler aliases this setup can attribute its warmup proof to."""
         if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
             # A custom object-level warmup has no per-handler attribution.
             return {spec.name}
+        return self._required_compile_names(spec, rec)
+
+    def _required_compile_names(
+        self, spec: EndpointSpec, rec: _ClassRecord,
+    ) -> set[str]:
+        """Non-skipped aliases that a mandatory compiled setup must prove."""
         jobs, _skips = self._warmup_plan(spec, rec)
-        return {job.spec.name for job in jobs}
+        names = {job.spec.name for job in jobs}
+        if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
+            # The custom object warmup directly proves only its initiating
+            # handler. Other warmable aliases remain required and therefore
+            # make W8A8 fail loud until they have attributable proof.
+            names.add(spec.name)
+        return names
 
     async def _run_synthesized_warmup(
         self, spec: EndpointSpec, rec: _ClassRecord, instance: Any,

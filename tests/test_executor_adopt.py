@@ -1510,12 +1510,13 @@ def test_w8a8_partial_handler_proof_fails_loud_without_disabling_skipped_turbo(
         def setup(self, pipeline: _LoadablePipe) -> None:
             self.pipeline = pipeline
 
-        def generate(self, ctx, payload: _In) -> _Out:
+        def warmup(self) -> None:
             _record_fake_warm(self.pipeline)
+
+        def generate(self, ctx, payload: _In) -> _Out:
             return _Out(y="ok")
 
         def edit(self, ctx, payload: _In) -> _Out:
-            # The handler succeeds, but it did not execute the guarded graph.
             return _Out(y="eager")
 
         def generate_turbo(self, ctx, payload: _In) -> _Out:
