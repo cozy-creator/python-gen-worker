@@ -687,6 +687,10 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 "shapes": [[int(v) for v in s] for s in es.compile.shapes],
                 "targets": list(es.compile.targets),
             }
+            if es.compile.guidance_scales:
+                fn["compile"]["guidance_scales"] = list(
+                    es.compile.guidance_scales
+                )
             # ie#381: the primary binding's weight-storage lane (gw#389 fp8
             # layerwise casting) rides along so the hub's cell producer
             # builds from an identically-loaded pipeline — the cast hooks
