@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import typing
+import uuid
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -390,6 +391,20 @@ def _cell_lane_matches(
     return base == "w8a8" if wants_w8a8 else base != "w8a8"
 
 
+def _ref_wants_w8a8(ref: str) -> bool:
+    """Whether one canonical Tensorhub model ref selects a W8A8 flavor."""
+    from .models.refs import parse_model_ref
+
+    try:
+        parsed = parse_model_ref(ref).tensorhub
+    except ValueError:
+        return False
+    if parsed is None or parsed.owner == "_system":
+        return False
+    flavor = parsed.flavor or ""
+    return flavor == "fp8-w8a8" or flavor.startswith("fp8-w8a8-")
+
+
 def _model_failure_vocab(exc: BaseException) -> str:
     """Contract §9 ModelEvent.error vocabulary for residency failures."""
     if is_cuda_oom(exc):
@@ -450,6 +465,12 @@ _TIER_TO_PB = {
 
 _USE_RESIDENT_IDENTITY = object()
 _ResidencyIdentity = Tuple[str, int]
+
+
+@dataclass(frozen=True)
+class _MaterializedLocal:
+    path: Path
+    identity: _ResidencyIdentity
 
 
 class ModelStore:
@@ -974,6 +995,17 @@ class ModelStore:
         *,
         binding: Any = None,
     ) -> Path:
+        """Public path-only materialization API used by ordinary callers."""
+        return (await self._materialize_local(
+            ref, snapshot, binding=binding)).path
+
+    async def _materialize_local(
+        self,
+        ref: str,
+        snapshot: Optional[pb.Snapshot] = None,
+        *,
+        binding: Any = None,
+    ) -> _MaterializedLocal:
         """Materialize `ref` on disk. Transient failures retry with backoff;
         terminal (4xx-class) failures raise immediately. Emits ModelEvents.
         ``binding`` (when known) supplies provider + file-selection metadata;
@@ -986,6 +1018,10 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
+
+        def complete(path: Path) -> _MaterializedLocal:
+            return _MaterializedLocal(path=path, identity=operation_identity)
+
         async with self._lock(ref):
             cached = self.residency.local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
@@ -999,7 +1035,7 @@ class ModelStore:
                 if ref in self._verified:
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
-                    return cached
+                    return complete(cached)
                 # First use this boot: verify before trusting (gw#408). A
                 # pod-churn-truncated snapshot used to fatal every load until
                 # a manual delete; now it is quarantined + re-materialized.
@@ -1010,7 +1046,7 @@ class ModelStore:
                     self._verified.add(ref)
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
-                    return cached
+                    return complete(cached)
                 logger.error(
                     "snapshot for %s failed first-use verification "
                     "(%d bad files); quarantining and re-materializing",
@@ -1105,7 +1141,7 @@ class ModelStore:
                     self._index.record(ref, path, size)
                     # Fresh downloads were digest-verified by the downloader.
                     self._verified.add(ref)
-                    return path
+                    return complete(path)
                 except Exception as exc:
                     terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
                     if terminal:
@@ -1126,6 +1162,15 @@ class ModelStore:
                     await asyncio.sleep(delay)
                     delay *= 4
             raise RuntimeError("unreachable")
+
+    def activate_load_identity(
+        self, ref: str, identity: _ResidencyIdentity,
+    ) -> _ResidencyIdentity:
+        """Promote the exact bytes used by one setup, never current disk state."""
+        if identity[0]:
+            self._set_resident_identity(ref, identity)
+            return identity
+        return self.activate_disk_identity(ref)
 
     # ---- snapshot integrity (gw#408) -------------------------------------------
 
@@ -1240,6 +1285,31 @@ class ModelStore:
 
 
 @dataclass
+class _CompileTargetRecord:
+    """One exact live pipeline object eligible for compile-cell adoption."""
+
+    incarnation_id: str
+    spec: EndpointSpec
+    pipeline: Any
+    pipeline_weight_lane: str
+    lora_bucket: int
+    contract_digest: str
+    active_compile_ref: str = ""
+    active_compile_snapshot_digest: str = ""
+    function_names: Tuple[str, ...] = ()
+    model_bindings: Tuple[Tuple[str, str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class _CompileArtifactSelection:
+    """One immutable hub-attached cell selected before model setup."""
+
+    path: Path
+    ref: str
+    snapshot_digest: str
+
+
+@dataclass
 class _ClassRecord:
     cls: type
     specs: List[EndpointSpec] = dc_field(default_factory=list)
@@ -1260,6 +1330,10 @@ class _ClassRecord:
     # keep the same wire ref while moving to new bytes; refs alone cannot
     # decide whether a ready instance is reusable.
     held_snapshot_digests: Dict[str, str] = dc_field(default_factory=dict)
+    # Canonical load-time slot/ref/digest triples. Compile-target applicability
+    # freezes these facts so two same-family SDXL checkpoints cannot
+    # cross-certify merely because their graph/lane contracts match.
+    held_bindings: List[Tuple[str, str, str]] = dc_field(default_factory=list)
     # The per-record object behind each booking. Residency has one entry per
     # wire ref, so a multiply-held ref needs this map to transfer its strong
     # representative when the latest owner leaves.
@@ -1272,6 +1346,10 @@ class _ClassRecord:
     # the executor must neither whole-job-pin nor eagerly promote them, or
     # the idle sibling can never be LRU-swapped out.
     lane_refs: set = dc_field(default_factory=set)
+    # pgw#572: exact compile-capable objects owned by this READY record. The
+    # IDs are minted after successful setup and cleared before vacate; they do
+    # not derive from mutable refs, authored specs, or object memory addresses.
+    compile_targets: Dict[str, _CompileTargetRecord] = dc_field(default_factory=dict)
 
 
 @dataclass
@@ -1313,6 +1391,15 @@ class _InjectionResult:
     # may become call-time-owned; an un-gateable pipeline (no instance
     # __call__) keeps the eager whole-job pin + promote path.
     gated_slots: set = dc_field(default_factory=set)
+    # Actual worker-constructed pipelines whose declared compile targets
+    # resolve. Kept separately because shared-lane residency may replace the
+    # bookkeeping object with a ModuleDict while setup receives the pipeline.
+    compile_objects: List[Any] = dc_field(default_factory=list)
+    # id(pipeline) -> exact attached artifact that successfully armed it.
+    # Installed only after the setup warmup completes.
+    active_compile_artifacts: Dict[int, _CompileArtifactSelection] = dc_field(
+        default_factory=dict)
+    trt_execution_before: Dict[int, int] = dc_field(default_factory=dict)
 
 
 @dataclass
@@ -1842,6 +1929,243 @@ class Executor:
             and self._classes[spec.instance_key].failed is None
         )
 
+    @staticmethod
+    def _refresh_compile_target(target: _CompileTargetRecord) -> None:
+        """Refresh compatibility evidence after an in-place lane mutation."""
+        from . import compile_cache
+        from .models.loading import pipeline_weight_lane
+
+        cfg = target.spec.compile
+        assert cfg is not None
+        contract_digest = compile_cache.execution_contract_digest(
+            target.pipeline, cfg)
+        target.pipeline_weight_lane = pipeline_weight_lane(target.pipeline)
+        target.lora_bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+        target.contract_digest = contract_digest
+
+    def _install_compile_targets(
+        self,
+        rec: _ClassRecord,
+        spec: EndpointSpec,
+        objects: typing.Iterable[Any],
+        active_artifacts: Optional[Dict[int, _CompileArtifactSelection]] = None,
+    ) -> None:
+        """Mint one incarnation for every compile-capable object just set up."""
+        from . import compile_cache
+
+        cfg = spec.compile
+        rec.compile_targets = {}
+        if cfg is None:
+            return
+        object_list = list(objects)
+        from .models.loading import pipeline_weight_lane
+
+        mandatory_w8a8 = any(
+            compile_cache.has_compile_target(pipeline, cfg)
+            and pipeline_weight_lane(pipeline).startswith("w8a8")
+            for pipeline in object_list if pipeline is not None
+        )
+        requested_w8a8 = any(
+            _ref_wants_w8a8(wire_ref(spec.models[slot]))
+            for slot in self._setup_slots(spec)
+        )
+        function_names = tuple(sorted({
+            str(s.name).strip() for s in rec.specs if str(s.name).strip()
+        }))
+        bindings = tuple(sorted(rec.held_bindings))
+        bindings_valid = bool(bindings) and all(
+            slot.strip() and ref.strip() and digest.strip()
+            for slot, ref, digest in bindings
+        ) and len({slot for slot, _ref, _digest in bindings}) == len(bindings)
+        if not function_names or not bindings_valid:
+            detail = (
+                f"immutable applicability is incomplete "
+                f"(functions={function_names!r} bindings={bindings!r})"
+            )
+            logger.warning(
+                "compile target omitted for %s: %s", spec.name, detail,
+            )
+            if mandatory_w8a8 or requested_w8a8:
+                raise compile_cache.CompiledLaneUnavailableError(detail)
+            return
+        active_artifacts = active_artifacts or {}
+        seen: set[int] = set()
+        for pipeline in object_list:
+            if pipeline is None or id(pipeline) in seen:
+                continue
+            seen.add(id(pipeline))
+            if not compile_cache.has_compile_target(pipeline, cfg):
+                continue
+            incarnation_id = uuid.uuid4().hex
+            target = _CompileTargetRecord(
+                incarnation_id=incarnation_id,
+                spec=spec,
+                pipeline=pipeline,
+                pipeline_weight_lane="",
+                lora_bucket=0,
+                contract_digest="",
+                function_names=function_names,
+                model_bindings=bindings,
+            )
+            self._refresh_compile_target(target)
+            lane_error = compile_cache.compile_target_lane_error(
+                target.pipeline_weight_lane, target.lora_bucket)
+            if lane_error:
+                if mandatory_w8a8 or requested_w8a8:
+                    raise compile_cache.CompiledLaneUnavailableError(lane_error)
+                logger.warning(
+                    "compile target omitted for %s: %s", spec.name, lane_error)
+                continue
+            if requested_w8a8 and not target.pipeline_weight_lane.startswith("w8a8"):
+                raise compile_cache.CompiledLaneUnavailableError(
+                    f"W8A8 binding for {spec.name!r} materialized a non-W8A8 "
+                    f"pipeline lane {target.pipeline_weight_lane!r}"
+                )
+            active_selection = active_artifacts.get(id(pipeline))
+            active_ref = active_selection.ref if active_selection else ""
+            active_digest = (
+                active_selection.snapshot_digest if active_selection else "")
+            if bool(active_ref) != bool(active_digest):
+                logger.warning(
+                    "compile target omitted for %s: active artifact identity "
+                    "is incomplete (ref=%r digest=%r)",
+                    spec.name, active_ref, active_digest,
+                )
+                continue
+            if target.pipeline_weight_lane.startswith("w8a8") and not active_ref:
+                # A W8A8 object without a proven exact cell is not a READY
+                # serving target. The loader normally raises earlier; keep
+                # this final wire-state invariant fail closed too.
+                raise compile_cache.CompiledLaneUnavailableError(
+                    f"W8A8 compile target for {spec.name!r} has no proven "
+                    "active Forge artifact"
+                )
+            target.active_compile_ref = active_ref
+            target.active_compile_snapshot_digest = active_digest
+            rec.compile_targets[incarnation_id] = target
+        if requested_w8a8 and not rec.compile_targets:
+            raise compile_cache.CompiledLaneUnavailableError(
+                f"W8A8 setup for {spec.name!r} produced no addressable "
+                "compile-capable pipeline target"
+            )
+
+    def compile_targets(self) -> List[pb.CompileTarget]:
+        """Full-replace READY compile-target snapshot for StateDelta."""
+        out: List[pb.CompileTarget] = []
+        for rec in self._classes.values():
+            if not rec.ready:
+                continue
+            for target in rec.compile_targets.values():
+                cfg = target.spec.compile
+                family = str(getattr(cfg, "family", "") or "").strip()
+                if not family:
+                    continue
+                out.append(pb.CompileTarget(
+                    incarnation_id=target.incarnation_id,
+                    family=family,
+                    pipeline_weight_lane=target.pipeline_weight_lane,
+                    lora_bucket=target.lora_bucket,
+                    contract_digest=target.contract_digest,
+                    active_compile_ref=target.active_compile_ref,
+                    active_compile_snapshot_digest=(
+                        target.active_compile_snapshot_digest),
+                    function_names=target.function_names,
+                    model_bindings=[pb.CompileTargetBinding(
+                        slot=slot, ref=ref, snapshot_digest=digest,
+                    ) for slot, ref, digest in target.model_bindings],
+                ))
+        return sorted(out, key=lambda target: target.incarnation_id)
+
+    def _compile_target(
+        self, incarnation_id: str,
+    ) -> Optional[Tuple[_ClassRecord, _CompileTargetRecord]]:
+        """Return an exact still-READY target; never infer by family/ref."""
+        for rec in self._classes.values():
+            if not rec.ready:
+                continue
+            target = rec.compile_targets.get(incarnation_id)
+            if target is not None:
+                return rec, target
+        return None
+
+    def _validate_required_compile(
+        self, spec: EndpointSpec, run: pb.RunJob,
+    ) -> None:
+        """Fence scheduler compile evidence against the exact live object.
+
+        This is deliberately repeated before execution. A target ID is a
+        worker-session address, not a durable model identity; vacate/reload,
+        mutable-tag republish, or an alias/model mismatch must requeue rather
+        than execute on a merely same-family pipeline.
+        """
+        setup_slots = self._setup_slots(spec)
+        wants_w8a8 = any(
+            _ref_wants_w8a8(wire_ref(spec.models[slot]))
+            for slot in setup_slots
+        )
+        if not run.HasField("required_compile"):
+            if wants_w8a8:
+                raise RetryableError(
+                    "required_compile_missing: W8A8 dispatch requires an "
+                    "exact active compile incarnation"
+                )
+            return
+        required = run.required_compile
+        identity = (
+            required.target_incarnation_id.strip(),
+            required.cell_ref.strip(),
+            required.cell_snapshot_digest.strip(),
+            required.contract_digest.strip(),
+        )
+        if not all(identity):
+            raise RetryableError(
+                "required_compile_invalid: target, cell ref/digest, and "
+                "contract digest must all be nonempty"
+            )
+        found = self._compile_target(identity[0])
+        if found is None:
+            raise RetryableError(
+                "required_compile_replaced: selected compile incarnation is "
+                "no longer READY"
+            )
+        _rec, target = found
+        if wants_w8a8 and not target.pipeline_weight_lane.startswith("w8a8"):
+            raise RetryableError(
+                "required_compile_lane_mismatch: W8A8 dispatch selected a "
+                "non-W8A8 live pipeline"
+            )
+        if spec.name not in target.function_names:
+            raise RetryableError(
+                "required_compile_function_mismatch: target does not serve "
+                f"{spec.name!r}"
+            )
+        if (
+            target.active_compile_ref != identity[1]
+            or target.active_compile_snapshot_digest != identity[2]
+            or target.contract_digest != identity[3]
+        ):
+            raise RetryableError(
+                "required_compile_identity_mismatch: active cell or execution "
+                "contract changed"
+            )
+
+        expected: List[Tuple[str, str, str]] = []
+        for slot in setup_slots:
+            ref = wire_ref(spec.models[slot]).strip()
+            snap = run.snapshots.get(ref)
+            digest = str(getattr(snap, "digest", "") or "").strip()
+            if not slot.strip() or not ref or not digest:
+                raise RetryableError(
+                    "required_compile_binding_missing: every setup-held model "
+                    "requires an immutable RunJob snapshot digest"
+                )
+            expected.append((slot, ref, digest))
+        if tuple(sorted(expected)) != target.model_bindings:
+            raise RetryableError(
+                "required_compile_binding_mismatch: selected target holds a "
+                "different model ref or snapshot digest"
+            )
+
     def in_flight_keys(self) -> List[Tuple[str, int]]:
         return [k for k, j in self.jobs.items() if not j.finished and not j.superseded]
 
@@ -2060,6 +2384,43 @@ class Executor:
                         )
                         rec.stale = True
                         break
+            if rec.ready and not rec.stale and spec.compile is not None:
+                mandatory_w8a8 = any(
+                    _ref_wants_w8a8(wire_ref(spec.models[slot]))
+                    for slot in self._setup_slots(spec)
+                )
+                from . import compile_cache
+
+                try:
+                    desired_cell = await self._fetch_compile_snapshot(
+                        spec, snapshots)
+                except compile_cache.CompiledLaneUnavailableError:
+                    if mandatory_w8a8:
+                        # Desired state no longer supplies a mandatory exact
+                        # cell. Remove the old READY incarnation before
+                        # reporting the state-driven failure; it must not keep
+                        # serving under superseded scheduler evidence.
+                        rec.stale = True
+                        async with self._load_lock:
+                            await self._vacate_record(rec)
+                        raise
+                    desired_cell = None
+                if desired_cell is not None:
+                    live_targets = list(rec.compile_targets.values())
+                    if not live_targets or any(
+                        target.active_compile_ref != desired_cell.ref
+                        or target.active_compile_snapshot_digest
+                        != desired_cell.snapshot_digest
+                        for target in live_targets
+                    ):
+                        logger.info(
+                            "desired compile identity moved for %s -> %s@%s; "
+                            "vacating stale instance",
+                            spec.name,
+                            desired_cell.ref,
+                            desired_cell.snapshot_digest,
+                        )
+                        rec.stale = True
             if rec.ready and rec.stale:
                 # gw#494: the instance was loaded for a superseded pick —
                 # vacate (releasing its OLD-ref bookings) and set up fresh
@@ -2092,7 +2453,7 @@ class Executor:
     async def _run_synthesized_warmup(
         self, spec: EndpointSpec, rec: _ClassRecord, instance: Any,
         snapshots: Optional[Dict[str, pb.Snapshot]],
-    ) -> None:
+    ) -> int:
         """gw#470 default boot warmup: one synthesized (or `warmup=`-declared)
         request per GPU inference handler of this instance group, run
         post-setup pre-READY under the load lock. Output is discarded — the
@@ -2100,7 +2461,7 @@ class Executor:
         local_output_dir, so nothing touches billing/outputs/CAS. A failure
         propagates as a load failure."""
         if spec.kind != "inference" or spec.cls is None:
-            return
+            return 0
         from . import warmup as warmup_mod
         from .api.decorators import ATTR as _DECL_ATTR
 
@@ -2108,7 +2469,7 @@ class Executor:
         if decl is None:
             # Not an @endpoint class (internally-constructed spec): no
             # declaration surface exists, so no synthesized warmup either.
-            return
+            return 0
         # Instance group = every spec sharing this instance: the code-table
         # siblings (matching instance_key) plus whatever this record has
         # already seen (covers pgw#532 derived per-pick specs).
@@ -2126,6 +2487,7 @@ class Executor:
         )
         for skip in skips:
             logger.info("boot warmup skipped for %s: %s", skip.spec.name, skip.reason)
+        warmed = 0
         for wj in jobs:
             handler_kwargs = await self._handler_kwargs(wj.spec, snapshots or {})
             t0 = time.monotonic()
@@ -2152,11 +2514,13 @@ class Executor:
                         wj.spec.name, exc)
                     if torch is not None and torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    return
+                    return warmed
+            warmed += 1
             logger.info(
                 "boot warmup %s (%s): %.1fs",
                 wj.spec.name, "declared" if wj.declared else "synthesized",
                 time.monotonic() - t0)
+        return warmed
 
     async def _invoke_warmup(
         self, spec: EndpointSpec, instance: Any, ctx: "RequestContext",
@@ -2208,14 +2572,18 @@ class Executor:
         slot_refs: Dict[str, str] = {
             slot: wire_ref(spec.models[slot]) for slot in setup_slots
         }
+        slot_identities: Dict[str, _ResidencyIdentity] = {}
         paths: Dict[str, str] = {}
         for slot in setup_slots:
             binding = spec.models[slot]
             ref = slot_refs[slot]
             snap = (snapshots or {}).get(ref)
-            path = await self.store.ensure_local(ref, snap, binding=binding)
-            paths[slot] = str(path)
-        compile_artifact = await self._fetch_compile_snapshot(spec, snapshots)
+            materialized = await self.store._materialize_local(
+                ref, snap, binding=binding)
+            paths[slot] = str(materialized.path)
+            slot_identities[slot] = materialized.identity
+        compile_selection = await self._fetch_compile_snapshot(spec, snapshots)
+        compile_artifact = compile_selection.path if compile_selection else None
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._load_lock:
@@ -2233,7 +2601,9 @@ class Executor:
             if callable(setup):
                 inj = await self._injection_kwargs(
                     spec, setup, paths, server=rec.server,
-                    compile_artifact=compile_artifact, snapshots=snapshots)
+                    compile_selection=compile_selection,
+                    snapshots=snapshots,
+                    slot_identities=slot_identities)
                 rec.shared_keys.extend(inj.shared_keys)
                 # pgw#517: a self-loading (str/Path-slot) endpoint builds its
                 # own pipeline inside setup() and the executor never sees it
@@ -2249,16 +2619,26 @@ class Executor:
                         await setup(**inj.kwargs)
                     else:
                         await _to_thread_complete(setup, **inj.kwargs)
+            from . import compile_cache
+            from . import trt_engine
+
+            proves_inductor = bool(
+                compile_selection
+                and inj.active_compile_artifacts
+                and not trt_engine.is_engine_ref(compile_selection.ref)
+            )
+            proof_before = (
+                compile_cache.inductor_counters() if proves_inductor else {})
+            warmed = 0
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
-                from . import compile_cache
-
                 counters_before = compile_cache.inductor_counters()
                 warm_t0 = time.monotonic()
                 if asyncio.iscoroutinefunction(warmup):
                     await warmup()
                 else:
                     await _to_thread_complete(warmup)
+                warmed = 1
                 if spec.compile is not None:
                     stats = compile_cache.counters_delta(
                         counters_before, compile_cache.inductor_counters())
@@ -2273,7 +2653,46 @@ class Executor:
                 # warmup for every GPU inference handler of this instance
                 # group, still pre-READY under the load lock. A failure
                 # propagates as a load failure (loud, th#581 rails).
-                await self._run_synthesized_warmup(spec, rec, instance, snapshots)
+                warmed = await self._run_synthesized_warmup(
+                    spec, rec, instance, snapshots)
+            if proves_inductor:
+                proof = compile_cache.counters_delta(
+                    proof_before, compile_cache.inductor_counters())
+                hits = int(proof.get("fxgraph_cache_hit", 0))
+                if not warmed or hits <= 0:
+                    w8a8 = False
+                    for pipe in inj.compile_objects:
+                        if id(pipe) not in inj.active_compile_artifacts:
+                            continue
+                        from .models.loading import pipeline_weight_lane
+
+                        w8a8 = w8a8 or pipeline_weight_lane(pipe).startswith("w8a8")
+                        compile_cache.unwrap(pipe)
+                        if int(getattr(spec.compile, "lora_bucket", 0) or 0):
+                            compile_cache.drop_lora_lane(pipe)
+                        inj.active_compile_artifacts.pop(id(pipe), None)
+                    detail = (
+                        "attached compile artifact did not serve a warmup "
+                        f"graph (warmups={warmed}, cache_hits={hits})"
+                    )
+                    if w8a8:
+                        raise compile_cache.CompiledLaneUnavailableError(detail)
+                    logger.warning("%s; serving eager", detail)
+            if compile_selection and trt_engine.is_engine_ref(compile_selection.ref):
+                unproven = [
+                    pipe for pipe in inj.compile_objects
+                    if id(pipe) in inj.active_compile_artifacts
+                    and trt_engine.execution_count(pipe)
+                    <= inj.trt_execution_before.get(id(pipe), 0)
+                ]
+                if unproven:
+                    for pipe in unproven:
+                        trt_engine.unwrap(pipe)
+                        inj.active_compile_artifacts.pop(id(pipe), None)
+                    logger.warning(
+                        "attached TRT artifact did not execute during warmup; "
+                        "serving eager"
+                    )
             vram_delta = max(0, self._vram_allocated() - vram_before)
             if rec.server is not None:
                 # Engine subprocess VRAM is invisible to torch's allocator;
@@ -2286,13 +2705,21 @@ class Executor:
             self._register_residency(
                 spec, setup_slots, inj.loaded, vram_delta,
                 lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes,
-                slot_refs=slot_refs)
+                slot_refs=slot_refs, slot_identities=slot_identities)
             rec.held_refs = sorted(set(slot_refs.values()))
             rec.held_snapshot_digests = {
-                ref: digest
-                for ref in rec.held_refs
-                if (digest := self.store.resident_identity(ref)[0])
+                slot_refs[slot]: identity[0]
+                for slot, identity in slot_identities.items()
+                if slot in slot_refs and identity[0]
             }
+            rec.held_bindings = sorted(
+                (
+                    slot,
+                    ref,
+                    rec.held_snapshot_digests.get(ref, ""),
+                )
+                for slot, ref in slot_refs.items()
+            )
             # gw#551: call-time-owned refs. Any record holding 2+ worker-
             # constructed pipelines can overcommit VRAM (content-keyed lanes
             # AND monolithic siblings alike) — those swap per use via the
@@ -2306,6 +2733,12 @@ class Executor:
                 obj = inj.loaded.get(slot, (None, 0))[0]
                 if obj is not None or ref not in rec.held_objects:
                     rec.held_objects[ref] = obj
+            self._install_compile_targets(
+                rec,
+                spec,
+                inj.compile_objects,
+                inj.active_compile_artifacts,
+            )
             rec.stale = False
             await self._clear_host_ram_capacity(list(slot_refs.values()))
         return instance
@@ -2320,6 +2753,7 @@ class Executor:
         lane_slots: Optional[set] = None,
         shared_bytes: int = 0,
         slot_refs: Optional[Dict[str, str]] = None,
+        slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
     ) -> None:
         """Honest per-ref residency after a setup (#369). Worker-constructed
         pipelines carry their own measured allocator delta AND the object
@@ -2332,7 +2766,9 @@ class Executor:
         res = self.store.residency
         lanes = lane_slots or set()
         refs = slot_refs or {}
+        identities = slot_identities or {}
         per_ref: Dict[str, Tuple[Any, int]] = {}
+        per_ref_identity: Dict[str, _ResidencyIdentity] = {}
         for slot in setup_slots:
             if slot in lanes:
                 continue
@@ -2342,13 +2778,23 @@ class Executor:
             obj, measured = loaded.get(slot, (None, 0))
             prev_obj, prev_bytes = per_ref.get(ref, (None, 0))
             per_ref[ref] = (obj or prev_obj, prev_bytes + measured)
+            identity = identities.get(slot, ("", 0))
+            prior_identity = per_ref_identity.get(ref)
+            if prior_identity is not None and identity[0] and identity != prior_identity:
+                raise RuntimeError(
+                    f"setup slots for {ref!r} captured conflicting snapshot "
+                    f"identities: {prior_identity!r} != {identity!r}"
+                )
+            if identity[0] or prior_identity is None:
+                per_ref_identity[ref] = identity
         lane_bytes = sum(loaded[s][1] for s in lanes if s in loaded)
         residual = max(0, total_delta - sum(b for _, b in per_ref.values())
                        - lane_bytes - max(0, int(shared_bytes)))
         opaque = [r for r, (obj, _) in per_ref.items() if obj is None]
         share = residual // len(opaque) if opaque else 0
         for ref, (obj, measured) in per_ref.items():
-            self.store.activate_disk_identity(ref)
+            self.store.activate_load_identity(
+                ref, per_ref_identity.get(ref, ("", 0)))
             vram = measured + (share if obj is None else 0)
             if vram > 0:
                 res.track_vram(ref, obj, vram_bytes=vram)
@@ -2783,39 +3229,24 @@ class Executor:
 
     async def _fetch_compile_snapshot(
         self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]]
-    ) -> Optional[Path]:
-        """Hub-attached compiled-artifact snapshot for this endpoint's family
-        (#569 boot-attach, opt-in hub-side): a TRT engine cell (#390,
-        preferred — bigger measured win) or an inductor cache cell. Returns
-        the local artifact path, or None. A plain lane may continue eager;
-        W8A8 setup subsequently fails retryably unless this returns an exact
-        W8A8 Forge cell."""
+    ) -> Optional[_CompileArtifactSelection]:
+        """Tensorhub-delivered compiled artifact for this endpoint family.
+
+        Plain acceleration remains optional and explicitly prefers a compatible
+        TRT engine (#390) over an Inductor cell. W8A8 delivery is mandatory:
+        setup fails retryably before pipeline/GPU load unless Tensorhub attaches
+        one exact immutable Forge cell. Returns the selected ref/digest/path or
+        ``None`` only for an ordinary eager-compatible lane.
+        """
         if spec.compile is None or not snapshots:
             return None
         from . import compile_cache, trt_engine
-        from .models.refs import parse_model_ref
-
         family = getattr(spec.compile, "family", "") or ""
         # The effective spec is already rebound to this RunJob's selected
         # checkpoints. Snapshot maps also contain attached cells and may carry
         # unrelated/prepositioned models, so they must not choose the lane.
         model_refs = [wire_ref(binding) for binding in spec.models.values()]
-        wants_w8a8 = False
-        for model_ref in model_refs:
-            try:
-                parsed = parse_model_ref(model_ref).tensorhub
-            except ValueError:
-                continue
-            flavor = (parsed.flavor or "") if parsed is not None else ""
-            if (
-                parsed is not None and parsed.owner != "_system"
-                and (
-                    flavor == "fp8-w8a8"
-                    or flavor.startswith("fp8-w8a8-")
-                )
-            ):
-                wants_w8a8 = True
-                break
+        wants_w8a8 = any(_ref_wants_w8a8(ref) for ref in model_refs)
         want_bucket = int(getattr(spec.compile, "lora_bucket", 0) or 0)
         if wants_w8a8:
             # TensorRT cells currently expose only their plain fp16 contract.
@@ -2827,21 +3258,70 @@ class Executor:
                     ref, family, wants_w8a8=True, want_bucket=want_bucket)
             ]
         else:
-            candidates = ([
+            trt_candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
                 if trt_engine.is_engine_ref(ref, family)
-            ] if not want_bucket else []) + [
+            ] if not want_bucket else []
+            inductor_candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
                 if _cell_lane_matches(
                     ref, family, wants_w8a8=False, want_bucket=want_bucket)
             ]
-        for ref, snap in candidates:
+            # Explicit kind policy, then uniqueness within that kind. A map's
+            # iteration order never chooses the artifact, while the existing
+            # measured plain-lane TRT preference remains intact.
+            candidates = trt_candidates or inductor_candidates
+        candidates = sorted(candidates, key=lambda item: item[0])
+        if wants_w8a8 and not candidates:
+            raise compile_cache.CompiledLaneUnavailableError(
+                f"no exact W8A8 Forge cell attached for family={family!r} "
+                f"lora_bucket={want_bucket}"
+            )
+        if len(candidates) > 1:
+            refs = ", ".join(ref for ref, _snap in candidates)
+            detail = (
+                "multiple compatible compiled artifacts were attached for "
+                f"family={family!r} lane={'w8a8' if wants_w8a8 else 'plain'}: "
+                f"{refs}; refusing map-order selection"
+            )
+            if wants_w8a8:
+                # W8A8 has no eager-compatible fallback: setup's mandatory
+                # lane gate must surface this as retryable before GPU load.
+                raise compile_cache.CompiledLaneUnavailableError(detail)
+            logger.warning("%s; serving eager", detail)
+            return None
+        if candidates:
+            ref, snap = candidates[0]
+            digest = str(snap.digest or "").strip()
+            if not digest:
+                detail = f"compiled-artifact snapshot {ref!r} has no immutable digest"
+                if wants_w8a8:
+                    raise compile_cache.CompiledLaneUnavailableError(detail)
+                logger.warning("%s; serving eager", detail)
+                return None
             try:
                 local = await self.store.ensure_local(ref, snap)
-                return compile_cache.find_artifact(local)
+                artifact = compile_cache.find_artifact(local)
+                if artifact is None:
+                    if wants_w8a8:
+                        raise compile_cache.CompiledLaneUnavailableError(
+                            f"W8A8 Forge snapshot {ref!r} contains no artifact")
+                    logger.warning(
+                        "compiled-artifact snapshot %s contains no artifact; "
+                        "serving eager", ref)
+                    return None
+                return _CompileArtifactSelection(
+                    path=artifact, ref=ref, snapshot_digest=digest)
             except Exception as exc:
+                if wants_w8a8 and isinstance(
+                    exc, compile_cache.CompiledLaneUnavailableError
+                ):
+                    raise
+                if wants_w8a8:
+                    raise compile_cache.CompiledLaneUnavailableError(
+                        f"W8A8 Forge snapshot {ref!r} is unusable: {exc}") from exc
                 logger.warning(
-                    "compiled-artifact snapshot %s unusable (%s); trying next/eager", ref, exc
+                    "compiled-artifact snapshot %s unusable (%s); serving eager", ref, exc
                 )
         return None
 
@@ -2904,8 +3384,9 @@ class Executor:
         paths: Dict[str, str],
         *,
         server: Any = None,
-        compile_artifact: Optional[Path] = None,
+        compile_selection: Optional[_CompileArtifactSelection] = None,
         snapshots: Optional[Dict[str, pb.Snapshot]] = None,
+        slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
     ) -> "_InjectionResult":
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
@@ -2931,6 +3412,7 @@ class Executor:
         kwargs: Dict[str, Any] = {}
         loaded: Dict[str, Tuple[Any, int]] = {}
         result = _InjectionResult(kwargs=kwargs, loaded=loaded)
+        compile_artifact = compile_selection.path if compile_selection else None
         share_plan = self._component_share_plan(spec, paths, hints)
         if server is not None:
             for pname, ann in hints.items():
@@ -3049,13 +3531,32 @@ class Executor:
                     # a TRT engine (#390, refit with this pipeline's weights)
                     # or an inductor cache (#384). No verified artifact =>
                     # stays eager. ``compile_artifact`` is hub-attached (#569).
-                    await _to_thread_complete(
+                    armed = await _to_thread_complete(
                         self._enable_compiled, pipe, spec.compile, compile_artifact,
                     )
+                    from . import compile_cache
+
+                    if compile_cache.has_compile_target(pipe, spec.compile):
+                        result.compile_objects.append(pipe)
+                        if armed and compile_selection is not None:
+                            result.active_compile_artifacts[id(pipe)] = compile_selection
+                            from . import trt_engine
+
+                            if trt_engine.is_engine_ref(compile_selection.ref):
+                                result.trt_execution_before[id(pipe)] = (
+                                    trt_engine.execution_count(pipe))
                 delta = max(0, self._vram_allocated() - before)
                 if slot_share:
                     lane_obj, lane_bytes = self._register_lane(
-                        slot, ref, pipe, slot_share, injected, delta, result)
+                        slot,
+                        ref,
+                        pipe,
+                        slot_share,
+                        injected,
+                        delta,
+                        result,
+                        (slot_identities or {}).get(slot, ("", 0)),
+                    )
                     loaded[slot] = (lane_obj, lane_bytes)
                     result.lane_slots.add(slot)
                 else:
@@ -3076,6 +3577,7 @@ class Executor:
         injected: Dict[str, Any],
         delta: int,
         result: "_InjectionResult",
+        load_identity: _ResidencyIdentity,
     ) -> Tuple[Any, int]:
         """Book one lane's residency (gw#479): freshly loaded shared
         components go into the content-keyed cache (VRAM counted once, held
@@ -3115,7 +3617,7 @@ class Executor:
             sorted(slot_share), fresh_bytes / _GiB,
             "fresh" if fresh_bytes else "reused",
         )
-        self.store.activate_disk_identity(ref)
+        self.store.activate_load_identity(ref, load_identity)
         if lane_bytes > 0:
             res.track_vram(ref, lane_obj, vram_bytes=lane_bytes)
         elif int(estimate_cuda_resident_gb(lane_obj) * _GiB) > 0:
@@ -3185,6 +3687,7 @@ class Executor:
     async def shutdown_instances(self) -> None:
         for rec in self._classes.values():
             inst, rec.instance, rec.ready = rec.instance, None, False
+            rec.compile_targets.clear()
             shutdown = getattr(inst, "shutdown", None)
             if inst is not None and callable(shutdown):
                 try:
@@ -3197,6 +3700,7 @@ class Executor:
             server, rec.server = rec.server, None
             if server is not None:
                 await asyncio.to_thread(server.stop)
+        self._on_state_change()
 
     # ---- Compile-cache adoption -------------------------------------------
 
@@ -3213,6 +3717,7 @@ class Executor:
         state: "pb.ModelState",
         snapshot_digest: str,
         operation_id: str,
+        target_incarnation_id: str,
         **kw: Any,
     ) -> pb.ModelEvent:
         """Build terminal evidence for one orchestrator-minted adoption op."""
@@ -3222,6 +3727,7 @@ class Executor:
             state,
             identity=identity,
             operation_id=operation_id,
+            target_incarnation_id=target_incarnation_id,
             **kw,
         )
 
@@ -3231,6 +3737,7 @@ class Executor:
         snap = op.snapshot if op.HasField("snapshot") else None
         snapshot_digest = snap.digest if snap is not None else ""
         operation_id = op.operation_id
+        target_incarnation_id = op.target_incarnation_id
         if not operation_id.strip():
             await self._send(pb.WorkerMessage(
                 model_event=self._adoption_event(
@@ -3238,6 +3745,7 @@ class Executor:
                     pb.MODEL_STATE_FAILED,
                     snapshot_digest,
                     operation_id,
+                    target_incarnation_id,
                     error="adopt_failed:missing_operation_id",
                 )
             ))
@@ -3252,13 +3760,26 @@ class Executor:
                     pb.MODEL_STATE_FAILED,
                     snapshot_digest,
                     operation_id,
+                    target_incarnation_id,
                     error="adopt_failed:missing_snapshot_digest",
+                )
+            ))
+            return
+        if not target_incarnation_id.strip():
+            await self._send(pb.WorkerMessage(
+                model_event=self._adoption_event(
+                    ref,
+                    pb.MODEL_STATE_FAILED,
+                    snapshot_digest,
+                    operation_id,
+                    target_incarnation_id,
+                    error="adopt_failed:missing_target_incarnation_id",
                 )
             ))
             return
         try:
             await self._adopt_compile_cache(
-                ref, snap, snapshot_digest, operation_id,
+                ref, snap, snapshot_digest, operation_id, target_incarnation_id,
             )
         except Exception as exc:
             logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
@@ -3268,6 +3789,7 @@ class Executor:
                     pb.MODEL_STATE_FAILED,
                     snapshot_digest,
                     operation_id,
+                    target_incarnation_id,
                     error=f"adopt_failed:{type(exc).__name__.lower()}",
                 )
             ))
@@ -3278,6 +3800,7 @@ class Executor:
         snap: Optional[pb.Snapshot],
         snapshot_digest: str,
         operation_id: str,
+        target_incarnation_id: str,
     ) -> None:
         """Hot adoption (th#567): download+verify a compiled artifact and
         re-wrap the already-resident modules in place — weights untouched, no
@@ -3289,8 +3812,13 @@ class Executor:
         from . import compile_cache, trt_engine
 
         t0 = time.monotonic()
+        staged_artifact: Any = None
 
         async def fail(reason: str, detail: str = "") -> None:
+            nonlocal staged_artifact
+            if staged_artifact is not None:
+                await asyncio.to_thread(staged_artifact.close)
+                staged_artifact = None
             logger.warning("compile-cache adopt %s failed: %s %s", ref, reason, detail)
             await self._send(pb.WorkerMessage(
                 model_event=self._adoption_event(
@@ -3298,6 +3826,7 @@ class Executor:
                     pb.MODEL_STATE_FAILED,
                     snapshot_digest,
                     operation_id,
+                    target_incarnation_id,
                     error=f"adopt_failed:{reason}",
                 )
             ))
@@ -3306,21 +3835,36 @@ class Executor:
         is_trt = trt_engine.is_engine_ref(ref)
         if not family or not (is_trt or compile_cache.is_cache_ref(ref)):
             return await fail("bad_ref")
-        candidates = [
-            s for s in self.specs.values()
-            if s.cls is not None and s.compile is not None
-            and (getattr(s.compile, "family", "") or "") == family
-            and s.name not in self.unavailable
-        ]
-        if not candidates:
-            return await fail("no_endpoint")
-        resident: Dict[int, Tuple[_ClassRecord, EndpointSpec]] = {}
-        for s in candidates:
-            rec = self._classes[s.instance_key]
-            if rec.ready:
-                resident.setdefault(id(rec), (rec, s))
-        if not resident:
-            return await fail("not_resident")
+        found = self._compile_target(target_incarnation_id)
+        if found is None:
+            return await fail("target_not_ready")
+        expected_rec, expected_target = found
+        target_family = str(
+            getattr(expected_target.spec.compile, "family", "") or ""
+        ).strip()
+        if target_family != family:
+            return await fail("target_family_mismatch")
+        previous_ref = expected_target.active_compile_ref
+        previous_digest = expected_target.active_compile_snapshot_digest
+        if previous_ref == ref and previous_digest == snapshot_digest:
+            # Replayed/reconnected operation for the exact already-proven
+            # artifact: acknowledge without another wrap or warmup.
+            await self._send(pb.WorkerMessage(model_event=self._adoption_event(
+                ref,
+                pb.MODEL_STATE_ADOPTED,
+                snapshot_digest,
+                operation_id,
+                target_incarnation_id,
+                duration_ms=0,
+            )))
+            return
+        if previous_ref:
+            # Replacing any already-active wrapper is not transactional:
+            # applying the new graph first unwraps the old one, and a failed
+            # warmup cannot promise a lossless restore. Never report the old
+            # artifact as active after removing it. Tensorhub vacates/reloads
+            # this incarnation for same-ref republish or kind/ref changes.
+            return await fail("active_replace_requires_reload")
         if self.in_flight_keys():
             # The hub schedules adoption idle-only; defensive — never touch
             # a module while any job is in flight.
@@ -3332,122 +3876,164 @@ class Executor:
         artifact = compile_cache.find_artifact(local)
         if artifact is None:
             return await fail("artifact_missing")
-        meta: Dict[str, Any] = {}
         if not is_trt:
             try:
-                meta = await asyncio.to_thread(
-                    compile_cache.seed_artifact, artifact, family, self.store._cache_dir
+                # Expensive extraction and runtime-key verification happen in
+                # an isolated tree before taking model/GPU locks. Activation
+                # and wrapper installation remain one serialized transaction.
+                staged_artifact = await asyncio.to_thread(
+                    compile_cache.stage_artifact,
+                    artifact,
+                    family,
+                    self.store._cache_dir,
                 )
             except compile_cache.AdoptError as exc:
                 return await fail(exc.reason, str(exc))
             except Exception as exc:
                 return await fail("artifact_invalid", str(exc))
 
-        # Re-wrap + warmup under the GPU slot: a job landing mid-adoption
-        # queues on the semaphore instead of racing the trace/refit.
-        async with self._gpu_semaphore:
-            adopted: List[Tuple[_ClassRecord, EndpointSpec]] = []
-            wrapped_objs: List[Any] = []
-            lane_objs: List[Any] = []
+        # Artifact work may take long enough for model juggling to replace the
+        # object. Serialize the final check + mutation with setup/vacate, and
+        # address only the exact incarnation observed before the download.
+        async with self._load_lock:
+            current = self._compile_target(target_incarnation_id)
+            if (
+                current is None
+                or current[0] is not expected_rec
+                or current[1] is not expected_target
+            ):
+                return await fail("target_replaced")
+            if self.in_flight_keys():
+                return await fail("model_in_use")
 
-            async def rollback() -> None:
-                for obj in wrapped_objs:
-                    compile_cache.unwrap(obj)
-                for obj in lane_objs:
-                    compile_cache.drop_lora_lane(obj)
+            # A job landing mid-adoption queues on the same GPU semaphore
+            # instead of racing a wrap/refit/warmup.
+            async with self._gpu_semaphore:
+                current = self._compile_target(target_incarnation_id)
+                if (
+                    current is None
+                    or current[0] is not expected_rec
+                    or current[1] is not expected_target
+                ):
+                    return await fail("target_replaced")
 
-            for rec, s in resident.values():
-                applied = False
-                for slot in self._setup_slots(s):
-                    obj = self.store.residency.obj(wire_ref(s.models[slot]))
-                    if obj is None:
-                        continue
-                    # gw#561: a lora_bucket endpoint that stayed eager at boot
-                    # rolled its branches back; re-apply the declared graph
-                    # family so the pushed lora cell's lane can match.
-                    bucket = int(getattr(s.compile, "lora_bucket", 0) or 0)
-                    if bucket and not is_trt:
-                        try:
-                            compile_cache.apply_lora_lane(obj, bucket)
-                            lane_objs.append(obj)
-                        except Exception as exc:
-                            return await fail("lane_apply", str(exc))
-                    if is_trt:
-                        try:
-                            await asyncio.to_thread(
-                                trt_engine.load_and_wrap, obj, s.compile,
-                                artifact, self.store._cache_dir,
-                            )
-                            applied = True
-                        except compile_cache.AdoptError as exc:
-                            return await fail(exc.reason, str(exc))
-                        except Exception as exc:
-                            return await fail("artifact_invalid", str(exc))
-                    else:
-                        # Graph-key parity (gw#391): the producer's low-VRAM
-                        # prep mode is traced into the cells — a drifted
-                        # pipeline can only miss, so reject deterministically
-                        # instead of paying a warmup to find out.
-                        drift = (
-                            compile_cache.mode_drift(meta, obj)
-                            or compile_cache.lane_drift(meta, obj)
-                            or compile_cache.contract_drift(meta, obj, s.compile)
+                rec, target = current
+                spec = target.spec
+                cfg = spec.compile
+                assert cfg is not None
+                obj = target.pipeline
+                wrapped = False
+                lane_applied = False
+                trt_before = trt_engine.execution_count(obj) if is_trt else 0
+
+                async def rollback() -> None:
+                    """Return a first-time failed adoption to honest eager."""
+                    if is_trt and wrapped:
+                        trt_engine.unwrap(obj)
+                    if wrapped:
+                        if not is_trt:
+                            compile_cache.unwrap(obj)
+                    if lane_applied:
+                        compile_cache.drop_lora_lane(obj)
+                    live = self._compile_target(target_incarnation_id)
+                    if live is not None and live[0] is rec and live[1] is target:
+                        self._refresh_compile_target(target)
+                        self._on_state_change()
+
+                bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+                if bucket and not is_trt:
+                    try:
+                        compile_cache.apply_lora_lane(obj, bucket)
+                        lane_applied = True
+                    except Exception as exc:
+                        await rollback()
+                        return await fail("lane_apply", str(exc))
+
+                if is_trt:
+                    try:
+                        await asyncio.to_thread(
+                            trt_engine.load_and_wrap, obj, cfg,
+                            artifact, self.store._cache_dir,
                         )
-                        if drift:
-                            await rollback()
-                            return await fail("key_mismatch", drift)
-                        # Re-adoption of a re-published cell: drop the previous
-                        # wrap + dynamo's in-memory code so warmup re-traces
-                        # against the freshly seeded caches (gw#391).
-                        compile_cache.unwrap(obj)
-                        if await asyncio.to_thread(
-                            compile_cache.apply, obj, s.compile, cache_ready=True
-                        ):
-                            applied = True
-                            wrapped_objs.append(obj)
-                if applied:
-                    adopted.append((rec, s))
-            if not adopted:
-                await rollback()
-                return await fail("no_target")
+                        wrapped = True
+                    except compile_cache.AdoptError as exc:
+                        await rollback()
+                        return await fail(exc.reason, str(exc))
+                    except Exception as exc:
+                        await rollback()
+                        return await fail("artifact_invalid", str(exc))
+                else:
+                    assert staged_artifact is not None
+                    try:
+                        # Exact graph/lane parity is checked against this one
+                        # live object, never every resident family member.
+                        await asyncio.to_thread(
+                            compile_cache.arm_staged_artifact,
+                            obj,
+                            cfg,
+                            staged_artifact,
+                        )
+                        staged_artifact = None
+                    except compile_cache.AdoptError as exc:
+                        await rollback()
+                        return await fail(exc.reason, str(exc))
+                    except Exception as exc:
+                        await rollback()
+                        return await fail("artifact_invalid", str(exc))
+                    wrapped = True
 
-            counters_before = compile_cache.inductor_counters()
-            warm_t0 = time.monotonic()
-            warmed = 0
-            for rec, _s in adopted:
+                counters_before = compile_cache.inductor_counters()
+                warm_t0 = time.monotonic()
                 warmup = getattr(rec.instance, "warmup", None)
-                if not callable(warmup):
-                    continue
                 try:
-                    if asyncio.iscoroutinefunction(warmup):
-                        await warmup()
+                    if callable(warmup):
+                        if asyncio.iscoroutinefunction(warmup):
+                            await warmup()
+                        else:
+                            await asyncio.to_thread(warmup)
+                        warmed = 1
                     else:
-                        await asyncio.to_thread(warmup)
-                    warmed += 1
+                        # Real FLUX/Z/SDXL endpoints use the decorator warmup
+                        # contract rather than a custom instance method. Reuse
+                        # the same production planner/invocation path as setup.
+                        warmed = await self._run_synthesized_warmup(
+                            spec, rec, rec.instance, None)
                 except Exception as exc:
                     await rollback()
                     return await fail("warmup", f"{type(exc).__name__}: {exc}")
-            warmup_s = round(time.monotonic() - warm_t0, 3)
-            stats = compile_cache.counters_delta(
-                counters_before, compile_cache.inductor_counters())
-            hits = stats.get("fxgraph_cache_hit", 0)
-            misses = stats.get("fxgraph_cache_miss", 0)
+                warmup_s = round(time.monotonic() - warm_t0, 3)
+                stats = compile_cache.counters_delta(
+                    counters_before, compile_cache.inductor_counters())
+                hits = stats.get("fxgraph_cache_hit", 0)
+                misses = stats.get("fxgraph_cache_miss", 0)
 
-            if not is_trt:
-                # Honest failure mode (gw#391): ADOPTED must mean the seeded
-                # cell actually served the trace. No warmup = unprovable;
-                # zero hits = silently eager. Both roll back to true eager.
-                if not warmed:
+                if not is_trt:
+                    if not warmed:
+                        await rollback()
+                        return await fail(
+                            "no_warmup",
+                            "target defines no runnable warmup; cache hits unprovable")
+                    if hits <= 0:
+                        await rollback()
+                        return await fail("cache_miss", (
+                            f"warmup observed 0 fxgraph cache hits "
+                            f"(misses={misses}, warmup={warmup_s}s) — cell useless "
+                            f"on this runtime, serving eager"))
+                elif trt_engine.execution_count(obj) <= trt_before:
                     await rollback()
                     return await fail(
-                        "no_warmup",
-                        "no adopted endpoint defines warmup(); cache hits unprovable")
-                if hits <= 0:
+                        "engine_not_executed",
+                        "warmup did not execute the attached TRT engine",
+                    )
+
+                current = self._compile_target(target_incarnation_id)
+                if current is None or current[0] is not rec or current[1] is not target:
                     await rollback()
-                    return await fail("cache_miss", (
-                        f"warmup observed 0 fxgraph cache hits "
-                        f"(misses={misses}, warmup={warmup_s}s) — cell useless "
-                        f"on this runtime, serving eager"))
+                    return await fail("target_replaced")
+                target.active_compile_ref = ref
+                target.active_compile_snapshot_digest = snapshot_digest
+                self._refresh_compile_target(target)
+                self._on_state_change()
 
         duration_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
@@ -3466,6 +4052,7 @@ class Executor:
                 pb.MODEL_STATE_ADOPTED,
                 snapshot_digest,
                 operation_id,
+                target_incarnation_id,
                 duration_ms=duration_ms,
             )
         ))
@@ -3507,6 +4094,11 @@ class Executor:
         released_refs: List[str] = []
         old_obj: Any = None
         inst, rec.instance, rec.ready = rec.instance, None, False
+        rec.compile_targets.clear()
+        # The next full StateDelta must remove the old address before any
+        # replacement can become READY. Do this synchronously before teardown
+        # awaits; adoption's second validation then rejects the stale ID.
+        self._on_state_change()
         shutdown = getattr(inst, "shutdown", None)
         if inst is not None and callable(shutdown):
             try:
@@ -3560,6 +4152,7 @@ class Executor:
                 released_refs.append(ref)
         rec.held_refs = []
         rec.held_snapshot_digests = {}
+        rec.held_bindings = []
         rec.lane_refs = set()
         rec.held_objects = {}
         # Do not let this teardown frame itself retain a departing pipeline
@@ -3665,6 +4258,17 @@ class Executor:
             # whole job — pins, setup, adapters, ctx.slots — so every
             # downstream consumer sees the pick, never the code seed.
             spec = job.spec = self._effective_spec(spec, run)
+        except Exception as exc:
+            status, msg = _map_exception(exc)
+            await self._finish(job, status, safe_message=msg)
+            return
+        if spec.cls is not None:
+            # Register the derived per-pick spec before fencing so the job is
+            # a visible record owner and vacate cannot race the validated
+            # incarnation.
+            self._class_record(spec)
+        try:
+            self._validate_required_compile(spec, run)
         except Exception as exc:
             status, msg = _map_exception(exc)
             await self._finish(job, status, safe_message=msg)
@@ -3821,6 +4425,10 @@ class Executor:
                         torch.cuda.reset_peak_memory_stats(gpu_index)
                     except Exception:
                         pass
+            # Last execution fence: no adapter mutation or tenant handler has
+            # run yet. The repeated check catches a replacement between
+            # scheduler assignment/intake and this GPU turn.
+            self._validate_required_compile(spec, run)
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Lane refs

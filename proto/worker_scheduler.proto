@@ -195,6 +195,36 @@ message StateDelta {
   // Latest desired-residency generation accepted by this worker. This is
   // observation, not convergence; ModelEvent reports best-effort outcomes.
   uint64 observed_residency_generation = 6;
+  // Exact READY live pipeline objects eligible for compile-cell adoption/
+  // dispatch. Full-replace with every StateDelta; object-level readiness is
+  // independent of aggregate phase. A vacated/replaced object disappears
+  // before its successor can be addressed.
+  repeated CompileTarget compile_targets = 7;
+}
+
+// One exact live pipeline object. incarnation_id is opaque, worker-minted,
+// scoped to the live object/session, and changes on setup/replacement; never
+// infer it from family/ref/function.
+message CompileTarget {
+  string incarnation_id = 1;
+  string family = 2;
+  string pipeline_weight_lane = 3;
+  int32 lora_bucket = 4;
+  string contract_digest = 5;
+  // Current exact compiled state: empty together for eager; nonempty together
+  // only after wrap+warmup proof. READY W8A8 always reports both nonempty.
+  string active_compile_ref = 6;
+  string active_compile_snapshot_digest = 7;
+  // Canonical sorted aliases that address this exact target.
+  repeated string function_names = 8;
+  // Canonical sorted exact immutable load-time bindings held by this target.
+  repeated CompileTargetBinding model_bindings = 9;
+}
+
+message CompileTargetBinding {
+  string slot = 1;
+  string ref = 2;
+  string snapshot_digest = 3;
 }
 
 enum WorkerPhase {
@@ -225,9 +255,21 @@ message RunJob {
   OutputMode output_mode = 9;  // client's inline-vs-url preference for media outputs
   ResolvedCompute compute = 10;
   repeated ModelBinding models = 11; // slot -> ref bindings resolved by the orchestrator
-  // Presigned snapshots for tensorhub-CAS refs this job may need and the
-  // orchestrator does not know to be on the worker's disk. Key: canonical ref.
+  // Presigned snapshots keyed by canonical ref. Ordinary warm-local bindings
+  // may be omitted; required_compile retains every exact model digest plus the
+  // selected cell so the worker can revalidate immutable execution identity.
   map<string, Snapshot> snapshots = 12;
+  // Exact current-state fence selected by Tensorhub. Mandatory for W8A8; when
+  // present on any lane the worker validates before setup/mutation and
+  // immediately before execution so replacement returns typed RETRYABLE.
+  RequiredCompileExecution required_compile = 13;
+}
+
+message RequiredCompileExecution {
+  string target_incarnation_id = 1;
+  string cell_ref = 2;
+  string cell_snapshot_digest = 3;
+  string contract_digest = 4;
 }
 
 enum OutputMode {
@@ -406,6 +448,9 @@ message ModelOp {
   // Opaque orchestrator-minted identity for this one adoption attempt. Required
   // for ADOPT_COMPILE_CACHE and echoed by every terminal ModelEvent.
   string operation_id = 4;
+  // Exact READY CompileTarget to mutate. Required for ADOPT_COMPILE_CACHE;
+  // family/ref fallback is forbidden.
+  string target_incarnation_id = 5;
 }
 
 enum ModelOpKind {
@@ -474,6 +519,9 @@ message ModelEvent {
   // Opaque identity of the ADOPT_COMPILE_CACHE command that produced this
   // terminal ADOPTED/FAILED result. Empty on ordinary residency/cache events.
   string operation_id = 18;
+  // Echoes ModelOp.target_incarnation_id on every ADOPT_COMPILE_CACHE
+  // terminal including failures; empty on ordinary model events.
+  string target_incarnation_id = 19;
 }
 
 enum ModelState {

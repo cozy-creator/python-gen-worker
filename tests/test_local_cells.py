@@ -167,9 +167,6 @@ def test_mint_refuses_empty_capture(monkeypatch, tmp_path):
 @pytest.fixture()
 def _local_env(monkeypatch, tmp_path):
     monkeypatch.setenv(lc.ENV_STORE_DIR, str(tmp_path / "store"))
-    monkeypatch.delenv(cc.ENV_CACHE_PATH, raising=False)
-    monkeypatch.delenv(cc.ENV_CACHE_URL, raising=False)
-    monkeypatch.delenv(cc.ENV_ALLOW_COLD, raising=False)
     monkeypatch.setattr(lc, "_cuda_ready", lambda: True)
     # keep the delivered-artifact leg deterministic on GPU-less CI
     from gen_worker.models import provision

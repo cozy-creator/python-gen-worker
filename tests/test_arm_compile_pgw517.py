@@ -19,9 +19,10 @@ import msgspec
 import pytest
 
 import gen_worker
+import gen_worker.executor as executor_mod
 from gen_worker import Compile, RequestContext, Resources, endpoint
 from gen_worker import compile_cache as cc
-from gen_worker.api.binding import Hub
+from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -203,16 +204,16 @@ def test_arming_scope_is_a_noop_when_compile_is_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _executor(spec: EndpointSpec, tmp_path: Path, sent: list) -> Executor:
+def _executor(spec: EndpointSpec, tmp_path: Path, sent: list, monkeypatch) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
     store = ModelStore(_send, cache_dir=tmp_path / "cas", vram_budget_bytes=4 << 30)
 
-    async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
+    async def _fake_ensure_local(ref, **kwargs) -> Path:
         return tmp_path / "snap"
 
-    store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
+    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
     return Executor([spec], _send, store=store)
 
 
@@ -245,8 +246,11 @@ def test_executor_arms_self_loaded_pipeline_via_arm_compile(
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, sent)
-        inst = await ex.ensure_setup(spec)
+        ex = _executor(spec, tmp_path, sent, monkeypatch)
+        inst = await ex.ensure_setup(spec, {
+            wire_ref(spec.models["model"]): pb.Snapshot(
+                digest="blake3:" + "a" * 64),
+        })
         assert inst.armed is True
         assert len(applied) == 1
         pipeline, cfg, cache_ready = applied[0]
@@ -283,8 +287,11 @@ def test_executor_never_arms_without_an_explicit_call(tmp_path, monkeypatch) -> 
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, sent)
-        await ex.ensure_setup(spec)
+        ex = _executor(spec, tmp_path, sent, monkeypatch)
+        await ex.ensure_setup(spec, {
+            wire_ref(spec.models["model"]): pb.Snapshot(
+                digest="blake3:" + "a" * 64),
+        })
         assert applied == []
 
     asyncio.run(_go())

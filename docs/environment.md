@@ -80,10 +80,11 @@ Also removed outright (no consumer at all): `GRPC_CA_BUNDLE`,
 gen-worker stopped populating it — see the proto comment), and the
 `HUGGING_FACE_HUB_TOKEN` alias for `HF_TOKEN` (`HF_TOKEN` is the one name).
 
-`GEN_WORKER_COMPILE_CACHE` / `_CACHE_URL` / `_ALLOW_COLD` moved from
-Settings fields to raw reads in `compile_cache.py` (real, tested
-manual-override / compile-cell-producer knobs — see below) since no
-production launcher ever populated them through Settings either.
+The old `GEN_WORKER_COMPILE_CACHE`, `_CACHE_URL`, and `_ALLOW_COLD` knobs were
+removed. Serving receives immutable compile artifacts through Tensorhub;
+local-cell and producer tools use explicit library arguments. An inherited
+environment can therefore never bypass scheduler selection or mandatory W8A8
+compile evidence.
 
 ## CI-lane opt-ins (raw env, tests/CI only)
 
@@ -96,17 +97,8 @@ production launcher ever populated them through Settings either.
 
 - `PYTORCH_CUDA_ALLOC_CONF` — `entrypoint.py` setdefault before torch import.
 - `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR` — WRITTEN by
-  `compile_cache.py` to latch inductor/triton onto seeded dirs (children
-  inherit); `GEN_WORKER_COMPILE_ALLOW_COLD` is also written by the producer
-  for its spawned compile workers.
-- `GEN_WORKER_COMPILE_CACHE` / `_CACHE_URL` — compile-cache artifact source
-  (local tar path / presigned URL), read raw in `compile_cache.py::prepare`.
-  Tested (`tests/test_compile_cache.py`) but never set by a production
-  launcher — the hub-attached-artifact path (tensorhub #569) is primary;
-  these are the local-dev / compile-job manual override.
-- `GEN_WORKER_COMPILE_ALLOW_COLD` — opt into cold `torch.compile` without a
-  seeded artifact (needs a C toolchain), read raw in
-  `compile_cache.py::apply`.
+  `compile_cache.py` to latch inductor/triton onto verified seeded dirs
+  (children inherit).
 - `GEN_WORKER_LOCAL_OUTPUT_DIR`, `USER` — cozy-local app plumbing / login
   fallback (`cli/local_context.py`).
 - `COZY_HTTP_CONNECT_TIMEOUT_S` / `COZY_HTTP_READ_TIMEOUT_S` — http timeout

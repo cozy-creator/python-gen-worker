@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import tarfile
+import threading
 
 import msgspec
 import pytest
@@ -38,6 +39,38 @@ def test_cell_lane_is_exact_and_checkpoint_free():
         "_system/family-sdxl#inductor-rtx-4090-torch2.13"
     ) == ""
     assert cc.cell_lane("owner/checkpoint#fp8-w8a8") == ""
+
+
+@pytest.mark.parametrize(
+    ("lane", "bucket"),
+    [
+        ("", 0),
+        ("fp8-hooks", 0),
+        ("w8a16", 0),
+        ("w8a8", 0),
+        ("lora16", 16),
+        ("fp8-hooks-lora32", 32),
+        ("w8a16-lora64", 64),
+        ("w8a8-lora128", 128),
+    ],
+)
+def test_compile_target_lane_vocabulary_matches_tensorhub(lane, bucket):
+    assert cc.compile_target_lane_error(lane, bucket) == ""
+
+
+@pytest.mark.parametrize(
+    ("lane", "bucket"),
+    [
+        ("w8a8-row", 0),
+        ("fp8", 0),
+        ("w8a8-lora8", 8),
+        ("w8a8-lora32-sparse", 32),
+        ("w8a8-lora32", 16),
+        ("w8a8", 32),
+    ],
+)
+def test_compile_target_lane_vocabulary_rejects_impossible_states(lane, bucket):
+    assert cc.compile_target_lane_error(lane, bucket)
 
 
 def test_verify_mismatches():
@@ -125,6 +158,58 @@ def test_execution_contract_records_dynamic_w8a8_exclusions():
     assert contract["activation_scaling"] == ["dynamic-per-row"]
     assert [r["path"] for r in contract["quantized"]] == ["transformer:fast"]
     assert [r["path"] for r in contract["excluded"]] == ["transformer:sensitive"]
+
+
+def test_execution_contract_digest_covers_every_runtime_graph_axis():
+    torch = pytest.importorskip("torch")
+
+    class _Scaled(torch.nn.Module):
+        _cozy_w8a8_linear = True
+
+        def __init__(self, *, per_tensor: bool, fill: float) -> None:
+            super().__init__()
+            self.in_features = self.out_features = 8
+            self.register_buffer("weight", torch.full(
+                (8, 8), fill, dtype=getattr(torch, "float8_e4m3fn")))
+            self.register_buffer("weight_scale", torch.ones(8, 1))
+            self.input_scale = None
+            self.gemm_mode = "pertensor" if per_tensor else "rowwise"
+
+        def forward(self, value):
+            return value
+
+    class _Target(torch.nn.Module):
+        def __init__(self, *, per_tensor: bool, fill: float) -> None:
+            super().__init__()
+            self.proj = _Scaled(per_tensor=per_tensor, fill=fill)
+
+    class _Pipe:
+        def __init__(
+            self, *, per_tensor: bool = False, fill: float = 1.0,
+            low_vram: str = "",
+        ) -> None:
+            self.transformer = _Target(per_tensor=per_tensor, fill=fill)
+            self._cozy_weight_lane = "w8a8"
+            self._cozy_low_vram_mode = low_vram
+
+    base_cfg = Compile(
+        shapes=((768, 768),), targets=("transformer",), family="flux2-klein-4b")
+    base = cc.execution_contract_digest(_Pipe(fill=1.0), base_cfg)
+
+    # Checkpoint values are deliberately excluded: compatible fine-tunes
+    # share a family cell.
+    assert cc.execution_contract_digest(_Pipe(fill=9.0), base_cfg) == base
+    # Every consumer compatibility axis changes the fence identity.
+    assert cc.execution_contract_digest(_Pipe(per_tensor=True), base_cfg) != base
+    assert cc.execution_contract_digest(
+        _Pipe(), Compile(
+            shapes=((1024, 1024),), targets=("transformer",),
+            family="flux2-klein-4b")) != base
+    assert cc.execution_contract_digest(
+        _Pipe(), Compile(
+            shapes=((768, 768),), targets=("transformer",),
+            family="flux2-klein-4b", regional=True)) != base
+    assert cc.execution_contract_digest(_Pipe(low_vram="model_offload"), base_cfg) != base
 
 
 def test_w8a8_guard_never_retries_eager():
@@ -277,6 +362,14 @@ def _capture_tree(root):
     return root
 
 
+def _tree_snapshot(root):
+    root = root.resolve()
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*")) if path.is_file()
+    }
+
+
 def test_pack_is_deterministic_and_roundtrips(tmp_path):
     src = _capture_tree(tmp_path / "cap")
     meta = cc.artifact_metadata(family="sd15", source_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
@@ -329,6 +422,190 @@ def test_unpack_requires_metadata(tmp_path):
         cc.unpack(bad, tmp_path / "seed")
 
 
+def test_failed_seed_never_mutates_live_cache(tmp_path):
+    cache_dir = tmp_path / "cache"
+    live = _capture_tree(cache_dir / "compile-cache")
+    before = _tree_snapshot(live)
+
+    src = _capture_tree(tmp_path / "candidate")
+    (src / "inductor" / "ab" / "graph.py").write_text("must-not-land")
+    mismatch = cc.artifact_metadata(
+        family="sd15", shapes=[(768, 768)], targets=["transformer"])
+    mismatch["torch"] = "not-this-runtime"
+    wrong = cc.pack(src, tmp_path / "wrong.tar.gz", mismatch)
+    with pytest.raises(cc.AdoptError, match="torch") as exc:
+        cc.seed_artifact(wrong, "sd15", cache_dir)
+    assert exc.value.reason == "key_mismatch"
+    assert _tree_snapshot(live) == before
+
+    unsafe = tmp_path / "unsafe.tar.gz"
+    valid = cc.artifact_metadata(
+        family="sd15", shapes=[(768, 768)], targets=["transformer"])
+    with tarfile.open(unsafe, mode="w:gz") as tar:
+        metadata = msgspec.json.encode(valid)
+        info = tarfile.TarInfo(cc.METADATA_NAME)
+        info.size = len(metadata)
+        tar.addfile(info, io.BytesIO(metadata))
+        info = tarfile.TarInfo("inductor/ab/graph.py")
+        info.size = len(b"must-not-land")
+        tar.addfile(info, io.BytesIO(b"must-not-land"))
+        info = tarfile.TarInfo("../inductor/escape.py")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+    with pytest.raises(cc.AdoptError, match="unsafe") as exc:
+        cc.seed_artifact(unsafe, "sd15", cache_dir)
+    assert exc.value.reason == "artifact_invalid"
+    assert _tree_snapshot(live) == before
+
+    corrupt = tmp_path / "corrupt.tar.gz"
+    corrupt.write_bytes(b"not a tar archive")
+    with pytest.raises(cc.AdoptError) as exc:
+        cc.seed_artifact(corrupt, "sd15", cache_dir)
+    assert exc.value.reason == "artifact_invalid"
+    assert _tree_snapshot(live) == before
+
+
+@pytest.mark.parametrize("mismatch", ["lane", "contract", "mode"])
+def test_pipeline_mismatch_never_activates_staged_cache(
+    tmp_path, monkeypatch, mismatch,
+):
+    class _Target:
+        def forward(self, value):
+            return value
+
+    class _Pipeline:
+        def __init__(self):
+            self.transformer = _Target()
+
+    pipe = _Pipeline()
+    cfg = Compile(
+        shapes=((768, 768),), family="sd15", targets=("transformer",),
+    )
+    signature, contract = cc.execution_contract(pipe, cfg)
+    meta = cc.artifact_metadata(
+        family="sd15", shapes=cfg.shapes, targets=cfg.targets,
+        graph_signature=signature, weight_contract=contract,
+    )
+    if mismatch == "lane":
+        meta["weight_lane"] = "fp8-hooks"
+    elif mismatch == "contract":
+        meta["graph_signature"] = "different-module-graph"
+    else:
+        meta["compile_mode"] = "regional"
+
+    cache_dir = tmp_path / "cache"
+    live = _capture_tree(cache_dir / "compile-cache")
+    before = _tree_snapshot(live)
+    source = _capture_tree(tmp_path / "candidate")
+    (source / "inductor" / "ab" / "graph.py").write_text("must-not-land")
+    artifact = cc.pack(source, tmp_path / "cell.tar.gz", meta)
+    monkeypatch.setattr(cc, "apply", lambda *args, **kwargs: False)
+
+    assert cc.enable(pipe, cfg, cache_dir, artifact) is False
+    assert _tree_snapshot(live) == before
+
+
+def test_cache_collision_and_merge_failure_leave_live_tree_unchanged(
+    tmp_path, monkeypatch,
+):
+    cache_dir = tmp_path / "cache"
+    live = _capture_tree(cache_dir / "compile-cache")
+    before = _tree_snapshot(live)
+    meta = cc.artifact_metadata(
+        family="sd15", shapes=[(768, 768)], targets=["transformer"])
+
+    collision_src = _capture_tree(tmp_path / "collision")
+    (collision_src / "inductor" / "ab" / "graph.py").write_text("different")
+    collision = cc.pack(collision_src, tmp_path / "collision.tar.gz", meta)
+    with pytest.raises(cc.AdoptError) as exc:
+        cc.seed_artifact(collision, "sd15", cache_dir)
+    assert exc.value.reason == "cache_collision"
+    assert _tree_snapshot(live) == before
+
+    additive_src = tmp_path / "additive"
+    (additive_src / "inductor" / "new-a").mkdir(parents=True)
+    (additive_src / "inductor" / "new-a" / "a.py").write_text("a")
+    (additive_src / "inductor" / "new-b").mkdir(parents=True)
+    (additive_src / "inductor" / "new-b" / "b.py").write_text("b")
+    additive = cc.pack(additive_src, tmp_path / "additive.tar.gz", meta)
+    real_replace = cc.os.replace
+    additions = 0
+
+    def fail_second_addition(source, target):
+        nonlocal additions
+        if "new-" in str(target):
+            additions += 1
+            if additions == 2:
+                raise OSError("injected merge failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(cc.os, "replace", fail_second_addition)
+    with pytest.raises(cc.AdoptError) as exc:
+        cc.seed_artifact(additive, "sd15", cache_dir)
+    assert exc.value.reason == "activation_failed"
+    assert _tree_snapshot(live) == before
+
+
+def test_seed_activation_blocks_concurrent_cold_arming(
+    tmp_path, monkeypatch,
+):
+    cache_dir = tmp_path / "cache"
+    src = _capture_tree(tmp_path / "candidate")
+    meta = cc.artifact_metadata(
+        family="sd15", shapes=[(768, 768)], targets=["transformer"])
+    artifact = cc.pack(src, tmp_path / "cell.tar.gz", meta)
+    merging = threading.Event()
+    release = threading.Event()
+    observed = []
+    errors = []
+    real_merge = cc._merge_staged_cache
+
+    def blocked_merge(staged, live):
+        merging.set()
+        assert release.wait(5)
+        real_merge(staged, live)
+
+    def observed_apply(_pipeline, _cfg, *, cache_ready):
+        observed.append((cache_ready, _tree_snapshot(cache_dir / "compile-cache")))
+        return True
+
+    monkeypatch.setattr(cc, "_merge_staged_cache", blocked_merge)
+    monkeypatch.setattr(cc, "apply", observed_apply)
+
+    def seed():
+        try:
+            cc.seed_artifact(artifact, "sd15", cache_dir)
+        except BaseException as exc:  # surfaced in the main test thread
+            errors.append(exc)
+
+    def cold_arm():
+        try:
+            cc.enable(
+                _FakePipe(), Compile(shapes=((768, 768),), family="sd15"),
+                cache_dir,
+            )
+        except BaseException as exc:  # surfaced in the main test thread
+            errors.append(exc)
+
+    seed_thread = threading.Thread(target=seed)
+    seed_thread.start()
+    assert merging.wait(5)
+    arm_thread = threading.Thread(target=cold_arm)
+    arm_thread.start()
+    arm_thread.join(0.1)
+    assert arm_thread.is_alive()
+    assert observed == []
+    release.set()
+    seed_thread.join(5)
+    arm_thread.join(5)
+    assert not seed_thread.is_alive() and not arm_thread.is_alive()
+    assert errors == []
+    assert observed == [(False, {
+        "inductor/ab/graph.py": b"code",
+        "triton/kern/kernel.cubin": b"\x00\x01",
+    })]
+
+
 def test_capture_env_sets_cache_dirs(tmp_path, monkeypatch):
     monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
     monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
@@ -348,28 +625,26 @@ class _FakePipe:
     pass
 
 
-def test_apply_stays_eager_without_cache(monkeypatch):
+def test_apply_stays_eager_without_cache():
     """No verified artifact and no explicit cold opt-in => untouched pipeline."""
-    monkeypatch.delenv(cc.ENV_ALLOW_COLD, raising=False)
     pipe = _FakePipe()
     cfg = Compile(shapes=((768, 768),))
     assert cc.apply(pipe, cfg, cache_ready=False) is False
     assert getattr(pipe, "_cozy_compile", None) is None
 
 
-def test_prepare_without_sources_is_none(monkeypatch, tmp_path):
-    monkeypatch.delenv(cc.ENV_CACHE_PATH, raising=False)
-    monkeypatch.delenv(cc.ENV_CACHE_URL, raising=False)
+def test_prepare_without_sources_is_none(tmp_path):
     assert cc.prepare("sd15", cache_dir=tmp_path) is None
 
 
-def test_prepare_rejects_key_mismatch(monkeypatch, tmp_path):
+def test_prepare_rejects_key_mismatch(tmp_path):
     src = _capture_tree(tmp_path / "cap")
     meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
     meta["torch"] = "0.0.0"  # never matches this runtime
     art = cc.pack(src, tmp_path / "art.tar.gz", meta)
-    monkeypatch.setenv(cc.ENV_CACHE_PATH, str(art))
-    assert cc.prepare("sd15", cache_dir=tmp_path / "cache") is None
+    assert cc.prepare(
+        "sd15", cache_dir=tmp_path / "cache", artifact=art,
+    ) is None
 
 
 # ---------------------------------------------------------------------------

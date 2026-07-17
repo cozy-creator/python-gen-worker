@@ -19,7 +19,8 @@ from pathlib import Path
 
 import msgspec
 
-from gen_worker.api.binding import Hub
+import gen_worker.executor as executor_mod
+from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.api.decorators import Resources
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.models.loading import load_from_pretrained
@@ -133,17 +134,19 @@ class _Out(msgspec.Struct):
     ok: bool = True
 
 
-def _executor(spec: EndpointSpec, tmp_path: Path, snap: Path, sent: list) -> Executor:
+def _executor(
+    spec: EndpointSpec, tmp_path: Path, snap: Path, sent: list, monkeypatch,
+) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
     store = ModelStore(_send, cache_dir=tmp_path, vram_budget_bytes=4 << 30)
 
-    async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
+    async def _fake_ensure_local(ref, **kwargs) -> Path:
         store.residency.track_disk(ref, snap)
         return snap
 
-    store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
+    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
     return Executor([spec], _send, store=store)
 
 
@@ -180,9 +183,12 @@ def test_executor_drops_cast_on_denoiserless_snapshot(
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, snap, sent)
+        ex = _executor(spec, tmp_path, snap, sent, monkeypatch)
         with caplog.at_level(logging.WARNING):
-            inst = await ex.ensure_setup(spec)
+            inst = await ex.ensure_setup(spec, {
+                wire_ref(spec.models["m"]): pb.Snapshot(
+                    digest="blake3:" + "a" * 64),
+            })
         # The cast was dropped BEFORE load: no fp8 stamp on the pipe.
         assert not getattr(inst.m, "_cozy_fp8_storage_requested", False)
         # Structural report, FnDegraded-shaped: wanted fp8, ran bf16.
@@ -221,8 +227,11 @@ def test_executor_keeps_cast_on_denoiser_snapshot(tmp_path, monkeypatch) -> None
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, snap, sent)
-        inst = await ex.ensure_setup(spec)
+        ex = _executor(spec, tmp_path, snap, sent, monkeypatch)
+        inst = await ex.ensure_setup(spec, {
+            wire_ref(spec.models["m"]): pb.Snapshot(
+                digest="blake3:" + "a" * 64),
+        })
         assert inst.m._cozy_fp8_storage_requested is True
         assert inst.m._cozy_fp8_storage_ok is True
         plan = ex.serve_plans.get("generate")

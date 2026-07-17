@@ -13,7 +13,6 @@ import pytest
 
 from gen_worker import compile_cache as cc
 from gen_worker import trt_engine as te
-from gen_worker.api.binding import wire_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from test_executor_adopt import (  # noqa: F401 — shared harness
@@ -191,7 +190,7 @@ def test_refit_weights_applies_transform_and_fails_closed():
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_compile_snapshot_prefers_trt(tmp_path):
+def test_fetch_compile_snapshot_deterministically_prefers_trt(tmp_path):
     spec = _spec()
     ex, _sent = _wire_executor(spec, tmp_path)
     trt_dir = tmp_path / "trt-snap"
@@ -205,9 +204,13 @@ def test_fetch_compile_snapshot_prefers_trt(tmp_path):
         return trt_dir if te.is_engine_ref(ref) else inductor_dir
 
     ex.store.ensure_local = _ensure  # type: ignore[method-assign]
-    snaps = {CACHE_REF: pb.Snapshot(), TRT_REF: pb.Snapshot()}
-    got = asyncio.run(ex._fetch_compile_snapshot(spec, snaps))
-    assert got is not None and got.parent == trt_dir
+    for refs in ((CACHE_REF, TRT_REF), (TRT_REF, CACHE_REF)):
+        snaps = {ref: pb.Snapshot(digest=DIGEST_A) for ref in refs}
+        got = asyncio.run(ex._fetch_compile_snapshot(spec, snaps))
+        assert got is not None
+        assert got.path.parent == trt_dir
+        assert got.ref == TRT_REF
+        assert got.snapshot_digest == DIGEST_A
 
 
 def test_adopt_trt_ref_wraps_and_reports(tmp_path, monkeypatch):
@@ -223,6 +226,8 @@ def test_adopt_trt_ref_wraps_and_reports(tmp_path, monkeypatch):
         return _meta()
 
     monkeypatch.setattr(te, "load_and_wrap", _fake_load_and_wrap)
+    counts = iter((0, 1))
+    monkeypatch.setattr(te, "execution_count", lambda _pipeline: next(counts))
     from test_executor_adopt import _Endpoint
 
     warmups_before = _Endpoint.warmups
@@ -251,6 +256,26 @@ def test_adopt_trt_key_mismatch_stays_eager(tmp_path, monkeypatch):
     assert failed[0].snapshot_digest == DIGEST_A
     assert failed[0].operation_id == OP_A
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+
+
+def test_adopt_trt_warmup_must_execute_engine_or_roll_back(tmp_path, monkeypatch):
+    (tmp_path / "snap").mkdir()
+    _tar(tmp_path / "snap")
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    monkeypatch.setattr(te, "load_and_wrap", lambda *args, **kwargs: _meta())
+    monkeypatch.setattr(te, "execution_count", lambda _pipeline: 0)
+    unwrapped = []
+    monkeypatch.setattr(te, "unwrap", lambda pipeline: unwrapped.append(pipeline) or True)
+
+    _adopt(ex, ref=TRT_REF)
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:engine_not_executed"
+    assert unwrapped
+    target = ex.compile_targets()[0]
+    assert target.active_compile_ref == ""
+    assert target.active_compile_snapshot_digest == ""
 
 
 def test_enable_compiled_dispatches_on_artifact_kind(tmp_path, monkeypatch):

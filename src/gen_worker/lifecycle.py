@@ -116,6 +116,7 @@ class Lifecycle:
             # must not drain/retire this worker on GPU-idleness alone.
             finalizing_jobs=self.executor.finalizing_jobs(),
             observed_residency_generation=self._observed_residency_generation,
+            compile_targets=self.executor.compile_targets(),
         )
 
     def build_resources(self) -> pb.WorkerResources:

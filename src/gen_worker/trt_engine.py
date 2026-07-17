@@ -438,7 +438,11 @@ def wrap_module(module: Any, runner: TrtModuleRunner, meta: Dict[str, Any]) -> N
     (config, dtype, device, weights) stays untouched — diffusers pipelines
     read its attributes, and its weights remain the refit source."""
     original = module.forward
-    state = {"failed": False}
+    state: Dict[str, Any] = {
+        "failed": False,
+        "successful_calls": 0,
+        "original": original,
+    }
 
     def trt_forward(*args: Any, **kwargs: Any) -> Any:
         if state["failed"]:
@@ -446,6 +450,7 @@ def wrap_module(module: Any, runner: TrtModuleRunner, meta: Dict[str, Any]) -> N
         try:
             feeds = _unet_feeds(meta, args, kwargs)
             out = runner(feeds)
+            state["successful_calls"] += 1
         except Exception as exc:  # noqa: BLE001 — ANY engine problem => eager
             state["failed"] = True
             logger.warning(
@@ -460,7 +465,10 @@ def wrap_module(module: Any, runner: TrtModuleRunner, meta: Dict[str, Any]) -> N
         return (out,)
 
     module.forward = trt_forward
-    setattr(module, _MARKER_ATTR, {"meta": {k: meta.get(k) for k in ("sku", "trt", "precision", "shapes")}})
+    setattr(module, _MARKER_ATTR, {
+        "meta": {k: meta.get(k) for k in ("sku", "trt", "precision", "shapes")},
+        "state": state,
+    })
 
 
 def enable(
@@ -518,9 +526,40 @@ def load_and_wrap(
     _refit_engine(engine, weights)
     runner = TrtModuleRunner(engine, meta, device=str(getattr(module, "device", "cuda")))
     wrap_module(module, runner, meta)
-    setattr(pipeline, _MARKER_ATTR, {"meta": meta})
+    module_marker = getattr(module, _MARKER_ATTR, {})
+    setattr(pipeline, _MARKER_ATTR, {
+        "meta": meta,
+        "state": module_marker.get("state", {}),
+        "module": module,
+    })
     logger.info("trt-engine: deserialize+refit in %.1fs", time.monotonic() - t0)
     return meta
+
+
+def execution_count(pipeline: Any) -> int:
+    """Successful engine calls observed on this exact wrapped pipeline."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    return int((marker.get("state") or {}).get("successful_calls", 0))
+
+
+def unwrap(pipeline: Any) -> bool:
+    """Restore eager forward after an unproven first-time engine adoption."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    module = marker.get("module")
+    state = marker.get("state") or {}
+    original = state.get("original")
+    if module is None or not callable(original):
+        return False
+    module.forward = original
+    try:
+        delattr(module, _MARKER_ATTR)
+    except AttributeError:
+        pass
+    try:
+        delattr(pipeline, _MARKER_ATTR)
+    except AttributeError:
+        pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +800,7 @@ __all__ = [
     "build",
     "build_refit_map",
     "enable",
+    "execution_count",
     "find_artifact",
     "flavor_label",
     "is_engine_ref",
@@ -768,6 +808,7 @@ __all__ = [
     "pack",
     "refit_weights",
     "runtime_key",
+    "unwrap",
     "trt_maj_min",
     "trt_version",
     "unpack",

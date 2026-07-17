@@ -12,6 +12,7 @@ from typing import Any
 
 import msgspec
 
+import gen_worker.executor as executor_mod
 from gen_worker.api.binding import Civitai, wire_ref
 from gen_worker.api.slot import Slot
 from gen_worker.executor import Executor
@@ -114,6 +115,26 @@ def test_proto_field_numbers_match_tensorhub_contract() -> None:
     assert pb.DesiredInstance.FUNCTION_NAME_FIELD_NUMBER == 1
     assert pb.DesiredInstance.MODELS_FIELD_NUMBER == 2
     assert pb.StateDelta.OBSERVED_RESIDENCY_GENERATION_FIELD_NUMBER == 6
+    assert pb.StateDelta.COMPILE_TARGETS_FIELD_NUMBER == 7
+    assert pb.CompileTarget.INCARNATION_ID_FIELD_NUMBER == 1
+    assert pb.CompileTarget.FAMILY_FIELD_NUMBER == 2
+    assert pb.CompileTarget.PIPELINE_WEIGHT_LANE_FIELD_NUMBER == 3
+    assert pb.CompileTarget.LORA_BUCKET_FIELD_NUMBER == 4
+    assert pb.CompileTarget.CONTRACT_DIGEST_FIELD_NUMBER == 5
+    assert pb.CompileTarget.ACTIVE_COMPILE_REF_FIELD_NUMBER == 6
+    assert pb.CompileTarget.ACTIVE_COMPILE_SNAPSHOT_DIGEST_FIELD_NUMBER == 7
+    assert pb.CompileTarget.FUNCTION_NAMES_FIELD_NUMBER == 8
+    assert pb.CompileTarget.MODEL_BINDINGS_FIELD_NUMBER == 9
+    assert pb.CompileTargetBinding.SLOT_FIELD_NUMBER == 1
+    assert pb.CompileTargetBinding.REF_FIELD_NUMBER == 2
+    assert pb.CompileTargetBinding.SNAPSHOT_DIGEST_FIELD_NUMBER == 3
+    assert pb.ModelOp.TARGET_INCARNATION_ID_FIELD_NUMBER == 5
+    assert pb.ModelEvent.TARGET_INCARNATION_ID_FIELD_NUMBER == 19
+    assert pb.RunJob.REQUIRED_COMPILE_FIELD_NUMBER == 13
+    assert pb.RequiredCompileExecution.TARGET_INCARNATION_ID_FIELD_NUMBER == 1
+    assert pb.RequiredCompileExecution.CELL_REF_FIELD_NUMBER == 2
+    assert pb.RequiredCompileExecution.CELL_SNAPSHOT_DIGEST_FIELD_NUMBER == 3
+    assert pb.RequiredCompileExecution.CONTRACT_DIGEST_FIELD_NUMBER == 4
     assert not hasattr(pb, "MODEL_OP_KIND_DOWNLOAD")
     assert not hasattr(pb, "MODEL_OP_KIND_LOAD")
     assert not hasattr(pb, "MODEL_OP_KIND_UNLOAD")
@@ -450,7 +471,7 @@ def test_run_job_cancellation_waits_for_model_load_thread(monkeypatch, tmp_path:
         max_active = 0
         calls = 0
 
-        async def ensure_local(ref: str, snapshot=None, *, binding=None):
+        async def ensure_local(ref: str, **kwargs):
             return tmp_path
 
         def load_slot(*args, **kwargs):
@@ -478,14 +499,22 @@ def test_run_job_cancellation_waits_for_model_load_thread(monkeypatch, tmp_path:
             async with executor._load_lock:
                 request_acquired_load_lock.set()
 
-        monkeypatch.setattr(executor.store, "ensure_local", ensure_local)
+        monkeypatch.setattr(executor_mod, "ensure_local", ensure_local)
         monkeypatch.setattr(executor, "handle_run_job", handle_run_job)
         monkeypatch.setattr(provision, "load_slot", load_slot)
 
         picked = "tensorhub/cyberrealistic-pony:prod"
+        snapshot = pb.Snapshot(
+            digest="blake3:" + "a" * 64,
+            files=[pb.SnapshotFile(
+                path="model.safetensors", size_bytes=1,
+                blake3="a" * 64, url="https://r2/model",
+            )],
+        )
         await lifecycle.on_hello_ack(pb.HelloAck(
             desired_residency=pb.DesiredResidency(
                 generation=1,
+                snapshots={picked: snapshot},
                 hot=[pb.DesiredInstance(
                     function_name="generate",
                     models=[pb.ModelBinding(slot="pipeline", ref=picked)],

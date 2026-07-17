@@ -23,8 +23,9 @@ from pathlib import Path
 
 import msgspec
 
+import gen_worker.executor as executor_mod
 import gen_worker.models.loading as loading_mod
-from gen_worker.api.binding import Hub
+from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.models.serve_fit import (
     RUN_EMERGENCY,
@@ -138,17 +139,19 @@ class _RungShim(_Pipe):
         return self
 
 
-def _executor(spec: EndpointSpec, tmp_path: Path, snap: Path, sent: list) -> Executor:
+def _executor(
+    spec: EndpointSpec, tmp_path: Path, snap: Path, sent: list, monkeypatch,
+) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
     store = ModelStore(_send, cache_dir=tmp_path, vram_budget_bytes=4 << 30)
 
-    async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
+    async def _fake_ensure_local(ref, **kwargs) -> Path:
         store.residency.track_disk(ref, snap)
         return snap
 
-    store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
+    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
     return Executor([spec], _send, store=store)
 
 
@@ -173,9 +176,12 @@ def test_executor_records_adaptive_rung(tmp_path, monkeypatch, caplog) -> None:
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, snap, sent)
+        ex = _executor(spec, tmp_path, snap, sent, monkeypatch)
         with caplog.at_level(logging.WARNING):
-            inst = await ex.ensure_setup(spec)
+            inst = await ex.ensure_setup(spec, {
+                wire_ref(spec.models["m"]): pb.Snapshot(
+                    digest="blake3:" + "a" * 64),
+            })
         assert getattr(inst.m, "_cozy_adaptive_rung", "") == "nf4"
         plan = ex.serve_plans["generate"]
         assert plan.degraded

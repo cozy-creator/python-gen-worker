@@ -96,8 +96,10 @@ def _generate(pipe: Flux2KleinPipeline, ctx: RequestContext, p: KleinTurboInput)
     model=HF(REPO_ID, dtype="bf16", files=KLEIN_FILES),
     resources=Resources(vram_gb=20),
     # Opt into torch.compile (#384). Safe by construction: the worker arms
-    # compile ONLY when a verified per-(model, SKU, torch, triton) cache
-    # artifact is seeded (GEN_WORKER_COMPILE_CACHE[_URL]); otherwise eager.
+    # Plain lanes compile only when Tensorhub attaches a verified per-(family,
+    # SKU, torch, triton) artifact and otherwise remain eager. A W8A8 binding
+    # is stricter: the worker fails retryably unless its exact cell is attached
+    # and proven; it never serves dequantized/eager W8A8.
     compile=Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024))),
 )
 class Flux2KleinTurbo:

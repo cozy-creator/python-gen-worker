@@ -14,14 +14,19 @@ split:
   `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024))))`.
   At load the worker seeds a VERIFIED artifact (exact-match on family, SKU,
   torch, triton, diffusers/transformers), then arms guarded `torch.compile`
-  (dynamic=False) on `Compile.targets`. Any miss/mismatch => eager. A
-  compiled call that still needs a fresh compile (undeclared shape, no
-  toolchain) permanently unwraps to eager — never a failed request.
+  (dynamic=False) on `Compile.targets`. Plain optional lanes fall back to eager
+  on a miss or mismatch. W8A8 is mandatory compiled execution: a missing,
+  mismatched, or unproven cell fails retryably before GPU/handler work and
+  never dequantizes or runs eager. A plain compiled call that still needs a
+  fresh compile (undeclared shape, no toolchain) permanently unwraps to eager
+  — never a failed request.
 
-Artifact sources today: `GEN_WORKER_COMPILE_CACHE` (local tar) or
-`GEN_WORKER_COMPILE_CACHE_URL` (presigned GET). Hub-side per-(SKU, torch)
-snapshot attach is tensorhub #569. `GEN_WORKER_COMPILE_ALLOW_COLD=1` permits
-cold compilation (compile job / dev only; requires a toolchain).
+Serving artifacts are immutable per-(SKU, torch) snapshots attached by
+Tensorhub. They are verified against the exact live pipeline contract before
+the worker activates their cache files. Local tooling passes artifact paths
+explicitly or uses `gen_worker.local_cells`; the compile producer opts into
+cold compilation through an explicit library argument. There is no serving
+environment fallback that can bypass scheduler attachment or W8A8 fencing.
 
 Trust: compiled artifacts are CODE. Only platform jobs may publish to
 `_system/*` (invoke-time destination-write preflight + cap-token repo+owner

@@ -16,6 +16,8 @@ from pathlib import Path
 import msgspec
 import pytest
 
+import gen_worker.executor as executor_mod
+
 torch = pytest.importorskip("torch")
 diffusers = pytest.importorskip("diffusers")
 
@@ -197,17 +199,19 @@ def _spec(cls) -> EndpointSpec:
     )
 
 
-def _executor(spec: EndpointSpec, tmp_path: Path, snap: Path, sent: list) -> Executor:
+def _executor(
+    spec: EndpointSpec, tmp_path: Path, snap: Path, sent: list, monkeypatch,
+) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
     store = ModelStore(_send, cache_dir=tmp_path, vram_budget_bytes=4 << 30)
 
-    async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
+    async def _fake_ensure_local(ref, **kwargs) -> Path:
         store.residency.track_disk(ref, snap)
         return snap
 
-    store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
+    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
     return Executor([spec], _send, store=store)
 
 
@@ -230,7 +234,7 @@ def _result(sent: list, rid: str) -> pb.JobResult:
 
 
 def test_setup_oom_learns_floor_and_skips_resident_on_reload(
-        shim_env, tmp_path, caplog) -> None:
+        shim_env, tmp_path, monkeypatch, caplog) -> None:
     class Endpoint:
         def setup(self, m: ShimPipe) -> None:
             self.m = m
@@ -242,7 +246,7 @@ def test_setup_oom_learns_floor_and_skips_resident_on_reload(
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, shim_env, sent)
+        ex = _executor(spec, tmp_path, shim_env, sent, monkeypatch)
         with caplog.at_level(logging.WARNING):
             inst = await ex.ensure_setup(spec)
         assert memory.low_vram_mode(inst.m) == "model_offload"
@@ -264,7 +268,7 @@ def test_setup_oom_learns_floor_and_skips_resident_on_reload(
 
 
 def test_inference_oom_quarantines_then_reloads_on_retry(
-        shim_env, tmp_path, caplog) -> None:
+        shim_env, tmp_path, monkeypatch, caplog) -> None:
     calls = {"n": 0}
 
     class Endpoint:
@@ -282,7 +286,7 @@ def test_inference_oom_quarantines_then_reloads_on_retry(
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, shim_env, sent)
+        ex = _executor(spec, tmp_path, shim_env, sent, monkeypatch)
         with caplog.at_level(logging.WARNING):
             await _run_job(ex, "r1")
         assert _result(sent, "r1").status == pb.JOB_STATUS_RETRYABLE
@@ -312,7 +316,7 @@ def test_inference_oom_quarantines_then_reloads_on_retry(
 
 
 def test_inference_oom_floor_excludes_component_and_preserves_duck_owner(
-        shim_env, tmp_path) -> None:
+        shim_env, tmp_path, monkeypatch) -> None:
     """AutoencoderKL exposes ``enable_group_offload`` through ModelMixin, but
     it is a component, not the owner of the pipeline's offload hooks. A floor
     learned for the VAE reloads it on CPU and poisons later CUDA pipelines.
@@ -352,7 +356,7 @@ def test_inference_oom_floor_excludes_component_and_preserves_duck_owner(
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, shim_env, sent)
+        ex = _executor(spec, tmp_path, shim_env, sent, monkeypatch)
         ShimPipe.reset(oom_on_cuda=False)
         pipe = ShimPipe.from_pretrained(str(shim_env))
         pipe._cozy_low_vram_mode = "vae_only"
@@ -380,7 +384,8 @@ def test_inference_oom_floor_excludes_component_and_preserves_duck_owner(
     asyncio.run(_go())
 
 
-def test_inference_oom_in_degraded_mode_fails_retryable(shim_env, tmp_path) -> None:
+def test_inference_oom_in_degraded_mode_fails_retryable(
+        shim_env, tmp_path, monkeypatch) -> None:
     calls = {"n": 0}
 
     class Endpoint:
@@ -396,7 +401,7 @@ def test_inference_oom_in_degraded_mode_fails_retryable(shim_env, tmp_path) -> N
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, shim_env, sent)
+        ex = _executor(spec, tmp_path, shim_env, sent, monkeypatch)
         await _run_job(ex, "r1")
         # No in-process replay: the hub retries after a clean reload.
         assert calls["n"] == 1
@@ -412,7 +417,8 @@ def test_inference_oom_in_degraded_mode_fails_retryable(shim_env, tmp_path) -> N
     asyncio.run(_go())
 
 
-def test_runtime_demotion_reemits_fn_degraded(shim_env, tmp_path) -> None:
+def test_runtime_demotion_reemits_fn_degraded(
+        shim_env, tmp_path, monkeypatch) -> None:
     """The rung transition is telemetry, not just a log line: FnDegraded
     re-emits when the active rung changes (lifecycle dedupe is per-rung)."""
     from types import SimpleNamespace
@@ -439,7 +445,7 @@ def test_runtime_demotion_reemits_fn_degraded(shim_env, tmp_path) -> None:
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, shim_env, sent)
+        ex = _executor(spec, tmp_path, shim_env, sent, monkeypatch)
         lc = Lifecycle(SimpleNamespace(worker_jwt="", worker_id="w", runpod_pod_id=""), ex)
         tp = _StubTransport()
         lc.transport = tp
@@ -460,7 +466,7 @@ def test_runtime_demotion_reemits_fn_degraded(shim_env, tmp_path) -> None:
 
 
 def test_runtime_floor_is_per_ref_not_all_dynamic_picks(
-        shim_env, tmp_path) -> None:
+        shim_env, tmp_path, monkeypatch) -> None:
     """One oversized pick may degrade function telemetry, but placement for
     a different concrete pick still starts from the hardware-gate plan."""
     class Endpoint:
@@ -471,7 +477,7 @@ def test_runtime_floor_is_per_ref_not_all_dynamic_picks(
             return _Out()
 
     spec = _spec(Endpoint)
-    ex = _executor(spec, tmp_path, shim_env, [])
+    ex = _executor(spec, tmp_path, shim_env, [], monkeypatch)
     native = ServePlan(
         serveable=True, run_mode="native", fit="fits",
         wanted="bf16", ran="bf16",
