@@ -90,12 +90,26 @@ class PreparedAdapter:
     parse_ms: int = 0   # safetensors read + validation (0 on cache hit)
 
 
-def _split_for_w8a8(
-    adapters: Sequence["PreparedAdapter"],
+# Normalized+split adapter halves, keyed by (pipeline class, cache_key).
+# The cached den_sd OBJECT is reused across requests so the branch layer's
+# staging cache (keyed on id(sd)) hits — repeat swaps skip key-mapping AND
+# the CPU flatten.
+_SPLIT_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_SPLIT_CACHE_MAX = 16
+_TE_KEY_PREFIXES = ("text_encoder", "lora_te", "te1.", "te2.")
+_TE_COMPONENTS = ("text_encoder", "text_encoder_2", "text_encoder_3")
+
+
+def _split_adapters(
+    pipe: Any, adapters: Sequence["PreparedAdapter"],
 ) -> tuple[List["PreparedAdapter"], List[tuple]]:
     """(peft-path adapters with denoiser keys stripped, branch set) for a
-    w8a8-lane pipeline. Branch entries are (state_dict, weight, ref) —
-    the models.w8a8_lora.apply_branch_adapters contract."""
+    branch-capable pipeline. Each adapter is first normalized through the
+    pipeline class's own ``lora_state_dict`` converter (zero drift with the
+    boot-time path, te#81 pattern), then split: denoiser keys ride the
+    additive branch, the rest (text-encoder halves) keep peft. Branch
+    entries are (state_dict, weight, ref) — the
+    models.w8a8_lora.apply_branch_adapters contract."""
     from dataclasses import replace
 
     from ..models import w8a8_lora
@@ -103,12 +117,48 @@ def _split_for_w8a8(
     peft: List[PreparedAdapter] = []
     branch: List[tuple] = []
     for a in adapters:
-        den, rest = w8a8_lora.split_state_dict(a.state_dict)
+        key = (type(pipe).__qualname__, a.cache_key)
+        cached = _SPLIT_CACHE.get(key)
+        if cached is None:
+            sd = w8a8_lora.normalize_adapter_state_dict(
+                pipe, a.state_dict, ref=a.ref
+            )
+            cached = w8a8_lora.split_state_dict(sd)
+            _SPLIT_CACHE[key] = cached
+            while len(_SPLIT_CACHE) > _SPLIT_CACHE_MAX:
+                _SPLIT_CACHE.popitem(last=False)
+        else:
+            _SPLIT_CACHE.move_to_end(key)
+        den, rest = cached
         if den:
             branch.append((den, a.weight, a.ref))
         if rest:
             peft.append(replace(a, state_dict=rest))
     return peft, branch
+
+
+def _reject_te_keys_on_cast_te(
+    pipe: Any, adapters: Sequence["PreparedAdapter"],
+) -> None:
+    """Typed refusal for text-encoder adapter halves on a cast TE (the
+    ``fp8+te`` lane): peft module wrapping under the block-window/layerwise
+    cast is the exact ie#374 breakage — fail loud, never fight the hooks."""
+    cast = [
+        name for name in _TE_COMPONENTS
+        if getattr(getattr(pipe, name, None), "_cozy_fp8_storage_applied", False)
+    ]
+    if not cast:
+        return
+    for a in adapters:
+        te_keys = [k for k in a.state_dict if k.startswith(_TE_KEY_PREFIXES)]
+        if te_keys:
+            raise RefCompatibilitySurprise(
+                f"adapter carries {len(te_keys)} text-encoder key(s) (e.g. "
+                f"{sorted(te_keys)[0]}) but this pipeline serves its text "
+                f"encoder(s) fp8-cast ({', '.join(cast)}) — text-encoder "
+                "adapters are unsupported on the fp8+te lane",
+                ref=a.ref, axis="state_dict",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -299,15 +349,21 @@ class AdapterResidency:
         """Make exactly *adapters* the pipeline's active set. Attach failure
         rolls back to a fully-deactivated pipeline.
 
-        w8a8 pipelines (gw#547): denoiser keys go to the bf16 side-branch on
-        Fp8ScaledLinear (peft can't target it); text-encoder keys keep the
-        peft path below."""
+        Branch-capable pipelines (gw#547 w8a8, gw#558 all lanes): denoiser
+        keys go to the additive side-branch (peft can't target
+        Fp8ScaledLinear and fights the layerwise-cast hooks — ie#374);
+        text-encoder keys keep the peft path below. Plain-bf16 pipelines
+        whose adapter cannot map onto branch-capable Linears (e.g. conv-
+        targeting LoCon) fall back to the whole-adapter peft path when the
+        pipeline supports it — capability preserved, branch primary."""
         from ..models import w8a8_lora
 
+        all_adapters = list(adapters)
         denoiser = w8a8_lora.branch_target(pipe)
         branch_set: List[tuple] = []
         if denoiser is not None:
-            adapters, branch_set = _split_for_w8a8(adapters)
+            adapters, branch_set = _split_adapters(pipe, adapters)
+            _reject_te_keys_on_cast_te(pipe, adapters)
         if adapters and not isinstance(pipe, LoraCapablePipeline):
             raise ValidationError(
                 "model slot does not support LoRA adapters "
@@ -316,25 +372,46 @@ class AdapterResidency:
         with self._lock:
             st = self._state(ref, pipe)
             try:
-                if denoiser is not None:
+                if denoiser is not None and branch_set:
                     # Compiled pipelines keep canonical placement and ONE
                     # traced bucket (a resize would mean a recompile at swap
                     # time — never allowed in prod); eager pipelines use
                     # sparse placement (branch kernels only where covered).
                     compiled = getattr(pipe, "_cozy_compile", None) is not None
-                    w8a8_lora.apply_branch_adapters(
-                        denoiser, branch_set,
-                        allow_resize=not compiled, uniform=compiled,
-                        request_id=request_id,
-                    )
+                    try:
+                        w8a8_lora.apply_branch_adapters(
+                            denoiser, branch_set,
+                            allow_resize=not compiled, uniform=compiled,
+                            request_id=request_id,
+                        )
+                    except RefCompatibilitySurprise:
+                        if (w8a8_lora.branch_lane(denoiser) == ""
+                                and not compiled
+                                and isinstance(pipe, LoraCapablePipeline)):
+                            logger.info(
+                                "[request_id=%s] adapter set does not map onto "
+                                "branch Linears; falling back to the peft path "
+                                "(plain lane)", request_id,
+                            )
+                            w8a8_lora.clear_branch_adapters(denoiser)
+                            w8a8_lora.stamp_lane(pipe, denoiser)
+                            adapters = all_adapters
+                        else:
+                            raise
+                    else:
+                        w8a8_lora.stamp_lane(pipe, denoiser)
+                elif denoiser is not None:
+                    # Adapter set has no denoiser half: make sure a previous
+                    # request's branches are off.
+                    w8a8_lora.clear_branch_adapters(denoiser)
                     w8a8_lora.stamp_lane(pipe, denoiser)
-                    if not adapters:
-                        # No peft half — make sure a previous request's TE
-                        # adapters are off, then we're done.
-                        if hasattr(pipe, "disable_lora"):
-                            pipe.disable_lora()
-                        st.active = True
-                        return
+                if denoiser is not None and not adapters:
+                    # No peft half — make sure a previous request's TE
+                    # adapters are off, then we're done.
+                    if hasattr(pipe, "disable_lora"):
+                        pipe.disable_lora()
+                    st.active = True
+                    return
                 load_ms = 0
                 attached_now: List[str] = []
                 for a in adapters:
@@ -401,15 +478,16 @@ class AdapterResidency:
                 denoiser = w8a8_lora.branch_target(pipe)
                 if denoiser is not None:
                     w8a8_lora.clear_branch_adapters(denoiser)
+                    w8a8_lora.stamp_lane(pipe, denoiser)
             except Exception:
                 logger.warning(
-                    "[request_id=%s] w8a8 lora branch clear failed", request_id,
+                    "[request_id=%s] lora branch clear failed", request_id,
                     exc_info=True,
                 )
             try:
                 if hasattr(pipe, "disable_lora"):
                     pipe.disable_lora()
-                else:
+                elif hasattr(pipe, "unload_lora_weights"):
                     pipe.unload_lora_weights()
                     st.attached.clear()
                 st.active = False

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.33.0 (2026-07-17)
+
+- **gw#558 (ie#388 dynamic-LoRA primary path): lane-general runtime LoRA
+  additive branches.** The gw#547 w8a8 side-branch generalizes to every
+  serve lane: plain `nn.Linear` denoisers (bf16-resident lane) and
+  layerwise-cast denoisers (the fp8-storage `fp8+te` lane) carry the same
+  `y += B(A @ x)` compute-dtype branch through an idempotent instance-forward
+  wrap — never peft module wrapping (ie#374), never a weight mutation, and
+  removal is bit-exact. Branch tensors on cast lanes live in the module
+  `__dict__` so the cast hooks can never fp8-round-trip them (verdict: the
+  branch COMPOSES with diffusers layerwise casting — the ie#374
+  incompatibility was peft-implementation-level, as ruled). Adapter state
+  dicts normalize through the pipeline class's own `lora_state_dict`
+  converter first (te#81's zero-drift pattern) with the existing
+  diffusers/peft/kohya grammar as fallback. Denoiser halves ALWAYS ride the
+  branch; text-encoder halves keep peft on uncast TEs and are refused typed
+  (`RefCompatibilitySurprise`) on cast TEs; unmappable adapters (conv-
+  targeting LoCon-class) on the plain lane fall back to whole-adapter peft.
+  Lane stamps compose as `<base>-lora<bucket>` (`w8a8-lora32`,
+  `fp8-hooks-lora32`, `lora32`), keeping branch-bearing pipelines and
+  branchless compile cells apart under the symmetric `lane_drift` guard;
+  compiled pipelines still refuse bucket resizes (no recompile at swap).
+
 ## 0.32.2 (2026-07-16)
 
 - **gw#559 / ie#496: Forge captures every declared image CFG regime.**
