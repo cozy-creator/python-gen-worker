@@ -262,8 +262,6 @@ def test_guard_records_cache_proof_on_the_exact_wrapped_object(monkeypatch):
     counters = iter((
         {"fxgraph_cache_hit": 10, "fxgraph_cache_miss": 2},
         {"fxgraph_cache_hit": 13, "fxgraph_cache_miss": 3},
-        {"fxgraph_cache_hit": 13, "fxgraph_cache_miss": 3},
-        {"fxgraph_cache_hit": 15, "fxgraph_cache_miss": 3},
     ))
     monkeypatch.setattr(cc, "inductor_counters", lambda: next(counters))
     signal = {
@@ -283,7 +281,7 @@ def test_guard_records_cache_proof_on_the_exact_wrapped_object(monkeypatch):
     assert guarded(4) == 5
     assert guarded(5) == 6
     assert signal["successful_calls"] == 2
-    assert signal["cache_hits"] == 5
+    assert signal["cache_hits"] == 3
     assert signal["cache_misses"] == 1
 
 

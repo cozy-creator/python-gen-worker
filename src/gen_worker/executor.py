@@ -1308,10 +1308,11 @@ class _CompileTargetRecord:
     # attached cells have no ModelOp and therefore leave this empty rather
     # than fabricating causal failure evidence later.
     active_adoption_operation_id: str = ""
-    # A runtime guard failure quarantines this immutable cell on this exact
-    # incarnation. Re-sending the same bytes must not repeat wrap+warmup;
-    # another cell identity or a newly minted target may be tried.
-    failed_compile_identity: Tuple[str, str] = ("", "")
+    # Runtime guard failures quarantine immutable cells on this exact
+    # incarnation. Successful adoption of B must not clear an earlier failure
+    # of A; only a newly minted target gets a fresh quarantine set.
+    failed_compile_identities: set[Tuple[str, str]] = dc_field(
+        default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -2021,7 +2022,7 @@ class Executor:
             failed_ref = target.active_compile_ref
             failed_digest = target.active_compile_snapshot_digest
             operation_id = target.active_adoption_operation_id
-            target.failed_compile_identity = (failed_ref, failed_digest)
+            target.failed_compile_identities.add((failed_ref, failed_digest))
             target.active_compile_ref = ""
             target.active_compile_snapshot_digest = ""
             target.active_adoption_operation_id = ""
@@ -2871,7 +2872,6 @@ class Executor:
             before = {
                 id(obj): (
                     compile_cache.execution_count(obj),
-                    compile_cache.cache_hit_count(obj),
                     trt_engine.execution_count(obj),
                 )
                 for obj in objects
@@ -2904,10 +2904,10 @@ class Executor:
                     return evidence
             evidence.count += 1
             for obj in objects:
-                calls_before, hits_before, trt_before = before[id(obj)]
+                calls_before, trt_before = before[id(obj)]
                 inductor_proven = (
                     compile_cache.execution_count(obj) > calls_before
-                    and compile_cache.cache_hit_count(obj) > hits_before
+                    and compile_cache.cache_hit_count(obj) > 0
                 )
                 trt_proven = trt_engine.execution_count(obj) > trt_before
                 if inductor_proven or trt_proven:
@@ -3044,7 +3044,6 @@ class Executor:
             proof_before = {
                 id(candidate.pipeline): (
                     compile_cache.execution_count(candidate.pipeline),
-                    compile_cache.cache_hit_count(candidate.pipeline),
                     compile_cache.cache_miss_count(candidate.pipeline),
                 )
                 for candidate in inj.compile_objects
@@ -3097,8 +3096,8 @@ class Executor:
                     if before is None:
                         continue
                     calls = compile_cache.execution_count(pipe) - before[0]
-                    pipe_hits = compile_cache.cache_hit_count(pipe) - before[1]
-                    pipe_misses = compile_cache.cache_miss_count(pipe) - before[2]
+                    pipe_hits = compile_cache.cache_hit_count(pipe)
+                    pipe_misses = compile_cache.cache_miss_count(pipe) - before[1]
                     hits += max(0, pipe_hits)
                     misses += max(0, pipe_misses)
                     if not warmed or calls <= 0 or pipe_hits <= 0:
@@ -4307,8 +4306,11 @@ class Executor:
         with expected_target.state_lock:
             previous_ref = expected_target.active_compile_ref
             previous_digest = expected_target.active_compile_snapshot_digest
-            failed_identity = expected_target.failed_compile_identity
-        if failed_identity == (ref, snapshot_digest):
+            cell_quarantined = (
+                (ref, snapshot_digest)
+                in expected_target.failed_compile_identities
+            )
+        if cell_quarantined:
             return await fail(
                 "cell_quarantined",
                 "this immutable cell already failed its runtime guard on "
@@ -4542,7 +4544,6 @@ class Executor:
                     target.active_compile_ref = ref
                     target.active_compile_snapshot_digest = snapshot_digest
                     target.active_adoption_operation_id = operation_id
-                    target.failed_compile_identity = ("", "")
                 self._on_state_change()
 
         duration_ms = int((time.monotonic() - t0) * 1000)

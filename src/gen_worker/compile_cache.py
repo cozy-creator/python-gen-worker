@@ -1020,10 +1020,14 @@ def _guarded(
         lock = signal.get("lock")
         if not isinstance(lock, _LOCK_TYPE):
             return None
-        # Every call needs its own counter window. Stopping after the first
-        # hit lets one endpoint alias certify a later sibling without proving
-        # that sibling's graph. Executor warmups exclude concurrent GPU work,
-        # so this process-wide counter delta belongs to this exact wrapper.
+        # Inductor counts graph lookup/compile hits, not every execution of an
+        # already-loaded graph. Capture activation once for this exact wrapper;
+        # successful_calls below remains a per-invocation alias proof. Executor
+        # proof warmups exclude concurrent GPU work, so the process-wide delta
+        # cannot come from another resident object.
+        with lock:
+            if int(signal.get("cache_hits", 0)) > 0:
+                return None
         return inductor_counters()
 
     def record_success(before: Optional[Dict[str, int]]) -> None:
@@ -1101,8 +1105,11 @@ def _guarded_regional(
         lock = signal.get("lock")
         if not isinstance(lock, _LOCK_TYPE):
             return None
-        # See _guarded: retain one counter window per compiled invocation so
-        # every declared handler alias must produce its own cache-hit proof.
+        # See _guarded: one exact-object activation is sufficient; subsequent
+        # aliases still need their own successful wrapper invocation.
+        with lock:
+            if int(signal.get("cache_hits", 0)) > 0:
+                return None
         return inductor_counters()
 
     def record_success(before: Optional[Dict[str, int]]) -> None:

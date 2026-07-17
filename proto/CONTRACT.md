@@ -272,8 +272,12 @@ alone.
 | `function_names` | W per-handler warmup proof | O applicability | sorted aliases proved on this exact object. The set is immutable for the incarnation; a skipped/unproved sibling is absent even if it shares endpoint config |
 | `model_bindings` | W setup ownership | O applicability + RunJob fence | sorted exact slot/ref/snapshot triples owned by this target. It may be a strict subset of RunJob setup bindings (for example SDXL pipeline owned, ancillary VAE omitted) |
 
-Inductor proof samples every compiled call, and setup/adoption warmups exclude
-concurrent GPU work before attributing cache-hit deltas to handler aliases.
+Inductor proof separates two causal facts: the exact object wrapper must observe
+at least one isolated cache activation hit, and every advertised handler alias
+must independently execute that same wrapper successfully. Inductor does not
+increment its lookup counter on every execution of an already-loaded graph.
+Setup/adoption warmups exclude concurrent GPU work while capturing activation,
+and wrapper-local counters prevent a sibling object from supplying it.
 Mandatory W8A8 publishes no partial target: every non-skipped compatible alias
 must prove the exact active object/cell or setup fails and those handlers are
 reported unavailable. Explicitly skipped handlers such as legacy SDXL Turbo do
@@ -561,7 +565,9 @@ fails immediately without wrap/warmup until the cell or target changes. This is
 state-driven; a desired-state generation, operation ID, or controller ordering
 rewrite alone does not re-arm the same target and immutable cell. Re-arming
 requires a new target/binding/contract incarnation, a different cell ref or
-digest, or a new worker session. There is no retry timer or timeout knob. A
+digest, or a new worker session. Quarantines accumulate for the incarnation;
+successfully adopting cell B never clears an earlier failed identity A. There
+is no retry timer or timeout knob. A
 boot-attached cell has no ModelOp operation ID and never fabricates a causal
 failure event. Declarative reconciliation may re-advertise the failed target's
 aliases only after a fresh target has an exact active cell and proves those

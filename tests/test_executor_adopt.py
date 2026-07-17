@@ -118,16 +118,21 @@ def _mark_fake_guard(pipeline) -> None:
     })
 
 
-def _record_fake_warm(pipeline) -> None:
+def _record_fake_warm(pipeline, *, hits=None, misses=None) -> None:
     marker = getattr(pipeline, cc._MARKER_ATTR, None) or {}
     signal = marker.get("failure_signal")
     if not isinstance(signal, dict):
         return
     lock = signal["lock"]
     with lock:
+        activated = signal["cache_hits"] > 0
         signal["successful_calls"] += 1
-        signal["cache_hits"] += _FAKE_WARM_PROOF["hits"]
-        signal["cache_misses"] += _FAKE_WARM_PROOF["misses"]
+        signal["cache_hits"] += (
+            (0 if activated else _FAKE_WARM_PROOF["hits"])
+            if hits is None else hits)
+        signal["cache_misses"] += (
+            (0 if activated else _FAKE_WARM_PROOF["misses"])
+            if misses is None else misses)
 
 
 def _guarded_apply(pipeline, _cfg, *, cache_ready, guard=True):
@@ -1143,6 +1148,8 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
 
         def edit(self, ctx, payload: _In) -> _Out:
             calls["edit"] += 1
+            # Reusing an already-loaded graph is a successful wrapper
+            # execution, but Inductor records no second lookup/cache hit.
             _record_fake_warm(self.pipeline)
             return _Out(y="ok")
 
@@ -1243,10 +1250,28 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert {"edit", "generate"}.issubset(recovered_delta.available_functions)
 
 
-def test_flux_real_guard_proves_each_alias_under_exclusive_gpu_warmup(
-    tmp_path, monkeypatch,
+@pytest.mark.parametrize(
+    (
+        "case", "edit_uses_wrapper", "counter_hits", "expected_names",
+        "expected_executions", "expected_hits",
+    ),
+    (
+        ("loaded_graph_reuse", True, (10, 11), ("edit", "generate"), 2, 1),
+        ("no_object_hit", True, (10, 10, 10, 10), (), 0, 0),
+        ("alias_bypasses_wrapper", False, (10, 11), ("generate",), 1, 1),
+    ),
+)
+def test_flux_real_guard_requires_object_activation_and_each_alias_execution(
+    tmp_path,
+    monkeypatch,
+    case,
+    edit_uses_wrapper,
+    counter_hits,
+    expected_names,
+    expected_executions,
+    expected_hits,
 ):
-    """Production setup uses one real guard counter window per FLUX alias."""
+    """One object hit plus one exact wrapper call per alias is causal proof."""
     import gen_worker.executor as executor_mod
     import torch
 
@@ -1276,7 +1301,8 @@ def test_flux_real_guard_proves_each_alias_under_exclusive_gpu_warmup(
 
         def edit(self, ctx, payload: _In) -> _Out:
             calls["edit"] += 1
-            self.pipeline.transformer.forward(payload.prompt)
+            if edit_uses_wrapper:
+                self.pipeline.transformer.forward(payload.prompt)
             return _Out(y="ok")
 
     specs = extract_specs(_FluxBaseEndpoint)
@@ -1297,12 +1323,16 @@ def test_flux_real_guard_proves_each_alias_under_exclusive_gpu_warmup(
         compiled_ready.set()
         return fn
 
-    counters = iter((
-        {"fxgraph_cache_hit": 10, "fxgraph_cache_miss": 1},
-        {"fxgraph_cache_hit": 11, "fxgraph_cache_miss": 1},
-        {"fxgraph_cache_hit": 11, "fxgraph_cache_miss": 1},
-        {"fxgraph_cache_hit": 12, "fxgraph_cache_miss": 1},
-    ))
+    counters = iter(counter_hits)
+    counter_reads = []
+
+    def _counters():
+        counter_reads.append(case)
+        return {
+            "fxgraph_cache_hit": next(counters),
+            "fxgraph_cache_miss": 1,
+        }
+
     monkeypatch.setattr(executor_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
@@ -1311,7 +1341,7 @@ def test_flux_real_guard_proves_each_alias_under_exclusive_gpu_warmup(
     )
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch, "compile", _compile)
-    monkeypatch.setattr(cc, "inductor_counters", lambda: next(counters))
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
 
     async def scenario() -> None:
         # Hold one of two permits. Setup may stage/arm, but its proof warmup
@@ -1333,11 +1363,105 @@ def test_flux_real_guard_proves_each_alias_under_exclusive_gpu_warmup(
     asyncio.run(scenario())
 
     assert calls == {"generate": 1, "edit": 1}
+    assert len(counter_reads) == len(counter_hits)
+    targets = ex.compile_targets()
+    if expected_names:
+        (target,) = targets
+        assert tuple(target.function_names) == expected_names
+        assert target.active_compile_ref == CACHE_REF
+        assert cc.execution_count(pipe) == expected_executions
+        assert cc.cache_hit_count(pipe) == expected_hits
+    else:
+        assert targets == []
+        assert getattr(pipe, cc._MARKER_ATTR, None) is None
+
+
+def test_compile_hit_on_other_object_cannot_certify_primary_object(
+    tmp_path, monkeypatch,
+):
+    """Process-wide hit deltas remain owned by the wrapper that observed them."""
+    import gen_worker.executor as executor_mod
+    import torch
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "two-object-models"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={
+            "primary": Hub("acme/flux-primary"),
+            "other": Hub("acme/flux-other"),
+        },
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={"generate": {"prompt": "warmup"}},
+    )
+    class _TwoObjectEndpoint:
+        def setup(
+            self, primary: _LoadablePipe, other: _LoadablePipe,
+        ) -> None:
+            self.primary = primary
+            self.other = other
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            # The primary wrapper executes but sees no cache activation. The
+            # other wrapper then sees the sole process-wide hit.
+            self.primary.transformer.forward(payload.prompt)
+            self.other.transformer.forward(payload.prompt)
+            return _Out(y="ok")
+
+    (spec,) = extract_specs(_TwoObjectEndpoint)
+    refs = {slot: wire_ref(binding) for slot, binding in spec.models.items()}
+    pipes = {"primary": _Pipe(), "other": _Pipe()}
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    counter_hits = iter((10, 10, 10, 11))
+    counter_reads = 0
+
+    def _counters():
+        nonlocal counter_reads
+        counter_reads += 1
+        return {
+            "fxgraph_cache_hit": next(counter_hits),
+            "fxgraph_cache_miss": 1,
+        }
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipes[kwargs["slot"]], is_pipeline=True,
+        ),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+
+    asyncio.run(ex.ensure_setup(spec, {
+        refs["primary"]: pb.Snapshot(digest=MODEL_DIGEST),
+        refs["other"]: pb.Snapshot(digest=DIGEST_B),
+        CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+    }))
+
+    assert counter_reads == 4
     (target,) = ex.compile_targets()
-    assert list(target.function_names) == ["edit", "generate"]
+    assert [(binding.slot, binding.ref) for binding in target.model_bindings] == [
+        ("other", refs["other"]),
+    ]
+    assert list(target.function_names) == [spec.name]
     assert target.active_compile_ref == CACHE_REF
-    assert cc.execution_count(pipe) == 2
-    assert cc.cache_hit_count(pipe) == 2
+    assert getattr(pipes["primary"], cc._MARKER_ATTR, None) is None
+    assert cc.execution_count(pipes["other"]) == 1
+    assert cc.cache_hit_count(pipes["other"]) == 1
 
 
 def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
@@ -2074,6 +2198,70 @@ def test_runtime_guard_revokes_state_emits_one_causal_failure_and_quarantines(
         operation_id=OP_B,
         target_incarnation_id=active_id,
     )
+
+
+def test_cell_quarantine_survives_successful_different_cell_adoption(
+    tmp_path, monkeypatch,
+):
+    """A failure stays sticky on its incarnation after B becomes active."""
+    _artifact(tmp_path)
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
+    target_id = _target_id(ex)
+
+    _adopt(
+        ex,
+        digest=DIGEST_A,
+        operation_id=OP_A,
+        target_incarnation_id=target_id,
+    )
+    found = ex._compile_target(target_id)
+    assert found is not None
+    _rec, target = found
+    callback = getattr(target.pipeline, cc._MARKER_ATTR)[
+        "failure_signal"
+    ]["callback"]
+    assert callable(callback)
+
+    async def _trip_a() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "cell A failed")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip_a())
+    assert (CACHE_REF, DIGEST_A) in target.failed_compile_identities
+
+    sent.clear()
+    _adopt(
+        ex,
+        digest=DIGEST_B,
+        operation_id=OP_B,
+        target_incarnation_id=target_id,
+    )
+    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
+    assert len(adopted) == 1
+    assert adopted[0].snapshot_digest == DIGEST_B
+    assert (CACHE_REF, DIGEST_A) in target.failed_compile_identities
+
+    sent.clear()
+    _adopt(
+        ex,
+        digest=DIGEST_A,
+        operation_id="adopt-operation-c",
+        target_incarnation_id=target_id,
+    )
+    _assert_failed(
+        sent,
+        "adopt_failed:cell_quarantined",
+        digest=DIGEST_A,
+        operation_id="adopt-operation-c",
+        target_incarnation_id=target_id,
+    )
+    (still_b,) = ex.compile_targets()
+    assert still_b.active_compile_snapshot_digest == DIGEST_B
 
 
 def test_multifunction_adoption_keeps_target_identity_through_guard_failure(
