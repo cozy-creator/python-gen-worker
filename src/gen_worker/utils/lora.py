@@ -408,9 +408,13 @@ class AdapterResidency:
                     w8a8_lora.clear_branch_adapters(denoiser)
                     w8a8_lora.stamp_lane(pipe, denoiser)
                 if denoiser is not None and not adapters:
-                    # No peft half — make sure a previous request's TE
-                    # adapters are off, then we're done.
-                    if hasattr(pipe, "disable_lora"):
+                    # No peft half — make sure a previous request's peft
+                    # adapters are off, then we're done. Only touch the peft
+                    # surface when THIS registry attached something there:
+                    # diffusers' disable_lora raises on peft-less images
+                    # (the LTX serving image ships no peft — ie#493), and a
+                    # branch-only pipeline never needs it.
+                    if st.attached and hasattr(pipe, "disable_lora"):
                         pipe.disable_lora()
                     st.active = True
                     return
@@ -487,7 +491,12 @@ class AdapterResidency:
                     exc_info=True,
                 )
             try:
-                if hasattr(pipe, "disable_lora"):
+                # Peft-surface teardown only when peft attachments exist —
+                # diffusers raises "PEFT backend is required" otherwise on
+                # peft-less serving images (branch-only lanes, ie#493).
+                if not st.attached:
+                    pass
+                elif hasattr(pipe, "disable_lora"):
                     pipe.disable_lora()
                 elif hasattr(pipe, "unload_lora_weights"):
                     pipe.unload_lora_weights()

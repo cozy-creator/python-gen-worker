@@ -348,3 +348,43 @@ def test_bf16_residency_branch_roundtrip_restores_output(bf16_unet: Any) -> None
         restored = unet(x, t).sample
     assert torch.equal(restored, base)
     assert pipe._cozy_weight_lane == ""  # type: ignore[attr-defined]
+
+
+class _PeftlessPipe:
+    """LTX-image shape (ie#493): the pipeline class EXPOSES the diffusers
+    lora surface but the image ships no peft — every peft call raises."""
+
+    def __init__(self, unet: Any) -> None:
+        self.unet = unet
+
+    def load_lora_weights(self, *a: Any, **k: Any) -> None:
+        raise ValueError("PEFT backend is required for this method.")
+
+    def set_adapters(self, *a: Any, **k: Any) -> None:
+        raise ValueError("PEFT backend is required for this method.")
+
+    def unload_lora_weights(self) -> None:
+        raise ValueError("PEFT backend is required for this method.")
+
+    def disable_lora(self) -> None:
+        raise ValueError("PEFT backend is required for this method.")
+
+
+def test_branch_only_attach_never_touches_peft_surface(bf16_unet: Any) -> None:
+    """gw#558 live find (ie#497 H100 run 3): denoiser-only adapters on a
+    peft-less image must attach/detach through the branch without ever
+    calling the diffusers peft surface."""
+    unet = _fresh(bf16_unet)
+    pipe = _PeftlessPipe(unet)
+    res = lora_util.AdapterResidency()
+    res.activate("m", pipe, [_prepared(_adapter_for(unet), "t/peftless")],
+                 request_id="r1")
+    assert w8a8_lora.branches_active(unet)
+    res.deactivate("m", pipe, request_id="r1")
+    assert not w8a8_lora.branches_active(unet)
+    # repeat attach after deactivate (the warm-swap path)
+    res.activate("m", pipe, [_prepared(_adapter_for(unet), "t/peftless")],
+                 request_id="r2")
+    assert w8a8_lora.branches_active(unet)
+    res.detach("m", pipe)
+    assert w8a8_lora.branch_bucket(unet) == 0
