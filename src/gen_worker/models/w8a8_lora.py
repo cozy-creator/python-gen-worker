@@ -82,8 +82,10 @@ def branch_target(pipe: Any) -> Optional[Any]:
 
 def branch_lane(model: Any) -> str:
     """The denoiser's base weight lane for branch policy/stamping:
-    ``"w8a8"`` | ``"fp8-hooks"`` | ``""`` (plain resident)."""
-    if getattr(model, "_cozy_w8a8_mode", "") == "scaled_mm":
+    ``"w8a8"`` | ``"fp8-hooks"`` | ``""`` (plain resident). Both fp8 GEMM
+    dispatch branches (rowwise sm_90+, pertensor sm_89 — gw#564) are the
+    w8a8 lane; the additive LoRA branch is orthogonal to the scaling mode."""
+    if getattr(model, "_cozy_w8a8_mode", "") in ("rowwise", "pertensor"):
         return "w8a8"
     if getattr(model, "_cozy_fp8_storage_applied", False):
         return "fp8-hooks"

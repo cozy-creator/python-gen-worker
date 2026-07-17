@@ -182,6 +182,10 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
     from .models.loading import pipeline_weight_lane
     from .models.memory import low_vram_mode
 
+    # gw#564: record the execution contract exactly like the production
+    # build — w8a8 cells are contract_drift-gated on the graph signature and
+    # weight-lane manifest, so a mint without them can never re-adopt.
+    graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
     meta = cc.artifact_metadata(
         family=family,
         source_ref="local-mint",
@@ -192,6 +196,8 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
         compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
         weight_lane=pipeline_weight_lane(pipe),
         lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
+        graph_signature=graph_signature,
+        weight_contract=weight_contract,
     )
     tmp = target.with_suffix(".part")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +211,21 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
     return target
 
 
+def _fail_closed(pipe: Any, reason: str) -> bool:
+    """The production w8a8 policy re-asserted at the local exits: a w8a8
+    pipeline never silently serves the slow eager GEMM path — when the local
+    mint cannot produce a cell either, the refusal stays TYPED (the same
+    CompiledLaneUnavailableError the executor maps). Plain lanes keep the
+    gw#555 never-raise miss policy (eager)."""
+    from .models.loading import pipeline_weight_lane
+
+    if pipeline_weight_lane(pipe).startswith("w8a8"):
+        raise cc.CompiledLaneUnavailableError(
+            f"W8A8 requires a compile cell and the local mint is "
+            f"unavailable ({reason})")
+    return False
+
+
 def enable_compiled(
     pipe: Any, cfg: Any, cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
@@ -213,19 +234,32 @@ def enable_compiled(
     policy, incl. TRT and the manual GEN_WORKER_COMPILE_CACHE overrides),
     then the local cell store — adopt a matching stored cell, or mint one.
 
-    Never raises: any store or mint failure logs and serves eager, exactly
-    like the production miss policy.
+    Store/mint failures log and serve eager (the production miss policy) —
+    EXCEPT on w8a8 lanes, whose fail-closed refusal stays typed
+    (:func:`_fail_closed`): production raises CompiledLaneUnavailableError
+    when no cell can arm, and the local runtime only downgrades that to a
+    mint attempt, never to silent slow eager (gw#564 found the raise
+    aborting the mint path live on a 4090).
     """
     from .models import provision
 
     family = str(getattr(cfg, "family", "") or "")
-    if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
-        return True
+    try:
+        if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
+            return True
+    except cc.CompiledLaneUnavailableError:
+        # No delivered w8a8 cell => production would refuse here. The LOCAL
+        # runtime's whole purpose is minting that cell (gw#555): fall
+        # through to the store/mint path — the typed refusal re-asserts at
+        # every exit that cannot produce one.
+        logger.info(
+            "local-cells: no delivered w8a8 cell; trying the local store/mint")
     if not family:
         logger.info("local-cells: Compile decl has no family; staying eager")
-        return False
+        return _fail_closed(pipe, "Compile decl has no family")
     if not _cuda_ready():
-        return False  # apply() already logged; nothing to mint for
+        # apply() already logged; nothing to mint for
+        return _fail_closed(pipe, "CUDA unavailable")
 
     from .models.loading import pipeline_weight_lane
 
@@ -241,10 +275,13 @@ def enable_compiled(
         reason = store_verdict(target, family, pipe, cfg)
         if not reason:
             # the exact delivered-cell consumer path (verify + drift + arm)
-            if cc.enable(pipe, cfg, cache_dir, artifact=target):
-                _say(f"local-cells: adopted stored cell {target.name}")
-                return True
-            reason = "seed/arm failed"
+            try:
+                if cc.enable(pipe, cfg, cache_dir, artifact=target):
+                    _say(f"local-cells: adopted stored cell {target.name}")
+                    return True
+                reason = "seed/arm failed"
+            except cc.CompiledLaneUnavailableError:
+                reason = "seed/arm failed (w8a8 fail-closed)"
         _say(f"local-cells: stored cell no longer matches ({reason}); re-minting")
 
     if not cc.toolchain_present():
@@ -255,7 +292,7 @@ def enable_compiled(
         )
         if bucket:
             cc.drop_lora_lane(pipe)
-        return False
+        return _fail_closed(pipe, "no C compiler for the one-time local mint")
     _say(
         f"local-cells: no compile cell for this GPU/torch yet — compiling "
         f"{len(tuple(cfg.shapes))} graph shape(s) once "
@@ -269,17 +306,23 @@ def enable_compiled(
         cc.unwrap(pipe)
         if bucket:
             cc.drop_lora_lane(pipe)
-        return False
+        return _fail_closed(pipe, f"local mint failed: {exc}")
     # Adopt the just-saved cell through the delivered-cell path (drops the
     # unguarded mint wrappers; re-traces hit the captured FX cache). This
     # also proves the saved artifact round-trips before we rely on it.
     cc.unwrap(pipe)
-    if cc.enable(pipe, cfg, cache_dir, artifact=target):
-        return True
+    try:
+        if cc.enable(pipe, cfg, cache_dir, artifact=target):
+            return True
+    except cc.CompiledLaneUnavailableError as exc:
+        logger.warning("local-cells: minted cell failed re-adoption (%s)", exc)
+        if bucket:
+            cc.drop_lora_lane(pipe)
+        raise
     logger.warning("local-cells: minted cell failed re-adoption; serving eager")
     if bucket:
         cc.drop_lora_lane(pipe)
-    return False
+    return _fail_closed(pipe, "minted cell failed re-adoption")
 
 
 __all__ = [

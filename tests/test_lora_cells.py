@@ -47,7 +47,7 @@ def w8a8_pipe(w8a8_tree: Path) -> Any:
         pass
 
     pipe = _Pipe()
-    pipe.unet = load_w8a8_denoiser(w8a8_tree, art, mode="scaled_mm")
+    pipe.unet = load_w8a8_denoiser(w8a8_tree, art, mode="rowwise")
     pipe._cozy_weight_lane = "w8a8"
     return pipe
 

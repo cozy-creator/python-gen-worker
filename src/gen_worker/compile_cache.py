@@ -746,10 +746,14 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
                 "out_features": int(out_features),
             }
             if bool(getattr(module, "_cozy_w8a8_linear", False)):
-                row["activation"] = (
-                    "static" if getattr(module, "input_scale", None) is not None
-                    else "dynamic-per-row"
-                )
+                # gw#564: the activation-scale granularity is a graph property
+                # (per-row rowwise sm_90+, per-tensor epilogue sm_89).
+                if getattr(module, "input_scale", None) is not None:
+                    row["activation"] = "static"
+                elif getattr(module, "gemm_mode", "") == "pertensor":
+                    row["activation"] = "dynamic-per-tensor"
+                else:
+                    row["activation"] = "dynamic-per-row"
                 quantized.append(row)
             else:
                 row["type"] = _type_name(module)
@@ -811,12 +815,22 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
         return "weight-lane artifact schema/exclusion manifest mismatch"
     if str(weight_contract.get("lane") or "").startswith("w8a8"):
         activations = weight_contract.get("activation_scaling") or []
-        if activations != ["dynamic-per-row"]:
-            return f"W8A8 activation scaling must be dynamic-per-row, got {activations!r}"
+        # DYNAMIC only, one homogeneous granularity per graph (gw#564:
+        # per-row = rowwise sm_90+, per-tensor = the sm_89 epilogue lane).
+        if activations not in (["dynamic-per-row"], ["dynamic-per-tensor"]):
+            return (f"W8A8 activation scaling must be dynamic "
+                    f"(per-row or per-tensor), got {activations!r}")
         if not weight_contract.get("quantized"):
             return "W8A8 graph contains no torch._scaled_mm modules"
+        here_digest = runtime_key()["image_digest"]
         for field in ("sm", "cuda", "cuda_driver", "image_digest"):
             if not str(meta.get(field) or ""):
+                if field == "image_digest" and not here_digest:
+                    # Bare-metal local runtime (gw#555 self-mint): no image
+                    # identity axis exists on either side. Production images
+                    # always carry WORKER_IMAGE_DIGEST, so fleet cells stay
+                    # fully pinned.
+                    continue
                 return f"W8A8 cell missing {field} identity"
     return ""
 
