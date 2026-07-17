@@ -1153,7 +1153,11 @@ def load_from_pretrained(
     # scaled-mm lane (fp8 resident, no per-layer cast); hosts without usable
     # scaled_mm dequant once to bf16-resident. Precedes the storage-cast
     # rungs — a scale-free fp8 tree never detects here.
-    from .w8a8 import detect_w8a8_artifact, load_w8a8_pipeline
+    from .w8a8 import (
+        detect_w8a8_artifact,
+        load_w8a8_pipeline,
+        load_w8a8_root_pipeline,
+    )
 
     w8a8_art = detect_w8a8_artifact(Path(path))
     if w8a8_art is not None and callable(getattr(cls, "from_pretrained", None)):
@@ -1163,6 +1167,18 @@ def load_from_pretrained(
                 compute = get_torch_dtype(dtype)
             except ImportError:
                 pass
+        if not w8a8_art.component:
+            # Root layout (gw#562): the pipeline class's own loader
+            # constructs; the worker swaps post-construction.
+            if components:
+                logger.warning(
+                    "preloaded components ignored on the root w8a8 lane")
+            if storage_dtype == "fp8+te":
+                logger.warning(
+                    "storage_dtype=fp8+te ignored on the root w8a8 lane "
+                    "(no component identity)")
+            return load_w8a8_root_pipeline(
+                cls, Path(path), w8a8_art, compute_dtype=compute)
         return load_w8a8_pipeline(
             cls, Path(path), w8a8_art, compute_dtype=compute,
             components=components,

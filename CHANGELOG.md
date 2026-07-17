@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.35.0 (2026-07-17)
+
+- **gw#562: w8a8 lane for root-layout (DiffSynth/singlefile) families —
+  hidream-o1 + anima.** The `#fp8-w8a8` path drops its diffusers-tree
+  assumption end to end. Producer: `streaming_w8a8_snapshot` accepts any
+  non-diffusers layout with a single root weight set (hidream-o1's
+  sharded-transformers root) — same per-channel requant, byte-gate
+  unchanged. Detector: `detect_w8a8_artifact` header-sniffs root shard
+  sets (index-aware) when no `model_index.json` exists; artifact
+  `component=""` marks the root layout. Serve: pipeline classes that
+  construct their own model (DiffSynth `from_pretrained` wrappers) call
+  `sanitize_w8a8_state_dict` while reading shards — quantized weights
+  dequant correctly on ANY host (never an unscaled fp8 upcast) — and
+  `load_from_pretrained` then swaps the constructed denoiser's quantized
+  Linears onto `Fp8ScaledLinear` in place (`swap_w8a8_linears`, module
+  path = tensor key, `key_map` hook for converter-renamed checkpoints
+  like anima's `net.` strip). Lane stamps (`w8a8`/`bf16-resident`),
+  scale-presence exclusion, and skip patterns are identical to the
+  diffusers lane. DiffSynth families have no compile cells yet — the
+  root lane serves eager w8a8.
+
 ## 0.34.0 (2026-07-17)
 
 - **gw#561 (gw#547 remainder; ie#488 turbo critical path): lora-bucket

@@ -56,8 +56,11 @@ class W8a8SnapshotError(W8a8Error):
 
 @dataclass(frozen=True)
 class W8a8Artifact:
-    component: str            # denoiser dir name ("transformer"/"unet")
-    files: tuple[Path, ...]   # the component's safetensors shards
+    # Denoiser dir name ("transformer"/"unet") for diffusers trees; "" for a
+    # root-layout snapshot (singlefile/sharded-transformers, gw#562) whose
+    # weight set IS the denoiser.
+    component: str
+    files: tuple[Path, ...]   # the weight set's safetensors shards
     quantized: tuple[str, ...]  # module names with weight+weight_scale pairs
     static_input_scales: bool
 
@@ -77,36 +80,69 @@ def _read_header(path: Path) -> dict:
     return header if isinstance(header, dict) else {}
 
 
+def _quantized_layers(files: tuple[Path, ...]) -> tuple[tuple[str, ...], bool]:
+    dtypes: Dict[str, str] = {}
+    for f in files:
+        for name, info in _read_header(f).items():
+            if isinstance(info, dict) and "dtype" in info:
+                dtypes[name] = str(info["dtype"])
+    quantized = tuple(sorted(
+        key[: -len(".weight_scale")]
+        for key in dtypes
+        if key.endswith(".weight_scale")
+        and dtypes.get(key[: -len(".weight_scale")] + ".weight") == "F8_E4M3"
+    ))
+    static = any(f"{n}.input_scale" in dtypes for n in quantized)
+    return quantized, static
+
+
+def _root_weight_files(d: Path) -> tuple[Path, ...]:
+    """Root weight set: index-mapped shards plus loose safetensors."""
+    sharded: set[str] = set()
+    for idx in sorted(d.glob("*.safetensors.index.json")):
+        try:
+            weight_map = json.loads(idx.read_text("utf-8")).get("weight_map") or {}
+            sharded.update(str(v) for v in weight_map.values())
+        except (OSError, ValueError):
+            continue
+    files = [d / s for s in sorted(sharded) if (d / s).is_file()]
+    files += [p for p in sorted(d.glob("*.safetensors"))
+              if p.is_file() and p.name not in sharded]
+    return tuple(dict.fromkeys(files))
+
+
 def detect_w8a8_artifact(model_path: Path) -> Optional[W8a8Artifact]:
-    """Header-sniff a snapshot for the w8a8 contract: any denoiser-dir layer
-    with an F8_E4M3 ``weight`` AND a ``weight_scale`` twin. A scale-FREE fp8
-    tree (the storage-cast ``#fp8`` flavor) never matches — the scales are
-    the distinguisher. Cheap: header reads only."""
+    """Header-sniff a snapshot for the w8a8 contract: any denoiser layer with
+    an F8_E4M3 ``weight`` AND a ``weight_scale`` twin. A scale-FREE fp8 tree
+    (the storage-cast ``#fp8`` flavor) never matches — the scales are the
+    distinguisher. Diffusers trees scan the denoiser component dirs;
+    everything else scans the root weight set (singlefile/sharded-
+    transformers layouts, gw#562). Cheap: header reads only."""
     root = Path(model_path)
-    if not root.is_dir() or not (root / "model_index.json").exists():
+    if not root.is_dir():
         return None
-    for comp in _COMPONENT_DIRS:
-        comp_dir = root / comp
-        if not comp_dir.is_dir():
-            continue
-        files = tuple(sorted(p for p in comp_dir.glob("*.safetensors") if p.is_file()))
-        if not files:
-            continue
-        dtypes: Dict[str, str] = {}
-        for f in files:
-            for name, info in _read_header(f).items():
-                if isinstance(info, dict) and "dtype" in info:
-                    dtypes[name] = str(info["dtype"])
-        quantized = tuple(sorted(
-            key[: -len(".weight_scale")]
-            for key in dtypes
-            if key.endswith(".weight_scale")
-            and dtypes.get(key[: -len(".weight_scale")] + ".weight") == "F8_E4M3"
-        ))
+    if (root / "model_index.json").exists():
+        for comp in _COMPONENT_DIRS:
+            comp_dir = root / comp
+            if not comp_dir.is_dir():
+                continue
+            files = tuple(sorted(
+                p for p in comp_dir.glob("*.safetensors") if p.is_file()))
+            if not files:
+                continue
+            quantized, static = _quantized_layers(files)
+            if quantized:
+                return W8a8Artifact(
+                    component=comp, files=files, quantized=quantized,
+                    static_input_scales=static,
+                )
+        return None
+    files = _root_weight_files(root)
+    if files:
+        quantized, static = _quantized_layers(files)
         if quantized:
-            static = any(f"{n}.input_scale" in dtypes for n in quantized)
             return W8a8Artifact(
-                component=comp, files=files, quantized=quantized,
+                component="", files=files, quantized=quantized,
                 static_input_scales=static,
             )
     return None
@@ -388,6 +424,174 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
 
 
 # ---------------------------------------------------------------------------
+# Root-layout serve path (gw#562): pipelines the worker does not assemble
+# (DiffSynth families — hidream-o1's sharded-transformers root, anima's
+# split checkpoint). The pipeline class's OWN from_pretrained constructs the
+# model; its loader runs sanitize_w8a8_state_dict so a quantized snapshot
+# lands correct dequantized weights on ANY host, and scaled_mm hosts then
+# swap the quantized Linears onto fp8 GEMM in place.
+# ---------------------------------------------------------------------------
+
+
+def sanitize_w8a8_state_dict(
+    state_dict: Dict[str, Any], compute_dtype: Any = None,
+) -> Dict[str, Any]:
+    """Dequantize w8a8 tensors in a raw state dict: fp8 weights with a
+    ``weight_scale`` twin become compute-dtype weights, scale tensors drop.
+    A scale-free dict passes through unchanged, so loaders that read
+    snapshots manually can call it unconditionally. Never ``.to(dtype)`` an
+    fp8 tensor before this — an unscaled upcast is silent garbage."""
+    import torch
+
+    compute = compute_dtype or torch.bfloat16
+    out: Dict[str, Any] = {}
+    for key, t in state_dict.items():
+        if key.endswith((".weight_scale", ".input_scale")):
+            continue
+        if (key.endswith(".weight") and isinstance(t, torch.Tensor)
+                and t.dtype == torch.float8_e4m3fn
+                and f"{key[: -len('.weight')]}.weight_scale" in state_dict):
+            layer = key[: -len(".weight")]
+            scale = _scale_2d(state_dict[f"{layer}.weight_scale"], int(t.shape[0]))
+            out[key] = (t.float() * scale).to(compute)
+        else:
+            out[key] = t
+    return out
+
+
+def swap_w8a8_linears(
+    model: Any,
+    art: W8a8Artifact,
+    *,
+    compute_dtype: Any = None,
+    key_map: Optional[Any] = None,
+) -> int:
+    """Swap the artifact's quantized Linears in an ALREADY-CONSTRUCTED model
+    onto :class:`Fp8ScaledLinear`, assigning fp8 weight + scale from the
+    artifact shards (whatever the constructing loader materialized there is
+    replaced). ``key_map`` maps an artifact layer name to its module path
+    (identity default; converter-renamed families pass their own — e.g.
+    anima's DiffSynth converter strips ``net.``). Layers whose dims break
+    scaled_mm's 16-alignment, or whose owner is not a plain Linear, keep
+    their dequantized weights. Returns the number of swapped modules."""
+    import torch
+    import torch.nn as nn
+    from safetensors import safe_open
+
+    compute = compute_dtype or torch.bfloat16
+    lin_cls = fp8_scaled_linear_class()
+    where: Dict[str, Path] = {}
+    for f in art.files:
+        for name in _read_header(f):
+            if name != "__metadata__":
+                where[name] = f
+    handles: Dict[Path, Any] = {}
+
+    def _tensor(name: str) -> Any:
+        src = where.get(name)
+        if src is None:
+            raise W8a8SnapshotError(f"artifact tensor {name!r} missing from shards")
+        fh = handles.get(src)
+        if fh is None:
+            fh = handles[src] = safe_open(str(src), framework="pt", device="cpu")
+        return fh.get_tensor(name)
+
+    swapped = 0
+    try:
+        for layer in art.quantized:
+            target = str(key_map(layer)) if key_map is not None else layer
+            parent_path, _, leaf = target.rpartition(".")
+            try:
+                parent = (model.get_submodule(parent_path)
+                          if parent_path else model)
+                old = getattr(parent, leaf)
+            except AttributeError as exc:
+                raise W8a8SnapshotError(
+                    f"quantized layer {layer!r} has no module {target!r} in "
+                    f"{type(model).__name__} — wrong key_map?") from exc
+            if not isinstance(old, nn.Linear) or type(old) is not nn.Linear:
+                logger.warning(
+                    "w8a8 swap: %s is %s, not a plain Linear; layer stays "
+                    "dequantized", target, type(old).__name__)
+                continue
+            w = _tensor(f"{layer}.weight")
+            out_f, in_f = int(w.shape[0]), int(w.shape[1])
+            if (out_f, in_f) != (int(old.out_features), int(old.in_features)):
+                raise W8a8SnapshotError(
+                    f"quantized layer {layer!r} shape [{out_f}, {in_f}] != "
+                    f"module {target!r} [{old.out_features}, {old.in_features}]")
+            if in_f % _DIM_ALIGN or out_f % _DIM_ALIGN:
+                continue  # scaled_mm alignment; dequant weights stay
+            has_static = f"{layer}.input_scale" in where
+            dev = old.weight.device
+            new = lin_cls(in_f, out_f, bias=old.bias is not None,
+                          compute_dtype=compute, static_input_scale=has_static)
+            new.weight = w.contiguous().to(dev)
+            new.weight_scale = _scale_2d(_tensor(f"{layer}.weight_scale"),
+                                         out_f).to(dev)
+            if has_static:
+                new.input_scale = (
+                    _tensor(f"{layer}.input_scale").float().reshape(1, 1).to(dev))
+            if old.bias is not None:
+                new.bias = nn.Parameter(
+                    old.bias.detach().to(compute), requires_grad=False)
+            setattr(parent, leaf, new)
+            swapped += 1
+    finally:
+        for fh in handles.values():
+            try:
+                fh.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+    logger.info("w8a8 swap: %d/%d quantized Linears on scaled_mm",
+                swapped, len(art.quantized))
+    return swapped
+
+
+def _root_denoiser(pipe: Any) -> Any:
+    import torch.nn as nn
+
+    for name in ("transformer", "unet", "dit"):
+        mod = getattr(pipe, name, None)
+        if isinstance(mod, nn.Module):
+            return mod
+    if isinstance(pipe, nn.Module):
+        return pipe
+    raise W8a8SnapshotError(
+        f"{type(pipe).__name__} exposes no denoiser module "
+        "(transformer/unet/dit) for the root w8a8 lane")
+
+
+def load_w8a8_root_pipeline(
+    cls: Any, path: Path, art: W8a8Artifact, *, compute_dtype: Any = None,
+) -> Any:
+    """Serve a root-layout w8a8 snapshot through the pipeline class's own
+    ``from_pretrained`` (which must sanitize — see module docstring), then
+    swap the denoiser's quantized Linears onto scaled_mm when the host
+    qualifies. Stamps ``_cozy_weight_lane`` like the diffusers lane."""
+    import torch
+
+    compute = compute_dtype or torch.bfloat16
+    mode = "scaled_mm" if scaled_mm_supported() else "dequant"
+    pipe = cls.from_pretrained(str(path), torch_dtype=compute)
+    denoiser = _root_denoiser(pipe)
+    if mode == "scaled_mm":
+        if not swap_w8a8_linears(denoiser, art, compute_dtype=compute):
+            raise W8a8SnapshotError(
+                "scaled_mm host but no quantized Linear swapped — artifact "
+                f"keys do not match {type(denoiser).__name__} modules")
+    try:
+        denoiser._cozy_w8a8_mode = mode
+        pipe._cozy_weight_lane = (
+            "w8a8" if mode == "scaled_mm" else "bf16-resident")
+    except Exception:
+        pass
+    logger.info("w8a8 root lane: %s (%d quantized layers, component root)",
+                mode, len(art.quantized))
+    return pipe
+
+
+# ---------------------------------------------------------------------------
 # Data-free producer — contract round-trips in tests + the parity harness.
 # Production calibrated artifacts come from the conversion side (modelopt,
 # te#79); this writes the identical on-disk contract with per-out-channel
@@ -466,6 +670,9 @@ __all__ = [
     "fp8_scaled_linear_class",
     "load_w8a8_denoiser",
     "load_w8a8_pipeline",
+    "load_w8a8_root_pipeline",
     "quantize_tree_w8a8",
+    "sanitize_w8a8_state_dict",
     "scaled_mm_supported",
+    "swap_w8a8_linears",
 ]

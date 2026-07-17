@@ -1150,11 +1150,39 @@ def streaming_w8a8_snapshot(
     encoders serve W8-storage, only the denoiser runs fp8 GEMMs). Every
     other component passes through untouched. The denoiser's config gains
     the gw#534 corroborating ``quantization_config`` (the safetensors
-    headers stay authoritative for detection)."""
+    headers stay authoritative for detection).
+
+    Non-diffusers layouts (gw#562) require a SINGLE root weight set — the
+    sharded-transformers/singlefile trees the DiffSynth families mirror,
+    where that weight set IS the denoiser. It gets the same requant; no
+    component config exists, so the headers alone carry detection."""
     source_dir, out_dir = Path(source_dir), Path(out_dir)
     if file_layout != "diffusers":
-        raise ConversionImplementationError(
-            "w8a8 flavors need component identity: diffusers layout only")
+        if te_components:
+            raise ConversionImplementationError(
+                "te_components need a diffusers layout (no component "
+                f"identity in {file_layout!r})")
+        root_groups = snapshot_weight_groups(source_dir, file_layout)
+        if len(root_groups) != 1 or root_groups[0][0] != "":
+            raise ConversionImplementationError(
+                "w8a8 flavors need component identity: a diffusers layout, "
+                "or a single root weight set — found "
+                f"{len(root_groups)} weight set(s) in {file_layout!r} layout")
+        entry = root_groups[0][1]
+        result = streaming_w8a8_cast(
+            entry, out_dir,
+            shard_prefix=_group_shard_prefix(entry),
+            shard_threshold=shard_threshold,
+        )
+        if not int(result["converted_count"]):
+            raise ConversionImplementationError(
+                "no w8a8-eligible weights in the root weight set (nothing "
+                "2-D/16-aligned under a repeated-block container missed "
+                "the skip patterns)")
+        copy_non_weight_files(source_dir, out_dir, skip_components={""})
+        return {"tensor_count": int(result["tensor_count"]),
+                "converted_count": int(result["converted_count"]),
+                "components": [""], "output_dir": out_dir}
     denoiser_set, te_set = set(components), set(te_components)
     groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
               if c in denoiser_set | te_set]
