@@ -1,109 +1,461 @@
-"""Input-asset materialization (#379): URL-ref Assets in the decoded payload
-are downloaded to local_path before the handler runs. Real HTTP socket, no
-transport mocks."""
+"""Fail-closed RunJob input Asset materialization (pgw#573).
+
+The socket fixture exercises real HTTP reads. Executor cases prove that the
+worker receives only Tensorhub's ephemeral transport form, runs no setup or
+handler for an unresolved canonical ref, and cleans paths on every outcome.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import http.server
 import threading
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import msgspec
 import pytest
 
 from gen_worker import input_assets
-from gen_worker.api.errors import ValidationError
-from gen_worker.api.types import Asset, ImageAsset
+from gen_worker.api.errors import CanceledError, RetryableError, ValidationError
+from gen_worker.api.types import Asset, ImageAsset, VideoAsset
+from gen_worker.executor import Executor
+from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.registry import EndpointSpec
 
-PNG = (
-    b"\x89PNG\r\n\x1a\n" + b"\x00" * 64  # magic bytes + filler
+PNG_A = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP8z8Dwn4GBgQEADQUCAOAHawIAAAAASUVORK5CYII="
 )
+PNG_B = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGNkYPj/n4GBgQEACwcCAKXJIuMAAAAASUVORK5CYII="
+)
+CORRUPT_PNG = b"\x89PNG\r\n\x1a\n" + b"not-a-decodable-image"
+MP3 = b"ID3" + b"audio" * 16
+_SERVER_CHUNK = 1 << 20
+
+
+class Nested(msgspec.Struct):
+    images: list[ImageAsset] = []
 
 
 class Payload(msgspec.Struct):
-    image: ImageAsset
+    image: ImageAsset | None = None
     prompt: str = ""
     extra: list[Asset] = []
+    nested: Nested | None = None
+    mapped: dict[str, Asset] = {}
+
+
+@dataclass
+class HTTPRoot:
+    base_url: str
+    hits: dict[str, int]
+    slow_started: threading.Event
+    slow_release: threading.Event
+
+    def url(self, name: str, query: str = "") -> str:
+        suffix = f"?{query}" if query else ""
+        return f"{self.base_url}/{name}{suffix}"
 
 
 @pytest.fixture()
-def http_root(tmp_path):
-    (tmp_path / "in.png").write_bytes(PNG)
+def http_root() -> Any:
+    hits: dict[str, int] = {}
+    slow_started = threading.Event()
+    slow_release = threading.Event()
+    bodies = {
+        "/a.png": ("image/png", PNG_A),
+        "/b.png": ("image/png", PNG_B),
+        "/audio.mp3": ("audio/mpeg", MP3),
+        "/corrupt.png": ("image/png", CORRUPT_PNG),
+    }
 
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *a, **kw):
-            super().__init__(*a, directory=str(tmp_path), **kw)
-
-        def log_message(self, *a):  # quiet
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
             pass
 
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
-    srv.shutdown()
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            path = urllib.parse.urlsplit(self.path).path
+            hits[path] = hits.get(path, 0) + 1
+            if path == "/error.png":
+                self.send_error(503)
+                return
+            if path == "/partial.png":
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(PNG_A) + 128))
+                self.end_headers()
+                self.wfile.write(PNG_A)
+                return
+            if path == "/slow.png":
+                body = PNG_A + b"x" * (2 * _SERVER_CHUNK)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body[:_SERVER_CHUNK])
+                    self.wfile.flush()
+                    slow_started.set()
+                    slow_release.wait(timeout=5)
+                    self.wfile.write(body[_SERVER_CHUNK:])
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
+            content = bodies.get(path)
+            if content is None:
+                self.send_error(404)
+                return
+            mime, body = content
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = HTTPRoot(
+        base_url=f"http://127.0.0.1:{server.server_address[1]}",
+        hits=hits,
+        slow_started=slow_started,
+        slow_release=slow_release,
+    )
+    yield root
+    slow_release.set()
+    server.shutdown()
+    thread.join(timeout=5)
 
 
 @pytest.fixture(autouse=True)
-def allow_localhost(monkeypatch):
-    monkeypatch.setattr(input_assets, "_url_is_blocked", lambda url: False)
+def allow_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(input_assets, "_url_is_blocked", lambda _url: False)
 
 
-def test_materializes_url_ref_assets(http_root, tmp_path):
-    rid = "req-mat-1"
-    p = Payload(image=ImageAsset(ref=f"{http_root}/in.png"))
+def test_zero_assets_creates_no_scope() -> None:
+    payload = Payload(prompt="text only")
+    assert input_assets.materialize_input_assets(payload, "req-zero", attempt=1) == 0
+    assert not input_assets.inputs_dir_for_request("req-zero", 1).exists()
+
+
+def test_one_asset_overwrites_forged_path_and_cleans(http_root: HTTPRoot) -> None:
+    asset = ImageAsset(
+        ref=http_root.url("a.png", "X-Amz-Signature=secret"),
+        local_path="/etc/passwd",
+    )
+    payload = Payload(image=asset)
+
+    assert input_assets.materialize_input_assets(payload, "req-one", attempt=2) == 1
+    active_dir = input_assets.inputs_dir_for_request("req-one", 2)
+    assert active_dir.name.startswith("gen-worker-inputs-")
+    assert asset.local_path and Path(asset.local_path).parent == active_dir
+    assert asset.local_path != "/etc/passwd"
+    assert Path(asset.local_path).read_bytes() == PNG_A
+
+    assigned = Path(asset.local_path)
+    input_assets.cleanup_input_assets("req-one", 2)
+    assert asset.local_path is None
+    assert not assigned.exists() and not active_dir.exists()
+
+
+def test_ordered_nested_duplicates_download_once(http_root: HTTPRoot) -> None:
+    first = ImageAsset(ref=http_root.url("a.png"))
+    second = ImageAsset(ref=http_root.url("b.png"))
+    duplicate = ImageAsset(ref=http_root.url("a.png"))
+    mapped = Asset(ref=http_root.url("b.png"))
+    payload = Payload(
+        image=first,
+        nested=Nested(images=[second, duplicate]),
+        mapped={"caller-key-is-not-an-error-path": mapped},
+    )
+
+    assert [asset.ref for asset in input_assets._iter_assets(payload)] == [
+        first.ref,
+        second.ref,
+        duplicate.ref,
+        mapped.ref,
+    ]
+    assert input_assets.materialize_input_assets(payload, "req-order", attempt=1) == 2
+    assert http_root.hits == {"/a.png": 1, "/b.png": 1}
+    assert first.local_path == duplicate.local_path
+    assert second.local_path == mapped.local_path
+    assert first.local_path != second.local_path
+    assert Path(first.local_path or "").read_bytes() == PNG_A
+    assert Path(second.local_path or "").read_bytes() == PNG_B
+    input_assets.cleanup_input_assets("req-order", 1)
+
+
+def test_unresolved_ref_rejects_and_erases_forged_path() -> None:
+    canonical_ref = "tenant/private/image-123"
+    asset = ImageAsset(ref=canonical_ref, local_path="/tmp/caller-forged.png")
+    payload = Payload(image=asset)
+
+    with pytest.raises(ValidationError, match="^unresolved_input_asset") as caught:
+        input_assets.materialize_input_assets(payload, "req-unresolved", attempt=1)
+    assert asset.local_path is None
+    assert canonical_ref not in str(caught.value)
+    assert "/tmp/caller-forged.png" not in str(caught.value)
+    assert not input_assets.inputs_dir_for_request("req-unresolved", 1).exists()
+
+
+@pytest.mark.parametrize("ref", ["file:///etc/passwd", "ftp://example.test/a", "data:image/png,x"])
+def test_unsupported_scheme_rejects_without_ref_leak(ref: str) -> None:
+    payload = Payload(image=ImageAsset(ref=ref))
+    with pytest.raises(ValidationError, match="^unsupported_input_asset_scheme") as caught:
+        input_assets.materialize_input_assets(payload, "req-scheme")
+    assert ref not in str(caught.value)
+
+
+def test_blocked_url_rejects_without_download(
+    http_root: HTTPRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(input_assets, "_url_is_blocked", lambda _url: True)
+    payload = Payload(image=ImageAsset(ref=http_root.url("a.png")))
+    with pytest.raises(ValidationError, match="^input_asset_url_not_allowed"):
+        input_assets.materialize_input_assets(payload, "req-blocked")
+    assert http_root.hits == {}
+
+
+def test_size_cap_and_declared_kind_enforced(http_root: HTTPRoot) -> None:
+    too_large = Payload(image=ImageAsset(ref=http_root.url("a.png"), url_max_bytes=8))
+    with pytest.raises(ValidationError, match="^input_asset_too_large"):
+        input_assets.materialize_input_assets(too_large, "req-size")
+
+    wrong_kind = Payload(image=ImageAsset(ref=http_root.url("audio.mp3")))
+    with pytest.raises(ValidationError, match="^input_asset_decode_failed"):
+        input_assets.materialize_input_assets(wrong_kind, "req-kind")
+
+    video_with_image_bytes = Payload(extra=[VideoAsset(ref=http_root.url("a.png"))])
+    with pytest.raises(ValidationError, match="^input_asset_kind_mismatch"):
+        input_assets.materialize_input_assets(video_with_image_bytes, "req-video-kind")
+
+    wrong_allowlist = Payload(
+        image=ImageAsset(ref=http_root.url("a.png"), url_allowed_mime_types=("audio/*",))
+    )
+    with pytest.raises(ValidationError, match="^input_asset_kind_mismatch"):
+        input_assets.materialize_input_assets(wrong_allowlist, "req-allowlist")
+
+
+def test_image_must_decode_and_fit_declared_bounds(http_root: HTTPRoot) -> None:
+    corrupt = Payload(image=ImageAsset(ref=http_root.url("corrupt.png")))
+    with pytest.raises(ValidationError, match="^input_asset_decode_failed"):
+        input_assets.materialize_input_assets(corrupt, "req-corrupt")
+
+    oversized = Payload(image=ImageAsset(ref=http_root.url("a.png"), url_max_width=1))
+    with pytest.raises(ValidationError, match="^input_asset_dimensions_exceeded"):
+        input_assets.materialize_input_assets(oversized, "req-dimensions")
+
+
+@pytest.mark.parametrize("name", ["partial.png", "error.png"])
+def test_download_failure_cleans_prior_success(http_root: HTTPRoot, name: str) -> None:
+    first = ImageAsset(ref=http_root.url("a.png"))
+    failing = ImageAsset(ref=http_root.url(name))
+    payload = Payload(image=first, nested=Nested(images=[failing]))
+
+    with pytest.raises(RetryableError, match="^input_asset_download_failed") as caught:
+        input_assets.materialize_input_assets(payload, "req-partial", attempt=3)
+    assert first.local_path is None and failing.local_path is None
+    assert not input_assets.inputs_dir_for_request("req-partial", 3).exists()
+    assert http_root.base_url not in str(caught.value)
+
+
+def test_cancellation_removes_partial_file(http_root: HTTPRoot) -> None:
+    asset = ImageAsset(ref=http_root.url("slow.png"))
+    payload = Payload(image=asset)
+    canceled = threading.Event()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            input_assets.materialize_input_assets,
+            payload,
+            "req-cancel",
+            attempt=4,
+            cancel_check=canceled.is_set,
+        )
+        assert http_root.slow_started.wait(timeout=5)
+        canceled.set()
+        http_root.slow_release.set()
+        with pytest.raises(CanceledError, match="canceled"):
+            future.result(timeout=5)
+
+    assert asset.local_path is None
+    assert not input_assets.inputs_dir_for_request("req-cancel", 4).exists()
+
+
+def test_retry_attempt_gets_a_fresh_directory(http_root: HTTPRoot) -> None:
+    first = Payload(image=ImageAsset(ref=http_root.url("a.png")))
+    input_assets.materialize_input_assets(first, "req-retry", attempt=1)
+    first_dir = input_assets.inputs_dir_for_request("req-retry", 1)
+    input_assets.cleanup_input_assets("req-retry", 1)
+
+    second = Payload(image=ImageAsset(ref=http_root.url("a.png")))
+    input_assets.materialize_input_assets(second, "req-retry", attempt=2)
+    second_dir = input_assets.inputs_dir_for_request("req-retry", 2)
     try:
-        n = input_assets.materialize_input_assets(p, rid)
-        assert n == 1
-        assert p.image.local_path and p.image.local_path.endswith(".png")
-        with open(p.image.local_path, "rb") as f:
-            assert f.read() == PNG
-        assert p.image.size_bytes == len(PNG)
-        assert p.image.mime_type == "image/png"
+        assert first_dir != second_dir
+        assert not first_dir.exists() and second_dir.exists()
     finally:
-        input_assets.cleanup_input_assets(rid)
-    assert not input_assets.inputs_dir_for_request(rid).exists()
+        input_assets.cleanup_input_assets("req-retry", 2)
 
 
-def test_non_url_refs_untouched(tmp_path):
-    p = Payload(image=ImageAsset(ref="outputs/foo.png"))
-    assert input_assets.materialize_input_assets(p, "req-mat-2") == 0
-    assert p.image.local_path is None
+class WorkerInput(msgspec.Struct):
+    images: list[ImageAsset] = []
 
 
-def test_size_cap_enforced(http_root):
-    p = Payload(image=ImageAsset(ref=f"{http_root}/in.png", url_max_bytes=8))
-    with pytest.raises(ValidationError, match="size cap"):
-        input_assets.materialize_input_assets(p, "req-mat-3")
-    input_assets.cleanup_input_assets("req-mat-3")
+class WorkerOutput(msgspec.Struct):
+    count: int
 
 
-@pytest.mark.parametrize("allowed,ok", [(("audio/mpeg",), False), (("image/*",), True)])
-def test_mime_allowlist_enforced(http_root, allowed, ok):
-    p = Payload(
-        image=ImageAsset(ref=f"{http_root}/in.png", url_allowed_mime_types=allowed)
+async def _run_executor(
+    payload: WorkerInput,
+    handler: Any,
+    *,
+    ensure_setup: Any | None = None,
+) -> tuple[pb.JobResult, Executor]:
+    sent: list[pb.WorkerMessage] = []
+
+    async def send(message: pb.WorkerMessage) -> None:
+        sent.append(message)
+
+    spec = EndpointSpec(
+        name="edit",
+        method=handler,
+        kind="inference",
+        payload_type=WorkerInput,
+        output_mode="single",
     )
-    if ok:
-        assert input_assets.materialize_input_assets(p, "req-mat-4") == 1
-    else:
-        with pytest.raises(ValidationError, match="not allowed"):
-            input_assets.materialize_input_assets(p, "req-mat-4")
-    input_assets.cleanup_input_assets("req-mat-4")
-
-
-def test_nested_list_assets(http_root):
-    p = Payload(
-        image=ImageAsset(ref="not-a-url", local_path="/tmp/x"),
-        extra=[Asset(ref=f"{http_root}/in.png"), Asset(ref="plain-ref")],
+    executor = Executor([spec], send)
+    if ensure_setup is not None:
+        executor.ensure_setup = ensure_setup  # type: ignore[method-assign]
+    await executor.handle_run_job(
+        pb.RunJob(
+            request_id="worker-input",
+            attempt=7,
+            function_name="edit",
+            input_payload=msgspec.msgpack.encode(payload),
+        )
     )
-    assert input_assets.materialize_input_assets(p, "req-mat-6") == 1
-    assert p.extra[0].local_path
-    assert p.extra[1].local_path is None
-    input_assets.cleanup_input_assets("req-mat-6")
+    job = executor.jobs[("worker-input", 7)]
+    assert job.task is not None
+    await job.task
+    results = [message.job_result for message in sent if message.WhichOneof("msg") == "job_result"]
+    assert len(results) == 1
+    return results[0], executor
 
 
-def test_private_url_blocked(http_root, monkeypatch):
-    monkeypatch.setattr(
-        input_assets, "_url_is_blocked", lambda url: True
+def test_executor_protocol_transport_preserves_order_and_cleans(http_root: HTTPRoot) -> None:
+    seen_assets: list[ImageAsset] = []
+    seen_paths: list[Path] = []
+
+    def handler(ctx: Any, payload: WorkerInput) -> WorkerOutput:
+        assert ctx.request_id == "worker-input"
+        seen_assets.extend(payload.images)
+        seen_paths.extend(Path(asset.local_path or "") for asset in payload.images)
+        assert [path.read_bytes() for path in seen_paths] == [PNG_A, PNG_B, PNG_A]
+        return WorkerOutput(count=len(payload.images))
+
+    transport_a = http_root.url("a.png", "X-Amz-Signature=short-lived-a")
+    transport_b = http_root.url("b.png", "X-Amz-Signature=short-lived-b")
+    payload = WorkerInput(
+        images=[
+            ImageAsset(ref=transport_a),
+            ImageAsset(ref=transport_b),
+            ImageAsset(ref=transport_a),
+        ]
     )
-    p = Payload(image=ImageAsset(ref=f"{http_root}/in.png"))
-    with pytest.raises(ValidationError, match="not allowed"):
-        input_assets.materialize_input_assets(p, "req-mat-7")
+    result, _executor = asyncio.run(_run_executor(payload, handler))
+
+    assert result.status == pb.JOB_STATUS_OK
+    assert msgspec.msgpack.decode(result.inline, type=WorkerOutput).count == 3
+    assert [asset.ref for asset in seen_assets] == [transport_a, transport_b, transport_a]
+    assert seen_paths[0] == seen_paths[2] and seen_paths[0] != seen_paths[1]
+    assert http_root.hits == {"/a.png": 1, "/b.png": 1}
+    assert all(asset.local_path is None for asset in seen_assets)
+    assert all(not path.exists() for path in seen_paths)
+
+
+def test_executor_unresolved_ref_fails_before_setup_or_handler() -> None:
+    setup_calls = 0
+    handler_calls = 0
+
+    async def ensure_setup(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal setup_calls
+        setup_calls += 1
+
+    def handler(ctx: Any, payload: WorkerInput) -> WorkerOutput:
+        nonlocal handler_calls
+        del ctx, payload
+        handler_calls += 1
+        return WorkerOutput(count=0)
+
+    canonical_ref = "tenant/private/canonical-image"
+    payload = WorkerInput(images=[ImageAsset(ref=canonical_ref, local_path="/tmp/forged.png")])
+    result, _executor = asyncio.run(_run_executor(payload, handler, ensure_setup=ensure_setup))
+
+    assert result.status == pb.JOB_STATUS_INVALID
+    assert result.safe_message.startswith("unresolved_input_asset:")
+    assert canonical_ref not in result.safe_message
+    assert "/tmp/forged.png" not in result.safe_message
+    assert setup_calls == 0 and handler_calls == 0
+    assert not input_assets.inputs_dir_for_request("worker-input", 7).exists()
+
+
+def test_executor_corrupt_image_fails_before_setup_or_handler(http_root: HTTPRoot) -> None:
+    setup_calls = 0
+    handler_calls = 0
+
+    async def ensure_setup(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal setup_calls
+        setup_calls += 1
+
+    def handler(ctx: Any, payload: WorkerInput) -> WorkerOutput:
+        nonlocal handler_calls
+        del ctx, payload
+        handler_calls += 1
+        return WorkerOutput(count=0)
+
+    transport = http_root.url("corrupt.png", "X-Amz-Signature=must-not-leak")
+    result, _executor = asyncio.run(
+        _run_executor(
+            WorkerInput(images=[ImageAsset(ref=transport)]),
+            handler,
+            ensure_setup=ensure_setup,
+        )
+    )
+
+    assert result.status == pb.JOB_STATUS_INVALID
+    assert result.safe_message.startswith("input_asset_decode_failed:")
+    assert transport not in result.safe_message
+    assert "gen-worker-inputs" not in result.safe_message
+    assert setup_calls == 0 and handler_calls == 0
+    assert not input_assets.inputs_dir_for_request("worker-input", 7).exists()
+
+
+def test_executor_handler_failure_cleans_materialized_inputs(http_root: HTTPRoot) -> None:
+    seen_asset: ImageAsset | None = None
+    seen_path: Path | None = None
+
+    def handler(ctx: Any, payload: WorkerInput) -> WorkerOutput:
+        nonlocal seen_asset, seen_path
+        del ctx
+        seen_asset = payload.images[0]
+        seen_path = Path(seen_asset.local_path or "")
+        assert seen_path.read_bytes() == PNG_A
+        raise RuntimeError("handler failed")
+
+    result, _executor = asyncio.run(
+        _run_executor(
+            WorkerInput(images=[ImageAsset(ref=http_root.url("a.png"))]),
+            handler,
+        )
+    )
+
+    assert result.status == pb.JOB_STATUS_FATAL
+    assert seen_asset is not None and seen_asset.local_path is None
+    assert seen_path is not None and not seen_path.exists()
+    assert not input_assets.inputs_dir_for_request("worker-input", 7).exists()

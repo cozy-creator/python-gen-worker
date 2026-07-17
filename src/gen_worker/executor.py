@@ -5179,13 +5179,22 @@ class Executor:
             )
 
         try:
+            # Tensorhub #871 owns canonical stored-ref authorization and
+            # presigning. RunJob must therefore contain only ephemeral
+            # HTTP(S) Asset transport refs. Validate/materialize that whole
+            # payload before any source/model acquisition or tenant handler
+            # work; opaque refs and caller local_path values fail closed.
+            await _to_thread_complete(
+                materialize_input_assets,
+                payload,
+                run.request_id,
+                attempt=run.attempt,
+                cancel_check=lambda: ctx.cancelled,
+            )
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
             if producer:
                 await self._materialize_datasets(ctx, payload)
-            # Typed media inputs: URL-ref Assets (hub-approved remote media)
-            # are downloaded and given a local_path before the handler runs.
-            await asyncio.to_thread(materialize_input_assets, payload, run.request_id)
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
@@ -5804,7 +5813,7 @@ class Executor:
         if job.renew_task is not None:
             job.renew_task.cancel()
             job.renew_task = None
-        cleanup_input_assets(job.request_id)
+        cleanup_input_assets(job.request_id, job.attempt)
         logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:
             await self._send_result(job.request_id, job.attempt, status, **kw)

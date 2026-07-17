@@ -290,7 +290,7 @@ not inherit another alias's proof.
 | `request_id` | O | W executor | unique request id |
 | `attempt` | O fencing (§2) | W (echoed on all replies) | dispatch fence |
 | `function_name` | O from client submit | W registry lookup | dispatch key; unknown fn ⇒ immediate `JobResult{INVALID}` |
-| `input_payload` | O pass-through from `/invoke` | W deserializes, validates against the fn payload type | MessagePack bytes; input file refs already materialized to presigned URLs by O |
+| `input_payload` | O assignment payload derived from `/invoke` | W deserializes, validates against the fn payload type | MessagePack bytes; O keeps canonical stored refs in durable request identity but replaces typed Asset refs only in this ephemeral payload with fresh authorized HTTP(S) URLs. W rejects opaque refs and caller `local_path`, downloads distinct URLs once in payload order, assigns that single fresh attempt-local path to every duplicate occurrence, and cleans it on every terminal path before model/handler work can observe a failure |
 | `timeout_ms` | O from endpoint config | W deadline watchdog | 0 = none; on expiry W aborts and sends `JobResult{FATAL, safe_message:"deadline exceeded"}` |
 | `tenant` | O request state | W upload scoping + structured logs | invoking owner slug |
 | `invoker_id` | O request state | W `ctx.invoker_id` (read-only tenant surface) | optional |
