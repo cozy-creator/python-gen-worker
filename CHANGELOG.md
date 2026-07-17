@@ -5,8 +5,9 @@
 - **gw#559 / ie#496: Forge captures every declared image CFG regime.**
   `Compile.guidance_scales` is an explicit family-cell contract axis carried
   through producer and local warmup, artifact metadata, and adoption drift
-  checks. SDXL can therefore capture ordinary CFG batch-2 and Turbo/no-CFG
-  batch-1 graphs in one checkpoint-independent `sdxl` cell.
+  checks. A compatible family can therefore capture ordinary CFG batch-2 and
+  no-CFG batch-1 graphs in one checkpoint-independent cell when both calls
+  share the same module graph. LoRA-mutated calls remain a separate cell lane.
 - **W8A8 exact-byte verification uses the declared quantization-input dtype.**
   `verify_w8a8_snapshot` can cast immutable source storage to the code-owned
   producer compute dtype before exact sampled byte/scale recomputation and

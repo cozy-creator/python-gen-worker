@@ -173,8 +173,8 @@ class Compile(msgspec.Struct, frozen=True):
     dialect-default shapes until they adopt buckets. CFG is a graph shape
     too: CFG variants trace batch-2 graphs, distilled variants batch-1.
     ``guidance_scales`` declares the image regimes Forge must warm into the
-    same family cell; for example ``(5.0, 0.0)`` captures both ordinary SDXL
-    and its no-CFG Turbo method without making checkpoint-specific cells.
+    same family cell; for example ``(5.0, 0.0)`` captures CFG and no-CFG calls
+    when they share one module graph. A LoRA-mutated graph needs its own lane.
     Empty preserves the pipeline's default. Declaring this does NOT force compilation: the
     worker arms torch.compile only when a verified cache artifact for
     (family, SKU, torch, triton) is seeded — otherwise it stays eager.
