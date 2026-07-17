@@ -80,6 +80,8 @@ def test_publish_flavors_destination_falls_back_to_ctx(fake_hub, tmp_path: Path)
     f.write_bytes(b"\x01" * 16)
     publish_flavors(_Ctx(fake_hub), [ProducedFlavor(path=f, flavor="fp32")])
     assert _FakeHub.state["auth"] == "Bearer cap-token"
+    # The commit actually landed on the ctx.destination repo.
+    assert "acme/fallback" in _FakeHub.state["commit_path"]
 
 
 def test_publish_flavors_requires_destination(fake_hub, tmp_path: Path) -> None:

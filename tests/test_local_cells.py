@@ -230,6 +230,8 @@ def test_miss_mints_once(_local_env, monkeypatch):
 
 
 def test_no_toolchain_stays_eager(_local_env, monkeypatch, capsys):
+    # Plain lanes keep the never-raise eager fallback (contrast: w8a8 lanes
+    # below raise a typed refusal instead).
     monkeypatch.setattr(cc, "toolchain_present", lambda: False)
     assert lc.enable_compiled(_Pipe(), _Cfg()) is False
     assert not lc.cell_path("fam").exists()
@@ -322,12 +324,6 @@ def test_w8a8_stored_cell_adopts_after_delivered_refusal(_w8a8_env, monkeypatch)
     assert lc.enable_compiled(pipe, cfg) is True
     assert calls["artifact"] == lc.cell_path("fam", "w8a8")
     assert minted == []
-
-
-def test_plain_lane_miss_policy_unchanged(_local_env, monkeypatch):
-    """Plain lanes keep the never-raise eager fallback."""
-    monkeypatch.setattr(cc, "toolchain_present", lambda: False)
-    assert lc.enable_compiled(_Pipe(), _Cfg()) is False
 
 
 def _quantized_pipe(gemm_mode: str):
@@ -461,15 +457,9 @@ def test_local_cells_has_no_publish_path():
         assert not bad, f"local_cells code references {bad}"
 
 
-def test_production_executor_never_reaches_local_cells():
-    """The mint entry is the local CLI only: the production executor and
-    lifecycle must not reference local_cells (fetch-only stays fetch-only)."""
-    root = Path(lc.__file__).parent
-    for name in ("executor.py", "lifecycle.py", "worker.py", "entrypoint.py"):
-        assert "local_cells" not in (root / name).read_text(), name
-
-
 def test_local_cli_is_the_only_mint_caller():
+    # The mint entry is the local CLI only: the production executor and
+    # lifecycle must never reference local_cells (fetch-only stays fetch-only).
     root = Path(lc.__file__).parent
     callers = [
         p for p in root.rglob("*.py")

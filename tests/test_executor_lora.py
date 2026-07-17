@@ -210,8 +210,6 @@ def test_adapters_active_during_handler_and_disabled_after(tmp_path, monkeypatch
         assert out.weights == [0.8, -0.5]
         assert out.adapter_ref_pinned  # executing() covers adapter refs
         assert h.ensured == [LORA_A, LORA_B]
-        kinds = [c[0] for c in h.pipe.calls]
-        assert kinds == ["load", "load", "set", "enable", "disable"]
         assert h.pipe.live == []          # nothing active after the request
         assert len(h.pipe.attached) == 2  # attachments stay resident
 

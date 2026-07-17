@@ -47,9 +47,10 @@ def test_staging_missing_reuploads_only_that_file(fake_hub, tmp_path: Path, monk
     assert st["finalize_calls"] >= 2
 
 
-def test_staging_missing_is_bounded_then_typed(fake_hub, tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("trigger", ["staging_missing", "session_expired"])
+def test_persistent_loss_is_bounded_then_typed(fake_hub, tmp_path: Path, monkeypatch, trigger) -> None:
     monkeypatch.setattr("time.sleep", lambda *_: None)
-    _FakeHub.state["staging_missing"] = {"shard-00004.safetensors": 10_000}
+    _FakeHub.state[trigger] = {"shard-00004.safetensors": 10_000}
 
     with pytest.raises(HubPublishError, match=r"staged bytes lost server-side"):
         _client(fake_hub).commit(
@@ -95,18 +96,6 @@ def test_session_expired_reopens_and_completes(fake_hub, tmp_path: Path, monkeyp
     # Original PUTs (2 files) + one re-upload of the expired file.
     assert sum(st["put_counts"].values()) == 3
     assert st["session_expired_hits"]
-
-
-def test_session_expired_is_bounded_then_typed(fake_hub, tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("time.sleep", lambda *_: None)
-    _FakeHub.state["session_expired"] = {"shard-00004.safetensors": 10_000}
-
-    with pytest.raises(HubPublishError, match=r"staged bytes lost server-side"):
-        _client(fake_hub).commit(
-            destination_repo="acme/qwen-image",
-            files=files_from_tree(_tree(tmp_path)),
-        )
-    assert _FakeHub.state["reopen_count"] == _REUPLOAD_ATTEMPTS
 
 
 def test_expired_part_url_403_reopens_and_completes(fake_hub, tmp_path: Path, monkeypatch) -> None:

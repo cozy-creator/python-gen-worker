@@ -390,13 +390,6 @@ def test_artifact_metadata_records_compile_mode():
     assert default["compile_mode"] == "whole"
 
 
-def test_compile_struct_regional_flag():
-    c = Compile(shapes=((960, 544, 241),), targets=("transformer",),
-                family="ltx-2.3", regional=True)
-    assert c.regional is True
-    assert Compile(shapes=((768, 768),)).regional is False
-
-
 def test_system_repo():
     assert cc.system_repo("sd15") == "_system/family-sd15"
     with pytest.raises(ValueError):
@@ -713,6 +706,9 @@ def test_compile_struct_validation():
     assert c.targets == ("transformer", "vae.decode")
     assert c.family == "sd15"
     assert c.guidance_scales == ()
+    assert c.regional is False
+    assert Compile(shapes=((960, 544, 241),), targets=("transformer",),
+                   family="ltx-2.3", regional=True).regional is True
     assert Compile(
         shapes=((1024, 1024),), guidance_scales=[5, 0],
     ).guidance_scales == (5.0, 0.0)

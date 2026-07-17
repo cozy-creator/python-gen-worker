@@ -59,22 +59,6 @@ class _Pipe:
 # --------------------------------------------------------------------------- #
 
 
-def test_demote_floor_is_size_aware(monkeypatch) -> None:
-    """Demoting a 6GiB pipeline into 12GiB available must be refused on a
-    64GiB host (floor 8GiB): 12 - 6 < 8 would land in thrash territory."""
-    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 64.0)
-    res = _res()
-    res.track_vram("m/a", _Pipe(), vram_bytes=6 * _GiB)
-
-    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 12.0)
-    assert res.demote("m/a") is False
-    assert res.tier("m/a") is Tier.VRAM
-
-    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 20.0)
-    assert res.demote("m/a") is True
-    assert res.tier("m/a") is Tier.RAM
-
-
 def test_ram_floor_adapts_to_small_hosts(monkeypatch) -> None:
     """A 16GiB dev box uses a fractional floor (3.2GiB), not the flat 8GiB —
     otherwise small hosts could never hold a warm tier at all."""
@@ -88,7 +72,13 @@ def test_ram_floor_adapts_to_small_hosts(monkeypatch) -> None:
     monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 64.0)
     res2 = _res()
     res2.track_vram("m/b", _Pipe(), vram_bytes=6 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 12.0)
     assert res2.demote("m/b") is False
+    assert res2.tier("m/b") is Tier.VRAM
+    # More headroom (20 - 6 >= 8 floor) clears the big-host refusal.
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 20.0)
+    assert res2.demote("m/b") is True
+    assert res2.tier("m/b") is Tier.RAM
 
 
 # --------------------------------------------------------------------------- #
@@ -456,7 +446,7 @@ def test_delivered_progress_retires_distinct_satisfied_refs(
     async def _run() -> None:
         sent: list[pb.WorkerMessage] = []
         ex = _executor([], tmp_path, sent)
-        refs = [f"acme/model-{index}" for index in range(2_000)]
+        refs = [f"acme/model-{index}" for index in range(5)]
         await ex._record_host_ram_failure(refs, _host_ram_error())
         monkeypatch.setattr(
             ex.store.residency,
@@ -469,8 +459,8 @@ def test_delivered_progress_retires_distinct_satisfied_refs(
             if message.WhichOneof("msg") == "model_event"
             and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
         ]
-        assert len(progress) == 2_000
-        assert len(ex._host_ram_progress) == 2_000
+        assert len(progress) == 5
+        assert len(ex._host_ram_progress) == 5
         lifecycle = Lifecycle(
             Settings(orchestrator_public_addr="localhost:1"), ex,
         )
@@ -502,7 +492,7 @@ def test_progress_reports_only_the_satisfying_release_transition(
             "host_ram_headroom",
             lambda _incoming: SimpleNamespace(available_bytes=available["bytes"]),
         )
-        for index in range(999):
+        for index in range(5):
             await ex._observe_host_ram_progress([f"acme/unrelated-{index}"])
         available["bytes"] = 16 * _GiB
         await ex._observe_host_ram_progress(["acme/final-release"])

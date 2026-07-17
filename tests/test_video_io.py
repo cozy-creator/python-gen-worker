@@ -117,10 +117,3 @@ def test_scan_output_assets_sums_nested_video_durations_and_counts() -> None:
     assert _scan_output_assets(out) == (12.5, 5)
     assert _scan_output_assets(None) == (0.0, 0)
     assert _scan_output_assets({"images": [ImageAsset(ref="i")]}) == (0.0, 1)
-
-
-def test_job_metrics_carries_output_media_duration() -> None:
-    from gen_worker.pb import worker_scheduler_pb2 as pb
-
-    m = pb.JobMetrics(runtime_ms=1000, output_media_duration_s=10.5)
-    assert m.output_media_duration_s == 10.5

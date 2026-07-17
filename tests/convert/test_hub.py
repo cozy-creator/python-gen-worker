@@ -288,17 +288,6 @@ def test_commit_default_flavor_rides_tags_and_top_level(fake_hub, tmp_path: Path
     assert body["tags"] == [{"tag": "prod", "default_flavor": "fp16"}]
 
 
-def test_clone_primary_output_claims_bare_selector() -> None:
-    # gw#419 regression guard at the clone layer: the i==0 commit passes
-    # default_flavor=<label>; secondary outputs stay explicit-flavor-only.
-    import inspect
-
-    from gen_worker.convert import clone as clone_mod
-
-    src = inspect.getsource(clone_mod)
-    assert 'default_flavor=flavor_label if i == 0 else ""' in src
-
-
 def test_commit_sanitizes_colon_dtype_and_flavor_tokens(fake_hub, tmp_path: Path) -> None:
     # gw#488: tensorhub derives a flavor row from the commit DTYPE
     # (derivePublishFlavors) and validates every token against

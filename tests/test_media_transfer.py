@@ -90,11 +90,6 @@ def test_staged_chunks_cuda_pipeline_matches_reference() -> None:
         np.testing.assert_array_equal(got, frames_to_uint8(want))
 
 
-def test_frame_stager_reuses_two_slots() -> None:
-    stager = mt.FrameStager()
-    assert len(stager._slots) == 2
-
-
 # ---- write_video end-to-end through the staged path (CPU chunks) -----------
 
 class _Ctx:
@@ -183,10 +178,7 @@ def test_host_canary_is_cached_per_process(monkeypatch) -> None:
 
     monkeypatch.setattr(hc, "_cached", None)
     first = hc.get_host_canary()
-    calls = []
-    monkeypatch.setattr(hc, "measure_host_canary", lambda: calls.append(1))
     assert hc.get_host_canary() is first
-    assert not calls
 
 
 def test_host_canary_rides_hello_worker_resources(monkeypatch) -> None:

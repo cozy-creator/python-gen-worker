@@ -46,55 +46,39 @@ class _Out(msgspec.Struct):
 # ---------------------------------------------------------------------------
 
 
-def test_compile_on_all_str_slots_is_a_discovery_error() -> None:
-    @endpoint(
-        model=Hub("acme/wan"),
-        resources=Resources(vram_gb=40),
-        compile=Compile(family=FAMILY, shapes=((768, 768),)),
-    )
-    class SelfLoader:
-        def setup(self, model: str) -> None:
-            self.model = model  # self-load: never reaches _enable_compiled
+@pytest.mark.parametrize("slot_type", ["str", "Path"])
+def test_compile_on_self_loading_slot_is_a_discovery_error(slot_type) -> None:
+    if slot_type == "str":
 
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out()
+        @endpoint(
+            model=Hub("acme/wan"),
+            resources=Resources(vram_gb=40),
+            compile=Compile(family=FAMILY, shapes=((768, 768),)),
+        )
+        class SelfLoader:
+            def setup(self, model: str) -> None:
+                self.model = model  # self-load: never reaches _enable_compiled
 
-    with pytest.raises(ValueError, match="self-loading"):
+            def generate(self, ctx: RequestContext, data: _In) -> _Out:
+                return _Out()
+
+    else:
+
+        @endpoint(
+            model=Hub("acme/wan"),
+            resources=Resources(vram_gb=40),
+            compile=Compile(family=FAMILY, shapes=((768, 768),)),
+        )
+        class SelfLoader:
+            def setup(self, model: Path) -> None:
+                self.model = model
+
+            def generate(self, ctx: RequestContext, data: _In) -> _Out:
+                return _Out()
+
+    with pytest.raises(ValueError, match="self-loading") as exc_info:
         extract_specs(SelfLoader)
-
-
-def test_compile_on_path_slot_is_also_a_discovery_error() -> None:
-    @endpoint(
-        model=Hub("acme/wan"),
-        resources=Resources(vram_gb=40),
-        compile=Compile(family=FAMILY, shapes=((768, 768),)),
-    )
-    class SelfLoader:
-        def setup(self, model: Path) -> None:
-            self.model = model
-
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out()
-
-    with pytest.raises(ValueError, match="self-loading"):
-        extract_specs(SelfLoader)
-
-
-def test_compile_error_names_both_fixes() -> None:
-    @endpoint(
-        model=Hub("acme/wan"),
-        resources=Resources(vram_gb=40),
-        compile=Compile(family=FAMILY, shapes=((768, 768),)),
-    )
-    class SelfLoader:
-        def setup(self, model: str) -> None:
-            self.model = model
-
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out()
-
-    with pytest.raises(ValueError) as exc_info:
-        extract_specs(SelfLoader)
+    # The error names both fix paths.
     msg = str(exc_info.value)
     assert "annotate the slot with the pipeline class" in msg
     assert "gen_worker.arm_compile(pipe)" in msg
