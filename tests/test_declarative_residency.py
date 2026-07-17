@@ -119,6 +119,110 @@ def test_proto_field_numbers_match_tensorhub_contract() -> None:
     assert not hasattr(pb, "MODEL_OP_KIND_UNLOAD")
 
 
+def test_reconnect_snapshot_uses_disk_identity_before_transition_callback(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    _, executor, _ = _lifecycle()
+    ref = "acme/moved-tag"
+    old_ram = ("snapshot-a", 6)
+    new_disk = ("snapshot-b", 7)
+
+    executor.store.residency.track_disk(ref, tmp_path)
+    executor.store.residency.track_ram(ref, object())
+    with executor.store._identity_lock:
+        executor.store._resident_identities[ref] = old_ram
+        executor.store._disk_identities[ref] = new_disk
+
+    callback_started = threading.Event()
+    allow_callback = threading.Event()
+    original_event = executor.store.residency._on_event
+
+    def pause_disk_callback(*args) -> None:
+        callback_started.set()
+        assert allow_callback.wait(2)
+        original_event(*args)
+
+    monkeypatch.setattr(executor.store.residency, "_on_event", pause_disk_callback)
+    monkeypatch.setattr("gen_worker.models.residency.flush_memory", lambda: None)
+    transition = threading.Thread(
+        target=executor.store.residency.release_to_disk,
+        args=(ref,),
+    )
+    transition.start()
+    assert callback_started.wait(2)
+
+    # Residency already exposes DISK, while the synchronous callback has not
+    # yet replaced resident A with disk B. Hello must still report DISK+B.
+    disk = executor.store.residency_snapshot()[0]
+    assert disk.tier == pb.RESIDENCY_TIER_DISK
+    assert (disk.snapshot_digest, disk.residency_generation) == new_disk
+    allow_callback.set()
+    transition.join(2)
+    assert not transition.is_alive()
+
+
+def test_reconnect_snapshot_holds_identity_across_tier_capture(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    _, executor, _ = _lifecycle()
+    ref = "acme/moved-tag"
+    old_ram = ("snapshot-a", 6)
+    new_disk = ("snapshot-b", 7)
+
+    executor.store.residency.track_disk(ref, tmp_path)
+    executor.store.residency.track_ram(ref, object())
+    with executor.store._identity_lock:
+        executor.store._resident_identities[ref] = old_ram
+        executor.store._disk_identities[ref] = new_disk
+
+    tier_captured = threading.Event()
+    allow_snapshot = threading.Event()
+    callback_started = threading.Event()
+    original_snapshot = executor.store.residency.snapshot
+    original_event = executor.store.residency._on_event
+
+    def pause_after_tier_capture():
+        rows = original_snapshot()
+        tier_captured.set()
+        assert allow_snapshot.wait(2)
+        return rows
+
+    def observe_callback(*args) -> None:
+        callback_started.set()
+        original_event(*args)
+
+    monkeypatch.setattr(executor.store.residency, "snapshot", pause_after_tier_capture)
+    monkeypatch.setattr(executor.store.residency, "_on_event", observe_callback)
+    monkeypatch.setattr("gen_worker.models.residency.flush_memory", lambda: None)
+
+    captured: list[pb.ModelResidency] = []
+    snapshot = threading.Thread(
+        target=lambda: captured.extend(executor.store.residency_snapshot())
+    )
+    snapshot.start()
+    assert tier_captured.wait(2)
+    transition = threading.Thread(
+        target=executor.store.residency.release_to_disk,
+        args=(ref,),
+    )
+    transition.start()
+    assert callback_started.wait(2)
+    assert transition.is_alive(), "identity callback must wait for Hello snapshot"
+    allow_snapshot.set()
+    snapshot.join(2)
+    transition.join(2)
+    assert not snapshot.is_alive()
+    assert not transition.is_alive()
+
+    ram = captured[0]
+    assert ram.tier == pb.RESIDENCY_TIER_RAM
+    assert (ram.snapshot_digest, ram.residency_generation) == old_ram
+    monkeypatch.setattr(executor.store.residency, "snapshot", original_snapshot)
+    disk = executor.store.residency_snapshot()[0]
+    assert disk.tier == pb.RESIDENCY_TIER_DISK
+    assert (disk.snapshot_digest, disk.residency_generation) == new_disk
+
+
 def test_declared_protobuf_floor_imports_generated_code() -> None:
     root = Path(__file__).parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
@@ -265,10 +369,17 @@ def test_run_job_preempts_then_resumes_current_desired_state(monkeypatch) -> Non
         canceled = asyncio.Event()
         resumed = asyncio.Event()
         calls = 0
+        ref = "acme/background"
+        desired_snapshot = _snapshot("https://r2/desired-b")
+        desired_snapshot.digest = "bb" * 32
+        priority_snapshot = _snapshot("https://r2/priority-a")
+        priority_snapshot.digest = "aa" * 32
 
         async def ensure_local(ref: str, snapshot=None, *, binding=None):
             nonlocal calls
             calls += 1
+            if snapshot is not None:
+                executor.store.bank_snapshot(ref, snapshot)
             if calls == 1:
                 started.set()
                 try:
@@ -276,25 +387,37 @@ def test_run_job_preempts_then_resumes_current_desired_state(monkeypatch) -> Non
                 except asyncio.CancelledError:
                     canceled.set()
                     raise
+            assert executor.store._snapshot_identity(ref, snapshot) == (
+                desired_snapshot.digest,
+                7,
+            )
             resumed.set()
 
         async def handle_run_job(run_job: pb.RunJob) -> None:
             executor._idle.clear()
             await asyncio.sleep(0)
             assert canceled.is_set(), "background work must cancel before request setup"
+            # Production RunJob materialization banks its exact snapshot with
+            # no desired generation.  The mutable ref has temporarily moved
+            # from desired B/gen7 back to request A/gen0.
+            executor.store.bank_snapshot(ref, run_job.snapshots[ref])
+            assert executor.store._snapshot_identity(
+                ref, run_job.snapshots[ref]
+            ) == (priority_snapshot.digest, 0)
 
         monkeypatch.setattr(executor.store, "ensure_local", ensure_local)
         monkeypatch.setattr(executor, "handle_run_job", handle_run_job)
 
         await lifecycle.on_hello_ack(pb.HelloAck(desired_residency=pb.DesiredResidency(
             generation=7,
-            disk_refs=["acme/background"],
-            snapshots={"acme/background": _snapshot("https://r2/background")},
+            disk_refs=[ref],
+            snapshots={ref: desired_snapshot},
         )))
         await started.wait()
 
         await lifecycle.on_message(pb.SchedulerMessage(run_job=pb.RunJob(
             request_id="request", attempt=1, function_name="generate",
+            snapshots={ref: priority_snapshot},
         )))
         await asyncio.sleep(0)
         assert calls == 1, "background work must stay paused while a job is active"
@@ -302,6 +425,16 @@ def test_run_job_preempts_then_resumes_current_desired_state(monkeypatch) -> Non
         executor._idle.set()
         await resumed.wait()
         assert calls == 2, "current desired state must resume after the job becomes idle"
+
+        # DesiredResidency is full replacement. Once B is removed, a later
+        # generation-less request for the same digest must not resurrect gen7.
+        await lifecycle.on_hello_ack(pb.HelloAck(desired_residency=pb.DesiredResidency(
+            generation=8,
+        )))
+        executor.store.bank_snapshot(ref, desired_snapshot)
+        assert executor.store._snapshot_identity(
+            ref, desired_snapshot
+        ) == (desired_snapshot.digest, 0)
 
     asyncio.run(run())
 

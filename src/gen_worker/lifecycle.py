@@ -192,10 +192,9 @@ class Lifecycle:
         else:
             self._observed_residency_generation = generation
             self.executor.store.keep = list(dict.fromkeys(ref for ref in desired.disk_refs if ref))
-            for ref, snapshot in desired.snapshots.items():
-                self.executor.store.bank_snapshot(
-                    ref, snapshot, generation=generation,
-                )
+            self.executor.store.replace_desired_snapshots(
+                dict(desired.snapshots), generation=generation,
+            )
             self._replace_residency_reconcile(desired)
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello. Capacity evidence has causal priority over retained results;

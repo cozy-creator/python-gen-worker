@@ -490,10 +490,16 @@ class ModelStore:
         # state / RunJob snapshot they cannot materialize tensorhub refs. Stale
         # URLs self-heal: they fail url_expired and the hub re-mints.
         self._snapshots: Dict[str, pb.Snapshot] = {}
-        # Desired generation attached to each banked snapshot. A RunJob may
-        # repeat the same snapshot without a generation; in that case the
-        # generation already learned from DesiredResidency is retained.
+        # Current generation attached to each banked snapshot. A generation-
+        # less bank inherits only from the exact current desired identity
+        # below; historical desired generations are never resurrected.
         self._snapshot_generations: Dict[str, int] = {}
+        # Current full-replacement desired identity per ref. This is bounded
+        # by the active DesiredResidency set, not an unbounded digest history:
+        # a priority RunJob may bank different bytes temporarily, while a
+        # later generation-less bank of the still-desired digest recovers its
+        # causal generation. Replacing desired state clears stale generations.
+        self._desired_snapshot_identities: Dict[str, _ResidencyIdentity] = {}
         # Identity of the bytes that ACTUALLY produced the current residency.
         # This deliberately does not follow _snapshots when a tag moves.
         self._resident_identities: Dict[str, _ResidencyIdentity] = {}
@@ -603,15 +609,30 @@ class ModelStore:
 
     def residency_snapshot(self) -> List[pb.ModelResidency]:
         out: List[pb.ModelResidency] = []
-        for ref, tier, vram in self.residency.snapshot():
-            digest, generation = self.resident_identity(ref)
-            out.append(pb.ModelResidency(
-                ref=ref,
-                tier=_TIER_TO_PB[tier],
-                vram_bytes=vram,
-                snapshot_digest=digest,
-                residency_generation=generation,
-            ))
+        # Hold identity stable while Residency captures its tiers. Residency
+        # callbacks run only after releasing their own lock, so this cannot
+        # invert lock order: a transition either happens entirely before this
+        # snapshot, or its identity update waits until the captured view is
+        # complete.
+        with self._identity_lock:
+            for ref, tier, vram in self.residency.snapshot():
+                # DISK is backed by the verified disk snapshot; RAM/VRAM is
+                # backed by the loaded resident object. During stale A -> B
+                # teardown those identities intentionally differ.
+                resident = self._resident_identities.get(ref, ("", 0))
+                identity = (
+                    self._disk_identities.get(ref, resident)
+                    if tier is residency_mod.Tier.DISK
+                    else resident
+                )
+                digest, generation = identity
+                out.append(pb.ModelResidency(
+                    ref=ref,
+                    tier=_TIER_TO_PB[tier],
+                    vram_bytes=vram,
+                    snapshot_digest=digest,
+                    residency_generation=generation,
+                ))
         return out
 
     def local_path(self, ref: str) -> Optional[Path]:
@@ -622,28 +643,63 @@ class ModelStore:
         (gw#465): snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
 
-    def bank_snapshot(
-        self, ref: str, snapshot: pb.Snapshot, *, generation: Optional[int] = None,
-    ) -> None:
+    def bank_snapshot(self, ref: str, snapshot: pb.Snapshot) -> None:
         """Make hub metadata available without starting a download."""
         if not ref or not snapshot.digest or not snapshot.files:
             return
         stored = pb.Snapshot()
         stored.CopyFrom(snapshot)
         with self._identity_lock:
-            previous = self._snapshots.get(ref)
-            previous_generation = self._snapshot_generations.get(ref, 0)
-            if generation is None:
-                generation = (
-                    previous_generation
-                    if previous is not None and previous.digest == stored.digest
-                    else 0
-                )
+            desired = self._desired_snapshot_identities.get(ref)
+            generation = (
+                desired[1]
+                if desired is not None and desired[0] == stored.digest
+                else 0
+            )
             self._snapshots[ref] = stored
             self._snapshot_generations[ref] = max(0, int(generation))
         waiter = self._snapshot_waiters.get(ref)
         if waiter is not None:
             waiter.set()
+
+    def replace_desired_snapshots(
+        self, snapshots: Dict[str, pb.Snapshot], *, generation: int,
+    ) -> None:
+        """Atomically replace desired snapshot identity and bank its metadata.
+
+        DesiredResidency is full-replacement state. Keeping this map separate
+        from the last RunJob bank lets priority requests use older bytes
+        without erasing the generation of bytes that remain desired, while a
+        removal cannot resurrect an obsolete generation later.
+        """
+        accepted_generation = max(0, int(generation))
+        stored: Dict[str, pb.Snapshot] = {}
+        for ref, snapshot in snapshots.items():
+            if not ref or not snapshot.digest or not snapshot.files:
+                continue
+            copy = pb.Snapshot()
+            copy.CopyFrom(snapshot)
+            stored[ref] = copy
+
+        desired = {
+            ref: (snapshot.digest, accepted_generation)
+            for ref, snapshot in stored.items()
+        }
+        with self._identity_lock:
+            self._desired_snapshot_identities = desired
+            # Generations belong only to the current desired identity. Leave
+            # actual resident identity untouched: those bytes may still be in
+            # RAM/VRAM and must remain honestly observable until transitioned.
+            for ref in self._snapshot_generations:
+                self._snapshot_generations[ref] = 0
+            for ref, snapshot in stored.items():
+                self._snapshots[ref] = snapshot
+                self._snapshot_generations[ref] = accepted_generation
+
+        for ref in stored:
+            waiter = self._snapshot_waiters.get(ref)
+            if waiter is not None:
+                waiter.set()
 
     def snapshot_digest(self, ref: str, snapshot: Optional[pb.Snapshot] = None) -> str:
         candidate = snapshot

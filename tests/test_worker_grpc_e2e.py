@@ -100,6 +100,26 @@ class _Conn:
         with self._recv_cond:
             return sum(1 for m in self.received if pred(m))
 
+    def wait_for_count(
+        self,
+        pred: Callable[[pb.WorkerMessage], bool],
+        count: int,
+        timeout: float = _TIMEOUT,
+    ) -> pb.WorkerMessage:
+        deadline = time.monotonic() + timeout
+        with self._recv_cond:
+            while True:
+                matches = [m for m in self.received if pred(m)]
+                if len(matches) >= count:
+                    return matches[count - 1]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"only {len(matches)} matching messages within "
+                        f"{timeout}s; wanted {count}"
+                    )
+                self._recv_cond.wait(remaining)
+
 
 class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
     def __init__(self, *, reject_unauthenticated: bool = False) -> None:
@@ -1249,6 +1269,35 @@ def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch)
                 "e2e/tiny", pb.MODEL_STATE_ON_DISK, "e2e-snap-2", 2,
             )
         ).model_event
+
+        # RunJob is the priority imperative operation.  A queued request that
+        # resolved before the tag moved may legitimately ask for old A while
+        # desired residency remains B/gen2.  Afterward, the resumed
+        # declarative loop must restore B *with generation 2*, not silently
+        # downgrade its evidence to B/gen0.
+        resumed_b = _is_exact_model_event(
+            "e2e/tiny", pb.MODEL_STATE_ON_DISK, "e2e-snap-2", 2,
+        )
+        b_events_before = conn.count(resumed_b)
+        assert b_events_before == 1
+        conn.send(run_job=pb.RunJob(
+            request_id="r-model-priority-a",
+            attempt=1,
+            function_name="model-echo",
+            input_payload=_msgpack("marco"),
+            snapshots={"e2e/tiny": snapshot},
+        ))
+        conn.wait_for(_is_exact_model_event(
+            "e2e/tiny", pb.MODEL_STATE_IN_RAM, "e2e-snap-1", 0,
+        ))
+        priority_a = conn.wait_for(_is_result_for("r-model-priority-a")).job_result
+        assert priority_a.status == pb.JOB_STATUS_OK
+        assert _decode_out(priority_a.inline).response == payload.decode()
+        conn.wait_for_count(resumed_b, b_events_before + 1)
+        assert harness.worker.executor.store.resident_identity("e2e/tiny") == (
+            "e2e-snap-2",
+            2,
+        )
 
         # Dispatch intent advances the desired generation for the same B
         # bytes, then warms the exact instance without downloading again.
