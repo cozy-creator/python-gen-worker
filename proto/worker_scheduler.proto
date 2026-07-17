@@ -400,6 +400,9 @@ message ModelOp {
   // Presigned compile-cache snapshot. Ordinary model residency is declared in
   // HelloAck.desired_residency; ModelOp is only the compile-cache escape hatch.
   Snapshot snapshot = 3;
+  // Opaque orchestrator-minted identity for this one adoption attempt. Required
+  // for ADOPT_COMPILE_CACHE and echoed by every terminal ModelEvent.
+  string operation_id = 4;
 }
 
 enum ModelOpKind {
@@ -412,8 +415,9 @@ enum ModelOpKind {
   // of endpoints declaring compile family <f>, runs one warmup trace, and
   // answers ModelEvent{ADOPTED, duration_ms, snapshot_digest}. ANY failure =>
   // stay eager and answer ModelEvent{FAILED, error:"adopt_failed:<reason>",
-  // snapshot_digest}. Both terminal results echo the exact ModelOp snapshot
-  // digest; a missing digest fails closed before download or mutation. Sent only to
+  // snapshot_digest, operation_id}. Both terminal results echo the exact
+  // ModelOp snapshot digest and operation ID; either missing identity fails
+  // closed before download or mutation. Sent only to
   // job-idle workers. Workers predating this kind ignore it silently (no
   // ModelEvent), which the orchestrator treats as not-adopted.
   MODEL_OP_KIND_ADOPT_COMPILE_CACHE = 4;
@@ -464,6 +468,9 @@ message ModelEvent {
   // DesiredResidency transition).
   string snapshot_digest = 16;
   uint64 residency_generation = 17;
+  // Opaque identity of the ADOPT_COMPILE_CACHE command that produced this
+  // terminal ADOPTED/FAILED result. Empty on ordinary residency/cache events.
+  string operation_id = 18;
 }
 
 enum ModelState {

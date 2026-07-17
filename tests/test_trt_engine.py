@@ -20,6 +20,7 @@ from test_executor_adopt import (  # noqa: F401 — shared harness
     CACHE_REF,
     DIGEST_A,
     FAMILY,
+    OP_A,
     _adopt,
     _events,
     _spec,
@@ -230,6 +231,7 @@ def test_adopt_trt_ref_wraps_and_reports(tmp_path, monkeypatch):
     assert calls[0][2].name.endswith(".tar.gz")
     adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
     assert len(adopted) == 1 and adopted[0].ref == TRT_REF
+    assert adopted[0].operation_id == OP_A
     assert _Endpoint.warmups == warmups_before + 1  # one warmup after the swap
 
 
@@ -247,6 +249,7 @@ def test_adopt_trt_key_mismatch_stays_eager(tmp_path, monkeypatch):
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert len(failed) == 1 and failed[0].error == "adopt_failed:key_mismatch"
     assert failed[0].snapshot_digest == DIGEST_A
+    assert failed[0].operation_id == OP_A
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 

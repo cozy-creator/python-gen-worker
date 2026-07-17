@@ -1415,6 +1415,11 @@ class Executor:
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
+        # Compile-cache adoption mutates already-resident modules in place.
+        # Serialize the whole operation (download through terminal evidence),
+        # not only its GPU warmup, so two commands can never cross wraps or
+        # let an older rollback mutate a newer adoption.
+        self._compile_cache_adoption_lock = asyncio.Lock()
         # pgw#548: worker-local capacity blocks retain the exact numeric
         # requirement that failed. They are cleared only by a later measured
         # observation after owner/pin release; no timer or prose retry path.
@@ -3199,32 +3204,70 @@ class Executor:
         """Handle the sole v3 ModelOp: hot adoption of a compile cache."""
         if op.op != pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE:
             return
+        async with self._compile_cache_adoption_lock:
+            await self._handle_compile_cache_adoption(op)
+
+    def _adoption_event(
+        self,
+        ref: str,
+        state: "pb.ModelState",
+        snapshot_digest: str,
+        operation_id: str,
+        **kw: Any,
+    ) -> pb.ModelEvent:
+        """Build terminal evidence for one orchestrator-minted adoption op."""
+        identity = (snapshot_digest, 0) if snapshot_digest else None
+        return self.store.model_event(
+            ref,
+            state,
+            identity=identity,
+            operation_id=operation_id,
+            **kw,
+        )
+
+    async def _handle_compile_cache_adoption(self, op: pb.ModelOp) -> None:
         self.store.bind_loop()
         ref = op.ref
         snap = op.snapshot if op.HasField("snapshot") else None
         snapshot_digest = snap.digest if snap is not None else ""
+        operation_id = op.operation_id
+        if not operation_id.strip():
+            await self._send(pb.WorkerMessage(
+                model_event=self._adoption_event(
+                    ref,
+                    pb.MODEL_STATE_FAILED,
+                    snapshot_digest,
+                    operation_id,
+                    error="adopt_failed:missing_operation_id",
+                )
+            ))
+            return
         if not snapshot_digest.strip():
             # Adoption is one-shot evidence for one immutable artifact.  A
             # mutable ref (or the resident identity for that ref) cannot
             # identify which bytes this operation actually used.
             await self._send(pb.WorkerMessage(
-                model_event=self.store.model_event(
+                model_event=self._adoption_event(
                     ref,
                     pb.MODEL_STATE_FAILED,
-                    identity=None,
+                    snapshot_digest,
+                    operation_id,
                     error="adopt_failed:missing_snapshot_digest",
                 )
             ))
             return
         try:
-            await self._adopt_compile_cache(ref, snap, snapshot_digest)
+            await self._adopt_compile_cache(
+                ref, snap, snapshot_digest, operation_id,
+            )
         except Exception as exc:
             logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
             await self._send(pb.WorkerMessage(
-                model_event=self.store.model_event(
+                model_event=self._adoption_event(
                     ref,
                     pb.MODEL_STATE_FAILED,
-                    identity=(snapshot_digest, 0),
+                    snapshot_digest,
+                    operation_id,
                     error=f"adopt_failed:{type(exc).__name__.lower()}",
                 )
             ))
@@ -3234,6 +3277,7 @@ class Executor:
         ref: str,
         snap: Optional[pb.Snapshot],
         snapshot_digest: str,
+        operation_id: str,
     ) -> None:
         """Hot adoption (th#567): download+verify a compiled artifact and
         re-wrap the already-resident modules in place — weights untouched, no
@@ -3249,9 +3293,11 @@ class Executor:
         async def fail(reason: str, detail: str = "") -> None:
             logger.warning("compile-cache adopt %s failed: %s %s", ref, reason, detail)
             await self._send(pb.WorkerMessage(
-                model_event=self.store.model_event(
-                    ref, pb.MODEL_STATE_FAILED,
-                    identity=(snapshot_digest, 0),
+                model_event=self._adoption_event(
+                    ref,
+                    pb.MODEL_STATE_FAILED,
+                    snapshot_digest,
+                    operation_id,
                     error=f"adopt_failed:{reason}",
                 )
             ))
@@ -3415,10 +3461,11 @@ class Executor:
         # warmup_s) but intentionally NOT sent — the orchestrator has no
         # reader for them (pgw#514/P3; see the proto field comments).
         await self._send(pb.WorkerMessage(
-            model_event=self.store.model_event(
+            model_event=self._adoption_event(
                 ref,
                 pb.MODEL_STATE_ADOPTED,
-                identity=(snapshot_digest, 0),
+                snapshot_digest,
+                operation_id,
                 duration_ms=duration_ms,
             )
         ))
