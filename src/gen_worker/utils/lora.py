@@ -93,9 +93,11 @@ class PreparedAdapter:
 # Normalized+split adapter halves, keyed by (pipeline class, cache_key).
 # The cached den_sd OBJECT is reused across requests so the branch layer's
 # staging cache (keyed on id(sd)) hits — repeat swaps skip key-mapping AND
-# the CPU flatten.
+# the CPU flatten. Split tensors alias the AdapterCache entries (converters
+# rename keys, they don't copy data), but the cap stays small so this cache
+# can never pin many evicted adapters by itself.
 _SPLIT_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
-_SPLIT_CACHE_MAX = 16
+_SPLIT_CACHE_MAX = 8
 _TE_KEY_PREFIXES = ("text_encoder", "lora_te", "te1.", "te2.")
 _TE_COMPONENTS = ("text_encoder", "text_encoder_2", "text_encoder_3")
 
