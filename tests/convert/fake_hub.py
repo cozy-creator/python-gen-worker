@@ -167,6 +167,15 @@ class _FakeHub(BaseHTTPRequestHandler):
                 self._send(409, {"error": {"code": "staging_object_missing",
                                            "message": "verify: get staging object: NoSuchKey"}})
                 return
+            expired = st.get("session_expired") or {}
+            if expired.get(path_label, 0) > 0:
+                # gw#570: the up-front-minted session outlived its fixed
+                # expiry mid-publish; only a re-open can mint a fresh one.
+                expired[path_label] -= 1
+                st.setdefault("session_expired_hits", []).append(uid)
+                self._send(410, {"error": {"code": "upload_session_expired",
+                                           "message": "upload session expired"}})
+                return
             if st.get("complete_race_count", 0) > 0:
                 # Simulates a still-finalizing concurrent attempt (tensorhub
                 # verifies large single files synchronously and can outlast
@@ -212,6 +221,14 @@ class _FakeHub(BaseHTTPRequestHandler):
             else:
                 st["fail_puts"] -= 1
             self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        expired_puts = st.get("expired_put_paths") or {}
+        if expired_puts.get(self.path, 0) > 0:
+            # gw#570: S3 answers 403 for an expired presigned URL.
+            expired_puts[self.path] -= 1
+            self.send_response(403)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return

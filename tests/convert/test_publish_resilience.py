@@ -78,6 +78,57 @@ def test_staging_missing_reopen_dedup_hit_short_circuits(fake_hub, tmp_path: Pat
     assert sum(st["put_counts"].values()) == 2
 
 
+def test_session_expired_reopens_and_completes(fake_hub, tmp_path: Path, monkeypatch) -> None:
+    """gw#570: 410 upload_session_expired at /complete costs one file's
+    re-open + re-upload, never the job."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    _FakeHub.state["session_expired"] = {"shard-00004.safetensors": 1}
+
+    result = _client(fake_hub).commit(
+        destination_repo="acme/qwen-image",
+        files=files_from_tree(_tree(tmp_path)),
+    )
+    assert result.uploaded == 2
+
+    st = _FakeHub.state
+    assert st["reopens"] == ["shard-00004.safetensors"]
+    # Original PUTs (2 files) + one re-upload of the expired file.
+    assert sum(st["put_counts"].values()) == 3
+    assert st["session_expired_hits"]
+
+
+def test_session_expired_is_bounded_then_typed(fake_hub, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    _FakeHub.state["session_expired"] = {"shard-00004.safetensors": 10_000}
+
+    with pytest.raises(HubPublishError, match=r"staged bytes lost server-side"):
+        _client(fake_hub).commit(
+            destination_repo="acme/qwen-image",
+            files=files_from_tree(_tree(tmp_path)),
+        )
+    assert _FakeHub.state["reopen_count"] == _REUPLOAD_ATTEMPTS
+
+
+def test_expired_part_url_403_reopens_and_completes(fake_hub, tmp_path: Path, monkeypatch) -> None:
+    """gw#570: a 403 on a part PUT (expired presigned URL) re-opens the file's
+    session for fresh URLs instead of failing the job."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    # Single-add commit: the fake's original part URL is /put/up-0/1.
+    (tmp_path / "weights.bin").write_bytes(b"\xab" * 90)
+    _FakeHub.state["expired_put_paths"] = {"/put/up-0/1": 1}
+
+    result = _client(fake_hub).commit(
+        destination_repo="acme/qwen-image",
+        files=files_from_tree(tmp_path),
+    )
+    assert result.uploaded == 1
+    st = _FakeHub.state
+    assert st["reopens"] == ["weights.bin"]
+    counts = st["put_counts"]
+    assert counts["/put/up-0/1"] == 1  # the expired attempt
+    assert sum(n for p, n in counts.items() if "/re-1/" in p) == 1
+
+
 def test_finalize_503s_then_succeeds(fake_hub, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("time.sleep", lambda *_: None)
     _FakeHub.state["fail_finalizes"] = 3

@@ -406,6 +406,15 @@ class HubClient:
                         u, data=b, timeout=(_CONNECT_TIMEOUT_S, self.timeout_s * 5))
 
                 resp = _send_with_retries(f"part PUT {entry.get('path')!r} #{i + 1}", _put)
+                if resp.status_code == 403:
+                    # gw#570: presigned part URLs share the session's fixed
+                    # expiry; on a long publish a later file's URLs are stale
+                    # before its first byte moves (S3 signals expiry as 403).
+                    # Re-open for fresh URLs — bounded by _REUPLOAD_ATTEMPTS,
+                    # so a genuine auth failure still fails typed.
+                    raise _StagingLostError(
+                        f"part PUT for {entry.get('path')!r} part #{i + 1} "
+                        f"rejected (403 — presigned URL likely expired)")
                 if resp.status_code < 200 or resp.status_code >= 300:
                     raise HubPublishError(
                         f"part PUT failed ({resp.status_code}) for {entry.get('path')!r} "
@@ -426,6 +435,15 @@ class HubClient:
             raise _StagingLostError(
                 f"staged bytes for {path_label!r} are gone server-side "
                 f"(409 staging_object_missing)")
+        if resp.status_code == 410 and _error_code_of(resp) == "upload_session_expired":
+            # gw#570: commit-create mints every file's session up-front with a
+            # fixed expiry; a long publish (slow uplink, many shards) outlives
+            # it for later files. The session is unusable but nothing is wrong
+            # with the bytes — re-open for a fresh session and re-send just
+            # this file, same as staging loss.
+            raise _StagingLostError(
+                f"upload session for {path_label!r} expired server-side "
+                f"(410 upload_session_expired)")
         raise HubPublishError(
             f"upload complete failed ({resp.status_code}) for {path_label!r} "
             f"after {_RETRY_ATTEMPTS} attempts: {resp.text[:500]}")
