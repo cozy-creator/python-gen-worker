@@ -228,13 +228,22 @@ def _plan_pairs(
     owner: str,
     pairs: Sequence[Tuple[str, type]],
     decl_warmup: Any,
+    *,
+    known_attrs: Optional[Iterable[str]] = None,
 ) -> Tuple[List[Tuple[str, _Factory, bool]], List[Tuple[str, str]]]:
     """Core planner over (attr_name, payload_type) pairs ->
-    (jobs=[(attr, factory, declared)], skips=[(attr, reason)])."""
+    (jobs=[(attr, factory, declared)], skips=[(attr, reason)]).
+
+    ``pairs`` is the active instance group to plan. ``known_attrs`` is the
+    class-wide handler vocabulary used only to validate ``warmup=`` keys.
+    They differ after a dynamic Slot pick splits one handler off from its
+    authored siblings into a distinct instance group.
+    """
     if isinstance(decl_warmup, NoWarmup):
         return [], [(a, f"NoWarmup: {decl_warmup.reason}") for a, _ in pairs]
     declared: Mapping[str, Any] = decl_warmup if isinstance(decl_warmup, Mapping) else {}
-    known = {a for a, _ in pairs}
+    pair_attrs = {a for a, _ in pairs}
+    known = set(known_attrs) if known_attrs is not None else pair_attrs
     unknown = set(declared) - known
     if unknown:
         raise TypeError(
@@ -268,8 +277,10 @@ def plan(
     """Warmup plan for the GPU inference handlers of ONE instance group.
 
     Declared ``warmup=`` payloads override synthesis per method; methods the
-    mapping does not name still auto-synthesize. Raises TypeError for
-    declarations that name unknown methods or fail schema validation.
+    mapping does not name still auto-synthesize. The declaration belongs to
+    the class, while this plan may cover only one dynamically rebound subset
+    of its handlers. Raises TypeError for declarations that name methods
+    unknown to the full class or fail schema validation.
     """
     eligible = [
         s for s in specs
@@ -281,8 +292,22 @@ def plan(
     assert cls0 is not None  # eligible filters cls None
     owner = cls0.__name__
     by_attr = {s.attr_name: s for s in eligible}
+    # A request-time Slot pick can split one handler away from its authored
+    # siblings by changing instance_key. Validate the class-level declaration
+    # against every authored handler, but apply it only to this active group.
+    # Otherwise a valid explicit skip for a sibling (for example SDXL Turbo)
+    # becomes an "unknown method" setup fatal when ordinary generate rebinds.
+    known_attrs = {
+        attr for attr, _method in (
+            getattr(cls0, "__gen_worker_handlers__", []) or []
+        )
+    } | set(by_attr)
     raw_jobs, raw_skips = _plan_pairs(
-        owner, [(s.attr_name, s.payload_type) for s in eligible], decl_warmup)
+        owner,
+        [(s.attr_name, s.payload_type) for s in eligible],
+        decl_warmup,
+        known_attrs=known_attrs,
+    )
     jobs = [WarmupJob(by_attr[a], f, d) for a, f, d in raw_jobs]
     skips = [WarmupSkip(by_attr[a], r) for a, r in raw_skips]
     return jobs, skips

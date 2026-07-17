@@ -13,10 +13,11 @@ from typing import Iterator, Optional
 import msgspec
 import pytest
 
-from gen_worker import NoWarmup, Resources, endpoint
+from gen_worker import Hub, NoWarmup, Resources, Slot, endpoint
 from gen_worker import warmup as warmup_mod
 from gen_worker.api.types import AudioAsset, ImageAsset, VideoAsset
-from gen_worker.executor import Executor
+from gen_worker.executor import Executor, _MaterializedLocal
+from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 
 
@@ -115,6 +116,12 @@ class _VideoIn(msgspec.Struct):
 class _PromptIn(msgspec.Struct):
     prompt: str
     steps: int = 2
+
+
+class _SlotPromptIn(msgspec.Struct):
+    prompt: str
+    steps: int = 2
+    model: str = ""
 
 
 def test_nowarmup_requires_reason():
@@ -255,6 +262,84 @@ def test_executor_runs_synthesized_warmup_pre_ready():
     # Both handlers of the instance group warmed exactly once, as warmup.
     assert calls == [(True, "warmup", False), (True, "warmup", False)]
     assert ex._classes[specs[0].instance_key].ready
+
+
+def test_executor_warmup_handles_dynamic_slot_split(tmp_path) -> None:
+    """A request-time Slot pick can split one method into a new instance key.
+
+    ``warmup=`` is still a class-wide declaration: a skip for the authored
+    Turbo sibling remains valid even when this picked instance contains only
+    ordinary generate. This is the SDXL release-06b6 production failure.
+    """
+    calls: list[str] = []
+
+    class _Pipeline:
+        pass
+
+    @endpoint(
+        models={
+            "pipeline": Slot(
+                _Pipeline,
+                selected_by="model",
+                default_checkpoint=Hub("acme/default", tag="prod"),
+            ),
+        },
+        resources=Resources(vram_gb=8),
+        warmup={
+            "generate": {"prompt": "warmup", "steps": 1},
+            "generate_turbo": None,
+        },
+    )
+    class Ep:
+        def setup(self, pipeline: str) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _SlotPromptIn) -> _Out:
+            calls.append(payload.prompt)
+            return _Out()
+
+        def generate_turbo(self, ctx, payload: _SlotPromptIn) -> _Out:
+            calls.append("turbo")
+            return _Out()
+
+    specs = extract_specs(Ep)
+    ex = Executor(specs, _noop_send)
+    generate = next(spec for spec in specs if spec.attr_name == "generate")
+    picked = ex._effective_spec(
+        generate,
+        pb.RunJob(
+            models=[
+                pb.ModelBinding(slot="pipeline", ref="acme/babes-pony:prod"),
+            ],
+        ),
+    )
+    assert picked.instance_key != generate.instance_key
+
+    async def _materialize_local(ref, snapshot=None, *, binding=None):
+        return _MaterializedLocal(path=tmp_path, identity=("", 0))
+
+    ex.store._materialize_local = _materialize_local  # type: ignore[method-assign]
+    asyncio.run(ex.ensure_setup(picked))
+
+    assert calls == ["warmup"]
+    assert ex._classes[picked.instance_key].ready
+
+    # The opposite split is equally important: the Turbo-only group keeps
+    # its explicit skip and must not synthesize a Turbo request merely because
+    # ordinary generate lives in another instance group.
+    turbo = next(spec for spec in specs if spec.attr_name == "generate_turbo")
+    turbo_picked = ex._effective_spec(
+        turbo,
+        pb.RunJob(
+            models=[
+                pb.ModelBinding(slot="pipeline", ref="acme/other-pony:prod"),
+            ],
+        ),
+    )
+    asyncio.run(ex.ensure_setup(turbo_picked))
+
+    assert calls == ["warmup"]
+    assert ex._classes[turbo_picked.instance_key].ready
 
 
 def test_executor_custom_warmup_method_suppresses_synthesis():
