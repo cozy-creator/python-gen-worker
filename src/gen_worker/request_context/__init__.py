@@ -1606,7 +1606,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
             row_artifacts_json: Optional mapping of row IDs → artifact
                 refs for datasets that reference external image blobs.
             snapshot_manifest: Optional list of ``{path, digest, size_bytes}``
-                entries — the parquet shards + any sidecar files that
+                entries — the data shards + any sidecar files that
                 comprise this dataset revision. Used for provenance /
                 content-identity tracking (naming-based versioning means
                 the dataset row is mutable, but the manifest captures what

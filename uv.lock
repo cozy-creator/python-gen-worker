@@ -604,9 +604,6 @@ audio = [
     { name = "numpy" },
     { name = "soundfile" },
 ]
-datasets = [
-    { name = "pyarrow" },
-]
 dev = [
     { name = "accelerate" },
     { name = "av" },
@@ -666,7 +663,6 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'images'", specifier = ">=10.0" },
     { name = "protobuf", specifier = ">=7.35.0" },
     { name = "psutil", specifier = ">=7.0.0" },
-    { name = "pyarrow", marker = "extra == 'datasets'", specifier = ">=17.0.0" },
     { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=17.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
@@ -683,7 +679,7 @@ requires-dist = [
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250913" },
 ]
-provides-extras = ["torch", "vision", "datasets", "images", "audio", "video", "signing", "dev"]
+provides-extras = ["torch", "vision", "images", "audio", "video", "signing", "dev"]
 
 [[package]]
 name = "gguf"

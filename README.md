@@ -13,7 +13,7 @@ pip install gen-worker          # plain Python (e.g. API-proxy endpoints)
 ```
 
 Optional extras: `[images]` / `[audio]` / `[video]` for media I/O,
-`[vision]` for torchvision, `[datasets]` for parquet shard reads.
+`[vision]` for torchvision.
 
 ## Hello world
 

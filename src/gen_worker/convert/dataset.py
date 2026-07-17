@@ -24,7 +24,7 @@ instruction data). Exposed via ``iter_examples`` / ``as_dataloader`` /
 <root>/
 ├── dataset_info.json      # {kind: "prompt_corpus", features, num_rows, ...}
 └── data/
-    └── train-00000.parquet     # columns: prompt, category, length_bucket, seed
+    └── train-00000.jsonl     # one row per line: prompt, category, length_bucket, seed
 ```
 
 One corpus can be reused across source models and calibrated-quant recipes.
@@ -36,7 +36,7 @@ Exposed via ``is_prompt_corpus`` / ``dataset_info`` / ``iter_prompts``.
 <root>/
 ├── dataset_info.json      # {kind: "eval_set", features, variants, prompt_corpus, ...}
 └── data/
-    └── train-00000.parquet     # columns: prompt, seed, category, image_<variant>: Image
+    └── train-00000.jsonl     # one row per line: prompt, seed, category, image_<variant>
 ```
 
 Source+variant-specific eval sets can hold side-by-side renders for A/B eval.
@@ -44,15 +44,20 @@ Exposed via ``is_eval_set`` / ``dataset_info`` / ``iter_rows``.
 
 ## Detection
 
-``is_prompt_corpus`` / ``is_eval_set`` feature-detect via
-``dataset_info.json`` at the snapshot root. Earlier revisions (#41 shipped
-with ``manifest.json`` + ``prompts.jsonl``) are handled transparently for
-readback compat — we do NOT require callers to migrate existing artifacts,
-but new artifacts write ``dataset_info.json`` + parquet.
+``is_prompt_corpus`` / ``is_eval_set`` feature-detect via ``dataset_info.json``
+at the snapshot root.
+
+## JSONL row encoding
+
+Rows are one JSON object per line. ``bytes``/``bytearray`` values (e.g. an
+``image`` column on an edit corpus) are base64-wrapped as
+``{"__bytes_b64__": "..."}`` on write and transparently decoded back to
+``bytes`` on read — see ``write_jsonl_shard`` / ``_decode_row``.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
@@ -60,6 +65,8 @@ from typing import TYPE_CHECKING, Any, Iterator
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
     import datasets as hf_datasets
+
+_BYTES_KEY = "__bytes_b64__"
 
 
 class Dataset:
@@ -77,16 +84,15 @@ class Dataset:
 
     Prompt-corpus + eval-set shapes:
 
-      dataset_info()                 -- parsed dataset_info.json (the new
-                                        format) or legacy manifest.json
+      dataset_info()                 -- parsed dataset_info.json
       kind                           -- "prompt_corpus" | "eval_set" | ""
       is_prompt_corpus()             -- True if kind == "prompt_corpus"
       is_eval_set()                  -- True if kind == "eval_set"
-      iter_prompts()                 -- yield prompt rows from the parquet
-                                        data/ shard (or legacy prompts.jsonl)
+      iter_prompts()                 -- yield prompt rows from the jsonl
+                                        data/ shard
       iter_rows()                    -- yield full rows with image columns
                                         (for eval sets)
-      parquet_shards()               -- list[Path] of parquet files under data/
+      shards()                       -- list[Path] of jsonl files under data/
     """
 
     def __init__(
@@ -215,11 +221,6 @@ class Dataset:
         snapshots and LLM-text datasets don't have this file —
         ``dataset_info()`` returns ``{}`` for them so callers can use
         ``dataset_info().get("kind")`` as a feature test.
-
-        Readback compat: if ``dataset_info.json`` is absent but the legacy
-        ``manifest.json`` from the shipped-then-rolled-back #41 format is
-        present, return that. ``kind`` is normalized to values
-        (``calibration_dataset`` → ``prompt_corpus``).
         """
         if self._info_cache == "unloaded":
             self._info_cache = _load_dataset_info(self._path)
@@ -240,56 +241,91 @@ class Dataset:
         """True iff this artifact is an eval set."""
         return self.kind == "eval_set"
 
-    def parquet_shards(self) -> list[Path]:
-        """Return the list of parquet shard files under ``data/``.
+    def shards(self) -> list[Path]:
+        """Return the list of jsonl shard files under ``data/``.
 
-        Convention: ``<root>/data/train-*.parquet``. Returns sorted shard
+        Convention: ``<root>/data/train-*.jsonl``. Returns sorted shard
         paths so iteration is deterministic. Empty list if the snapshot
-        isn't in the parquet layout (e.g. legacy jsonl shape).
+        isn't in the prompt-corpus / eval-set layout.
         """
         data_dir = self._path / "data"
         if not data_dir.is_dir():
             return []
-        return sorted(data_dir.glob("*.parquet"))
+        return sorted(data_dir.glob("*.jsonl"))
 
     def iter_prompts(self) -> Iterator[dict]:
         """Yield prompt rows — ``{prompt, category, length_bucket, seed}``.
 
-        Primary path: read the parquet shard(s) under ``data/`` using
-        pyarrow, pushing down the prompt + metadata columns only. Image
-        columns on eval sets are skipped automatically — calibration
-        reads only the text it needs.
+        Reads the jsonl shard(s) under ``data/`` one row at a time, keeping
+        only the prompt + metadata fields. Image columns on eval sets are
+        dropped per row rather than materialized — calibration reads only
+        the text it needs.
 
-        Raises ``FileNotFoundError`` if no parquet shards are present —
+        Raises ``FileNotFoundError`` if no jsonl shards are present —
         callers should guard with ``is_prompt_corpus() or is_eval_set()``.
         """
-        shards = self.parquet_shards()
+        shards = self.shards()
         if not shards:
             raise FileNotFoundError(
-                f"dataset {self._ref!r} has no prompts — expected parquet "
+                f"dataset {self._ref!r} has no prompts — expected jsonl "
                 f"shards under {self._path}/data/"
             )
-        yield from _iter_parquet_prompt_columns(shards)
+        yield from _iter_jsonl_prompt_columns(shards)
 
     def iter_rows(self) -> Iterator[dict]:
         """Yield ALL rows (including image columns on eval sets).
 
-        Unlike ``iter_prompts``, this does not push down columns — image
-        bytes are decoded for each row. Suitable for eval-set consumers
+        Unlike ``iter_prompts``, this decodes every field — image bytes
+        are base64-decoded for each row. Suitable for eval-set consumers
         (human review UI, VLM eval jobs) that need the rendered outputs.
 
         For prompt-corpus datasets this is equivalent to ``iter_prompts``
         since there are no image columns.
         """
-        shards = self.parquet_shards()
+        shards = self.shards()
         if not shards:
             yield from self.iter_prompts()  # raises FileNotFoundError
             return
-        import pyarrow.parquet as pq
         for shard in shards:
-            table = pq.read_table(str(shard))
-            for row in table.to_pylist():
-                yield row
+            with open(shard) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    yield _decode_row(json.loads(line))
+
+
+def write_jsonl_shard(
+    rows: list[dict], out_dir: Path, *, name: str = "train-00000.jsonl",
+) -> Path:
+    """Write ``rows`` as a jsonl shard at ``<out_dir>/data/<name>``.
+
+    One JSON object per line. ``bytes``/``bytearray`` values (e.g. a PNG
+    ``image`` column on an edit corpus) are base64-wrapped transparently —
+    see ``_decode_row`` for the read side.
+    """
+    data_dir = out_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / name
+    with open(path, "w") as f:
+        for row in rows:
+            f.write(json.dumps(row, default=_json_row_default))
+            f.write("\n")
+    return path
+
+
+def _json_row_default(obj: Any) -> Any:
+    if isinstance(obj, (bytes, bytearray)):
+        return {_BYTES_KEY: base64.b64encode(bytes(obj)).decode("ascii")}
+    raise TypeError(f"object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _decode_row(row: dict) -> dict:
+    return {
+        k: (base64.b64decode(v[_BYTES_KEY])
+            if isinstance(v, dict) and set(v) == {_BYTES_KEY} else v)
+        for k, v in row.items()
+    }
 
 
 def _load_dataset_info(path: Path) -> dict | None:
@@ -309,30 +345,29 @@ def _load_dataset_info(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _iter_parquet_prompt_columns(shards: list[Path]) -> Iterator[dict]:
-    """Yield rows from parquet shards using the pyarrow column pushdown.
+_WANTED_PROMPT_COLS = ("prompt", "category", "length_bucket", "seed")
 
-    Reads only the lightweight text/metadata columns present in the schema
-    (prompt / category / length_bucket / seed). Image columns — which on
-    an eval set can be tens of MB per row — are NOT materialized. This
-    keeps the calibration-read cost linear in prompt count, not total
-    snapshot size.
+
+def _iter_jsonl_prompt_columns(shards: list[Path]) -> Iterator[dict]:
+    """Yield rows from jsonl shards, keeping only the prompt + metadata
+    fields (``prompt`` / ``category`` / ``length_bucket`` / ``seed``).
+
+    Image columns — which on an eval set can be tens of MB per row — are
+    dropped immediately after each row is parsed, not materialized further.
     """
-    import pyarrow.parquet as pq
-
-    wanted_cols = ("prompt", "category", "length_bucket", "seed")
     for shard in shards:
-        pf = pq.ParquetFile(str(shard))
-        available = set(pf.schema_arrow.names)
-        cols = [c for c in wanted_cols if c in available]
-        if "prompt" not in cols:
-            raise ValueError(
-                f"parquet shard {shard} is missing the required 'prompt' "
-                f"column (have: {sorted(available)})"
-            )
-        for batch in pf.iter_batches(columns=cols):
-            for row in batch.to_pylist():
-                yield row
+        with open(shard) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                raw = json.loads(line)
+                if "prompt" not in raw:
+                    raise ValueError(
+                        f"jsonl shard {shard} has a row missing the required "
+                        f"'prompt' field (have: {sorted(raw)})"
+                    )
+                yield {k: raw[k] for k in _WANTED_PROMPT_COLS if k in raw}
 
 
 def _guess_text_field(example: dict) -> str:
@@ -353,4 +388,4 @@ def _guess_text_field(example: dict) -> str:
     )
 
 
-__all__ = ["Dataset"]
+__all__ = ["Dataset", "write_jsonl_shard"]
