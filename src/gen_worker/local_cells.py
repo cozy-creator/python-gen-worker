@@ -151,6 +151,7 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2) -> None:
             pipe, shape, steps=steps,
             prompt="cache warm-up: a lighthouse on a cliff at dawn, detailed",
             decode=decode,
+            guidance_scales=getattr(cfg, "guidance_scales", ()),
         )
         torch.cuda.synchronize()
         key = "x".join(str(v) for v in shape)
@@ -186,6 +187,7 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
         source_ref="local-mint",
         shapes=cfg.shapes,
         targets=cfg.targets,
+        guidance_scales=getattr(cfg, "guidance_scales", ()),
         low_vram_mode=low_vram_mode(pipe),
         compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
         weight_lane=pipeline_weight_lane(pipe),

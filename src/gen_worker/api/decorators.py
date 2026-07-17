@@ -33,6 +33,7 @@ methods; only weight-sharing forces one class.
 from __future__ import annotations
 
 import inspect
+import math
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar, Union, overload
 
 import msgspec
@@ -170,8 +171,11 @@ class Compile(msgspec.Struct, frozen=True):
     that bucket table — one source of truth, 100% cache coverage of legal
     requests. Endpoints still accepting free width/height use the family's
     dialect-default shapes until they adopt buckets. CFG is a graph shape
-    too: CFG variants trace batch-2 graphs, distilled variants batch-1 —
-    a variant must never cross the boundary (clamp guidance_scale). Declaring this does NOT force compilation: the
+    too: CFG variants trace batch-2 graphs, distilled variants batch-1.
+    ``guidance_scales`` declares the image regimes Forge must warm into the
+    same family cell; for example ``(5.0, 0.0)`` captures CFG and no-CFG calls
+    when they share one module graph. A LoRA-mutated graph needs its own lane.
+    Empty preserves the pipeline's default. Declaring this does NOT force compilation: the
     worker arms torch.compile only when a verified cache artifact for
     (family, SKU, torch, triton) is seeded — otherwise it stays eager.
     See ``gen_worker.compile_cache``.
@@ -180,6 +184,7 @@ class Compile(msgspec.Struct, frozen=True):
     shapes: tuple[tuple[int, ...], ...]
     targets: tuple[str, ...] = ("transformer", "vae.decode")
     family: str = ""
+    guidance_scales: tuple[float, ...] = ()
     # Regional compilation (diffusers compile_repeated_blocks): compile the
     # target's repeated transformer blocks instead of the whole forward.
     # REQUIRED for big fp8 layerwise-cast models (ie#381, measured on LTX
@@ -208,6 +213,15 @@ class Compile(msgspec.Struct, frozen=True):
             raise ValueError("Compile.targets must not be empty")
         force(self, "targets", targets)
         force(self, "family", str(self.family or "").strip())
+        guidance_scales = tuple(float(v) for v in self.guidance_scales)
+        if any(not math.isfinite(v) or v < 0.0 for v in guidance_scales):
+            raise ValueError(
+                "Compile.guidance_scales must contain finite non-negative values, "
+                f"got {self.guidance_scales!r}"
+            )
+        if len(set(guidance_scales)) != len(guidance_scales):
+            raise ValueError("Compile.guidance_scales must not contain duplicates")
+        force(self, "guidance_scales", guidance_scales)
 
 
 class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):

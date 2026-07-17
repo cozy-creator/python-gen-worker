@@ -25,6 +25,7 @@ from typing import Annotated, AsyncIterator, Union
 
 import msgspec
 import pytest
+import gen_worker
 
 from gen_worker import (
     HF, Hub, Model, ModelChoice, ModelDefaults, ModelRef, RequestContext,
@@ -529,7 +530,6 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     """ie#381: the lock's compile block carries (w, h, frames) rows verbatim
     and the primary binding's weight-storage lane, so the hub's cell producer
     builds from an identically-loaded (fp8) pipeline."""
-    import gen_worker
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
@@ -555,6 +555,7 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     assert entry["compile"]["shapes"] == [[960, 544, 241], [1920, 1088, 241], [1280, 704, 121]]
     assert entry["compile"]["storage_dtype"] == "fp8"
     assert entry["compile"]["targets"] == ["transformer"]
+    assert "guidance_scales" not in entry["compile"]
 
 
 def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
@@ -564,7 +565,10 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
     @endpoint(
         model=Hub("cozy/sdxl-base"),
         resources=Resources(vram_gb=12),
-        compile=Compile(family="sdxl", shapes=((1024, 1024),)),
+        compile=Compile(
+            family="sdxl", shapes=((1024, 1024),),
+            guidance_scales=(5.0, 0.0),
+        ),
     )
     class Gen:
         def setup(self, model: str) -> None:
@@ -577,6 +581,7 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
 
     (entry,) = _extract_entries(Gen, "testmod")
     assert "storage_dtype" not in entry["compile"]
+    assert entry["compile"]["guidance_scales"] == [5.0, 0.0]
 
 
 def test_binding_emits_family_stamp_from_compile() -> None:

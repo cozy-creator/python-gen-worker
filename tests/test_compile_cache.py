@@ -241,8 +241,10 @@ def test_unwrap_clears_regional_mods():
 
 
 def test_artifact_metadata_records_compile_mode():
-    meta = cc.artifact_metadata(family="ltx-2.3", shapes=[(960, 544, 241)],
-                                targets=["transformer"], compile_mode="regional")
+    meta = cc.artifact_metadata(
+        family="ltx-2.3", shapes=[(960, 544, 241)],
+        targets=["transformer"], compile_mode="regional",
+    )
     assert meta["compile_mode"] == "regional"
     default = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
     assert default["compile_mode"] == "whole"
@@ -380,12 +382,22 @@ def test_compile_struct_validation():
     assert c.shapes == ((768, 768), (1024, 1024))
     assert c.targets == ("transformer", "vae.decode")
     assert c.family == "sd15"
+    assert c.guidance_scales == ()
+    assert Compile(
+        shapes=((1024, 1024),), guidance_scales=[5, 0],
+    ).guidance_scales == (5.0, 0.0)
     with pytest.raises(ValueError):
         Compile(shapes=())
     with pytest.raises(ValueError):
         Compile(shapes=((0, 768),))
     with pytest.raises(ValueError):
         Compile(shapes=((768, 768),), targets=())
+    with pytest.raises(ValueError, match="finite non-negative"):
+        Compile(shapes=((768, 768),), guidance_scales=(float("nan"),))
+    with pytest.raises(ValueError, match="finite non-negative"):
+        Compile(shapes=((768, 768),), guidance_scales=(-1.0,))
+    with pytest.raises(ValueError, match="duplicates"):
+        Compile(shapes=((768, 768),), guidance_scales=(5.0, 5.0))
 
 
 def test_compile_struct_video_shapes():
@@ -419,6 +431,51 @@ def test_artifact_metadata_video_shapes_and_storage_dtype():
     assert cc.verify(meta, family="ltx-2.3") == ""
 
 
+def test_guidance_regimes_are_artifact_contract_axis():
+    torch = pytest.importorskip("torch")
+
+    class _Pipe:
+        def __init__(self) -> None:
+            self.transformer = torch.nn.Linear(16, 16)
+
+    cfg = Compile(
+        family="sdxl", shapes=((1024, 1024),), targets=("transformer",),
+        guidance_scales=(5.0, 0.0),
+    )
+    meta = cc.artifact_metadata(
+        family="sdxl", shapes=cfg.shapes, targets=cfg.targets,
+        guidance_scales=cfg.guidance_scales,
+    )
+    assert meta["guidance_scales"] == [5.0, 0.0]
+    assert cc.contract_drift(meta, _Pipe(), cfg) == ""
+    assert "guidance_scales" in cc.contract_drift(
+        dict(meta, guidance_scales=[5.0]), _Pipe(), cfg,
+    )
+
+
+def test_warm_call_captures_cfg_and_no_cfg(monkeypatch):
+    torch = pytest.importorskip("torch")
+    calls = []
+
+    class _Generator:
+        def __init__(self, device=None) -> None:
+            self.device = device
+
+        def manual_seed(self, _seed):
+            return self
+
+    class _Pipe:
+        def __call__(self, *, guidance_scale=7.5, **_kwargs):
+            calls.append(guidance_scale)
+
+    monkeypatch.setattr(torch, "Generator", _Generator)
+    cc._warm_call(
+        _Pipe(), (1024, 1024), steps=2, prompt="warm", decode=False,
+        guidance_scales=(5.0, 0.0),
+    )
+    assert calls == [5.0, 0.0]
+
+
 class In(msgspec.Struct):
     prompt: str = ""
 
@@ -430,7 +487,10 @@ class Out(msgspec.Struct):
 def test_endpoint_compile_reaches_spec():
     import types
 
-    @endpoint(resources=Resources(vram_gb=4), compile=Compile(shapes=((768, 768),)))
+    @endpoint(
+        resources=Resources(vram_gb=4),
+        compile=Compile(shapes=((768, 768),), guidance_scales=(5.0, 0.0)),
+    )
     class Ep:
         def setup(self) -> None:
             pass
@@ -443,6 +503,7 @@ def test_endpoint_compile_reaches_spec():
     assert len(specs) == 1
     assert specs[0].compile is not None
     assert specs[0].compile.shapes == ((768, 768),)
+    assert specs[0].compile.guidance_scales == (5.0, 0.0)
 
     with pytest.raises(TypeError, match="compile="):
         @endpoint(compile="yes")  # type: ignore[arg-type]
