@@ -242,6 +242,8 @@ def _is_accept_for(rid: str):
 
 
 def test_full_contract_round_trip(scheduler_and_worker) -> None:
+    import torch
+
     scheduler, harness = scheduler_and_worker
     conn = scheduler.wait_connection(0)
 
@@ -249,6 +251,7 @@ def test_full_contract_round_trip(scheduler_and_worker) -> None:
     assert conn.hello is not None
     assert conn.hello.protocol_version == pb.PROTOCOL_VERSION_CURRENT
     assert conn.hello.worker_id == "e2e-worker"
+    assert conn.hello.resources.torch_version == str(torch.__version__)
 
     # ---- StateDelta advertises the functions once READY ----------------------
     ready = conn.wait_for(

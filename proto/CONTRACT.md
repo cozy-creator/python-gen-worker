@@ -196,6 +196,7 @@ Static per-boot facts. Never re-sent mid-connection.
 | `image_digest` | W env | O resource-profile keying + triage | worker image sha256 |
 | `git_commit` | W env | O triage/display | build provenance |
 | `instance_id` | W env | O provider bookkeeping (e.g. runpod pod retire) | cloud instance id; empty for local |
+| `torch_version` | W runtime probe | O Inductor-cell compatibility filter | full actual `torch.__version__`; O fails closed when absent or major.minor differs from the selected cell |
 
 ### ModelResidency (embedded in Hello)
 

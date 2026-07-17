@@ -97,6 +97,9 @@ message WorkerResources {
   // measurable (CPU-only build, probe failure). Additive: old orchestrators
   // ignore it; old workers send it unset.
   HostCanary host_canary  = 9;
+  // Full actual runtime identity (e.g. "2.13.0+cu130"). Tensorhub compares
+  // major.minor before dispatching a version-keyed Inductor cache.
+  string torch_version    = 10;
 }
 
 // Boot host canary (gw#550): the host properties the CPU-bound video tail
