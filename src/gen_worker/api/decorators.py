@@ -194,6 +194,12 @@ class Compile(msgspec.Struct, frozen=True):
     # graph per shape, reused across blocks). Cells record the mode — a
     # mode drift consumer stays eager (cache would miss anyway).
     regional: bool = False
+    # gw#561: dynamic-LoRA endpoints declare the traced rank bucket. The
+    # worker then serves the branch-bearing graph family: canonical zeroed
+    # rank-<bucket> branches enabled at load (gw#547 compiled-lane
+    # contract), only `<lane>-lora<bucket>` cells adopt, and adapter swaps
+    # stay buffer copies — never a recompile. 0 = branchless (today).
+    lora_bucket: int = 0
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -222,6 +228,16 @@ class Compile(msgspec.Struct, frozen=True):
         if len(set(guidance_scales)) != len(guidance_scales):
             raise ValueError("Compile.guidance_scales must not contain duplicates")
         force(self, "guidance_scales", guidance_scales)
+        bucket = int(self.lora_bucket or 0)
+        if bucket:
+            from ..models.w8a8_lora import RANK_BUCKETS
+
+            if bucket not in RANK_BUCKETS:
+                raise ValueError(
+                    f"Compile.lora_bucket must be 0 or one of {RANK_BUCKETS}, "
+                    f"got {self.lora_bucket!r}"
+                )
+        force(self, "lora_bucket", bucket)
 
 
 class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):

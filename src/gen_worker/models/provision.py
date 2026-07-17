@@ -171,10 +171,21 @@ def enable_compiled(
     """Arm the best available compiled path for a freshly loaded pipeline:
     a TRT engine artifact swaps the module (fail-soft), anything else goes
     through the torch.compile cache policy (which also covers the no-
-    artifact and ALLOW_COLD lanes)."""
+    artifact and ALLOW_COLD lanes).
+
+    ``Compile.lora_bucket`` (gw#561) puts the pipeline on the branch-bearing
+    graph family BEFORE arming, so only matching ``-lora<bucket>`` cells
+    adopt. Staying eager rolls the branches back — canonical zeroed slots
+    cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
+    placement per request."""
     from .. import compile_cache, trt_engine
 
-    if artifact is not None:
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    if bucket:
+        compile_cache.apply_lora_lane(pipe, bucket)
+    if artifact is not None and not bucket:
+        # TRT engines expose only their plain contract — a lora_bucket
+        # declaration always rides the inductor lane.
         try:
             meta = trt_engine.unpack_metadata(Path(artifact))
         except Exception:
@@ -183,7 +194,10 @@ def enable_compiled(
             if trt_engine.enable(pipe, cfg, cache_dir, artifact):
                 return True
             artifact = None  # unusable engine: fall through to eager policy
-    return compile_cache.enable(pipe, cfg, cache_dir, artifact)
+    armed = compile_cache.enable(pipe, cfg, cache_dir, artifact)
+    if bucket and not armed:
+        compile_cache.drop_lora_lane(pipe)
+    return armed
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.34.0 (2026-07-17)
+
+- **gw#561 (gw#547 remainder; ie#488 turbo critical path): lora-bucket
+  compile cells.** `Compile(lora_bucket=N)` declares a dynamic-LoRA
+  endpoint's traced rank bucket: the worker enables canonical zeroed
+  rank-N branches after load/placement and BEFORE compile arming, so the
+  pipeline traces (and only adopts) the `<lane>-lora<bucket>` graph family;
+  staying eager rolls the branches back (canonical zeroed slots measured
+  +21-32% eager in gw#547). `compile_cache.build(lora_bucket=N)` produces
+  branch-bearing cells the same way — labels/metadata inherit the lane
+  (`inductor-<sku>-torch<mm>-w8a8-lora128`), plus a `lora_bucket` metadata
+  field. Cell pick at boot is lane-AND-bucket exact (a branchless endpoint
+  never fetches a lora cell and vice versa — both would lane_drift and
+  shadow the right cell); hub-pushed runtime adoption re-applies the
+  declared lane before the drift check and rolls it back on failure.
+  TRT engines never serve lora buckets. Discovery carries
+  `compile.lora_bucket` for the hub's producer reconciler (th#854/te#88).
+  Local cells (cozy-local self-mint) key, mint and adopt lora-bucket cells
+  through the same seam.
+
 ## 0.33.0 (2026-07-17)
 
 - **gw#558 (ie#388 dynamic-LoRA primary path): lane-general runtime LoRA
