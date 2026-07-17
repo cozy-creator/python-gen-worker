@@ -201,6 +201,105 @@ def test_byte_gate_passes_then_catches_tampering(
         verify_w8a8_snapshot(tiny_dit, bad, sample=len(art.quantized))
 
 
+def _candidate_with_shifted_scales(
+    source: Path, candidate: Path, destination: Path, *, ulps: int,
+) -> Path:
+    """Model a valid CUDA export whose /448 result neighbors CPU's value."""
+    import shutil
+
+    from safetensors.torch import save_file
+
+    shutil.copytree(candidate, destination)
+    art = detect_w8a8_artifact(candidate)
+    assert art is not None
+    source_tensors = _load_all(source / art.component)
+    candidate_tensors = _load_all(destination / art.component)
+    for layer in art.quantized:
+        weight_name = f"{layer}.weight"
+        scale_name = f"{layer}.weight_scale"
+        source_weight = source_tensors[weight_name].float()
+        scale = source_weight.abs().amax(dim=1) / 448.0
+        for _ in range(ulps):
+            scale = torch.nextafter(scale, torch.full_like(scale, torch.inf))
+        candidate_tensors[scale_name] = scale
+        candidate_tensors[weight_name] = (
+            (source_weight / scale.reshape(-1, 1))
+            .clamp(-448.0, 448.0)
+            .to(torch.float8_e4m3fn)
+        )
+
+    component = destination / art.component
+    for path in component.glob("*.safetensors"):
+        path.unlink()
+    index = component / "diffusion_pytorch_model.safetensors.index.json"
+    if index.exists():
+        index.unlink()
+    save_file(candidate_tensors, str(component / "diffusion_pytorch_model.safetensors"))
+    return destination
+
+
+def test_byte_gate_accepts_only_cpu_cuda_one_ulp_scale_envelope(
+    tiny_dit: Path, produced: Path, tmp_path: Path,
+) -> None:
+    adjacent = _candidate_with_shifted_scales(
+        tiny_dit, produced, tmp_path / "adjacent", ulps=1,
+    )
+    report = verify_w8a8_snapshot(tiny_dit, adjacent, sample=1000)
+    assert report["byte_exact"] is True
+    assert report["max_scale_ulp"] == 1
+
+    outside = _candidate_with_shifted_scales(
+        tiny_dit, produced, tmp_path / "outside", ulps=2,
+    )
+    with pytest.raises(ConversionImplementationError, match="maximum 1"):
+        verify_w8a8_snapshot(tiny_dit, outside, sample=1000)
+
+
+def test_byte_gate_rejects_nonfinite_source_at_fp32_ulp_boundary(
+    tiny_dit: Path, produced: Path, tmp_path: Path,
+) -> None:
+    """+Inf is one FP32 bit above max-finite; it is not a valid ULP neighbor."""
+    import shutil
+
+    from safetensors.torch import save_file
+
+    source = tmp_path / "nonfinite-source"
+    candidate = tmp_path / "nonfinite-candidate"
+    shutil.copytree(tiny_dit, source)
+    shutil.copytree(produced, candidate)
+    art = detect_w8a8_artifact(candidate)
+    assert art is not None
+    layer = art.quantized[0]
+    weight_name = f"{layer}.weight"
+    scale_name = f"{layer}.weight_scale"
+
+    source_component = source / art.component
+    source_tensors = _load_all(source_component)
+    source_weight = source_tensors[weight_name].clone()
+    source_weight[0, 0] = torch.inf
+    source_tensors[weight_name] = source_weight
+    for path in source_component.glob("*.safetensors"):
+        path.unlink()
+    save_file(source_tensors, str(source_component / "model.safetensors"))
+
+    candidate_component = candidate / art.component
+    candidate_tensors = _load_all(candidate_component)
+    scale = candidate_tensors[scale_name].clone()
+    scale[0] = torch.finfo(torch.float32).max
+    candidate_tensors[scale_name] = scale
+    candidate_tensors[weight_name] = (
+        (source_weight.float() / scale.reshape(-1, 1))
+        .clamp(-448.0, 448.0)
+        .to(torch.float8_e4m3fn)
+    )
+    for path in candidate_component.glob("*.safetensors"):
+        path.unlink()
+    save_file(candidate_tensors, str(candidate_component / "model.safetensors"))
+
+    with pytest.raises(ConversionImplementationError, match="source tensor.*non-finite"):
+        verify_w8a8_snapshot(source, candidate, sample=1000)
+
+
 def _rewrite_component_float_dtype(
     root: Path, dtype: "torch.dtype", *, inject_fp16_detail: bool = False,
 ) -> None:
