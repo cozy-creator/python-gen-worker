@@ -182,6 +182,10 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
     from .models.loading import pipeline_weight_lane
     from .models.memory import low_vram_mode
 
+    # gw#564: record the execution contract exactly like the production
+    # build — w8a8 cells are contract_drift-gated on the graph signature and
+    # weight-lane manifest, so a mint without them can never re-adopt.
+    graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
     meta = cc.artifact_metadata(
         family=family,
         source_ref="local-mint",
@@ -192,6 +196,8 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
         compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
         weight_lane=pipeline_weight_lane(pipe),
         lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
+        graph_signature=graph_signature,
+        weight_contract=weight_contract,
     )
     tmp = target.with_suffix(".part")
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -285,6 +285,40 @@ def test_pertensor_carries_additive_lora_branch(
     assert torch.equal(mod(x), base)
 
 
+def test_execution_contract_records_activation_granularity() -> None:
+    """gw#564: the activation-scale granularity is a graph property — the
+    contract must distinguish the per-tensor epilogue lane from rowwise."""
+    import torch.nn as nn
+
+    from gen_worker import compile_cache as cc
+
+    class _Cfg:
+        shapes = ((64, 64),)
+        targets = ("unet",)
+        guidance_scales = ()
+
+    contracts = {}
+    for mode in ("rowwise", "pertensor"):
+        mod = _quantized_module(mode, 16, 16, bias=False)
+
+        class _Denoiser(nn.Module):
+            def __init__(self, m) -> None:
+                super().__init__()
+                self.proj = m
+
+        class _P:
+            _cozy_weight_lane = "w8a8"
+
+        pipe = _P()
+        pipe.unet = _Denoiser(mod)
+        _sig, wc = cc.execution_contract(pipe, _Cfg())
+        contracts[mode] = wc
+    assert contracts["rowwise"]["activation_scaling"] == ["dynamic-per-row"]
+    assert contracts["pertensor"]["activation_scaling"] == ["dynamic-per-tensor"]
+    # cross-lane adoption is structurally impossible: the manifests differ
+    assert contracts["rowwise"] != contracts["pertensor"]
+
+
 def test_branch_lane_covers_both_gemm_modes() -> None:
     class _M:
         pass

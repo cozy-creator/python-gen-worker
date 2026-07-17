@@ -333,6 +333,93 @@ def test_plain_lane_miss_policy_unchanged(_local_env, monkeypatch):
     assert lc.enable_compiled(_Pipe(), _Cfg()) is False
 
 
+def _quantized_pipe(gemm_mode: str):
+    """A w8a8-lane pipeline with one REAL Fp8ScaledLinear denoiser child."""
+    torch = pytest.importorskip("torch")
+    import torch.nn as nn
+
+    from gen_worker.models.w8a8 import fp8_scaled_linear_class
+
+    lin_cls = fp8_scaled_linear_class()
+    mod = lin_cls(16, 16, bias=False, compute_dtype=torch.bfloat16,
+                  static_input_scale=False, gemm_mode=gemm_mode)
+    w = torch.randn(16, 16)
+    scale = (w.abs().amax(dim=1, keepdim=True) / 448.0).clamp(min=1e-12)
+    mod.load_state_dict({
+        "weight": (w / scale).clamp(-448, 448).to(torch.float8_e4m3fn),
+        "weight_scale": scale,
+    }, assign=True)
+
+    class _Denoiser(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = mod
+
+        def forward(self, x):
+            return self.proj(x)
+
+    pipe = _W8a8Pipe()
+    pipe.unet = _Denoiser()
+    return pipe
+
+
+def test_w8a8_mint_records_execution_contract(_w8a8_env, monkeypatch):
+    """gw#564 live find (run sdxl4090-3): a mint without graph_signature/
+    weight_contract can NEVER re-adopt — contract_drift rejects the empty
+    signature on w8a8 lanes. The mint must record the contract exactly like
+    the production build; a bare-metal runtime (no WORKER_IMAGE_DIGEST)
+    must still pass the identity gate."""
+    pytest.importorskip("torch")
+    import json
+    import tarfile
+
+    real_key = cc.runtime_key
+
+    def filled_key():
+        key = dict(real_key())
+        key.update(sm="sm_89", cuda="13.0", cuda_driver="13000")
+        return key
+
+    monkeypatch.setattr(cc, "runtime_key", filled_key)
+    monkeypatch.setattr(lc, "_compile_and_warm", _fake_compile_and_warm)
+    pipe, cfg = _quantized_pipe("pertensor"), _Cfg(targets=("unet",))
+    target = lc.cell_path("fam", "w8a8")
+    lc._mint(pipe, cfg, target, "fam")
+
+    with tarfile.open(target) as tar:
+        meta = json.loads(tar.extractfile(cc.METADATA_NAME).read())
+    assert len(meta["graph_signature"]) == 64
+    wc = meta["weight_contract"]
+    assert wc["lane"] == "w8a8"
+    assert wc["activation_scaling"] == ["dynamic-per-tensor"]
+    assert wc["quantized"]
+    # the exact consumer gate: no drift, incl. the empty-image_digest case
+    assert meta.get("image_digest") == ""
+    assert cc.contract_drift(meta, pipe, cfg) == ""
+
+
+def test_w8a8_production_cell_still_requires_image_digest(monkeypatch):
+    """Fleet strictness preserved: when the RUNTIME carries an image digest
+    (every production worker), a digestless w8a8 cell is rejected."""
+    pytest.importorskip("torch")
+    real_key = cc.runtime_key
+
+    def prod_key():
+        key = dict(real_key())
+        key.update(sm="sm_89", cuda="13.0", cuda_driver="13000",
+                   image_digest="sha256:deadbeef")
+        return key
+
+    monkeypatch.setattr(cc, "runtime_key", prod_key)
+    pipe, cfg = _quantized_pipe("pertensor"), _Cfg(targets=("unet",))
+    sig, wc = cc.execution_contract(pipe, cfg)
+    meta = cc.artifact_metadata(
+        family="fam", shapes=cfg.shapes, targets=cfg.targets,
+        weight_lane="w8a8", graph_signature=sig, weight_contract=wc)
+    meta["image_digest"] = ""
+    assert "image_digest" in cc.contract_drift(meta, pipe, cfg)
+
+
 # ---------------------------------------------------------------------------
 # trust boundary: no publish path exists, structurally
 # ---------------------------------------------------------------------------
