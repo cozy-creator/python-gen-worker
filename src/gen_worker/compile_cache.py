@@ -78,6 +78,7 @@ _JUNK_SUFFIXES = (".lock", ".tmp", ".pid")
 # against a half-merged artifact. RLock keeps prepare -> seed_artifact and
 # seed_artifact -> capture_env composable without another configuration layer.
 _SEED_ARM_LOCK = threading.RLock()
+_LOCK_TYPE = type(threading.Lock())
 
 
 # ---------------------------------------------------------------------------
@@ -985,24 +986,80 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
 def _guarded(
     original: Callable[..., Any], compiled: Callable[..., Any], label: str,
     *, fail_closed: bool = False,
+    failure_signal: Optional[Dict[str, Any]] = None,
 ) -> Callable[..., Any]:
-    """Guard a compiled call; W8A8 cannot silently become eager compute."""
-    state: Dict[str, Any] = {"failed": False, "detail": ""}
+    """Guard one exact compiled callable and record its own warm-call proof.
+
+    The process-wide Dynamo counters are sampled *inside this wrapper* around
+    this object's compiled call.  Executor adoption therefore cannot use a
+    cache hit produced by a different resident pipeline as proof for this one.
+    """
+    state: Dict[str, Any] = {
+        "failed": False,
+        "detail": "",
+        "revocation_error": "",
+    }
+
+    def revoke(detail: str) -> None:
+        callback = (failure_signal or {}).get("callback")
+        if callable(callback):
+            try:
+                callback(detail)
+            except Exception as exc:
+                state["revocation_error"] = (
+                    "compiled-state revocation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                logger.exception("compile-cache: %s", state["revocation_error"])
+                raise CompiledLaneUnavailableError(
+                    state["revocation_error"]
+                ) from exc
+
+    def proof_before() -> Optional[Dict[str, int]]:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return None
+        with lock:
+            if int(signal.get("cache_hits", 0)) > 0:
+                return None
+        return inductor_counters()
+
+    def record_success(before: Optional[Dict[str, int]]) -> None:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return
+        stats = counters_delta(before, inductor_counters()) if before is not None else {}
+        with lock:
+            signal["successful_calls"] = int(signal.get("successful_calls", 0)) + 1
+            signal["cache_hits"] = int(signal.get("cache_hits", 0)) + max(
+                0, int(stats.get("fxgraph_cache_hit", 0)))
+            signal["cache_misses"] = int(signal.get("cache_misses", 0)) + max(
+                0, int(stats.get("fxgraph_cache_miss", 0)))
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if state["revocation_error"]:
+            raise CompiledLaneUnavailableError(state["revocation_error"])
         if state["failed"]:
             if fail_closed:
                 raise CompiledLaneUnavailableError(state["detail"])
             return original(*args, **kwargs)
+        before = proof_before()
         try:
-            return compiled(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 — any compile failure => eager
+            result = compiled(*args, **kwargs)
+            record_success(before)
+            return result
+        except Exception as exc:  # noqa: BLE001 — optional lanes may use eager
             state["failed"] = True
             state["detail"] = (
-                f"compiled W8A8 target {label} failed: "
+                f"compiled {'W8A8 ' if fail_closed else ''}target {label} failed: "
                 f"{type(exc).__name__}: {exc}"
             )
+            # Revoke scheduler-visible compiled proof synchronously before
+            # either the optional eager fallback or mandatory W8A8 error.
+            revoke(state["detail"])
             if fail_closed:
                 logger.error("compile-cache: %s", state["detail"])
                 raise CompiledLaneUnavailableError(state["detail"]) from exc
@@ -1023,32 +1080,86 @@ def _clear_regional(mod: Any) -> None:
 
 
 def _guarded_regional(
-    mod: Any, original: Callable[..., Any], label: str, *, fail_closed: bool = False,
+    mod: Any,
+    original: Callable[..., Any],
+    label: str,
+    *,
+    fail_closed: bool = False,
+    failure_signal: Optional[Dict[str, Any]] = None,
 ) -> Callable[..., Any]:
     """Regional analogue of :func:`_guarded`: blocks are compiled in place,
     so eager fallback must first CLEAR the block compilations, then retry."""
-    state: Dict[str, Any] = {"failed": False, "detail": ""}
+    state: Dict[str, Any] = {
+        "failed": False,
+        "detail": "",
+        "revocation_error": "",
+    }
+
+    def proof_before() -> Optional[Dict[str, int]]:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return None
+        with lock:
+            if int(signal.get("cache_hits", 0)) > 0:
+                return None
+        return inductor_counters()
+
+    def record_success(before: Optional[Dict[str, int]]) -> None:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return
+        stats = counters_delta(before, inductor_counters()) if before is not None else {}
+        with lock:
+            signal["successful_calls"] = int(signal.get("successful_calls", 0)) + 1
+            signal["cache_hits"] = int(signal.get("cache_hits", 0)) + max(
+                0, int(stats.get("fxgraph_cache_hit", 0)))
+            signal["cache_misses"] = int(signal.get("cache_misses", 0)) + max(
+                0, int(stats.get("fxgraph_cache_miss", 0)))
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if state["revocation_error"]:
+            raise CompiledLaneUnavailableError(state["revocation_error"])
         if not state["failed"]:
+            before = proof_before()
             try:
-                return original(*args, **kwargs)
-            except Exception as exc:  # noqa: BLE001 — any compile failure => eager
+                result = original(*args, **kwargs)
+                record_success(before)
+                return result
+            except Exception as exc:  # noqa: BLE001 — optional lanes may use eager
                 state["failed"] = True
                 state["detail"] = (
-                    f"regional compiled W8A8 target {label} failed: "
+                    f"regional compiled {'W8A8 ' if fail_closed else ''}"
+                    f"target {label} failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
+                # Regional eager state is real only after the in-place block
+                # compilations are gone. Revoke proof after that mutation and
+                # before a state delta can be scheduled.
+                _clear_regional(mod)
+                callback = (failure_signal or {}).get("callback")
+                if callable(callback):
+                    try:
+                        callback(state["detail"])
+                    except Exception as callback_exc:
+                        state["revocation_error"] = (
+                            "compiled-state revocation failed: "
+                            f"{type(callback_exc).__name__}: {callback_exc}"
+                        )
+                        logger.exception(
+                            "compile-cache: %s", state["revocation_error"])
+                        raise CompiledLaneUnavailableError(
+                            state["revocation_error"]
+                        ) from callback_exc
                 if fail_closed:
-                    _clear_regional(mod)
                     logger.error("compile-cache: %s", state["detail"])
                     raise CompiledLaneUnavailableError(state["detail"]) from exc
                 logger.warning(
                     "compile-cache: regional-compiled %s failed (%s: %s); eager "
                     "for the rest of this process", label, type(exc).__name__, exc,
                 )
-                _clear_regional(mod)
         if fail_closed:
             raise CompiledLaneUnavailableError(state["detail"])
         return original(*args, **kwargs)
@@ -1116,6 +1227,13 @@ def apply(
     from .models.loading import pipeline_weight_lane
 
     fail_closed = pipeline_weight_lane(pipeline).startswith("w8a8")
+    failure_signal: Dict[str, Any] = {
+        "callback": None,
+        "lock": threading.Lock(),
+        "successful_calls": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+    }
     applied: list[str] = []
     originals: list[Tuple[Any, str, Callable[..., Any]]] = []
     regional_mods: list[Any] = []
@@ -1136,7 +1254,12 @@ def apply(
             owner.compile_repeated_blocks(dynamic=False)
             if guard:
                 setattr(owner, attr, _guarded_regional(
-                    owner, fn, target, fail_closed=fail_closed))
+                    owner,
+                    fn,
+                    target,
+                    fail_closed=fail_closed,
+                    failure_signal=failure_signal,
+                ))
                 originals.append((owner, attr, fn))
             regional_mods.append(owner)
             applied.append(target)
@@ -1154,7 +1277,12 @@ def apply(
                 vae.to(memory_format=torch.channels_last)
         compiled = torch.compile(fn, dynamic=False)
         setattr(owner, attr, _guarded(
-            fn, compiled, target, fail_closed=fail_closed) if guard else compiled)
+            fn,
+            compiled,
+            target,
+            fail_closed=fail_closed,
+            failure_signal=failure_signal,
+        ) if guard else compiled)
         applied.append(target)
         originals.append((owner, attr, fn))
     if not applied:
@@ -1165,11 +1293,51 @@ def apply(
         "cache": bool(cache_ready),
         "originals": originals,
         "regional_mods": regional_mods,
+        "failure_signal": failure_signal,
     })
     logger.info(
         "compile-cache: torch.compile armed for %s (cache=%s regional=%s)",
         applied, cache_ready, regional)
     return True
+
+
+def set_guard_failure_callback(
+    pipeline: Any, callback: Callable[[str], None],
+) -> bool:
+    """Bind scheduler-state revocation to an armed consumer guard."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    signal = marker.get("failure_signal")
+    if not isinstance(signal, dict):
+        return False
+    signal["callback"] = callback
+    return True
+
+
+def _proof_count(pipeline: Any, key: str) -> int:
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    signal = marker.get("failure_signal")
+    if not isinstance(signal, dict):
+        return 0
+    lock = signal.get("lock")
+    if isinstance(lock, _LOCK_TYPE):
+        with lock:
+            return int(signal.get(key, 0))
+    return int(signal.get(key, 0))
+
+
+def execution_count(pipeline: Any) -> int:
+    """Successful compiled calls observed on this exact pipeline object."""
+    return _proof_count(pipeline, "successful_calls")
+
+
+def cache_hit_count(pipeline: Any) -> int:
+    """FX-graph cache hits observed inside this exact pipeline's guard."""
+    return _proof_count(pipeline, "cache_hits")
+
+
+def cache_miss_count(pipeline: Any) -> int:
+    """FX-graph cache misses observed inside this exact pipeline's guard."""
+    return _proof_count(pipeline, "cache_misses")
 
 
 def unwrap(pipeline: Any) -> bool:
@@ -1508,7 +1676,10 @@ __all__ = [
     "cell_lane",
     "contract_drift",
     "counters_delta",
+    "cache_hit_count",
+    "cache_miss_count",
     "enable",
+    "execution_count",
     "execution_contract",
     "execution_contract_digest",
     "family_from_ref",
@@ -1528,6 +1699,7 @@ __all__ = [
     "runtime_key",
     "seed_artifact",
     "seed_env",
+    "set_guard_failure_callback",
     "sku_slug",
     "system_repo",
     "toolchain_present",

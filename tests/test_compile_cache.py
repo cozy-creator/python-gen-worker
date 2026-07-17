@@ -230,6 +230,60 @@ def test_w8a8_guard_never_retries_eager():
     assert calls["eager"] == 0
 
 
+def test_guard_revocation_failure_latches_fail_closed_for_optional_lane():
+    calls = {"compiled": 0, "eager": 0, "callback": 0}
+
+    def eager(value):
+        calls["eager"] += 1
+        return value
+
+    def broken(_value):
+        calls["compiled"] += 1
+        raise RuntimeError("graph failed")
+
+    def revoke(_detail):
+        calls["callback"] += 1
+        raise RuntimeError("state path unavailable")
+
+    signal = {"callback": revoke}
+    guarded = cc._guarded(eager, broken, "transformer", failure_signal=signal)
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError, match="revocation failed",
+    ):
+        guarded(1)
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError, match="revocation failed",
+    ):
+        guarded(2)
+    assert calls == {"compiled": 1, "eager": 0, "callback": 1}
+
+
+def test_guard_records_cache_proof_on_the_exact_wrapped_object(monkeypatch):
+    counters = iter((
+        {"fxgraph_cache_hit": 10, "fxgraph_cache_miss": 2},
+        {"fxgraph_cache_hit": 13, "fxgraph_cache_miss": 3},
+    ))
+    monkeypatch.setattr(cc, "inductor_counters", lambda: next(counters))
+    signal = {
+        "callback": None,
+        "lock": threading.Lock(),
+        "successful_calls": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+    }
+
+    guarded = cc._guarded(
+        lambda value: value,
+        lambda value: value + 1,
+        "transformer",
+        failure_signal=signal,
+    )
+    assert guarded(4) == 5
+    assert signal["successful_calls"] == 1
+    assert signal["cache_hits"] == 3
+    assert signal["cache_misses"] == 1
+
+
 def test_mode_drift():
     class _P:
         pass

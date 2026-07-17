@@ -6,6 +6,7 @@ a compile-cache snapshot on RunJob.snapshots reaches compile_cache.enable."""
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 import msgspec
 import pytest
 
-from gen_worker import Compile, RequestContext, endpoint
+from gen_worker import Compile, RequestContext, Resources, endpoint
 from gen_worker import compile_cache as cc
 from gen_worker.models import provision
 from gen_worker.api.binding import Hub
@@ -22,7 +23,7 @@ from gen_worker.api.errors import RetryableError
 from gen_worker.executor import Executor, _Job
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.registry import EndpointSpec
+from gen_worker.registry import EndpointSpec, extract_specs
 
 FAMILY = "flux2-klein-4b"
 CACHE_REF = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
@@ -58,6 +59,10 @@ class _LoadablePipe(_Pipe):
         return cls()
 
 
+class _AncillaryVae:
+    pass
+
+
 class _ColdEndpoint:
     setups = 0
     warmups = 0
@@ -69,6 +74,7 @@ class _ColdEndpoint:
 
     def warmup(self) -> None:
         type(self).warmups += 1
+        _record_fake_warm(self.pipeline)
 
     def run(self, ctx, payload: _In) -> _Out:
         type(self).runs += 1
@@ -87,9 +93,53 @@ class _Endpoint:
 
     def warmup(self) -> None:
         type(self).warmups += 1
+        pipeline = getattr(self, "pipeline", None)
+        if pipeline is not None:
+            _record_fake_warm(pipeline)
 
     def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
         return _Out()
+
+
+_FAKE_WARM_PROOF = {"hits": 1, "misses": 0}
+
+
+def _mark_fake_guard(pipeline) -> None:
+    setattr(pipeline, cc._MARKER_ATTR, {
+        "failure_signal": {
+            "callback": None,
+            "lock": threading.Lock(),
+            "successful_calls": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+        },
+        "originals": [],
+        "regional_mods": [],
+    })
+
+
+def _record_fake_warm(pipeline) -> None:
+    marker = getattr(pipeline, cc._MARKER_ATTR, None) or {}
+    signal = marker.get("failure_signal")
+    if not isinstance(signal, dict):
+        return
+    lock = signal["lock"]
+    with lock:
+        signal["successful_calls"] += 1
+        signal["cache_hits"] += _FAKE_WARM_PROOF["hits"]
+        signal["cache_misses"] += _FAKE_WARM_PROOF["misses"]
+
+
+def _guarded_apply(pipeline, _cfg, *, cache_ready, guard=True):
+    assert cache_ready
+    assert guard
+    _mark_fake_guard(pipeline)
+    return True
+
+
+def _guarded_enable(pipeline, *_args):
+    _mark_fake_guard(pipeline)
+    return True
 
 
 def _spec(compile_cfg=None) -> EndpointSpec:
@@ -101,15 +151,17 @@ def _spec(compile_cfg=None) -> EndpointSpec:
     )
 
 
-def _artifact(tmp_path: Path, **meta_overrides) -> Path:
+def _artifact(
+    tmp_path: Path, *, family: str = FAMILY, **meta_overrides,
+) -> Path:
     cap = tmp_path / "cap"
     (cap / "inductor" / "g").mkdir(parents=True)
     (cap / "inductor" / "g" / "code.py").write_text("x")
     (cap / "triton").mkdir()
-    cfg = Compile(shapes=((768, 768),), family=FAMILY)
+    cfg = Compile(shapes=((768, 768),), family=family)
     signature, weight_contract = cc.execution_contract(_Pipe(), cfg)
     meta = cc.artifact_metadata(
-        family=FAMILY, shapes=cfg.shapes, targets=cfg.targets,
+        family=family, shapes=cfg.shapes, targets=cfg.targets,
         graph_signature=signature, weight_contract=weight_contract,
     )
     meta.update(meta_overrides)
@@ -130,6 +182,7 @@ def _wire_executor(spec, tmp_path, *, ready=True, resident=True):
     pipe = _Pipe()
     if ready:
         rec.instance = _Endpoint()
+        rec.instance.pipeline = pipe
         rec.ready = True
         model_ref = wire_ref(spec.models["pipeline"])
         rec.held_refs = [model_ref]
@@ -138,13 +191,20 @@ def _wire_executor(spec, tmp_path, *, ready=True, resident=True):
         active = None
         if "#fp8-w8a8" in model_ref:
             setattr(pipe, "_cozy_weight_lane", "w8a8")
+            _mark_fake_guard(pipe)
             selection = type("Selection", (), {
                 "ref": CACHE_REF + "-w8a8",
                 "snapshot_digest": DIGEST_A,
                 "path": tmp_path / "already-proven-w8a8.tar.gz",
             })()
             active = {id(pipe): selection}
-        ex._install_compile_targets(rec, spec, [pipe], active)
+        ex._install_compile_targets(
+            rec,
+            spec,
+            [pipe],
+            active,
+            {id(pipe): {spec.name}} if active else None,
+        )
     if resident:
         ex.store.residency.track_vram(
             wire_ref(spec.models["pipeline"]), pipe, vram_bytes=1)
@@ -226,16 +286,9 @@ def test_family_from_ref_and_is_cache_ref():
 
 
 def _fake_counters(monkeypatch, *, hits=3, misses=1):
-    """Simulate inductor counters advancing across the adoption warmup."""
-    state = {"n": 0}
-
-    def counters():
-        state["n"] += 1
-        if state["n"] == 1:  # before-warmup snapshot
-            return {"fxgraph_cache_hit": 10, "fxgraph_cache_miss": 5}
-        return {"fxgraph_cache_hit": 10 + hits, "fxgraph_cache_miss": 5 + misses}
-
-    monkeypatch.setattr(cc, "inductor_counters", counters)
+    """Simulate exact-object cache proof inside the endpoint warmup."""
+    monkeypatch.setitem(_FAKE_WARM_PROOF, "hits", hits)
+    monkeypatch.setitem(_FAKE_WARM_PROOF, "misses", misses)
 
 
 def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
@@ -248,6 +301,7 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
 
     def _fake_apply(pipeline, cfg, *, cache_ready, guard=True):
         applied.append((pipeline, cfg, cache_ready))
+        _mark_fake_guard(pipeline)
         return True
 
     monkeypatch.setattr(cc, "apply", _fake_apply)
@@ -261,12 +315,9 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
     assert adopted[0].operation_id == OP_A
     assert adopted[0].target_incarnation_id == _target_id(ex)
     assert adopted[0].duration_ms >= 0
-    # cache_hits/cache_misses/warmup_s are computed internally (gating the
-    # cache_miss rollback below) but intentionally not sent on the wire —
-    # the orchestrator has no reader for them (pgw#514/P3).
-    assert adopted[0].cache_hits == 0
-    assert adopted[0].cache_misses == 0
-    assert adopted[0].warmup_s == 0
+    assert adopted[0].cache_hits == 3
+    assert adopted[0].cache_misses == 1
+    assert adopted[0].warmup_s >= 0
     assert not _events(sent, pb.MODEL_STATE_FAILED)
     assert len(applied) == 1 and applied[0][2] is True
     assert isinstance(applied[0][0], _Pipe)
@@ -283,7 +334,7 @@ def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
     _artifact(tmp_path)
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
     _fake_counters(monkeypatch, hits=0, misses=2)
     unwrapped: list = []
     monkeypatch.setattr(cc, "unwrap", lambda obj: unwrapped.append(obj))
@@ -314,9 +365,8 @@ def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
-def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
-    """An endpoint without warmup() cannot prove the cell hits — the honest
-    answer is adopt_failed:no_warmup, never a blind ADOPTED."""
+def test_endpoint_without_warmup_exposes_no_adopt_target(tmp_path, monkeypatch):
+    """An endpoint without a warmup contract advertises no false target."""
 
     class _NoWarmupEndpoint:
         def setup(self, pipeline: str) -> None:  # pragma: no cover
@@ -336,11 +386,12 @@ def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
     rec = ex._classes[spec.instance_key]
     rec.instance = _NoWarmupEndpoint()
     rec.ready = True
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
-    _fake_counters(monkeypatch, hits=5, misses=0)  # counters moved elsewhere: still unprovable
+    monkeypatch.setattr(
+        cc, "apply", lambda *args, **kwargs: pytest.fail("must not adopt"))
 
+    assert ex.compile_targets() == []
     _adopt(ex)
-    _assert_failed(sent, "adopt_failed:no_warmup")
+    _assert_failed(sent, "adopt_failed:target_not_ready")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -366,7 +417,7 @@ def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
     _artifact(tmp_path)
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
     monkeypatch.setattr(_Endpoint, "warmup", lambda self: 1 / 0)
 
     _adopt(ex)
@@ -514,15 +565,8 @@ def test_adopt_serializes_same_ref_ops_across_transport_reconnect(
         active_transport["sent"].append(msg)
 
     ex._send = _send
-    monkeypatch.setattr(cc, "apply", lambda *args, **kwargs: True)
-
-    counter = {"hits": 0}
-
-    def _counters():
-        counter["hits"] += 1
-        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
-
-    monkeypatch.setattr(cc, "inductor_counters", _counters)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
 
     async def run():
         a_started = asyncio.Event()
@@ -654,9 +698,10 @@ def test_target_vacate_removes_address_before_replacement(tmp_path):
 
     rec.instance = _Endpoint()
     rec.ready = True
-    rec.held_refs = [MODEL_REF]
-    rec.held_snapshot_digests = {MODEL_REF: MODEL_DIGEST}
-    rec.held_bindings = [("pipeline", MODEL_REF, MODEL_DIGEST)]
+    model_ref = wire_ref(spec.models["pipeline"])
+    rec.held_refs = [model_ref]
+    rec.held_snapshot_digests = {model_ref: MODEL_DIGEST}
+    rec.held_bindings = [("pipeline", model_ref, MODEL_DIGEST)]
     ex._install_compile_targets(rec, spec, [_Pipe()])
     assert _target_id(ex) != old_id
 
@@ -701,11 +746,14 @@ def test_shared_instance_target_reports_sorted_function_aliases(tmp_path):
     rec = ex._classes[first.instance_key]
     rec.instance = _Endpoint()
     rec.ready = True
-    rec.held_refs = [MODEL_REF]
-    rec.held_snapshot_digests = {MODEL_REF: MODEL_DIGEST}
-    rec.held_bindings = [("pipeline", MODEL_REF, MODEL_DIGEST)]
+    model_ref = wire_ref(first.models["pipeline"])
+    rec.held_refs = [model_ref]
+    rec.held_snapshot_digests = {model_ref: MODEL_DIGEST}
+    rec.held_bindings = [("pipeline", model_ref, MODEL_DIGEST)]
     ex._install_compile_targets(rec, first, [_Pipe()])
-    assert list(ex.compile_targets()[0].function_names) == ["edit", "ep"]
+    # A custom object-level warmup cannot prove which sibling handler it
+    # covers. Only the setup-initiating handler is honestly addressable.
+    assert list(ex.compile_targets()[0].function_names) == ["ep"]
 
 
 def test_same_family_base_and_lora_targets_remain_distinct(tmp_path):
@@ -741,7 +789,10 @@ def test_same_family_base_and_lora_targets_remain_distinct(tmp_path):
             "snapshot_digest": DIGEST_A,
             "path": tmp_path / ("turbo.tar.gz" if spec is turbo else "base.tar.gz"),
         })()
-        ex._install_compile_targets(rec, spec, [pipe], {id(pipe): selection})
+        _mark_fake_guard(pipe)
+        ex._install_compile_targets(
+            rec, spec, [pipe], {id(pipe): selection}, {id(pipe): {spec.name}},
+        )
 
     targets = {t.function_names[0]: t for t in ex.compile_targets()}
     assert targets["base"].pipeline_weight_lane == "w8a8"
@@ -755,7 +806,7 @@ def test_same_family_base_and_lora_targets_remain_distinct(tmp_path):
     "bindings",
     [
         [("pipeline", MODEL_REF, "")],
-        [("pipeline", MODEL_REF, MODEL_DIGEST),
+        [("pipeline", wire_ref(_spec().models["pipeline"]), MODEL_DIGEST),
          ("pipeline", "acme/other:latest", DIGEST_B)],
     ],
 )
@@ -784,7 +835,8 @@ def test_unrelated_record_loading_preserves_existing_target(tmp_path):
     first_rec = ex._classes[first.instance_key]
     first_rec.instance = _Endpoint()
     first_rec.ready = True
-    first_rec.held_bindings = [("pipeline", MODEL_REF, MODEL_DIGEST)]
+    first_rec.held_bindings = [(
+        "pipeline", wire_ref(first.models["pipeline"]), MODEL_DIGEST)]
     ex._install_compile_targets(first_rec, first, [_Pipe()])
     first_id = ex.compile_targets()[0].incarnation_id
 
@@ -832,7 +884,7 @@ def test_active_digest_republish_requires_reload_without_unwrap(tmp_path, monkey
     _artifact(tmp_path)
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
     _fake_counters(monkeypatch, hits=2, misses=0)
     _adopt(ex, digest=DIGEST_A)
     target_before = ex.compile_targets()[0]
@@ -897,7 +949,7 @@ def test_production_setup_stamps_cold_active_identity_after_warmup(
         "load_slot",
         lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
     )
-    monkeypatch.setattr(ex, "_enable_compiled", lambda *args: True)
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
     counter = {"hits": 0}
 
     def _counters():
@@ -920,6 +972,381 @@ def test_production_setup_stamps_cold_active_identity_after_warmup(
     assert target.model_bindings[0].ref == model_ref
     assert target.model_bindings[0].snapshot_digest == MODEL_DIGEST
     assert target.contract_digest == cc.execution_contract_digest(pipe, spec.compile)
+
+
+def test_boot_warmup_proves_each_compile_object_independently(
+    tmp_path, monkeypatch,
+):
+    """A hit from pipeline A must never certify its unexecuted sibling B."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    first_ref = "acme/first"
+    second_ref = "acme/second"
+
+    class _DualEndpoint:
+        def setup(self, first: _LoadablePipe, second: _LoadablePipe) -> None:
+            self.first = first
+            self.second = second
+
+        def warmup(self) -> None:
+            _record_fake_warm(self.first)
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = EndpointSpec(
+        name="dual", method=_DualEndpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=_DualEndpoint,
+        attr_name="run",
+        models={"first": Hub(first_ref), "second": Hub(second_ref)},
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipes = {"first": _LoadablePipe(), "second": _LoadablePipe()}
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipes[kwargs["slot"]], is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    instance = asyncio.run(ex.ensure_setup(spec, {
+        first_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        second_ref: pb.Snapshot(digest=DIGEST_B),
+        CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+    }))
+    assert isinstance(instance, _DualEndpoint)
+    targets = {
+        target.model_bindings[0].slot: target for target in ex.compile_targets()
+    }
+    # The custom warmup proves only the first object. The untouched sibling is
+    # omitted rather than advertised as an adoptable target it can never prove.
+    assert set(targets) == {"first"}
+    assert targets["first"].active_compile_ref == CACHE_REF
+    assert targets["first"].active_compile_snapshot_digest == DIGEST_A
+    assert targets["first"].model_bindings[0].ref == first_ref
+
+
+def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
+    tmp_path, monkeypatch,
+):
+    """SDXL's legacy Turbo handler rejects W8A8 and is explicitly skipped.
+
+    The ordinary generate warmup still proves the attached cell and reaches
+    READY, but its cache hit must not certify the incompatible sibling alias.
+    """
+    import gen_worker.executor as executor_mod
+
+    family = "sdxl"
+    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    artifact = _artifact(tmp_path, family=family)
+    model_dir = tmp_path / "sdxl-model"
+    model_dir.mkdir()
+    calls = {"generate": 0, "generate_turbo": 0}
+
+    @endpoint(
+        models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((1024, 1024),), family=family),
+        warmup={"generate": {"prompt": "warmup"}, "generate_turbo": None},
+    )
+    class _SdxlEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            calls["generate"] += 1
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def generate_turbo(self, ctx, payload: _In) -> _Out:
+            calls["generate_turbo"] += 1
+            raise AssertionError("legacy Turbo is incompatible with W8A8")
+
+    specs = extract_specs(_SdxlEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
+
+    assert calls == {"generate": 1, "generate_turbo": 0}
+    (target,) = ex.compile_targets()
+    assert list(target.function_names) == ["generate"]
+    assert target.active_compile_ref == cell_ref
+    assert target.active_compile_snapshot_digest == DIGEST_A
+
+
+def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
+    tmp_path, monkeypatch,
+):
+    """Both aliases recover coherently after one target guard failure."""
+    import gen_worker.executor as executor_mod
+
+    cell_ref = CACHE_REF + "-w8a8"
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "flux-model"
+    model_dir.mkdir()
+    calls = {"generate": 0, "edit": 0}
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _FluxBaseEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            calls["generate"] += 1
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            calls["edit"] += 1
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+    specs = extract_specs(_FluxBaseEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipes = [_LoadablePipe(), _LoadablePipe()]
+    for pipe in pipes:
+        setattr(pipe, "_cozy_weight_lane", "w8a8")
+    remaining_pipes = iter(pipes)
+    sent: list[pb.WorkerMessage] = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=next(remaining_pipes), is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    snapshots = {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }
+    asyncio.run(ex.ensure_setup(generate, snapshots))
+
+    assert calls == {"generate": 1, "edit": 1}
+    (target,) = ex.compile_targets()
+    assert list(target.function_names) == ["edit", "generate"]
+    assert target.active_compile_ref == cell_ref
+
+    # Replay binds a real operation identity to the boot-attached active cell,
+    # then a runtime guard failure disables every alias on the exact target.
+    _adopt(
+        ex,
+        ref=cell_ref,
+        digest=DIGEST_A,
+        operation_id=OP_A,
+        target_incarnation_id=target.incarnation_id,
+    )
+    found = ex._compile_target(target.incarnation_id)
+    assert found is not None
+    rec, internal = found
+    ex.unavailable["unrelated-hardware-gate"] = (
+        "hardware_unmet", "another record owns this", {"gpu": "too_small"},
+    )
+    signal = getattr(internal.pipeline, cc._MARKER_ATTR)["failure_signal"]
+    callback = signal["callback"]
+    assert callable(callback)
+
+    async def _trip() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "compiled graph exploded")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip())
+    assert rec.stale is True
+    assert set(ex.unavailable) >= {"edit", "generate"}
+    assert all(
+        ex.unavailable[name][0] == "compile_cell_failed"
+        for name in ("edit", "generate")
+    )
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtime_guard"
+    assert failed[0].operation_id == OP_A
+
+    lifecycle = Lifecycle(
+        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+    failed_delta = lifecycle._state_delta()
+    assert "edit" not in failed_delta.available_functions
+    assert "generate" not in failed_delta.available_functions
+
+    # Declarative reconciliation replaces the stale incarnation. Only after
+    # the new exact active target proves both aliases are its owned marks
+    # cleared; unrelated unavailable reasons would remain untouched.
+    asyncio.run(ex.ensure_setup(generate, snapshots))
+    (recovered,) = ex.compile_targets()
+    assert recovered.incarnation_id != target.incarnation_id
+    assert recovered.active_compile_ref == cell_ref
+    assert list(recovered.function_names) == ["edit", "generate"]
+    assert calls == {"generate": 2, "edit": 2}
+    assert "edit" not in ex.unavailable
+    assert "generate" not in ex.unavailable
+    assert ex.unavailable["unrelated-hardware-gate"][0] == "hardware_unmet"
+    recovered_delta = lifecycle._state_delta()
+    assert {"edit", "generate"}.issubset(recovered_delta.available_functions)
+
+
+def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
+    tmp_path, monkeypatch,
+):
+    """Production-shaped SDXL: ancillary bindings cannot certify the graph."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    class _PipelineWithVaeEndpoint:
+        def setup(self, pipeline: _LoadablePipe, vae: _AncillaryVae) -> None:
+            self.pipeline = pipeline
+            self.vae = vae
+
+        def warmup(self) -> None:
+            _record_fake_warm(self.pipeline)
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = EndpointSpec(
+        name="sdxl-with-vae",
+        method=_PipelineWithVaeEndpoint.run,
+        kind="inference",
+        payload_type=_In,
+        output_mode="single",
+        cls=_PipelineWithVaeEndpoint,
+        attr_name="run",
+        models={
+            "pipeline": Hub("acme/sdxl", flavor="fp8-w8a8"),
+            "vae": Hub("acme/sdxl-vae"),
+        },
+        compile=Compile(shapes=((1024, 1024),), family=FAMILY),
+    )
+    pipeline_ref = wire_ref(spec.models["pipeline"])
+    vae_ref = wire_ref(spec.models["vae"])
+    cell_ref = CACHE_REF + "-w8a8"
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+    vae = _AncillaryVae()
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipe if kwargs["slot"] == "pipeline" else vae,
+            is_pipeline=kwargs["slot"] == "pipeline",
+        ),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    asyncio.run(ex.ensure_setup(spec, {
+        pipeline_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        vae_ref: pb.Snapshot(digest=DIGEST_B),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
+    (target,) = ex.compile_targets()
+    assert [binding.slot for binding in target.model_bindings] == ["pipeline"]
+
+    def run_with_snapshots(snapshots) -> pb.RunJob:
+        return pb.RunJob(
+            function_name=spec.name,
+            models=[
+                pb.ModelBinding(slot="pipeline", ref=pipeline_ref),
+                pb.ModelBinding(slot="vae", ref=vae_ref),
+            ],
+            snapshots=snapshots,
+            required_compile=pb.RequiredCompileExecution(
+                target_incarnation_id=target.incarnation_id,
+                cell_ref=target.active_compile_ref,
+                cell_snapshot_digest=target.active_compile_snapshot_digest,
+                contract_digest=target.contract_digest,
+            ),
+        )
+
+    # Exact pipeline evidence accepts. VAE identity remains an independent
+    # setup/residency concern and cannot replace or broaden the target proof.
+    ex._validate_required_compile(spec, run_with_snapshots({
+        pipeline_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        vae_ref: pb.Snapshot(digest=DIGEST_B),
+    }))
+    ex._validate_required_compile(spec, run_with_snapshots({
+        pipeline_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        vae_ref: pb.Snapshot(digest="blake3:" + "e" * 64),
+    }))
+    with pytest.raises(RetryableError, match="required_compile_binding_missing"):
+        ex._validate_required_compile(spec, run_with_snapshots({
+            vae_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        }))
+    with pytest.raises(RetryableError, match="required_compile_binding_mismatch"):
+        ex._validate_required_compile(spec, run_with_snapshots({
+            pipeline_ref: pb.Snapshot(digest=DIGEST_B),
+            vae_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        }))
 
 
 def test_w8a8_without_exact_cell_fails_before_pipeline_load_or_handler(
@@ -1028,7 +1455,9 @@ def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
         "path": tmp_path / "cell.tar.gz",
     })()
     with pytest.raises(cc.CompiledLaneUnavailableError, match="non-W8A8"):
-        ex._install_compile_targets(rec, spec, [pipe], {id(pipe): selection})
+        ex._install_compile_targets(
+            rec, spec, [pipe], {id(pipe): selection}, {id(pipe): {spec.name}},
+        )
 
 
 def test_w8a8_setup_with_no_addressable_compile_object_fails(tmp_path, monkeypatch):
@@ -1060,7 +1489,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_fails(tmp_path, monkeypat
         lambda *args, **kwargs: provision.SlotLoad(
             obj=_SupportObject(), is_pipeline=True),
     )
-    monkeypatch.setattr(ex, "_enable_compiled", lambda *args: True)
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
 
     with pytest.raises(cc.CompiledLaneUnavailableError, match="no addressable"):
         asyncio.run(ex.ensure_setup(spec, {
@@ -1103,7 +1532,7 @@ def test_desired_w8a8_cell_digest_and_ref_changes_vacate_then_rebuild(
         return provision.SlotLoad(obj=pipe, is_pipeline=True)
 
     monkeypatch.setattr(provision, "load_slot", _load)
-    monkeypatch.setattr(ex, "_enable_compiled", lambda *args: True)
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
     counter = {"hits": 0}
 
     def _counters():
@@ -1190,7 +1619,7 @@ def test_desired_plain_cell_change_vacates_then_rebuilds(
         lambda *args, **kwargs: provision.SlotLoad(
             obj=_LoadablePipe(), is_pipeline=True),
     )
-    monkeypatch.setattr(ex, "_enable_compiled", lambda *args: True)
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
     counter = {"hits": 0}
 
     def _counters():
@@ -1397,6 +1826,326 @@ def test_required_compile_rejects_missing_fence_and_binding_digest_drift(tmp_pat
         ex._validate_required_compile(other, run)
 
 
+def test_runtime_guard_revokes_state_emits_one_causal_failure_and_quarantines(
+    tmp_path,
+):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, sent = _wire_executor(spec, tmp_path)
+    active = _active_w8a8_target(ex)
+    active_ref = active.active_compile_ref
+    active_digest = active.active_compile_snapshot_digest
+    active_id = active.incarnation_id
+    required_run = _required_run(spec, active)
+    _adopt(
+        ex,
+        ref=active_ref,
+        digest=active_digest,
+        operation_id=OP_A,
+        target_incarnation_id=active_id,
+    )
+    sent.clear()
+    found = ex._compile_target(active_id)
+    assert found is not None
+    rec, internal = found
+    signal = getattr(internal.pipeline, cc._MARKER_ATTR)["failure_signal"]
+    callback = signal["callback"]
+    assert callable(callback)
+
+    async def _trip() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "compiled graph exploded")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        # The wrapper calls the callback only once, but duplicate delivery is
+        # harmless and cannot fabricate a second causal terminal event.
+        await asyncio.to_thread(callback, "duplicate")
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip())
+    (revoked,) = ex.compile_targets()
+    assert revoked.incarnation_id == active_id
+    assert revoked.active_compile_ref == ""
+    assert revoked.active_compile_snapshot_digest == ""
+    assert rec.stale is True
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtime_guard"
+    assert failed[0].ref == active_ref
+    assert failed[0].snapshot_digest == active_digest
+    assert failed[0].operation_id == OP_A
+    assert failed[0].target_incarnation_id == active_id
+
+    with pytest.raises(RetryableError, match="required_compile_identity_mismatch"):
+        ex._validate_required_compile(spec, required_run)
+
+    sent.clear()
+    # A controller-only desired/order rewrite can mint a new operation ID but
+    # does not change executable identity. The same target + immutable cell
+    # remains quarantined and cannot repeat wrap/warmup.
+    _adopt(
+        ex,
+        ref=active_ref,
+        digest=active_digest,
+        operation_id=OP_B,
+        target_incarnation_id=active_id,
+    )
+    _assert_failed(
+        sent,
+        "adopt_failed:cell_quarantined",
+        digest=active_digest,
+        operation_id=OP_B,
+        target_incarnation_id=active_id,
+    )
+
+
+def test_multifunction_adoption_keeps_target_identity_through_guard_failure(
+    tmp_path, monkeypatch,
+):
+    """ADOPTED -> StateDelta -> causal guard failure keeps one target key.
+
+    Tensorhub correlates the pending operation to the pre-adoption target
+    identity, including its function aliases. Adoption therefore proves the
+    entire advertised set and never narrows it in place before a later guard
+    event can quarantine the exact operation.
+    """
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "multifunction-model"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _FluxBaseEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+    specs = extract_specs(_FluxBaseEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _Pipe()
+    sent: list[pb.WorkerMessage] = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+    }))
+    (before,) = ex.compile_targets()
+    assert list(before.function_names) == ["edit", "generate"]
+    assert before.active_compile_ref == ""
+
+    async def _local_cell(ref, snapshot=None, *, binding=None):
+        return artifact.parent
+
+    ex.store.ensure_local = _local_cell  # type: ignore[method-assign]
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
+    _adopt(
+        ex,
+        operation_id=OP_A,
+        target_incarnation_id=before.incarnation_id,
+    )
+    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
+    assert len(adopted) == 1
+    assert adopted[0].target_incarnation_id == before.incarnation_id
+
+    lifecycle = Lifecycle(
+        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+    (after_adopt,) = lifecycle._state_delta().compile_targets
+    assert after_adopt.incarnation_id == before.incarnation_id
+    assert list(after_adopt.function_names) == list(before.function_names)
+    assert after_adopt.active_compile_ref == CACHE_REF
+
+    found = ex._compile_target(before.incarnation_id)
+    assert found is not None
+    _rec, internal = found
+    signal = getattr(internal.pipeline, cc._MARKER_ATTR)["failure_signal"]
+    callback = signal["callback"]
+    assert callable(callback)
+
+    async def _trip() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "compiled graph exploded")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip())
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtime_guard"
+    assert failed[0].operation_id == OP_A
+    assert failed[0].target_incarnation_id == before.incarnation_id
+
+    (after_guard,) = lifecycle._state_delta().compile_targets
+    assert after_guard.incarnation_id == before.incarnation_id
+    assert list(after_guard.function_names) == list(before.function_names)
+    assert after_guard.active_compile_ref == ""
+    assert after_guard.active_compile_snapshot_digest == ""
+
+
+def test_hot_adoption_rejects_an_unproven_advertised_function_alias(
+    tmp_path, monkeypatch,
+):
+    """One function's cache hit cannot certify its advertised sibling."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "partial-function-proof-model"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _PartiallyCoveredEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            return _Out(y="eager-only")
+
+    specs = extract_specs(_PartiallyCoveredEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _Pipe()
+    sent: list[pb.WorkerMessage] = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+    }))
+    (before,) = ex.compile_targets()
+    assert list(before.function_names) == ["edit", "generate"]
+
+    async def _local_cell(ref, snapshot=None, *, binding=None):
+        return artifact.parent
+
+    ex.store.ensure_local = _local_cell  # type: ignore[method-assign]
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
+    _adopt(ex, target_incarnation_id=before.incarnation_id)
+
+    _assert_failed(
+        sent,
+        "adopt_failed:function_alias_unproven",
+        target_incarnation_id=before.incarnation_id,
+    )
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+    (after,) = ex.compile_targets()
+    assert after.incarnation_id == before.incarnation_id
+    assert list(after.function_names) == list(before.function_names)
+    assert after.active_compile_ref == ""
+
+
+def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
+    tmp_path,
+):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, sent = _wire_executor(spec, tmp_path)
+    active = _active_w8a8_target(ex)
+    _adopt(
+        ex,
+        ref=active.active_compile_ref,
+        digest=active.active_compile_snapshot_digest,
+        operation_id=OP_A,
+        target_incarnation_id=active.incarnation_id,
+    )
+    sent.clear()
+    found = ex._compile_target(active.incarnation_id)
+    assert found is not None
+    _rec, internal = found
+    callback = getattr(
+        internal.pipeline, cc._MARKER_ATTR)["failure_signal"]["callback"]
+    run = _required_run(spec, active)
+
+    async def scenario() -> None:
+        ex._loop = asyncio.get_running_loop()
+        first_has_gpu = asyncio.Event()
+        sibling_validated = asyncio.Event()
+
+        async def first_request() -> None:
+            async with ex._gpu_semaphore:
+                first_has_gpu.set()
+                await sibling_validated.wait()
+                # The active request trips its guard before releasing the GPU
+                # turn to a sibling that validated during queueing.
+                await asyncio.to_thread(callback, "first request guard failed")
+
+        async def sibling_request() -> None:
+            await first_has_gpu.wait()
+            ex._validate_required_compile(spec, run)  # intake fence passes
+            sibling_validated.set()
+            async with ex._gpu_semaphore:
+                # This is the production final fence immediately after GPU
+                # acquisition. Revocation must already be visible here.
+                with pytest.raises(
+                    RetryableError, match="required_compile_identity_mismatch",
+                ):
+                    ex._validate_required_compile(spec, run)
+
+        await asyncio.gather(first_request(), sibling_request())
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert len(_events(sent, pb.MODEL_STATE_FAILED)) == 1
+
+
 def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_path):
     spec = replace(
         _spec(), models={"pipeline": Hub(
@@ -1443,7 +2192,14 @@ def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_pa
                 "snapshot_digest": old.active_compile_snapshot_digest,
                 "path": tmp_path / "replacement.tar.gz",
             })()
-            ex._install_compile_targets(rec, spec, [new_pipe], {id(new_pipe): selection})
+            _mark_fake_guard(new_pipe)
+            ex._install_compile_targets(
+                rec,
+                spec,
+                [new_pipe],
+                {id(new_pipe): selection},
+                {id(new_pipe): {spec.name}},
+            )
             assert _target_id(ex) != old.incarnation_id
             ex._gpu_semaphore.release()
             await job.task

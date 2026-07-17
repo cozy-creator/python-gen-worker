@@ -87,19 +87,17 @@ message WorkerResources {
   string gpu_sm           = 4; // compute capability, e.g. "89"
   repeated string installed_libs = 5; // e.g. "torchao"
   string image_digest     = 6; // docker image sha256
-  // Currently unpopulated (pgw#514/P4): no launcher sets WORKER_GIT_COMMIT
-  // and no Go reader consumes this field. Kept for a future coordinated fill
-  // (image_digest has the same "no producer yet" gap but a plausible one —
-  // see gen-worker Settings.worker_image_digest).
   string git_commit       = 7;
   string instance_id      = 8; // cloud provider instance id (e.g. runpod pod id)
+
   // gw#550: one-shot boot host-quality measurement. Zeros = axis not
   // measurable (CPU-only build, probe failure). Additive: old orchestrators
   // ignore it; old workers send it unset.
   HostCanary host_canary  = 9;
-  // Full actual runtime identity (e.g. "2.13.0+cu130"). Tensorhub compares
-  // major.minor before dispatching a version-keyed Inductor cache.
-  string torch_version    = 10;
+  // Exact runtime evidence used to select torch.compile cells. Full version
+  // (for example 2.13.0+cu130); consumers compare the major.minor key while
+  // artifact metadata remains responsible for stricter compatibility checks.
+  string torch_version = 10;
 }
 
 // Boot host canary (gw#550): the host properties the CPU-bound video tail
@@ -121,8 +119,10 @@ message ModelResidency {
   string ref = 1;              // canonical model ref string
   ResidencyTier tier = 2;      // highest tier the model currently occupies
   int64 vram_bytes = 3;        // measured footprint; set when tier = VRAM, else 0
-  // Exact worker-observed identity. Empty/zero is a legacy or otherwise
-  // unknown observation; the orchestrator must never infer it from a tag.
+  // Exact immutable bytes and the DesiredResidency generation that caused
+  // their materialization. Both are additive protocol-v3 evidence: legacy
+  // workers leave them zero/empty, which means identity is unknown rather
+  // than inferred from the mutable ref.
   string snapshot_digest = 4;
   uint64 residency_generation = 5;
 }
@@ -208,16 +208,22 @@ message StateDelta {
 message CompileTarget {
   string incarnation_id = 1;
   string family = 2;
+  // Raw worker runtime vocabulary: "" | "fp8-hooks" | "w8a8", optionally
+  // with the declared LoRA bucket suffix. Only compile-cell flavor identity
+  // canonicalizes fp8-hooks to the token w8a16.
   string pipeline_weight_lane = 3;
   int32 lora_bucket = 4;
   string contract_digest = 5;
-  // Current exact compiled state: empty together for eager; nonempty together
-  // only after wrap+warmup proof. READY W8A8 always reports both nonempty.
+  // Current exact compiled state: empty together for eager/unavailable;
+  // nonempty together only after wrap+warmup proof. Mandatory W8A8 dispatch
+  // fails closed while these are empty or its exact identity is quarantined.
   string active_compile_ref = 6;
   string active_compile_snapshot_digest = 7;
-  // Canonical sorted aliases that address this exact target.
+  // Canonical sorted worker-proven aliases that address this exact target;
+  // an omitted alias has no target proof even if it shares endpoint config.
   repeated string function_names = 8;
-  // Canonical sorted exact immutable load-time bindings held by this target.
+  // Canonical sorted exact immutable load-time bindings owned by this target.
+  // This may be a strict subset of the function's/RunJob's setup bindings.
   repeated CompileTargetBinding model_bindings = 9;
 }
 
@@ -259,9 +265,11 @@ message RunJob {
   // may be omitted; required_compile retains every exact model digest plus the
   // selected cell so the worker can revalidate immutable execution identity.
   map<string, Snapshot> snapshots = 12;
-  // Exact current-state fence selected by Tensorhub. Mandatory for W8A8; when
-  // present on any lane the worker validates before setup/mutation and
-  // immediately before execution so replacement returns typed RETRYABLE.
+  // Unique exact current-state fence selected by Tensorhub. Multiple
+  // applicable targets fail closed. Mandatory for W8A8; when present on any
+  // lane the worker validates before setup/mutation and
+  // immediately before execution so replacement or causal runtime revocation
+  // returns typed RETRYABLE without GPU work.
   RequiredCompileExecution required_compile = 13;
 }
 
@@ -299,14 +307,12 @@ message ModelBinding {
   // resolves them and attaches presigned snapshots in RunJob.snapshots;
   // workers never fetch upstream. Additive: old workers ignore this field.
   repeated LoraOverlay loras = 3;
-  // th#767c: the resolved repo's inference-defaults metadata for this slot,
-  // JSON-encoded as an instance of the slot's family vocabulary struct
-  // (gen_worker.families.FamilyDefaults subclass; see `gen-worker families
-  // export-schemas` for the JSON Schema tensorhub validates repo metadata
-  // against at PUT time). Empty when the resolved repo carries no metadata
-  // — the worker falls back to the endpoint's code-declared
-  // Slot(fallback=...) preset. Additive: old orchestrators omit this field
-  // and workers degrade to fallback-only.
+  // th#767: the resolved repo's family-typed inference defaults/constraints,
+  // JSON-encoded ("" = none set). Schema is per-family and versioned
+  // hub-side (internal/modelfamily/inferencedefaults); pgw#520 CONTRACT.md
+  // documents this exact field name for the SDK's resolution chain
+  // (precedence: explicit payload value > this > endpoint fallback preset).
+  // Additive: old workers ignore this field.
   string inference_defaults = 4;
 }
 
@@ -330,8 +336,7 @@ message LoraOverlay {
 
 // A pinned tensorhub repo snapshot with presigned download URLs. The worker
 // never calls tensorhub for ref resolution; the orchestrator is the only
-// resolver and ships snapshots on DesiredResidency / RunJob (or compile-cache
-// adoption ModelOp).
+// resolver and ships snapshots on DesiredResidency / RunJob.
 message Snapshot {
   string digest = 1; // snapshot digest the download is pinned to
   repeated SnapshotFile files = 2;
@@ -374,10 +379,7 @@ enum JobStatus {
   JOB_STATUS_INVALID     = 2; // bad input; never retry
   JOB_STATUS_RETRYABLE   = 3; // transient; orchestrator may requeue (bumping attempt)
   JOB_STATUS_FATAL       = 4; // permanent execution failure; do not retry
-  JOB_STATUS_CANCELED    = 5; // terminal ack of CancelJob (NOT deadline abort — a
-                               // deadline expiry sends FATAL, safe_message:"deadline
-                               // exceeded"; see executor.py's _DeadlineExceeded handler
-                               // and CONTRACT.md's status table)
+  JOB_STATUS_CANCELED    = 5; // terminal ack of CancelJob (or local deadline abort)
 }
 
 // The one metrics vehicle. Worker-observed values only; the orchestrator
@@ -437,16 +439,17 @@ message CancelJob {
 // Models
 // ---------------------------------------------------------------------------
 
-// Orchestrator -> worker model residency command. Every op is answered by at
-// least one ModelEvent for the same ref.
+// Orchestrator -> worker compile-cache adoption command. Ordinary model
+// residency is declared through HelloAck.desired_residency.
 message ModelOp {
   ModelOpKind op = 1;
   string ref = 2;
-  // Presigned compile-cache snapshot. Ordinary model residency is declared in
-  // HelloAck.desired_residency; ModelOp is only the compile-cache escape hatch.
+  // Presigned compile-cache snapshot.
   Snapshot snapshot = 3;
-  // Opaque orchestrator-minted identity for this one adoption attempt. Required
-  // for ADOPT_COMPILE_CACHE and echoed by every terminal ModelEvent.
+  // Orchestrator-minted causal identity for one hot-adoption attempt. Workers
+  // echo it on its ADOPTED/adopt-FAILED terminal and retain it for at most one
+  // later causal compiled-runtime FAILED. It is deliberately distinct from
+  // the snapshot digest: retries may target identical bytes.
   string operation_id = 4;
   // Exact READY CompileTarget to mutate. Required for ADOPT_COMPILE_CACHE;
   // family/ref fallback is forbidden.
@@ -461,35 +464,31 @@ enum ModelOpKind {
   // ref (`_system/family-<f>#inductor-<sku>-torch<maj.min>`). The worker
   // downloads+verifies+seeds the cache, re-wraps the already-resident modules
   // of endpoints declaring compile family <f>, runs one warmup trace, and
-  // answers ModelEvent{ADOPTED, duration_ms, snapshot_digest}. ANY failure =>
-  // stay eager and answer ModelEvent{FAILED, error:"adopt_failed:<reason>",
-  // snapshot_digest, operation_id}. Both terminal results echo the exact
-  // ModelOp snapshot digest and operation ID; either missing identity fails
-  // closed before download or mutation. Sent only to
+  // answers ModelEvent{ADOPTED, duration_ms}. ANY failure => stay eager and
+  // answer ModelEvent{FAILED, error:"adopt_failed:<reason>"}. Sent only to
   // job-idle workers. Workers predating this kind ignore it silently (no
   // ModelEvent), which the orchestrator treats as not-adopted.
   MODEL_OP_KIND_ADOPT_COMPILE_CACHE = 4;
 }
 
 // Worker -> orchestrator model residency transition. The single channel for
-// transfer/setup outcomes, VRAM footprints, and evictions — whether triggered
-// by desired-state reconciliation, compile-cache adoption, or local policy.
+// download progress, load/unload outcomes, VRAM footprints, and evictions —
+// whether triggered by desired reconciliation, compile-cache adoption, or the
+// worker's own cache policy.
 message ModelEvent {
   string ref = 1;
   ModelState state = 2;
   int64 vram_bytes = 3;  // measured VRAM footprint; set when state = IN_VRAM
-  string error = 4;      // set when state = FAILED (e.g. "oom", "model_in_use", "url_expired", "adopt_failed:<reason>")
+  string error = 4;      // set when FAILED (e.g. "oom", "url_expired", initial "adopt_failed:<reason>", later causal "adopt_failed:runtime_guard")
   int64 bytes_done = 5;  // download progress; set while state = DOWNLOADING
   int64 bytes_total = 6; // set while state = DOWNLOADING (0 = unknown)
   int64 duration_ms = 7; // op wall time; set when state = ADOPTED
-  // Adoption observability (gw#391), intended for state = ADOPTED on inductor
+  // Adoption observability (gw#391), set when state = ADOPTED for inductor
   // cells: FX-graph cache hits/misses observed during the adoption warmup and
-  // the warmup wall seconds. hits>0 with misses>0 would mean partial shape
-  // coverage. NOT currently populated by gen-worker (pgw#514/P3): the
-  // orchestrator has no reader for these three fields, so the worker stopped
-  // writing them rather than ship values nothing consumes. Re-populate
-  // (executor.py's compile-cache adopt path already computes hits/misses/
-  // warmup_s locally) if/when the orchestrator grows a reader.
+  // the warmup wall seconds. A warmup observing ZERO hits never reports
+  // ADOPTED - it rolls back to eager and reports adopt_failed:cache_miss; an
+  // endpoint without warmup() cannot prove the cell and reports
+  // adopt_failed:no_warmup. hits>0 with misses>0 = partial shape coverage.
   int64 cache_hits = 8;
   int64 cache_misses = 9;
   double warmup_s = 10;
@@ -508,19 +507,19 @@ message ModelEvent {
   // the worker; same-process reconnects replay only satisfying generations
   // whose successful stream.write delivery has not completed yet.
   uint64 host_ram_capacity_generation = 15;
-  // Snapshot identity captured when this operation began. Both fields are
-  // required for exact residency evidence; empty/zero remains backward-compatible
-  // unknown state rather than being relabelled from current desired config.
-  // ADOPTED/FAILED terminal compile-cache results always echo the exact
-  // ModelOp.snapshot.digest (and use generation zero because ModelOp is not a
-  // DesiredResidency transition).
+  // Immutable bytes and DesiredResidency generation for this ref transition.
+  // A receiver must treat an empty digest or zero generation as identity
+  // unknown. Generation fences delayed events after a tag moves or a newer
+  // desired replacement is reconciled without changing protocol version 3.
   string snapshot_digest = 16;
   uint64 residency_generation = 17;
-  // Opaque identity of the ADOPT_COMPILE_CACHE command that produced this
-  // terminal ADOPTED/FAILED result. Empty on ordinary residency/cache events.
+  // Echoes ModelOp.operation_id on ADOPTED/adopt-FAILED and at most one later
+  // causal compiled-runtime FAILED. Empty on boot-attached cells and ordinary
+  // snapshot/download/residency events.
   string operation_id = 18;
-  // Echoes ModelOp.target_incarnation_id on every ADOPT_COMPILE_CACHE
-  // terminal including failures; empty on ordinary model events.
+  // Echoes ModelOp.target_incarnation_id on ADOPTED/adopt-FAILED and at most
+  // one later causal compiled-runtime FAILED; empty on boot-attached cells and
+  // ordinary model events.
   string target_incarnation_id = 19;
 }
 
@@ -549,11 +548,7 @@ enum ModelState {
 message FnUnavailable {
   string function_name = 1;
   // reason vocabulary: compute_capability_unmet, insufficient_vram,
-  // missing_cuda_library, cuda_unavailable, setup_failed. (NOT
-  // insufficient_disk — disk pressure is treated as transient and only ever
-  // fails the job RETRYABLE; it never disables the function. See gen-worker
-  // executor.py Executor._mark_setup_failed / the setup/injection except
-  // branch, both of which explicitly exclude InsufficientDiskError here.)
+  // missing_cuda_library, insufficient_disk, cuda_unavailable, setup_failed.
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}
@@ -577,7 +572,7 @@ message FnDegraded {
 // Orchestrator -> worker: stop accepting work, finish in-flight jobs, ship
 // results, close the stream, exit. No reply message; stream close is the ack.
 message Drain {
-  int64 deadline_ms = 1; // 0 waits indefinitely; >0 is the total grace budget from receipt
+  int64 deadline_ms = 1; // relative grace budget; 0 waits without a lifecycle deadline
 }
 
 // ---------------------------------------------------------------------------

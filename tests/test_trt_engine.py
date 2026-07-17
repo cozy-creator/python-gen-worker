@@ -5,6 +5,7 @@ hot-adopt) — everything that runs without a GPU or tensorrt installed."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 from pathlib import Path
 
@@ -48,6 +49,13 @@ def _tar(tmp_path: Path, meta=None, name="trt-rtx-4090-trt10.16-fp16.tar.gz") ->
     (work / te.ENGINE_NAME).write_bytes(b"\x00engine-bytes")
     (work / te.REFIT_MAP_NAME).write_text("[]")
     return te.pack(work, tmp_path / name, meta or _meta())
+
+
+def _tree_snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*")) if path.is_file()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +129,115 @@ def test_unpack_rejects_unexpected_members(tmp_path):
         te.unpack(p, tmp_path / "out")
 
 
+def test_rejected_stage_leaves_cache_byte_identical(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "sentinel").write_bytes(b"live-cache-bytes")
+    before = _tree_snapshot(cache)
+    artifact = _tar(tmp_path, meta=_meta(trt="10.16.0.99"))
+    monkeypatch.setattr(te, "runtime_key", lambda: dict(RUNTIME))
+
+    with pytest.raises(cc.AdoptError) as exc:
+        te.stage_artifact(artifact, FAMILY, cache)
+    assert exc.value.reason == "key_mismatch"
+    assert _tree_snapshot(cache) == before
+    assert list(cache.glob("trt-engine-stage-*")) == []
+
+
+def test_concurrent_stages_are_isolated_and_never_publish_live_files(
+    tmp_path, monkeypatch,
+):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "sentinel").write_bytes(b"unchanged")
+    artifact = _tar(tmp_path)
+    monkeypatch.setattr(te, "runtime_key", lambda: dict(RUNTIME))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        staged = list(pool.map(
+            lambda _index: te.stage_artifact(artifact, FAMILY, cache), range(4),
+        ))
+    try:
+        assert len({item.root for item in staged}) == 4
+        assert all((item.root / te.ENGINE_NAME).read_bytes() == b"\x00engine-bytes"
+                   for item in staged)
+        assert not (cache / "trt-engine" / te.ENGINE_NAME).exists()
+        assert (cache / "sentinel").read_bytes() == b"unchanged"
+    finally:
+        for item in staged:
+            item.close()
+    assert list(cache.glob("trt-engine-stage-*")) == []
+
+
+def test_failure_after_staging_cleans_isolated_tree_before_live_mutation(
+    tmp_path, monkeypatch,
+):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "sentinel").write_bytes(b"unchanged")
+    artifact = _tar(tmp_path)
+    monkeypatch.setattr(te, "runtime_key", lambda: dict(RUNTIME))
+    monkeypatch.setattr(
+        te, "_load_engine", lambda _path: (_ for _ in ()).throw(
+            RuntimeError("process died while deserializing")),
+    )
+
+    class _Module:
+        def forward(self, value):
+            return value
+
+        def state_dict(self):
+            return {}
+
+    class _Pipeline:
+        def __init__(self):
+            self.unet = _Module()
+
+    pipeline = _Pipeline()
+    original = pipeline.unet.forward
+    with pytest.raises(RuntimeError, match="process died"):
+        te.load_and_wrap(pipeline, _spec().compile, artifact, cache)
+    assert pipeline.unet.forward == original
+    assert not hasattr(pipeline, te._MARKER_ATTR)
+    assert (cache / "sentinel").read_bytes() == b"unchanged"
+    assert list(cache.glob("trt-engine-stage-*")) == []
+
+
 def test_find_artifact(tmp_path):
     a = _tar(tmp_path)
     assert te.find_artifact(a) == a
     assert te.find_artifact(tmp_path) == a
     assert te.find_artifact(tmp_path / "nope") is None
+
+
+def test_trt_guard_revocation_failure_never_falls_back(monkeypatch):
+    calls = {"eager": 0, "runner": 0, "callback": 0}
+
+    class _Module:
+        def forward(self, *_args, **_kwargs):
+            calls["eager"] += 1
+            return "eager"
+
+    class _Runner:
+        def __call__(self, _feeds):
+            calls["runner"] += 1
+            raise RuntimeError("engine failed")
+
+    monkeypatch.setattr(te, "_unet_feeds", lambda *args, **kwargs: {})
+    module = _Module()
+    te.wrap_module(module, _Runner(), _meta())
+    state = getattr(module, te._MARKER_ATTR)["state"]
+
+    def revoke(_detail):
+        calls["callback"] += 1
+        raise RuntimeError("state path unavailable")
+
+    state["failure_callback"] = revoke
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="revocation failed"):
+        module.forward(object())
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="revocation failed"):
+        module.forward(object())
+    assert calls == {"eager": 0, "runner": 1, "callback": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +335,11 @@ def test_adopt_trt_ref_wraps_and_reports(tmp_path, monkeypatch):
 
     def _fake_load_and_wrap(pipeline, cfg, artifact, cache_dir=None):
         calls.append((pipeline, cfg, Path(artifact)))
+        setattr(pipeline, te._MARKER_ATTR, {
+            "meta": _meta(),
+            "state": {"failure_callback": None},
+            "module": pipeline.transformer,
+        })
         return _meta()
 
     monkeypatch.setattr(te, "load_and_wrap", _fake_load_and_wrap)
