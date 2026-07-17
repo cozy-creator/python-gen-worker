@@ -49,6 +49,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import time
@@ -152,14 +153,31 @@ def gen_worker_version() -> str:
         return ""
 
 
+def lane_bucket(lane: str) -> Tuple[str, int]:
+    """(base lane, rank bucket) for a weight lane in stamp OR label-token
+    form: ``"w8a8-lora128"`` -> ``("w8a8", 128)``, ``"lora32"`` -> ``("", 32)``,
+    ``"w8a8"`` -> ``("w8a8", 0)``. Sparse stamps (eager-only, never cells)
+    do not parse as bucketed — they pass through as their whole string."""
+    m = re.search(r"(?:^|-)lora(\d+)$", str(lane or ""))
+    if m is None:
+        return str(lane or ""), 0
+    base = lane[: m.start()]
+    return base, int(m.group(1))
+
+
 def lane_token(weight_lane: str) -> str:
     """Label token for a traced weight lane (gw#534): cells of different
     lanes are DIFFERENT graphs and must not collide on one flavor label.
     "" (plain resident, incl. bf16-resident) stays unsuffixed. LoRA-branch
-    lanes (``w8a8-lora<bucket>``, gw#547) pass through — one graph family
-    per rank bucket."""
-    return {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8"}.get(
-        str(weight_lane or ""), str(weight_lane))
+    lanes (gw#547/gw#561) keep their base lane's token + the bucket suffix:
+    ``w8a8-lora128`` -> ``w8a8-lora128``, ``fp8-hooks-lora32`` ->
+    ``w8a16-lora32``, ``lora32`` -> ``lora32`` — one graph family per
+    (base lane, rank bucket)."""
+    base, bucket = lane_bucket(str(weight_lane or ""))
+    tok = {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8"}.get(base, base)
+    if bucket:
+        return f"{tok}-lora{bucket}" if tok else f"lora{bucket}"
+    return tok
 
 
 def flavor_label(sku: str, torch_version: str, weight_lane: str = "") -> str:
@@ -240,6 +258,7 @@ def artifact_metadata(
     storage_dtype: str = "",
     compile_mode: str = "whole",
     weight_lane: str = "",
+    lora_bucket: int = 0,
     graph_signature: str = "",
     weight_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -271,6 +290,7 @@ def artifact_metadata(
         "storage_dtype": str(storage_dtype or ""),
         "compile_mode": str(compile_mode or "whole"),
         "weight_lane": str(weight_lane or ""),
+        "lora_bucket": int(lora_bucket or 0),
         "graph_signature": str(graph_signature or ""),
         "weight_contract": dict(weight_contract or {}),
         "libs": _lib_versions(),
@@ -511,6 +531,42 @@ def mode_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     if want != have:
         return f"low_vram_mode {want!r} != pipeline {have!r}"
     return ""
+
+
+def apply_lora_lane(pipeline: Any, bucket: int) -> bool:
+    """Put the pipeline on the branch-bearing graph family for ``bucket``
+    (gw#561): canonical zeroed rank-``bucket`` branches on every
+    branch-capable denoiser Linear (the gw#547 compiled-lane contract) + the
+    ``<base>-lora<bucket>`` lane stamp, so :func:`lane_drift` admits exactly
+    the matching lora cells. Raises when the pipeline has no branch-capable
+    denoiser — a declared bucket that cannot trace must fail loud, not
+    publish/adopt the wrong graph."""
+    if not bucket:
+        return False
+    from .models import w8a8_lora
+
+    denoiser = w8a8_lora.branch_target(pipeline)
+    if denoiser is None:
+        raise RuntimeError(
+            "Compile.lora_bucket declared but the pipeline has no "
+            "branch-capable denoiser (transformer/unet)"
+        )
+    w8a8_lora.enable_lora_branches(denoiser, int(bucket))
+    w8a8_lora.stamp_lane(pipeline, denoiser)
+    return True
+
+
+def drop_lora_lane(pipeline: Any) -> None:
+    """Undo :func:`apply_lora_lane`: drop the branch buffers and restore the
+    branchless lane stamp (the eager rollback — canonical zeroed branches
+    cost +21-32% eager, gw#547)."""
+    from .models import w8a8_lora
+
+    denoiser = w8a8_lora.branch_target(pipeline)
+    if denoiser is None:
+        return
+    w8a8_lora.disable_lora_branches(denoiser)
+    w8a8_lora.stamp_lane(pipeline, denoiser)
 
 
 def lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
@@ -1110,6 +1166,7 @@ def build(
     prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
     declared_vram_gb: float = 0.0,
     serving_image_digest: str = "",
+    lora_bucket: int = 0,
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Compile a diffusers pipeline over ``shapes`` and package the resulting
     inductor+triton caches as a per-SKU artifact.
@@ -1163,6 +1220,11 @@ def build(
     # traced under travels in the metadata for adopt-time parity checks. Run
     # on a pod with the same free-VRAM class as the target workers.
     placed = place_pipeline(pipe)
+    # gw#561: branch-bearing cells trace WITH canonical zeroed rank-bucket
+    # branches installed — zeroed slots are bit-exact with branchless output
+    # (gw#547), so the warm calls render normally while the traced graphs
+    # carry the branch GEMMs.
+    apply_lora_lane(pipe, int(lora_bucket))
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
     # Child processes (inductor compile workers) inherit the opt-in; this
@@ -1205,6 +1267,7 @@ def build(
         # gw#534: the lane the pipeline ACTUALLY traced under — the loader may
         # have upgraded a requested fp8 cast to bf16-resident on this pod.
         weight_lane=pipeline_weight_lane(pipe),
+        lora_bucket=int(lora_bucket or 0),
         graph_signature=graph_signature,
         weight_contract=weight_contract,
     )
@@ -1228,8 +1291,10 @@ __all__ = [
     "ENV_CACHE_PATH",
     "ENV_CACHE_URL",
     "apply",
+    "apply_lora_lane",
     "artifact_metadata",
     "capture_env",
+    "drop_lora_lane",
     "cell_lane",
     "contract_drift",
     "counters_delta",
@@ -1242,6 +1307,7 @@ __all__ = [
     "gen_worker_version",
     "inductor_counters",
     "is_cache_ref",
+    "lane_bucket",
     "lane_token",
     "lane_drift",
     "mode_drift",

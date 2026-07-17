@@ -371,6 +371,25 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     )
 
 
+def _cell_lane_matches(
+    ref: str, family: str, *, wants_w8a8: bool, want_bucket: int
+) -> bool:
+    """Whether an inductor cell ref serves this endpoint's graph family
+    (gw#561): the declared rank bucket is half of the identity — a
+    lora_bucket endpoint needs exactly a ``-lora<bucket>`` cell of its base
+    lane, and a branchless endpoint must never fetch one (either mismatch is
+    a guaranteed lane_drift that would shadow the right cell and serve
+    eager)."""
+    from . import compile_cache
+
+    if not compile_cache.is_cache_ref(ref, family):
+        return False
+    base, bucket = compile_cache.lane_bucket(compile_cache.cell_lane(ref))
+    if bucket != int(want_bucket or 0):
+        return False
+    return base == "w8a8" if wants_w8a8 else base != "w8a8"
+
+
 def _model_failure_vocab(exc: BaseException) -> str:
     """Contract §9 ModelEvent.error vocabulary for residency failures."""
     if is_cuda_oom(exc):
@@ -2477,23 +2496,24 @@ class Executor:
             ):
                 wants_w8a8 = True
                 break
+        want_bucket = int(getattr(spec.compile, "lora_bucket", 0) or 0)
         if wants_w8a8:
             # TensorRT cells currently expose only their plain fp16 contract.
             # The existing Forge's -w8a8 Inductor cell is the sole artifact
             # proven to preserve Fp8ScaledLinear/torch._scaled_mm semantics.
             candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
-                if compile_cache.is_cache_ref(ref, family)
-                and compile_cache.cell_lane(ref) == "w8a8"
+                if _cell_lane_matches(
+                    ref, family, wants_w8a8=True, want_bucket=want_bucket)
             ]
         else:
-            candidates = [
+            candidates = ([
                 (ref, snap) for ref, snap in snapshots.items()
                 if trt_engine.is_engine_ref(ref, family)
-            ] + [
+            ] if not want_bucket else []) + [
                 (ref, snap) for ref, snap in snapshots.items()
-                if compile_cache.is_cache_ref(ref, family)
-                and compile_cache.cell_lane(ref) != "w8a8"
+                if _cell_lane_matches(
+                    ref, family, wants_w8a8=False, want_bucket=want_bucket)
             ]
         for ref, snap in candidates:
             try:
@@ -2940,12 +2960,30 @@ class Executor:
         async with self._gpu_semaphore:
             adopted: List[Tuple[_ClassRecord, EndpointSpec]] = []
             wrapped_objs: List[Any] = []
+            lane_objs: List[Any] = []
+
+            async def rollback() -> None:
+                for obj in wrapped_objs:
+                    compile_cache.unwrap(obj)
+                for obj in lane_objs:
+                    compile_cache.drop_lora_lane(obj)
+
             for rec, s in resident.values():
                 applied = False
                 for slot in self._setup_slots(s):
                     obj = self.store.residency.obj(wire_ref(s.models[slot]))
                     if obj is None:
                         continue
+                    # gw#561: a lora_bucket endpoint that stayed eager at boot
+                    # rolled its branches back; re-apply the declared graph
+                    # family so the pushed lora cell's lane can match.
+                    bucket = int(getattr(s.compile, "lora_bucket", 0) or 0)
+                    if bucket and not is_trt:
+                        try:
+                            compile_cache.apply_lora_lane(obj, bucket)
+                            lane_objs.append(obj)
+                        except Exception as exc:
+                            return await fail("lane_apply", str(exc))
                     if is_trt:
                         try:
                             await asyncio.to_thread(
@@ -2968,6 +3006,7 @@ class Executor:
                             or compile_cache.contract_drift(meta, obj, s.compile)
                         )
                         if drift:
+                            await rollback()
                             return await fail("key_mismatch", drift)
                         # Re-adoption of a re-published cell: drop the previous
                         # wrap + dynamo's in-memory code so warmup re-traces
@@ -2981,11 +3020,8 @@ class Executor:
                 if applied:
                     adopted.append((rec, s))
             if not adopted:
+                await rollback()
                 return await fail("no_target")
-
-            async def rollback() -> None:
-                for obj in wrapped_objs:
-                    compile_cache.unwrap(obj)
 
             counters_before = compile_cache.inductor_counters()
             warm_t0 = time.monotonic()

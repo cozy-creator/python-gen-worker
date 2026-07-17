@@ -191,6 +191,7 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
         low_vram_mode=low_vram_mode(pipe),
         compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
         weight_lane=pipeline_weight_lane(pipe),
+        lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
     )
     tmp = target.with_suffix(".part")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -228,6 +229,13 @@ def enable_compiled(
 
     from .models.loading import pipeline_weight_lane
 
+    # gw#561: the eager-miss rollback in provision.enable_compiled dropped
+    # the branch lane; local store/mint must key + trace the DECLARED graph
+    # family, so re-apply it for the rest of this arming attempt.
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    if bucket:
+        cc.apply_lora_lane(pipe, bucket)
+
     target = cell_path(family, pipeline_weight_lane(pipe))
     if target.exists():
         reason = store_verdict(target, family, pipe, cfg)
@@ -245,6 +253,8 @@ def enable_compiled(
             "compiler is installed (need cc/gcc/clang); serving eager. "
             "Install one to let cozy compile once and cache the result."
         )
+        if bucket:
+            cc.drop_lora_lane(pipe)
         return False
     _say(
         f"local-cells: no compile cell for this GPU/torch yet — compiling "
@@ -257,6 +267,8 @@ def enable_compiled(
     except Exception as exc:  # noqa: BLE001 — mint failure => eager, never fatal
         logger.warning("local-cells: mint failed (%s); serving eager", exc)
         cc.unwrap(pipe)
+        if bucket:
+            cc.drop_lora_lane(pipe)
         return False
     # Adopt the just-saved cell through the delivered-cell path (drops the
     # unguarded mint wrappers; re-traces hit the captured FX cache). This
@@ -265,6 +277,8 @@ def enable_compiled(
     if cc.enable(pipe, cfg, cache_dir, artifact=target):
         return True
     logger.warning("local-cells: minted cell failed re-adoption; serving eager")
+    if bucket:
+        cc.drop_lora_lane(pipe)
     return False
 
 

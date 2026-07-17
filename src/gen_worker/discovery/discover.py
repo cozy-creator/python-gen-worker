@@ -702,6 +702,10 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 fn["compile"]["storage_dtype"] = storage
             if getattr(es.compile, "regional", False):
                 fn["compile"]["regional"] = True
+            # gw#561: dynamic-LoRA endpoints trace the branch-bearing graph
+            # family; the hub's producer must build `-lora<bucket>` cells.
+            if getattr(es.compile, "lora_bucket", 0):
+                fn["compile"]["lora_bucket"] = int(es.compile.lora_bucket)
         out.append(fn)
 
     return out
