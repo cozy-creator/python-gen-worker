@@ -18,6 +18,7 @@ torch/safetensors imports are deferred so importing gen_worker.convert stays che
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import struct
@@ -1318,12 +1319,18 @@ def verify_w8a8_snapshot(
         if cast_dtype is not None:
             stored = stored.to(dtype=cast_dtype)
         src = stored.float()
+        if not bool(torch.isfinite(src).all()):
+            raise ConversionImplementationError(
+                f"byte-gate: source tensor {wname} contains non-finite values")
         with safe_open(str(out_where[wname]), framework="pt", device="cpu") as fh:
             got_q = fh.get_tensor(wname)
         with safe_open(str(out_where[sname]), framework="pt", device="cpu") as fh:
             got_s = fh.get_tensor(sname).float()
         expected_scale = (src.abs().amax(dim=1)
                           / _FP8_E4M3_MAX).clamp(min=1e-12)
+        if not bool(torch.isfinite(expected_scale).all()):
+            raise ConversionImplementationError(
+                f"byte-gate: source-derived scale for {sname} is non-finite")
         artifact_scale = got_s.reshape(-1)
         if artifact_scale.numel() != expected_scale.numel():
             raise ConversionImplementationError(
@@ -1357,6 +1364,9 @@ def verify_w8a8_snapshot(
         deq = got_q.float() * artifact_scale.reshape(-1, 1)
         row_amax = src.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
         rel = ((deq - src).abs() / row_amax).max().item()
+        if not math.isfinite(rel):
+            raise ConversionImplementationError(
+                f"byte-gate: {wname} dequant error is non-finite")
         # e4m3 half-ulp relative error at worst 2**-4 for normals, plus the
         # subnormal quantization floor for near-zero elements.
         if rel > 2 ** -4 + 2 ** -9:
