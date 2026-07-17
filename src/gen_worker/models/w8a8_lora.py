@@ -69,14 +69,13 @@ def branch_target(pipe: Any) -> Optional[Any]:
     """The pipeline's denoiser when it is branch-capable (gw#558: every
     lane — w8a8 scaled_mm, fp8-storage layerwise-cast, plain resident), else
     None (no discoverable denoiser module — such pipelines keep the whole
-    peft path)."""
+    peft path). Deliberately NO module scan here: this runs on every demote
+    (residency.pre_demote -> detach) — adapters that map onto no Linear
+    fail typed in :func:`map_adapter` (with the plain-lane peft fallback in
+    AdapterResidency.activate)."""
     for name in ("transformer", "unet"):
         denoiser = getattr(pipe, name, None)
-        if denoiser is None or not hasattr(denoiser, "named_modules"):
-            continue
-        if getattr(denoiser, "_cozy_w8a8_mode", "") == "scaled_mm":
-            return denoiser
-        if branch_modules(denoiser):
+        if denoiser is not None and hasattr(denoiser, "named_modules"):
             return denoiser
     return None
 

@@ -90,16 +90,41 @@ class PreparedAdapter:
     parse_ms: int = 0   # safetensors read + validation (0 on cache hit)
 
 
-# Normalized+split adapter halves, keyed by (pipeline class, cache_key).
-# The cached den_sd OBJECT is reused across requests so the branch layer's
-# staging cache (keyed on id(sd)) hits — repeat swaps skip key-mapping AND
-# the CPU flatten. Split tensors alias the AdapterCache entries (converters
-# rename keys, they don't copy data), but the cap stays small so this cache
-# can never pin many evicted adapters by itself.
+# Normalized+split adapter halves, keyed by (pipeline class, denoiser-config
+# fingerprint, cache_key). The cached den_sd OBJECT is reused across requests
+# so the branch layer's staging cache (keyed on id(sd)) hits — repeat swaps
+# skip key-mapping AND the CPU flatten. Split tensors alias the AdapterCache
+# entries (converters rename keys, they don't copy data), but the cap stays
+# small so this cache can never pin many evicted adapters by itself.
+# Guarded by its own lock: activate() calls this BEFORE taking the residency
+# lock, and multi-slot workers activate from several threads.
 _SPLIT_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 _SPLIT_CACHE_MAX = 8
-_TE_KEY_PREFIXES = ("text_encoder", "lora_te", "te1.", "te2.")
-_TE_COMPONENTS = ("text_encoder", "text_encoder_2", "text_encoder_3")
+_SPLIT_CACHE_LOCK = threading.Lock()
+# Component prefix -> pipe attribute, for both normalized and kohya-flat key
+# grammars. Kohya te1/te2 numbering follows diffusers' convention.
+_TE_PREFIX_TO_COMPONENT = (
+    ("text_encoder_3", "text_encoder_3"),
+    ("text_encoder_2", "text_encoder_2"),
+    ("text_encoder", "text_encoder"),
+    ("lora_te3_", "text_encoder_3"),
+    ("lora_te2_", "text_encoder_2"),
+    ("lora_te1_", "text_encoder"),
+    ("lora_te_", "text_encoder"),
+)
+
+
+def _denoiser_fingerprint(pipe: Any) -> str:
+    """Kohya/SGM normalization consults the denoiser's config — two
+    checkpoints sharing a pipeline class but differing in block layout must
+    not share a normalized-split cache entry."""
+    for name in ("unet", "transformer"):
+        cfg = getattr(getattr(pipe, name, None), "config", None)
+        if cfg is not None:
+            return str(getattr(cfg, "down_block_types", "")) + str(
+                getattr(cfg, "block_out_channels", "")) + str(
+                getattr(cfg, "num_layers", ""))
+    return ""
 
 
 def _split_adapters(
@@ -116,21 +141,27 @@ def _split_adapters(
 
     from ..models import w8a8_lora
 
+    fp = _denoiser_fingerprint(pipe)
     peft: List[PreparedAdapter] = []
     branch: List[tuple] = []
     for a in adapters:
-        key = (type(pipe).__qualname__, a.cache_key)
-        cached = _SPLIT_CACHE.get(key)
+        key = (type(pipe).__qualname__, fp, a.cache_key)
+        with _SPLIT_CACHE_LOCK:
+            cached = _SPLIT_CACHE.get(key)
+            if cached is not None:
+                _SPLIT_CACHE.move_to_end(key)
         if cached is None:
             sd = w8a8_lora.normalize_adapter_state_dict(
                 pipe, a.state_dict, ref=a.ref
             )
             cached = w8a8_lora.split_state_dict(sd)
-            _SPLIT_CACHE[key] = cached
-            while len(_SPLIT_CACHE) > _SPLIT_CACHE_MAX:
-                _SPLIT_CACHE.popitem(last=False)
-        else:
-            _SPLIT_CACHE.move_to_end(key)
+            with _SPLIT_CACHE_LOCK:
+                # A racing thread may have inserted the same key — keep the
+                # FIRST entry so every caller shares one den_sd object (the
+                # branch staging cache keys on its id).
+                cached = _SPLIT_CACHE.setdefault(key, cached)
+                while len(_SPLIT_CACHE) > _SPLIT_CACHE_MAX:
+                    _SPLIT_CACHE.popitem(last=False)
         den, rest = cached
         if den:
             branch.append((den, a.weight, a.ref))
@@ -142,25 +173,30 @@ def _split_adapters(
 def _reject_te_keys_on_cast_te(
     pipe: Any, adapters: Sequence["PreparedAdapter"],
 ) -> None:
-    """Typed refusal for text-encoder adapter halves on a cast TE (the
-    ``fp8+te`` lane): peft module wrapping under the block-window/layerwise
-    cast is the exact ie#374 breakage — fail loud, never fight the hooks."""
-    cast = [
-        name for name in _TE_COMPONENTS
-        if getattr(getattr(pipe, name, None), "_cozy_fp8_storage_applied", False)
-    ]
-    if not cast:
-        return
+    """Typed refusal for text-encoder adapter halves TARGETING a cast TE
+    (the ``fp8+te`` lane): peft module wrapping under the block-window/
+    layerwise cast is the exact ie#374 breakage — fail loud, never fight
+    the hooks. Keys targeting an UNCAST encoder in a mixed setup stay on
+    the peft path."""
+    def component_of(key: str) -> str:
+        for prefix, comp in _TE_PREFIX_TO_COMPONENT:
+            if key.startswith(prefix):
+                return comp
+        return ""
+
     for a in adapters:
-        te_keys = [k for k in a.state_dict if k.startswith(_TE_KEY_PREFIXES)]
-        if te_keys:
-            raise RefCompatibilitySurprise(
-                f"adapter carries {len(te_keys)} text-encoder key(s) (e.g. "
-                f"{sorted(te_keys)[0]}) but this pipeline serves its text "
-                f"encoder(s) fp8-cast ({', '.join(cast)}) — text-encoder "
-                "adapters are unsupported on the fp8+te lane",
-                ref=a.ref, axis="state_dict",
-            )
+        for k in a.state_dict:
+            comp = component_of(k)
+            if not comp:
+                continue
+            te = getattr(pipe, comp, None)
+            if te is not None and getattr(te, "_cozy_fp8_storage_applied", False):
+                raise RefCompatibilitySurprise(
+                    f"adapter targets {comp} (e.g. {k}) but this pipeline "
+                    f"serves {comp} fp8-cast — text-encoder adapters are "
+                    "unsupported on the fp8+te lane",
+                    ref=a.ref, axis="state_dict",
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -528,11 +564,13 @@ class AdapterResidency:
                 from ..models import w8a8_lora
 
                 denoiser = w8a8_lora.branch_target(pipe)
-                if denoiser is not None:
+                # branch_bucket guard: never-lora pipelines skip the module
+                # walk entirely — this runs on EVERY demote (gw#551 swaps).
+                if denoiser is not None and w8a8_lora.branch_bucket(denoiser):
                     w8a8_lora.disable_lora_branches(denoiser)
                     w8a8_lora.stamp_lane(pipe, denoiser)
             except Exception:
-                logger.warning("w8a8 lora branch drop on demote failed for %s",
+                logger.warning("lora branch drop on demote failed for %s",
                                ref, exc_info=True)
             if st is None or not st.attached or st.pipe_id != id(pipe):
                 return
