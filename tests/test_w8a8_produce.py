@@ -201,6 +201,60 @@ def test_byte_gate_passes_then_catches_tampering(
         verify_w8a8_snapshot(tiny_dit, bad, sample=len(art.quantized))
 
 
+def _candidate_with_shifted_scales(
+    source: Path, candidate: Path, destination: Path, *, ulps: int,
+) -> Path:
+    """Model a valid CUDA export whose /448 result neighbors CPU's value."""
+    import shutil
+
+    from safetensors.torch import save_file
+
+    shutil.copytree(candidate, destination)
+    art = detect_w8a8_artifact(candidate)
+    assert art is not None
+    source_tensors = _load_all(source / art.component)
+    candidate_tensors = _load_all(destination / art.component)
+    for layer in art.quantized:
+        weight_name = f"{layer}.weight"
+        scale_name = f"{layer}.weight_scale"
+        source_weight = source_tensors[weight_name].float()
+        scale = source_weight.abs().amax(dim=1) / 448.0
+        for _ in range(ulps):
+            scale = torch.nextafter(scale, torch.full_like(scale, torch.inf))
+        candidate_tensors[scale_name] = scale
+        candidate_tensors[weight_name] = (
+            (source_weight / scale.reshape(-1, 1))
+            .clamp(-448.0, 448.0)
+            .to(torch.float8_e4m3fn)
+        )
+
+    component = destination / art.component
+    for path in component.glob("*.safetensors"):
+        path.unlink()
+    index = component / "diffusion_pytorch_model.safetensors.index.json"
+    if index.exists():
+        index.unlink()
+    save_file(candidate_tensors, str(component / "diffusion_pytorch_model.safetensors"))
+    return destination
+
+
+def test_byte_gate_accepts_only_cpu_cuda_one_ulp_scale_envelope(
+    tiny_dit: Path, produced: Path, tmp_path: Path,
+) -> None:
+    adjacent = _candidate_with_shifted_scales(
+        tiny_dit, produced, tmp_path / "adjacent", ulps=1,
+    )
+    report = verify_w8a8_snapshot(tiny_dit, adjacent, sample=1000)
+    assert report["byte_exact"] is True
+    assert report["max_scale_ulp"] == 1
+
+    outside = _candidate_with_shifted_scales(
+        tiny_dit, produced, tmp_path / "outside", ulps=2,
+    )
+    with pytest.raises(ConversionImplementationError, match="maximum 1"):
+        verify_w8a8_snapshot(tiny_dit, outside, sample=1000)
+
+
 def _rewrite_component_float_dtype(
     root: Path, dtype: "torch.dtype", *, inject_fp16_detail: bool = False,
 ) -> None:

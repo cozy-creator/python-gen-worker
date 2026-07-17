@@ -1244,11 +1244,13 @@ def verify_w8a8_snapshot(
 
     Detection runs through the CONSUMER's own sniffer
     (:func:`gen_worker.models.w8a8.detect_w8a8_artifact`), then for a
-    deterministic sample of quantized layers: (a) the recomputed
-    quant+scale bytes must be EXACTLY the artifact's (the recipe is
-    deterministic — any drift is corruption or a recipe change), and
-    (b) ``dequant(w_fp8 x scale)`` must sit within fp8-e4m3 format error of
-    the source (max row-relative error <= 2**-4 + subnormal floor).
+    deterministic sample of quantized layers: (a) recomputing the FP8 weight
+    with the artifact's recorded scale must reproduce its bytes EXACTLY,
+    (b) that scale must be the source-derived per-row amax/448 value within
+    one FP32 ULP (CUDA and CPU division legitimately choose adjacent FP32
+    values), and (c) ``dequant(w_fp8 x scale)`` must sit within fp8-e4m3
+    format error of the source (max row-relative error <= 2**-4 + subnormal
+    floor).
     Raises :class:`ConversionImplementationError` on any failure; returns a
     report dict for produce logs. ``source_compute_dtype`` names the exact
     producer-side quantization input view. For example, an immutable FP16
@@ -1302,6 +1304,7 @@ def verify_w8a8_snapshot(
     rng = random.Random(seed)
     picked = names if len(names) <= sample else sorted(rng.sample(names, sample))
     max_rel = 0.0
+    max_scale_ulp = 0
     source_storage_dtypes: set[str] = set()
     for layer in picked:
         wname, sname = f"{layer}.weight", f"{layer}{_SCALE_SUFFIX}"
@@ -1319,17 +1322,39 @@ def verify_w8a8_snapshot(
             got_q = fh.get_tensor(wname)
         with safe_open(str(out_where[sname]), framework="pt", device="cpu") as fh:
             got_s = fh.get_tensor(sname).float()
-        scale = (src.abs().amax(dim=1, keepdim=True)
-                 / _FP8_E4M3_MAX).clamp(min=1e-12)
-        want_q = (src / scale).clamp(
+        expected_scale = (src.abs().amax(dim=1)
+                          / _FP8_E4M3_MAX).clamp(min=1e-12)
+        artifact_scale = got_s.reshape(-1)
+        if artifact_scale.numel() != expected_scale.numel():
+            raise ConversionImplementationError(
+                f"byte-gate: {sname} has {artifact_scale.numel()} values for "
+                f"{expected_scale.numel()} source rows")
+        if not bool(torch.isfinite(artifact_scale).all()) or not bool(
+            (artifact_scale > 0).all()
+        ):
+            raise ConversionImplementationError(
+                f"byte-gate: {sname} contains non-finite/non-positive values")
+
+        # ModelOpt derives the scale on CUDA while this portable verifier reads
+        # the immutable source on CPU.  FP32 division by 448 differs by one ULP
+        # for some rows across those devices.  Compare the positive FP32 bit
+        # patterns directly: this admits only the two valid adjacent results,
+        # rather than an arbitrary numerical epsilon.
+        expected_bits = expected_scale.contiguous().view(torch.int32).to(torch.int64)
+        artifact_bits = artifact_scale.contiguous().view(torch.int32).to(torch.int64)
+        scale_ulp = (expected_bits - artifact_bits).abs()
+        layer_max_scale_ulp = int(scale_ulp.max().item())
+        if layer_max_scale_ulp > 1:
+            raise ConversionImplementationError(
+                f"byte-gate: {sname} differs from source-derived amax/448 by "
+                f"{layer_max_scale_ulp} FP32 ULPs (maximum 1)")
+
+        want_q = (src / artifact_scale.reshape(-1, 1)).clamp(
             -_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
         if not torch.equal(want_q.view(torch.uint8), got_q.view(torch.uint8)):
             raise ConversionImplementationError(
                 f"byte-gate: {wname} recomputed fp8 bytes differ from artifact")
-        if not torch.equal(scale.reshape(-1), got_s.reshape(-1)):
-            raise ConversionImplementationError(
-                f"byte-gate: {sname} recomputed scales differ from artifact")
-        deq = got_q.float() * got_s.reshape(-1, 1)
+        deq = got_q.float() * artifact_scale.reshape(-1, 1)
         row_amax = src.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
         rel = ((deq - src).abs() / row_amax).max().item()
         # e4m3 half-ulp relative error at worst 2**-4 for normals, plus the
@@ -1339,11 +1364,13 @@ def verify_w8a8_snapshot(
                 f"byte-gate: {wname} dequant error {rel:.5f} exceeds the "
                 "fp8-e4m3 format bound")
         max_rel = max(max_rel, rel)
+        max_scale_ulp = max(max_scale_ulp, layer_max_scale_ulp)
     return {
         "component": art.component,
         "quantized_total": len(names),
         "sampled": len(picked),
         "byte_exact": True,
+        "max_scale_ulp": max_scale_ulp,
         "max_rel_err": max_rel,
         "source_storage_dtypes": sorted(source_storage_dtypes),
         "source_compute_dtype": canonical_compute_dtype,
