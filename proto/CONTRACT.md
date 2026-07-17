@@ -204,6 +204,8 @@ Static per-boot facts. Never re-sent mid-connection.
 | `ref` | W model cache | O residency index | canonical ref string (one grammar; tag/flavor/digest inside the ref) |
 | `tier` | W model cache | O cache-aware placement (VRAM > RAM > DISK > cold) | highest current tier |
 | `vram_bytes` | W measured at load | O model-size cache / VRAM packing | set when tier=VRAM |
+| `snapshot_digest` | W exact materialization result | O immutable residency identity | digest of the snapshot that actually produced this residency; empty means unknown, never "current tag target" |
+| `residency_generation` | W desired-state receiver | O per-ref event fence | desired generation under which this exact snapshot was materialized; zero means a legacy/unknown observation |
 
 ### InFlightJob (embedded in Hello)
 
@@ -501,6 +503,8 @@ model-ready signals, and the JSON download-event fabric.
 | `host_ram_available_before_bytes` / `host_ram_available_after_bytes` | W cgroup-aware host-RAM probe | O capacity block / durable request evidence | exact measured headroom around failed cleanup, or from the last insufficient observation to the satisfying observation |
 | `host_ram_evicted_refs` | W owner-aware record teardown | O capacity audit | FAILED: canonical refs released during that failed admission attempt; PROGRESS: refs released in the exact measured before→after transition that satisfied the requirement. Never inferred from logs, accumulated from unrelated observations, or an opaque worker-local `shared::*` cache key |
 | `host_ram_capacity_generation` | W executor | O capacity fencing | process-monotonic observation generation, fenced within the active Connect stream; the consumer resets its numeric fence on each Hello re-baseline, while a same-process reconnect replays only undelivered satisfying progress; progress clears only the same ref's older failed generation |
+| `snapshot_digest` | W exact materialization operation | O immutable residency identity | digest operated on by this event; empty is unknown and O MUST NOT fill it from the ref's current tag target |
+| `residency_generation` | W desired-state receiver | O per-ref event fence | desired generation captured when the operation began; lower generations and same-generation digest conflicts are stale and do not mutate residency |
 
 **State machine per (worker, ref):** `DOWNLOADING → ON_DISK → IN_RAM ⇄ IN_VRAM`,
 demotions emit the new lower tier, `EVICTED` = removed from disk (fully gone).
@@ -513,7 +517,10 @@ results after a stream reconnect; after satisfaction, only the self-contained
 progress event remains until successful stream delivery. Elapsed time and unrelated
 insufficient demotions do not produce it. O's baseline is `Hello.models`;
 events mutate it; reconnect
-re-baselines. `ADOPTED` is also not a residency tier: it reports one-shot success of ADOPT_COMPILE_CACHE for
+re-baselines. A positive `residency_generation` plus non-empty
+`snapshot_digest` is exact evidence; zero/empty remains legacy-unknown. O never
+manufactures observed identity from desired config or a mutable tag target.
+`ADOPTED` is also not a residency tier: it reports one-shot success of ADOPT_COMPILE_CACHE for
 a compile-cache ref (whose bytes independently report DOWNLOADING/ON_DISK
 like any snapshot download). O MUST NOT feed `_system/family-*` compile-cache
 refs into model-failure availability handling: a failed cache ref means
@@ -589,7 +596,9 @@ The stream is HTTP/2: reliable, ordered per direction. Consequences relied on:
 - `Hello` precedes everything; `HelloAck` precedes all O→W traffic.
 - `JobAccepted` precedes that attempt's `JobProgress`, which precede its `JobResult`.
 - A `ModelEvent` sequence per ref is ordered; O never sees IN_VRAM before ON_DISK
-  within one connection.
+  within one connection. Across reconnects or concurrent work, the per-ref
+  `residency_generation`/`snapshot_digest` fence rejects late transitions for a
+  prior desired snapshot.
 - `StateDelta` full-replace makes reordering across reconnects harmless.
 
 ---
@@ -609,6 +618,13 @@ Actual progress and failures are `ModelEvent`s, with `Hello.models` as the
 reconnect baseline. W MAY evict desired refs under real disk/VRAM pressure and
 reports that honestly; O then revises or re-sends desired state. Same-generation
 re-sends refresh expired snapshots and retry failed work.
+
+W captures the desired generation and exact snapshot digest at the start of a
+materialization, reports that identity on every resulting residency event, and
+retains it in `Hello.models` across reconnects. A later tag resolution cannot
+relabel bytes already in RAM/VRAM. If old loaded bytes coexist with a newer
+disk snapshot, W continues reporting the old highest-tier identity, vacates the
+stale instance, and only then promotes the newer disk identity.
 
 **Compile-cache snapshots (#569).** When a release's endpoint declares
 `compile=Compile(family=...)` and boot-attach is enabled (opt-in; default OFF

@@ -100,6 +100,26 @@ class _Conn:
         with self._recv_cond:
             return sum(1 for m in self.received if pred(m))
 
+    def wait_for_count(
+        self,
+        pred: Callable[[pb.WorkerMessage], bool],
+        count: int,
+        timeout: float = _TIMEOUT,
+    ) -> pb.WorkerMessage:
+        deadline = time.monotonic() + timeout
+        with self._recv_cond:
+            while True:
+                matches = [m for m in self.received if pred(m)]
+                if len(matches) >= count:
+                    return matches[count - 1]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"only {len(matches)} matching messages within "
+                        f"{timeout}s; wanted {count}"
+                    )
+                self._recv_cond.wait(remaining)
+
 
 class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
     def __init__(self, *, reject_unauthenticated: bool = False) -> None:
@@ -1118,6 +1138,14 @@ def _is_model_event(ref: str, state: int):
     )
 
 
+def _is_exact_model_event(ref: str, state: int, digest: str, generation: int):
+    return lambda m: (
+        _is_model_event(ref, state)(m)
+        and m.model_event.snapshot_digest == digest
+        and m.model_event.residency_generation == generation
+    )
+
+
 def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch) -> None:
     import http.server
 
@@ -1127,10 +1155,13 @@ def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch)
 
     # Serve one real weight file over HTTP (the presigned-URL stand-in).
     payload = b"tiny-weights"
+    moved_payload = b"moved-tag-weights"
     digest = blake3(payload).hexdigest()
+    moved_digest = blake3(moved_payload).hexdigest()
     serve_dir = tmp_path / "www"
     serve_dir.mkdir()
     (serve_dir / "blob").write_bytes(payload)
+    (serve_dir / "blob-moved").write_bytes(moved_payload)
 
     class _Quiet(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
@@ -1142,12 +1173,20 @@ def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch)
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Quiet)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     blob_url = f"http://127.0.0.1:{httpd.server_address[1]}/blob"
+    moved_blob_url = f"http://127.0.0.1:{httpd.server_address[1]}/blob-moved"
 
     snapshot = pb.Snapshot(
         digest="e2e-snap-1",
         files=[pb.SnapshotFile(
             path="model.safetensors", size_bytes=len(payload),
             blake3=digest, url=blob_url,
+        )],
+    )
+    moved_snapshot = pb.Snapshot(
+        digest="e2e-snap-2",
+        files=[pb.SnapshotFile(
+            path="model.safetensors", size_bytes=len(moved_payload),
+            blake3=moved_digest, url=moved_blob_url,
         )],
     )
 
@@ -1182,9 +1221,18 @@ def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch)
                 snapshots={"e2e/tiny": snapshot},
             ),
         ))
-        conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_DOWNLOADING))
-        conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_ON_DISK))
-        conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_IN_RAM))
+        downloading = conn.wait_for(
+            _is_model_event("e2e/tiny", pb.MODEL_STATE_DOWNLOADING)
+        ).model_event
+        on_disk = conn.wait_for(
+            _is_model_event("e2e/tiny", pb.MODEL_STATE_ON_DISK)
+        ).model_event
+        in_ram = conn.wait_for(
+            _is_model_event("e2e/tiny", pb.MODEL_STATE_IN_RAM)
+        ).model_event
+        for event in (downloading, on_disk, in_ram):
+            assert event.snapshot_digest == "e2e-snap-1"
+            assert event.residency_generation == 1
         conn.wait_for(
             lambda m: m.WhichOneof("msg") == "state_delta"
             and "model-echo" in m.state_delta.available_functions
@@ -1199,9 +1247,97 @@ def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch)
         assert res.status == pb.JOB_STATUS_OK
         assert _decode_out(res.inline).response == payload.decode()
 
-        # Hello-shape sanity: the residency snapshot carries the ref.
-        snap_refs = {r.ref for r in harness.worker.executor.store.residency_snapshot()}
-        assert "e2e/tiny" in snap_refs
+        # A mutable tag can keep the same wire ref while moving to new bytes.
+        # Tensorhub prepositions disk residency before dispatching a job, so
+        # prove the disk-only production path first. The worker must vacate A
+        # and report B even though no DesiredInstance accompanies generation 2.
+        conn.send(hello_ack=pb.HelloAck(
+            protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+            desired_residency=pb.DesiredResidency(
+                generation=2,
+                disk_refs=["e2e/tiny"],
+                snapshots={"e2e/tiny": moved_snapshot},
+            ),
+        ))
+        moved_downloading = conn.wait_for(
+            _is_exact_model_event(
+                "e2e/tiny", pb.MODEL_STATE_DOWNLOADING, "e2e-snap-2", 2,
+            )
+        ).model_event
+        moved_disk = conn.wait_for(
+            _is_exact_model_event(
+                "e2e/tiny", pb.MODEL_STATE_ON_DISK, "e2e-snap-2", 2,
+            )
+        ).model_event
+
+        # RunJob is the priority imperative operation.  A queued request that
+        # resolved before the tag moved may legitimately ask for old A while
+        # desired residency remains B/gen2.  Afterward, the resumed
+        # declarative loop must restore B *with generation 2*, not silently
+        # downgrade its evidence to B/gen0.
+        resumed_b = _is_exact_model_event(
+            "e2e/tiny", pb.MODEL_STATE_ON_DISK, "e2e-snap-2", 2,
+        )
+        b_events_before = conn.count(resumed_b)
+        assert b_events_before == 1
+        conn.send(run_job=pb.RunJob(
+            request_id="r-model-priority-a",
+            attempt=1,
+            function_name="model-echo",
+            input_payload=_msgpack("marco"),
+            snapshots={"e2e/tiny": snapshot},
+        ))
+        conn.wait_for(_is_exact_model_event(
+            "e2e/tiny", pb.MODEL_STATE_IN_RAM, "e2e-snap-1", 0,
+        ))
+        priority_a = conn.wait_for(_is_result_for("r-model-priority-a")).job_result
+        assert priority_a.status == pb.JOB_STATUS_OK
+        assert _decode_out(priority_a.inline).response == payload.decode()
+        conn.wait_for_count(resumed_b, b_events_before + 1)
+        assert harness.worker.executor.store.resident_identity("e2e/tiny") == (
+            "e2e-snap-2",
+            2,
+        )
+
+        # Dispatch intent advances the desired generation for the same B
+        # bytes, then warms the exact instance without downloading again.
+        conn.send(hello_ack=pb.HelloAck(
+            protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+            desired_residency=pb.DesiredResidency(
+                generation=3,
+                disk_refs=["e2e/tiny"],
+                hot=[pb.DesiredInstance(
+                    function_name="model-echo",
+                    models=[pb.ModelBinding(slot="model", ref="e2e/tiny")],
+                )],
+                snapshots={"e2e/tiny": moved_snapshot},
+            ),
+        ))
+        moved_ram = conn.wait_for(
+            _is_exact_model_event(
+                "e2e/tiny", pb.MODEL_STATE_IN_RAM, "e2e-snap-2", 3,
+            )
+        ).model_event
+        for event in (moved_downloading, moved_disk):
+            assert event.snapshot_digest == "e2e-snap-2"
+            assert event.residency_generation == 2
+        assert moved_ram.snapshot_digest == "e2e-snap-2"
+        assert moved_ram.residency_generation == 3
+        conn.send(run_job=pb.RunJob(
+            request_id="r-model-moved", attempt=1, function_name="model-echo",
+            input_payload=_msgpack("marco")))
+        moved = conn.wait_for(_is_result_for("r-model-moved")).job_result
+        assert moved.status == pb.JOB_STATUS_OK
+        assert _decode_out(moved.inline).response == moved_payload.decode()
+
+        # Reconnect baseline is the actual materialized B bytes, not whatever
+        # tag target happens to be current when Hello is built.
+        residencies = {
+            r.ref: r for r in harness.worker.executor.store.residency_snapshot()
+        }
+        observed = residencies["e2e/tiny"]
+        assert observed.snapshot_digest == "e2e-snap-2"
+        assert observed.residency_generation == 3
 
     finally:
         harness.stop()

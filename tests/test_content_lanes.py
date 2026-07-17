@@ -130,11 +130,17 @@ def _executor(specs, tmp_path: Path, budget_bytes: int, sent: list,
     async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
         path = repos[ref]
         store.residency.track_disk(ref, path)
+        # Mirror ModelStore.ensure_local's verified-cache identity activation.
+        # Without this, the lane fixture creates an impossible production
+        # state: a known snapshot paired with identity-less resident bytes.
+        await store._confirm_cached_identity(
+            ref, store._snapshot_identity(ref, snapshot)
+        )
         return path
 
     store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
     for ref, path in repos.items():
-        store._snapshots[ref] = _snapshot_pb(path)
+        store.bank_snapshot(ref, _snapshot_pb(path))
     return Executor(specs, _send, store=store)
 
 
