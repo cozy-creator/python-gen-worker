@@ -333,9 +333,14 @@ def _install_branch_forward(mod: Any) -> None:
         if a.device != x.device:
             # Self-heal after a host-resident alloc (block-offload lane):
             # branch tensors are tiny; pin them to the execution device.
-            a = a.to(x.device)
-            b = b.to(x.device)
-            mod.lora_a, mod.lora_b = a, b
+            # Rebind ONLY if the module still holds the exact pair we read —
+            # a concurrent realloc must never be clobbered with stale copies
+            # (the compute below uses the consistent local pair either way).
+            a2, b2 = a.to(x.device), b.to(x.device)
+            if (mod.__dict__.get("lora_a") is a
+                    and mod.__dict__.get("lora_b") is b):
+                mod.lora_a, mod.lora_b = a2, b2
+            a, b = a2, b2
         x2 = x.reshape(-1, x.shape[-1])
         if x2.dtype != a.dtype:
             x2 = x2.to(a.dtype)

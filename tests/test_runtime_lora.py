@@ -388,3 +388,58 @@ def test_branch_only_attach_never_touches_peft_surface(bf16_unet: Any) -> None:
     assert w8a8_lora.branches_active(unet)
     res.detach("m", pipe)
     assert w8a8_lora.branch_bucket(unet) == 0
+
+
+def test_split_cache_thread_safety(bf16_unet: Any) -> None:
+    """Review finding 1: _split_adapters races the module-level LRU from
+    concurrent worker threads — hammer it with distinct keys under the cap
+    churn and assert no corruption and stable results."""
+    import threading
+
+    unet = _fresh(bf16_unet)
+    pipe = SimpleNamespace(unet=unet)
+    sds = [_adapter_for(unet) for _ in range(12)]
+    errors: list = []
+
+    def worker(i: int) -> None:
+        try:
+            for j in range(30):
+                a = _prepared(sds[(i * 7 + j) % len(sds)], f"t/th-{(i * 7 + j) % len(sds)}")
+                peft, branch = lora_util._split_adapters(pipe, [a])
+                assert branch and not peft
+        except Exception as e:  # pragma: no cover - failure surface
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+
+
+def test_split_cache_keys_on_denoiser_config(bf16_unet: Any) -> None:
+    """Review finding 2: two checkpoints sharing one pipeline class but
+    differing in denoiser architecture must not share a normalized-split
+    entry (the SGM/kohya remap consults the config)."""
+    from diffusers import UNet2DModel
+
+    unet = _fresh(bf16_unet)
+    other = UNet2DModel(
+        sample_size=8, in_channels=3, out_channels=3,
+        block_out_channels=(16, 16), layers_per_block=2,
+        down_block_types=("DownBlock2D", "AttnDownBlock2D"),
+        up_block_types=("AttnUpBlock2D", "UpBlock2D"),
+        norm_num_groups=8,
+    ).to(torch.bfloat16)
+    fp_a = lora_util._denoiser_fingerprint(SimpleNamespace(unet=unet))
+    fp_b = lora_util._denoiser_fingerprint(SimpleNamespace(unet=other))
+    assert fp_a and fp_b and fp_a != fp_b
+    # Same class + same adapter key, different config -> distinct cache rows
+    sd = _adapter_for(unet)
+    a = _prepared(sd, "t/fp")
+    lora_util._split_adapters(SimpleNamespace(unet=unet), [a])
+    keys = [k for k in lora_util._SPLIT_CACHE if k[2] == a.cache_key]
+    lora_util._split_adapters(SimpleNamespace(unet=other), [a])
+    keys2 = [k for k in lora_util._SPLIT_CACHE if k[2] == a.cache_key]
+    assert len(keys2) > len(keys) or keys2 != keys

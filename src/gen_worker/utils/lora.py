@@ -121,9 +121,10 @@ def _denoiser_fingerprint(pipe: Any) -> str:
     for name in ("unet", "transformer"):
         cfg = getattr(getattr(pipe, name, None), "config", None)
         if cfg is not None:
-            return str(getattr(cfg, "down_block_types", "")) + str(
-                getattr(cfg, "block_out_channels", "")) + str(
-                getattr(cfg, "num_layers", ""))
+            return "|".join(
+                str(getattr(cfg, k, ""))
+                for k in ("down_block_types", "block_out_channels",
+                          "layers_per_block", "num_layers"))
     return ""
 
 
