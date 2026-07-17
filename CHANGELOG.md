@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.35.1 (2026-07-17)
+
+- **gw#562 follow-up: oversize tensors shard alone instead of failing the
+  cast.** `plan_shards` gave up (`tensor_exceeds_max_shard_bytes`) on any
+  single tensor over the 2GiB shard target — which killed EVERY fp8/w8a8
+  cast of an fp32 tree whose excluded lm_head/embedding exceeds it
+  (hidream-o1's fp32 lm_head = 2.49GB, found live ie#480). HF
+  `split_torch_state_dict_into_shards` semantics now: the oversize tensor
+  rides alone in its own oversized shard.
+
 ## 0.35.0 (2026-07-17)
 
 - **gw#562: w8a8 lane for root-layout (DiffSynth/singlefile) families —
