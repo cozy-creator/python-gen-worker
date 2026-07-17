@@ -161,7 +161,7 @@ def _requires_image_decode(occurrences: list[_AssetOccurrence]) -> bool:
     )
 
 
-def _decode_image(path: Path, occurrence_path: str) -> tuple[str, int, int]:
+def _decode_image(path: Path, occurrences: list[_AssetOccurrence]) -> str:
     try:
         from PIL import Image
     except ImportError:  # pragma: no cover - image endpoints install the images extra
@@ -175,16 +175,22 @@ def _decode_image(path: Path, occurrence_path: str) -> tuple[str, int, int]:
             with Image.open(path) as image:
                 width, height = image.size
                 mime = str(image.get_format_mimetype() or "").lower()
+                # Tensorhub's assignment-specific bounds are intentionally
+                # tighter than Pillow's process-global bomb threshold. Check
+                # them from the header before any pixel buffer is allocated.
+                _validate_image_dimensions(occurrences, int(width), int(height))
                 image.verify()
             # ``verify`` checks container integrity without decoding pixels.
             # Reopen and load to prove the first image is actually decodable.
             with Image.open(path) as image:
                 image.load()
+    except ValidationError:
+        raise
     except Exception:
         raise ValidationError(
-            f"input_asset_decode_failed: {occurrence_path} is not a decodable image"
+            f"input_asset_decode_failed: {occurrences[0].path} is not a decodable image"
         ) from None
-    return mime, int(width), int(height)
+    return mime
 
 
 def _validate_image_dimensions(
@@ -276,8 +282,7 @@ def _download(
         _check_cancel(cancel_check)
         mime = _infer_mime_type(url, head)
         if _requires_image_decode(occurrences):
-            mime, width, height = _decode_image(tmp, occurrences[0].path)
-            _validate_image_dimensions(occurrences, width, height)
+            mime = _decode_image(tmp, occurrences)
         _check_cancel(cancel_check)
         for occurrence in occurrences:
             asset = occurrence.asset

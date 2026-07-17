@@ -241,14 +241,28 @@ def test_size_cap_and_declared_kind_enforced(http_root: HTTPRoot) -> None:
         input_assets.materialize_input_assets(wrong_allowlist, "req-allowlist")
 
 
-def test_image_must_decode_and_fit_declared_bounds(http_root: HTTPRoot) -> None:
+def test_image_must_decode_and_fit_declared_bounds(
+    http_root: HTTPRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
     corrupt = Payload(image=ImageAsset(ref=http_root.url("corrupt.png")))
     with pytest.raises(ValidationError, match="^input_asset_decode_failed"):
         input_assets.materialize_input_assets(corrupt, "req-corrupt")
 
+    from PIL import Image
+
+    load_calls = 0
+    original_load = Image.Image.load
+
+    def track_load(image: Image.Image, *args: Any, **kwargs: Any) -> Any:
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(image, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "load", track_load)
     oversized = Payload(image=ImageAsset(ref=http_root.url("a.png"), url_max_width=1))
     with pytest.raises(ValidationError, match="^input_asset_dimensions_exceeded"):
         input_assets.materialize_input_assets(oversized, "req-dimensions")
+    assert load_calls == 0
 
 
 @pytest.mark.parametrize("name", ["partial.png", "error.png"])
