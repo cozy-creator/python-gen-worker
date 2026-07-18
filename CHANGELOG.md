@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.37.5 (2026-07-18)
+
+- **gw#589/th#901: publish_as_is clone strategies cast an explicitly
+  requested dtype instead of silently swallowing it.** `run_clone`'s
+  publish_as_is branch (transformers/diffusers_component/peft/
+  sentence_transformers/native_lora/gguf/pipeline_tree) special-cased
+  `spec.dtype != "bf16"`, making an explicit bf16 request indistinguishable
+  from `normalize_outputs`' unspecified-request default — an explicit bf16
+  ask against a non-bf16 source silently republished the source untouched,
+  no error surfaced. `explicit_outputs` now gates passthrough vs cast: an
+  explicit mismatch on a cast-eligible dense-safetensors strategy runs a
+  real cast via `build_flavor_tree`; any other mismatch fails loud.
+
 ## 0.37.4 (2026-07-18)
 
 - **gw#586: mints trace through the serving pipeline class.** Traced FX graphs
