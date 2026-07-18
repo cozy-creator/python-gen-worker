@@ -1637,17 +1637,18 @@ def build(
     from .models.loading import load_from_pretrained
     from .models.memory import place_pipeline
 
+    _W8A8_MINT_NEEDS_DIGEST = (
+        "W8A8 cell mint requires serving_image_digest (the endpoint "
+        "serving image's immutable OCI digest); a cell stamped with the "
+        "producer image identity can never be adopted by the fleet"
+    )
     if "w8a8" in str(storage_dtype) and not str(serving_image_digest).strip():
         # gw#577 finding (b): contract_drift requires image_digest identity on
         # W8A8 cells and verify() pins it exactly. Without the SERVING digest
         # the artifact stamps the PRODUCER pod's WORKER_IMAGE_DIGEST — every
         # serving worker then rejects it and W8A8 serves NOTHING
         # (fail-closed). Refuse loudly before any load or compile.
-        raise RuntimeError(
-            "W8A8 cell mint requires serving_image_digest (the endpoint "
-            "serving image's immutable OCI digest); a cell stamped with the "
-            "producer image identity can never be adopted by the fleet"
-        )
+        raise RuntimeError(_W8A8_MINT_NEEDS_DIGEST)
     if not toolchain_present():
         raise RuntimeError(
             "compile-cache build needs a C toolchain (cc/gcc); run in the "
@@ -1683,6 +1684,15 @@ def build(
     # traced under travels in the metadata for adopt-time parity checks. Run
     # on a pod with the same free-VRAM class as the target workers.
     placed = place_pipeline(pipe)
+    from .models.loading import pipeline_weight_lane as _traced_lane
+
+    if _traced_lane(pipe).startswith("w8a8") and not str(
+        serving_image_digest
+    ).strip():
+        # The lane can materialize as w8a8 from the SOURCE flavor alone
+        # (e.g. storage_dtype="fp8+te" over an fp8-w8a8 checkpoint), so the
+        # authoritative check is on the traced lane, before the compile.
+        raise RuntimeError(_W8A8_MINT_NEEDS_DIGEST)
     # gw#561: branch-bearing cells trace WITH canonical zeroed rank-bucket
     # branches installed — zeroed slots are bit-exact with branchless output
     # (gw#547), so the warm calls render normally while the traced graphs
