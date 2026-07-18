@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.37.2 (2026-07-18)
+
+- **gw#579: reclaim idle checkpoints behind shared-reference pins.** Host-RAM
+  admission now tests whether the checkpoint selected for eviction is in use,
+  so an incoming job's pin on a shared VAE no longer freezes an unrelated idle
+  pipeline. Vacating the idle record still preserves the pinned shared asset.
+
 ## 0.37.1 (2026-07-18)
 
 - **gw#584: defer compile-declared endpoints from eager boot setup.** `Lifecycle.startup()`
