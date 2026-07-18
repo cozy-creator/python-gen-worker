@@ -116,15 +116,15 @@ def test_cell_lane_matcher_uses_candidate_keys():
     key = ck.from_axes(_AXES).digest
     ref = f"_system/family-ltx-2.3#{key}"
     assert _cell_lane_matches(
-        ref, "ltx-2.3", wants_w8a8=True, want_bucket=0,
+        ref, "ltx-2.3", want_lane="w8a8", want_bucket=0,
         candidate_keys={key})
     assert not _cell_lane_matches(
-        ref, "ltx-2.3", wants_w8a8=True, want_bucket=0,
+        ref, "ltx-2.3", want_lane="w8a8", want_bucket=0,
         candidate_keys={"ck1-" + "0" * 56})
     # legacy labels keep the lane-parse policy
     assert _cell_lane_matches(
         "_system/family-ltx-2.3#inductor-b200-torch2.13-w8a8",
-        "ltx-2.3", wants_w8a8=True, want_bucket=0)
+        "ltx-2.3", want_lane="w8a8", want_bucket=0)
 
 
 class _Target:

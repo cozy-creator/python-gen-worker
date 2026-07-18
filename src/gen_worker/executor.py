@@ -385,11 +385,16 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     )
 
 
+#: Traced weight lanes a stored flavor MANDATES (fail-closed serving):
+#: `#fp8-w8a8` -> "w8a8" (gw#534), `#nvfp4-w4a4` -> "w4a4" (gw#540).
+_MANDATORY_LANES = ("w8a8", "w4a4")
+
+
 def _cell_lane_matches(
     ref: str,
     family: str,
     *,
-    wants_w8a8: bool,
+    want_lane: str,
     want_bucket: int,
     candidate_keys: typing.AbstractSet[str] = frozenset(),
 ) -> bool:
@@ -410,21 +415,37 @@ def _cell_lane_matches(
     base, bucket = compile_cache.lane_bucket(compile_cache.cell_lane(ref))
     if bucket != int(want_bucket or 0):
         return False
-    return base == "w8a8" if wants_w8a8 else base != "w8a8"
+    if want_lane:
+        return base == want_lane
+    return base not in _MANDATORY_LANES
 
 
-def _ref_wants_w8a8(ref: str) -> bool:
-    """Whether one canonical Tensorhub model ref selects a W8A8 flavor."""
+def _ref_mandatory_lane(ref: str) -> str:
+    """The traced weight lane one canonical Tensorhub model ref MANDATES:
+    "w8a8" for `#fp8-w8a8` flavors, "w4a4" for `#nvfp4-w4a4`, "" otherwise."""
     from .models.refs import parse_model_ref
 
     try:
         parsed = parse_model_ref(ref).tensorhub
     except ValueError:
-        return False
+        return ""
     if parsed is None or parsed.owner == "_system":
-        return False
+        return ""
     flavor = parsed.flavor or ""
-    return flavor == "fp8-w8a8" or flavor.startswith("fp8-w8a8-")
+    if flavor == "fp8-w8a8" or flavor.startswith("fp8-w8a8-"):
+        return "w8a8"
+    if flavor == "nvfp4-w4a4" or flavor.startswith("nvfp4-w4a4-"):
+        return "w4a4"
+    return ""
+
+
+def _mandatory_lane_of(refs: typing.Iterable[str]) -> str:
+    """The single mandatory lane a binding set selects ("" when none)."""
+    for ref in refs:
+        lane = _ref_mandatory_lane(ref)
+        if lane:
+            return lane
+    return ""
 
 
 def _model_failure_vocab(exc: BaseException) -> str:
@@ -2077,14 +2098,15 @@ class Executor:
             target.active_compile_ref = ""
             target.active_compile_snapshot_digest = ""
             target.active_adoption_operation_id = ""
-            mandatory_w8a8 = target.pipeline_weight_lane.startswith("w8a8")
-            if mandatory_w8a8:
+            mandatory_quant = target.pipeline_weight_lane.startswith(
+                _MANDATORY_LANES)
+            if mandatory_quant:
                 # Keep the same incarnation visible with an empty active
                 # identity until declarative reconciliation replaces it.
                 # RequiredCompileExecution then fails closed locally while
                 # Tensorhub can correlate the causal FAILED to this row.
                 rec.stale = True
-        if mandatory_w8a8:
+        if mandatory_quant:
             self._mark_compile_target_unavailable(rec, target, detail)
         logger.warning(
             "compile target %s runtime guard tripped; compiled proof revoked: %s",
@@ -2237,9 +2259,8 @@ class Executor:
             else _CompileObjectCandidate(item, set(all_slots))
             for item in objects
         ]
-        requested_w8a8 = any(
-            _ref_wants_w8a8(wire_ref(spec.models[slot]))
-            for slot in self._setup_slots(spec)
+        requested_lane = _mandatory_lane_of(
+            wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
         )
         active_artifacts = active_artifacts or {}
         function_proofs = function_proofs or {}
@@ -2314,16 +2335,18 @@ class Executor:
             expected_names = compatible_names & required_names
             target.function_names = tuple(sorted(
                 compatible_names & permitted_names))
-            mandatory_w8a8 = target.pipeline_weight_lane.startswith("w8a8")
-            candidate_requested_w8a8 = any(
-                _ref_wants_w8a8(ref) for _slot, ref, _digest in bindings
-            )
+            target_quant_lane = next(
+                (lane for lane in _MANDATORY_LANES
+                 if target.pipeline_weight_lane.startswith(lane)), "")
+            candidate_requested_lane = _mandatory_lane_of(
+                ref for _slot, ref, _digest in bindings)
+            mandatory_quant = bool(target_quant_lane)
             if (
-                (mandatory_w8a8 or candidate_requested_w8a8)
+                (mandatory_quant or candidate_requested_lane)
                 and set(target.function_names) != expected_names
             ):
                 raise compile_cache.CompiledLaneUnavailableError(
-                    "mandatory W8A8 function proof incomplete "
+                    "mandatory quantized-lane function proof incomplete "
                     f"(expected={sorted(expected_names)!r} "
                     f"proven={list(target.function_names)!r})"
                 )
@@ -2336,21 +2359,23 @@ class Executor:
                 logger.warning(
                     "compile target omitted for %s: %s", spec.name, detail,
                 )
-                if mandatory_w8a8 or candidate_requested_w8a8:
+                if mandatory_quant or candidate_requested_lane:
                     raise compile_cache.CompiledLaneUnavailableError(detail)
                 continue
             lane_error = compile_cache.compile_target_lane_error(
                 target.pipeline_weight_lane, target.lora_bucket)
             if lane_error:
-                if mandatory_w8a8 or candidate_requested_w8a8:
+                if mandatory_quant or candidate_requested_lane:
                     raise compile_cache.CompiledLaneUnavailableError(lane_error)
                 logger.warning(
                     "compile target omitted for %s: %s", spec.name, lane_error)
                 continue
-            if candidate_requested_w8a8 and not mandatory_w8a8:
+            if (candidate_requested_lane
+                    and target_quant_lane != candidate_requested_lane):
                 raise compile_cache.CompiledLaneUnavailableError(
-                    f"W8A8 binding for {spec.name!r} materialized a non-W8A8 "
-                    f"pipeline lane {target.pipeline_weight_lane!r}"
+                    f"{candidate_requested_lane.upper()} binding for "
+                    f"{spec.name!r} materialized pipeline lane "
+                    f"{target.pipeline_weight_lane!r}"
                 )
             active_ref = active_selection.ref if active_selection else ""
             active_digest = (
@@ -2362,13 +2387,13 @@ class Executor:
                     spec.name, active_ref, active_digest,
                 )
                 continue
-            if mandatory_w8a8 and not active_ref:
-                # A W8A8 object without a proven exact cell is not a READY
-                # serving target. The loader normally raises earlier; keep
-                # this final wire-state invariant fail closed too.
+            if mandatory_quant and not active_ref:
+                # A quantized-lane object without a proven exact cell is not
+                # a READY serving target. The loader normally raises earlier;
+                # keep this final wire-state invariant fail closed too.
                 raise compile_cache.CompiledLaneUnavailableError(
-                    f"W8A8 compile target for {spec.name!r} has no proven "
-                    "active Forge artifact"
+                    f"{target_quant_lane.upper()} compile target for "
+                    f"{spec.name!r} has no proven active Forge artifact"
                 )
             with target.state_lock:
                 target.active_compile_ref = active_ref
@@ -2381,19 +2406,19 @@ class Executor:
                 with target.state_lock:
                     target.active_compile_ref = ""
                     target.active_compile_snapshot_digest = ""
-                if mandatory_w8a8:
+                if mandatory_quant:
                     raise compile_cache.CompiledLaneUnavailableError(
-                        f"W8A8 compile target for {spec.name!r} has no "
-                        "runtime guard revocation signal"
+                        f"{target_quant_lane.upper()} compile target for "
+                        f"{spec.name!r} has no runtime guard revocation signal"
                     )
                 logger.warning(
                     "compile target %s has no runtime guard revocation signal; "
                     "advertising eager", incarnation_id,
                 )
-        if requested_w8a8 and not rec.compile_targets:
+        if requested_lane and not rec.compile_targets:
             raise compile_cache.CompiledLaneUnavailableError(
-                f"W8A8 setup for {spec.name!r} produced no addressable "
-                "compile-capable pipeline target"
+                f"{requested_lane.upper()} setup for {spec.name!r} produced "
+                "no addressable compile-capable pipeline target"
             )
 
     def compile_targets(self) -> List[pb.CompileTarget]:
@@ -2455,11 +2480,10 @@ class Executor:
                 if cfg is None or not family:
                     continue
                 bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-                wants_w8a8 = any(
-                    _ref_wants_w8a8(wire_ref(binding))
-                    for binding in spec.models.values()
+                want_lane = _mandatory_lane_of(
+                    wire_ref(binding) for binding in spec.models.values()
                 )
-                lanes = ("w8a8",) if wants_w8a8 else ("", "fp8-hooks")
+                lanes = (want_lane,) if want_lane else ("", "fp8-hooks")
                 for lane in lanes:
                     try:
                         digest = cell_key.compute(
@@ -2497,15 +2521,14 @@ class Executor:
         than execute on a merely same-family pipeline.
         """
         setup_slots = self._setup_slots(spec)
-        wants_w8a8 = any(
-            _ref_wants_w8a8(wire_ref(spec.models[slot]))
-            for slot in setup_slots
+        want_lane = _mandatory_lane_of(
+            wire_ref(spec.models[slot]) for slot in setup_slots
         )
         if not run.HasField("required_compile"):
-            if wants_w8a8:
+            if want_lane:
                 raise RetryableError(
-                    "required_compile_missing: W8A8 dispatch requires an "
-                    "exact active compile incarnation"
+                    f"required_compile_missing: {want_lane.upper()} dispatch "
+                    "requires an exact active compile incarnation"
                 )
             return
         required = run.required_compile
@@ -2536,10 +2559,11 @@ class Executor:
                 target.contract_digest,
             )
             target_bindings = target.model_bindings
-        if wants_w8a8 and not target_lane.startswith("w8a8"):
+        if want_lane and not target_lane.startswith(want_lane):
             raise RetryableError(
-                "required_compile_lane_mismatch: W8A8 dispatch selected a "
-                "non-W8A8 live pipeline"
+                f"required_compile_lane_mismatch: {want_lane.upper()} "
+                "dispatch selected a live pipeline on lane "
+                f"{target_lane!r}"
             )
         if spec.name not in target_functions:
             raise RetryableError(
@@ -2838,8 +2862,8 @@ class Executor:
                         rec.stale = True
                         break
             if rec.ready and not rec.stale and spec.compile is not None:
-                mandatory_w8a8 = any(
-                    _ref_wants_w8a8(wire_ref(spec.models[slot]))
+                mandatory_lane = _mandatory_lane_of(
+                    wire_ref(spec.models[slot])
                     for slot in self._setup_slots(spec)
                 )
                 from . import compile_cache
@@ -2848,7 +2872,7 @@ class Executor:
                     desired_cell = await self._fetch_compile_snapshot(
                         spec, snapshots)
                 except compile_cache.CompiledLaneUnavailableError as exc:
-                    if mandatory_w8a8:
+                    if mandatory_lane:
                         # Desired state no longer supplies a mandatory exact
                         # cell. Remove the old READY incarnation before
                         # reporting the state-driven failure; it must not keep
@@ -3304,8 +3328,9 @@ class Executor:
                 if unproven:
                     from .models.loading import pipeline_weight_lane
 
-                    w8a8 = any(
-                        pipeline_weight_lane(candidate.pipeline).startswith("w8a8")
+                    quant_lane = any(
+                        pipeline_weight_lane(
+                            candidate.pipeline).startswith(_MANDATORY_LANES)
                         for candidate in unproven
                     )
                     for candidate in unproven:
@@ -3321,7 +3346,7 @@ class Executor:
                         f"(warmups={warmed}, cache_hits={hits}, "
                         f"cache_misses={misses})"
                     )
-                    if w8a8:
+                    if quant_lane:
                         raise compile_cache.CompiledLaneUnavailableError(detail)
                     logger.warning("%s; serving eager", detail)
             if compile_selection and trt_engine.is_engine_ref(compile_selection.ref):
@@ -3995,7 +4020,7 @@ class Executor:
         # checkpoints. Snapshot maps also contain attached cells and may carry
         # unrelated/prepositioned models, so they must not choose the lane.
         model_refs = [wire_ref(binding) for binding in spec.models.values()]
-        wants_w8a8 = any(_ref_wants_w8a8(ref) for ref in model_refs)
+        want_lane = _mandatory_lane_of(model_refs)
         want_bucket = int(getattr(spec.compile, "lora_bucket", 0) or 0)
         # th#883 pull-by-key: a key-flavored cell is selected only when its
         # key is one this runtime computed for itself (the same candidates
@@ -4003,7 +4028,7 @@ class Executor:
         from . import cell_key
 
         candidate_keys: set[str] = set()
-        for lane in (("w8a8",) if wants_w8a8 else ("", "fp8-hooks")):
+        for lane in ((want_lane,) if want_lane else ("", "fp8-hooks")):
             try:
                 candidate_keys.add(cell_key.compute(
                     family, lane, want_bucket,
@@ -4011,14 +4036,14 @@ class Executor:
                 ).digest)
             except Exception:
                 continue
-        if wants_w8a8:
+        if want_lane:
             # TensorRT cells currently expose only their plain fp16 contract.
-            # The existing Forge's -w8a8 Inductor cell is the sole artifact
-            # proven to preserve Fp8ScaledLinear/torch._scaled_mm semantics.
+            # A Forge Inductor cell of the mandated lane is the sole artifact
+            # proven to preserve the scaled_mm semantics (gw#534/gw#540).
             candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
                 if _cell_lane_matches(
-                    ref, family, wants_w8a8=True, want_bucket=want_bucket,
+                    ref, family, want_lane=want_lane, want_bucket=want_bucket,
                     candidate_keys=candidate_keys)
             ]
         else:
@@ -4029,7 +4054,7 @@ class Executor:
             inductor_candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
                 if _cell_lane_matches(
-                    ref, family, wants_w8a8=False, want_bucket=want_bucket,
+                    ref, family, want_lane="", want_bucket=want_bucket,
                     candidate_keys=candidate_keys)
             ]
             # Explicit kind policy, then uniqueness within that kind. A map's
@@ -4037,20 +4062,20 @@ class Executor:
             # measured plain-lane TRT preference remains intact.
             candidates = trt_candidates or inductor_candidates
         candidates = sorted(candidates, key=lambda item: item[0])
-        if wants_w8a8 and not candidates:
+        if want_lane and not candidates:
             raise compile_cache.CompiledLaneUnavailableError(
-                f"no exact W8A8 Forge cell attached for family={family!r} "
-                f"lora_bucket={want_bucket}"
+                f"no exact {want_lane.upper()} Forge cell attached for "
+                f"family={family!r} lora_bucket={want_bucket}"
             )
         if len(candidates) > 1:
             refs = ", ".join(ref for ref, _snap in candidates)
             detail = (
                 "multiple compatible compiled artifacts were attached for "
-                f"family={family!r} lane={'w8a8' if wants_w8a8 else 'plain'}: "
+                f"family={family!r} lane={want_lane or 'plain'}: "
                 f"{refs}; refusing map-order selection"
             )
-            if wants_w8a8:
-                # W8A8 has no eager-compatible fallback: setup's mandatory
+            if want_lane:
+                # Mandated lanes have no eager-compatible fallback: setup's
                 # lane gate must surface this as retryable before GPU load.
                 raise compile_cache.CompiledLaneUnavailableError(detail)
             logger.warning("%s; serving eager", detail)
@@ -4060,7 +4085,7 @@ class Executor:
             digest = str(snap.digest or "").strip()
             if not digest:
                 detail = f"compiled-artifact snapshot {ref!r} has no immutable digest"
-                if wants_w8a8:
+                if want_lane:
                     raise compile_cache.CompiledLaneUnavailableError(detail)
                 logger.warning("%s; serving eager", detail)
                 return None
@@ -4068,9 +4093,10 @@ class Executor:
                 local = await self.store.ensure_local(ref, snap)
                 artifact = compile_cache.find_artifact(local)
                 if artifact is None:
-                    if wants_w8a8:
+                    if want_lane:
                         raise compile_cache.CompiledLaneUnavailableError(
-                            f"W8A8 Forge snapshot {ref!r} contains no artifact")
+                            f"{want_lane.upper()} Forge snapshot {ref!r} "
+                            "contains no artifact")
                     logger.warning(
                         "compiled-artifact snapshot %s contains no artifact; "
                         "serving eager", ref)
@@ -4078,13 +4104,14 @@ class Executor:
                 return _CompileArtifactSelection(
                     path=artifact, ref=ref, snapshot_digest=digest)
             except Exception as exc:
-                if wants_w8a8 and isinstance(
+                if want_lane and isinstance(
                     exc, compile_cache.CompiledLaneUnavailableError
                 ):
                     raise
-                if wants_w8a8:
+                if want_lane:
                     raise compile_cache.CompiledLaneUnavailableError(
-                        f"W8A8 Forge snapshot {ref!r} is unusable: {exc}") from exc
+                        f"{want_lane.upper()} Forge snapshot {ref!r} is "
+                        f"unusable: {exc}") from exc
                 logger.warning(
                     "compiled-artifact snapshot %s unusable (%s); serving eager", ref, exc
                 )
@@ -4331,9 +4358,10 @@ class Executor:
                         ))
                         from .models.loading import pipeline_weight_lane
 
-                        if pipeline_weight_lane(pipe).startswith("w8a8"):
-                            # W8A8 stays fail-closed: surface as the
-                            # retryable lane refusal, cause preserved.
+                        if pipeline_weight_lane(pipe).startswith(
+                                _MANDATORY_LANES):
+                            # Quantized lanes stay fail-closed: surface as
+                            # the retryable lane refusal, cause preserved.
                             raise compile_cache.CompiledLaneUnavailableError(
                                 f"cell_selection_bug: {exc}") from exc
                         armed = False
