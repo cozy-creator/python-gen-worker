@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.37.4 (2026-07-18)
+
+- **gw#586: mints trace through the serving pipeline class.** Traced FX graphs
+  depend on the pipeline's CALL path, not just the module tree: the serving
+  Condition class drives LTX's DiT with per-token timestep/modulation tensors
+  while `build()`'s generic load broadcast them — no generic-load cell ever
+  served a serving-path lookup (pre-proof fleets silently cold-compiled the
+  real graphs at boot). `build(pipeline_class=...)` +
+  `resolve_pipeline_class()` load through the named serving class; unknown
+  names refuse loudly. Class stamped in metadata for observability; the ck1
+  key and graph_signature stay class-agnostic.
+
 ## 0.37.3 (2026-07-18)
 
 - **gw#579: reclaim idle on-disk checkpoint cache under host-RAM pressure.**
