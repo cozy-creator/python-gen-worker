@@ -1548,6 +1548,7 @@ def enable(
                         str(getattr(cfg, "family", "") or ""),
                         _pwl(pipeline),
                         int(getattr(cfg, "lora_bucket", 0) or 0),
+                        regional=bool(getattr(cfg, "regional", False)),
                     )
                     if not cell_key.mismatch(meta, want):
                         self_key = want.digest
@@ -1555,7 +1556,10 @@ def enable(
                     self_key = ""
                 drift = artifact_drift(meta, pipeline, cfg)
                 if drift:
-                    if self_key:
+                    # low_vram prep mode is DYNAMIC (free-VRAM placement at
+                    # load) and outside the key: its drift is a legitimate
+                    # miss even on a self-requested cell, never the bug class.
+                    if self_key and not drift.startswith("low_vram_mode"):
                         raise CellSelectionBugError(
                             f"self-requested cell {self_key} refused to "
                             f"arm: {drift}"

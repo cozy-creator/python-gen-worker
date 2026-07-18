@@ -84,6 +84,19 @@ def test_lane_canonicalization(fixed_runtime):
     assert ck.compute("f", "w8a8").digest != ck.compute("f", "").digest
 
 
+def test_regional_mode_is_identity(fixed_runtime):
+    """Regional per-block cells are different artifacts (ie#381)."""
+    assert (ck.compute("f", regional=True).digest
+            != ck.compute("f").digest)
+    assert (ck.from_axes(dict(_AXES, mode="regional")).digest
+            != ck.from_axes(_AXES).digest)
+    meta = cc.artifact_metadata(
+        family="f", shapes=((768, 768),), targets=("transformer",),
+        compile_mode="regional",
+    )
+    assert meta["cell_key"] == ck.compute("f", regional=True).digest
+
+
 def test_trt_metadata_has_no_cell_key():
     with pytest.raises(ck.CellKeyError):
         ck.from_artifact_metadata(dict(_AXES, kind="trt-engine"))

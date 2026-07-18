@@ -2015,7 +2015,8 @@ class Executor:
             from . import cell_key
 
             key = cell_key.compute(
-                str(getattr(cfg, "family", "") or ""), lane, bucket)
+                str(getattr(cfg, "family", "") or ""), lane, bucket,
+                regional=bool(getattr(cfg, "regional", False)))
             requested_key, requested_axes = key.digest, key.axes
         except Exception:
             pass  # no computable identity on this runtime => no key
@@ -2438,7 +2439,10 @@ class Executor:
                 lanes = ("w8a8",) if wants_w8a8 else ("", "fp8-hooks")
                 for lane in lanes:
                     try:
-                        digest = cell_key.compute(family, lane, bucket).digest
+                        digest = cell_key.compute(
+                            family, lane, bucket,
+                            regional=bool(getattr(cfg, "regional", False)),
+                        ).digest
                     except Exception:
                         continue
                     seen.add((family, digest))
@@ -3920,8 +3924,10 @@ class Executor:
         candidate_keys: set[str] = set()
         for lane in (("w8a8",) if wants_w8a8 else ("", "fp8-hooks")):
             try:
-                candidate_keys.add(
-                    cell_key.compute(family, lane, want_bucket).digest)
+                candidate_keys.add(cell_key.compute(
+                    family, lane, want_bucket,
+                    regional=bool(getattr(spec.compile, "regional", False)),
+                ).digest)
             except Exception:
                 continue
         if wants_w8a8:
@@ -4549,7 +4555,13 @@ class Executor:
             # th#875 transient vocabulary stays bare: the hub re-arm matcher
             # compares those four statuses EXACTLY.
             error = f"adopt_failed:{reason}"
-            if self_requested and reason in _SELECTION_BUG_REASONS:
+            if (
+                self_requested
+                and reason in _SELECTION_BUG_REASONS
+                # low_vram prep mode is dynamic placement, outside the key:
+                # its drift is a legitimate miss, never the bug class.
+                and "low_vram_mode" not in detail
+            ):
                 logger.error(
                     "cell_selection_bug on %s: %s %s", ref, reason, detail)
                 error = f"cell_selection_bug:{reason}"

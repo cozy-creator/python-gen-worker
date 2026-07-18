@@ -99,7 +99,7 @@ def test_store_verdict_hit(tmp_path):
         ({"sku": "not-this-gpu"}, "sku"),
         ({"format": 99}, "format"),
         ({"weight_lane": "fp8-hooks"}, "lane"),   # lane drift, symmetric
-        ({"compile_mode": "regional"}, "compile_mode"),
+        ({"compile_mode": "regional"}, "mode"),
         ({"low_vram_mode": "vae_only"}, "low_vram_mode"),
     ],
 )

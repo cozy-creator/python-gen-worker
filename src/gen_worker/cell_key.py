@@ -56,8 +56,10 @@ _DIGEST_HEX = 56
 _REQUIRED = ("format", "kind", "family", "sku", "sm", "cuda", "torch",
              "triton", "gen_worker")
 # Axes that may be legitimately absent ("" => omitted from canonical form):
-# image_digest is absent on local runtimes; libs may not be installed.
-_OPTIONAL = ("lane", "image_digest", "diffusers", "transformers")
+# image_digest is absent on local runtimes; libs may not be installed; lane
+# "" is the plain-resident graph family; mode "" is whole-graph compilation
+# ("regional" per-block cells are different artifacts, ie#381).
+_OPTIONAL = ("lane", "mode", "image_digest", "diffusers", "transformers")
 
 
 class CellKeyError(ValueError):
@@ -132,6 +134,7 @@ def compute(
     weight_lane: str = "",
     lora_bucket: int = 0,
     *,
+    regional: bool = False,
     image_digest: Optional[str] = None,
 ) -> CellKey:
     """The key THIS runtime wants for ``family`` on ``weight_lane``.
@@ -153,6 +156,7 @@ def compute(
         "kind": "inductor",
         "family": str(family or ""),
         "lane": _canonical_lane(weight_lane, lora_bucket),
+        "mode": "regional" if regional else "",
         "sku": rt["sku"],
         "sm": rt["sm"],
         "cuda": rt["cuda"],
@@ -177,6 +181,7 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     if kind != "torch-inductor-cache":
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
     libs = meta.get("libs") or {}
+    mode = str(meta.get("compile_mode") or "whole")
     return from_axes({
         "format": str(meta.get("format") or ""),
         "kind": "inductor",
@@ -185,6 +190,7 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
             str(meta.get("weight_lane") or ""),
             int(meta.get("lora_bucket") or 0),
         ),
+        "mode": "" if mode == "whole" else mode,
         "sku": str(meta.get("sku") or ""),
         "sm": str(meta.get("sm") or ""),
         "cuda": str(meta.get("cuda") or ""),

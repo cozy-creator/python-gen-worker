@@ -98,6 +98,7 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
         want = cell_key.compute(
             family, pipeline_weight_lane(pipe),
             int(getattr(cfg, "lora_bucket", 0) or 0),
+            regional=bool(getattr(cfg, "regional", False)),
         )
         reason = cell_key.mismatch(meta, want)
         if reason and "records no computable key" in reason:
@@ -109,10 +110,10 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
     reason = cc.mode_drift(meta, pipe) or cc.lane_drift(meta, pipe)
     if reason:
         return reason
-    want = "regional" if getattr(cfg, "regional", False) else "whole"
+    want_mode = "regional" if getattr(cfg, "regional", False) else "whole"
     have = str(meta.get("compile_mode") or "whole")
-    if have != want:
-        return f"compile_mode {have!r} != declared {want!r}"
+    if have != want_mode:
+        return f"compile_mode {have!r} != declared {want_mode!r}"
     return ""
 
 
