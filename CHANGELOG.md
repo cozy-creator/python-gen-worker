@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.37.3 (2026-07-18)
+
+- **gw#579: reclaim idle on-disk checkpoint cache under host-RAM pressure.**
+  When prior rotations have already moved every old pipeline to DISK, admission
+  now advises clean pages from the oldest immutable snapshots out of the file
+  cache one ref at a time and re-probes exact headroom after each. Incoming,
+  loaded, executing, and shared inodes remain protected; model bytes stay local.
+
 ## 0.37.2 (2026-07-18)
 
 - **gw#579: reclaim idle checkpoints behind shared-reference pins.** Host-RAM
