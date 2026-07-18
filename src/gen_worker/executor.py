@@ -65,6 +65,7 @@ from .models.memory import (
     is_cuda_oom,
     low_vram_mode,
     next_offload_rung,
+    release_unused_pinned_host_cache,
 )
 from .models.cache_paths import tensorhub_cas_dir
 from .models.download import ensure_local, lookup_provider_for_ref
@@ -3623,13 +3624,24 @@ class Executor:
                 continue
 
             # Let completed demotion/to_thread frames release their arguments,
-            # then collect after the record owner is gone.  Under this already-
-            # measured pressure only, drop clean pages for refs that truthfully
-            # reached DISK; this keeps every snapshot local while avoiding the
-            # live J17 failure where two 6.9GiB records were vacated but their
-            # active file cache returned only 5MB of cgroup headroom (#579).
+            # then collect after the record owner is gone.  Pinned swap returns
+            # dead tensors to PyTorch's process-wide host cache, not the OS, so
+            # release its unused blocks first and re-probe.  Only if that is
+            # still insufficient do we chill clean snapshot pages for refs
+            # that truthfully reached DISK; every model byte stays local.
             await asyncio.sleep(0)
             await asyncio.to_thread(flush_memory)
+            released_pinned = await asyncio.to_thread(
+                release_unused_pinned_host_cache)
+            if released_pinned:
+                logger.info(
+                    "host-RAM admission released %d unused pinned-host bytes "
+                    "after vacating refs=%s for %s",
+                    released_pinned, released, spec.name,
+                )
+            after = await asyncio.to_thread(res.host_ram_headroom, incoming)
+            if after.sufficient:
+                return
             advised = await self._reclaim_released_file_cache(
                 released, [Path(p) for p in paths.values()],
             )

@@ -44,6 +44,40 @@ from gen_worker.transport import Transport
 _GiB = 1024 ** 3
 
 
+def test_pressure_release_returns_real_unused_pinned_blocks_to_os() -> None:
+    """#579: Python GC/device empty-cache do not flush the host allocator."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("real pinned-host allocator test requires CUDA")
+    if not callable(getattr(torch.cuda.memory, "host_memory_stats", None)):
+        pytest.skip("installed PyTorch does not expose host allocator stats")
+
+    # Start from an empty reusable pool so this allocation cannot hide inside
+    # a block left by another CUDA test in the same process.
+    memory_mod.release_unused_pinned_host_cache()
+    baseline = int(torch.cuda.memory.host_memory_stats().get(
+        "allocated_bytes.current", 0))
+    block = torch.empty(64 * 1024 * 1024, dtype=torch.uint8, pin_memory=True)
+    block.fill_(1)  # fault every pinned page into this process's working set
+    torch.cuda.synchronize()
+    live = int(torch.cuda.memory.host_memory_stats().get(
+        "allocated_bytes.current", 0))
+    assert live >= baseline + block.numel()
+
+    del block
+    gc.collect()
+    torch.cuda.synchronize()
+    cached = int(torch.cuda.memory.host_memory_stats().get(
+        "allocated_bytes.current", 0))
+    assert cached >= live  # freed tensor is still owned by the host cache
+
+    released = memory_mod.release_unused_pinned_host_cache()
+    after = int(torch.cuda.memory.host_memory_stats().get(
+        "allocated_bytes.current", 0))
+    assert released >= cached - after > 0
+    assert after <= baseline
+
+
 def _resident_file_bytes(path: Path) -> int:
     """Kernel page-cache residency without faulting file contents."""
     if os.name != "posix" or not hasattr(os, "POSIX_FADV_DONTNEED"):
