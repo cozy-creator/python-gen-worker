@@ -375,18 +375,27 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
 
 
 def _cell_lane_matches(
-    ref: str, family: str, *, wants_w8a8: bool, want_bucket: int
+    ref: str,
+    family: str,
+    *,
+    wants_w8a8: bool,
+    want_bucket: int,
+    candidate_keys: typing.AbstractSet[str] = frozenset(),
 ) -> bool:
     """Whether an inductor cell ref serves this endpoint's graph family
     (gw#561): the declared rank bucket is half of the identity — a
     lora_bucket endpoint needs exactly a ``-lora<bucket>`` cell of its base
     lane, and a branchless endpoint must never fetch one (either mismatch is
     a guaranteed lane_drift that would shadow the right cell and serve
-    eager)."""
-    from . import compile_cache
+    eager). Key-flavored cells (th#883 pull-by-key, ``#ck1-…``) match only
+    when their key is one this runtime computed for itself."""
+    from . import cell_key, compile_cache
 
     if not compile_cache.is_cache_ref(ref, family):
         return False
+    _fam, flavor = compile_cache.parse_cell_ref(ref)
+    if cell_key.is_key(flavor):
+        return flavor in candidate_keys
     base, bucket = compile_cache.lane_bucket(compile_cache.cell_lane(ref))
     if bucket != int(want_bucket or 0):
         return False
@@ -1296,6 +1305,11 @@ class _CompileTargetRecord:
     pipeline_weight_lane: str
     lora_bucket: int
     contract_digest: str
+    # th#883/gw#581 pull-by-key: the exact cell key this live object's
+    # runtime computed for itself (gen_worker.cell_key), plus its axes for
+    # the wire. "" when a required axis is unavailable (no cell identity).
+    requested_cell_key: str = ""
+    requested_cell_axes: Tuple[Tuple[str, str], ...] = ()
     active_compile_ref: str = ""
     active_compile_snapshot_digest: str = ""
     function_names: Tuple[str, ...] = ()
@@ -1995,10 +2009,22 @@ class Executor:
             target.pipeline, cfg)
         lane = pipeline_weight_lane(target.pipeline)
         bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+        requested_key = ""
+        requested_axes: Tuple[Tuple[str, str], ...] = ()
+        try:
+            from . import cell_key
+
+            key = cell_key.compute(
+                str(getattr(cfg, "family", "") or ""), lane, bucket)
+            requested_key, requested_axes = key.digest, key.axes
+        except Exception:
+            pass  # no computable identity on this runtime => no key
         with target.state_lock:
             target.pipeline_weight_lane = lane
             target.lora_bucket = bucket
             target.contract_digest = contract_digest
+            target.requested_cell_key = requested_key
+            target.requested_cell_axes = requested_axes
 
     def _compile_guard_failed(
         self,
@@ -2371,8 +2397,55 @@ class Executor:
                         model_bindings=[pb.CompileTargetBinding(
                             slot=slot, ref=ref, snapshot_digest=digest,
                         ) for slot, ref, digest in target.model_bindings],
+                        requested_cell_key=target.requested_cell_key,
+                        requested_cell_axes=dict(target.requested_cell_axes),
                     ))
         return sorted(out, key=lambda target: target.incarnation_id)
+
+    def cell_lookups(self) -> List[pb.CellLookup]:
+        """Full-replace pull-by-key lookup hints (th#883/gw#581).
+
+        Live targets contribute their exact requested keys; compile-declared
+        specs not yet live contribute pre-load CANDIDATE keys (the loader's
+        resident-upgrade decision is unknown before load, so both plain
+        lanes are candidates). Lookup hints only: the hub may attach store
+        hits at boot; forge demand comes exclusively from live targets."""
+        from . import cell_key
+
+        seen: set[Tuple[str, str]] = set()
+        for rec in self._classes.values():
+            live = [
+                target for target in rec.compile_targets.values()
+                if target.requested_cell_key
+            ] if rec.ready else []
+            for target in live:
+                family = str(getattr(
+                    target.spec.compile, "family", "") or "").strip()
+                if family:
+                    seen.add((family, target.requested_cell_key))
+            if live:
+                continue
+            for spec in rec.specs:
+                cfg = spec.compile
+                family = str(getattr(cfg, "family", "") or "").strip()
+                if cfg is None or not family:
+                    continue
+                bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+                wants_w8a8 = any(
+                    _ref_wants_w8a8(wire_ref(binding))
+                    for binding in spec.models.values()
+                )
+                lanes = ("w8a8",) if wants_w8a8 else ("", "fp8-hooks")
+                for lane in lanes:
+                    try:
+                        digest = cell_key.compute(family, lane, bucket).digest
+                    except Exception:
+                        continue
+                    seen.add((family, digest))
+        return [
+            pb.CellLookup(family=family, cell_key=key)
+            for family, key in sorted(seen)
+        ]
 
     def _compile_target(
         self, incarnation_id: str,
@@ -3839,6 +3912,18 @@ class Executor:
         model_refs = [wire_ref(binding) for binding in spec.models.values()]
         wants_w8a8 = any(_ref_wants_w8a8(ref) for ref in model_refs)
         want_bucket = int(getattr(spec.compile, "lora_bucket", 0) or 0)
+        # th#883 pull-by-key: a key-flavored cell is selected only when its
+        # key is one this runtime computed for itself (the same candidates
+        # the worker advertises in cell_lookups).
+        from . import cell_key
+
+        candidate_keys: set[str] = set()
+        for lane in (("w8a8",) if wants_w8a8 else ("", "fp8-hooks")):
+            try:
+                candidate_keys.add(
+                    cell_key.compute(family, lane, want_bucket).digest)
+            except Exception:
+                continue
         if wants_w8a8:
             # TensorRT cells currently expose only their plain fp16 contract.
             # The existing Forge's -w8a8 Inductor cell is the sole artifact
@@ -3846,7 +3931,8 @@ class Executor:
             candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
                 if _cell_lane_matches(
-                    ref, family, wants_w8a8=True, want_bucket=want_bucket)
+                    ref, family, wants_w8a8=True, want_bucket=want_bucket,
+                    candidate_keys=candidate_keys)
             ]
         else:
             trt_candidates = [
@@ -3856,7 +3942,8 @@ class Executor:
             inductor_candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
                 if _cell_lane_matches(
-                    ref, family, wants_w8a8=False, want_bucket=want_bucket)
+                    ref, family, wants_w8a8=False, want_bucket=want_bucket,
+                    candidate_keys=candidate_keys)
             ]
             # Explicit kind policy, then uniqueness within that kind. A map's
             # iteration order never chooses the artifact, while the existing
@@ -4122,10 +4209,47 @@ class Executor:
                     # a TRT engine (#390, refit with this pipeline's weights)
                     # or an inductor cache (#384). No verified artifact =>
                     # stays eager. ``compile_artifact`` is hub-attached (#569).
-                    armed = await _to_thread_complete(
-                        self._enable_compiled, pipe, spec.compile, compile_artifact,
-                    )
                     from . import compile_cache
+
+                    try:
+                        armed = await _to_thread_complete(
+                            self._enable_compiled,
+                            pipe, spec.compile, compile_artifact,
+                        )
+                    except compile_cache.CellSelectionBugError as exc:
+                        # th#883 invariant: a SELF-REQUESTED, identity-
+                        # verified cell failed to arm — by construction a
+                        # bug in the one selection brain. Loud event class
+                        # on the wire; never a silent eager fallback.
+                        bug_ref = (
+                            compile_selection.ref
+                            if compile_selection is not None else ""
+                        )
+                        bug_digest = (
+                            compile_selection.snapshot_digest
+                            if compile_selection is not None else ""
+                        )
+                        logger.error(
+                            "cell_selection_bug on %s (%s): %s",
+                            spec.name, bug_ref, exc)
+                        await self._send(pb.WorkerMessage(
+                            model_event=self.store.model_event(
+                                bug_ref,
+                                pb.MODEL_STATE_FAILED,
+                                identity=(
+                                    (bug_digest, 0) if bug_digest else None),
+                                error=(
+                                    f"cell_selection_bug: {str(exc)[:300]}"),
+                            )
+                        ))
+                        from .models.loading import pipeline_weight_lane
+
+                        if pipeline_weight_lane(pipe).startswith("w8a8"):
+                            # W8A8 stays fail-closed: surface as the
+                            # retryable lane refusal, cause preserved.
+                            raise compile_cache.CompiledLaneUnavailableError(
+                                f"cell_selection_bug: {exc}") from exc
+                        armed = False
 
                     if compile_cache.has_compile_target(pipe, spec.compile):
                         result.add_compile_object(pipe, (slot,))
@@ -4407,6 +4531,12 @@ class Executor:
 
         t0 = time.monotonic()
         staged_artifact: Any = None
+        # th#883: once the staged artifact's axes are proven to describe
+        # exactly the key this target computed for itself, arm failures in
+        # the selection/parity vocabulary are BY CONSTRUCTION bugs in the
+        # one worker-owned brain and surface as their own loud event class.
+        self_requested = False
+        _SELECTION_BUG_REASONS = ("key_mismatch", "no_target", "lane_apply")
 
         async def fail(reason: str, detail: str = "") -> None:
             nonlocal staged_artifact
@@ -4419,6 +4549,10 @@ class Executor:
             # th#875 transient vocabulary stays bare: the hub re-arm matcher
             # compares those four statuses EXACTLY.
             error = f"adopt_failed:{reason}"
+            if self_requested and reason in _SELECTION_BUG_REASONS:
+                logger.error(
+                    "cell_selection_bug on %s: %s %s", ref, reason, detail)
+                error = f"cell_selection_bug:{reason}"
             if detail and reason not in (
                 "model_in_use", "target_not_ready", "target_replaced", "download",
             ):
@@ -4508,6 +4642,13 @@ class Executor:
                 return await fail(exc.reason, str(exc))
             except Exception as exc:
                 return await fail("artifact_invalid", str(exc))
+            with expected_target.state_lock:
+                want_key = expected_target.requested_cell_key
+            if want_key and staged_artifact is not None:
+                from . import cell_key
+
+                self_requested = not cell_key.mismatch(
+                    staged_artifact.metadata, want_key)
 
         # Artifact work may take long enough for model juggling to replace the
         # object. Serialize the final check + mutation with setup/vacate, and

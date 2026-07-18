@@ -117,6 +117,9 @@ class Lifecycle:
             finalizing_jobs=self.executor.finalizing_jobs(),
             observed_residency_generation=self._observed_residency_generation,
             compile_targets=self.executor.compile_targets(),
+            # th#883 pull-by-key: worker-computed cell keys the hub may look
+            # up in its store (boot attach) — never hub-side selection input.
+            cell_lookups=self.executor.cell_lookups(),
         )
 
     def build_resources(self) -> pb.WorkerResources:

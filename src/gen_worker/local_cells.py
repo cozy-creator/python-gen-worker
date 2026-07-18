@@ -86,7 +86,24 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
             meta = json.loads(member.read().decode())
     except Exception as exc:  # noqa: BLE001 — any unreadable cell re-mints
         return f"unreadable artifact ({exc})"
-    reason = cc.verify(meta, family=family)
+    # th#883/gw#581: ONE compatibility brain — when both sides can state a
+    # cell key (local mints stamp one via artifact_metadata), the verdict is
+    # the exact key comparison fleet workers use; pre-key cells fall back to
+    # the legacy axis-by-axis verify.
+    reason = ""
+    try:
+        from . import cell_key
+        from .models.loading import pipeline_weight_lane
+
+        want = cell_key.compute(
+            family, pipeline_weight_lane(pipe),
+            int(getattr(cfg, "lora_bucket", 0) or 0),
+        )
+        reason = cell_key.mismatch(meta, want)
+        if reason and "records no computable key" in reason:
+            reason = cc.verify(meta, family=family)
+    except Exception:
+        reason = cc.verify(meta, family=family)
     if reason:
         return reason
     reason = cc.mode_drift(meta, pipe) or cc.lane_drift(meta, pipe)
@@ -279,6 +296,13 @@ def enable_compiled(
                     _say(f"local-cells: adopted stored cell {target.name}")
                     return True
                 reason = "seed/arm failed"
+            except cc.CellSelectionBugError as exc:
+                # th#883 invariant, local edition: a stored cell whose axes
+                # describe exactly this runtime refused to arm — a bug in
+                # the one selection brain. Loud, then re-mint (the local
+                # store can always replace its cell).
+                _say(f"local-cells: cell_selection_bug: {exc}")
+                reason = f"cell_selection_bug: {exc}"
             except cc.CompiledLaneUnavailableError:
                 reason = "seed/arm failed (w8a8 fail-closed)"
         _say(f"local-cells: stored cell no longer matches ({reason}); re-minting")
@@ -313,6 +337,11 @@ def enable_compiled(
     try:
         if cc.enable(pipe, cfg, cache_dir, artifact=target):
             return True
+    except cc.CellSelectionBugError as exc:
+        _say(f"local-cells: cell_selection_bug on freshly minted cell: {exc}")
+        if bucket:
+            cc.drop_lora_lane(pipe)
+        return _fail_closed(pipe, f"cell_selection_bug: {exc}")
     except cc.CompiledLaneUnavailableError as exc:
         logger.warning("local-cells: minted cell failed re-adoption (%s)", exc)
         if bucket:

@@ -194,7 +194,14 @@ def enable_compiled(
             if trt_engine.enable(pipe, cfg, cache_dir, artifact):
                 return True
             artifact = None  # unusable engine: fall through to eager policy
-    armed = compile_cache.enable(pipe, cfg, cache_dir, artifact)
+    try:
+        armed = compile_cache.enable(pipe, cfg, cache_dir, artifact)
+    except compile_cache.CellSelectionBugError:
+        # th#883: the loud invariant propagates, but the caller continuing
+        # eager must not inherit the branch-bearing lane.
+        if bucket:
+            compile_cache.drop_lora_lane(pipe)
+        raise
     if bucket and not armed:
         compile_cache.drop_lora_lane(pipe)
     return armed
