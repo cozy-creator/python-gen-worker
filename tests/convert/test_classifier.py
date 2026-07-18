@@ -55,6 +55,29 @@ def test_diffusers_dtype_preference_fp16() -> None:
     assert "transformer/diffusion_pytorch_model.bf16.safetensors" not in allow
 
 
+def test_diffusers_pipeline_selects_complete_official_variant_shard_set() -> None:
+    files = [
+        "model_index.json",
+        "unet/config.json",
+        "unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.safetensors.index.fp16.json",
+        "unet/diffusion_pytorch_model.bf16-00001-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.bf16-00002-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.safetensors.index.bf16.json",
+    ]
+    c = classify_repo(files, dtype_pref=("fp16",))
+
+    assert c.strategy == "diffusers"
+    assert set(c.allow_patterns) == {
+        "model_index.json",
+        "unet/config.json",
+        "unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.safetensors.index.fp16.json",
+    }
+
+
 def test_diffusers_skips_root_allinone_checkpoints() -> None:
     # SD1.5 shape: the repo ships all-in-one root checkpoints (12GB) on top
     # of the component tree — a diffusers-layout ingest must never pull them

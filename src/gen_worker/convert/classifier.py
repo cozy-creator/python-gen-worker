@@ -36,6 +36,13 @@ _DTYPE_TAGS: dict[str, tuple[str, ...]] = {
     "fp8": ("fp8", "fp8_e4m3fn", "fp8-e4m3", "fp8_e5m2"),
 }
 _VARIANT_TAG_RE = re.compile(r"\.([a-z0-9_\-]+)\.safetensors$")
+_SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
+_OFFICIAL_INDEX_VARIANT_RE = re.compile(
+    r"\.safetensors\.index\.([a-z0-9_-]+)\.json$",
+)
+_LEGACY_INDEX_VARIANT_RE = re.compile(
+    r"\.([a-z0-9_-]+)\.safetensors\.index\.json$",
+)
 
 _GGUF_QUANT_PREFERENCE = (
     "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q4_k_m", "q4_k_s", "q4_0",
@@ -103,8 +110,21 @@ def _root(paths: Sequence[str]) -> list[str]:
 
 
 def _variant_tag(path: str) -> str:
-    m = _VARIANT_TAG_RE.search(path.rsplit("/", 1)[-1].lower())
+    name = path.rsplit("/", 1)[-1].lower()
+    if name.endswith(".safetensors"):
+        stem = _SHARD_SUFFIX_RE.sub("", name.removesuffix(".safetensors"))
+        name = stem + ".safetensors"
+    m = _VARIANT_TAG_RE.search(name)
     return m.group(1) if m else ""
+
+
+def _index_variant_tag(path: str) -> str:
+    name = path.rsplit("/", 1)[-1].lower()
+    match = _OFFICIAL_INDEX_VARIANT_RE.search(name)
+    if match is not None:
+        return match.group(1)
+    match = _LEGACY_INDEX_VARIANT_RE.search(name)
+    return match.group(1) if match is not None else ""
 
 
 def _dtype_of_tag(tag: str) -> str:
@@ -262,18 +282,15 @@ def classify_repo(
                 continue
             comp_weights, comp_dtype = _pick_weight_set(group, dtype_pref)
             d_weights.extend(comp_weights)
+            selected_tag = _variant_tag(comp_weights[0]) if comp_weights else ""
+            d_indexes.extend(sorted(
+                p for p in paths
+                if _is_safetensors_index(p)
+                and (p.split("/", 1)[0] if "/" in p else "") == comp
+                and _index_variant_tag(p) == selected_tag
+            ))
             if comp and comp_dtype:
                 resolved[comp] = comp_dtype
-        # Sharded-set indexes for the picked weights only.
-        picked_set = set(d_weights)
-        for p in paths:
-            if _is_safetensors_index(p):
-                stem = p[: -len(".index.json")]
-                tag = _variant_tag(stem)
-                comp = p.split("/", 1)[0] if "/" in p else ""
-                comp_pick = [w for w in picked_set if w.startswith(f"{comp}/")] if comp else list(picked_set)
-                if any(_variant_tag(w) == tag for w in comp_pick):
-                    d_indexes.append(p)
         if not d_weights:
             raise RepoRefusal("missing_safetensors", files_seen=paths)
         dtypes = sorted(set(resolved.values()))
