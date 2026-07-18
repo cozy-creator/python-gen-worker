@@ -89,6 +89,62 @@ def test_cast_direction_fp16(tiny_llama, tmp_path: Path) -> None:
     assert all(t.dtype == torch.float16 for t in loaded.values() if t.is_floating_point())
 
 
+def test_th901_publish_as_is_mismatched_dtype_runs_real_conversion(
+    tiny_llama, tmp_path: Path, monkeypatch, fake_hub,
+) -> None:
+    """th#901 end-to-end proof: a 'transformers'-strategy source (the same
+    shape as HiDream-O1's UiT backbone) is fp32; requesting bf16 through the
+    real run_clone/publish path must produce a REAL bf16 checkpoint, not
+    silently republish the fp32 source under the bf16 label. This is the
+    live bug's exact reproduction, minus the network-huge weights."""
+    from fake_hub import _FakeHub
+    from gen_worker.convert.clone import run_clone
+    from gen_worker.convert.hub import blake3_file
+
+    class _Ctx:
+        def __init__(self, server) -> None:
+            self._file_api_base_url = f"http://127.0.0.1:{server.server_port}"
+            self._worker_capability_token = "cap-token"
+            self.owner = "acme"
+            self.request_id = "req-901"
+            self.destination = {"repo": "acme/dest"}
+
+    _FakeHub.state["finalize_calls"] = 1
+    monkeypatch.setenv("COZY_CONVERT_WORKDIR", str(tmp_path / "work"))
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.ingest_huggingface",
+        lambda source_ref, dest_dir, **kwargs: tiny_llama,
+    )
+
+    result = run_clone(
+        _Ctx(fake_hub), provider="huggingface", source_ref=_TINY_LLAMA,
+        destination_repo="acme/dest",
+        outputs=[{"dtype": "bf16", "file_layout": "diffusers", "file_type": "safetensors"}],
+    )
+
+    assert not result.failed_flavors, result.failed_flavors
+    assert result.published[0]["flavor"] == "bf16"
+    req = _FakeHub.state["commit_request"]
+    assert req["flavor"] == "bf16" and req["dtype"] == "bf16"
+    weight_op = next(op for op in req["operations"] if op["path"].endswith(".safetensors"))
+    assert weight_op["blake3"] != blake3_file(tiny_llama.dir / "model.safetensors"), (
+        "uploaded blob must differ from the untouched fp32 source — a real cast ran"
+    )
+    # the fake hub actually received PUT bytes for THIS weight's upload_id
+    # (real upload, not a CAS dedup hit against the fp32 source) — load them
+    # and assert the real on-disk dtype.
+    uid = next(
+        u for u, path in _FakeHub.state.get("upload_paths", {}).items()
+        if path == weight_op["path"]
+    )
+    put_bytes = _FakeHub.state.get("put_bytes", {})
+    uploaded = put_bytes[f"/put/{uid}/1"]
+    out = tmp_path / "uploaded.safetensors"
+    out.write_bytes(uploaded)
+    loaded = load_file(str(out))
+    assert all(t.dtype == torch.bfloat16 for t in loaded.values() if t.is_floating_point())
+
+
 def test_ingest_diffusers_pipe(tiny_sdxl) -> None:
     src = tiny_sdxl
     assert src.classification.strategy == "diffusers"

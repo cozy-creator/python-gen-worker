@@ -575,6 +575,16 @@ _PUBLISH_AS_IS_STRATEGIES = frozenset({
     "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
     "pipeline_tree", "diffusers_component",
 })
+# th#901: publish_as_is strategies whose weight set is an ordinary dense
+# safetensors tree (not a binary quant container like gguf, and not a
+# mixed-dtype multi-checkpoint bundle like pipeline_tree) — a genuinely
+# mismatched requested dtype is real, in-line-castable work via
+# build_flavor_tree, not something to silently swallow or unconditionally
+# refuse.
+_CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES = frozenset({
+    "transformers", "peft", "sentence_transformers", "native_lora",
+    "diffusers_component",
+})
 _DIRECT_GGUF_ENCODINGS = frozenset({"f32", "f16", "bf16", "q8_0"})
 _DTYPE_STORAGE_BITS = {
     "fp32": 32, "f32": 32, "float32": 32,
@@ -787,6 +797,13 @@ def run_clone(
     tags = normalize_tags(destination_repo_tags)
     layout_hint = str(target_layout or "diffusers").strip().lower() or "diffusers"
     specs = normalize_outputs(outputs, layout_hint=layout_hint)
+    # th#901: normalize_outputs collapses "caller asked for nothing" onto a
+    # schema default (dtype="bf16") — indistinguishable from an EXPLICIT
+    # bf16 request once normalized. Only an explicit request may force a
+    # publish_as_is source through a real conversion; an unspecified request
+    # keeps mirroring the source's own dtype untouched (no cast nobody asked
+    # for).
+    explicit_outputs = bool(outputs)
     effective_hf_token = str(hf_token or "").strip() or str(getattr(ctx, "hf_token", "") or "").strip()
 
     def _progress(p: float, stage: str) -> None:
@@ -909,18 +926,58 @@ def run_clone(
             try:
                 if publish_as_is:
                     source_dtype = str(source.attrs.get("dtype") or "").strip().lower()
-                    if i > 0 or (source_dtype and spec.dtype != source_dtype and spec.dtype != "bf16"):
+                    dtype_matches = (not source_dtype) or spec.dtype == source_dtype
+                    if dtype_matches or not explicit_outputs:
+                        # Already satisfied, OR nobody actually asked for a
+                        # specific dtype (normalize_outputs' schema default
+                        # just landed on bf16) — mirror the source's own
+                        # dtype untouched rather than force a cast nobody
+                        # requested.
+                        tree = source.dir
+                        attrs = dict(source.attrs)
+                        flavor_label = source_dtype or spec.dtype
+                    elif i == 0 and spec.file_type == "safetensors" \
+                            and strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES:
+                        # th#901: an EXPLICITLY mismatched requested dtype is
+                        # real, in-line-castable work for these strategies
+                        # (ordinary dense safetensors trees) —
+                        # build_flavor_tree already knows how to cast a
+                        # single/few-weight-set tree. Never silently
+                        # republish the source's own dtype under the
+                        # requested flavor's label. These strategies publish
+                        # as-is ORGANIZATIONALLY too — no layout repackage is
+                        # attempted here (that stays a separate job) — so the
+                        # cast targets the source's own on-disk layout, only
+                        # the dtype changes.
+                        effective_layout = (
+                            source.layout if source.layout in _KNOWN_FILE_LAYOUTS
+                            else "singlefile"
+                        )
+                        cast_spec = OutputSpec(
+                            dtype=spec.dtype, file_layout=effective_layout,
+                            file_type=spec.file_type,
+                        )
+                        flavor_dir = workdir / f"flavor-{spec.label}"
+                        shutil.rmtree(flavor_dir, ignore_errors=True)
+                        shutil.rmtree(workdir / f"flavor-{spec.label}.__repack__",
+                                      ignore_errors=True)
+                        tree, attrs = build_flavor_tree(
+                            source, cast_spec, flavor_dir,
+                            quantize_components=quantize_components,
+                        )
+                        flavor_label = str(attrs.get("dtype") or spec.dtype)
+                    else:
                         # Only the source's own flavor is published for
-                        # non-diffusers classes (quant runs as a separate job).
-                        if spec.dtype != source_dtype:
-                            raise InlineConversionNotPossible(
-                                reason=f"{strategy} sources publish as-is; "
-                                       f"run a conversion job for {spec.dtype}",
-                                target_dtype=spec.dtype,
-                            )
-                    tree = source.dir
-                    attrs = dict(source.attrs)
-                    flavor_label = source_dtype or spec.dtype
+                        # classes this worker cannot cast in-line (quant/gguf
+                        # containers, mixed-dtype multi-checkpoint bundles —
+                        # those run as a separate job) or for i>0 extra
+                        # specs. Fail loud instead of silently republishing
+                        # under the wrong flavor label.
+                        raise InlineConversionNotPossible(
+                            reason=f"{strategy} sources publish as-is; "
+                                   f"run a conversion job for {spec.dtype}",
+                            target_dtype=spec.dtype,
+                        )
                 else:
                     # Wipe any partial flavor tree from a prior failed run —
                     # only the downloaded source is resumable.
