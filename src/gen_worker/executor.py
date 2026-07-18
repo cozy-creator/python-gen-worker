@@ -1474,6 +1474,7 @@ class _Job:
     renew_task: Optional[asyncio.Task] = None
     finished: bool = False
     superseded: bool = False
+    cancel_requested: bool = False
     # gw#516: True while the job is past the decode->finalize handoff (GPU
     # slot terminally released, encode/upload tail running, result unshipped).
     finalizing: bool = False
@@ -4996,6 +4997,7 @@ class Executor:
         for (rid, att), job in list(self.jobs.items()):
             if rid == run.request_id and att != run.attempt and not job.finished:
                 job.superseded = True
+                job.cancel_requested = True
                 if job.ctx is not None:
                     job.ctx._cancel()
                 if job.exec_task is not None:
@@ -5028,6 +5030,10 @@ class Executor:
         job = self.jobs.get((cancel.request_id, cancel.attempt))
         if job is None or job.finished:
             return  # unknown pair or natural result already stands
+        # JobAccepted means this exact attempt is cancellable even before its
+        # context or handler task exists. Retain the request across every
+        # pre-execution await instead of dropping an early CancelJob.
+        job.cancel_requested = True
         if job.ctx is not None:
             job.ctx._cancel()  # cooperative: sync handlers poll ctx
         if job.exec_task is not None and job.spec is not None and job.spec.is_async:
@@ -5163,6 +5169,8 @@ class Executor:
             **producer_kwargs,
         )
         job.ctx = ctx
+        if job.cancel_requested:
+            ctx._cancel()
         if run.capability_token and self.file_base_url:
             from .capability_renewal import renew_capability_while_running
 
@@ -5179,17 +5187,28 @@ class Executor:
             )
 
         try:
+            # Tensorhub #871 owns canonical stored-ref authorization and
+            # presigning. RunJob must therefore contain only ephemeral
+            # HTTP(S) Asset transport refs. Validate/materialize that whole
+            # payload before any source/model acquisition or tenant handler
+            # work; opaque refs and caller local_path values fail closed.
+            await _to_thread_complete(
+                materialize_input_assets,
+                payload,
+                run.request_id,
+                attempt=run.attempt,
+                cancel_check=lambda: ctx.cancelled,
+            )
+            ctx.raise_if_cancelled("canceled")
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
             if producer:
                 await self._materialize_datasets(ctx, payload)
-            # Typed media inputs: URL-ref Assets (hub-approved remote media)
-            # are downloaded and given a local_path before the handler runs.
-            await asyncio.to_thread(materialize_input_assets, payload, run.request_id)
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
-        except asyncio.CancelledError:
+            ctx.raise_if_cancelled("canceled")
+        except (asyncio.CancelledError, CanceledError):
             await self._finish(job, pb.JOB_STATUS_CANCELED, safe_message="canceled")
             return
         except Exception as exc:
@@ -5268,6 +5287,7 @@ class Executor:
                                 await asyncio.to_thread(
                                     self._adapters.deactivate, ref, pipe, run.request_id
                                 )
+                    ctx.raise_if_cancelled("canceled")
                     try:
                         output = await self._execute(job, spec, instance, ctx, payload, kwargs,
                                                      timeout_ms=timeout_ms, gpu_index=gpu_index)
@@ -5804,7 +5824,7 @@ class Executor:
         if job.renew_task is not None:
             job.renew_task.cancel()
             job.renew_task = None
-        cleanup_input_assets(job.request_id)
+        cleanup_input_assets(job.request_id, job.attempt)
         logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:
             await self._send_result(job.request_id, job.attempt, status, **kw)
