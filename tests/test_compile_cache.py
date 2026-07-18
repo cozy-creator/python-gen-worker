@@ -98,10 +98,25 @@ def test_verify_mismatches():
     del other["gen_worker"]
     assert "gen_worker" in cc.verify(other, family="sd15")
 
-    for field in ("sm", "cuda", "cuda_driver", "image_digest"):
+    for field in ("sm", "cuda", "image_digest"):
         other = dict(meta)
         other[field] = "definitely-not-this-runtime"
-        assert field in cc.verify(other, family="sd15")
+        reason = cc.verify(other, family="sd15")
+        # the named-axis contract (gw#577): refusals carry axis + both values
+        assert field in reason and "definitely-not-this-runtime" in reason
+
+
+def test_verify_ignores_cuda_driver_host_lottery():
+    """gw#577: a cell minted on one host must deliver to another same-SKU
+    same-image host running a different driver build. Inductor/triton
+    artifacts are keyed by torch/triton/cuda-runtime/SM arch (triton's disk
+    key is source+ptxas-version+arch, ptxas ships in the wheel); the host
+    libcuda build keys nothing — pinning it made fleet delivery a lottery
+    (2 of 3 fresh B200 pods refused a proven cell, ie#495 flip rollback)."""
+    meta = cc.artifact_metadata(
+        family="sd15", shapes=[(768, 768)], targets=["transformer"])
+    other = dict(meta, cuda_driver="13010")
+    assert cc.verify(other, family="sd15") == ""
 
 
 def test_execution_contract_uses_structure_not_checkpoint_values():
@@ -551,6 +566,142 @@ def test_pipeline_mismatch_never_activates_staged_cache(
 
     assert cc.enable(pipe, cfg, cache_dir, artifact) is False
     assert _tree_snapshot(live) == before
+
+
+# ---------------------------------------------------------------------------
+# gw#577: fleet delivery axes + named refusal reasons
+# ---------------------------------------------------------------------------
+
+
+def _module_tree_pipe(wrapper_name: str):
+    torch = pytest.importorskip("torch")
+
+    class _Tree:
+        def __init__(self):
+            self.transformer = torch.nn.Sequential(
+                torch.nn.Linear(16, 16), torch.nn.SiLU(),
+            )
+
+    return type(wrapper_name, (_Tree,), {})()
+
+
+def test_execution_contract_ignores_pipeline_wrapper_class():
+    """gw#577 axis (c): conversion traces via generic DiffusionPipeline
+    (-> LTX2Pipeline) while serving wraps the SAME module tree in
+    LTX2ConditionPipeline. torch.compile wraps target callables — the
+    pipeline class never enters a traced graph — so the signature must key
+    on the traced module structure only (dual-load probe: identical trees,
+    sig 2625baca vs e0f356f5 under the old class-name hash)."""
+    cfg = Compile(shapes=((1024, 1024),), targets=("transformer",), family="fam")
+    conv_sig, conv_wc = cc.execution_contract(
+        _module_tree_pipe("LTX2Pipeline"), cfg)
+    serve_sig, serve_wc = cc.execution_contract(
+        _module_tree_pipe("LTX2ConditionPipeline"), cfg)
+    assert conv_sig == serve_sig
+    assert conv_wc == serve_wc
+    # genuine structural drift still produces a different signature
+    torch = pytest.importorskip("torch")
+    other = _module_tree_pipe("LTX2Pipeline")
+    other.transformer = torch.nn.Sequential(torch.nn.Linear(32, 32))
+    assert cc.execution_contract(other, cfg)[0] != conv_sig
+
+
+def test_contract_drift_names_signature_values():
+    """A genuine graph mismatch refuses with BOTH digests in the reason —
+    never the bare 'module graph signature mismatch' that cost a raw
+    dual-load probe pod to diagnose."""
+    pipe = _module_tree_pipe("AnyPipeline")
+    cfg = Compile(shapes=((1024, 1024),), targets=("transformer",), family="fam")
+    sig, wc = cc.execution_contract(pipe, cfg)
+    meta = cc.artifact_metadata(
+        family="fam", shapes=cfg.shapes, targets=cfg.targets,
+        graph_signature="0" * 64, weight_contract=wc)
+    reason = cc.contract_drift(meta, pipe, cfg)
+    assert "module graph signature" in reason
+    assert "0" * 12 in reason and sig[:12] in reason
+
+
+def test_w8a8_identity_gate_drops_cuda_driver_keeps_rest(monkeypatch):
+    """W8A8 cells still require sm/cuda/image_digest identity, but not the
+    host-lottery cuda_driver axis (gw#577)."""
+    pytest.importorskip("torch")
+    real_key = cc.runtime_key
+
+    def prod_key():
+        key = dict(real_key())
+        key.update(sm="sm_100", cuda="13.0", cuda_driver="13000",
+                   image_digest="sha256:feedface")
+        return key
+
+    monkeypatch.setattr(cc, "runtime_key", prod_key)
+    pipe = _module_tree_pipe("Serving")
+    pipe.transformer[0]._cozy_w8a8_linear = True
+    pipe.transformer[0].gemm_mode = "rowwise"
+    pipe._cozy_weight_lane = "w8a8"
+    cfg = Compile(shapes=((1024, 1024),), targets=("transformer",), family="fam")
+    sig, wc = cc.execution_contract(pipe, cfg)
+    meta = cc.artifact_metadata(
+        family="fam", shapes=cfg.shapes, targets=cfg.targets,
+        weight_lane="w8a8", graph_signature=sig, weight_contract=wc)
+    meta["cuda_driver"] = ""  # cell minted without the axis: fine
+    assert cc.contract_drift(meta, pipe, cfg) == ""
+    # a cell recording a DIFFERENT driver build still delivers (verify skips)
+    meta["cuda_driver"] = "13010"
+    assert cc.verify(meta, family="fam") == ""
+    assert cc.contract_drift(meta, pipe, cfg) == ""
+    # the honest axes stay fail-closed, with named values
+    for field in ("sm", "cuda", "image_digest"):
+        broken = dict(meta)
+        broken[field] = ""
+        assert field in cc.contract_drift(broken, pipe, cfg)
+
+
+def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
+    """gw#577 axis (a): the raised CompiledLaneUnavailableError is the ONLY
+    wire-visible diagnostic on a serve pod — it must carry the exact
+    mismatched axis and values, per refusal cause."""
+    pytest.importorskip("torch")
+    pipe = _module_tree_pipe("Serving")
+    pipe._cozy_weight_lane = "w8a8"
+    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
+    cache_dir = tmp_path / "cache"
+
+    # no artifact delivered
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="no cell artifact delivered"):
+        cc.enable(pipe, cfg, cache_dir, artifact=None)
+
+    # key mismatch: the axis and both values appear in the raise
+    sig, wc = cc.execution_contract(pipe, cfg)
+    meta = cc.artifact_metadata(
+        family="fam", shapes=cfg.shapes, targets=cfg.targets,
+        weight_lane="w8a8", graph_signature=sig, weight_contract=wc)
+    meta["torch"] = "0.0.0+fake"
+    source = _capture_tree(tmp_path / "cand")
+    artifact = cc.pack(source, tmp_path / "cell.tar.gz", meta)
+    with pytest.raises(cc.CompiledLaneUnavailableError) as exc:
+        cc.enable(pipe, cfg, cache_dir, artifact=artifact)
+    assert "torch" in str(exc.value) and "0.0.0+fake" in str(exc.value)
+
+    # contract drift: the drift verdict appears in the raise
+    meta = cc.artifact_metadata(
+        family="fam", shapes=cfg.shapes, targets=cfg.targets,
+        weight_lane="w8a8", graph_signature="1" * 64, weight_contract=wc)
+    source2 = _capture_tree(tmp_path / "cand2")
+    artifact2 = cc.pack(source2, tmp_path / "cell2.tar.gz", meta)
+    with pytest.raises(cc.CompiledLaneUnavailableError) as exc:
+        cc.enable(pipe, cfg, cache_dir, artifact=artifact2)
+    assert "module graph signature" in str(exc.value)
+    assert "1" * 12 in str(exc.value)
+
+
+def test_build_refuses_w8a8_mint_without_serving_image_digest(tmp_path):
+    """gw#577 finding (b): a w8a8 cell stamped with the PRODUCER image's
+    digest can never be adopted by the fleet — refuse before any work."""
+    with pytest.raises(RuntimeError, match="serving_image_digest"):
+        cc.build(
+            tmp_path, tmp_path / "out", shapes=[(768, 768)],
+            family="fam", storage_dtype="fp8-w8a8",
+        )
 
 
 def test_cache_collision_and_merge_failure_leave_live_tree_unchanged(

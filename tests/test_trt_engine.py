@@ -444,7 +444,10 @@ def test_adopt_trt_key_mismatch_stays_eager(tmp_path, monkeypatch):
     monkeypatch.setattr(te, "load_and_wrap", _mismatch)
     _adopt(ex, ref=TRT_REF)
     failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(failed) == 1 and failed[0].error == "adopt_failed:key_mismatch"
+    # gw#577: the wire refusal names the mismatched axis + both values
+    assert len(failed) == 1 and failed[0].error == (
+        "adopt_failed:key_mismatch: trt '10.16.0.14' != runtime '10.15.2.1'"
+    )
     assert failed[0].snapshot_digest == DIGEST_A
     assert failed[0].operation_id == OP_A
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
@@ -463,7 +466,10 @@ def test_adopt_trt_warmup_must_execute_engine_or_roll_back(tmp_path, monkeypatch
     _adopt(ex, ref=TRT_REF)
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert len(failed) == 1
-    assert failed[0].error == "adopt_failed:engine_not_executed"
+    assert failed[0].error == (
+        "adopt_failed:engine_not_executed: "
+        "warmup did not execute the attached TRT engine"
+    )
     assert unwrapped
     target = ex.compile_targets()[0]
     assert target.active_compile_ref == ""

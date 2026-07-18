@@ -226,12 +226,27 @@ def _events(sent, state):
             if m.WhichOneof("msg") == "model_event" and m.model_event.state == state]
 
 
+# th#875's hub-side re-arm matcher compares these adopt statuses EXACTLY;
+# the worker must keep them bare (no appended detail) on the wire (gw#577).
+_TRANSIENT_REASONS = (
+    "adopt_failed:model_in_use", "adopt_failed:target_not_ready",
+    "adopt_failed:target_replaced", "adopt_failed:download",
+)
+
+
 def _assert_failed(
     sent, error, digest=DIGEST_A, operation_id=OP_A,
     target_incarnation_id=None,
 ):
     failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == error
+    # gw#577: terminal refusals may carry ": <exact reason>" after the
+    # classified code; the th#875 transient vocabulary must stay bare.
+    assert failed and (
+        failed[-1].error == error
+        or failed[-1].error.startswith(error + ":")
+    )
+    if error in _TRANSIENT_REASONS:
+        assert failed[-1].error == error
     assert failed[-1].snapshot_digest == digest
     assert failed[-1].operation_id == operation_id
     if target_incarnation_id is None:
@@ -549,7 +564,8 @@ def test_adopt_unexpected_failure_echoes_operation_digest(tmp_path, monkeypatch)
 
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert len(failed) == 1
-    assert failed[0].error == "adopt_failed:runtimeerror"
+    # gw#577: the unexpected-failure event carries the exception text
+    assert failed[0].error == "adopt_failed:runtimeerror: unexpected"
     assert failed[0].snapshot_digest == DIGEST_B
     assert failed[0].operation_id == OP_A
     assert failed[0].target_incarnation_id == _target_id(ex)
