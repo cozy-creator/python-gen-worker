@@ -645,7 +645,7 @@ def test_pressure_pinned_release_runs_after_owner_teardown_and_stops_eviction(
     monkeypatch.setattr(
         executor_mod, "release_unused_pinned_host_cache", _release_pinned,
     )
-    ex._reclaim_released_file_cache = _unexpected_file_advice  # type: ignore[method-assign]
+    ex._reclaim_disk_file_cache = _unexpected_file_advice  # type: ignore[method-assign]
 
     async def _run() -> None:
         await ex._record_host_ram_failure(
