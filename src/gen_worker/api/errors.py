@@ -77,6 +77,32 @@ class OutputTooLargeError(ValidationError):
         super().__init__(f"output file too large (size_bytes={self.size_bytes}, max_bytes={self.max_bytes})")
 
 
+class ModelSlotIdentityError(WorkerError):
+    """Dispatched model slot's repo differs from the function's declared ref
+    (gw#583, the ie#518 silence).
+
+    Fail-closed, named-axis refusal (the gw#577 pattern: every refusal names
+    the exact axis plus both conflicting values). ``@endpoint(models={...})``
+    fixes a slot's repo identity unless the slot declares
+    ``Slot(selected_by=...)`` (a hub-owned catalog the endpoint explicitly
+    opted into) — for a fixed slot, a dispatch naming a DIFFERENT repo is
+    silent drift, not a legitimate pick. Hub-resolved tag/flavor picks for
+    the SAME repo are never a mismatch; this checks repo identity only.
+    """
+
+    def __init__(
+        self, function: str, slot: str, *, declared_ref: str, dispatched_ref: str,
+    ) -> None:
+        self.function = str(function or "")
+        self.slot = str(slot or "")
+        self.declared_ref = str(declared_ref or "")
+        self.dispatched_ref = str(dispatched_ref or "")
+        super().__init__(
+            f"{self.function!r} slot {self.slot!r}: dispatched repo "
+            f"{self.dispatched_ref!r} != declared {self.declared_ref!r}"
+        )
+
+
 class RefCompatibilitySurprise(ValidationError):
     """Post-download runtime mismatch on a caller-supplied PAYLOAD_REF.
 
