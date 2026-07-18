@@ -28,7 +28,7 @@ option go_package = "github.com/cozy-creator/tensorhub/internal/orchestrator/grp
 // FAILED_PRECONDITION. No minor versions, no feature gates, no negotiation.
 enum ProtocolVersion {
   PROTOCOL_VERSION_UNSPECIFIED = 0;
-  PROTOCOL_VERSION_CURRENT     = 3;
+  PROTOCOL_VERSION_CURRENT     = 4;
 }
 
 service WorkerScheduler {
@@ -120,7 +120,7 @@ message ModelResidency {
   ResidencyTier tier = 2;      // highest tier the model currently occupies
   int64 vram_bytes = 3;        // measured footprint; set when tier = VRAM, else 0
   // Exact immutable bytes and the DesiredResidency generation that caused
-  // their materialization. Both are additive protocol-v3 evidence: legacy
+  // their materialization. Both are protocol-v4 evidence: legacy
   // workers leave them zero/empty, which means identity is unknown rather
   // than inferred from the mutable ref.
   string snapshot_digest = 4;
@@ -144,14 +144,14 @@ message InFlightJob {
 message HelloAck {
   ProtocolVersion protocol_version = 1; // orchestrator's version, for symmetric validation
   string file_base_url = 2;  // tensorhub base URL for capability-token HTTP calls (uploads, blob refs)
-  repeated string keep = 3;  // legacy v2 field; ignored by protocol v3 workers
+  repeated string keep = 3;  // legacy v2 field; ignored by protocol v4 workers
   // th#697 precision ladder: per-model flavor resolutions for THIS worker's
   // card. The worker applies each entry to bindings whose wire ref equals
   // `ref` (a bare declared ref): download/load `resolved_ref` and apply the
   // `cast` transform at load. Full-replace with the ack. Additive: old
   // workers ignore it and load their declared bindings.
   repeated ModelResolution resolutions = 4;
-  // Full-replace desired model residency for this worker (protocol v3).
+  // Full-replace desired model residency for this worker (protocol v4).
   DesiredResidency desired_residency = 5;
 }
 
@@ -276,7 +276,7 @@ message RunJob {
   string request_id = 1;
   int64  attempt    = 2; // fencing token; bumped by the orchestrator on every (re)queue
   string function_name = 3;
-  bytes  input_payload = 4; // MessagePack-encoded input struct (input file refs pre-materialized to URLs)
+  bytes  input_payload = 4; // canonical MessagePack input; stored Asset refs remain opaque
   int64  timeout_ms = 5;    // execution deadline; 0 = no explicit timeout
   string tenant     = 6;    // invoking owner (org/user slug)
   string invoker_id = 7;    // surfaced read-only as ctx.invoker_id
@@ -294,6 +294,18 @@ message RunJob {
   // immediately before execution so replacement or causal runtime revocation
   // returns typed RETRYABLE without GPU work.
   RequiredCompileExecution required_compile = 13;
+  // Ordered, credential-free stored inputs authorized at submit. The worker
+  // resolves fresh transport URLs for the exact request+attempt capability.
+  repeated InputAsset input_assets = 14;
+}
+
+message InputAsset {
+  string asset_id = 1;
+  string source_ref = 2;
+  string blake3 = 3;
+  int64 size_bytes = 4;
+  string kind = 5;
+  string mime_type = 6;
 }
 
 message RequiredCompileExecution {
@@ -533,7 +545,7 @@ message ModelEvent {
   // Immutable bytes and DesiredResidency generation for this ref transition.
   // A receiver must treat an empty digest or zero generation as identity
   // unknown. Generation fences delayed events after a tag moves or a newer
-  // desired replacement is reconciled without changing protocol version 3.
+  // desired replacement is reconciled without changing protocol version 4.
   string snapshot_digest = 16;
   uint64 residency_generation = 17;
   // Echoes ModelOp.operation_id on ADOPTED/adopt-FAILED and at most one later
