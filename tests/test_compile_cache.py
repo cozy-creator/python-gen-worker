@@ -555,6 +555,12 @@ def test_pipeline_mismatch_never_activates_staged_cache(
         meta["graph_signature"] = "different-module-graph"
     else:
         meta["compile_mode"] = "regional"
+    # A pre-key cell (no computable cell-key axes): gw#581 SELF-REQUESTED
+    # cells escalate drift to CellSelectionBugError instead — own test below.
+    # verify() skips an unrecorded sm; the key requires it, so this cell can
+    # never be classified as this runtime's own request.
+    meta.pop("sm", None)
+    meta.pop("cell_key", None)
 
     cache_dir = tmp_path / "cache"
     live = _capture_tree(cache_dir / "compile-cache")
@@ -682,10 +688,14 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
         cc.enable(pipe, cfg, cache_dir, artifact=artifact)
     assert "torch" in str(exc.value) and "0.0.0+fake" in str(exc.value)
 
-    # contract drift: the drift verdict appears in the raise
+    # contract drift on a FOREIGN cell: the drift verdict appears in the
+    # raise. (A self-keyed drifted cell is the th#883 cell_selection_bug
+    # class instead — tests/test_cell_key.py.)
     meta = cc.artifact_metadata(
         family="fam", shapes=cfg.shapes, targets=cfg.targets,
         weight_lane="w8a8", graph_signature="1" * 64, weight_contract=wc)
+    meta.pop("sm", None)
+    meta.pop("cell_key", None)
     source2 = _capture_tree(tmp_path / "cand2")
     artifact2 = cc.pack(source2, tmp_path / "cell2.tar.gz", meta)
     with pytest.raises(cc.CompiledLaneUnavailableError) as exc:

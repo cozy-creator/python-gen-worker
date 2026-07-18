@@ -276,11 +276,15 @@ def family_from_ref(ref: str) -> str:
 
 def is_cache_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names an inductor compile-cache cell (optionally of
-    one specific family)."""
+    one specific family). Cells are flavored either with the legacy human
+    label (``inductor-<sku>-torch<mm>[-lane]``) or, post-th#883, with the
+    worker-computed cell key itself (``ck1-<sha256>`` — pull-by-key)."""
+    from . import cell_key
+
     fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
         return False
-    return flavor.startswith("inductor-")
+    return flavor.startswith("inductor-") or cell_key.is_key(flavor)
 
 
 def artifact_metadata(
@@ -312,7 +316,7 @@ def artifact_metadata(
     parity-checked at :func:`enable` like ``low_vram_mode``. Shape rows are
     (w, h) or (w, h, frames); ``guidance_scales`` records the image CFG /
     no-CFG graph regimes captured for every 2-D row — see ``Compile``."""
-    return {
+    meta: Dict[str, Any] = {
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
         **runtime_key(),
@@ -332,6 +336,13 @@ def artifact_metadata(
         "weight_contract": dict(weight_contract or {}),
         "libs": _lib_versions(),
     }
+    # gw#581/th#883: stamp the worker-owned cell key the recorded axes
+    # describe. Derived FROM the metadata (never probed separately), so the
+    # stamp can never disagree with the axes it summarizes. Callers that
+    # later override a key axis (build()'s serving image digest) re-stamp.
+    from . import cell_key
+
+    return cell_key.stamp(meta)
 
 
 def verify(meta: Dict[str, Any], *, family: str = "") -> str:
@@ -530,6 +541,21 @@ class AdoptError(RuntimeError):
     def __init__(self, reason: str, detail: str = "") -> None:
         self.reason = reason
         super().__init__(detail or reason)
+
+
+class CellSelectionBugError(RuntimeError):
+    """A SELF-REQUESTED, identity-verified cell failed to arm (th#883).
+
+    Under worker-owned selection the worker never refuses a cell it asked
+    for: the artifact's axes describe exactly the key this runtime computed
+    for itself, so any arm failure is by construction a bug in the one
+    shared selection/parity brain — never a compatibility outcome. Callers
+    must surface it as the ``cell_selection_bug`` event class (loud, wire-
+    visible), never as a silent eager fallback."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 class CompiledLaneUnavailableError(RetryableError):
@@ -1505,10 +1531,39 @@ def enable(
     try:
         with _SEED_ARM_LOCK:
             meta: Optional[Dict[str, Any]] = None
+            self_key = ""
             if staged is not None:
                 meta = staged.metadata
+                # th#883/gw#581: is this MY cell — the artifact whose axes
+                # describe exactly the key this runtime computes for itself
+                # with the one shared brain? If so, a refusal below is by
+                # construction a selection/parity bug, never compatibility.
+                try:
+                    from . import cell_key
+                    from .models.loading import (
+                        pipeline_weight_lane as _pwl,
+                    )
+
+                    want = cell_key.compute(
+                        str(getattr(cfg, "family", "") or ""),
+                        _pwl(pipeline),
+                        int(getattr(cfg, "lora_bucket", 0) or 0),
+                        regional=bool(getattr(cfg, "regional", False)),
+                    )
+                    if not cell_key.mismatch(meta, want):
+                        self_key = want.digest
+                except Exception:
+                    self_key = ""
                 drift = artifact_drift(meta, pipeline, cfg)
                 if drift:
+                    # low_vram prep mode is DYNAMIC (free-VRAM placement at
+                    # load) and outside the key: its drift is a legitimate
+                    # miss even on a self-requested cell, never the bug class.
+                    if self_key and not drift.startswith("low_vram_mode"):
+                        raise CellSelectionBugError(
+                            f"self-requested cell {self_key} refused to "
+                            f"arm: {drift}"
+                        )
                     refusal = f"cell rejected: {drift}"
                     logger.warning("compile-cache: %s; staying eager", drift)
                     meta = None
@@ -1522,6 +1577,11 @@ def enable(
                             "staying eager", exc)
                         meta = None
             armed = apply(pipeline, cfg, cache_ready=meta is not None)
+            if meta is not None and not armed and self_key:
+                raise CellSelectionBugError(
+                    f"self-requested cell {self_key} activated but armed "
+                    "no compile target"
+                )
             from .models.loading import pipeline_weight_lane
 
             if pipeline_weight_lane(pipeline).startswith("w8a8") and not armed:
@@ -1619,6 +1679,7 @@ def build(
     declared_vram_gb: float = 0.0,
     serving_image_digest: str = "",
     lora_bucket: int = 0,
+    requested_cell_key: str = "",
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Compile a diffusers pipeline over ``shapes`` and package the resulting
     inductor+triton caches as a per-SKU artifact.
@@ -1749,6 +1810,24 @@ def build(
         # digest from the release, so it—not the producer container—is the
         # identity the worker must match.
         meta["image_digest"] = str(serving_image_digest).strip()
+    # gw#581/th#883: re-stamp the key over the final axes, then honor the
+    # forge's echo — a demand-driven mint names the exact worker-computed
+    # key it must satisfy, and publishing a cell under a key its own axes
+    # do not describe would be a permanently un-armable store entry.
+    from . import cell_key
+
+    cell_key.stamp(meta)
+    if str(requested_cell_key or "").strip():
+        reason = cell_key.mismatch(meta, str(requested_cell_key).strip())
+        if reason:
+            try:
+                axes = cell_key.from_artifact_metadata(meta).canonical()
+            except cell_key.CellKeyError:
+                axes = "<not key-complete>"
+            raise RuntimeError(
+                "cell mint does not satisfy the requested cell key "
+                f"({reason}); producer axes: {axes}"
+            )
     label = flavor_label(meta["sku"], meta["torch"], meta.get("weight_lane", ""))
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
     return artifact, meta, timings
@@ -1757,6 +1836,7 @@ def build(
 __all__ = [
     "ARTIFACT_FORMAT",
     "AdoptError",
+    "CellSelectionBugError",
     "CompiledLaneUnavailableError",
     "build",
     "apply",

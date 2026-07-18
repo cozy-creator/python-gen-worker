@@ -268,7 +268,7 @@ class ModelResolution(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ...) -> None: ...
 
 class StateDelta(_message.Message):
-    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets")
+    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups")
     PHASE_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
@@ -276,6 +276,7 @@ class StateDelta(_message.Message):
     FINALIZING_JOBS_FIELD_NUMBER: _ClassVar[int]
     OBSERVED_RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     COMPILE_TARGETS_FIELD_NUMBER: _ClassVar[int]
+    CELL_LOOKUPS_FIELD_NUMBER: _ClassVar[int]
     phase: WorkerPhase
     available_functions: _containers.RepeatedScalarFieldContainer[str]
     loading_functions: _containers.RepeatedScalarFieldContainer[str]
@@ -283,10 +284,26 @@ class StateDelta(_message.Message):
     finalizing_jobs: int
     observed_residency_generation: int
     compile_targets: _containers.RepeatedCompositeFieldContainer[CompileTarget]
-    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ...) -> None: ...
+    cell_lookups: _containers.RepeatedCompositeFieldContainer[CellLookup]
+    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ..., cell_lookups: _Optional[_Iterable[_Union[CellLookup, _Mapping]]] = ...) -> None: ...
+
+class CellLookup(_message.Message):
+    __slots__ = ("family", "cell_key")
+    FAMILY_FIELD_NUMBER: _ClassVar[int]
+    CELL_KEY_FIELD_NUMBER: _ClassVar[int]
+    family: str
+    cell_key: str
+    def __init__(self, family: _Optional[str] = ..., cell_key: _Optional[str] = ...) -> None: ...
 
 class CompileTarget(_message.Message):
-    __slots__ = ("incarnation_id", "family", "pipeline_weight_lane", "lora_bucket", "contract_digest", "active_compile_ref", "active_compile_snapshot_digest", "function_names", "model_bindings")
+    __slots__ = ("incarnation_id", "family", "pipeline_weight_lane", "lora_bucket", "contract_digest", "active_compile_ref", "active_compile_snapshot_digest", "function_names", "model_bindings", "requested_cell_key", "requested_cell_axes")
+    class RequestedCellAxesEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
     INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
     FAMILY_FIELD_NUMBER: _ClassVar[int]
     PIPELINE_WEIGHT_LANE_FIELD_NUMBER: _ClassVar[int]
@@ -296,6 +313,8 @@ class CompileTarget(_message.Message):
     ACTIVE_COMPILE_SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_NAMES_FIELD_NUMBER: _ClassVar[int]
     MODEL_BINDINGS_FIELD_NUMBER: _ClassVar[int]
+    REQUESTED_CELL_KEY_FIELD_NUMBER: _ClassVar[int]
+    REQUESTED_CELL_AXES_FIELD_NUMBER: _ClassVar[int]
     incarnation_id: str
     family: str
     pipeline_weight_lane: str
@@ -305,7 +324,9 @@ class CompileTarget(_message.Message):
     active_compile_snapshot_digest: str
     function_names: _containers.RepeatedScalarFieldContainer[str]
     model_bindings: _containers.RepeatedCompositeFieldContainer[CompileTargetBinding]
-    def __init__(self, incarnation_id: _Optional[str] = ..., family: _Optional[str] = ..., pipeline_weight_lane: _Optional[str] = ..., lora_bucket: _Optional[int] = ..., contract_digest: _Optional[str] = ..., active_compile_ref: _Optional[str] = ..., active_compile_snapshot_digest: _Optional[str] = ..., function_names: _Optional[_Iterable[str]] = ..., model_bindings: _Optional[_Iterable[_Union[CompileTargetBinding, _Mapping]]] = ...) -> None: ...
+    requested_cell_key: str
+    requested_cell_axes: _containers.ScalarMap[str, str]
+    def __init__(self, incarnation_id: _Optional[str] = ..., family: _Optional[str] = ..., pipeline_weight_lane: _Optional[str] = ..., lora_bucket: _Optional[int] = ..., contract_digest: _Optional[str] = ..., active_compile_ref: _Optional[str] = ..., active_compile_snapshot_digest: _Optional[str] = ..., function_names: _Optional[_Iterable[str]] = ..., model_bindings: _Optional[_Iterable[_Union[CompileTargetBinding, _Mapping]]] = ..., requested_cell_key: _Optional[str] = ..., requested_cell_axes: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class CompileTargetBinding(_message.Message):
     __slots__ = ("slot", "ref", "snapshot_digest")

@@ -98,8 +98,8 @@ def test_store_verdict_hit(tmp_path):
         ({"gen_worker": "0.0.0-not-this"}, "gen_worker"),
         ({"sku": "not-this-gpu"}, "sku"),
         ({"format": 99}, "format"),
-        ({"weight_lane": "fp8-hooks"}, "weight_lane"),   # lane drift, symmetric
-        ({"compile_mode": "regional"}, "compile_mode"),
+        ({"weight_lane": "fp8-hooks"}, "lane"),   # lane drift, symmetric
+        ({"compile_mode": "regional"}, "mode"),
         ({"low_vram_mode": "vae_only"}, "low_vram_mode"),
     ],
 )

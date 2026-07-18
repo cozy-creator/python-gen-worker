@@ -200,6 +200,20 @@ message StateDelta {
   // independent of aggregate phase. A vacated/replaced object disappears
   // before its successor can be addressed.
   repeated CompileTarget compile_targets = 7;
+  // th#883 pull-by-key (gw#581): every cell key this worker's runtime could
+  // consume right now — candidate keys computed pre-load from endpoint
+  // declarations, narrowed to the exact per-target keys once objects are
+  // live. Full-replace. Store-lookup hints ONLY (boot attach rides these);
+  // forge demand comes exclusively from compile_targets' exact keys.
+  repeated CellLookup cell_lookups = 8;
+}
+
+// One worker-computed cell identity the hub may look up in its store. The
+// hub never derives compatibility from the axes; they parameterize a forge
+// mint (SKU pin, lockstep image) and operator diagnostics only.
+message CellLookup {
+  string family = 1;
+  string cell_key = 2; // "ck1-<sha256hex>", computed by gen_worker.cell_key
 }
 
 // One exact live pipeline object. incarnation_id is opaque, worker-minted,
@@ -225,6 +239,15 @@ message CompileTarget {
   // Canonical sorted exact immutable load-time bindings owned by this target.
   // This may be a strict subset of the function's/RunJob's setup bindings.
   repeated CompileTargetBinding model_bindings = 9;
+  // th#883 pull-by-key (gw#581): the exact cell key this live object's
+  // runtime computed for itself (gen_worker.cell_key — the ONE compatibility
+  // brain). The hub serves a stored cell by this key or records demand for
+  // the forge; it never derives compatibility hub-side. Empty when the
+  // runtime cannot state a required axis.
+  string requested_cell_key = 10;
+  // The requested key's axes, verbatim: forge mint parameters (SKU pin,
+  // torch, image digest) and diagnostics only — never hub-side selection.
+  map<string, string> requested_cell_axes = 11;
 }
 
 message CompileTargetBinding {
