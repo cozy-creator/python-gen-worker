@@ -3640,6 +3640,7 @@ class Executor:
                     released_pinned, released, spec.name,
                 )
             after = await asyncio.to_thread(res.host_ram_headroom, incoming)
+            await self._observe_host_ram_progress(released)
             if after.sufficient:
                 return
             advised = await self._reclaim_released_file_cache(
@@ -3652,8 +3653,7 @@ class Executor:
                     advised, spec.name,
                 )
             after = await asyncio.to_thread(res.host_ram_headroom, incoming)
-            if rec is None:
-                await self._observe_host_ram_progress(released)
+            await self._observe_host_ram_progress(released)
             if after.sufficient:
                 return
 

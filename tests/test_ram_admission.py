@@ -396,6 +396,126 @@ def test_pressure_eviction_reclaims_real_snapshot_cache_and_protects_shared_inod
     assert vae_file.read_bytes() == b"a" * vae_file.stat().st_size
 
 
+@pytest.mark.parametrize("owned_by_record", [True, False])
+def test_pressure_pinned_release_runs_after_owner_teardown_and_stops_eviction(
+    tmp_path: Path, monkeypatch, owned_by_record: bool,
+) -> None:
+    """#579: production admission must wire host-cache release in order.
+
+    The controlled release is the only operation that can satisfy measured
+    headroom.  Removing it, moving it before owner teardown, skipping the
+    immediate re-probe, or falling through to file advice must fail here.
+    Record-owned and ownerless residency entries share the same contract.
+    """
+    from gen_worker.models import disk_gc
+
+    class Endpoint:
+        def setup(self, pipeline: _FakePipe) -> None:
+            self.pipeline = pipeline
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    victim_ref = "tensorhub/pinned-victim"
+    survivor_ref = "tensorhub/warm-survivor"
+    victim_spec = _spec("victim", Endpoint, {"pipeline": HF(victim_ref)})
+    survivor_spec = _spec(
+        "survivor", Endpoint, {"pipeline": HF(survivor_ref)},
+    )
+    incoming_spec = _spec(
+        "incoming", Endpoint, {"pipeline": HF("tensorhub/incoming")},
+    )
+    sent: list[pb.WorkerMessage] = []
+    ex = _executor(
+        [victim_spec, survivor_spec, incoming_spec], tmp_path, sent,
+    )
+    res = ex.store.residency
+    victim_dir = tmp_path / "victim"
+    incoming_dir = tmp_path / "incoming"
+    victim_dir.mkdir()
+    incoming_dir.mkdir()
+
+    victim = _FakePipe()
+    victim_weak = weakref.ref(victim)
+    survivor = _FakePipe()
+    res.track_ram(victim_ref, victim, path=victim_dir)
+    res.track_ram(survivor_ref, survivor, path=tmp_path / "survivor")
+    victim_record = ex._classes[victim_spec.instance_key]
+    if owned_by_record:
+        victim_record.instance = SimpleNamespace(pipeline=victim)
+        victim_record.ready = True
+        victim_record.held_refs = [victim_ref]
+        victim_record.held_objects = {victim_ref: victim}
+    survivor_record = ex._classes[survivor_spec.instance_key]
+    survivor_record.instance = SimpleNamespace(pipeline=survivor)
+    survivor_record.ready = True
+    survivor_record.held_refs = [survivor_ref]
+    survivor_record.held_objects = {survivor_ref: survivor}
+    del victim
+
+    released = {"host_cache": False}
+
+    def _headroom(needed: int) -> HostRamHeadroom:
+        available = 32 * _GiB if released["host_cache"] else 1 * _GiB
+        return HostRamHeadroom(
+            available_bytes=available,
+            floor_bytes=4 * _GiB,
+            required_bytes=int(needed) + 4 * _GiB,
+        )
+
+    def _release_pinned() -> int:
+        assert res.tier(victim_ref) is Tier.DISK
+        assert res.obj(victim_ref) is None
+        if owned_by_record:
+            assert victim_record.ready is False
+            assert victim_record.instance is None
+            assert victim_record.held_objects == {}
+        assert victim_weak() is None
+        released["host_cache"] = True
+        return 9 * _GiB
+
+    async def _unexpected_file_advice(*_args, **_kwargs) -> int:
+        raise AssertionError("sufficient pinned release must skip file advice")
+
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda _path: 4 * _GiB)
+    monkeypatch.setattr(res, "host_ram_headroom", _headroom)
+    monkeypatch.setattr(
+        executor_mod, "release_unused_pinned_host_cache", _release_pinned,
+    )
+    ex._reclaim_released_file_cache = _unexpected_file_advice  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        await ex._record_host_ram_failure(
+            ["tensorhub/blocked"],
+            InsufficientHostRamError(
+                "incoming",
+                incoming_bytes=4 * _GiB,
+                floor_bytes=4 * _GiB,
+                required_bytes=8 * _GiB,
+                available_before_bytes=1 * _GiB,
+                available_after_bytes=1 * _GiB,
+            ),
+        )
+        async with ex._load_lock:
+            await ex._ensure_host_ram_for(
+                incoming_spec, {"pipeline": str(incoming_dir)},
+            )
+
+    asyncio.run(_run())
+    assert released["host_cache"] is True
+    assert res.tier(survivor_ref) is Tier.RAM
+    assert survivor_record.ready is True
+    progress = [
+        message.model_event for message in sent
+        if message.WhichOneof("msg") == "model_event"
+        and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+    ]
+    assert len(progress) == 1
+    assert progress[0].host_ram_available_before_bytes == 1 * _GiB
+    assert progress[0].host_ram_available_after_bytes == 32 * _GiB
+    assert list(progress[0].host_ram_evicted_refs) == [victim_ref]
+
+
 def test_capacity_progress_requires_measured_owner_release(
     tmp_path: Path, monkeypatch,
 ) -> None:
