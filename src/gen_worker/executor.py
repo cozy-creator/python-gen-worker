@@ -33,6 +33,7 @@ from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
+    ModelSlotIdentityError,
     RetryableError,
     ValidationError,
 )
@@ -207,6 +208,16 @@ def _capability_job_id(token: str) -> Optional[str]:
         return str(_decode_unverified_jwt_claims(raw).get("job_id") or "").strip() or None
     except Exception:
         return None
+
+
+def _undeclared_model_slots(spec: EndpointSpec, run: "pb.RunJob") -> List[str]:
+    """``ModelBinding.slot`` names the hub dispatched that the endpoint never
+    declared in ``@endpoint(models={...})`` (gw#583, the ie#518 silence).
+
+    Not fatal — a new hub-side model param must stay forward-compatible with
+    older workers — but never silent: the caller logs one warning per name.
+    """
+    return sorted({b.slot for b in run.models if b.slot and b.slot not in spec.models})
 
 
 def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dict[str, Any]:
@@ -2624,6 +2635,14 @@ class Executor:
         when neither source yields a CAS ref the dispatch fails RETRYABLE —
         the hub must resolve the slot to a ref this worker can load, not
         the worker self-fetching Civitai/HF.
+
+        Identity gate (gw#583, the ie#518 silence): a FIXED slot — one whose
+        declared ``Slot`` carries no ``selected_by=`` catalog, or a bare
+        binding — has exactly one code-declared repo. A hub-resolved pick
+        that differs only in tag/flavor is the ordinary case above; a pick
+        naming a DIFFERENT REPO for a fixed slot is silent drift, not a
+        legitimate choice, and refuses closed. ``selected_by=`` slots opt
+        into hub-catalog picks explicitly — those are exempt by design.
         """
         declared = spec.models.get(slot)
         if run_ref:
@@ -2634,11 +2653,24 @@ class Executor:
             ):
                 return declared
             try:
-                return self._hub_binding(run_ref)
+                binding = self._hub_binding(run_ref)
             except ValueError:
                 logger.warning(
                     "slot %r of %s: resolved_models ref %r is not a CAS ref; "
                     "falling back to the declared default", slot, spec.name, run_ref)
+            else:
+                catalog_slot = spec.slots.get(slot)
+                fixed_repo = (
+                    declared is not None
+                    and declared.source == "tensorhub"
+                    and not (catalog_slot is not None and catalog_slot.selected_by)
+                )
+                if fixed_repo and declared is not None and binding.path != declared.path:
+                    raise ModelSlotIdentityError(
+                        spec.name, slot,
+                        declared_ref=wire_ref(declared), dispatched_ref=run_ref,
+                    )
+                return binding
         if declared is not None and declared.source == "tensorhub":
             return declared
         raise RetryableError(
@@ -5076,6 +5108,11 @@ class Executor:
             status, msg = _map_exception(exc)
             await self._finish(job, status, safe_message=msg)
             return
+        for undeclared in _undeclared_model_slots(spec, run):
+            logger.warning(
+                "UNDECLARED_MODEL_SLOT function=%s slot=%s request_id=%s: "
+                "dispatched model param not declared in @endpoint(models={...}) "
+                "— ignored, not loaded", spec.name, undeclared, run.request_id)
         if spec.cls is not None:
             # Register the derived per-pick spec before fencing so the job is
             # a visible record owner and vacate cannot race the validated
