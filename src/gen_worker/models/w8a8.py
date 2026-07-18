@@ -104,17 +104,26 @@ def _quantized_layers(files: tuple[Path, ...]) -> tuple[tuple[str, ...], bool]:
 
 
 def _root_weight_files(d: Path) -> tuple[Path, ...]:
-    """Root weight set: index-mapped shards plus loose safetensors."""
-    sharded: set[str] = set()
-    for idx in sorted(d.glob("*.safetensors.index.json")):
-        try:
-            weight_map = json.loads(idx.read_text("utf-8")).get("weight_map") or {}
-            sharded.update(str(v) for v in weight_map.values())
-        except (OSError, ValueError):
-            continue
-    files = [d / s for s in sorted(sharded) if (d / s).is_file()]
-    files += [p for p in sorted(d.glob("*.safetensors"))
-              if p.is_file() and p.name not in sharded]
+    """Root weight set: index-mapped shards plus loose safetensors, at the
+    root and under nested dirs (split-checkpoint layouts keep component
+    files under subdirs). Hidden dirs (``.cache`` download metadata) are
+    skipped."""
+    dirs = [d] + sorted(
+        p for p in d.rglob("*")
+        if p.is_dir()
+        and not any(part.startswith(".") for part in p.relative_to(d).parts))
+    files: list[Path] = []
+    for sub in dirs:
+        sharded: set[str] = set()
+        for idx in sorted(sub.glob("*.safetensors.index.json")):
+            try:
+                weight_map = json.loads(idx.read_text("utf-8")).get("weight_map") or {}
+                sharded.update(str(v) for v in weight_map.values())
+            except (OSError, ValueError):
+                continue
+        files += [sub / s for s in sorted(sharded) if (sub / s).is_file()]
+        files += [p for p in sorted(sub.glob("*.safetensors"))
+                  if p.is_file() and p.name not in sharded]
     return tuple(dict.fromkeys(files))
 
 
@@ -733,16 +742,22 @@ def load_w8a8_root_pipeline(
     """Serve a root-layout w8a8 snapshot through the pipeline class's own
     ``from_pretrained`` (which must sanitize — see module docstring), then
     swap the denoiser's quantized Linears onto scaled_mm when the host
-    qualifies. Stamps ``_cozy_weight_lane`` like the diffusers lane."""
+    qualifies. Stamps ``_cozy_weight_lane`` like the diffusers lane.
+
+    Converter-renamed families declare ``_cozy_w8a8_key_map`` on the
+    pipeline class (a ``staticmethod`` mapping an artifact layer name to
+    its module path) — forwarded to :func:`swap_w8a8_linears`."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
     mode = w8a8_gemm_mode() or "dequant"
     pipe = cls.from_pretrained(str(path), torch_dtype=compute)
     denoiser = _root_denoiser(pipe)
+    key_map = (getattr(pipe, "_cozy_w8a8_key_map", None)
+               or getattr(cls, "_cozy_w8a8_key_map", None))
     if mode != "dequant":
         if not swap_w8a8_linears(denoiser, art, compute_dtype=compute,
-                                 gemm_mode=mode):
+                                 key_map=key_map, gemm_mode=mode):
             raise W8a8SnapshotError(
                 "scaled_mm host but no quantized Linear swapped — artifact "
                 f"keys do not match {type(denoiser).__name__} modules")

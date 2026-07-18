@@ -120,7 +120,7 @@ def source_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def w8a8_root(source_root: Path) -> Path:
     out = source_root.parent / "w8a8"
     result = streaming_w8a8_snapshot(source_root, out, file_layout="singlefile")
-    assert result["components"] == [""]
+    assert result["components"] == ["model.safetensors"]
     return out
 
 
@@ -240,6 +240,98 @@ def test_swap_with_key_map_reaches_renamed_modules(
         model, art, compute_dtype=torch.bfloat16,
         key_map=lambda k: k[len("net."):])
     assert swapped == len(_QUANTIZED_LAYERS)
+
+
+class _TinyNestedPipeline:
+    """Split-checkpoint-shaped (anima class): DiT under a nested dir with a
+    converter-renamed (``net.``-prefixed) key space, a second passthrough
+    weight set beside it. Declares the swap key_map on the class."""
+
+    _cozy_w8a8_key_map = staticmethod(lambda k: k[len("net."):])
+
+    def __init__(self) -> None:
+        self.transformer: nn.Module | None = None
+
+    @classmethod
+    def from_pretrained(cls, path: str, torch_dtype=None, **_) -> "_TinyNestedPipeline":
+        dtype = torch_dtype or torch.bfloat16
+        dit_file = next(Path(path).rglob("dit.safetensors"))
+        sd = sanitize_w8a8_state_dict(load_file(str(dit_file)), dtype)
+        sd = {k[len("net."):]: v.to(dtype) for k, v in sd.items()}
+        model = _TinyDiT()
+        model.load_state_dict(sd, assign=True)
+        model.eval()
+        pipe = cls()
+        pipe.transformer = model
+        return pipe
+
+
+def _nested_source(tmp_path: Path) -> Path:
+    torch.manual_seed(11)
+    src = tmp_path / "nested-src"
+    (src / "models" / "dit").mkdir(parents=True)
+    (src / "models" / "te").mkdir(parents=True)
+    dit_sd = {f"net.{k}": v.detach().to(torch.bfloat16).contiguous()
+              for k, v in _TinyDiT().state_dict().items()}
+    save_file(dit_sd, str(src / "models" / "dit" / "dit.safetensors"))
+    # The passthrough set ALSO carries w8a8-eligible-looking tensors
+    # (repeated-block 2-D 16-aligned) — the ambiguity the selector exists for.
+    te_sd = {
+        "model.layers.0.mlp.up.weight":
+            torch.randn(64, 32, dtype=torch.bfloat16),
+        "model.layers.1.mlp.up.weight":
+            torch.randn(64, 32, dtype=torch.bfloat16),
+    }
+    save_file(te_sd, str(src / "models" / "te" / "te.safetensors"))
+    (src / "config.json").write_text(json.dumps({"model_type": "tiny_split"}))
+    return src
+
+
+def test_nested_multiset_needs_selector_and_passes_rest_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = _nested_source(tmp_path)
+    with pytest.raises(ConversionImplementationError, match="weight_set_patterns"):
+        streaming_w8a8_snapshot(src, tmp_path / "o1", file_layout="singlefile")
+    with pytest.raises(ConversionImplementationError, match="match none"):
+        streaming_w8a8_snapshot(
+            src, tmp_path / "o2", file_layout="singlefile",
+            weight_set_patterns=("nope/*",))
+
+    out = tmp_path / "w8a8"
+    result = streaming_w8a8_snapshot(
+        src, out, file_layout="singlefile",
+        weight_set_patterns=("models/dit/*",))
+    assert result["components"] == ["models/dit/dit.safetensors"]
+
+    # Selected set requanted in place (rel dir preserved), TE byte-identical.
+    te_src = (src / "models" / "te" / "te.safetensors").read_bytes()
+    te_out = (out / "models" / "te" / "te.safetensors").read_bytes()
+    assert te_out == te_src
+    assert (out / "config.json").exists()
+
+    art = detect_w8a8_artifact(out)
+    assert art is not None and art.component == ""
+    assert art.quantized == tuple(f"net.{n}" for n in _QUANTIZED_LAYERS)
+    verify_w8a8_snapshot(src, out)
+
+    # Serve: worker constructs via the class loader, swaps through the
+    # class-declared key_map hook (module surgery is device-agnostic).
+    monkeypatch.setattr(w8a8, "w8a8_gemm_mode", lambda: "rowwise")
+    pipe = load_from_pretrained(_TinyNestedPipeline, out)
+    assert pipe._cozy_weight_lane == "w8a8"
+    lin_cls = fp8_scaled_linear_class()
+    for layer in _QUANTIZED_LAYERS:
+        assert isinstance(pipe.transformer.get_submodule(layer), lin_cls), layer
+    assert type(pipe.transformer.patch_embed) is nn.Linear
+
+
+def test_diffusers_layout_refuses_weight_set_patterns(tmp_path: Path) -> None:
+    (tmp_path / "model_index.json").write_text("{}")
+    with pytest.raises(ConversionImplementationError, match="non-diffusers"):
+        streaming_w8a8_snapshot(
+            tmp_path, tmp_path / "o", file_layout="diffusers",
+            weight_set_patterns=("x/*",))
 
 
 def test_sanitize_passes_scale_free_dicts_through(source_root: Path) -> None:

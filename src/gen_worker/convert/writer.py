@@ -1137,6 +1137,35 @@ def streaming_fp8_snapshot(
             "components": sorted(done), "output_dir": out_dir}
 
 
+def _nested_weight_sets(d: Path) -> list[tuple[str, Path, tuple[Path, ...]]]:
+    """(rel entry, entry path, member files) per weight set, at the root
+    and under nested dirs (split-checkpoint layouts). entry is the shard
+    index for sharded sets, else the safetensors file; members are the
+    set's on-disk files (index + shards, or the single file). Hidden dirs
+    (``.cache`` download metadata) are skipped."""
+    sets: list[tuple[str, Path, tuple[Path, ...]]] = []
+    dirs = [d] + sorted(
+        p for p in d.rglob("*")
+        if p.is_dir()
+        and not any(part.startswith(".") for part in p.relative_to(d).parts))
+    for sub in dirs:
+        sharded: set[str] = set()
+        for idx in sorted(sub.glob("*.safetensors.index.json")):
+            members: list[Path] = [idx]
+            try:
+                weight_map = json.loads(idx.read_text("utf-8")).get("weight_map") or {}
+            except (OSError, ValueError):
+                continue
+            sharded.update(str(v) for v in weight_map.values())
+            members += [sub / s for s in sorted(set(weight_map.values()))
+                        if (sub / s).is_file()]
+            sets.append((str(idx.relative_to(d)), idx, tuple(members)))
+        for f in sorted(sub.glob("*.safetensors")):
+            if f.is_file() and f.name not in sharded:
+                sets.append((str(f.relative_to(d)), f, (f,)))
+    return sets
+
+
 def streaming_w8a8_snapshot(
     source_dir: Path,
     out_dir: Path,
@@ -1144,6 +1173,7 @@ def streaming_w8a8_snapshot(
     file_layout: str,
     components: tuple[str, ...] = FP8_DEFAULT_COMPONENTS,
     te_components: tuple[str, ...] = (),
+    weight_set_patterns: tuple[str, ...] = (),
     shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
 ) -> dict[str, Any]:
     """Produce the ``#fp8-w8a8`` flavor of a diffusers snapshot, streaming.
@@ -1156,37 +1186,77 @@ def streaming_w8a8_snapshot(
     the gw#534 corroborating ``quantization_config`` (the safetensors
     headers stay authoritative for detection).
 
-    Non-diffusers layouts (gw#562) require a SINGLE root weight set — the
-    sharded-transformers/singlefile trees the DiffSynth families mirror,
-    where that weight set IS the denoiser. It gets the same requant; no
-    component config exists, so the headers alone carry detection."""
+    Non-diffusers layouts (gw#562) scan the WHOLE tree for weight sets
+    (root and nested — split-checkpoint layouts keep component files under
+    subdirs). Exactly the denoiser set(s) get the requant: a single
+    discovered set is unambiguous; with several, ``weight_set_patterns``
+    (globs over each set's rel entry path) must select — other sets pass
+    through byte-identical, so text encoders/VAEs never grow scale twins
+    (their quantized keys could never resolve in the denoiser at swap
+    time). No component config exists; the headers alone carry
+    detection."""
+    from fnmatch import fnmatch
+
     source_dir, out_dir = Path(source_dir), Path(out_dir)
     if file_layout != "diffusers":
         if te_components:
             raise ConversionImplementationError(
                 "te_components need a diffusers layout (no component "
                 f"identity in {file_layout!r})")
-        root_groups = snapshot_weight_groups(source_dir, file_layout)
-        if len(root_groups) != 1 or root_groups[0][0] != "":
+        sets = _nested_weight_sets(source_dir)
+        if not sets:
             raise ConversionImplementationError(
-                "w8a8 flavors need component identity: a diffusers layout, "
-                "or a single root weight set — found "
-                f"{len(root_groups)} weight set(s) in {file_layout!r} layout")
-        entry = root_groups[0][1]
-        result = streaming_w8a8_cast(
-            entry, out_dir,
-            shard_prefix=_group_shard_prefix(entry),
-            shard_threshold=shard_threshold,
-        )
-        if not int(result["converted_count"]):
+                f"no safetensors weight sets found in {file_layout!r} layout")
+        rels = [rel for rel, _e, _m in sets]
+        if weight_set_patterns:
+            selected = [s for s in sets
+                        if any(fnmatch(s[0], p) for p in weight_set_patterns)]
+            if not selected:
+                raise ConversionImplementationError(
+                    f"weight_set_patterns {list(weight_set_patterns)} match "
+                    f"none of the discovered weight sets {rels}")
+        elif len(sets) == 1:
+            selected = sets
+        else:
             raise ConversionImplementationError(
-                "no w8a8-eligible weights in the root weight set (nothing "
-                "2-D/16-aligned under a repeated-block container missed "
-                "the skip patterns)")
-        copy_non_weight_files(source_dir, out_dir, skip_components={""})
-        return {"tensor_count": int(result["tensor_count"]),
-                "converted_count": int(result["converted_count"]),
-                "components": [""], "output_dir": out_dir}
+                f"{len(sets)} weight sets in {file_layout!r} layout "
+                f"({rels}) — pass weight_set_patterns to select the "
+                "denoiser set(s); the rest pass through byte-identical")
+        tensor_count = converted = 0
+        skip_rel: set[str] = set()
+        for rel, entry, members in selected:
+            result = streaming_w8a8_cast(
+                entry, out_dir / Path(rel).parent,
+                shard_prefix=_group_shard_prefix(entry),
+                shard_threshold=shard_threshold,
+            )
+            tensor_count += int(result["tensor_count"])
+            converted += int(result["converted_count"])
+            skip_rel |= {str(m.relative_to(source_dir)) for m in members}
+        if not converted:
+            raise ConversionImplementationError(
+                "no w8a8-eligible weights in the selected weight set(s) "
+                "(nothing 2-D/16-aligned under a repeated-block container "
+                "missed the skip patterns)")
+        # Passthrough: every other file hardlinks byte-identical (unselected
+        # weight sets dedup against the source mirror in CAS).
+        for f in sorted(source_dir.rglob("*")):
+            if not f.is_file():
+                continue
+            rel_path = f.relative_to(source_dir)
+            if rel_path.parts[:2] == (".cache", "huggingface"):
+                continue
+            if f.name == ".civitai.json" or str(rel_path) in skip_rel:
+                continue
+            _link_or_copy(f, out_dir / rel_path)
+        return {"tensor_count": tensor_count,
+                "converted_count": converted,
+                "components": sorted(rel for rel, _e, _m in selected),
+                "output_dir": out_dir}
+    if weight_set_patterns:
+        raise ConversionImplementationError(
+            "weight_set_patterns applies to non-diffusers layouts only "
+            "(diffusers selection is by component name)")
     denoiser_set, te_set = set(components), set(te_components)
     groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
               if c in denoiser_set | te_set]
@@ -1297,9 +1367,17 @@ def verify_w8a8_snapshot(
         return where
 
     out_where = _tensor_map(list(art.files))
-    src_where = _tensor_map(sorted(
-        p for p in (source_dir / art.component).glob("*.safetensors")
-        if p.is_file()))
+    if art.component:
+        src_files = sorted(
+            p for p in (source_dir / art.component).glob("*.safetensors")
+            if p.is_file())
+    else:
+        # Root layout: nested split-checkpoint trees carry the weight sets
+        # under subdirs — reuse the detector's own file discovery.
+        from gen_worker.models.w8a8 import _root_weight_files
+
+        src_files = [p for p in _root_weight_files(source_dir) if p.is_file()]
+    src_where = _tensor_map(src_files)
 
     names = list(art.quantized)
     rng = random.Random(seed)
