@@ -250,6 +250,74 @@ def _host_ram_error(
     )
 
 
+def test_failed_setup_rolls_back_exact_ownership_before_fresh_reload(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A failure after residency registration cannot leak a stale instance.
+
+    This uses the real setup, typed injection, residency registration,
+    compile-target publication seam, rollback, and retry path. Only the tiny
+    local pipeline and hardware probes are deterministic substitutes.
+    """
+    shutdown_markers: list[int] = []
+    constructed = 0
+
+    class Endpoint:
+        def __init__(self) -> None:
+            nonlocal constructed
+            constructed += 1
+            self.marker = constructed
+
+        def setup(self, pipeline: _FakePipe) -> None:
+            self.pipeline = pipeline
+
+        def shutdown(self) -> None:
+            shutdown_markers.append(self.marker)
+
+        def run(self, ctx, payload: _In) -> _In:  # pragma: no cover
+            return payload
+
+    ref = "acme/reload"
+    spec = _spec("generate", Endpoint, {"pipeline": HF(ref)})
+    ex = _executor([spec], tmp_path, monkeypatch=monkeypatch)
+    install = ex._install_compile_targets
+    attempts = 0
+
+    def fail_first_publish(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("injected post-registration failure")
+        return install(*args, **kwargs)
+
+    monkeypatch.setattr(ex, "_install_compile_targets", fail_first_publish)
+
+    async def _run() -> None:
+        with pytest.raises(RuntimeError, match="post-registration"):
+            await ex.ensure_setup(spec)
+
+        rec = ex._classes[spec.instance_key]
+        assert not rec.ready
+        assert rec.instance is None
+        assert rec.server is None
+        assert rec.held_refs == []
+        assert rec.held_objects == {}
+        assert rec.shared_keys == []
+        assert rec.compile_targets == {}
+        assert ex.store.residency.tier(ref) is Tier.DISK
+        assert shutdown_markers == [1]
+
+        fresh = await ex.ensure_setup(spec)
+        assert fresh.marker == 2
+        assert fresh is rec.instance
+        assert rec.ready
+        assert rec.held_refs == [ref]
+        assert ex.store.residency.obj(ref) is fresh.pipeline
+        assert shutdown_markers == [1]
+
+    asyncio.run(_run())
+
+
 def test_setup_refused_retryable_when_host_ram_insufficient(tmp_path: Path, monkeypatch) -> None:
     from gen_worker.models import disk_gc
 
@@ -1689,6 +1757,8 @@ def test_runjob_sixteen_model_cgroup_swap_stress(
     async def _run() -> None:
         observed_before: list[int] = []
         ready_after: list[int] = []
+        first_record: _ClassRecord | None = None
+        first_instance: weakref.ReferenceType[object] | None = None
         for i in range(16):
             observed_before.append(int(_ram().available_gb * _GiB))
             pipeline_ref = f"tensorhub/sdxl-{i}:prod"
@@ -1719,6 +1789,12 @@ def test_runjob_sixteen_model_cgroup_swap_stress(
                 and message.job_result.request_id == run.request_id
             )
             assert result.status == pb.JOB_STATUS_OK, result.safe_message
+            if i == 0:
+                first_record = next(
+                    rec for rec in ex._classes.values()
+                    if rec.ready and pipeline_ref in ex._record_refs(rec)
+                )
+                first_instance = weakref.ref(first_record.instance)
             ready_after.append(len({
                 id(rec) for rec in ex._classes.values() if rec.ready
             }))
@@ -1726,11 +1802,51 @@ def test_runjob_sixteen_model_cgroup_swap_stress(
         required = model_bytes + int(31.0 * 0.2 * _GiB)
         assert any(available < required for available in observed_before[8:])
         assert max(ready_after) <= 8
+        assert first_record is not None and first_instance is not None
+        assert not first_record.ready
+        assert first_record.instance is None
+        assert first_record.held_refs == []
+
+        # Revisit an actually evicted pick. The same record identity is
+        # intentionally reusable, but it must own a newly constructed
+        # endpoint/pipeline and rebind Residency to that exact object.
+        replay_ref = "tensorhub/sdxl-0:prod"
+        vae_ref = "tensorhub/sdxl-vae:prod"
+        replay = pb.RunJob(
+            request_id="swap-reload-0",
+            attempt=1,
+            function_name="generate",
+            input_payload=msgspec.msgpack.encode(_In(x="replay-0")),
+            models=[
+                pb.ModelBinding(slot="pipeline", ref=replay_ref),
+                pb.ModelBinding(slot="vae", ref=vae_ref),
+            ],
+            snapshots={
+                replay_ref: pb.Snapshot(digest="blake3:" + f"{1:064x}"),
+                vae_ref: pb.Snapshot(digest="blake3:" + "f" * 64),
+            },
+        )
+        await ex.handle_run_job(replay)
+        replay_job = ex.jobs[(replay.request_id, replay.attempt)]
+        assert replay_job.task is not None
+        await replay_job.task
+        replay_result = next(
+            message.job_result for message in reversed(sent)
+            if message.WhichOneof("msg") == "job_result"
+            and message.job_result.request_id == replay.request_id
+        )
+        assert replay_result.status == pb.JOB_STATUS_OK, replay_result.safe_message
+        reloaded = first_record.instance
+        assert first_record.ready and reloaded is not None
+        previous = first_instance()
+        assert previous is None or reloaded is not previous
+        assert set(first_record.held_refs) == {replay_ref, vae_ref}
+        assert ex.store.residency.obj(replay_ref) is reloaded.pipeline
         assert len(live) <= 16
         assert len([
             message for message in sent
             if message.WhichOneof("msg") == "job_result"
-        ]) == 16
+        ]) == 17
         assert not [
             message for message in sent
             if message.WhichOneof("msg") == "model_event"

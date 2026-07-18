@@ -2771,9 +2771,31 @@ class Executor:
             if rec.ready:
                 await self._promote_setup_refs(spec, promote_slots, rec=rec)
                 return rec.instance
+            if self._record_has_setup_ownership(rec):
+                # A prior process-local cancellation/failure may have reached
+                # tenant setup before this worker version could roll it back.
+                # Never layer a fresh instance over uncertain ownership.
+                logger.warning(
+                    "clearing incomplete setup ownership before retrying %s",
+                    spec.name,
+                )
+                await self._rollback_failed_setup(rec)
             try:
                 instance = await self._setup_locked(spec, rec, snapshots)
-            except Exception as exc:
+            except BaseException as exc:
+                # Setup is a transaction: endpoint construction, tenant
+                # setup/warmup, residency registration, and compile-target
+                # publication either all reach READY or all ownership is
+                # removed through the ordinary record-vacate path. Include
+                # cancellation — _to_thread_complete has already joined any
+                # tenant thread before it propagates CancelledError here.
+                try:
+                    await self._rollback_failed_setup(rec)
+                except BaseException:
+                    logger.exception(
+                        "failed to roll back incomplete setup for %s", spec.name)
+                if not isinstance(exc, Exception):
+                    raise
                 # Honest failure (th#581): a function whose model download /
                 # pipeline setup fails must surface a terminal per-function
                 # error to the hub, not sit in loading_functions forever
@@ -2957,6 +2979,40 @@ class Executor:
             self.unavailable[s.name] = (reason, detail, axes)
         self._on_state_change()
 
+    @staticmethod
+    def _record_has_setup_ownership(rec: _ClassRecord) -> bool:
+        """Whether a non-READY record owns anything that needs teardown."""
+        return bool(
+            rec.instance is not None
+            or rec.server is not None
+            or rec.held_refs
+            or rec.held_objects
+            or rec.shared_keys
+            or rec.compile_targets
+        )
+
+    async def _rollback_failed_setup(self, rec: _ClassRecord) -> None:
+        """Remove every provisional owner left by an incomplete setup.
+
+        The normal vacate path is the single teardown implementation: it
+        invokes endpoint shutdown, stops an engine server, releases loaded
+        residency objects and shared-component holds, clears compile targets,
+        and emits the resulting state. Failed setup can also leave freed
+        staging buffers in PyTorch's pinned-host cache, so return those unused
+        blocks after the owners have gone.
+        """
+        if not self._record_has_setup_ownership(rec):
+            return
+        async with self._load_lock:
+            released = await self._vacate_record(rec)
+        released_pinned = await asyncio.to_thread(
+            release_unused_pinned_host_cache)
+        logger.info(
+            "rolled back incomplete setup refs=%s pinned_host_bytes=%d",
+            released,
+            released_pinned,
+        )
+
     async def _setup_locked(
         self, spec: EndpointSpec, rec: _ClassRecord,
         snapshots: Optional[Dict[str, pb.Snapshot]],
@@ -2991,6 +3047,25 @@ class Executor:
             # the actual post-demotion pressure (pgw#541).
             await self._ensure_host_ram_for(spec, paths)
             instance = spec.cls()
+            # Stamp provisional ownership BEFORE tenant setup/warmup. The
+            # record is not advertised until rec.ready becomes true, but an
+            # exception or cancellation can now tear down the exact instance
+            # and exact resolved refs instead of losing them in stack locals.
+            rec.instance = instance
+            rec.held_refs = sorted(set(slot_refs.values()))
+            rec.held_snapshot_digests = {
+                slot_refs[slot]: identity[0]
+                for slot, identity in slot_identities.items()
+                if slot in slot_refs and identity[0]
+            }
+            rec.held_bindings = sorted(
+                (
+                    slot,
+                    ref,
+                    rec.held_snapshot_digests.get(ref, ""),
+                )
+                for slot, ref in slot_refs.items()
+            )
             setup = getattr(instance, "setup", None)
             inj = _InjectionResult(kwargs={}, loaded={})
             from . import compile_cache, trt_engine
@@ -3165,20 +3240,6 @@ class Executor:
                 spec, setup_slots, inj.loaded, vram_delta,
                 lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes,
                 slot_refs=slot_refs, slot_identities=slot_identities)
-            rec.held_refs = sorted(set(slot_refs.values()))
-            rec.held_snapshot_digests = {
-                slot_refs[slot]: identity[0]
-                for slot, identity in slot_identities.items()
-                if slot in slot_refs and identity[0]
-            }
-            rec.held_bindings = sorted(
-                (
-                    slot,
-                    ref,
-                    rec.held_snapshot_digests.get(ref, ""),
-                )
-                for slot, ref in slot_refs.items()
-            )
             # gw#551: call-time-owned refs. Any record holding 2+ worker-
             # constructed pipelines can overcommit VRAM (content-keyed lanes
             # AND monolithic siblings alike) — those swap per use via the
@@ -4739,9 +4800,9 @@ class Executor:
                 if old_obj is not None:
                     released_refs.append(ref)
                 continue
-            if self.store.residency.release_to_disk(ref) and (
-                old_obj is not None
-                or tier_before in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
+            if (
+                tier_before in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
+                and self.store.residency.release_to_disk(ref)
             ):
                 released_refs.append(ref)
         rec.held_refs = []
