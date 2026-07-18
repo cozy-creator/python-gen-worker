@@ -46,7 +46,7 @@ _GGUF_QUANT_PREFERENCE = (
 # and i-quant ("IQ4_XS") forms the preference list doesn't name.
 _GGUF_QTYPE_RE = re.compile(r"(?:ud-)?(?:i?q\d[0-9a-z_]*|bf16|f16|f32)")
 _DIFFUSERS_COMPONENT_WEIGHT_RE = re.compile(
-    r"^diffusion_pytorch_model(?:\.([a-z0-9_-]+))?"
+    r"^diffusion_pytorch_model(?:\.([a-z0-9_-]+?))?"
     r"(?:-\d{5}-of-\d{5})?\.safetensors$",
 )
 

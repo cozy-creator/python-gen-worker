@@ -106,6 +106,31 @@ def test_standalone_diffusers_vae_selects_only_canonical_weight() -> None:
     }
 
 
+def test_standalone_diffusers_component_selects_complete_variant_shard_set() -> None:
+    files = [
+        "config.json",
+        "diffusion_pytorch_model.safetensors",
+        "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "diffusion_pytorch_model.fp16.safetensors.index.json",
+        "vae-copy.safetensors",
+    ]
+    c = classify_repo(
+        files,
+        config_json={"_class_name": "AutoencoderKL"},
+        dtype_pref=("fp16",),
+    )
+
+    assert c.strategy == "diffusers_component"
+    assert c.attrs["dtype"] == "fp16"
+    assert set(c.allow_patterns) == {
+        "config.json",
+        "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "diffusion_pytorch_model.fp16.safetensors.index.json",
+    }
+
+
 def test_transformers_with_sharded_index_and_onnx_excluded() -> None:
     files = [
         "config.json", "generation_config.json", "tokenizer.json",
