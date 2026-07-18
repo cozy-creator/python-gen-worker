@@ -13,10 +13,11 @@ import json
 import logging
 import os
 import shutil
+import stat
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,82 @@ def tree_bytes(path: Path) -> int:
         return 0
 
 
+def _regular_files(path: Path) -> Iterator[Tuple[Path, os.stat_result]]:
+    """Regular files reachable from ``path`` without following directories.
+
+    Snapshot files may be hardlinks or Hugging Face-style symlinks into an
+    immutable blob store.  Following a file symlink is safe here: file advice
+    changes only page-cache residency, never bytes or metadata.
+    """
+    root = Path(path)
+    candidates: Iterable[Path]
+    if root.is_dir():
+        candidates = (
+            Path(dirpath) / name
+            for dirpath, _dirs, names in os.walk(root, followlinks=False)
+            for name in names
+        )
+    else:
+        candidates = iter((root,))
+    for candidate in candidates:
+        try:
+            info = candidate.stat()
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            yield candidate, info
+
+
+def reclaim_file_cache(
+    path: Path, *, preserve_paths: Iterable[Path] = (),
+) -> int:
+    """Drop clean cached pages for an immutable local snapshot, best effort.
+
+    ``POSIX_FADV_DONTNEED`` keeps every model byte on disk while returning
+    recently-read file pages to the kernel under host-RAM pressure.  Inodes
+    reachable from ``preserve_paths`` are skipped, including hardlinks: a
+    shared VAE or current request therefore cannot be chilled through another
+    snapshot tree.  Unsupported platforms simply return zero.
+
+    The return value is bytes successfully advised, not claimed reclaimed
+    memory.  Callers must re-probe real cgroup headroom before proceeding.
+    """
+    advise = getattr(os, "posix_fadvise", None)
+    dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if advise is None or dontneed is None:
+        return 0
+
+    protected: set[Tuple[int, int]] = set()
+    for protected_path in preserve_paths:
+        for _file, info in _regular_files(Path(protected_path)):
+            protected.add((int(info.st_dev), int(info.st_ino)))
+
+    advised = 0
+    seen: set[Tuple[int, int]] = set()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    for file_path, info in _regular_files(Path(path)):
+        key = (int(info.st_dev), int(info.st_ino))
+        if key in seen or key in protected:
+            continue
+        seen.add(key)
+        try:
+            fd = os.open(file_path, flags)
+        except OSError:
+            continue
+        try:
+            current = os.fstat(fd)
+            current_key = (int(current.st_dev), int(current.st_ino))
+            if current_key in protected or not stat.S_ISREG(current.st_mode):
+                continue
+            advise(fd, 0, 0, dontneed)
+            advised += int(current.st_size)
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+    return advised
+
+
 def _retention_unit(path: Path, cas_dir: Path) -> Path:
     """The directory/file that must be deleted to reclaim a ref's bytes:
     the snapshot dir for CAS refs, the ``models--*`` repo dir for HF refs,
@@ -156,4 +233,10 @@ def sweep_orphan_blobs(cas_dir: Path) -> int:
     return freed
 
 
-__all__ = ["RefIndex", "tree_bytes", "delete_ref_bytes", "sweep_orphan_blobs"]
+__all__ = [
+    "RefIndex",
+    "tree_bytes",
+    "reclaim_file_cache",
+    "delete_ref_bytes",
+    "sweep_orphan_blobs",
+]

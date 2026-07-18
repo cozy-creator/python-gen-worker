@@ -3496,6 +3496,52 @@ class Executor:
                 for event in [*failures, *progress]
             ]
 
+    async def _reclaim_released_file_cache(
+        self, released_refs: List[str], incoming_paths: List[Path],
+    ) -> int:
+        """Advise only pressure-evicted immutable snapshots out of file cache.
+
+        A DISK transition preserves model bytes, but recently-read clean pages
+        can still fill the pod cgroup and make the following load look
+        impossible.  Protect the incoming snapshot and every still-loaded or
+        executing ref by inode; then advise only refs that truthfully reached
+        DISK.  The caller always re-probes measured headroom afterward.
+
+        This runs inside ``_setup_locked``'s process-wide load lock.  Every
+        setup and ordinary RAM->VRAM promotion takes that same lock, so a DISK
+        ref cannot be reloaded or promoted between this tier check and the
+        blocking file-advice scan.
+        """
+        if not self._load_lock.locked():
+            raise RuntimeError("snapshot file-cache reclaim requires the load lock")
+        res = self.store.residency
+        preserve = list(incoming_paths)
+        for live_ref, tier, _vram_bytes in res.snapshot():
+            if (
+                tier not in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
+                and not res.in_use(live_ref)
+            ):
+                continue
+            local = res.local_path(live_ref)
+            if local is not None:
+                preserve.append(local)
+
+        advised = 0
+        seen_paths: set[Path] = set()
+        for ref in dict.fromkeys(released_refs):
+            if res.tier(ref) is not residency_mod.Tier.DISK or res.in_use(ref):
+                continue
+            local = res.local_path(ref)
+            if local is None or local in seen_paths:
+                continue
+            seen_paths.add(local)
+            advised += await asyncio.to_thread(
+                disk_gc.reclaim_file_cache,
+                local,
+                preserve_paths=tuple(preserve),
+            )
+        return advised
+
     async def _ensure_host_ram_for(self, spec: EndpointSpec, paths: Dict[str, str]) -> None:
         """Owner-aware host-RAM admission (gw#407/pgw#541). ``from_pretrained``
         stages the full weight set in host RAM before placement; loading into
@@ -3577,9 +3623,22 @@ class Executor:
                 continue
 
             # Let completed demotion/to_thread frames release their arguments,
-            # then collect after the record owner is gone before observing RAM.
+            # then collect after the record owner is gone.  Under this already-
+            # measured pressure only, drop clean pages for refs that truthfully
+            # reached DISK; this keeps every snapshot local while avoiding the
+            # live J17 failure where two 6.9GiB records were vacated but their
+            # active file cache returned only 5MB of cgroup headroom (#579).
             await asyncio.sleep(0)
             await asyncio.to_thread(flush_memory)
+            advised = await self._reclaim_released_file_cache(
+                released, [Path(p) for p in paths.values()],
+            )
+            if advised:
+                logger.info(
+                    "host-RAM admission advised %d immutable snapshot bytes "
+                    "out of file cache for %s",
+                    advised, spec.name,
+                )
             after = await asyncio.to_thread(res.host_ram_headroom, incoming)
             if rec is None:
                 await self._observe_host_ram_progress(released)

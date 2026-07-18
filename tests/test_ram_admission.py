@@ -11,9 +11,12 @@ and a load that still cannot fit fails RETRYABLE instead of thrashing.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import gc
 import inspect
 import logging
+import mmap
+import os
 import time
 import weakref
 from pathlib import Path
@@ -33,12 +36,52 @@ from gen_worker.executor import Executor, ModelStore, _ClassRecord, _Job
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.models import memory as memory_mod
 from gen_worker.models import residency as residency_mod
-from gen_worker.models.residency import LoadedComponentKey, Residency, Tier
+from gen_worker.models.residency import HostRamHeadroom, LoadedComponentKey, Residency, Tier
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 from gen_worker.transport import Transport
 
 _GiB = 1024 ** 3
+
+
+def _resident_file_bytes(path: Path) -> int:
+    """Kernel page-cache residency without faulting file contents."""
+    if os.name != "posix" or not hasattr(os, "POSIX_FADV_DONTNEED"):
+        pytest.skip("real page-cache test requires POSIX file advice")
+    size = path.stat().st_size
+    if size <= 0:
+        return 0
+    page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    pages = (size + page_size - 1) // page_size
+    libc = ctypes.CDLL(None, use_errno=True)
+    mincore = getattr(libc, "mincore", None)
+    if mincore is None:
+        pytest.skip("real page-cache test requires mincore")
+    mincore.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_ubyte),
+    ]
+    mincore.restype = ctypes.c_int
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        mapping = mmap.mmap(fd, size, access=mmap.ACCESS_COPY)
+        try:
+            states = (ctypes.c_ubyte * pages)()
+            address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
+            if mincore(address, size, states) != 0:
+                raise OSError(ctypes.get_errno(), "mincore failed")
+            return sum(bool(state & 1) for state in states) * page_size
+        finally:
+            mapping.close()
+    finally:
+        os.close(fd)
+
+
+def _warm_file(path: Path) -> None:
+    with path.open("rb", buffering=0) as stream:
+        while stream.read(1024 * 1024):
+            pass
 
 
 def _res(events: list | None = None, budget_gb: int = 24) -> Residency:
@@ -221,6 +264,112 @@ def test_setup_refused_retryable_when_host_ram_insufficient(tmp_path: Path, monk
         assert isinstance(inst.m, _FakePipe)
 
     asyncio.run(_run())
+
+
+def test_pressure_eviction_reclaims_real_snapshot_cache_and_protects_shared_inode(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """#579: exercise the real owner-teardown and kernel file-advice path.
+
+    Cgroup-equivalent headroom is derived from real ``mincore`` residency, not
+    fake object reachability.  Without ``POSIX_FADV_DONTNEED`` the old snapshot
+    stays hot, admission remains below the exact requirement, and this test
+    raises ``InsufficientHostRamError``.  A shared VAE hardlink proves that an
+    active owner's inode is protected even when reachable through the victim
+    tree.
+    """
+    if not hasattr(os, "posix_fadvise"):
+        pytest.skip("real page-cache test requires os.posix_fadvise")
+
+    victim_dir = tmp_path / "victim"
+    vae_dir = tmp_path / "shared-vae"
+    incoming_dir = tmp_path / "incoming"
+    for directory in (victim_dir, vae_dir, incoming_dir):
+        directory.mkdir()
+    victim_file = victim_dir / "weights.bin"
+    vae_file = vae_dir / "vae.bin"
+    incoming_file = incoming_dir / "weights.bin"
+    victim_file.write_bytes(b"v" * (32 * 1024 * 1024))
+    vae_file.write_bytes(b"a" * (8 * 1024 * 1024))
+    incoming_file.write_bytes(b"n" * (8 * 1024 * 1024))
+    os.link(vae_file, victim_dir / "shared-vae.bin")
+    for file_path in (victim_file, vae_file, incoming_file):
+        with file_path.open("rb") as stream:
+            os.fsync(stream.fileno())
+        fd = os.open(file_path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+        _warm_file(file_path)
+
+    victim_size = victim_file.stat().st_size
+    assert _resident_file_bytes(victim_file) >= victim_size
+    assert _resident_file_bytes(vae_file) >= vae_file.stat().st_size
+    assert _resident_file_bytes(incoming_file) >= incoming_file.stat().st_size
+
+    class Endpoint:
+        def setup(self, pipeline: _FakePipe) -> None:
+            self.pipeline = pipeline
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    old_ref = "tensorhub/old"
+    vae_ref = "tensorhub/shared-vae"
+    old_spec = _spec("old", Endpoint, {"pipeline": HF(old_ref)})
+    incoming_spec = _spec(
+        "incoming", Endpoint, {"pipeline": HF("tensorhub/incoming")},
+    )
+    ex = _executor([old_spec, incoming_spec], tmp_path / "cache")
+    res = ex.store.residency
+    old_pipeline = _FakePipe()
+    old_vae = _FakePipe()
+    survivor_vae = _FakePipe()
+    res.track_ram(old_ref, old_pipeline, path=victim_dir)
+    res.track_ram(vae_ref, survivor_vae, path=vae_dir)
+
+    old_record = ex._classes[old_spec.instance_key]
+    old_record.instance = SimpleNamespace(pipeline=old_pipeline, vae=old_vae)
+    old_record.ready = True
+    old_record.held_refs = [old_ref, vae_ref]
+    old_record.held_objects = {old_ref: old_pipeline, vae_ref: old_vae}
+    ex._classes["shared-vae-survivor"] = _ClassRecord(
+        cls=Endpoint,
+        instance=SimpleNamespace(vae=survivor_vae),
+        ready=True,
+        held_refs=[vae_ref],
+        held_objects={vae_ref: survivor_vae},
+    )
+
+    floor = 8 * 1024 * 1024
+    baseline = 4 * 1024 * 1024
+
+    def _headroom(needed: int) -> HostRamHeadroom:
+        reclaimed = victim_size - min(victim_size, _resident_file_bytes(victim_file))
+        return HostRamHeadroom(
+            available_bytes=baseline + reclaimed,
+            floor_bytes=floor,
+            required_bytes=int(needed) + floor,
+        )
+
+    monkeypatch.setattr(res, "host_ram_headroom", _headroom)
+
+    async def _run() -> None:
+        async with ex._load_lock:
+            await ex._ensure_host_ram_for(
+                incoming_spec, {"pipeline": str(incoming_dir)},
+            )
+
+    asyncio.run(_run())
+    assert old_record.ready is False
+    assert res.tier(old_ref) is Tier.DISK
+    assert res.tier(vae_ref) is Tier.RAM
+    assert _resident_file_bytes(victim_file) < victim_size // 4
+    assert _resident_file_bytes(vae_file) >= vae_file.stat().st_size
+    assert _resident_file_bytes(incoming_file) >= incoming_file.stat().st_size
+    assert victim_file.read_bytes() == b"v" * victim_size
+    assert vae_file.read_bytes() == b"a" * vae_file.stat().st_size
 
 
 def test_capacity_progress_requires_measured_owner_release(
