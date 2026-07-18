@@ -106,7 +106,7 @@ def _snapshot(url: str) -> pb.Snapshot:
 
 
 def test_proto_field_numbers_match_tensorhub_contract() -> None:
-    assert pb.PROTOCOL_VERSION_CURRENT == 3
+    assert pb.PROTOCOL_VERSION_CURRENT == 4
     assert pb.HelloAck.DESIRED_RESIDENCY_FIELD_NUMBER == 5
     assert pb.DesiredResidency.GENERATION_FIELD_NUMBER == 1
     assert pb.DesiredResidency.DISK_REFS_FIELD_NUMBER == 2

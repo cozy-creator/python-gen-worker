@@ -212,11 +212,13 @@ def test_ordered_nested_duplicates_download_once(http_root: HTTPRoot) -> None:
 
 
 def test_unresolved_ref_rejects_and_erases_forged_path() -> None:
+    # v4 (gw#585): an opaque stored ref with no dispatched manifest entry is a
+    # manifest mismatch, refused before any resolver call or GET.
     canonical_ref = "tenant/private/image-123"
     asset = ImageAsset(ref=canonical_ref, local_path="/tmp/caller-forged.png")
     payload = Payload(image=asset)
 
-    with pytest.raises(ValidationError, match="^unresolved_input_asset") as caught:
+    with pytest.raises(ValidationError, match="^input_asset_manifest_mismatch") as caught:
         input_assets.materialize_input_assets(payload, "req-unresolved", attempt=1)
     assert asset.local_path is None
     assert canonical_ref not in str(caught.value)
@@ -442,6 +444,7 @@ def test_cancel_after_asset_scan_fences_setup_and_handler(
         *,
         attempt: int,
         cancel_check: Any,
+        **_kwargs: Any,
     ) -> int:
         assert attempt == 1 and not cancel_check()
         scanned.set()
@@ -564,7 +567,7 @@ def test_executor_unresolved_ref_fails_before_setup_or_handler() -> None:
     result, _executor = asyncio.run(_run_executor(payload, handler, ensure_setup=ensure_setup))
 
     assert result.status == pb.JOB_STATUS_INVALID
-    assert result.safe_message.startswith("unresolved_input_asset:")
+    assert result.safe_message.startswith("input_asset_manifest_mismatch")
     assert canonical_ref not in result.safe_message
     assert "/tmp/forged.png" not in result.safe_message
     assert setup_calls == 0 and handler_calls == 0
