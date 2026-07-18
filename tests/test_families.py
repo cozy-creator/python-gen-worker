@@ -31,6 +31,7 @@ def test_sdxl_registers_and_round_trips() -> None:
     assert family_for("sdxl") is SdxlDefaults
     d = SdxlDefaults(steps=30, guidance=7.0)
     assert d.family == "sdxl"
+    assert d.kind == "checkpoint"
     assert d.schema_version == 1
     # frozen: no post-construction mutation.
     with pytest.raises(AttributeError):
@@ -71,9 +72,10 @@ def test_family_decorator_rejects_non_family_defaults_subclass() -> None:
 
 
 def test_unregistered_family_lookup_returns_none() -> None:
-    assert family_for("does-not-exist") is None
-    with pytest.raises(KeyError):
-        export_json_schema("does-not-exist")
+    for kwargs in ({}, {"kind": KIND_LORA}):
+        assert family_for("does-not-exist", **kwargs) is None
+        with pytest.raises(KeyError):
+            export_json_schema("does-not-exist", **kwargs)
 
 
 def test_family_forbids_unknown_fields() -> None:
@@ -81,15 +83,21 @@ def test_family_forbids_unknown_fields() -> None:
         msgspec.json.decode(b'{"unknown_field": 1}', type=SdxlDefaults)
 
 
-def test_sdxl_schema_export_matches_golden_file() -> None:
+@pytest.mark.parametrize(
+    ("golden_name", "kind"),
+    [("sdxl.schema.json", None), ("sdxl.lora.schema.json", KIND_LORA)],
+    ids=["checkpoint", "lora"],
+)
+def test_schema_export_matches_golden_file(golden_name: str, kind) -> None:
     """Golden-file test: the exported schema is a stable, reviewable
     contract — a diff here is a deliberate vocabulary change, not an
     accident. Regenerate with:
         uv run python -c "from gen_worker.families import export_json_schema; \\
             import json; print(json.dumps(export_json_schema('sdxl'), indent=2, sort_keys=True))"
     """
-    golden = json.loads((TESTDATA / "sdxl.schema.json").read_text())
-    assert export_json_schema("sdxl") == golden
+    golden = json.loads((TESTDATA / golden_name).read_text())
+    kwargs = {} if kind is None else {"kind": kind}
+    assert export_json_schema("sdxl", **kwargs) == golden
 
 
 def test_sdxl_schema_is_closed_draft_2020_12() -> None:
@@ -165,15 +173,6 @@ def test_sdxl_lora_fields_default_to_no_opinion() -> None:
     assert d.kind == "lora"
 
 
-def test_sdxl_checkpoint_instance_reports_checkpoint_kind() -> None:
-    assert SdxlDefaults().kind == "checkpoint"
-
-
-def test_sdxl_lora_schema_export_matches_golden_file() -> None:
-    golden = json.loads((TESTDATA / "sdxl.lora.schema.json").read_text())
-    assert export_json_schema("sdxl", kind=KIND_LORA) == golden
-
-
 def test_schema_filename_convention() -> None:
     assert schema_filename("sdxl") == "sdxl.schema.json"
     assert schema_filename("sdxl", kind=KIND_CHECKPOINT) == "sdxl.schema.json"
@@ -198,9 +197,3 @@ def test_duplicate_family_kind_pair_raises_but_cross_kind_is_fine() -> None:
 
     assert family_for("_test_only_family", kind=KIND_CHECKPOINT) is _Ckpt
     assert family_for("_test_only_family", kind=KIND_LORA) is _Lora
-
-
-def test_unregistered_kind_lookup_returns_none() -> None:
-    assert family_for("does-not-exist", kind=KIND_LORA) is None
-    with pytest.raises(KeyError):
-        export_json_schema("does-not-exist", kind=KIND_LORA)

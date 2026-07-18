@@ -42,28 +42,17 @@ def _build(payload_type: type):
         return factory(tmp)
 
 
-def test_synthesis_defaults_and_required_str():
+def test_synthesis_field_fills():
     class In(msgspec.Struct):
-        prompt: str
-        steps: int = 4
+        prompt: str                   # required str -> warmup text
+        size: _Size                   # enum -> first member
+        image: Optional[ImageAsset]   # required-but-optional asset -> None
+        steps: int = 4                # default preserved
 
     p = _build(In)
     assert p.prompt == warmup_mod.WARMUP_TEXT and p.steps == 4
-
-
-def test_synthesis_optional_required_fills_none():
-    class In(msgspec.Struct):
-        image: Optional[ImageAsset]
-        prompt: str = ""
-
-    assert _build(In).image is None
-
-
-def test_synthesis_enum_picks_first_member():
-    class In(msgspec.Struct):
-        size: _Size
-
-    assert _build(In).size is _Size.SMALL
+    assert p.size is _Size.SMALL
+    assert p.image is None
 
 
 def test_synthesis_media_assets_have_readable_files():
@@ -124,24 +113,54 @@ class _SlotPromptIn(msgspec.Struct):
     model: str = ""
 
 
-def test_nowarmup_requires_reason():
-    with pytest.raises(ValueError):
-        NoWarmup("  ")
+def _nowarmup_blank_reason():
+    NoWarmup("  ")
 
 
-def test_warmup_on_function_endpoint_rejected():
-    with pytest.raises(ValueError, match="requires a class"):
-        @endpoint(warmup={"x": None})
-        def fn(ctx, payload: _PromptIn) -> _Out:  # pragma: no cover
+def _warmup_on_function_endpoint():
+    @endpoint(warmup={"x": None})
+    def fn(ctx, payload: _PromptIn) -> _Out:  # pragma: no cover
+        return _Out()
+
+
+def _gpu_class_unwarmable_payload():
+    @endpoint(resources=Resources(vram_gb=8))
+    class Ep:
+        def generate(self, ctx, payload: _VideoIn) -> _Out:  # pragma: no cover
             return _Out()
 
 
-def test_gpu_class_with_unwarmable_payload_fails_at_decoration():
-    with pytest.raises(TypeError, match="default-on"):
-        @endpoint(resources=Resources(vram_gb=8))
-        class Ep:
-            def generate(self, ctx, payload: _VideoIn) -> _Out:  # pragma: no cover
-                return _Out()
+def _declared_unknown_method():
+    @endpoint(resources=Resources(vram_gb=8), warmup={"nope": {"prompt": "x"}})
+    class Ep:
+        def generate(self, ctx, payload: _PromptIn) -> _Out:  # pragma: no cover
+            return _Out()
+
+
+def _declared_invalid_payload():
+    @endpoint(resources=Resources(vram_gb=8), warmup={"generate": {"steps": "NaN-ish"}})
+    class Ep:
+        def generate(self, ctx, payload: _PromptIn) -> _Out:  # pragma: no cover
+            return _Out()
+
+
+@pytest.mark.parametrize(
+    ("define", "exc", "match"),
+    [
+        pytest.param(_nowarmup_blank_reason, ValueError, "", id="nowarmup-blank-reason"),
+        pytest.param(_warmup_on_function_endpoint, ValueError, "requires a class",
+                     id="warmup-on-function"),
+        pytest.param(_gpu_class_unwarmable_payload, TypeError, "default-on",
+                     id="gpu-unwarmable-payload"),
+        pytest.param(_declared_unknown_method, TypeError, "unknown",
+                     id="declared-unknown-method"),
+        pytest.param(_declared_invalid_payload, TypeError, "not a valid",
+                     id="declared-invalid-payload"),
+    ],
+)
+def test_invalid_warmup_declarations_fail_at_decoration(define, exc, match):
+    with pytest.raises(exc, match=match):
+        define()
 
 
 def test_gpu_class_opts_out_with_reason():
@@ -196,22 +215,6 @@ def test_declared_none_skips_method():
 
     jobs, skips = warmup_mod.plan_for_class(Ep)
     assert not jobs and "declared skip" in skips[0].reason
-
-
-def test_declared_unknown_method_fails():
-    with pytest.raises(TypeError, match="unknown"):
-        @endpoint(resources=Resources(vram_gb=8), warmup={"nope": {"prompt": "x"}})
-        class Ep:
-            def generate(self, ctx, payload: _PromptIn) -> _Out:  # pragma: no cover
-                return _Out()
-
-
-def test_declared_invalid_payload_fails():
-    with pytest.raises(TypeError, match="not a valid"):
-        @endpoint(resources=Resources(vram_gb=8), warmup={"generate": {"steps": "NaN-ish"}})
-        class Ep:
-            def generate(self, ctx, payload: _PromptIn) -> _Out:  # pragma: no cover
-                return _Out()
 
 
 def test_cpu_class_needs_no_warmup():

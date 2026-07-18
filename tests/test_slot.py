@@ -27,29 +27,27 @@ class _Out(msgspec.Struct):
     y: str
 
 
-def test_slot_requires_a_type_for_pipeline_cls() -> None:
-    with pytest.raises(TypeError, match="class"):
-        Slot("not-a-class")  # type: ignore[arg-type]
-
-
-def test_slot_default_checkpoint_must_be_a_model_ref() -> None:
-    with pytest.raises(TypeError, match="ModelRef"):
-        Slot(object, default_checkpoint="o/r")  # type: ignore[arg-type]
-
-
-def test_slot_default_config_must_be_family_defaults() -> None:
-    with pytest.raises(TypeError, match="FamilyDefaults"):
-        Slot(object, default_config=object())  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    ("build", "match"),
+    [
+        pytest.param(lambda: Slot("not-a-class"),  # type: ignore[arg-type]
+                     "class", id="pipeline-cls-not-a-type"),
+        pytest.param(lambda: Slot(object, default_checkpoint="o/r"),  # type: ignore[arg-type]
+                     "ModelRef", id="checkpoint-not-a-model-ref"),
+        pytest.param(lambda: Slot(object, default_config=object()),  # type: ignore[arg-type]
+                     "FamilyDefaults", id="config-not-family-defaults"),
+    ],
+)
+def test_slot_constructor_validation(build, match) -> None:
+    with pytest.raises(TypeError, match=match):
+        build()
 
 
 def test_slot_family_from_default_config_registration() -> None:
     s = Slot(object, default_checkpoint=HF("o/r"), default_config=SdxlDefaults(steps=30))
     assert s.family == "sdxl"
-
-
-def test_slot_family_empty_with_no_default_config() -> None:
-    s = Slot(object, default_checkpoint=HF("o/r"))
-    assert s.family == ""
+    # No default_config -> no family stamp.
+    assert Slot(object, default_checkpoint=HF("o/r")).family == ""
 
 
 def test_bare_modelref_and_slot_coexist_in_models_dict() -> None:
@@ -124,28 +122,28 @@ def test_model_shorthand_accepts_a_slot() -> None:
     assert s.models["model"].path == "o/r"
 
 
-def test_selected_by_must_name_an_existing_payload_field() -> None:
-    with pytest.raises(ValueError, match="names no field"):
-        @endpoint(model=Slot(object, selected_by="nonexistent", default_checkpoint=HF("o/r")))
-        class Gen:
-            def setup(self, model: object) -> None: ...
+@pytest.mark.parametrize("case", ["missing-field", "non-str-field"])
+def test_selected_by_must_name_a_plain_str_payload_field(case: str) -> None:
+    if case == "missing-field":
+        with pytest.raises(ValueError, match="names no field"):
+            @endpoint(model=Slot(object, selected_by="nonexistent", default_checkpoint=HF("o/r")))
+            class GenMissing:
+                def setup(self, model: object) -> None: ...
 
-            def generate(self, ctx: RequestContext, data: _In) -> _Out:
-                return _Out(y="ok")
+                def generate(self, ctx: RequestContext, data: _In) -> _Out:
+                    return _Out(y="ok")
 
-        extract_specs(Gen)
+            extract_specs(GenMissing)
+    else:
+        with pytest.raises(ValueError, match="plain str"):
+            @endpoint(model=Slot(object, selected_by="model", default_checkpoint=HF("o/r")))
+            class GenBadType:
+                def setup(self, model: object) -> None: ...
 
+                def generate(self, ctx: RequestContext, data: _BadIn) -> _Out:
+                    return _Out(y="ok")
 
-def test_selected_by_must_be_plain_str_typed() -> None:
-    with pytest.raises(ValueError, match="plain str"):
-        @endpoint(model=Slot(object, selected_by="model", default_checkpoint=HF("o/r")))
-        class Gen:
-            def setup(self, model: object) -> None: ...
-
-            def generate(self, ctx: RequestContext, data: _BadIn) -> _Out:
-                return _Out(y="ok")
-
-        extract_specs(Gen)
+            extract_specs(GenBadType)
 
 
 def test_slot_validated_per_handler_not_per_class() -> None:

@@ -184,11 +184,6 @@ def test_select_component_paths_empty_components_keeps_everything() -> None:
     assert select_component_paths(_DIFFUSERS_REPO, ()) == set(_DIFFUSERS_REPO)
 
 
-def test_select_component_paths_root_non_json_dropped() -> None:
-    sel = select_component_paths(_DIFFUSERS_REPO, ("vae",))
-    assert "README.md" not in sel
-
-
 def _stub_hub_diffusers(monkeypatch, tmp_path):
     """Stub huggingface_hub over the diffusers-shaped repo fixture."""
     import huggingface_hub

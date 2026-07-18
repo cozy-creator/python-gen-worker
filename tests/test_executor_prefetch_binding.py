@@ -61,38 +61,23 @@ def _capture_download(monkeypatch, tmp_path: Path) -> List[Dict[str, Any]]:
     return calls
 
 
-def test_bare_ref_store_ensure_local_applies_binding_files(monkeypatch, tmp_path) -> None:
-    # DesiredResidency carries a ref and snapshot, not the declared binding.
-    calls = _capture_download(monkeypatch, tmp_path)
-
-    async def _run() -> None:
-        ex = Executor([_spec()], _noop_send)
-        await ex.store.ensure_local(_REF)
-
-    asyncio.run(_run())
-    assert calls[0]["provider"] == "huggingface"
-    assert calls[0]["allow_patterns"] == _BINDING.files
-
-
-def test_explicit_binding_still_wins(monkeypatch, tmp_path) -> None:
+def test_ensure_local_binding_resolution(monkeypatch, tmp_path) -> None:
+    """Bare refs pick up the declared binding's files/provider (DesiredResidency
+    carries only ref+snapshot), an explicit binding overrides it, and unknown
+    refs download unrestricted."""
     calls = _capture_download(monkeypatch, tmp_path)
     override = HF(_REF, files=("only-this.safetensors",))
 
     async def _run() -> None:
-        ex = Executor([_spec()], _noop_send)
-        await ex.store.ensure_local(_REF, binding=override)
+        # Fresh executor per phase: ensure_local dedups an already-local ref.
+        await Executor([_spec()], _noop_send).store.ensure_local(_REF)
+        await Executor([_spec()], _noop_send).store.ensure_local(
+            _REF, binding=override)
+        await Executor([_spec()], _noop_send).store.ensure_local("acme/unbound")
 
     asyncio.run(_run())
-    assert calls[0]["allow_patterns"] == ("only-this.safetensors",)
-
-
-def test_unknown_ref_downloads_without_patterns(monkeypatch, tmp_path) -> None:
-    calls = _capture_download(monkeypatch, tmp_path)
-
-    async def _run() -> None:
-        ex = Executor([_spec()], _noop_send)
-        await ex.store.ensure_local("acme/unbound")
-
-    asyncio.run(_run())
-    assert calls[0]["provider"] is None
-    assert calls[0]["allow_patterns"] == ()
+    assert calls[0]["provider"] == "huggingface"
+    assert calls[0]["allow_patterns"] == _BINDING.files
+    assert calls[1]["allow_patterns"] == ("only-this.safetensors",)
+    assert calls[2]["provider"] is None
+    assert calls[2]["allow_patterns"] == ()
