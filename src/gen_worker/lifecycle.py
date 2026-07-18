@@ -448,13 +448,13 @@ class Lifecycle:
         for spec in list(self.executor.specs.values()):
             if spec.name in self.executor.unavailable:
                 continue
-            if spec.slots:
-                # pgw#532: dynamic slots materialize the HUB-resolved ref
-                # (DesiredResidency pre-warms / RunJob supplies snapshots),
-                # per dispatch, instance-per-pick. Setting up eagerly here
-                # would load the code seed — the exact fc157 setup-failure
-                # bug (raw civitai default -> civitai_not_found -> every
-                # function load_failed).
+            if spec.slots or spec.compile is not None:
+                # pgw#532 (slots) + gw#584 (compile): both a Slot pick and a
+                # compile cell arrive ONLY via hub delivery (HelloAck
+                # resolutions, DesiredResidency, RunJob snapshots) — never a
+                # boot-time default. Eager setup here races HelloAck's rebind
+                # and selects from bare refs with no snapshots (fc157; the
+                # ie#501 W8A8 cell-selection miss).
                 dynamic.append(spec.name)
                 continue
             missing = sorted({
@@ -476,8 +476,9 @@ class Lifecycle:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
         if dynamic:
             logger.info(
-                "dynamic-slot functions serve hub-resolved picks per dispatch "
-                "(pgw#532; no boot-time setup): %s", ", ".join(sorted(dynamic)))
+                "hub-resolved functions (dynamic slots / compile cells) set up "
+                "on delivery, not at boot (pgw#532, gw#584): %s",
+                ", ".join(sorted(dynamic)))
         if awaiting_hub:
             logger.warning(
                 "functions waiting on hub-supplied snapshots (DesiredResidency, "
