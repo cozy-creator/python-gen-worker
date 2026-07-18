@@ -528,6 +528,56 @@ def flush_memory() -> None:
         pass
 
 
+def release_unused_pinned_host_cache() -> int:
+    """Return unused PyTorch pinned-host blocks to the OS, best effort.
+
+    Pinned swap keeps live RAM-tier weights checked out from PyTorch's host
+    allocator.  Once an owner is torn down those tensors are gone, but the
+    allocator caches their blocks process-wide; ordinary ``gc.collect()`` and
+    ``torch.cuda.empty_cache()`` release neither.  Under measured host-memory
+    pressure callers may use this after dropping every object owner.  Active
+    blocks (including surviving RAM-tier models) remain owned and untouched.
+
+    The result is the allocator's observed decrease in owned host bytes.  Zero
+    means no bytes were released or the installed PyTorch lacks this API.
+    """
+    try:
+        gc.collect()
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        # Pinned frees can remain stream-dependent.  Finish prior CUDA work so
+        # the host allocator can distinguish inactive blocks before flushing.
+        torch.cuda.synchronize()
+        try:
+            before = int(torch.cuda.memory.host_memory_stats().get(
+                "allocated_bytes.current", 0))
+        except Exception:
+            before = 0
+
+        accelerator = getattr(torch, "accelerator", None)
+        accelerator_memory = getattr(accelerator, "memory", None)
+        empty_host_cache = getattr(
+            accelerator_memory, "empty_host_cache", None)
+        if not callable(empty_host_cache):
+            # PyTorch exposed the same allocator operation privately before
+            # torch.accelerator.memory.empty_host_cache became public.
+            empty_host_cache = getattr(
+                getattr(torch, "_C", None), "_host_emptyCache", None)
+        if not callable(empty_host_cache):
+            return 0
+        empty_host_cache()
+        try:
+            after = int(torch.cuda.memory.host_memory_stats().get(
+                "allocated_bytes.current", before))
+        except Exception:
+            return 0
+        return max(0, before - after)
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Mode selection (auto) — the ONE low-VRAM decider, free-VRAM inputs only
 # ---------------------------------------------------------------------------
@@ -1139,4 +1189,5 @@ __all__ = [
     "get_available_ram_gb",
     "get_total_ram_gb",
     "flush_memory",
+    "release_unused_pinned_host_cache",
 ]
