@@ -91,6 +91,13 @@ def _ext(p: str) -> str:
     return "." + base.rsplit(".", 1)[-1] if "." in base else ""
 
 
+def _is_safetensors_index(path: str) -> bool:
+    lower = path.lower()
+    return lower.endswith(".safetensors.index.json") or (
+        ".safetensors.index." in lower and lower.endswith(".json")
+    )
+
+
 def _root(paths: Sequence[str]) -> list[str]:
     return [p for p in paths if "/" not in p]
 
@@ -199,7 +206,7 @@ def classify_repo(
         p for p in paths
         if _ext(p) in {".json", ".txt", ".model", ".jinja", ".yaml", ".yml"}
         and _ext(p) not in _JUNK_EXTS
-        and not p.lower().endswith(".safetensors.index.json")
+        and not _is_safetensors_index(p)
     ]
     always = [p for p in root if p.lower() in _ALWAYS_INCLUDE]
 
@@ -260,7 +267,7 @@ def classify_repo(
         # Sharded-set indexes for the picked weights only.
         picked_set = set(d_weights)
         for p in paths:
-            if p.lower().endswith(".safetensors.index.json"):
+            if _is_safetensors_index(p):
                 stem = p[: -len(".index.json")]
                 tag = _variant_tag(stem)
                 comp = p.split("/", 1)[0] if "/" in p else ""
@@ -301,7 +308,7 @@ def classify_repo(
         )
 
     has_st = any(p.lower().endswith(".safetensors") for p in paths)
-    has_st_index = any(p.lower().endswith(".safetensors.index.json") for p in paths)
+    has_st_index = any(_is_safetensors_index(p) for p in paths)
 
     # 4 pipeline tree (TRELLIS-style: pipeline.json at root composing nested
     # per-model checkpoint pairs, e.g. ckpts/<name>.{json,safetensors}). The
@@ -314,7 +321,7 @@ def classify_repo(
 
     # 5. transformers
     if config_json is not None and "config.json" in root_set and (has_st or has_st_index):
-        t_indexes = [p for p in root if p.lower().endswith(".safetensors.index.json")]
+        t_indexes = [p for p in root if _is_safetensors_index(p)]
         t_weights, t_dtype = _pick_weight_set(
             [p for p in root if p.lower().endswith(".safetensors")], dtype_pref)
         attrs: dict[str, str] = {"file_layout": "singlefile"}

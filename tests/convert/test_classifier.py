@@ -112,7 +112,10 @@ def test_standalone_diffusers_component_selects_complete_variant_shard_set() -> 
         "diffusion_pytorch_model.safetensors",
         "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
         "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
-        "diffusion_pytorch_model.fp16.safetensors.index.json",
+        "diffusion_pytorch_model.safetensors.index.fp16.json",
+        "diffusion_pytorch_model.bf16-00001-of-00002.safetensors",
+        "diffusion_pytorch_model.bf16-00002-of-00002.safetensors",
+        "diffusion_pytorch_model.safetensors.index.bf16.json",
         "vae-copy.safetensors",
     ]
     c = classify_repo(
@@ -127,7 +130,7 @@ def test_standalone_diffusers_component_selects_complete_variant_shard_set() -> 
         "config.json",
         "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
         "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
-        "diffusion_pytorch_model.fp16.safetensors.index.json",
+        "diffusion_pytorch_model.safetensors.index.fp16.json",
     }
 
 

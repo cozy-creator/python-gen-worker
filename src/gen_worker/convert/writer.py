@@ -1509,6 +1509,10 @@ VARIANT_WEIGHT_NAME_RE = re.compile(
     r"^(?P<base>.+)\.(?P<v>fp16|bf16|fp32)"
     r"(?P<shard>-\d{5}-of-\d{5})?\.safetensors(?P<idx>\.index\.json)?$"
 )
+VARIANT_INDEX_NAME_RE = re.compile(
+    r"^(?P<base>.+)\.safetensors\.index\."
+    r"(?P<v>fp16|bf16|fp32)\.json$"
+)
 
 
 def normalize_variant_filenames(tree: Path) -> None:
@@ -1530,9 +1534,13 @@ def normalize_variant_filenames(tree: Path) -> None:
         renames: dict[str, str] = {}
         for p in sorted(d.iterdir()):
             m = VARIANT_WEIGHT_NAME_RE.match(p.name)
-            if not m:
-                continue
-            new_name = f"{m['base']}{m['shard'] or ''}.safetensors{m['idx'] or ''}"
+            if m:
+                new_name = f"{m['base']}{m['shard'] or ''}.safetensors{m['idx'] or ''}"
+            else:
+                index_match = VARIANT_INDEX_NAME_RE.match(p.name)
+                if index_match is None:
+                    continue
+                new_name = f"{index_match['base']}.safetensors.index.json"
             if (d / new_name).exists():
                 renames.clear()
                 break
