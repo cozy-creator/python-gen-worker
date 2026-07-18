@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.37.1 (2026-07-18)
+
+- **gw#584: defer compile-declared endpoints from eager boot setup.** `Lifecycle.startup()`
+  raced `transport.run()`'s HelloAck handshake: a `spec.compile`-declared function with
+  locally-present weights could reach `ensure_setup` at boot with bare authored refs and
+  `snapshots=None`, silently skipping compile-cell selection while a later HelloAck-driven
+  setup materialized the resolved w8a8 lane — selection and materialization derived from
+  different resolved states, fail-closing `enable()` generically (ie#501 run 17). Compile
+  cells now defer the same way `Slot` picks already do (pgw#532): both arrive only via hub
+  delivery, never a boot default.
+
 ## 0.37.0 (2026-07-18)
 
 - **gw#581 (th#883): worker-owned cell selection.** New `gen_worker.cell_key`
