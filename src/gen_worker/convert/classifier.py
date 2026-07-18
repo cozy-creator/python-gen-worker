@@ -45,6 +45,10 @@ _GGUF_QUANT_PREFERENCE = (
 # Full quant token in a gguf FILENAME, incl. unsloth-dynamic ("UD-Q4_K_XL")
 # and i-quant ("IQ4_XS") forms the preference list doesn't name.
 _GGUF_QTYPE_RE = re.compile(r"(?:ud-)?(?:i?q\d[0-9a-z_]*|bf16|f16|f32)")
+_DIFFUSERS_COMPONENT_WEIGHT_RE = re.compile(
+    r"^diffusion_pytorch_model(?:\.([a-z0-9_-]+))?"
+    r"(?:-\d{5}-of-\d{5})?\.safetensors$",
+)
 
 
 class RepoRefusal(RuntimeError):
@@ -67,7 +71,8 @@ class RepoRefusal(RuntimeError):
 class RepoClassification:
     """Result of :func:`classify_repo` + :func:`select_files`."""
 
-    strategy: str          # diffusers | pipeline_tree | transformers | peft |
+    strategy: str          # diffusers | diffusers_component | pipeline_tree |
+                           # transformers | peft |
                            # sentence_transformers | gguf | native_lora | aio_singlefile
     runtime_library: str   # diffusers | trellis2 | transformers | peft |
                            # sentence-transformers | llama-cpp |
@@ -127,6 +132,44 @@ def _pick_weight_set(
     # first preferred-order tag deterministically.
     tag = sorted(by_tag)[0]
     return sorted(by_tag[tag]), _dtype_of_tag(tag)
+
+
+def _pick_diffusers_component_weight_set(
+    root_paths: Sequence[str],
+    dtype_pref: Sequence[str],
+) -> tuple[list[str], list[str], str]:
+    """Pick the canonical weight set for a standalone Diffusers component.
+
+    Component repos can carry convenience aliases beside the loadable
+    ``diffusion_pytorch_model*`` tree (the SDXL fp16-fix VAE carries three
+    same-size aliases). Only the canonical tree belongs in the mirror.
+    """
+    by_tag: dict[str, list[str]] = {}
+    for path in root_paths:
+        match = _DIFFUSERS_COMPONENT_WEIGHT_RE.match(path.lower())
+        if match is not None:
+            by_tag.setdefault(match.group(1) or "", []).append(path)
+    if not by_tag:
+        return [], [], ""
+
+    selected_tag = ""
+    for want in dtype_pref:
+        selected_tag = next(
+            (tag for tag in by_tag if tag and _dtype_of_tag(tag) == want), "")
+        if selected_tag:
+            break
+    if not selected_tag and "" not in by_tag:
+        selected_tag = sorted(by_tag)[0]
+    weights = sorted(by_tag[selected_tag])
+
+    prefix = "diffusion_pytorch_model"
+    index_names = {
+        f"{prefix}.safetensors.index.json" if not selected_tag
+        else f"{prefix}.{selected_tag}.safetensors.index.json",
+        f"{prefix}.safetensors.index.{selected_tag}.json" if selected_tag else "",
+    }
+    indexes = sorted(path for path in root_paths if path.lower() in index_names)
+    return weights, indexes, _dtype_of_tag(selected_tag)
 
 
 def classify_repo(
@@ -232,10 +275,35 @@ def classify_repo(
                         "file_layout": "diffusers"},
                        "model_index.json at root")
 
+    # 3.5 standalone diffusers component. Diffusers ModelMixin repos use a
+    # root config with _class_name plus the canonical
+    # diffusion_pytorch_model* weight set, but no pipeline model_index.json.
+    # They are not transformers models, and convenience root aliases must not
+    # be mirrored as additional logical weights (gw#426).
+    diffusers_class = str((config_json or {}).get("_class_name") or "").strip()
+    component_weights, component_indexes, component_dtype = (
+        _pick_diffusers_component_weight_set(root, dtype_pref)
+    )
+    if diffusers_class and component_weights:
+        component_attrs = {
+            "file_layout": "singlefile",
+            "architecture": diffusers_class,
+        }
+        if component_dtype:
+            component_attrs["dtype"] = component_dtype
+        return _finish(
+            "diffusers_component",
+            "diffusers",
+            component_weights,
+            component_indexes,
+            component_attrs,
+            f"diffusers component config ({diffusers_class})",
+        )
+
     has_st = any(p.lower().endswith(".safetensors") for p in paths)
     has_st_index = any(p.lower().endswith(".safetensors.index.json") for p in paths)
 
-    # 3.5 pipeline tree (TRELLIS-style: pipeline.json at root composing nested
+    # 4 pipeline tree (TRELLIS-style: pipeline.json at root composing nested
     # per-model checkpoint pairs, e.g. ckpts/<name>.{json,safetensors}). The
     # tree is one artifact — every safetensors rides, no dtype-variant pick
     # (mixed per-model dtypes are intentional upstream).
@@ -244,7 +312,7 @@ def classify_repo(
         return _finish("pipeline_tree", "trellis2", pt_weights, [],
                        {"file_layout": "singlefile"}, "pipeline.json at root")
 
-    # 4. transformers
+    # 5. transformers
     if config_json is not None and "config.json" in root_set and (has_st or has_st_index):
         t_indexes = [p for p in root if p.lower().endswith(".safetensors.index.json")]
         t_weights, t_dtype = _pick_weight_set(
@@ -260,7 +328,7 @@ def classify_repo(
         return _finish("transformers", "transformers", t_weights, t_indexes, attrs,
                        "config.json + safetensors")
 
-    # 5. GGUF
+    # 6. GGUF
     gguf_files = [p for p in root if p.lower().endswith(".gguf")]
     if gguf_files:
         def _quant_of(p: str) -> str:
@@ -287,7 +355,7 @@ def classify_repo(
                         "file_type": "gguf", "file_layout": "singlefile"},
                        f"{len(gguf_files)} *.gguf at root")
 
-    # 6/7. root safetensors: native LoRA vs AIO singlefile
+    # 7/8. root safetensors: native LoRA vs AIO singlefile
     st_root = [p for p in root if p.lower().endswith(".safetensors")]
     if st_root:
         md = dict(safetensors_metadata or {})

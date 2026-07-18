@@ -72,6 +72,40 @@ def test_diffusers_skips_root_allinone_checkpoints() -> None:
     assert "transformer/diffusion_pytorch_model.fp16.safetensors" in allow
 
 
+def test_standalone_diffusers_vae_selects_only_canonical_weight() -> None:
+    """gw#426: madebyollin's SDXL VAE is a Diffusers component, not a
+    Transformers model, and its A1111 aliases are not extra logical weights."""
+    files = [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.bin",
+        "diffusion_pytorch_model.safetensors",
+        "images/vae-fix.jpg",
+        "sdxl.vae.safetensors",
+        "sdxl_vae.safetensors",
+    ]
+    c = classify_repo(
+        files,
+        config_json={
+            "_class_name": "AutoencoderKL",
+            "_diffusers_version": "0.18.0.dev0",
+        },
+    )
+
+    assert c.strategy == "diffusers_component"
+    assert c.runtime_library == "diffusers"
+    assert c.attrs == {
+        "file_layout": "singlefile",
+        "architecture": "AutoencoderKL",
+    }
+    assert set(c.allow_patterns) == {
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.safetensors",
+    }
+
+
 def test_transformers_with_sharded_index_and_onnx_excluded() -> None:
     files = [
         "config.json", "generation_config.json", "tokenizer.json",

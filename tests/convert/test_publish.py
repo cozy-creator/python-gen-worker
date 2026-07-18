@@ -7,13 +7,16 @@ failure / removed on success, and no-publish-cannot-read-as-success.
 
 from __future__ import annotations
 
+import json
+import struct
 from pathlib import Path
 
 import pytest
 
 from gen_worker.convert import ProducedFlavor, publish_flavors
 from gen_worker.convert.clone import run_clone
-from gen_worker.convert.ingest import IngestedSource
+from gen_worker.convert.classifier import classify_repo
+from gen_worker.convert.ingest import HFSourcePlan, IngestedSource
 
 from fake_hub import _FakeHub
 
@@ -152,6 +155,90 @@ def test_run_clone_publishes_clean_tree_and_removes_workdir(
     assert not any(o.startswith(".cache/") for o in ops)
     # success: keyed workdir is gone
     assert list((tmp_path / "work").glob("clone-*")) == []
+
+
+def test_run_clone_publishes_standalone_sdxl_vae_as_diffusers_component(
+    fake_hub, tmp_path: Path, monkeypatch
+) -> None:
+    """Exact small fixture for the production gw#426 failure: exercise the
+    plan -> selective download -> ingest -> publish path without the 335 MB
+    VAE bytes."""
+    _FakeHub.state["finalize_calls"] = 1
+    monkeypatch.setenv("COZY_CONVERT_WORKDIR", str(tmp_path / "work"))
+    paths = [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.bin",
+        "diffusion_pytorch_model.safetensors",
+        "images/vae-fix.jpg",
+        "sdxl.vae.safetensors",
+        "sdxl_vae.safetensors",
+    ]
+    config = {
+        "_class_name": "AutoencoderKL",
+        "_diffusers_version": "0.18.0.dev0",
+        "force_upcast": False,
+    }
+    classification = classify_repo(paths, config_json=config)
+    plan = HFSourcePlan(
+        repo_id="madebyollin/sdxl-vae-fp16-fix",
+        revision="97ea5f13002d40686c2447609d24e5685dac0abb",
+        paths=paths,
+        sizes={path: 128 for path in paths},
+        side={"config_json": config},
+        classification=classification,
+        content_ids={path: f"git:{index:040x}" for index, path in enumerate(paths, 1)},
+    )
+    monkeypatch.setattr("gen_worker.convert.clone.plan_huggingface", lambda *a, **k: plan)
+
+    def fake_download(repo_id, revision, dest_dir, *, allow_patterns, **kwargs):
+        assert repo_id == plan.repo_id
+        assert revision == plan.revision
+        assert set(allow_patterns) == {
+            "README.md",
+            "config.json",
+            "diffusion_pytorch_model.safetensors",
+        }
+        root = Path(dest_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "README.md").write_text("SDXL VAE fp16 fix", encoding="utf-8")
+        (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        header = json.dumps({
+            "decoder.conv.weight": {
+                "dtype": "F16",
+                "shape": [1],
+                "data_offsets": [0, 2],
+            },
+        }, separators=(",", ":")).encode()
+        (root / "diffusion_pytorch_model.safetensors").write_bytes(
+            struct.pack("<Q", len(header)) + header + b"\0\0"
+        )
+
+    monkeypatch.setattr(
+        "gen_worker.convert.ingest._snapshot_download_with_retries",
+        fake_download,
+    )
+    monkeypatch.setattr("gen_worker.convert.ingest.install_hf_http_timeouts", lambda: None)
+
+    result = run_clone(
+        _Ctx(fake_hub),
+        provider="huggingface",
+        source_ref=plan.repo_id,
+        destination_repo="acme/sdxl-vae-fp16-fix",
+    )
+
+    assert result.published[0]["flavor"] == "fp16"
+    request = _FakeHub.state["commit_request"]
+    assert request["library_name"] == "diffusers"
+    assert request["class_name"] == "AutoencoderKL"
+    assert request["model_family"] == "sdxl"
+    assert request["file_layout"] == "singlefile"
+    assert {op["path"] for op in request["operations"]} == {
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.safetensors",
+    }
 
 
 def test_run_clone_failure_cleans_workdir_then_retry_succeeds(

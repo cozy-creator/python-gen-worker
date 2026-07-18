@@ -573,7 +573,7 @@ class CloneDiskSpaceError(RuntimeError):
 _DISK_MARGIN_BYTES = 2 * 1024**3
 _PUBLISH_AS_IS_STRATEGIES = frozenset({
     "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
-    "pipeline_tree",
+    "pipeline_tree", "diffusers_component",
 })
 _DIRECT_GGUF_ENCODINGS = frozenset({"f32", "f16", "bf16", "q8_0"})
 _DTYPE_STORAGE_BITS = {
