@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.37.0 (2026-07-18)
+
+- **gw#581 (th#883): worker-owned cell selection.** New `gen_worker.cell_key`
+  module — the ONE compatibility brain: the worker computes its exact
+  compile-cell identity (`ck1-<56hex>` over the honest axes; `cuda_driver`
+  excluded) and requests cells BY KEY. Protocol additions (additive):
+  `CompileTarget.requested_cell_key`/`requested_cell_axes`,
+  `StateDelta.cell_lookups`. Mints stamp the key their axes describe;
+  `build(requested_cell_key=…)` refuses a mismatched mint. A SELF-REQUESTED,
+  identity-verified cell that fails to arm surfaces as `cell_selection_bug`
+  (loud, wire-visible), never a silent eager fallback; cozy-local verdicts
+  share the same brain. Key-flavored cells (`#ck1-…`) ride the existing
+  delivery rails.
+
 ## 0.36.1 (2026-07-17)
 
 - **gw#567: prompt-corpus / eval-set artifacts drop parquet — jsonl
