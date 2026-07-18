@@ -889,6 +889,17 @@ class ModelStore:
             else:
                 self._index.remove(ref)
 
+    def lru_disk_refs(self, *, exclude: Tuple[str, ...] = ()) -> List[str]:
+        """Idle DISK refs in persisted last-use order, oldest first."""
+        excluded = set(exclude)
+        candidates = [
+            (self._index.last_used(ref), ref)
+            for ref in self.residency.refs_in(residency_mod.Tier.DISK)
+            if ref not in excluded and not self.residency.in_use(ref)
+        ]
+        candidates.sort()
+        return [ref for _last_used, ref in candidates]
+
     def gc_disk(self, target_free_bytes: int, *, exclude: Tuple[str, ...] = ()) -> None:
         """Evict LRU disk-tier refs until free disk reaches the target.
         Non-keep refs go first (grace-honoring, then grace-ignoring); under
@@ -3668,16 +3679,18 @@ class Executor:
                 for event in [*failures, *progress]
             ]
 
-    async def _reclaim_released_file_cache(
-        self, released_refs: List[str], incoming_paths: List[Path],
+    async def _reclaim_disk_file_cache(
+        self, candidate_refs: List[str], incoming_paths: List[Path],
     ) -> int:
-        """Advise only pressure-evicted immutable snapshots out of file cache.
+        """Advise only idle immutable snapshots out of file cache.
 
         A DISK transition preserves model bytes, but recently-read clean pages
         can still fill the pod cgroup and make the following load look
         impossible.  Protect the incoming snapshot and every still-loaded or
-        executing ref by inode; then advise only refs that truthfully reached
-        DISK.  The caller always re-probes measured headroom afterward.
+        executing ref by inode; then advise only candidate refs that truthfully
+        reached DISK.  Candidates may have been evicted during this admission
+        or during an earlier rotation.  The caller always re-probes measured
+        headroom afterward.
 
         This runs inside ``_setup_locked``'s process-wide load lock.  Every
         setup and ordinary RAM->VRAM promotion takes that same lock, so a DISK
@@ -3700,7 +3713,7 @@ class Executor:
 
         advised = 0
         seen_paths: set[Path] = set()
-        for ref in dict.fromkeys(released_refs):
+        for ref in dict.fromkeys(candidate_refs):
             if res.tier(ref) is not residency_mod.Tier.DISK or res.in_use(ref):
                 continue
             local = res.local_path(ref)
@@ -3814,7 +3827,7 @@ class Executor:
             await self._observe_host_ram_progress(released)
             if after.sufficient:
                 return
-            advised = await self._reclaim_released_file_cache(
+            advised = await self._reclaim_disk_file_cache(
                 released, [Path(p) for p in paths.values()],
             )
             if advised:
@@ -3827,6 +3840,41 @@ class Executor:
             await self._observe_host_ram_progress(released)
             if after.sufficient:
                 return
+
+        # A prior rotation may already have truthfully moved every old model
+        # to DISK.  In that state there is no RAM-tier victim above, but clean
+        # pages from loading those immutable snapshots can still occupy the
+        # conservative cgroup working set (active_file is deliberately not
+        # counted as immediately available).  Chill the oldest idle DISK refs
+        # before declaring the host incapable.  This does not delete model
+        # bytes and the inode-preservation gate above protects the incoming
+        # model plus every loaded/executing component.
+        incoming_ref_set = set(incoming_refs)
+        disk_refs = self.store.lru_disk_refs(
+            exclude=tuple(incoming_ref_set),
+        )
+        advised = 0
+        for ref in disk_refs:
+            advised += await self._reclaim_disk_file_cache(
+                [ref], [Path(p) for p in paths.values()],
+            )
+            after = await asyncio.to_thread(res.host_ram_headroom, incoming)
+            await self._observe_host_ram_progress([])
+            if after.sufficient:
+                if advised:
+                    logger.info(
+                        "host-RAM admission advised %d already-DISK immutable "
+                        "snapshot bytes out of file cache for %s",
+                        advised, spec.name,
+                    )
+                return
+        if advised:
+            logger.info(
+                "host-RAM admission advised %d already-DISK immutable "
+                "snapshot bytes out of file cache for %s without reaching "
+                "required headroom",
+                advised, spec.name,
+            )
 
         error = InsufficientHostRamError(
             spec.name,

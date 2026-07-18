@@ -464,6 +464,101 @@ def test_pressure_eviction_reclaims_real_snapshot_cache_and_protects_shared_inod
     assert vae_file.read_bytes() == b"a" * vae_file.stat().st_size
 
 
+def test_pressure_reclaims_already_disk_snapshot_cache_without_ram_victim(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """#579: an earlier DISK transition must remain reclaimable later.
+
+    The live 16-checkpoint canary reached a state with every prior checkpoint
+    already ON_DISK and no RAM-tier victim, while their recently-read clean
+    pages still occupied the conservative cgroup working set.  Exercise the
+    production admission and file-advice paths against real page-cache state:
+    the old snapshot is chilled, the incoming snapshot stays hot, and no model
+    bytes are deleted.
+    """
+    if not hasattr(os, "posix_fadvise"):
+        pytest.skip("real page-cache test requires os.posix_fadvise")
+
+    old_dir = tmp_path / "already-disk"
+    recent_dir = tmp_path / "recently-used-disk"
+    incoming_dir = tmp_path / "incoming"
+    old_dir.mkdir()
+    recent_dir.mkdir()
+    incoming_dir.mkdir()
+    old_file = old_dir / "weights.bin"
+    recent_file = recent_dir / "weights.bin"
+    incoming_file = incoming_dir / "weights.bin"
+    old_file.write_bytes(b"o" * (32 * 1024 * 1024))
+    recent_file.write_bytes(b"r" * (8 * 1024 * 1024))
+    incoming_file.write_bytes(b"n" * (8 * 1024 * 1024))
+    for file_path in (old_file, recent_file, incoming_file):
+        with file_path.open("rb") as stream:
+            os.fsync(stream.fileno())
+        fd = os.open(file_path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+        _warm_file(file_path)
+
+    old_size = old_file.stat().st_size
+    recent_size = recent_file.stat().st_size
+    incoming_size = incoming_file.stat().st_size
+    assert _resident_file_bytes(old_file) >= old_size
+    assert _resident_file_bytes(recent_file) >= recent_size
+    assert _resident_file_bytes(incoming_file) >= incoming_size
+
+    class Endpoint:
+        def setup(self, pipeline: _FakePipe) -> None:
+            self.pipeline = pipeline
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    old_ref = "tensorhub/a-already-disk"
+    recent_ref = "tensorhub/z-recently-used-disk"
+    incoming_spec = _spec(
+        "incoming", Endpoint, {"pipeline": HF("tensorhub/incoming")},
+    )
+    ex = _executor([incoming_spec], tmp_path / "cache")
+    res = ex.store.residency
+    res.track_disk(old_ref, old_dir)
+    res.track_disk(recent_ref, recent_dir)
+    ex.store._index.record(old_ref, old_dir, old_size)
+    ex.store._index.record(recent_ref, recent_dir, recent_size)
+
+    floor = 8 * 1024 * 1024
+    baseline = 4 * 1024 * 1024
+
+    def _headroom(needed: int) -> HostRamHeadroom:
+        reclaimed = old_size - min(old_size, _resident_file_bytes(old_file))
+        return HostRamHeadroom(
+            available_bytes=baseline + reclaimed,
+            floor_bytes=floor,
+            required_bytes=int(needed) + floor,
+        )
+
+    monkeypatch.setattr(res, "host_ram_headroom", _headroom)
+
+    async def _run() -> None:
+        async with ex._load_lock:
+            await ex._ensure_host_ram_for(
+                incoming_spec, {"pipeline": str(incoming_dir)},
+            )
+
+    asyncio.run(_run())
+    assert res.tier(old_ref) is Tier.DISK
+    assert res.tier(recent_ref) is Tier.DISK
+    assert _resident_file_bytes(old_file) < old_size // 4
+    # Re-probing after the oldest ref reaches the exact requirement stops the
+    # scan before it needlessly chills a hotter local checkpoint.
+    assert _resident_file_bytes(recent_file) >= recent_size
+    assert _resident_file_bytes(incoming_file) >= incoming_size
+    assert old_file.read_bytes() == b"o" * old_size
+    assert recent_file.read_bytes() == b"r" * recent_size
+    assert incoming_file.read_bytes() == b"n" * incoming_size
+
+
 @pytest.mark.parametrize("owned_by_record", [True, False])
 def test_pressure_pinned_release_runs_after_owner_teardown_and_stops_eviction(
     tmp_path: Path, monkeypatch, owned_by_record: bool,
@@ -550,7 +645,7 @@ def test_pressure_pinned_release_runs_after_owner_teardown_and_stops_eviction(
     monkeypatch.setattr(
         executor_mod, "release_unused_pinned_host_cache", _release_pinned,
     )
-    ex._reclaim_released_file_cache = _unexpected_file_advice  # type: ignore[method-assign]
+    ex._reclaim_disk_file_cache = _unexpected_file_advice  # type: ignore[method-assign]
 
     async def _run() -> None:
         await ex._record_host_ram_failure(
