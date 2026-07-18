@@ -3772,7 +3772,7 @@ class Executor:
                 continue
             rec = owners[0] if owners else None
             if rec is not None:
-                if self._record_in_use(rec):
+                if self._record_in_use(rec, reclaim_ref=ref):
                     continue
                 owned = [
                     held for held in self._record_refs(rec)
@@ -3874,7 +3874,7 @@ class Executor:
                 # residency object; wait for a unique record-owned victim.
                 continue
             rec = owners[0]
-            if self._record_in_use(rec):
+            if self._record_in_use(rec, reclaim_ref=ref):
                 continue
             await self._vacate_record(rec)
             if await asyncio.to_thread(res.make_room, needed):
@@ -4912,16 +4912,29 @@ class Executor:
             if rec.ready and ref in self._record_refs(rec)
         ]
 
-    def _record_in_use(self, rec: _ClassRecord) -> bool:
-        # A job on a rebound spec no longer references the record's held
-        # refs — membership of the job's spec in this record is the honest
-        # "instance in use" signal (gw#494).
+    def _record_in_use(
+        self, rec: _ClassRecord, *, reclaim_ref: Optional[str] = None,
+    ) -> bool:
+        """Whether teardown would disturb live work.
+
+        ``reclaim_ref`` narrows a pressure-driven teardown to the candidate
+        that selected this record. A different held ref can be pinned by an
+        incoming job before its own setup (the common SDXL VAE); that does not
+        make this record's idle checkpoint active. ``_vacate_record`` leaves
+        such a pinned ref resident because ``release_to_disk`` refuses it.
+        Full-record invalidation omits the argument and remains conservative.
+
+        A job on a rebound spec no longer references the record's held refs;
+        membership of the job's spec in this record is the honest instance-use
+        signal (gw#494).
+        """
         for job in self.jobs.values():
             if job.finished or job.superseded or job.spec is None:
                 continue
             if job.spec in rec.specs:
                 return True
-        for ref in self._record_refs(rec):
+        refs = [reclaim_ref] if reclaim_ref is not None else self._record_refs(rec)
+        for ref in refs:
             owners = self._records_holding(ref)
             if (len(owners) == 1 and owners[0] is rec
                     and self.store.residency.in_use(ref)):
