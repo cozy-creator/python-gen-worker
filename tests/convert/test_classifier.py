@@ -55,6 +55,29 @@ def test_diffusers_dtype_preference_fp16() -> None:
     assert "transformer/diffusion_pytorch_model.bf16.safetensors" not in allow
 
 
+def test_diffusers_pipeline_selects_complete_official_variant_shard_set() -> None:
+    files = [
+        "model_index.json",
+        "unet/config.json",
+        "unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.safetensors.index.fp16.json",
+        "unet/diffusion_pytorch_model.bf16-00001-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.bf16-00002-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.safetensors.index.bf16.json",
+    ]
+    c = classify_repo(files, dtype_pref=("fp16",))
+
+    assert c.strategy == "diffusers"
+    assert set(c.allow_patterns) == {
+        "model_index.json",
+        "unet/config.json",
+        "unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "unet/diffusion_pytorch_model.safetensors.index.fp16.json",
+    }
+
+
 def test_diffusers_skips_root_allinone_checkpoints() -> None:
     # SD1.5 shape: the repo ships all-in-one root checkpoints (12GB) on top
     # of the component tree — a diffusers-layout ingest must never pull them
@@ -70,6 +93,68 @@ def test_diffusers_skips_root_allinone_checkpoints() -> None:
     assert "v1-5-pruned.safetensors" not in allow
     assert "v1-5-pruned-emaonly.safetensors" not in allow
     assert "transformer/diffusion_pytorch_model.fp16.safetensors" in allow
+
+
+def test_standalone_diffusers_vae_selects_only_canonical_weight() -> None:
+    """gw#426: madebyollin's SDXL VAE is a Diffusers component, not a
+    Transformers model, and its A1111 aliases are not extra logical weights."""
+    files = [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.bin",
+        "diffusion_pytorch_model.safetensors",
+        "images/vae-fix.jpg",
+        "sdxl.vae.safetensors",
+        "sdxl_vae.safetensors",
+    ]
+    c = classify_repo(
+        files,
+        config_json={
+            "_class_name": "AutoencoderKL",
+            "_diffusers_version": "0.18.0.dev0",
+        },
+    )
+
+    assert c.strategy == "diffusers_component"
+    assert c.runtime_library == "diffusers"
+    assert c.attrs == {
+        "file_layout": "singlefile",
+        "architecture": "AutoencoderKL",
+    }
+    assert set(c.allow_patterns) == {
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.safetensors",
+    }
+
+
+def test_standalone_diffusers_component_selects_complete_variant_shard_set() -> None:
+    files = [
+        "config.json",
+        "diffusion_pytorch_model.safetensors",
+        "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "diffusion_pytorch_model.safetensors.index.fp16.json",
+        "diffusion_pytorch_model.bf16-00001-of-00002.safetensors",
+        "diffusion_pytorch_model.bf16-00002-of-00002.safetensors",
+        "diffusion_pytorch_model.safetensors.index.bf16.json",
+        "vae-copy.safetensors",
+    ]
+    c = classify_repo(
+        files,
+        config_json={"_class_name": "AutoencoderKL"},
+        dtype_pref=("fp16",),
+    )
+
+    assert c.strategy == "diffusers_component"
+    assert c.attrs["dtype"] == "fp16"
+    assert set(c.allow_patterns) == {
+        "config.json",
+        "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+        "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+        "diffusion_pytorch_model.safetensors.index.fp16.json",
+    }
 
 
 def test_transformers_with_sharded_index_and_onnx_excluded() -> None:

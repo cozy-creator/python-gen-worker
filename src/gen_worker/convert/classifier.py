@@ -36,6 +36,13 @@ _DTYPE_TAGS: dict[str, tuple[str, ...]] = {
     "fp8": ("fp8", "fp8_e4m3fn", "fp8-e4m3", "fp8_e5m2"),
 }
 _VARIANT_TAG_RE = re.compile(r"\.([a-z0-9_\-]+)\.safetensors$")
+_SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
+_OFFICIAL_INDEX_VARIANT_RE = re.compile(
+    r"\.safetensors\.index\.([a-z0-9_-]+)\.json$",
+)
+_LEGACY_INDEX_VARIANT_RE = re.compile(
+    r"\.([a-z0-9_-]+)\.safetensors\.index\.json$",
+)
 
 _GGUF_QUANT_PREFERENCE = (
     "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q4_k_m", "q4_k_s", "q4_0",
@@ -45,6 +52,10 @@ _GGUF_QUANT_PREFERENCE = (
 # Full quant token in a gguf FILENAME, incl. unsloth-dynamic ("UD-Q4_K_XL")
 # and i-quant ("IQ4_XS") forms the preference list doesn't name.
 _GGUF_QTYPE_RE = re.compile(r"(?:ud-)?(?:i?q\d[0-9a-z_]*|bf16|f16|f32)")
+_DIFFUSERS_COMPONENT_WEIGHT_RE = re.compile(
+    r"^diffusion_pytorch_model(?:\.([a-z0-9_-]+?))?"
+    r"(?:-\d{5}-of-\d{5})?\.safetensors$",
+)
 
 
 class RepoRefusal(RuntimeError):
@@ -67,7 +78,8 @@ class RepoRefusal(RuntimeError):
 class RepoClassification:
     """Result of :func:`classify_repo` + :func:`select_files`."""
 
-    strategy: str          # diffusers | pipeline_tree | transformers | peft |
+    strategy: str          # diffusers | diffusers_component | pipeline_tree |
+                           # transformers | peft |
                            # sentence_transformers | gguf | native_lora | aio_singlefile
     runtime_library: str   # diffusers | trellis2 | transformers | peft |
                            # sentence-transformers | llama-cpp |
@@ -86,13 +98,33 @@ def _ext(p: str) -> str:
     return "." + base.rsplit(".", 1)[-1] if "." in base else ""
 
 
+def _is_safetensors_index(path: str) -> bool:
+    lower = path.lower()
+    return lower.endswith(".safetensors.index.json") or (
+        ".safetensors.index." in lower and lower.endswith(".json")
+    )
+
+
 def _root(paths: Sequence[str]) -> list[str]:
     return [p for p in paths if "/" not in p]
 
 
 def _variant_tag(path: str) -> str:
-    m = _VARIANT_TAG_RE.search(path.rsplit("/", 1)[-1].lower())
+    name = path.rsplit("/", 1)[-1].lower()
+    if name.endswith(".safetensors"):
+        stem = _SHARD_SUFFIX_RE.sub("", name.removesuffix(".safetensors"))
+        name = stem + ".safetensors"
+    m = _VARIANT_TAG_RE.search(name)
     return m.group(1) if m else ""
+
+
+def _index_variant_tag(path: str) -> str:
+    name = path.rsplit("/", 1)[-1].lower()
+    match = _OFFICIAL_INDEX_VARIANT_RE.search(name)
+    if match is not None:
+        return match.group(1)
+    match = _LEGACY_INDEX_VARIANT_RE.search(name)
+    return match.group(1) if match is not None else ""
 
 
 def _dtype_of_tag(tag: str) -> str:
@@ -129,6 +161,44 @@ def _pick_weight_set(
     return sorted(by_tag[tag]), _dtype_of_tag(tag)
 
 
+def _pick_diffusers_component_weight_set(
+    root_paths: Sequence[str],
+    dtype_pref: Sequence[str],
+) -> tuple[list[str], list[str], str]:
+    """Pick the canonical weight set for a standalone Diffusers component.
+
+    Component repos can carry convenience aliases beside the loadable
+    ``diffusion_pytorch_model*`` tree (the SDXL fp16-fix VAE carries three
+    same-size aliases). Only the canonical tree belongs in the mirror.
+    """
+    by_tag: dict[str, list[str]] = {}
+    for path in root_paths:
+        match = _DIFFUSERS_COMPONENT_WEIGHT_RE.match(path.lower())
+        if match is not None:
+            by_tag.setdefault(match.group(1) or "", []).append(path)
+    if not by_tag:
+        return [], [], ""
+
+    selected_tag = ""
+    for want in dtype_pref:
+        selected_tag = next(
+            (tag for tag in by_tag if tag and _dtype_of_tag(tag) == want), "")
+        if selected_tag:
+            break
+    if not selected_tag and "" not in by_tag:
+        selected_tag = sorted(by_tag)[0]
+    weights = sorted(by_tag[selected_tag])
+
+    prefix = "diffusion_pytorch_model"
+    index_names = {
+        f"{prefix}.safetensors.index.json" if not selected_tag
+        else f"{prefix}.{selected_tag}.safetensors.index.json",
+        f"{prefix}.safetensors.index.{selected_tag}.json" if selected_tag else "",
+    }
+    indexes = sorted(path for path in root_paths if path.lower() in index_names)
+    return weights, indexes, _dtype_of_tag(selected_tag)
+
+
 def classify_repo(
     files: Sequence[str],
     *,
@@ -156,7 +226,7 @@ def classify_repo(
         p for p in paths
         if _ext(p) in {".json", ".txt", ".model", ".jinja", ".yaml", ".yml"}
         and _ext(p) not in _JUNK_EXTS
-        and not p.lower().endswith(".safetensors.index.json")
+        and not _is_safetensors_index(p)
     ]
     always = [p for p in root if p.lower() in _ALWAYS_INCLUDE]
 
@@ -212,18 +282,15 @@ def classify_repo(
                 continue
             comp_weights, comp_dtype = _pick_weight_set(group, dtype_pref)
             d_weights.extend(comp_weights)
+            selected_tag = _variant_tag(comp_weights[0]) if comp_weights else ""
+            d_indexes.extend(sorted(
+                p for p in paths
+                if _is_safetensors_index(p)
+                and (p.split("/", 1)[0] if "/" in p else "") == comp
+                and _index_variant_tag(p) == selected_tag
+            ))
             if comp and comp_dtype:
                 resolved[comp] = comp_dtype
-        # Sharded-set indexes for the picked weights only.
-        picked_set = set(d_weights)
-        for p in paths:
-            if p.lower().endswith(".safetensors.index.json"):
-                stem = p[: -len(".index.json")]
-                tag = _variant_tag(stem)
-                comp = p.split("/", 1)[0] if "/" in p else ""
-                comp_pick = [w for w in picked_set if w.startswith(f"{comp}/")] if comp else list(picked_set)
-                if any(_variant_tag(w) == tag for w in comp_pick):
-                    d_indexes.append(p)
         if not d_weights:
             raise RepoRefusal("missing_safetensors", files_seen=paths)
         dtypes = sorted(set(resolved.values()))
@@ -232,10 +299,35 @@ def classify_repo(
                         "file_layout": "diffusers"},
                        "model_index.json at root")
 
-    has_st = any(p.lower().endswith(".safetensors") for p in paths)
-    has_st_index = any(p.lower().endswith(".safetensors.index.json") for p in paths)
+    # 3.5 standalone diffusers component. Diffusers ModelMixin repos use a
+    # root config with _class_name plus the canonical
+    # diffusion_pytorch_model* weight set, but no pipeline model_index.json.
+    # They are not transformers models, and convenience root aliases must not
+    # be mirrored as additional logical weights (gw#426).
+    diffusers_class = str((config_json or {}).get("_class_name") or "").strip()
+    component_weights, component_indexes, component_dtype = (
+        _pick_diffusers_component_weight_set(root, dtype_pref)
+    )
+    if diffusers_class and component_weights:
+        component_attrs = {
+            "file_layout": "singlefile",
+            "architecture": diffusers_class,
+        }
+        if component_dtype:
+            component_attrs["dtype"] = component_dtype
+        return _finish(
+            "diffusers_component",
+            "diffusers",
+            component_weights,
+            component_indexes,
+            component_attrs,
+            f"diffusers component config ({diffusers_class})",
+        )
 
-    # 3.5 pipeline tree (TRELLIS-style: pipeline.json at root composing nested
+    has_st = any(p.lower().endswith(".safetensors") for p in paths)
+    has_st_index = any(_is_safetensors_index(p) for p in paths)
+
+    # 4 pipeline tree (TRELLIS-style: pipeline.json at root composing nested
     # per-model checkpoint pairs, e.g. ckpts/<name>.{json,safetensors}). The
     # tree is one artifact — every safetensors rides, no dtype-variant pick
     # (mixed per-model dtypes are intentional upstream).
@@ -244,9 +336,9 @@ def classify_repo(
         return _finish("pipeline_tree", "trellis2", pt_weights, [],
                        {"file_layout": "singlefile"}, "pipeline.json at root")
 
-    # 4. transformers
+    # 5. transformers
     if config_json is not None and "config.json" in root_set and (has_st or has_st_index):
-        t_indexes = [p for p in root if p.lower().endswith(".safetensors.index.json")]
+        t_indexes = [p for p in root if _is_safetensors_index(p)]
         t_weights, t_dtype = _pick_weight_set(
             [p for p in root if p.lower().endswith(".safetensors")], dtype_pref)
         attrs: dict[str, str] = {"file_layout": "singlefile"}
@@ -260,7 +352,7 @@ def classify_repo(
         return _finish("transformers", "transformers", t_weights, t_indexes, attrs,
                        "config.json + safetensors")
 
-    # 5. GGUF
+    # 6. GGUF
     gguf_files = [p for p in root if p.lower().endswith(".gguf")]
     if gguf_files:
         def _quant_of(p: str) -> str:
@@ -287,7 +379,7 @@ def classify_repo(
                         "file_type": "gguf", "file_layout": "singlefile"},
                        f"{len(gguf_files)} *.gguf at root")
 
-    # 6/7. root safetensors: native LoRA vs AIO singlefile
+    # 7/8. root safetensors: native LoRA vs AIO singlefile
     st_root = [p for p in root if p.lower().endswith(".safetensors")]
     if st_root:
         md = dict(safetensors_metadata or {})

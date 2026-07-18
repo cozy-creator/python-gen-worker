@@ -55,6 +55,33 @@ class TestNormalizeVariantFilenames:
         assert (tmp_path / "text_encoder/model.safetensors").exists()
         assert (tmp_path / "vae/diffusion_pytorch_model.safetensors").exists()
 
+    def test_official_variant_index_and_shards_become_one_canonical_set(
+        self, tmp_path: Path,
+    ) -> None:
+        _mk(tmp_path, "vae/diffusion_pytorch_model.fp16-00001-of-00002.safetensors")
+        _mk(tmp_path, "vae/diffusion_pytorch_model.fp16-00002-of-00002.safetensors")
+        _mk(
+            tmp_path,
+            "vae/diffusion_pytorch_model.safetensors.index.fp16.json",
+            json.dumps({
+                "weight_map": {
+                    "a": "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+                    "b": "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+                },
+            }).encode(),
+        )
+
+        _normalize_variant_filenames(tmp_path)
+
+        vae = tmp_path / "vae"
+        canonical_index = vae / "diffusion_pytorch_model.safetensors.index.json"
+        assert canonical_index.is_file()
+        assert not list(vae.glob("*.fp16*"))
+        assert json.loads(canonical_index.read_text())["weight_map"] == {
+            "a": "diffusion_pytorch_model-00001-of-00002.safetensors",
+            "b": "diffusion_pytorch_model-00002-of-00002.safetensors",
+        }
+
     def test_canonical_names_untouched(self, tmp_path: Path) -> None:
         _mk(tmp_path, "unet/diffusion_pytorch_model.safetensors")
         _mk(tmp_path, "unet/config.json")
