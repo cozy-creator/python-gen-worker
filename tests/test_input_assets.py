@@ -76,23 +76,17 @@ def test_size_cap_enforced(http_root):
     input_assets.cleanup_input_assets("req-mat-3")
 
 
-def test_mime_allowlist_enforced(http_root):
+@pytest.mark.parametrize("allowed,ok", [(("audio/mpeg",), False), (("image/*",), True)])
+def test_mime_allowlist_enforced(http_root, allowed, ok):
     p = Payload(
-        image=ImageAsset(
-            ref=f"{http_root}/in.png", url_allowed_mime_types=("audio/mpeg",)
-        )
+        image=ImageAsset(ref=f"{http_root}/in.png", url_allowed_mime_types=allowed)
     )
-    with pytest.raises(ValidationError, match="not allowed"):
-        input_assets.materialize_input_assets(p, "req-mat-4")
+    if ok:
+        assert input_assets.materialize_input_assets(p, "req-mat-4") == 1
+    else:
+        with pytest.raises(ValidationError, match="not allowed"):
+            input_assets.materialize_input_assets(p, "req-mat-4")
     input_assets.cleanup_input_assets("req-mat-4")
-
-
-def test_wildcard_mime_allowed(http_root):
-    p = Payload(
-        image=ImageAsset(ref=f"{http_root}/in.png", url_allowed_mime_types=("image/*",))
-    )
-    assert input_assets.materialize_input_assets(p, "req-mat-5") == 1
-    input_assets.cleanup_input_assets("req-mat-5")
 
 
 def test_nested_list_assets(http_root):

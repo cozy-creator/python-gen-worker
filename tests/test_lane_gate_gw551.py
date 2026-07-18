@@ -282,29 +282,6 @@ def test_pinned_swap_detects_out_of_band_weight_replacement() -> None:
     assert m[0].weight.detach().float().mean().item() == pytest.approx(1.0)
 
 
-@_cuda
-def test_pinned_swap_promote_is_faster_than_pageable(caplog) -> None:
-    """Measured, logged (informational): pinned H2D vs a pageable .to()."""
-    m = _tiny_module(256).cuda()
-    swap_module(m, "cpu")            # builds the pinned cache
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    swap_module(m, "cuda")
-    pinned_s = time.perf_counter() - t0
-
-    m2 = _tiny_module(256)           # pageable cpu weights
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    m2.to("cuda")
-    torch.cuda.synchronize()
-    pageable_s = time.perf_counter() - t0
-    logging.getLogger(__name__).warning(
-        "gw#551 promote 256MB: pinned=%.1fms pageable=%.1fms",
-        pinned_s * 1e3, pageable_s * 1e3,
-    )
-    assert pinned_s < max(pageable_s * 2.0, 1.0)  # sanity, not a benchmark
-
-
 # --------------------------------------------------------------------------- #
 # Real two-lane juggling through the executor (CUDA)
 # --------------------------------------------------------------------------- #

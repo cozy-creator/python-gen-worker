@@ -398,27 +398,38 @@ def test_discovery_walks_layouts_dedups_and_skips_third_party(tmp_pkg: Path, cap
 # --------------------------------------------------------------------------- #
 
 
-def test_producer_kind_rejects_sync_generator_class_handler() -> None:
-    with pytest.raises(TypeError, match="publish_flavors"):
-        @endpoint(kind="conversion")
-        class BadConversion:
-            def run(self, ctx: RequestContext, data: _In):
-                yield _Out(result="x")
-
-
-def test_producer_kind_rejects_async_generator_class_handler() -> None:
-    with pytest.raises(TypeError, match="inference-only"):
-        @endpoint(kind="training")
-        class BadTraining:
-            async def run(self, ctx: RequestContext, data: _In):
-                yield _Out(result="x")
-
-
-def test_producer_kind_rejects_generator_function() -> None:
-    with pytest.raises(TypeError, match="must not be a generator"):
-        @endpoint(kind="dataset")
-        def bad_dataset(ctx: RequestContext, data: _In):
+def _define_sync_generator_class(kind: str) -> None:
+    @endpoint(kind=kind)
+    class BadConversion:
+        def run(self, ctx: RequestContext, data: _In):
             yield _Out(result="x")
+
+
+def _define_async_generator_class(kind: str) -> None:
+    @endpoint(kind=kind)
+    class BadTraining:
+        async def run(self, ctx: RequestContext, data: _In):
+            yield _Out(result="x")
+
+
+def _define_generator_function(kind: str) -> None:
+    @endpoint(kind=kind)
+    def bad_dataset(ctx: RequestContext, data: _In):
+        yield _Out(result="x")
+
+
+@pytest.mark.parametrize(
+    ("kind", "match", "define"),
+    [
+        ("conversion", "publish_flavors", _define_sync_generator_class),
+        ("training", "inference-only", _define_async_generator_class),
+        ("dataset", "must not be a generator", _define_generator_function),
+    ],
+    ids=["sync-gen-class", "async-gen-class", "gen-function"],
+)
+def test_producer_kind_rejects_generator_handlers(kind, match, define) -> None:
+    with pytest.raises(TypeError, match=match):
+        define(kind)
 
 
 def test_from_scratch_example_uses_publish_contract() -> None:
@@ -526,112 +537,107 @@ def test_model_shorthand_skips_server_handle_setup_param() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
+@pytest.mark.parametrize("storage", ["fp8", "bf16"], ids=["fp8-emits", "bf16-omits"])
+def test_compile_block_storage_dtype_and_shapes(storage: str) -> None:
     """ie#381: the lock's compile block carries (w, h, frames) rows verbatim
     and the primary binding's weight-storage lane, so the hub's cell producer
-    builds from an identically-loaded (fp8) pipeline."""
+    builds from an identically-loaded (fp8) pipeline; bf16 (default-storage)
+    bindings omit the storage_dtype key."""
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
-    @endpoint(
-        model=Hub("tensorhub/ltx-2.3-distilled", storage_dtype="fp8"),
-        resources=Resources(vram_gb=78),
-        compile=Compile(
-            family="ltx-2.3",
-            shapes=((960, 544, 241), (1920, 1088, 241), (1280, 704, 121)),
-            targets=("transformer",),
-        ),
-    )
-    class Gen:
-        def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
-            self.model = model
-            gen_worker.arm_compile(self.model)
+    if storage == "fp8":
+        @endpoint(
+            model=Hub("tensorhub/ltx-2.3-distilled", storage_dtype="fp8"),
+            resources=Resources(vram_gb=78),
+            compile=Compile(
+                family="ltx-2.3",
+                shapes=((960, 544, 241), (1920, 1088, 241), (1280, 704, 121)),
+                targets=("transformer",),
+            ),
+        )
+        class Gen:
+            def setup(self, model: str) -> None:
+                # self-loading (str) slot: arms compile explicitly (pgw#517).
+                self.model = model
+                gen_worker.arm_compile(self.model)
 
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
+            def generate(self, ctx: RequestContext, data: _In) -> _Out:
+                return _Out(result="")
+    else:
+        @endpoint(
+            model=Hub("cozy/sdxl-base"),
+            resources=Resources(vram_gb=12),
+            compile=Compile(
+                family="sdxl", shapes=((1024, 1024),),
+                guidance_scales=(5.0, 0.0),
+            ),
+        )
+        class Gen:
+            def setup(self, model: str) -> None:
+                # self-loading (str) slot: arms compile explicitly (pgw#517).
+                self.model = model
+                gen_worker.arm_compile(self.model)
 
-    (entry,) = _extract_entries(Gen, "testmod")
-    assert entry["compile"]["shapes"] == [[960, 544, 241], [1920, 1088, 241], [1280, 704, 121]]
-    assert entry["compile"]["storage_dtype"] == "fp8"
-    assert entry["compile"]["targets"] == ["transformer"]
-    assert "guidance_scales" not in entry["compile"]
-
-
-def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
-    from gen_worker import Compile, Hub
-    from gen_worker.discovery.discover import _extract_entries
-
-    @endpoint(
-        model=Hub("cozy/sdxl-base"),
-        resources=Resources(vram_gb=12),
-        compile=Compile(
-            family="sdxl", shapes=((1024, 1024),),
-            guidance_scales=(5.0, 0.0),
-        ),
-    )
-    class Gen:
-        def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
-            self.model = model
-            gen_worker.arm_compile(self.model)
-
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
+            def generate(self, ctx: RequestContext, data: _In) -> _Out:
+                return _Out(result="")
 
     (entry,) = _extract_entries(Gen, "testmod")
-    assert "storage_dtype" not in entry["compile"]
-    assert entry["compile"]["guidance_scales"] == [5.0, 0.0]
+    if storage == "fp8":
+        assert entry["compile"]["shapes"] == [[960, 544, 241], [1920, 1088, 241], [1280, 704, 121]]
+        assert entry["compile"]["storage_dtype"] == "fp8"
+        assert entry["compile"]["targets"] == ["transformer"]
+        assert "guidance_scales" not in entry["compile"]
+    else:
+        assert "storage_dtype" not in entry["compile"]
+        assert entry["compile"]["guidance_scales"] == [5.0, 0.0]
 
 
-def test_binding_emits_family_stamp_from_compile() -> None:
+@pytest.mark.parametrize(
+    "with_family", [True, False], ids=["family-from-compile", "no-family-declared"]
+)
+def test_binding_family_stamp_from_compile(with_family: bool) -> None:
     """pgw#523: family stamping is unconditional-when-known — no allow_lora
     flag gates it, and ModelRef carries no such flag any more (identity !=
     permission; overlay permission lives on the slot-policy loras axis,
-    th#772)."""
-    from gen_worker import Compile, Hub
-    from gen_worker.discovery.discover import _extract_entries
-
-    @endpoint(
-        model=Hub("cozy/sdxl-base"),
-        resources=Resources(vram_gb=12),
-        compile=Compile(family="sdxl", shapes=((1024, 1024),)),
-    )
-    class Gen:
-        def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
-            self.model = model
-            gen_worker.arm_compile(self.model)
-
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
-
-    (entry,) = _extract_entries(Gen, "testmod")
-    (block,) = entry["bindings"].values()
-    assert "allow_lora" not in block
-    assert block["family"] == "sdxl"
-
-
-def test_binding_emits_no_family_when_none_declared() -> None:
-    """pgw#523: with no Compile(family=...) and no fallback-preset family,
+    th#772). With no Compile(family=...) and no fallback-preset family,
     a binding simply carries no `family` key — this used to hard-fail when
     allow_lora=True lacked a family (th#586's gate rekeyed off the binding/
     slot family directly, not that flag, so the co-occurrence requirement
     is gone too)."""
-    from gen_worker import Hub
+    from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
-    @endpoint(model=Hub("cozy/sdxl-base"), resources=Resources(vram_gb=12))
-    class Gen:
-        def setup(self, model: str) -> None:
-            self.model = model
+    if with_family:
+        @endpoint(
+            model=Hub("cozy/sdxl-base"),
+            resources=Resources(vram_gb=12),
+            compile=Compile(family="sdxl", shapes=((1024, 1024),)),
+        )
+        class Gen:
+            def setup(self, model: str) -> None:
+                # self-loading (str) slot: arms compile explicitly (pgw#517).
+                self.model = model
+                gen_worker.arm_compile(self.model)
 
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
+            def generate(self, ctx: RequestContext, data: _In) -> _Out:
+                return _Out(result="")
+    else:
+        @endpoint(model=Hub("cozy/sdxl-base"), resources=Resources(vram_gb=12))
+        class Gen:
+            def setup(self, model: str) -> None:
+                self.model = model
+
+            def generate(self, ctx: RequestContext, data: _In) -> _Out:
+                return _Out(result="")
 
     (entry,) = _extract_entries(Gen, "testmod")
     (block,) = entry["bindings"].values()
-    assert "family" not in block
+    assert "allow_lora" not in block
+    if with_family:
+        assert block["family"] == "sdxl"
+    else:
+        assert "family" not in block
 
 
 def test_components_binding_emits_in_manifest() -> None:
@@ -662,20 +668,16 @@ def test_components_binding_emits_in_manifest() -> None:
     assert bindings["pipeline"]["components"] == ["vae"]
     assert bindings["extra"]["components"] == ["unet", "text_encoder"]
 
-
-def test_no_components_binding_omits_manifest_key() -> None:
-    from gen_worker import Hub
-    from gen_worker.discovery.discover import _extract_entries
-
+    # No components= declared -> the manifest key is omitted entirely.
     @endpoint(model=Hub("o/whole-repo"), resources=Resources(vram_gb=12))
-    class Gen:
+    class Whole:
         def setup(self, model: str) -> None:
             self.model = model
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
 
-    (entry,) = _extract_entries(Gen, "testmod")
+    (entry,) = _extract_entries(Whole, "testmod")
     (block,) = entry["bindings"].values()
     assert "components" not in block
 

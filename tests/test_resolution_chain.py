@@ -62,16 +62,13 @@ def test_invalid_repo_metadata_raises_clear_validation_error() -> None:
         resolve_slot("pipeline", slot, ref=_REF, raw_metadata_json='{"steps": "not-an-int"}')
 
 
-def test_no_metadata_and_no_fallback_raises_clear_error() -> None:
-    slot = Slot(object, default_checkpoint=_REF)  # no default_config, no metadata
+def test_unresolvable_slot_raises_clear_error() -> None:
+    # No default_config and no metadata: nothing to resolve.
     with pytest.raises(ValueError, match="nothing to resolve"):
-        resolve_slot("pipeline", slot, ref=_REF)
-
-
-def test_no_ref_raises_clear_error() -> None:
-    slot = Slot(object, default_config=SdxlDefaults(steps=28))
+        resolve_slot("pipeline", Slot(object, default_checkpoint=_REF), ref=_REF)
+    # No resolved ref at all.
     with pytest.raises(ValueError, match="no resolved model ref"):
-        resolve_slot("pipeline", slot, ref=None)
+        resolve_slot("pipeline", Slot(object, default_config=SdxlDefaults(steps=28)), ref=None)
 
 
 def test_resolve_slots_collects_per_slot_failures_without_raising() -> None:
@@ -187,22 +184,20 @@ def test_lora_with_no_opinions_leaves_recipe_untouched() -> None:
     assert resolved.defaults.guidance == 6.0
 
 
-def test_empty_lora_metadata_entries_are_skipped() -> None:
+@pytest.mark.parametrize(
+    ("kwargs",),
+    [
+        pytest.param({"lora_metadata_json": ["", "  "]}, id="empty-entries"),
+        # No kind="lora" vocabulary registered for this family -> best-effort
+        # skip, never blocks the checkpoint's own resolved recipe.
+        pytest.param({"family": "does-not-exist",
+                      "lora_metadata_json": ['{"steps": 4}']},
+                     id="unregistered-lora-kind-family"),
+    ],
+)
+def test_inapplicable_lora_metadata_is_skipped(kwargs) -> None:
     slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28))
-    resolved = resolve_slot(
-        "pipeline", slot, ref=_REF, lora_metadata_json=["", "  "],
-    )
-    assert resolved.defaults.steps == 28
-
-
-def test_lora_metadata_for_unregistered_lora_kind_family_is_skipped() -> None:
-    """No kind="lora" vocabulary registered for this family -> best-effort
-    skip, never blocks the checkpoint's own resolved recipe."""
-    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28))
-    resolved = resolve_slot(
-        "pipeline", slot, ref=_REF, family="does-not-exist",
-        lora_metadata_json=['{"steps": 4}'],
-    )
+    resolved = resolve_slot("pipeline", slot, ref=_REF, **kwargs)
     assert resolved.defaults.steps == 28
 
 

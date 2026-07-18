@@ -258,31 +258,9 @@ def test_static_input_scale_feeds_pertensor_gemm_directly(
     assert rec.calls[0]["scale_a_shape"] == (1, 1)  # [1,1] static, no expand
 
 
-# ---------------------------------------------------------------------------
-# LoRA composability (gw#558/gw#547): the additive branch rides identically
-# on the epilogue lane — orthogonal to the GEMM scaling mode.
-# ---------------------------------------------------------------------------
-
-
-def test_pertensor_carries_additive_lora_branch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(torch, "_scaled_mm", _Recorder())
-    K, N, rank = 32, 48, 4
-    mod = _quantized_module("pertensor", K, N, seed=7)
-    x = torch.randn(3, K, dtype=torch.bfloat16)
-    base = mod(x)
-
-    a = torch.randn(rank, K, dtype=torch.bfloat16)
-    b = torch.randn(N, rank, dtype=torch.bfloat16)
-    mod.lora_a, mod.lora_b = a, b
-    with_branch = mod(x)
-    addend = (x.reshape(-1, K) @ a.t()) @ b.t()
-    assert torch.allclose(with_branch, base + addend, atol=2e-2, rtol=2e-2)
-
-    # branch removal restores the branchless epilogue path bit-exactly
-    mod.lora_a = mod.lora_b = None
-    assert torch.equal(mod(x), base)
+# LoRA composability (gw#558/gw#547) is orthogonal to the GEMM scaling mode;
+# the additive-branch contract is covered by
+# test_w8a8_produce.py::test_wrapped_linear_carries_additive_branch.
 
 
 def test_execution_contract_records_activation_granularity() -> None:

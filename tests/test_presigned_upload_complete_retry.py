@@ -40,12 +40,9 @@ class _FakeResponse:
         return self._body
 
 
-def test_error_code_of_extracts_structured_error_code():
+def test_error_code_of():
     resp = _FakeResponse(409, {"error": {"code": "upload_complete_in_progress", "message": "x"}})
     assert _error_code_of(resp) == "upload_complete_in_progress"
-
-
-def test_error_code_of_returns_empty_for_non_structured_body():
     assert _error_code_of(_FakeResponse(500, text="internal error")) == ""
     assert _error_code_of(_FakeResponse(200, {"ok": True})) == ""
 

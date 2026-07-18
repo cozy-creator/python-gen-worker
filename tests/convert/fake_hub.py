@@ -78,6 +78,7 @@ class _FakeHub(BaseHTTPRequestHandler):
                 return
             req = self._read_json()
             st["commit_request"] = req
+            st["commit_path"] = self.path
             st.setdefault("commit_requests", []).append(req)
             st["auth"] = self.headers.get("Authorization", "")
             uploads = []

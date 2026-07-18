@@ -43,29 +43,33 @@ def _full_grant_mapping_snake() -> dict:
     }
 
 
-def test_grant_from_mapping_snake_case() -> None:
-    g = s3_transfer.S3TransferGrant.from_mapping(_full_grant_mapping_snake())
+@pytest.mark.parametrize(
+    "raw,region",
+    [
+        (_full_grant_mapping_snake(), "weur"),
+        # Tensorhub may serialize either casing; both must parse. Region
+        # defaults to "auto" when not supplied.
+        (
+            {
+                "endpointUrl": "https://acct.r2.cloudflarestorage.com",
+                "bucket": "tensor-cas",
+                "objectKey": "blobs/ab/abcd",
+                "accessKeyId": "AKIA_TEST",
+                "secretAccessKey": "secret_test",
+                "sessionToken": "sess_test",
+            },
+            "auto",
+        ),
+    ],
+    ids=["snake_case", "camel_case"],
+)
+def test_grant_from_mapping_casings(raw: dict, region: str) -> None:
+    g = s3_transfer.S3TransferGrant.from_mapping(raw)
     assert g.bucket == "tensor-cas"
     assert g.key == "blobs/ab/abcd"
     assert g.access_key_id == "AKIA_TEST"
     assert g.session_token == "sess_test"
-    assert g.region == "weur"
-
-
-def test_grant_from_mapping_camel_case() -> None:
-    # Tensorhub may serialize either casing; both must parse.
-    g = s3_transfer.S3TransferGrant.from_mapping({
-        "endpointUrl": "https://acct.r2.cloudflarestorage.com",
-        "bucket": "tensor-cas",
-        "objectKey": "blobs/ab/abcd",
-        "accessKeyId": "AKIA_TEST",
-        "secretAccessKey": "secret_test",
-        "sessionToken": "sess_test",
-    })
-    assert g.key == "blobs/ab/abcd"
-    assert g.access_key_id == "AKIA_TEST"
-    # region defaults to "auto" when not supplied.
-    assert g.region == "auto"
+    assert g.region == region
 
 
 @pytest.mark.parametrize("missing", ["endpoint_url", "bucket", "key", "access_key_id", "secret_access_key"])

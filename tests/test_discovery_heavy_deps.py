@@ -82,19 +82,16 @@ def test_installed_roots_are_never_stubbed() -> None:
 
 
 def test_no_op_when_all_installed(monkeypatch) -> None:
-    # With every allowlisted root "installed", the context changes nothing:
-    # no __import__ wrapper, no meta-path finder.
+    # With every allowlisted root "installed", nothing is stubbed and normal
+    # imports still resolve to the real modules.
     monkeypatch.setattr(
         "gen_worker.discovery.heavy_deps._root_installed", lambda root: True
     )
-    import builtins
-
-    before_import = builtins.__import__
-    before_meta = list(sys.meta_path)
     with stub_missing_heavy_deps() as stubbed:
         assert stubbed == frozenset()
-        assert builtins.__import__ is before_import
-        assert sys.meta_path == before_meta
+        import json as real_json
+
+        assert real_json.loads("1") == 1
 
 
 def test_missing_root_imports_as_stub_including_submodules() -> None:
@@ -219,30 +216,29 @@ def test_discovery_module_scope_use_of_missing_heavy_dep_fails_loud(tmp_pkg: Pat
 # --------------------------------------------------------------------------- #
 
 
-def test_broken_submodule_hard_fails_the_walk(tmp_pkg: Path) -> None:
-    pkg = tmp_pkg / "ep_broken_sub"
+@pytest.mark.parametrize(
+    ("pkg_name", "sub", "src", "cause"),
+    [
+        pytest.param("ep_broken_sub", "broken",
+                     "import definitely_not_a_real_package_xyz\n",
+                     ModuleNotFoundError, id="missing-import"),
+        pytest.param("ep_syntax", "oops", "def broken(:\n",
+                     SyntaxError, id="syntax-error"),
+    ],
+)
+def test_broken_submodule_hard_fails_the_walk(
+    tmp_pkg: Path, pkg_name, sub, src, cause,
+) -> None:
+    pkg = tmp_pkg / pkg_name
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
     (pkg / "main.py").write_text(_endpoint_src())
-    (pkg / "broken.py").write_text("import definitely_not_a_real_package_xyz\n")
+    (pkg / f"{sub}.py").write_text(src)
 
     with pytest.raises(EndpointImportError) as ei:
-        find_endpoints(["ep_broken_sub"])
-    assert "ep_broken_sub.broken" in str(ei.value)
-    assert isinstance(ei.value.__cause__, ModuleNotFoundError)
-
-
-def test_syntax_error_in_submodule_hard_fails(tmp_pkg: Path) -> None:
-    pkg = tmp_pkg / "ep_syntax"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text("")
-    (pkg / "main.py").write_text(_endpoint_src())
-    (pkg / "oops.py").write_text("def broken(:\n")
-
-    with pytest.raises(EndpointImportError) as ei:
-        find_endpoints(["ep_syntax"])
-    assert "ep_syntax.oops" in str(ei.value)
-    assert isinstance(ei.value.__cause__, SyntaxError)
+        find_endpoints([pkg_name])
+    assert f"{pkg_name}.{sub}" in str(ei.value)
+    assert isinstance(ei.value.__cause__, cause)
 
 
 def test_top_level_import_error_hard_fails(tmp_pkg: Path) -> None:

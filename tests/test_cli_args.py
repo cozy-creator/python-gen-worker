@@ -47,19 +47,17 @@ def test_build_payload_merges_over_base() -> None:
     assert out == {"prompt": "base", "steps": 10}
 
 
-def test_build_payload_unknown_field_errors() -> None:
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param("nope=1", id="unknown-field"),
+        pytest.param("hires=maybe", id="bad-bool"),
+        pytest.param("tags=a", id="list-needs-rawjson"),  # must use :=
+    ],
+)
+def test_build_payload_errors(token: str) -> None:
     with pytest.raises(ArgError):
-        build_payload(["nope=1"], _P)
-
-
-def test_build_payload_bad_bool_errors() -> None:
-    with pytest.raises(ArgError):
-        build_payload(["hires=maybe"], _P)
-
-
-def test_build_payload_list_via_equals_errors() -> None:
-    with pytest.raises(ArgError):
-        build_payload(["tags=a"], _P)  # must use :=
+        build_payload([token], _P)
 
 
 def test_build_payload_file(tmp_path) -> None:

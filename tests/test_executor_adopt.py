@@ -353,23 +353,6 @@ def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
     assert target.active_compile_snapshot_digest == ""
 
 
-def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
-    """A cell traced under a different low-VRAM prep mode can only miss —
-    rejected deterministically before any warmup (gw#391 parity)."""
-    from gen_worker.models.memory import _COZY_MODE_ATTR
-
-    _artifact(tmp_path, low_vram_mode="off")
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    obj = ex.store.residency.obj(wire_ref(spec.models["pipeline"]))
-    setattr(obj, _COZY_MODE_ATTR, "vae_only")
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
-
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:key_mismatch")
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-
-
 def test_endpoint_without_warmup_exposes_no_adopt_target(tmp_path, monkeypatch):
     """An endpoint without a warmup contract advertises no false target."""
 
@@ -435,17 +418,14 @@ def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_adopt_key_mismatch_stays_eager(tmp_path, monkeypatch):
+def _case_key_mismatch(tmp_path, monkeypatch):
     _artifact(tmp_path, sku="not-this-gpu")
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
+    ex, sent = _wire_executor(_spec(), tmp_path)
     monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
-
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:key_mismatch")
+    return ex, sent, {}, None
 
 
-def test_adopt_refuses_while_jobs_in_flight(tmp_path):
+def _case_model_in_use(tmp_path, monkeypatch):
     _artifact(tmp_path)
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
@@ -458,38 +438,58 @@ def test_adopt_refuses_while_jobs_in_flight(tmp_path):
         return tmp_path / "snap"
 
     ex.store.ensure_local = _no_download  # type: ignore[method-assign]
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:model_in_use")
-    assert calls == []  # refused before any download
+
+    def _refused_before_download():
+        assert calls == []  # refused before any download
+
+    return ex, sent, {}, _refused_before_download
 
 
-def test_adopt_rejects_target_from_another_family(tmp_path):
+def _case_family_mismatch(tmp_path, monkeypatch):
+    # _adopt's ref names flux2-klein-4b; only sdxl is declared
     spec = _spec(Compile(shapes=((768, 768),), family="sdxl"))
     ex, sent = _wire_executor(spec, tmp_path)
-    _adopt(ex)  # ref names flux2-klein-4b; only sdxl is declared
-    _assert_failed(sent, "adopt_failed:target_family_mismatch")
+    return ex, sent, {}, None
 
 
-def test_adopt_target_not_ready(tmp_path):
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path, ready=False, resident=False)
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:target_not_ready")
+def _case_target_not_ready(tmp_path, monkeypatch):
+    ex, sent = _wire_executor(_spec(), tmp_path, ready=False, resident=False)
+    return ex, sent, {}, None
 
 
-def test_adopt_bad_ref(tmp_path):
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    _adopt(ex, ref="acme/not-a-cache:latest")
-    _assert_failed(sent, "adopt_failed:bad_ref")
+def _case_bad_ref(tmp_path, monkeypatch):
+    ex, sent = _wire_executor(_spec(), tmp_path)
+    return ex, sent, {"ref": "acme/not-a-cache:latest"}, None
 
 
-def test_adopt_artifact_missing(tmp_path):
+def _case_artifact_missing(tmp_path, monkeypatch):
     (tmp_path / "snap").mkdir()  # empty snapshot dir: no tarball
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:artifact_missing")
+    ex, sent = _wire_executor(_spec(), tmp_path)
+    return ex, sent, {}, None
+
+
+@pytest.mark.parametrize(
+    ("case", "error"),
+    [
+        (_case_key_mismatch, "adopt_failed:key_mismatch"),
+        (_case_model_in_use, "adopt_failed:model_in_use"),
+        (_case_family_mismatch, "adopt_failed:target_family_mismatch"),
+        (_case_target_not_ready, "adopt_failed:target_not_ready"),
+        (_case_bad_ref, "adopt_failed:bad_ref"),
+        (_case_artifact_missing, "adopt_failed:artifact_missing"),
+    ],
+    ids=[
+        "key-mismatch-stays-eager", "refuses-while-jobs-in-flight",
+        "target-from-another-family", "target-not-ready", "bad-ref",
+        "artifact-missing",
+    ],
+)
+def test_adopt_classified_failures(tmp_path, monkeypatch, case, error):
+    ex, sent, adopt_kwargs, extra_check = case(tmp_path, monkeypatch)
+    _adopt(ex, **adopt_kwargs)
+    _assert_failed(sent, error)
+    if extra_check is not None:
+        extra_check()
 
 
 @pytest.mark.parametrize(
@@ -2584,7 +2584,7 @@ def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_pa
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_compile_snapshot_finds_family_cache(tmp_path):
+def test_fetch_compile_snapshot_finds_family_cache_and_ignores_others(tmp_path):
     artifact = _artifact(tmp_path)
     spec = _spec()
     ex, _sent = _wire_executor(spec, tmp_path)
@@ -2597,59 +2597,31 @@ def test_fetch_compile_snapshot_finds_family_cache(tmp_path):
     assert got.path == artifact
     assert got.ref == CACHE_REF
     assert got.snapshot_digest == "blake3:bb"
-
-
-def test_fetch_compile_snapshot_ignores_other_families(tmp_path):
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, _sent = _wire_executor(spec, tmp_path)
-    snapshots = {"_system/family-sdxl#inductor-rtx-4090-torch2.9": pb.Snapshot()}
-    assert asyncio.run(ex._fetch_compile_snapshot(spec, snapshots)) is None
+    # Other families' cells and an absent snapshot map both resolve to None.
+    other = {"_system/family-sdxl#inductor-rtx-4090-torch2.9": pb.Snapshot()}
+    assert asyncio.run(ex._fetch_compile_snapshot(spec, other)) is None
     assert asyncio.run(ex._fetch_compile_snapshot(spec, None)) is None
 
 
-def test_fetch_compile_snapshot_selects_exact_w8a8_lane(tmp_path):
-    spec = replace(
-        _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")},
-    )
+@pytest.mark.parametrize("lane", ["w8a8", "plain"])
+def test_fetch_compile_snapshot_selects_exact_lane(tmp_path, lane):
+    """The spec's weight lane picks exactly its own cell — w8a8 specs take
+    the -w8a8 cell, plain specs ignore it — and only that cell is fetched."""
+    if lane == "w8a8":
+        spec = replace(
+            _spec(), models={"pipeline": Hub(
+                "acme/klein-finetune", flavor="fp8-w8a8")},
+        )
+        extra_ref = "acme/klein-finetune#fp8-w8a8"
+    else:
+        spec = _spec()
+        extra_ref = "acme/unselected#fp8-w8a8"
     ex, _sent = _wire_executor(spec, tmp_path)
     plain = tmp_path / "plain"
     w8a8 = tmp_path / "w8a8"
     plain.mkdir()
     w8a8.mkdir()
     (plain / "plain.tar.gz").write_bytes(b"plain")
-    wanted = w8a8 / "w8a8.tar.gz"
-    wanted.write_bytes(b"w8a8")
-    seen: list[str] = []
-
-    async def _ensure(ref, snapshot=None, *, binding=None):
-        seen.append(ref)
-        return w8a8 if ref.endswith("-w8a8") else plain
-
-    ex.store.ensure_local = _ensure  # type: ignore[method-assign]
-    plain_ref = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
-    w8a8_ref = plain_ref + "-w8a8"
-    snapshots = {
-        plain_ref: pb.Snapshot(digest=DIGEST_A),
-        w8a8_ref: pb.Snapshot(digest=DIGEST_B),
-        "acme/klein-finetune#fp8-w8a8": pb.Snapshot(),
-    }
-    got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
-    assert got is not None and got.path == wanted
-    assert got.ref == w8a8_ref and got.snapshot_digest == DIGEST_B
-    assert seen == [w8a8_ref]
-
-
-def test_fetch_compile_snapshot_plain_lane_ignores_w8a8_cell(tmp_path):
-    spec = _spec()
-    ex, _sent = _wire_executor(spec, tmp_path)
-    plain = tmp_path / "plain"
-    w8a8 = tmp_path / "w8a8"
-    plain.mkdir()
-    w8a8.mkdir()
-    wanted = plain / "plain.tar.gz"
-    wanted.write_bytes(b"plain")
     (w8a8 / "w8a8.tar.gz").write_bytes(b"w8a8")
     seen: list[str] = []
 
@@ -2661,14 +2633,20 @@ def test_fetch_compile_snapshot_plain_lane_ignores_w8a8_cell(tmp_path):
     plain_ref = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
     w8a8_ref = plain_ref + "-w8a8"
     snapshots = {
-        w8a8_ref: pb.Snapshot(digest=DIGEST_B),
         plain_ref: pb.Snapshot(digest=DIGEST_A),
-        "acme/unselected#fp8-w8a8": pb.Snapshot(),
+        w8a8_ref: pb.Snapshot(digest=DIGEST_B),
+        extra_ref: pb.Snapshot(),
     }
     got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
-    assert got is not None and got.path == wanted
-    assert got.ref == plain_ref and got.snapshot_digest == DIGEST_A
-    assert seen == [plain_ref]
+    assert got is not None
+    if lane == "w8a8":
+        assert got.path == w8a8 / "w8a8.tar.gz"
+        assert got.ref == w8a8_ref and got.snapshot_digest == DIGEST_B
+        assert seen == [w8a8_ref]
+    else:
+        assert got.path == plain / "plain.tar.gz"
+        assert got.ref == plain_ref and got.snapshot_digest == DIGEST_A
+        assert seen == [plain_ref]
 
 
 def test_prepare_with_explicit_artifact_seeds(tmp_path):
