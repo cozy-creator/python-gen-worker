@@ -1451,6 +1451,83 @@ def test_setup_vacates_warm_record_after_vram_make_room(
     asyncio.run(_run())
 
 
+def test_shared_ref_pin_does_not_freeze_sole_idle_record(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """gw#579: an incoming job's shared ref is not use of an old pipeline.
+
+    The cap-3 SDXL revisit pinned the common VAE before setup. VRAM admission
+    then left one idle RAM-tier checkpoint as the VAE's sole ready record.
+    Treating that incidental VAE pin as use of the whole record skipped the
+    only reclaimable pipeline and failed with ``evicted_refs=[]``. Vacating
+    the idle record is safe: Residency retains the pinned VAE object while
+    the checkpoint reaches DISK, and the incoming setup replaces the VAE
+    representative after loading.
+    """
+    from gen_worker.models import disk_gc
+
+    class Endpoint:
+        def setup(self, pipeline: _FakePipe, vae: _FakePipe) -> None:
+            self.pipeline = pipeline
+            self.vae = vae
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    shared_ref = "acme/shared-vae"
+    old_ref = "acme/old-checkpoint"
+    incoming_ref = "acme/incoming-checkpoint"
+    old_spec = _spec(
+        "old", Endpoint,
+        {"pipeline": HF(old_ref), "vae": HF(shared_ref)},
+    )
+    incoming_spec = _spec(
+        "incoming", Endpoint,
+        {"pipeline": HF(incoming_ref), "vae": HF(shared_ref)},
+    )
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda _path: 6 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    pressure = {"active": False}
+    state: dict[str, _ClassRecord | None] = {"old_rec": None}
+
+    async def _run() -> None:
+        ex = _executor(
+            [old_spec, incoming_spec], tmp_path, monkeypatch=monkeypatch,
+        )
+        res = ex.store.residency
+        monkeypatch.setattr(
+            residency_mod,
+            "get_available_ram_gb",
+            lambda: 7.0 if (
+                pressure["active"]
+                and state["old_rec"] is not None
+                and state["old_rec"].instance is not None
+            ) else 24.0,
+        )
+        await ex.ensure_setup(old_spec)
+        old_rec = ex._classes[old_spec.instance_key]
+        state["old_rec"] = old_rec
+        old_pipeline = weakref.ref(old_rec.instance.pipeline)
+        events: list[tuple[str, str]] = []
+        res._on_event = lambda ref, state, *_: events.append((ref, state))
+
+        pressure["active"] = True
+        with res.executing(shared_ref):
+            incoming = await ex.ensure_setup(incoming_spec)
+            assert res.in_use(shared_ref)
+
+        assert isinstance(incoming.pipeline, _FakePipe)
+        assert old_rec.ready is False
+        assert old_rec.instance is None
+        assert old_pipeline() is None
+        assert res.tier(old_ref) is Tier.DISK
+        assert res.tier(shared_ref) is Tier.RAM
+        assert (old_ref, residency_mod.ON_DISK) in events
+        assert (shared_ref, residency_mod.ON_DISK) not in events
+
+    asyncio.run(_run())
+
+
 def test_shared_ref_does_not_pin_idle_record_or_publish_false_disk(
     tmp_path: Path, monkeypatch
 ) -> None:
