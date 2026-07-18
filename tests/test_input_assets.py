@@ -20,6 +20,7 @@ from typing import Any
 import msgspec
 import pytest
 
+from gen_worker import executor as executor_module
 from gen_worker import input_assets
 from gen_worker.api.errors import CanceledError, RetryableError, ValidationError
 from gen_worker.api.types import Asset, ImageAsset, VideoAsset
@@ -380,6 +381,120 @@ async def _run_executor(
     results = [message.job_result for message in sent if message.WhichOneof("msg") == "job_result"]
     assert len(results) == 1
     return results[0], executor
+
+
+def test_cancel_during_accept_is_retained_until_context_exists() -> None:
+    sent: list[pb.WorkerMessage] = []
+    handler_calls = 0
+
+    def handler(ctx: Any, payload: WorkerInput) -> WorkerOutput:
+        nonlocal handler_calls
+        del ctx, payload
+        handler_calls += 1
+        return WorkerOutput(count=0)
+
+    async def scenario() -> None:
+        executor: Executor
+
+        async def send(message: pb.WorkerMessage) -> None:
+            sent.append(message)
+            if message.WhichOneof("msg") == "job_accepted":
+                executor.handle_cancel(pb.CancelJob(request_id="cancel-on-accept", attempt=1))
+
+        spec = EndpointSpec(
+            name="edit",
+            method=handler,
+            kind="inference",
+            payload_type=WorkerInput,
+            output_mode="single",
+        )
+        executor = Executor([spec], send)
+        await executor.handle_run_job(
+            pb.RunJob(
+                request_id="cancel-on-accept",
+                attempt=1,
+                function_name="edit",
+                input_payload=msgspec.msgpack.encode(WorkerInput()),
+            )
+        )
+        job = executor.jobs[("cancel-on-accept", 1)]
+        assert job.task is not None
+        await asyncio.wait_for(job.task, timeout=2)
+
+    asyncio.run(scenario())
+    results = [message.job_result for message in sent if message.WhichOneof("msg") == "job_result"]
+    assert len(results) == 1 and results[0].status == pb.JOB_STATUS_CANCELED
+    assert handler_calls == 0
+
+
+def test_cancel_after_asset_scan_fences_setup_and_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scanned = threading.Event()
+    release = threading.Event()
+    sent: list[pb.WorkerMessage] = []
+    setup_calls = 0
+    handler_calls = 0
+
+    def blocking_scan(
+        _payload: Any,
+        _request_id: str,
+        *,
+        attempt: int,
+        cancel_check: Any,
+    ) -> int:
+        assert attempt == 1 and not cancel_check()
+        scanned.set()
+        assert release.wait(timeout=2)
+        return 0
+
+    async def ensure_setup(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal setup_calls
+        setup_calls += 1
+
+    def handler(ctx: Any, payload: WorkerInput) -> WorkerOutput:
+        nonlocal handler_calls
+        del ctx, payload
+        handler_calls += 1
+        return WorkerOutput(count=0)
+
+    monkeypatch.setattr(executor_module, "materialize_input_assets", blocking_scan)
+
+    async def scenario() -> None:
+        async def send(message: pb.WorkerMessage) -> None:
+            sent.append(message)
+
+        spec = EndpointSpec(
+            name="edit",
+            method=handler,
+            kind="inference",
+            payload_type=WorkerInput,
+            output_mode="single",
+        )
+        executor = Executor([spec], send)
+        executor.ensure_setup = ensure_setup  # type: ignore[method-assign]
+        await executor.handle_run_job(
+            pb.RunJob(
+                request_id="cancel-after-scan",
+                attempt=1,
+                function_name="edit",
+                input_payload=msgspec.msgpack.encode(WorkerInput()),
+            )
+        )
+        job = executor.jobs[("cancel-after-scan", 1)]
+        try:
+            assert await asyncio.to_thread(scanned.wait, 2)
+            assert job.ctx is not None and job.exec_task is None
+            executor.handle_cancel(pb.CancelJob(request_id="cancel-after-scan", attempt=1))
+        finally:
+            release.set()
+        assert job.task is not None
+        await asyncio.wait_for(job.task, timeout=2)
+
+    asyncio.run(scenario())
+    results = [message.job_result for message in sent if message.WhichOneof("msg") == "job_result"]
+    assert len(results) == 1 and results[0].status == pb.JOB_STATUS_CANCELED
+    assert setup_calls == 0 and handler_calls == 0
 
 
 def test_tensorhub_assignment_payload_preserves_order_and_cleans(http_root: HTTPRoot) -> None:

@@ -1474,6 +1474,7 @@ class _Job:
     renew_task: Optional[asyncio.Task] = None
     finished: bool = False
     superseded: bool = False
+    cancel_requested: bool = False
     # gw#516: True while the job is past the decode->finalize handoff (GPU
     # slot terminally released, encode/upload tail running, result unshipped).
     finalizing: bool = False
@@ -4996,6 +4997,7 @@ class Executor:
         for (rid, att), job in list(self.jobs.items()):
             if rid == run.request_id and att != run.attempt and not job.finished:
                 job.superseded = True
+                job.cancel_requested = True
                 if job.ctx is not None:
                     job.ctx._cancel()
                 if job.exec_task is not None:
@@ -5028,6 +5030,10 @@ class Executor:
         job = self.jobs.get((cancel.request_id, cancel.attempt))
         if job is None or job.finished:
             return  # unknown pair or natural result already stands
+        # JobAccepted means this exact attempt is cancellable even before its
+        # context or handler task exists. Retain the request across every
+        # pre-execution await instead of dropping an early CancelJob.
+        job.cancel_requested = True
         if job.ctx is not None:
             job.ctx._cancel()  # cooperative: sync handlers poll ctx
         if job.exec_task is not None and job.spec is not None and job.spec.is_async:
@@ -5163,6 +5169,8 @@ class Executor:
             **producer_kwargs,
         )
         job.ctx = ctx
+        if job.cancel_requested:
+            ctx._cancel()
         if run.capability_token and self.file_base_url:
             from .capability_renewal import renew_capability_while_running
 
@@ -5191,6 +5199,7 @@ class Executor:
                 attempt=run.attempt,
                 cancel_check=lambda: ctx.cancelled,
             )
+            ctx.raise_if_cancelled("canceled")
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
             if producer:
@@ -5198,7 +5207,8 @@ class Executor:
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
-        except asyncio.CancelledError:
+            ctx.raise_if_cancelled("canceled")
+        except (asyncio.CancelledError, CanceledError):
             await self._finish(job, pb.JOB_STATUS_CANCELED, safe_message="canceled")
             return
         except Exception as exc:
@@ -5277,6 +5287,7 @@ class Executor:
                                 await asyncio.to_thread(
                                     self._adapters.deactivate, ref, pipe, run.request_id
                                 )
+                    ctx.raise_if_cancelled("canceled")
                     try:
                         output = await self._execute(job, spec, instance, ctx, payload, kwargs,
                                                      timeout_ms=timeout_ms, gpu_index=gpu_index)
