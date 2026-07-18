@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.38.0 (2026-07-18)
+
+- **gw#590: root w8a8 generality — nested multi-set layouts, weight-set
+  selector, pipeline-class key_map hook.** Non-diffusers w8a8 sources scan
+  the whole tree for weight sets (split-checkpoint layouts nest component
+  files); `streaming_w8a8_snapshot(weight_set_patterns=)` selects the
+  denoiser set(s) when several exist and the rest pass through
+  byte-identical (CAS-dedup against the source mirror, no stray scale
+  twins). `detect_w8a8_artifact`/`verify_w8a8_snapshot` recurse the same
+  way. `load_w8a8_root_pipeline` forwards a pipeline-class-declared
+  `_cozy_w8a8_key_map` (staticmethod) to `swap_w8a8_linears` for
+  converter-renamed families. Root-lane produce results now report the
+  selected weight-set rel paths in `components` (was `[""]`).
+
 ## 0.37.5 (2026-07-18)
 
 - **gw#589/th#901: publish_as_is clone strategies cast an explicitly
