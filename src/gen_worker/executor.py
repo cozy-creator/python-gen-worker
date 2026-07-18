@@ -4320,7 +4320,10 @@ class Executor:
                     snapshot_digest,
                     operation_id,
                     target_incarnation_id,
-                    error=f"adopt_failed:{type(exc).__name__.lower()}",
+                    error=(
+                        f"adopt_failed:{type(exc).__name__.lower()}: "
+                        f"{str(exc)[:300]}"
+                    ),
                 )
             ))
 
@@ -4350,6 +4353,15 @@ class Executor:
                 await asyncio.to_thread(staged_artifact.close)
                 staged_artifact = None
             logger.warning("compile-cache adopt %s failed: %s %s", ref, reason, detail)
+            # gw#577: terminal refusals carry the exact mismatch (axis +
+            # cell-vs-runtime values) on the wire — pods expose no logs. The
+            # th#875 transient vocabulary stays bare: the hub re-arm matcher
+            # compares those four statuses EXACTLY.
+            error = f"adopt_failed:{reason}"
+            if detail and reason not in (
+                "model_in_use", "target_not_ready", "target_replaced", "download",
+            ):
+                error = f"{error}: {detail[:300]}"
             await self._send(pb.WorkerMessage(
                 model_event=self._adoption_event(
                     ref,
@@ -4357,7 +4369,7 @@ class Executor:
                     snapshot_digest,
                     operation_id,
                     target_incarnation_id,
-                    error=f"adopt_failed:{reason}",
+                    error=error,
                 )
             ))
 

@@ -349,7 +349,13 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     # Extended runtime axes are exact when a cell records them. Old proven
     # non-W8A8 format-2 cells remain usable; W8A8 requires every field in
     # contract_drift below and therefore never gets this compatibility path.
-    for field in ("sm", "cuda", "cuda_driver", "image_digest"):
+    # cuda_driver is deliberately NOT here (gw#577): inductor/triton artifacts
+    # are keyed by torch/triton/cuda-runtime/SM-arch — triton's disk cache key
+    # is (source, ptxas_version-from-the-wheel, sm arch, options); the host
+    # libcuda build never enters any compiled-artifact key. Pinning it made
+    # cell delivery a host lottery across same-image same-SKU pods. The driver
+    # stays recorded in metadata for observability only.
+    for field in ("sm", "cuda", "image_digest"):
         want, have = str(meta.get(field) or ""), here[field]
         if want and want != have:
             return f"{field} {want!r} != runtime {have!r}"
@@ -822,6 +828,15 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     SDXL/Pony/Illustrious incompatibility (different module class/shape or
     different scaled-mm exclusion surface) produces a different signature
     and is rejected before adoption.
+
+    The signature hashes ONLY the traced module structure — the resolved
+    targets' module types, paths and tensor schemas — never the wrapping
+    pipeline class (gw#577): torch.compile wraps target callables such as
+    ``transformer.forward``; the pipeline class never enters any traced
+    graph. Conversion producers load via generic ``DiffusionPipeline``
+    (model_index -> e.g. LTX2Pipeline) while serving loads the endpoint's
+    declared wrapper (e.g. LTX2ConditionPipeline) over a byte-identical
+    module tree — proven identical-graph, and must share one cell.
     """
     graph_targets: list[Dict[str, Any]] = []
     quantized: list[Dict[str, Any]] = []
@@ -876,7 +891,6 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
         })
 
     graph = {
-        "pipeline": _type_name(pipeline),
         "targets": graph_targets,
     }
     encoded = json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()
@@ -932,6 +946,23 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _first_contract_difference(cell: Dict[str, Any], here: Dict[str, Any]) -> str:
+    """Name the first differing weight-contract key with compact values, so a
+    refusal is diagnosable from the reason alone (gw#577)."""
+    for key in sorted(set(cell) | set(here)):
+        want, have = cell.get(key), here.get(key)
+        if want == have:
+            continue
+        if isinstance(want, list) and isinstance(have, list):
+            return (
+                f"{key}: cell has {len(want)} row(s), consumer {len(have)}; "
+                f"first cell-only rows {[r for r in want if r not in have][:2]!r} "
+                f"vs consumer-only {[r for r in have if r not in want][:2]!r}"
+            )
+        return f"{key}: cell {want!r} != consumer {have!r}"
+    return "identical keys, differing encoding"
+
+
 def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     """Mismatch between the cell's declared graph and the loaded consumer."""
     shapes = sorted(
@@ -958,9 +989,15 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     ).startswith("w8a8"):
         return ""  # legacy format-2 non-W8A8 cell
     if meta_signature != signature:
-        return "module graph signature mismatch"
+        return (
+            f"module graph signature: cell {meta_signature[:12]!r} != "
+            f"consumer {signature[:12]!r}"
+        )
     if meta_weights != weight_contract:
-        return "weight-lane artifact schema/exclusion manifest mismatch"
+        return (
+            "weight-lane artifact schema/exclusion manifest mismatch: "
+            + _first_contract_difference(meta_weights, weight_contract)
+        )
     if str(weight_contract.get("lane") or "").startswith("w8a8"):
         activations = weight_contract.get("activation_scaling") or []
         # DYNAMIC only, one homogeneous granularity per graph (gw#564:
@@ -971,7 +1008,8 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
         if not weight_contract.get("quantized"):
             return "W8A8 graph contains no torch._scaled_mm modules"
         here_digest = runtime_key()["image_digest"]
-        for field in ("sm", "cuda", "cuda_driver", "image_digest"):
+        # cuda_driver excluded (gw#577): host-lottery axis, see verify().
+        for field in ("sm", "cuda", "image_digest"):
             if not str(meta.get(field) or ""):
                 if field == "image_digest" and not here_digest:
                     # Bare-metal local runtime (gw#555 self-mint): no image
@@ -1447,8 +1485,14 @@ def enable(
     artifact: Optional[Path] = None,
 ) -> bool:
     """The one consumer entry point (executor + local CLI): seed an explicitly
-    attached verified artifact, then arm compile under the safety policy."""
+    attached verified artifact, then arm compile under the safety policy.
+
+    A W8A8 refusal names its exact cause — the mismatched key axis with the
+    cell-vs-runtime values, the drift verdict, or the missing delivery
+    (gw#577): the raise IS the wire-visible job error, and serve pods expose
+    no logs, so a generic message makes a refused cell undiagnosable."""
     staged: Optional[_StagedArtifact] = None
+    refusal = "no cell artifact delivered"
     if artifact is not None:
         try:
             staged = stage_artifact(
@@ -1456,6 +1500,7 @@ def enable(
                 cache_dir=cache_dir,
             )
         except Exception as exc:
+            refusal = f"cell rejected: {exc}"
             logger.warning("compile-cache: artifact unusable (%s); staying eager", exc)
     try:
         with _SEED_ARM_LOCK:
@@ -1464,12 +1509,14 @@ def enable(
                 meta = staged.metadata
                 drift = artifact_drift(meta, pipeline, cfg)
                 if drift:
+                    refusal = f"cell rejected: {drift}"
                     logger.warning("compile-cache: %s; staying eager", drift)
                     meta = None
                 else:
                     try:
                         _activate_staged(staged)
                     except Exception as exc:
+                        refusal = f"cell activation failed: {exc}"
                         logger.warning(
                             "compile-cache: cache activation failed (%s); "
                             "staying eager", exc)
@@ -1478,9 +1525,11 @@ def enable(
             from .models.loading import pipeline_weight_lane
 
             if pipeline_weight_lane(pipeline).startswith("w8a8") and not armed:
+                if meta is not None:
+                    refusal = "verified cell armed no compile target"
                 raise CompiledLaneUnavailableError(
-                    "W8A8 requires an exact compatible Forge cell; eager/dequantized "
-                    "execution is not a W8A8 production lane"
+                    f"W8A8 requires an exact compatible Forge cell ({refusal}); "
+                    "eager/dequantized execution is not a W8A8 production lane"
                 )
             return armed
     finally:
@@ -1588,6 +1637,18 @@ def build(
     from .models.loading import load_from_pretrained
     from .models.memory import place_pipeline
 
+    _W8A8_MINT_NEEDS_DIGEST = (
+        "W8A8 cell mint requires serving_image_digest (the endpoint "
+        "serving image's immutable OCI digest); a cell stamped with the "
+        "producer image identity can never be adopted by the fleet"
+    )
+    if "w8a8" in str(storage_dtype) and not str(serving_image_digest).strip():
+        # gw#577 finding (b): contract_drift requires image_digest identity on
+        # W8A8 cells and verify() pins it exactly. Without the SERVING digest
+        # the artifact stamps the PRODUCER pod's WORKER_IMAGE_DIGEST — every
+        # serving worker then rejects it and W8A8 serves NOTHING
+        # (fail-closed). Refuse loudly before any load or compile.
+        raise RuntimeError(_W8A8_MINT_NEEDS_DIGEST)
     if not toolchain_present():
         raise RuntimeError(
             "compile-cache build needs a C toolchain (cc/gcc); run in the "
@@ -1623,6 +1684,15 @@ def build(
     # traced under travels in the metadata for adopt-time parity checks. Run
     # on a pod with the same free-VRAM class as the target workers.
     placed = place_pipeline(pipe)
+    from .models.loading import pipeline_weight_lane as _traced_lane
+
+    if _traced_lane(pipe).startswith("w8a8") and not str(
+        serving_image_digest
+    ).strip():
+        # The lane can materialize as w8a8 from the SOURCE flavor alone
+        # (e.g. storage_dtype="fp8+te" over an fp8-w8a8 checkpoint), so the
+        # authoritative check is on the traced lane, before the compile.
+        raise RuntimeError(_W8A8_MINT_NEEDS_DIGEST)
     # gw#561: branch-bearing cells trace WITH canonical zeroed rank-bucket
     # branches installed — zeroed slots are bit-exact with branchless output
     # (gw#547), so the warm calls render normally while the traced graphs
