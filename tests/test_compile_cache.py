@@ -1008,3 +1008,21 @@ def test_flavor_label_carries_weight_lane_gw534() -> None:
         "inductor-rtx-4090-torch2.9-w8a16")
     assert lane_token("") == "" and lane_token("w8a8") == "w8a8"
     assert is_cache_ref("_system/family-qwen-image#inductor-h100-80gb-hbm3-torch2.13-w8a8")
+
+
+def test_resolve_pipeline_class_gw586() -> None:
+    """gw#586 call-path parity: a mint may name the SERVING pipeline class;
+    unknown names refuse loudly — a silent generic fallback would trace the
+    wrong call path and publish a cell no serving lookup can hit."""
+    from gen_worker.compile_cache import resolve_pipeline_class
+
+    cls = resolve_pipeline_class("DiffusionPipeline")
+    assert callable(getattr(cls, "from_pretrained", None))
+
+    with pytest.raises(RuntimeError, match="wrong call path"):
+        resolve_pipeline_class("NoSuchPipelineClass")
+    with pytest.raises(RuntimeError, match="non-empty"):
+        resolve_pipeline_class("   ")
+    # A diffusers attribute that is not a loadable pipeline class refuses too.
+    with pytest.raises(RuntimeError, match="wrong call path"):
+        resolve_pipeline_class("__version__")

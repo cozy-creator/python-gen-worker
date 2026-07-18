@@ -1602,6 +1602,29 @@ def enable(
 # ---------------------------------------------------------------------------
 
 
+def resolve_pipeline_class(name: str) -> Any:
+    """Resolve a serving pipeline class name for a mint (gw#586).
+
+    The traced FX graphs depend on the pipeline's CALL path, not just the
+    module tree — an unknown name must refuse loudly, because a silent
+    generic-load fallback would trace the wrong call and publish a cell no
+    serving lookup can ever hit.
+    """
+    import diffusers
+
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        raise RuntimeError("pipeline_class must be a non-empty class name")
+    cls = getattr(diffusers, cleaned, None)
+    if cls is None or not callable(getattr(cls, "from_pretrained", None)):
+        raise RuntimeError(
+            f"pipeline_class {cleaned!r} is not a loadable diffusers "
+            "pipeline class in this producer image; a generic-load fallback "
+            "would trace the wrong call path (gw#586), so the mint refuses"
+        )
+    return cls
+
+
 def _warm_call(
     pipe: Any,
     shape: Tuple[int, ...],
@@ -1680,6 +1703,7 @@ def build(
     serving_image_digest: str = "",
     lora_bucket: int = 0,
     requested_cell_key: str = "",
+    pipeline_class: str = "",
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Compile a diffusers pipeline over ``shapes`` and package the resulting
     inductor+triton caches as a per-SKU artifact.
@@ -1688,6 +1712,18 @@ def build(
     (gw#389 fp8 layerwise casting): the cast hooks are traced INTO the FX
     graphs, so a cell for an fp8-served model must be built from an
     fp8-loaded pipeline or every request misses the cache (ie#381).
+
+    ``pipeline_class`` (gw#586) names the diffusers pipeline class the
+    SERVING endpoint declares (e.g. ``"LTX2ConditionPipeline"``). The traced
+    FX graphs depend on the pipeline's CALL path, not just the module tree:
+    LTX2ConditionPipeline drives the DiT with PER-TOKEN timestep/modulation
+    tensors even for a plain unconditioned call, while the generic
+    model_index class broadcasts them — structurally different graphs, so a
+    cell minted through the generic load can never serve the serving path's
+    lookups (found live: warmups=1, cache_hits=0). The gw#577
+    ``graph_signature`` remains class-agnostic (same module tree) — this is
+    call-path parity, not module identity. Unknown class names refuse
+    loudly: a silent generic fallback would re-open the exact parity gap.
 
     Runs on the TARGET GPU SKU with a C toolchain present (cold compile).
     Returns ``(artifact_path, metadata, per-shape warm-up seconds)`` — the
@@ -1729,8 +1765,12 @@ def build(
         shapes=tuple(shapes), targets=tuple(targets),
         guidance_scales=tuple(guidance_scales), regional=bool(regional),
     )
+    load_cls: Any = DiffusionPipeline
+    if str(pipeline_class or "").strip():
+        # gw#586 call-path parity: trace through the SERVING pipeline class.
+        load_cls = resolve_pipeline_class(str(pipeline_class))
     pipe = load_from_pretrained(
-        DiffusionPipeline, str(model_path), dtype=dtype,
+        load_cls, str(model_path), dtype=dtype,
         storage_dtype=storage_dtype,
         # Producer/consumer LANE parity (ie#381): the serving worker decides
         # the bf16-resident upgrade against its function's declared envelope;
@@ -1810,6 +1850,12 @@ def build(
         # digest from the release, so it—not the producer container—is the
         # identity the worker must match.
         meta["image_digest"] = str(serving_image_digest).strip()
+    if str(pipeline_class or "").strip():
+        # gw#586 observability only — NOT a key axis (graph_signature and the
+        # ck1 key stay class-agnostic; the class shapes the traced CALL, and
+        # a wrong class shows up as serving cache misses, which the warmup
+        # proof refuses loudly).
+        meta["pipeline_class"] = str(pipeline_class).strip()
     # gw#581/th#883: re-stamp the key over the final axes, then honor the
     # forge's echo — a demand-driven mint names the exact worker-computed
     # key it must satisfy, and publishing a cell under a key its own axes
@@ -1867,6 +1913,7 @@ __all__ = [
     "mode_drift",
     "pack",
     "prepare",
+    "resolve_pipeline_class",
     "runtime_key",
     "seed_artifact",
     "seed_env",
