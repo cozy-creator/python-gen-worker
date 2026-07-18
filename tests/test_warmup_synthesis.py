@@ -480,11 +480,15 @@ def test_executor_warmup_output_stays_local():
 def test_executor_drain_during_warmup_cancels_cleanly():
     entered = threading.Event()
     release = threading.Event()
+    shutdowns: list[str] = []
 
     @endpoint(resources=Resources(vram_gb=8))
     class Ep:
         def setup(self) -> None:
             pass
+
+        def shutdown(self) -> None:
+            shutdowns.append("shutdown")
 
         def generate(self, ctx, payload: _PromptIn) -> _Out:
             entered.set()
@@ -503,4 +507,8 @@ def test_executor_drain_during_warmup_cancels_cleanly():
             await task
 
     asyncio.run(scenario())
-    assert not ex._classes[specs[0].instance_key].ready
+    rec = ex._classes[specs[0].instance_key]
+    assert not rec.ready
+    assert rec.instance is None
+    assert rec.held_refs == []
+    assert shutdowns == ["shutdown"]
