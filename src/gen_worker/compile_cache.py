@@ -1456,6 +1456,21 @@ def unwrap(pipeline: Any) -> bool:
     return True
 
 
+def _reconcile_resident_mode(meta: Optional[Dict[str, Any]], pipeline: Any) -> None:
+    """gw#588: 'off' and 'vae_only' are both fully-resident preps differing
+    only in flag groups — converge the pipeline to the cell's traced mode so
+    an honest :func:`mode_drift` passes. Offload drift keeps refusing."""
+    if not meta:
+        return
+    want = str(meta.get("low_vram_mode") or "")
+    from .models.memory import low_vram_mode, reconcile_resident_mode
+
+    resident = ("off", "vae_only")
+    have = low_vram_mode(pipeline)
+    if want != have and want in resident and have in resident:
+        reconcile_resident_mode(pipeline, want)
+
+
 def artifact_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     """The complete pipeline/config compatibility verdict for one cell."""
     drift = (
@@ -1488,6 +1503,7 @@ def arm_staged_artifact(
     try:
         with _SEED_ARM_LOCK:
             meta = staged.metadata
+            _reconcile_resident_mode(meta, pipeline)
             drift = artifact_drift(meta, pipeline, cfg)
             if drift:
                 raise AdoptError("key_mismatch", drift)
@@ -1554,6 +1570,7 @@ def enable(
                         self_key = want.digest
                 except Exception:
                     self_key = ""
+                _reconcile_resident_mode(meta, pipeline)
                 drift = artifact_drift(meta, pipeline, cfg)
                 if drift:
                     # low_vram prep mode is DYNAMIC (free-VRAM placement at
