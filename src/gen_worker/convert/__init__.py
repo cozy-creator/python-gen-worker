@@ -16,12 +16,19 @@ them; ``import gen_worker.convert`` stays cheap.
 from __future__ import annotations
 
 from .calibration import CalibrationAction, CalibrationPolicy, resolve_calibration_action
-from .classifier import RepoClassification, RepoRefusal, classify_repo
+from .classifier import (
+    RepoClassification,
+    RepoRefusal,
+    SourceIncludeError,
+    apply_source_include,
+    classify_repo,
+)
 from .clone import (
     CloneResult,
     OutputSpec,
     from_civitai,
     from_huggingface,
+    normalize_source_include,
     run_clone,
 )
 from .component import Component
@@ -80,6 +87,8 @@ __all__ = [
     "ingest_civitai",
     "RepoClassification",
     "RepoRefusal",
+    "SourceIncludeError",
+    "apply_source_include",
     "classify_repo",
     # Clone + publish
     "clone",
@@ -88,6 +97,7 @@ __all__ = [
     "run_clone",
     "from_huggingface",
     "from_civitai",
+    "normalize_source_include",
     "publish_flavors",
     "HubClient",
     "HubPublishError",

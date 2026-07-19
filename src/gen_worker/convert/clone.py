@@ -113,6 +113,32 @@ def normalize_destination_ref(value: str) -> str:
     return ref
 
 
+def normalize_source_include(value: Any) -> tuple[str, ...]:
+    """gw#593 item 2: dual-form clone-request field disambiguating a
+    multi-checkpoint-bundle source repo (e.g. Lightricks/LTX-2.3's
+    dev/distilled/lora/upscaler root bundle) — compact form is a single glob
+    string, structured form is a list of globs. Both mean the same thing:
+    an explicit allowlist matched against repo-relative paths, applied
+    before classification (see :func:`gen_worker.convert.classifier.
+    apply_source_include`). ``None``/empty means "today's heuristic,
+    unrestricted" — the default, unchanged behavior.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        v = value.strip()
+        return (v,) if v else ()
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for item in value:
+            s = str(item or "").strip()
+            if s and s not in out:
+                out.append(s)
+        return tuple(out)
+    raise ValueError(
+        f"source_include must be a string or a list of strings, got {type(value).__name__}")
+
+
 def normalize_tags(values: Iterable[str] | None) -> list[str]:
     out: list[str] = []
     for raw in values or []:
@@ -791,12 +817,16 @@ def run_clone(
     gguf_quant: str | None = None,
     hf_token: str | None = None,
     civitai_api_key: str | None = None,
+    source_include: Any = None,
 ) -> CloneResult:
     provider = str(provider or "").strip().lower()
     destination = normalize_destination_ref(destination_repo)
     tags = normalize_tags(destination_repo_tags)
     layout_hint = str(target_layout or "diffusers").strip().lower() or "diffusers"
     specs = normalize_outputs(outputs, layout_hint=layout_hint)
+    include = normalize_source_include(source_include)
+    if include and provider != "huggingface":
+        raise ValueError("source_include is only supported for provider='huggingface'")
     # th#901: normalize_outputs collapses "caller asked for nothing" onto a
     # schema default (dtype="bf16") — indistinguishable from an EXPLICIT
     # bf16 request once normalized. Only an explicit request may force a
@@ -842,6 +872,7 @@ def run_clone(
                     dtype_preference=source_dtype_preference,
                     gguf_quant=gguf_quant,
                     hf_token=effective_hf_token,
+                    source_include=include,
                 )
             else:
                 plan = plan_civitai(
@@ -898,6 +929,7 @@ def run_clone(
                 hf_token=effective_hf_token,
                 progress=_dl_progress,
                 plan=plan,
+                source_include=include,
             )
         else:
             source = ingest_civitai(
@@ -1161,6 +1193,7 @@ def from_huggingface(ctx: Any, payload: Any, *, hf_token: str | None = None) -> 
         overwrite_repo=bool(getattr(payload, "overwrite_repo", False)),
         gguf_quant=getattr(payload, "gguf_quant", None),
         hf_token=hf_token,
+        source_include=getattr(payload, "source_include", None),
     )
 
 
@@ -1192,6 +1225,7 @@ __all__ = [
     "from_huggingface",
     "normalize_destination_ref",
     "normalize_outputs",
+    "normalize_source_include",
     "normalize_tags",
     "run_clone",
 ]

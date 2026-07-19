@@ -14,6 +14,7 @@ hierarchy; ``reason`` is a stable machine token.
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
@@ -79,6 +80,57 @@ class RepoRefusal(RuntimeError):
         if detail:
             msg += f" ({detail})"
         super().__init__(msg)
+
+
+class SourceIncludeError(ValueError):
+    """gw#593 item 2: one or more ``source_include`` globs matched no file in
+    the source repo's listing. Every glob is a REQUIRED selector (the caller
+    is explicitly pinning a file that must exist) — a typo or stale pattern
+    must fail loud here, not silently narrow the candidate set or fall
+    through to a generic ``missing_safetensors``/``too_large`` refusal that
+    gives no hint which selector was wrong.
+    """
+
+    def __init__(
+        self,
+        unmatched: Sequence[str],
+        *,
+        matched: Mapping[str, Sequence[str]],
+        all_paths: Sequence[str],
+    ) -> None:
+        self.unmatched = list(unmatched)
+        self.matched = {str(k): list(v) for k, v in matched.items()}
+        self.all_paths = list(all_paths)
+        detail = "; ".join(
+            f"{g!r} -> {len(v)} file(s)" for g, v in self.matched.items() if g not in unmatched
+        )
+        super().__init__(
+            f"source_include glob(s) matched no file: {self.unmatched!r} "
+            f"(other globs: {detail or 'none'}; {len(self.all_paths)} file(s) in repo)"
+        )
+
+
+def apply_source_include(paths: Sequence[str], include: Sequence[str]) -> list[str]:
+    """Filter repo-relative paths to only those matching at least one glob in
+    ``include`` (``fnmatch`` against the full repo-relative path, e.g.
+    ``"ltx-2.3-22b-dev.safetensors"`` or ``"text_encoder/**"``).
+
+    Every glob must match >=1 path or the whole call fails loud
+    (:class:`SourceIncludeError`) — see its docstring. An empty/``None``
+    ``include`` is a no-op (today's heuristic keeps running unrestricted).
+    """
+    if not include:
+        return list(paths)
+    matched: dict[str, list[str]] = {}
+    keep: set[str] = set()
+    for pattern in include:
+        hits = [p for p in paths if fnmatch.fnmatch(p, pattern)]
+        matched[pattern] = hits
+        keep.update(hits)
+    unmatched = [g for g, hits in matched.items() if not hits]
+    if unmatched:
+        raise SourceIncludeError(unmatched, matched=matched, all_paths=paths)
+    return sorted(keep)
 
 
 @dataclass(frozen=True)
@@ -442,4 +494,7 @@ def classify_repo(
     raise RepoRefusal("unknown_shape", files_seen=paths)
 
 
-__all__ = ["RepoClassification", "RepoRefusal", "classify_repo"]
+__all__ = [
+    "RepoClassification", "RepoRefusal", "classify_repo",
+    "SourceIncludeError", "apply_source_include",
+]
