@@ -166,8 +166,9 @@ def _sanitize(message: str) -> str:
 
 
 def _reserved_repo_info(payload: Any, field_name: str) -> Dict[str, Any]:
-    """``payload.source`` / ``payload.destination`` as a plain dict ({} when
-    absent). Producer payloads carry these reserved-name structs (#376)."""
+    """``payload.source`` / ``payload.destination`` / ``payload.text_encoder``
+    as a plain dict ({} when absent). Producer payloads carry these
+    reserved-name structs (#376, pgw#594)."""
     obj = getattr(payload, field_name, None)
     if obj is None:
         return {}
@@ -5248,6 +5249,10 @@ class Executor:
         producer = spec.kind != "inference"
         source_info = _reserved_repo_info(payload, "source") if producer else {}
         destination_info = _reserved_repo_info(payload, "destination") if producer else {}
+        # pgw#594/te#70: a second, wholly independent reserved model input
+        # (e.g. a text-encoder repo separate from the primary `source` DiT).
+        # Absent on every existing payload struct — stays {} and is a no-op.
+        text_encoder_info = _reserved_repo_info(payload, "text_encoder") if producer else {}
 
         # gw#453: arm repo-CAS checkpoint routing for producer jobs. Without
         # kind/destination_repo/job_id the ctx's _repo_job_upload_scope() is
@@ -5270,6 +5275,7 @@ class Executor:
             producer_kwargs = dict(
                 source_info=source_info,
                 destination_info=destination_info,
+                text_encoder_info=text_encoder_info,
                 hf_token=getattr(self._settings, "hf_token", "") or "",
             )
 
@@ -5328,6 +5334,11 @@ class Executor:
             ctx.raise_if_cancelled("canceled")
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
+            if text_encoder_info:
+                await self._materialize_source(
+                    ctx, text_encoder_info, snapshots,
+                    set_path=ctx._set_text_encoder_path, field_name="text_encoder",
+                )
             if producer:
                 await self._materialize_datasets(ctx, payload)
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
@@ -5512,16 +5523,24 @@ class Executor:
             self._maybe_idle()
 
     async def _materialize_source(
-        self, ctx: Any, info: Dict[str, Any], snapshots: Dict[str, pb.Snapshot]
+        self,
+        ctx: Any,
+        info: Dict[str, Any],
+        snapshots: Dict[str, pb.Snapshot],
+        *,
+        set_path: Optional[Callable[[str], None]] = None,
+        field_name: str = "source",
     ) -> None:
-        """Reserved-source contract (#376): materialize ``payload.source``
-        locally before the handler runs. Same ModelStore path as model
-        bindings — identical retry/classification and ModelEvent emission."""
+        """Reserved repo-field contract (#376, generalized pgw#594):
+        materialize a reserved ``SourceRepo``-shaped payload field (default
+        ``payload.source``, also used for ``payload.text_encoder``) locally
+        before the handler runs. Same ModelStore path as model bindings —
+        identical retry/classification and ModelEvent emission."""
         ref = str(info.get("ref") or "").strip()
         if not ref:
-            raise ValidationError("payload.source.ref must be a non-empty repo ref")
+            raise ValidationError(f"payload.{field_name}.ref must be a non-empty repo ref")
         path = await self.store.ensure_local(ref, snapshots.get(ref))
-        ctx._set_source_path(str(path))
+        (set_path or ctx._set_source_path)(str(path))
 
     async def _materialize_datasets(self, ctx: Any, payload: Any) -> None:
         """Reserved-datasets contract (gw#425): materialize every

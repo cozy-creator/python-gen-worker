@@ -971,9 +971,9 @@ class _PublisherMixin:
     ``_get_worker_capability_token``).
 
     Producer-only STATE lives here too (pgw#526): the reserved
-    ``source``/``destination`` payload structs, the hf token, and the repo
-    spec for checkpoint commits initialize in this ``__init__`` — a plain
-    inference ``RequestContext`` never carries them.
+    ``source``/``destination``/``text_encoder`` payload structs, the hf
+    token, and the repo spec for checkpoint commits initialize in this
+    ``__init__`` — a plain inference ``RequestContext`` never carries them.
 
     Not a public surface: tenants should never import this directly.
     """
@@ -983,6 +983,7 @@ class _PublisherMixin:
         *args: Any,
         source_info: Optional[Dict[str, Any]] = None,
         destination_info: Optional[Dict[str, Any]] = None,
+        text_encoder_info: Optional[Dict[str, Any]] = None,
         hf_token: str = "",
         **kwargs: Any,
     ) -> None:
@@ -994,6 +995,8 @@ class _PublisherMixin:
         self._source_info = dict(source_info or {})
         self._destination_info = dict(destination_info or {})
         self._source_path: Optional[str] = None
+        self._text_encoder_info = dict(text_encoder_info or {})
+        self._text_encoder_path: Optional[str] = None
         self._hf_token = (hf_token or "").strip()
         # Repo fields declared by the ingest pipeline before the first
         # checkpoint commit. Sent in the /commits body so tensorhub can
@@ -1057,6 +1060,22 @@ class _PublisherMixin:
     def _set_source_path(self, path: str) -> None:
         """Library-internal: called after source materialization."""
         self._source_path = str(path) if path else None
+
+    # Second reserved-name model input (pgw#594, te#70): a wholly independent
+    # repo from `source`, materialized the same way. Absent for every
+    # existing producer payload — `text_encoder`/`text_encoder_path` stay
+    # empty/None and no behavior changes.
+    @property
+    def text_encoder(self) -> dict[str, Any]:
+        return dict(self._text_encoder_info)
+
+    @property
+    def text_encoder_path(self) -> Optional[str]:
+        return self._text_encoder_path
+
+    def _set_text_encoder_path(self, path: str) -> None:
+        """Library-internal: called after text_encoder materialization."""
+        self._text_encoder_path = str(path) if path else None
 
     def set_repo_spec(
         self,
