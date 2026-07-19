@@ -364,3 +364,69 @@ def test_pipeline_tree_trellis_shape() -> None:
 def test_pipeline_tree_without_weights_falls_through() -> None:
     with pytest.raises(RepoRefusal):
         classify_repo(["pipeline.json", "README.md"])
+
+
+def test_variant_tag_ignores_embedded_version_numbers() -> None:
+    """gw#593: a real HF repo's root safetensors bundle, each name carrying
+    its own dotted version number (not a diffusers dtype-variant suffix).
+    Real Lightricks/LTX-2.3 filenames + sizes (2026-07-19 tree API). Before
+    the fix, _variant_tag misread "2.3"/"1.0"/"1.1" as variant tags, split
+    every file into its own bogus group, and the alphabetically-first
+    fallback group happened to be the 3 upscaler files ONLY — SILENTLY
+    excluding the actual 22B DiT checkpoint entirely (found live: e2e#185's
+    clone published a mirror with zero base-model weights, gw#593).
+
+    After the fix every file lands untagged (no false dtype match), so they
+    group into ONE ~147GB bundle spanning dev+distilled+lora+upscaler
+    checkpoints — a real refusal (`too_large`, over the 100GB gate) instead
+    of a silent wrong-file publish. This is the correct interim behavior:
+    fail loud, not fail silently wrong. Actually selecting the ONE intended
+    checkpoint (`ltx-2.3-22b-dev.safetensors`) needs an explicit
+    caller-supplied selector — gw#593 item 2, deliberately not attempted
+    here (a real API-surface change, not a regex fix)."""
+    files_sizes = {
+        ".gitattributes": 1571,
+        "LICENSE": 21399,
+        "README.md": 6570,
+        "ltx-2.3-22b-dev.safetensors": 46149344974,
+        "ltx-2.3-22b-distilled-1.1.safetensors": 46149345334,
+        "ltx-2.3-22b-distilled-lora-384-1.1.safetensors": 7605507256,
+        "ltx-2.3-22b-distilled-lora-384.safetensors": 7605507256,
+        "ltx-2.3-22b-distilled.safetensors": 46149345038,
+        "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors": 1090125794,
+        "ltx-2.3-spatial-upscaler-x2-1.0.safetensors": 995743504,
+        "ltx-2.3-spatial-upscaler-x2-1.1.safetensors": 995743504,
+        "ltx-2.3-temporal-upscaler-x2-1.0.safetensors": 995743504,
+        "ltx2.3-open.png": 1000,
+    }
+    with pytest.raises(RepoRefusal) as exc:
+        classify_repo(list(files_sizes), sizes=files_sizes)
+    assert exc.value.reason == "too_large"
+
+
+def test_variant_tag_no_longer_silently_drops_base_checkpoint() -> None:
+    """Narrower proof of the gw#593 false-positive fix in isolation, without
+    the too_large refusal: a small subset (dev + one upscaler only, sizes
+    that fit under the gate) must group TOGETHER (both untagged), never
+    excluding the dev checkpoint the way the buggy regex did."""
+    files_sizes = {
+        "ltx-2.3-22b-dev.safetensors": 5_000_000_000,
+        "ltx-2.3-spatial-upscaler-x2-1.0.safetensors": 995_743_504,
+    }
+    c = classify_repo(list(files_sizes), sizes=files_sizes)
+    assert c.strategy == "aio_singlefile"
+    assert set(c.allow_patterns) == set(files_sizes)
+
+
+def test_variant_tag_still_recognizes_real_dtype_suffixes() -> None:
+    """Guardrail: gw#593's fix must not break the genuine diffusers
+    dtype-variant convention it was designed for."""
+    from gen_worker.convert.classifier import _variant_tag
+
+    assert _variant_tag("diffusion_pytorch_model.fp16.safetensors") == "fp16"
+    assert _variant_tag("diffusion_pytorch_model.bf16.safetensors") == "bf16"
+    assert _variant_tag("model.fp8_e4m3fn.safetensors") == "fp8_e4m3fn"
+    # The gw#593 false positives: version numbers are NOT dtype tags.
+    assert _variant_tag("ltx-2.3-22b-dev.safetensors") == ""
+    assert _variant_tag("ltx-2.3-22b-distilled-1.1.safetensors") == ""
+    assert _variant_tag("model-v1.0.safetensors") == ""
