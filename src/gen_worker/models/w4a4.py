@@ -203,8 +203,11 @@ def cast_e2m1(t: Any) -> Any:
 
 def pack_e2m1(codes: Any) -> Any:
     """[..., K] nibble codes -> [..., K/2] packed uint8 (element 2j in the
-    LOW nibble — torch.float4_e2m1fn_x2 / modelopt convention)."""
-    return (codes[..., 1::2] << 4) | codes[..., 0::2]
+    LOW nibble — torch.float4_e2m1fn_x2 / modelopt convention). Explicitly
+    contiguous: cuBLASLt refuses strided fp4 operands
+    (CUBLAS_STATUS_NOT_SUPPORTED, found live on B200), and TensorIterator
+    may propagate the slice strides into the packed output."""
+    return ((codes[..., 1::2] << 4) | codes[..., 0::2]).contiguous()
 
 
 def unpack_e2m1(packed: Any) -> Any:
