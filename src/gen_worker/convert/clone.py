@@ -1008,6 +1008,30 @@ def run_clone(
                         tree = source.dir
                         attrs = dict(source.attrs)
                         flavor_label = source_dtype or spec.dtype
+                        # gw#593 companion: this passthrough bypasses
+                        # build_flavor_tree entirely (every one of ITS
+                        # branches ends in _stage_oversize_safetensors), so a
+                        # source shipping one oversized MONOLITHIC
+                        # safetensors file with no HF-convention shards (no
+                        # sharding at all to reshard around — e.g. LTX-2.3's
+                        # 46GB ltx-2.3-22b-dev.safetensors) was published raw
+                        # and tensorhub's commit API rejected it
+                        # (request_too_large: file exceeds
+                        # max_bytes_per_file). Found live: e2e#185
+                        # ltx-firstlight run 8. Hardlink into a scratch tree
+                        # and reshard only when something is actually
+                        # oversize — the common case (already-sharded
+                        # sources) stays the zero-cost passthrough.
+                        if spec.file_type == "safetensors" and any(
+                            f.is_file() and f.stat().st_size > MAX_SAFETENSORS_SHARD_BYTES
+                            for f in Path(tree).rglob("*.safetensors")
+                        ):
+                            reshard_dir = workdir / f"flavor-{spec.label}.__reshard__"
+                            shutil.rmtree(reshard_dir, ignore_errors=True)
+                            reshard_dir.mkdir(parents=True, exist_ok=True)
+                            copy_non_weight_files(Path(tree), reshard_dir, skip_components=set())
+                            _stage_oversize_safetensors(reshard_dir)
+                            tree = reshard_dir
                     elif i == 0 and spec.file_type == "safetensors" \
                             and (strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
                                  or ltx2_native):

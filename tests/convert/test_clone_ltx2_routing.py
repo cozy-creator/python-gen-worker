@@ -171,3 +171,57 @@ def test_non_ltx2_aio_singlefile_is_unaffected(
     assert not result.failed_flavors, result.failed_flavors
     assert len(calls) == 1
     assert calls[0]["file_layout"] == "singlefile"
+
+
+def test_ltx2_oversized_monolith_reshards_before_publish(
+    fake_hub, tmp_path: Path, monkeypatch,
+) -> None:
+    """gw#593 companion: the publish_as_is passthrough branch (dtype
+    matches, no cast needed) bypasses build_flavor_tree entirely — every ONE
+    of build_flavor_tree's own branches ends in
+    _stage_oversize_safetensors, so a source shipping a single oversized
+    MONOLITHIC safetensors file (no HF-convention shards to begin with --
+    exactly LTX-2.3's real 46GB ltx-2.3-22b-dev.safetensors) was published
+    raw. tensorhub's commit API rejects an over-cap single file
+    (request_too_large: file exceeds max_bytes_per_file) -- found live,
+    e2e#185 ltx-firstlight run 8. Threshold monkeypatched tiny so the test
+    stays byte-sized; asserts the reshard step actually ran (not the
+    original source.dir) and non-weight files still ride along."""
+    _FakeHub.state["finalize_calls"] = 1
+    monkeypatch.setenv("COZY_CONVERT_WORKDIR", str(tmp_path / "work"))
+    monkeypatch.setattr("gen_worker.convert.clone.MAX_SAFETENSORS_SHARD_BYTES", 16)
+
+    reshard_calls: list = []
+    import gen_worker.convert.clone as clone_mod
+
+    real_stage = clone_mod._stage_oversize_safetensors
+
+    def spy_stage(tree, **kwargs):
+        # Capture path + contents NOW — run_clone's cleanup rmtrees the
+        # whole workdir (incl. this scratch dir) once the clone succeeds.
+        reshard_calls.append((Path(tree), sorted(p.name for p in Path(tree).iterdir())))
+        return real_stage(tree, **kwargs)
+
+    monkeypatch.setattr("gen_worker.convert.clone._stage_oversize_safetensors", spy_stage)
+
+    source_dir = tmp_path / "source"
+    source = _ltx2_source(source_dir, dtype="bf16")
+    (source_dir / "README.md").write_text("license text")
+    _install_fake_ingest(monkeypatch, source)
+
+    result = run_clone(
+        _Ctx(fake_hub), provider="huggingface", source_ref="Lightricks/LTX-2.3",
+        destination_repo="acme/ltx-2.3-dev",
+        outputs=[{"dtype": "bf16", "file_layout": "diffusers", "file_type": "safetensors"}],
+    )
+
+    assert not result.failed_flavors, result.failed_flavors
+    assert len(result.published) == 1
+    # The oversize check fired and staged into a NEW tree, not source.dir.
+    assert reshard_calls, "expected _stage_oversize_safetensors to run"
+    reshard_dir, reshard_contents = reshard_calls[0]
+    assert reshard_dir != source_dir
+    assert reshard_dir.is_relative_to(tmp_path / "work")  # scratch workdir, not source
+    # Non-weight files still ride along (hardlinked before the reshard).
+    assert "README.md" in reshard_contents
+    assert "ltx-2.3-13b-dev.safetensors" in reshard_contents
