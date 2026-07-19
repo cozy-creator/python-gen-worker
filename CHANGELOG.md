@@ -2,6 +2,15 @@
 
 ## 0.38.1 (2026-07-19)
 
+- **gw#591: finish boot setup when hub-delivered snapshots arrive.** The
+  startup scan parks class+models functions whose tensorhub refs are not yet
+  local; the hub's desired-disk plan delivers them seconds later but nothing
+  re-ran setup — the worker never advertised the function and the request
+  queued forever (cold-boot deadlock, found live in ie#519). A boot watcher
+  now completes setup when the awaited refs land and pushes a StateDelta.
+
+## 0.38.1 (2026-07-19)
+
 - **gw#588: reconcile resident low-VRAM prep mode to the cell's traced
   mode.** `off` and `vae_only` are both fully-CUDA-resident preps differing
   only in the vae-slicing/vae-tiling/attention-slicing flag groups. When a
