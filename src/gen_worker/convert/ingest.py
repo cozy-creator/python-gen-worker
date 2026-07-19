@@ -14,10 +14,10 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 from ..net import hf, install_hf_http_timeouts
-from .classifier import RepoClassification, classify_repo
+from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
 
 logger = logging.getLogger(__name__)
@@ -267,12 +267,25 @@ def plan_huggingface(
     dtype_preference: list[str] | None = None,
     gguf_quant: str | None = None,
     hf_token: str | None = None,
+    source_include: Sequence[str] | None = None,
 ) -> HFSourcePlan:
-    """Resolve + classify one HF repo from metadata alone (no weight bytes)."""
+    """Resolve + classify one HF repo from metadata alone (no weight bytes).
+
+    ``source_include`` (gw#593 item 2): an optional explicit allowlist of
+    globs matched against repo-relative paths. When given, the classifier
+    only ever sees the matching subset — the caller's way of disambiguating
+    a multi-checkpoint-bundle repo (e.g. Lightricks/LTX-2.3's dev/distilled/
+    lora/upscaler root bundle) that today's dtype-variant heuristic cannot
+    resolve on its own. Every glob must match >=1 file (fail loud on a typo).
+    """
     install_hf_http_timeouts()
     repo_id, sha = resolve_hf_identity(source_ref, revision=revision, hf_token=hf_token)
     rev = sha or (str(revision).strip() if revision else None)
     paths, sizes, side, content_ids = _hf_classification_inputs(repo_id, rev, hf_token)
+    if source_include:
+        paths = apply_source_include(paths, source_include)
+        sizes = {p: v for p, v in sizes.items() if p in paths}
+        content_ids = {p: v for p, v in content_ids.items() if p in paths}
     classification = classify_repo(
         paths,
         sizes=sizes,
@@ -384,16 +397,18 @@ def ingest_huggingface(
     hf_token: str | None = None,
     progress: ProgressFn | None = None,
     plan: HFSourcePlan | None = None,
+    source_include: Sequence[str] | None = None,
 ) -> IngestedSource:
     """Classify + selectively download one HF repo into ``dest_dir``.
 
     ``plan`` (from :func:`plan_huggingface`) skips re-doing the metadata
-    calls when the caller already planned this source."""
+    calls when the caller already planned this source. ``source_include`` is
+    ignored when ``plan`` is already given (the plan was built with it)."""
     install_hf_http_timeouts()
     if plan is None:
         plan = plan_huggingface(
             source_ref, revision=revision, dtype_preference=dtype_preference,
-            gguf_quant=gguf_quant, hf_token=hf_token)
+            gguf_quant=gguf_quant, hf_token=hf_token, source_include=source_include)
     repo_id, sha = plan.repo_id, plan.revision
     rev = sha or (str(revision).strip() if revision else None)
     paths, sizes = plan.paths, plan.sizes

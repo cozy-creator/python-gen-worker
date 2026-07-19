@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.38.4 (2026-07-19)
+
+- **gw#593 item 2: `source_include` — explicit source-file selection on the
+  clone request.** `Lightricks/LTX-2.3` bundles dev/distilled/distilled-lora/
+  upscaler checkpoints at repo root; even with item 1's fix, the classifier
+  groups all of them into one bundle (over the 100GB size gate) because it
+  has no way to know which one the caller wants. `source_include` is a new
+  optional clone field, dual-form like the rest of the clone request surface:
+  a compact single glob string, or a structured list of globs, matched
+  against repo-relative paths. When given, only the matching subset ever
+  reaches `classify_repo` — every existing strategy branch keeps working
+  unchanged on the narrowed listing. Every glob MUST match >=1 file; an
+  unmatched glob (typo, stale pattern) is a loud, typed
+  `SourceIncludeError` naming the bad glob and what the other globs matched,
+  never a silent no-op. HuggingFace-only for now (civitai clones raise if
+  given).
+
 ## 0.38.3 (2026-07-19)
 
 - **gw#593: classifier._variant_tag must not match embedded version numbers.**
