@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.39.1 (2026-07-19)
+
+- **gw#595: qwen compiled serve — producer guidance-kwarg parity +
+  per-object warmup provability (ie#501 run 19).** Two coupled defects:
+  (a) `compile_cache._warm_call` warmed every declared guidance scale
+  through `guidance_scale=` — on classes exposing `true_cfg_scale` (qwen)
+  that is the distilled-guidance embed no-op and classic CFG rides
+  `true_cfg_scale` + a non-None `negative_prompt`, so the minted "cfg 4.0"
+  pass traced the SAME unconditioned graph as the 1.0 pass and the serving
+  CFG lookup could never hit (the gw#586 class, call-KWARG axis). The warm
+  call now uses the true-CFG convention when the signature declares it
+  (also inherited by 0.39.0's shared mint brain `mint_artifact`, so fleet
+  self-mints trace the real CFG graphs too).
+  (b) The post-arm warmup proof required EVERY armed compile object to
+  serve its own cache hit, but a merged multi-lane endpoint (qwen t2i +
+  edit on one family cell) has objects the declared warmup structurally
+  cannot exercise (edit needs an input image) — mandatory-W8A8 setup
+  fail-closed forever. The proof now scopes per object: an EXERCISED
+  object (calls>0) must hit or the cell is disproven and fails closed
+  exactly as before; an unexercised object (calls=0) with a proven sibling
+  stays armed unproven on mandatory lanes (logged:
+  "armed unproven: no warmup modality") or unwraps to eager on optional
+  lanes; zero proven objects still fails closed (the gw#586 hole stays
+  shut). Hot adopt gains the distinct `no_warmup_modality` refusal so an
+  unprovable target is named as such instead of `cache_miss`.
+
 ## 0.39.0 (2026-07-19)
 
 - **gw#587: fleet worker self-mint — the serving worker compiles its own
@@ -22,6 +48,8 @@
   attestation basis; absent ⇒ publish refused, harmless for old workers
   which never call the route). A hub delivery without a cell no longer
   tears down a worker's own armed, proven target (worker-owned cells).
+
+## 0.38.7 (2026-07-19)
 
 - **pgw#594: second reserved model-input field, `text_encoder`, for producer
   payloads (te#70 Gemma-TE video-LoRA training).** `source`/`destination`

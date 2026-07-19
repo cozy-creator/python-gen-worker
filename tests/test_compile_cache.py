@@ -963,6 +963,48 @@ def test_warm_call_captures_cfg_and_no_cfg(monkeypatch):
     assert calls == [5.0, 0.0]
 
 
+def test_warm_call_true_cfg_convention(monkeypatch):
+    """gw#595 mint-vs-serve guidance parity: on classes exposing
+    ``true_cfg_scale`` (qwen), classic CFG rides true_cfg_scale +
+    negative_prompt; ``guidance_scale`` is the distilled-guidance embed
+    no-op. Warming through guidance_scale would trace the unconditioned
+    graph for every declared scale and the serving CFG lookup could never
+    hit (ie#501 run 19)."""
+    torch = pytest.importorskip("torch")
+    calls = []
+    cfg_traces = []
+
+    class _Generator:
+        def __init__(self, device=None) -> None:
+            self.device = device
+
+        def manual_seed(self, _seed):
+            return self
+
+    class _TrueCfgPipe:
+        def __call__(
+            self, *, prompt=None, num_inference_steps=None, width=None,
+            height=None, generator=None, guidance_scale=1.0,
+            true_cfg_scale=4.0, negative_prompt=None, **_kwargs,
+        ):
+            calls.append((true_cfg_scale, negative_prompt, guidance_scale))
+            # diffusers' do_true_cfg gate: the CFG graph only exists when
+            # BOTH are supplied — the exact drift the mint must not repeat.
+            if true_cfg_scale > 1 and negative_prompt is not None:
+                cfg_traces.append(true_cfg_scale)
+
+    monkeypatch.setattr(torch, "Generator", _Generator)
+    cc._warm_call(
+        _TrueCfgPipe(), (1328, 1328), steps=2, prompt="warm", decode=False,
+        guidance_scales=(1.0, 4.0),
+    )
+    assert [c[0] for c in calls] == [1.0, 4.0]
+    assert calls[0][1] is None  # CFG off: no uncond pass, batch-1 graph
+    assert calls[1][1] is not None  # CFG regime carries a negative prompt
+    assert all(c[2] == 1.0 for c in calls)  # embed knob left at default
+    assert cfg_traces == [4.0]  # the true-CFG graph was actually traced
+
+
 class In(msgspec.Struct):
     prompt: str = ""
 

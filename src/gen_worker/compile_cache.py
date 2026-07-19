@@ -1683,8 +1683,15 @@ def _warm_call(
     upsampler of identical shape) will look up. Video calls force the
     batch-1 no-CFG serving regime (CFG is a graph shape — ``Compile``) and
     skip decode unless a vae target is declared. Image calls run once per
-    explicitly declared guidance scale, capturing CFG batch-2 and no-CFG
-    batch-1 graphs in one family cell."""
+    explicitly declared guidance scale, capturing CFG and no-CFG graphs in
+    one family cell.
+
+    Guidance-kwarg convention (gw#595, the gw#586 class one axis over): on
+    classes exposing ``true_cfg_scale`` (qwen-style), ``guidance_scale`` is
+    the distilled-guidance embed no-op and classic CFG rides
+    ``true_cfg_scale`` + a non-None ``negative_prompt`` — warming through
+    ``guidance_scale`` there traces the SAME unconditioned graph for every
+    declared scale and the serving CFG lookup can never hit."""
     import inspect
 
     import torch
@@ -1714,6 +1721,16 @@ def _warm_call(
         pipe(**kwargs)
         return
     params = inspect.signature(type(pipe).__call__).parameters
+    if "true_cfg_scale" in params:
+        # Serving parity with the endpoint call: true_cfg_scale always
+        # passed; negative_prompt only when CFG is on (scale > 1), matching
+        # the CFG-off batch-1 graph exactly (no uncond pass).
+        for scale in scales:
+            call = dict(kwargs, true_cfg_scale=scale)
+            if scale > 1.0:
+                call["negative_prompt"] = " "
+            pipe(**call)
+        return
     accepts_guidance = "guidance_scale" in params or any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
     )
