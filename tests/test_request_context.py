@@ -108,9 +108,11 @@ def test_models_property_copies() -> None:
 def test_inference_ctx_carries_no_producer_state() -> None:
     ctx = _ctx()
     for attr in ("_source_info", "_destination_info", "_source_path",
+                 "_text_encoder_info", "_text_encoder_path",
                  "_hf_token", "_repo_spec"):
         assert not hasattr(ctx, attr), attr
     for surface in ("hf_token", "source", "destination", "source_path",
+                    "text_encoder", "text_encoder_path",
                     "set_repo_spec", "save_checkpoint", "checkpoint_dir",
                     "compute"):
         assert not hasattr(ctx, surface), surface
@@ -133,6 +135,34 @@ def test_producer_ctx_carries_producer_state() -> None:
     assert ctx.source_path == "/models/base"
     ctx.set_repo_spec(kind="lora", model_family="sdxl")
     assert ctx._repo_spec == {"kind": "lora", "model_family": "sdxl"}
+
+
+def test_producer_ctx_carries_text_encoder_state() -> None:
+    """pgw#594/te#70: second reserved model input, independent of `source`."""
+    from gen_worker.request_context import TrainingContext
+
+    ctx = TrainingContext(
+        request_id="r1",
+        source_info={"ref": "o/dit-base"},
+        text_encoder_info={"ref": "o/gemma-3-12b"},
+    )
+    assert ctx.text_encoder == {"ref": "o/gemma-3-12b"}
+    assert ctx.text_encoder_path is None
+    ctx._set_text_encoder_path("/models/text-encoder")
+    assert ctx.text_encoder_path == "/models/text-encoder"
+    # Independent of `source` — setting one never clobbers the other.
+    assert ctx.source_path is None
+    ctx._set_source_path("/models/dit-base")
+    assert ctx.source_path == "/models/dit-base"
+    assert ctx.text_encoder_path == "/models/text-encoder"
+
+
+def test_producer_ctx_text_encoder_defaults_empty() -> None:
+    from gen_worker.request_context import TrainingContext
+
+    ctx = TrainingContext(request_id="r1", source_info={"ref": "o/base"})
+    assert ctx.text_encoder == {}
+    assert ctx.text_encoder_path is None
 
 
 def test_producer_kwargs_rejected_on_inference_ctx() -> None:

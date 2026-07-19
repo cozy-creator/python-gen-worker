@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.38.7 (2026-07-19)
+
+- **pgw#594: second reserved model-input field, `text_encoder`, for producer
+  payloads (te#70 Gemma-TE video-LoRA training).** `source`/`destination`
+  were reserved-name `SourceRepo`/`DestinationRepo` fields special-cased by
+  literal name in the executor; any producer (training/conversion) payload
+  can now also declare `text_encoder: SourceRepo | None = None` and get it
+  materialized the same way as `source` — into `ctx.text_encoder_path`
+  (`ctx.text_encoder` for the raw dict), fully independent of
+  `ctx.source_path`. Generic mechanism: gen-worker has no ltx2/Gemma
+  awareness. Absent field (every existing endpoint) is byte-for-byte
+  unchanged — no extra `ensure_local` call, `ctx.text_encoder_path` stays
+  `None`.
+
 ## 0.38.6 (2026-07-19)
 
 - **gw#593 companion: publish_as_is's zero-cost passthrough never resharded
