@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.38.2 (2026-07-19)
+
+- **gw#592: LTX-2.3 family detection + native publish routing.**
+  `Lightricks/LTX-2.3` (monolith or DiffSynth-Studio repackage layout) has no
+  diffusers pipeline manifest, so family detection stamped 'unknown' and a
+  requested `{dtype bf16, layout diffusers}` clone died "no publishable
+  flavor" trying to repackage into a diffusers layout that doesn't exist for
+  this family. Now detects `model_family='ltx2'` (filename hint + a
+  repo-structure sentinel for the repackage layout) and routes it through
+  the existing publish_as_is/th#901 dtype-cast path — the te#70 trainer
+  resolves the native singlefile snapshot directly, so no repackager is
+  built. Other aio_singlefile families (sd15/sdxl/flux/zimage) unaffected.
+
 ## 0.38.1 (2026-07-19)
 
 - **gw#591: finish boot setup when hub-delivered snapshots arrive.** The

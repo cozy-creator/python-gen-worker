@@ -919,7 +919,17 @@ def run_clone(
         # Non-diffusers-class sources publish as-is; extra output specs that
         # would need conversion are refused per-flavor, not per-job.
         strategy = source.classification.strategy if source.classification is not None else ""
-        publish_as_is = strategy in _PUBLISH_AS_IS_STRATEGIES
+        # gw#592: LTX-2 (monolith or DiffSynth-Studio repackage layout) has
+        # no diffusers pipeline to repackage into — the te#70 trainer resolves
+        # the native singlefile snapshot directly — so route it through
+        # publish-as-is instead of build_flavor_tree's singlefile->diffusers
+        # repackager (which has no rule for this family and never should:
+        # nobody consumes an "ltx2 diffusers layout"). classify_repo has no
+        # dedicated LTX-2 strategy (it lands in the generic aio_singlefile
+        # bucket alongside any other bare single/multi-root safetensors repo),
+        # so this is gated on the detected family, not the strategy alone.
+        ltx2_native = strategy == "aio_singlefile" and source.model_family == "ltx2"
+        publish_as_is = strategy in _PUBLISH_AS_IS_STRATEGIES or ltx2_native
 
         for i, spec in enumerate(specs):
             flavor_label = spec.dtype
@@ -937,7 +947,8 @@ def run_clone(
                         attrs = dict(source.attrs)
                         flavor_label = source_dtype or spec.dtype
                     elif i == 0 and spec.file_type == "safetensors" \
-                            and strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES:
+                            and (strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
+                                 or ltx2_native):
                         # th#901: an EXPLICITLY mismatched requested dtype is
                         # real, in-line-castable work for these strategies
                         # (ordinary dense safetensors trees) —
