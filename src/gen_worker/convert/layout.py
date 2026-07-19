@@ -69,6 +69,8 @@ def canonical_model_family_from_variant(variant: str) -> str:
         return "auraflow"
     if raw == "hidream_o1":
         return "hidream-o1"
+    if raw == "ltx2":
+        return "ltx2"
     if raw == "sdxl":
         return "sdxl"
     if raw == "sd15":
@@ -93,6 +95,12 @@ def infer_model_family_variant_from_hint(value: str | None) -> str:
         return "wan22"
     if "hidreamo1" in normalized:
         return "hidream_o1"
+    if "ltx2" in normalized:
+        # gw#592: "ltx-2", "ltx2", "ltx-2.3" all normalize to a string
+        # containing "ltx2" once punctuation is stripped. Deliberately
+        # narrower than "ltx" alone — LTX-Video (v1) is a distinct diffusers
+        # family and must not be misdetected here.
+        return "ltx2"
     if "qwenimage" in normalized:
         return "qwen_image"
     if "zimage" in normalized:
@@ -223,6 +231,23 @@ def _detect_family_variant_from_singlefile_paths(paths: list[str]) -> str:
     return "unknown"
 
 
+# gw#592: DiffSynth-Studio/LTX-2.3-Repackage per-submodule root layout has no
+# "ltx" token in any single filename (transformer.safetensors,
+# video_vae_encoder.safetensors, ...), so the per-path hint scan above misses
+# it. Mirrors the te#70 trainer's own sentinel check
+# (image_lora_finetuner.families.ltx2.snapshot_model_paths /
+# families.__init__._is_ltx2_snapshot) so both sides agree on what counts as
+# an LTX-2 snapshot.
+_LTX2_REPACKAGE_SENTINEL_FILES = frozenset({
+    "video_vae_encoder.safetensors", "text_encoder_post_modules.safetensors",
+})
+
+
+def _is_ltx2_repackage_layout(paths: list[str]) -> bool:
+    root_lower = {p.lower() for p in paths if "/" not in p}
+    return _LTX2_REPACKAGE_SENTINEL_FILES.issubset(root_lower)
+
+
 def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> SourceLayoutInfo:
     """Tagging-only metadata: detect diffusers-vs-singlefile shape + family variant.
 
@@ -246,6 +271,8 @@ def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> Sou
         model_family_variant = _detect_family_variant_from_components(normalized)
     if model_family_variant == "unknown" and source_layout == "singlefile":
         model_family_variant = _detect_family_variant_from_singlefile_paths(normalized)
+    if model_family_variant == "unknown" and _is_ltx2_repackage_layout(normalized):
+        model_family_variant = "ltx2"
     model_family = canonical_model_family_from_variant(model_family_variant)
     if model_family == "unknown":
         model_family = infer_model_family_from_hint(" ".join(normalized[:64]))
