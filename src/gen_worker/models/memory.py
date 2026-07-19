@@ -1166,9 +1166,39 @@ def low_vram_mode(pipeline: Any) -> str:
     return str(getattr(pipeline, _COZY_MODE_ATTR, "") or "")
 
 
+_RESIDENT_MODES = ("off", "vae_only")
+
+
+def reconcile_resident_mode(pipeline: Any, want: str) -> bool:
+    """Converge a fully-CUDA-resident pipeline between 'off' and 'vae_only' by
+    toggling the slicing/tiling flag groups (gw#588). Any other mode pair is
+    untouched: offload rungs trace genuinely different graphs and residency."""
+    have = low_vram_mode(pipeline)
+    if want not in _RESIDENT_MODES or have not in _RESIDENT_MODES:
+        return False
+    if have == want:
+        return True
+    _LOG.info(
+        "low_vram: reconciling resident mode %r -> %r (free VRAM %.1f GB)",
+        have, want, get_available_vram_gb(),
+    )
+    if want == "vae_only":
+        _apply_vae_and_attention(pipeline, {})
+    else:
+        vae = getattr(pipeline, "vae", None)
+        if not _call_if_present(pipeline, "disable_vae_slicing") and vae is not None:
+            _call_if_present(vae, "disable_slicing")
+        if not _call_if_present(pipeline, "disable_vae_tiling") and vae is not None:
+            _call_if_present(vae, "disable_tiling")
+        _call_if_present(pipeline, "disable_attention_slicing")
+    setattr(pipeline, _COZY_MODE_ATTR, want)
+    return True
+
+
 __all__ = [
     "apply_low_vram_config",
     "low_vram_mode",
+    "reconcile_resident_mode",
     "rearm_offload",
     "place_pipeline",
     "next_offload_rung",

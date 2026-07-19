@@ -398,15 +398,33 @@ def test_endpoint_without_warmup_exposes_no_adopt_target(tmp_path, monkeypatch):
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
-def test_adopt_prep_mode_drift_rejected(tmp_path, monkeypatch):
-    """gw#391: the producer's low-VRAM prep mode is part of the graph key — a
-    pipeline prepped under a different mode can only miss, so adoption rejects
-    it deterministically (key_mismatch) before any wrap or warmup."""
+def test_adopt_resident_prep_mode_drift_converges(tmp_path, monkeypatch):
+    """gw#588: 'off' and 'vae_only' are both fully-resident preps — hot adopt
+    converges the pipeline to the cell's traced mode and adopts instead of
+    refusing (ie#501 run 18)."""
     _artifact(tmp_path, low_vram_mode="off")
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
     obj = ex.store.residency.obj(wire_ref(spec.models["pipeline"]))
     obj._cozy_low_vram_mode = "vae_only"
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=2, misses=0)
+
+    _adopt(ex)
+    assert len(_events(sent, pb.MODEL_STATE_ADOPTED)) == 1
+    assert not _events(sent, pb.MODEL_STATE_FAILED)
+    assert obj._cozy_low_vram_mode == "off"
+
+
+def test_adopt_offload_prep_mode_drift_rejected(tmp_path, monkeypatch):
+    """gw#391: an offload prep mode traces genuinely different graphs — a
+    pipeline prepped under one can only miss, so adoption still rejects it
+    deterministically (key_mismatch) before any wrap or warmup."""
+    _artifact(tmp_path, low_vram_mode="off")
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    obj = ex.store.residency.obj(wire_ref(spec.models["pipeline"]))
+    obj._cozy_low_vram_mode = "model_offload"
     applied: list = []
     monkeypatch.setattr(cc, "apply", lambda *a, **k: applied.append(1) or True)
 
@@ -414,6 +432,7 @@ def test_adopt_prep_mode_drift_rejected(tmp_path, monkeypatch):
     _assert_failed(sent, "adopt_failed:key_mismatch")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
     assert not applied  # rejected before the wrap
+    assert obj._cozy_low_vram_mode == "model_offload"
 
 
 def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):

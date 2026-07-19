@@ -1026,3 +1026,170 @@ def test_resolve_pipeline_class_gw586() -> None:
     # A diffusers attribute that is not a loadable pipeline class refuses too.
     with pytest.raises(RuntimeError, match="wrong call path"):
         resolve_pipeline_class("__version__")
+
+
+# ---------------------------------------------------------------------------
+# gw#588: resident prep-mode drift (off <-> vae_only) converges to the cell
+# ---------------------------------------------------------------------------
+
+
+def _resident_pipe(mode: str):
+    """A pipeline with the three resident flag groups and a compile target.
+    Flags start matching ``mode`` ('vae_only' = all on, 'off'/other = off)."""
+    torch = pytest.importorskip("torch")
+
+    class _Pipe:
+        def __init__(self):
+            self.transformer = torch.nn.Sequential(
+                torch.nn.Linear(16, 16), torch.nn.SiLU(),
+            )
+            on = mode == "vae_only"
+            self.flags = {
+                "vae_slicing": on, "vae_tiling": on, "attention_slicing": on,
+            }
+            if mode:
+                self._cozy_low_vram_mode = mode
+
+        def enable_vae_slicing(self):
+            self.flags["vae_slicing"] = True
+
+        def disable_vae_slicing(self):
+            self.flags["vae_slicing"] = False
+
+        def enable_vae_tiling(self):
+            self.flags["vae_tiling"] = True
+
+        def disable_vae_tiling(self):
+            self.flags["vae_tiling"] = False
+
+        def enable_attention_slicing(self):
+            self.flags["attention_slicing"] = True
+
+        def disable_attention_slicing(self):
+            self.flags["attention_slicing"] = False
+
+    return _Pipe()
+
+
+def _resident_cell(tmp_path, pipe, cfg, *, low_vram_mode, weight_lane=""):
+    sig, wc = cc.execution_contract(pipe, cfg)
+    meta = cc.artifact_metadata(
+        family=cfg.family, shapes=cfg.shapes, targets=cfg.targets,
+        weight_lane=weight_lane, low_vram_mode=low_vram_mode,
+        graph_signature=sig, weight_contract=wc)
+    source = _capture_tree(tmp_path / "cand")
+    return cc.pack(source, tmp_path / "cell.tar.gz", meta)
+
+
+def _pin_w8a8_identity(monkeypatch):
+    """W8A8 contract requires sm/cuda/image_digest; pin fakes on a GPU-less
+    test host (both mint and verify see the same monkeypatched key)."""
+    real_key = cc.runtime_key
+
+    def prod_key():
+        key = dict(real_key())
+        key.update(sm="sm_90", cuda="12.8", image_digest="sha256:gw588")
+        return key
+
+    monkeypatch.setattr(cc, "runtime_key", prod_key)
+
+
+def test_enable_reconciles_vae_only_pipeline_to_off_cell(tmp_path, monkeypatch):
+    """ie#501 run 18: producer minted alone ('off'), serve worker's multi-lane
+    load landed 'vae_only'. Both fully resident — the consumer converges to
+    the cell's traced mode and ARMS instead of starving the w8a8 lane."""
+    _pin_w8a8_identity(monkeypatch)
+    pipe = _resident_pipe("vae_only")
+    pipe.transformer[0]._cozy_w8a8_linear = True
+    pipe.transformer[0].gemm_mode = "rowwise"
+    pipe._cozy_weight_lane = "w8a8"
+    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
+    artifact = _resident_cell(
+        tmp_path, pipe, cfg, low_vram_mode="off", weight_lane="w8a8")
+    monkeypatch.setattr(
+        cc, "apply", lambda pipeline, cfg, **kw: kw.get("cache_ready", False))
+
+    assert cc.enable(pipe, cfg, tmp_path / "cache", artifact) is True
+    assert pipe._cozy_low_vram_mode == "off"
+    assert pipe.flags == {
+        "vae_slicing": False, "vae_tiling": False, "attention_slicing": False,
+    }
+
+
+def test_arm_staged_artifact_reconciles_resident_drift(tmp_path, monkeypatch):
+    """Hot adopt: the same resident convergence, no AdoptError."""
+    pipe = _resident_pipe("vae_only")
+    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
+    artifact = _resident_cell(tmp_path, pipe, cfg, low_vram_mode="off")
+    monkeypatch.setattr(cc, "apply", lambda *a, **kw: True)
+
+    staged = cc.stage_artifact(artifact, "fam", cache_dir=tmp_path / "cache")
+    meta = cc.arm_staged_artifact(pipe, cfg, staged)
+    assert meta["low_vram_mode"] == "off"
+    assert pipe._cozy_low_vram_mode == "off"
+    assert not any(pipe.flags.values())
+
+
+def test_enable_reconciles_off_pipeline_to_vae_only_cell(tmp_path, monkeypatch):
+    pipe = _resident_pipe("off")
+    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
+    artifact = _resident_cell(tmp_path, pipe, cfg, low_vram_mode="vae_only")
+    monkeypatch.setattr(
+        cc, "apply", lambda pipeline, cfg, **kw: kw.get("cache_ready", False))
+
+    assert cc.enable(pipe, cfg, tmp_path / "cache", artifact) is True
+    assert pipe._cozy_low_vram_mode == "vae_only"
+    assert pipe.flags == {
+        "vae_slicing": True, "vae_tiling": True, "attention_slicing": True,
+    }
+
+
+def test_offload_mode_drift_still_refuses(tmp_path, monkeypatch):
+    """model_offload traces genuinely different graphs: enable() on a w8a8
+    lane raises the named refusal; hot adopt classifies key_mismatch."""
+    pipe = _resident_pipe("model_offload")
+    pipe._cozy_weight_lane = "w8a8"
+    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
+    artifact = _resident_cell(
+        tmp_path, pipe, cfg, low_vram_mode="off", weight_lane="w8a8")
+    monkeypatch.setattr(
+        cc, "apply", lambda pipeline, cfg, **kw: kw.get("cache_ready", False))
+
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="low_vram_mode"):
+        cc.enable(pipe, cfg, tmp_path / "cache", artifact)
+    assert pipe._cozy_low_vram_mode == "model_offload"
+
+    staged = cc.stage_artifact(artifact, "fam", cache_dir=tmp_path / "cache")
+    with pytest.raises(cc.AdoptError, match="low_vram_mode") as exc:
+        cc.arm_staged_artifact(pipe, cfg, staged)
+    assert exc.value.reason == "key_mismatch"
+    assert pipe._cozy_low_vram_mode == "model_offload"
+
+
+def test_reconcile_resident_mode_unit():
+    from gen_worker.models.memory import reconcile_resident_mode
+
+    # unset current mode: refuse, never stamp
+    pipe = _resident_pipe("")
+    assert reconcile_resident_mode(pipe, "off") is False
+    assert not hasattr(pipe, "_cozy_low_vram_mode")
+
+    # offload current or offload target: refuse, untouched
+    pipe = _resident_pipe("model_offload")
+    assert reconcile_resident_mode(pipe, "off") is False
+    assert pipe._cozy_low_vram_mode == "model_offload"
+    pipe = _resident_pipe("off")
+    assert reconcile_resident_mode(pipe, "group_offload") is False
+    assert pipe._cozy_low_vram_mode == "off"
+
+    # resident <-> resident converges both ways
+    pipe = _resident_pipe("off")
+    assert reconcile_resident_mode(pipe, "vae_only") is True
+    assert pipe._cozy_low_vram_mode == "vae_only"
+    assert all(pipe.flags.values())
+    assert reconcile_resident_mode(pipe, "off") is True
+    assert pipe._cozy_low_vram_mode == "off"
+    assert not any(pipe.flags.values())
+
+    # already converged: True, no-op
+    assert reconcile_resident_mode(pipe, "off") is True
