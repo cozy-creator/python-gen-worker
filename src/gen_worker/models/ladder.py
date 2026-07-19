@@ -28,6 +28,10 @@ CLASS_FP8 = "fp8"  # fp8-E4M3 storage; universal (bf16-upcast path needs no fp8 
 CLASS_SVDQ_FP4 = "svdq-fp4"  # nunchaku SVDQuant fp4 — consumer Blackwell only
 CLASS_SVDQ_INT4 = "svdq-int4"  # nunchaku SVDQuant int4 — sm_75-89
 CLASS_NVFP4 = "nvfp4"  # plain nvfp4 artifact — Blackwell datacenter, TRT lane (not a diffusers rung)
+# Calibrated nvfp4 with two-level scales (gw#540): torch fp4 blockwise
+# scaled_mm serve lane. Blackwell-only (sm_100+ incl. sm_120 consumer) —
+# no fp4 silicon below, and the 4x dequant blow-up erases the fit story.
+CLASS_NVFP4_W4A4 = "nvfp4-w4a4"
 
 _BASE_TOKENS = ("", "bf16", "fp16", "fp32")
 
@@ -61,6 +65,8 @@ def classify_flavor_token(flavor: str) -> str:
         return CLASS_SVDQ_INT4
     if token == "fp8" or token.startswith("fp8-"):
         return CLASS_FP8
+    if token == "nvfp4-w4a4" or token.startswith("nvfp4-w4a4-"):
+        return CLASS_NVFP4_W4A4
     if token == "nvfp4" or token.startswith("nvfp4-"):
         return CLASS_NVFP4
     return ""
@@ -77,6 +83,8 @@ def default_placement(precision_class: str) -> Optional[Placement]:
         return Placement(CLASS_SVDQ_FP4, sm_allowed=tuple(SVDQ_FP4_SMS), engines=("nunchaku",))
     if precision_class == CLASS_SVDQ_INT4:
         return Placement(CLASS_SVDQ_INT4, sm_allowed=tuple(SVDQ_INT4_SMS), engines=("nunchaku",))
+    if precision_class == CLASS_NVFP4_W4A4:
+        return Placement(CLASS_NVFP4_W4A4, sm_min=100)
     if precision_class == CLASS_NVFP4:
         return Placement(CLASS_NVFP4, sm_min=100)
     return None
@@ -139,6 +147,7 @@ __all__ = [
     "CLASS_BASE",
     "CLASS_FP8",
     "CLASS_NVFP4",
+    "CLASS_NVFP4_W4A4",
     "CLASS_SVDQ_FP4",
     "CLASS_SVDQ_INT4",
     "EMERGENCY_NF4_VRAM_FACTOR",

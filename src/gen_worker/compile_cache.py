@@ -180,7 +180,8 @@ def lane_token(weight_lane: str) -> str:
     ``w8a16-lora32``, ``lora32`` -> ``lora32`` — one graph family per
     (base lane, rank bucket)."""
     base, bucket = lane_bucket(str(weight_lane or ""))
-    tok = {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8"}.get(base, base)
+    tok = {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8",
+           "w4a4": "w4a4"}.get(base, base)
     if bucket:
         return f"{tok}-lora{bucket}" if tok else f"lora{bucket}"
     return tok
@@ -198,7 +199,7 @@ def compile_target_lane_error(weight_lane: str, lora_bucket: int) -> str:
     lane = str(weight_lane or "")
     declared = int(lora_bucket or 0)
     base, observed = lane_bucket(lane)
-    if base not in ("", "fp8-hooks", "w8a16", "w8a8"):
+    if base not in ("", "fp8-hooks", "w8a16", "w8a8", "w4a4"):
         return f"unsupported pipeline_weight_lane {lane!r}"
     from .models.w8a8_lora import RANK_BUCKETS
 
@@ -909,6 +910,15 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
                 else:
                     row["activation"] = "dynamic-per-row"
                 quantized.append(row)
+            elif bool(getattr(module, "_cozy_w4a4_linear", False)):
+                # gw#540: block scales are always dynamic per-16-block; the
+                # graph property is the second-level activation scale mode.
+                row["activation"] = (
+                    "static" if getattr(module, "input_scale", None)
+                    is not None else "dynamic-per-tensor")
+                if getattr(module, "pre_quant_scale", None) is not None:
+                    row["pre_quant_scale"] = True
+                quantized.append(row)
             else:
                 row["type"] = _type_name(module)
                 excluded.append(row)
@@ -924,12 +934,15 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
 
     lane = pipeline_weight_lane(pipeline)
     weight_contract: Dict[str, Any] = {"lane": lane}
-    if lane.startswith("w8a8"):
+    if lane.startswith(("w8a8", "w4a4")):
         activations = sorted({str(r["activation"]) for r in quantized})
         weight_contract.update({
-            "artifact_schema": "fp8-w8a8-v1",
+            "artifact_schema": (
+                "nvfp4-w4a4-v1" if lane.startswith("w4a4") else "fp8-w8a8-v1"),
             "operator": "torch._scaled_mm",
-            "weight_scaling": "per-output-channel",
+            "weight_scaling": (
+                "per-16-block+per-tensor" if lane.startswith("w4a4")
+                else "per-output-channel"),
             "activation_scaling": activations,
             "quantized": sorted(quantized, key=lambda r: str(r["path"])),
             "excluded": sorted(excluded, key=lambda r: str(r["path"])),
@@ -1012,8 +1025,8 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     meta_weights = meta.get("weight_contract") or {}
     if not meta_signature and not meta_weights and not str(
         weight_contract.get("lane") or ""
-    ).startswith("w8a8"):
-        return ""  # legacy format-2 non-W8A8 cell
+    ).startswith(("w8a8", "w4a4")):
+        return ""  # legacy format-2 non-quantized-lane cell
     if meta_signature != signature:
         return (
             f"module graph signature: cell {meta_signature[:12]!r} != "
@@ -1024,15 +1037,24 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
             "weight-lane artifact schema/exclusion manifest mismatch: "
             + _first_contract_difference(meta_weights, weight_contract)
         )
-    if str(weight_contract.get("lane") or "").startswith("w8a8"):
+    cell_lane_base = str(weight_contract.get("lane") or "")
+    if cell_lane_base.startswith(("w8a8", "w4a4")):
         activations = weight_contract.get("activation_scaling") or []
-        # DYNAMIC only, one homogeneous granularity per graph (gw#564:
-        # per-row = rowwise sm_90+, per-tensor = the sm_89 epilogue lane).
-        if activations not in (["dynamic-per-row"], ["dynamic-per-tensor"]):
-            return (f"W8A8 activation scaling must be dynamic "
-                    f"(per-row or per-tensor), got {activations!r}")
+        if cell_lane_base.startswith("w8a8"):
+            # DYNAMIC only, one homogeneous granularity per graph (gw#564:
+            # per-row = rowwise sm_90+, per-tensor = the sm_89 epilogue lane).
+            if activations not in (["dynamic-per-row"], ["dynamic-per-tensor"]):
+                return (f"W8A8 activation scaling must be dynamic "
+                        f"(per-row or per-tensor), got {activations!r}")
+        else:
+            # gw#540: one homogeneous second-level activation scale mode per
+            # graph (static = calibrated input_scale, the production mode).
+            if activations not in (["static"], ["dynamic-per-tensor"]):
+                return (f"W4A4 activation scaling must be homogeneous "
+                        f"static or dynamic-per-tensor, got {activations!r}")
         if not weight_contract.get("quantized"):
-            return "W8A8 graph contains no torch._scaled_mm modules"
+            return (f"{cell_lane_base[:4].upper()} graph contains no "
+                    "torch._scaled_mm modules")
         here_digest = runtime_key()["image_digest"]
         # cuda_driver excluded (gw#577): host-lottery axis, see verify().
         for field in ("sm", "cuda", "image_digest"):
@@ -1043,7 +1065,7 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
                     # always carry WORKER_IMAGE_DIGEST, so fleet cells stay
                     # fully pinned.
                     continue
-                return f"W8A8 cell missing {field} identity"
+                return f"quantized-lane cell missing {field} identity"
     return ""
 
 
@@ -1307,7 +1329,7 @@ def apply(
     regional = bool(getattr(cfg, "regional", False))
     from .models.loading import pipeline_weight_lane
 
-    fail_closed = pipeline_weight_lane(pipeline).startswith("w8a8")
+    fail_closed = pipeline_weight_lane(pipeline).startswith(("w8a8", "w4a4"))
     failure_signal: Dict[str, Any] = {
         "callback": None,
         "lock": threading.Lock(),
@@ -1584,12 +1606,15 @@ def enable(
                 )
             from .models.loading import pipeline_weight_lane
 
-            if pipeline_weight_lane(pipeline).startswith("w8a8") and not armed:
+            quant_lane = pipeline_weight_lane(pipeline)
+            if quant_lane.startswith(("w8a8", "w4a4")) and not armed:
                 if meta is not None:
                     refusal = "verified cell armed no compile target"
+                lane_name = quant_lane[:4].upper()
                 raise CompiledLaneUnavailableError(
-                    f"W8A8 requires an exact compatible Forge cell ({refusal}); "
-                    "eager/dequantized execution is not a W8A8 production lane"
+                    f"{lane_name} requires an exact compatible Forge cell "
+                    f"({refusal}); eager/dequantized execution is not a "
+                    f"{lane_name} production lane"
                 )
             return armed
     finally:
@@ -1739,7 +1764,8 @@ def build(
         "serving image's immutable OCI digest); a cell stamped with the "
         "producer image identity can never be adopted by the fleet"
     )
-    if "w8a8" in str(storage_dtype) and not str(serving_image_digest).strip():
+    if (("w8a8" in str(storage_dtype) or "w4a4" in str(storage_dtype))
+            and not str(serving_image_digest).strip()):
         # gw#577 finding (b): contract_drift requires image_digest identity on
         # W8A8 cells and verify() pins it exactly. Without the SERVING digest
         # the artifact stamps the PRODUCER pod's WORKER_IMAGE_DIGEST — every
@@ -1787,10 +1813,10 @@ def build(
     placed = place_pipeline(pipe)
     from .models.loading import pipeline_weight_lane as _traced_lane
 
-    if _traced_lane(pipe).startswith("w8a8") and not str(
+    if _traced_lane(pipe).startswith(("w8a8", "w4a4")) and not str(
         serving_image_digest
     ).strip():
-        # The lane can materialize as w8a8 from the SOURCE flavor alone
+        # The lane can materialize as w8a8/w4a4 from the SOURCE flavor alone
         # (e.g. storage_dtype="fp8+te" over an fp8-w8a8 checkpoint), so the
         # authoritative check is on the traced lane, before the compile.
         raise RuntimeError(_W8A8_MINT_NEEDS_DIGEST)

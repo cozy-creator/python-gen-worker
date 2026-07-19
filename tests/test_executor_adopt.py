@@ -1688,7 +1688,7 @@ def test_w8a8_partial_handler_proof_fails_loud_without_disabling_skipped_turbo(
 
     with pytest.raises(
         cc.CompiledLaneUnavailableError,
-        match="mandatory W8A8 function proof incomplete",
+        match="mandatory quantized-lane function proof incomplete",
     ):
         asyncio.run(ex.ensure_setup(generate, {
             model_ref: pb.Snapshot(digest=MODEL_DIGEST),
@@ -1770,7 +1770,7 @@ def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
         "snapshot_digest": DIGEST_A,
         "path": tmp_path / "cell.tar.gz",
     })()
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="non-W8A8"):
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="materialized pipeline lane"):
         ex._install_compile_targets(
             rec, spec, [pipe], {id(pipe): selection}, {id(pipe): {spec.name}},
         )

@@ -230,17 +230,18 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
 
 
 def _fail_closed(pipe: Any, reason: str) -> bool:
-    """The production w8a8 policy re-asserted at the local exits: a w8a8
-    pipeline never silently serves the slow eager GEMM path — when the local
-    mint cannot produce a cell either, the refusal stays TYPED (the same
-    CompiledLaneUnavailableError the executor maps). Plain lanes keep the
-    gw#555 never-raise miss policy (eager)."""
+    """The production quantized-lane policy re-asserted at the local exits:
+    a w8a8/w4a4 pipeline never silently serves the slow eager GEMM path —
+    when the local mint cannot produce a cell either, the refusal stays
+    TYPED (the same CompiledLaneUnavailableError the executor maps). Plain
+    lanes keep the gw#555 never-raise miss policy (eager)."""
     from .models.loading import pipeline_weight_lane
 
-    if pipeline_weight_lane(pipe).startswith("w8a8"):
+    lane = pipeline_weight_lane(pipe)
+    if lane.startswith(("w8a8", "w4a4")):
         raise cc.CompiledLaneUnavailableError(
-            f"W8A8 requires a compile cell and the local mint is "
-            f"unavailable ({reason})")
+            f"{lane[:4].upper()} requires a compile cell and the local mint "
+            f"is unavailable ({reason})")
     return False
 
 
@@ -305,7 +306,7 @@ def enable_compiled(
                 _say(f"local-cells: cell_selection_bug: {exc}")
                 reason = f"cell_selection_bug: {exc}"
             except cc.CompiledLaneUnavailableError:
-                reason = "seed/arm failed (w8a8 fail-closed)"
+                reason = "seed/arm failed (quantized-lane fail-closed)"
         _say(f"local-cells: stored cell no longer matches ({reason}); re-minting")
 
     if not cc.toolchain_present():

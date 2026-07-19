@@ -174,7 +174,7 @@ def test_cell_pick_is_lane_and_bucket_exact() -> None:
     plain_l32 = f"_system/family-{fam}#inductor-h100-sxm-torch2.13-lora32"
 
     def pick(ref: str, *, w8a8_lane: bool, bucket: int) -> bool:
-        return _cell_lane_matches(ref, fam, wants_w8a8=w8a8_lane, want_bucket=bucket)
+        return _cell_lane_matches(ref, fam, want_lane="w8a8" if w8a8_lane else "", want_bucket=bucket)
 
     # branchless w8a8 endpoint: exactly the branchless w8a8 cell
     assert pick(w8a8, w8a8_lane=True, bucket=0)
@@ -191,7 +191,14 @@ def test_cell_pick_is_lane_and_bucket_exact() -> None:
     assert not pick(plain, w8a8_lane=False, bucket=32)
     # wrong family never matches
     assert not _cell_lane_matches(
-        w8a8_l128, "sdxl", wants_w8a8=True, want_bucket=128)
+        w8a8_l128, "sdxl", want_lane="w8a8", want_bucket=128)
+    # w4a4 (gw#540): mandated-lane exactness, and plain endpoints never
+    # fetch a quantized-lane cell
+    w4a4 = f"_system/family-{fam}#inductor-rtx-5090-torch2.13-w4a4"
+    assert _cell_lane_matches(w4a4, fam, want_lane="w4a4", want_bucket=0)
+    assert not _cell_lane_matches(w4a4, fam, want_lane="w8a8", want_bucket=0)
+    assert not _cell_lane_matches(w4a4, fam, want_lane="", want_bucket=0)
+    assert not _cell_lane_matches(w8a8, fam, want_lane="w4a4", want_bucket=0)
 
 
 def test_rank_buckets_cover_declared_cells() -> None:

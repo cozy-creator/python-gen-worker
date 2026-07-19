@@ -1184,6 +1184,38 @@ def load_from_pretrained(
             components=components,
             fp8_text_encoders=storage_dtype == "fp8+te",
         )
+    # W4A4 nvfp4 flavors (gw#540): packed fp4 weights WITH two-level scales
+    # take the blockwise fp4 scaled_mm lane on Blackwell (sm_100+); other
+    # qualifying hosts dequant once to bf16-resident. Disjoint from w8a8
+    # detection (uint8 vs e4m3 weights) and from scale-free trees.
+    from .w4a4 import (
+        detect_w4a4_artifact,
+        load_w4a4_pipeline,
+        load_w4a4_root_pipeline,
+    )
+
+    w4a4_art = detect_w4a4_artifact(Path(path))
+    if w4a4_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        compute = None
+        if dtype:
+            try:
+                compute = get_torch_dtype(dtype)
+            except ImportError:
+                pass
+        if storage_dtype == "fp8+te":
+            logger.warning(
+                "storage_dtype=fp8+te ignored on the w4a4 lane (gw#540 v1: "
+                "denoiser-only quantization)")
+        if not w4a4_art.component:
+            if components:
+                logger.warning(
+                    "preloaded components ignored on the root w4a4 lane")
+            return load_w4a4_root_pipeline(
+                cls, Path(path), w4a4_art, compute_dtype=compute)
+        return load_w4a4_pipeline(
+            cls, Path(path), w4a4_art, compute_dtype=compute,
+            components=components,
+        )
     gguf_art = detect_gguf_snapshot(Path(path))
     if gguf_art is not None and callable(getattr(cls, "from_pretrained", None)):
         gguf_file, qtype = gguf_art
