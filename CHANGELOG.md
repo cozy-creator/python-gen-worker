@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.38.1 (2026-07-19)
+
+- **gw#588: reconcile resident low-VRAM prep mode to the cell's traced
+  mode.** `off` and `vae_only` are both fully-CUDA-resident preps differing
+  only in the vae-slicing/vae-tiling/attention-slicing flag groups. When a
+  delivered cell's `low_vram_mode` and the pipeline's current mode are both
+  resident and differ, both consumer arm paths (`enable()` + hot adopt) now
+  converge the pipeline to the cell's traced mode before the drift check
+  instead of refusing — the ie#501 run-18 mandatory-w8a8 starvation
+  (producer mints alone → 'off'; multi-lane serve load → 'vae_only').
+  Offload-mode drift keeps refusing: genuinely different graphs/residency.
+
 ## 0.38.0 (2026-07-18)
 
 - **gw#590: root w8a8 generality — nested multi-set layouts, weight-set
