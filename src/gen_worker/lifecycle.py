@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 _VRAM_QUANTUM_FRACTION = 0.05  # quantize free-VRAM deltas to 5% of total
 
+# gw#591 boot-setup watcher: poll cadence for hub-delivered snapshots of
+# functions the startup scan left awaiting (store lookups are local + cheap).
+_BOOT_SETUP_WATCH_INTERVAL_S = 2.0
+
 
 def probe_hardware() -> Dict[str, Any]:
     """Static hardware facts + gate inputs. torch is optional."""
@@ -96,6 +100,7 @@ class Lifecycle:
         # mere membership) so a runtime ladder demotion (gw#463) re-emits.
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
+        self._boot_setup_watch: Optional[asyncio.Task] = None
         self._drain_deadline_at: Optional[float] = None
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
@@ -486,8 +491,45 @@ class Lifecycle:
                 "check that the release has resolved desired bindings for these refs",
                 "; ".join(f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())),
             )
+            # gw#591: the hub's desired-disk plan delivers those snapshots
+            # seconds later, but nothing re-ran setup — the function sat in
+            # loading_functions forever while the hub dispatches only to
+            # advertised functions (each side waiting on the other; found
+            # live, ie#519). Finish boot setup the moment the refs land.
+            self._boot_setup_watch = asyncio.create_task(
+                self._setup_awaiting_functions(awaiting_hub),
+                name="boot-setup-watch")
 
         await self.set_phase(pb.WORKER_PHASE_READY)
+
+    async def _setup_awaiting_functions(
+        self, awaiting: Dict[str, List[str]]
+    ) -> None:
+        """Complete boot setup for functions whose tensorhub snapshots arrive
+        via hub delivery after the startup scan (gw#591), then push a
+        StateDelta so ``available_functions`` advertises them."""
+        pending = {fn: list(refs) for fn, refs in awaiting.items()}
+        while pending and not self.draining:
+            for fn in sorted(pending):
+                left = [r for r in pending[fn]
+                        if self.executor.store.local_path(r) is None]
+                if left:
+                    pending[fn] = left
+                    continue
+                del pending[fn]
+                spec = self.executor.specs.get(fn)
+                if spec is None or fn in self.executor.unavailable:
+                    continue
+                try:
+                    await self.executor.ensure_setup(spec)
+                    logger.info(
+                        "boot setup of %s completed after hub snapshot "
+                        "delivery (gw#591)", fn)
+                except Exception as exc:
+                    logger.error("startup setup of %s failed: %s", fn, exc)
+                await self.maybe_send_state_delta()
+            if pending:
+                await asyncio.sleep(_BOOT_SETUP_WATCH_INTERVAL_S)
 
     # ---- drain -------------------------------------------------------------------
 

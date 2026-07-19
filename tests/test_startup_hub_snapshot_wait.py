@@ -101,3 +101,65 @@ def test_startup_does_not_log_when_nothing_waits_on_hub(caplog, tmp_path, monkey
 
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert not any("waiting on hub-supplied snapshots" in m for m in msgs), msgs
+
+
+def test_boot_setup_completes_when_hub_snapshots_arrive(tmp_path, monkeypatch) -> None:
+    """gw#591 (found live, ie#519): the hub's desired-disk plan delivers the
+    awaited snapshots seconds after the startup scan; the watcher must finish
+    setup then, advertise the function, and push a StateDelta — without it the
+    worker sits at fns=[] loading=[fn] forever while the hub dispatches only
+    to advertised functions."""
+    import gen_worker.lifecycle as lifecycle_mod
+
+    monkeypatch.setattr(lifecycle_mod, "_BOOT_SETUP_WATCH_INTERVAL_S", 0.02)
+
+    ran: list[str] = []
+
+    class Endpoint:
+        def setup(self, model: str) -> None:
+            ran.append("setup")
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out(y=payload.x)
+
+    spec = EndpointSpec(
+        name="generate", method=Endpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=Endpoint,
+        attr_name="run", models={"model": Hub("tensorhub/anima")},
+    )
+    ex = Executor([spec], _noop_send)
+    lc = Lifecycle(Settings(orchestrator_public_addr="localhost:1"), ex)
+    lc.hardware = {"gpu_count": 1, "gpu_total_mem": 32 * 1024**3,
+                   "gpu_free_mem": 30 * 1024**3, "gpu_sm": "90", "installed_libs": []}
+
+    deltas: list[bool] = []
+
+    async def _fake_delta(**kwargs):  # noqa: ANN003
+        deltas.append(True)
+
+    monkeypatch.setattr(lc, "maybe_send_state_delta", _fake_delta)
+
+    async def _fake_setup(s, snapshots=None):  # noqa: ANN001
+        ran.append(f"ensure_setup:{s.name}")
+        rec = ex._classes[s.instance_key]
+        rec.ready = True
+        return None
+
+    monkeypatch.setattr(ex, "ensure_setup", _fake_setup)
+
+    async def _scenario() -> None:
+        await lc.startup()
+        # Still waiting: the ref is not local, setup has not run.
+        assert ex.loading_functions() == ["generate"]
+        assert ran == []
+        # The hub's disk plan lands the snapshot.
+        monkeypatch.setattr(ex.store, "local_path", lambda ref: tmp_path)
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            if ex.available_functions() == ["generate"]:
+                break
+        assert ex.available_functions() == ["generate"]
+        assert "ensure_setup:generate" in ran
+        assert deltas, "StateDelta push expected after late boot setup"
+
+    asyncio.run(_scenario())
