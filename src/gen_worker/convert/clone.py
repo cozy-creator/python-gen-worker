@@ -626,6 +626,22 @@ _DTYPE_STORAGE_BITS = {
 }
 
 
+def _hf_plan_looks_like_ltx2(plan: Any) -> bool:
+    """Pre-download family hint mirroring run_clone's post-download
+    ``ltx2_native`` check (gw#592), using ONLY the file-listing paths
+    ``plan_huggingface`` already has (no bytes fetched yet). LTX-2 root
+    checkpoint filenames (``ltx-2.3-22b-dev.safetensors``) carry the "ltx2"
+    token themselves, so :func:`layout.infer_model_family_variant_from_hint`
+    resolves it from paths alone — the same signal
+    ``detect_huggingface_source_layout`` uses post-download."""
+    from .layout import infer_model_family_variant_from_hint
+
+    for p in getattr(plan, "paths", None) or ():
+        if infer_model_family_variant_from_hint(str(p)) == "ltx2":
+            return True
+    return False
+
+
 def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
     """Fail fast when the disk cannot fit the clone. The source plan knows
     every selected file's size before a byte is downloaded (HF list_repo_tree
@@ -654,12 +670,26 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             attrs = {"file_layout": "singlefile", "file_type": source_type}
             if source_type == "gguf":
                 strategy = "gguf"
+        # gw#592/gw#593: run_clone routes strategy="aio_singlefile" LTX-2
+        # sources through publish_as_is (no diffusers pipeline exists for the
+        # family; the te#70 trainer resolves the native singlefile snapshot
+        # directly) regardless of the requested output layout — but this
+        # preflight only sees the pre-download classification, which has no
+        # ltx2_native concept, so it was estimating a full layout-repack +
+        # materialized-dtype-tree budget (388GB for a 43GB source) for a
+        # clone that actually only ever needs the source bytes + margin.
+        # Found live: e2e#185 ltx-firstlight run 7, CloneDiskSpaceError on a
+        # 200GB pod for a 43GB LTX-2.3 dev-checkpoint clone.
+        ltx2_native = (
+            strategy == "aio_singlefile" and provider == "huggingface"
+            and _hf_plan_looks_like_ltx2(plan)
+        )
     except Exception:  # noqa: BLE001 — preflight is best-effort on odd plans
         return
     if source_bytes <= 0:
         return
 
-    if strategy in _PUBLISH_AS_IS_STRATEGIES:
+    if strategy in _PUBLISH_AS_IS_STRATEGIES or ltx2_native:
         required = source_bytes + _DISK_MARGIN_BYTES
         operation = f"{strategy} publishes the source tree directly"
     else:
