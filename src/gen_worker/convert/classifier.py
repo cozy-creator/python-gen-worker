@@ -36,6 +36,13 @@ _DTYPE_TAGS: dict[str, tuple[str, ...]] = {
     "fp8": ("fp8", "fp8_e4m3fn", "fp8-e4m3", "fp8_e5m2"),
 }
 _VARIANT_TAG_RE = re.compile(r"\.([a-z0-9_\-]+)\.safetensors$")
+# gw#593: _VARIANT_TAG_RE alone also matches a plain dotted version number
+# embedded in a filename ("ltx-2.3-22b-dev.safetensors" -> falsely captures
+# "3-22b-dev") — real repos outside the diffusers convention (Lightricks
+# LTX-2.3's root bundle: dev/distilled/distilled-lora/upscaler checkpoints,
+# each with its own "2.3"/"1.0"/"1.1" version token) hit this. Only a KNOWN
+# dtype token is a real variant suffix; every _DTYPE_TAGS value is one.
+_KNOWN_VARIANT_TAGS = frozenset(t for tags in _DTYPE_TAGS.values() for t in tags)
 _SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
 _OFFICIAL_INDEX_VARIANT_RE = re.compile(
     r"\.safetensors\.index\.([a-z0-9_-]+)\.json$",
@@ -115,16 +122,26 @@ def _variant_tag(path: str) -> str:
         stem = _SHARD_SUFFIX_RE.sub("", name.removesuffix(".safetensors"))
         name = stem + ".safetensors"
     m = _VARIANT_TAG_RE.search(name)
-    return m.group(1) if m else ""
+    if m is None:
+        return ""
+    tag = m.group(1)
+    # gw#593: reject anything that isn't a recognized dtype token — a bare
+    # regex match also fires on a filename's own dotted version number.
+    return tag if tag in _KNOWN_VARIANT_TAGS else ""
 
 
 def _index_variant_tag(path: str) -> str:
     name = path.rsplit("/", 1)[-1].lower()
+    tag = ""
     match = _OFFICIAL_INDEX_VARIANT_RE.search(name)
     if match is not None:
-        return match.group(1)
-    match = _LEGACY_INDEX_VARIANT_RE.search(name)
-    return match.group(1) if match is not None else ""
+        tag = match.group(1)
+    else:
+        match = _LEGACY_INDEX_VARIANT_RE.search(name)
+        if match is not None:
+            tag = match.group(1)
+    # gw#593: same guard as _variant_tag — only a recognized dtype token.
+    return tag if tag in _KNOWN_VARIANT_TAGS else ""
 
 
 def _dtype_of_tag(tag: str) -> str:

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.38.3 (2026-07-19)
+
+- **gw#593: classifier._variant_tag must not match embedded version numbers.**
+  A repo whose root safetensors filenames carry their own dotted version
+  number (`ltx-2.3-22b-dev.safetensors`) had that number misread as a
+  diffusers dtype-variant suffix, silently excluding the real checkpoint from
+  a multi-file bundle in favor of an unrelated smaller file. Now only a
+  recognized dtype token (bf16/fp16/fp32/fp8/...) counts as a variant tag;
+  everything else is untagged. Turns a silent wrong-file publish into a loud
+  refusal for oversized bundles instead.
+
 ## 0.38.2 (2026-07-19)
 
 - **gw#592: LTX-2.3 family detection + native publish routing.**
