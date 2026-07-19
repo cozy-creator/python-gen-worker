@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.38.6 (2026-07-19)
+
+- **gw#593 companion: publish_as_is's zero-cost passthrough never resharded
+  an oversized monolithic weight file.** `run_clone`'s `tree = source.dir`
+  shortcut (dtype already matches, no cast needed) bypasses
+  `build_flavor_tree` entirely — every one of ITS branches ends in
+  `_stage_oversize_safetensors` — so a source shipping ONE oversized
+  safetensors file with no HF-convention shards to begin with (exactly
+  `Lightricks/LTX-2.3`'s 46GB `ltx-2.3-22b-dev.safetensors`) was published
+  raw, and Tensorhub's commit API rejected it (`request_too_large: file
+  exceeds max_bytes_per_file`). Found live: e2e#185 ltx-firstlight run 8.
+  Now hardlinks into a scratch tree and reshards only when something is
+  actually oversize — the common case (already-sharded sources) stays the
+  zero-cost passthrough.
+
 ## 0.38.5 (2026-07-19)
 
 - **gw#592/gw#593 companion: disk preflight didn't know about LTX-2's
