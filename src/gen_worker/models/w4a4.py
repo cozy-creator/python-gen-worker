@@ -861,6 +861,7 @@ def quantize_tree_w4a4(
         shutil.rmtree(out_tree)
     shutil.copytree(src_tree, out_tree,
                     ignore=shutil.ignore_patterns("*.safetensors"))
+    total_quantized = 0
     for f in sorted(src_tree.rglob("*.safetensors")):
         rel = f.relative_to(src_tree)
         dst = out_tree / rel
@@ -889,7 +890,15 @@ def quantize_tree_w4a4(
             "quant_scheme": W4A4_FLAVOR, "calibration_corpus": "",
             "modelopt_version": "",
         })
+        total_quantized += quantized
         logger.info("w4a4 producer: %s — %d layers quantized", rel, quantized)
+    if not total_quantized:
+        # A pickle-only tree (no denoiser safetensors) or one with zero
+        # eligible Linears must refuse: writing quantization_config onto an
+        # unquantized copy poisons every downstream loader (te#44 shape).
+        shutil.rmtree(out_tree)
+        raise W4a4SnapshotError(
+            f"{src_tree} has no quantizable denoiser safetensors weights")
     cfg_path = out_tree / comp / "config.json"
     cfg = json.loads(cfg_path.read_text("utf-8")) if cfg_path.exists() else {}
     cfg["quantization_config"] = {
