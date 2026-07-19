@@ -36,10 +36,13 @@ class _Plan:
         strategy: str = "",
         attrs: dict[str, str] | None = None,
         paths: list[str] | None = None,
+        provider: str = "",
     ) -> None:
         self._sizes = sizes
         self._paths = paths or [f"f{i}.safetensors" for i in range(len(sizes))]
         self.classification = SimpleNamespace(strategy=strategy, attrs=attrs or {})
+        self.provider = provider
+        self.paths = self._paths
 
     def bank_files(self):
         return [
@@ -110,6 +113,58 @@ def test_preflight_passes_tiny_source(tmp_path: Path) -> None:
 
 def test_preflight_skips_when_plan_unavailable(tmp_path: Path) -> None:
     _preflight_disk(tmp_path, None, _specs())  # fail-open: download surfaces its own error
+
+
+def test_preflight_ltx2_singlefile_needs_only_source_plus_margin(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """gw#592/gw#593 companion: run_clone routes strategy='aio_singlefile'
+    LTX-2 sources through publish_as_is regardless of the requested output
+    layout (no diffusers pipeline exists for the family) -- but without this
+    fix, preflight had no ltx2_native concept and budgeted a full
+    layout-repack + materialized-dtype tree for a clone that only ever needs
+    the source bytes. Found live: e2e#185 run 7, CloneDiskSpaceError
+    (need ~388.8 GiB) on a real 43GB LTX-2.3 dev-checkpoint clone that
+    should only need ~45GB. Real filename (source_include-narrowed to the
+    ONE checkpoint) + real size."""
+    source_bytes = 46_149_344_974  # real ltx-2.3-22b-dev.safetensors size
+    plan = _Plan(
+        [source_bytes],
+        strategy="aio_singlefile",
+        attrs={"file_layout": "singlefile", "dtype": "bf16"},
+        paths=["ltx-2.3-22b-dev.safetensors"],
+        provider="huggingface",
+    )
+    # Requested {dtype bf16, layout diffusers} -- mismatched layout from the
+    # singlefile source, which (absent the ltx2_native carve-out) would send
+    # this down the materialized/repack disk-budget branch.
+    specs = _specs(dtype="bf16", layout="diffusers")
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=60 * 1024**3),  # fits source+margin, NOT the repack budget
+    )
+    _preflight_disk(tmp_path, plan, specs)  # must not raise
+
+
+def test_preflight_non_ltx2_singlefile_still_budgets_the_repack(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Guardrail: the ltx2 carve-out must not swallow the general singlefile
+    ->diffusers repack case (e.g. sdxl/flux/zimage) -- those genuinely need
+    the wider budget."""
+    plan = _Plan(
+        [50 * 1024**3],
+        strategy="aio_singlefile",
+        attrs={"file_layout": "singlefile", "dtype": "bf16"},
+        paths=["some-checkpoint-v1.safetensors"],
+        provider="huggingface",
+    )
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=60 * 1024**3),  # fits source+margin, NOT the repack budget
+    )
+    with pytest.raises(CloneDiskSpaceError):
+        _preflight_disk(tmp_path, plan, _specs(dtype="bf16", layout="diffusers"))
 
 
 def test_preflight_has_no_environment_headroom_override(tmp_path: Path, monkeypatch) -> None:

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.38.5 (2026-07-19)
+
+- **gw#592/gw#593 companion: disk preflight didn't know about LTX-2's
+  publish_as_is routing.** `run_clone` routes `strategy="aio_singlefile"`
+  LTX-2 sources through publish_as_is regardless of the requested output
+  layout (gw#592 — no diffusers pipeline exists for the family), but
+  `_preflight_disk` only sees the pre-download classification and had no
+  equivalent carve-out, so it budgeted a full layout-repack +
+  materialized-dtype-tree estimate (388GB for a 43GB source) for a clone
+  that only ever needs the source bytes + margin. Preflight now derives the
+  same LTX-2 hint from the pre-download file listing
+  (`layout.infer_model_family_variant_from_hint` on each path — the
+  filename itself carries the "ltx2" token) and applies the
+  publish-as-is budget. Found live: e2e#185 ltx-firstlight run 7,
+  `CloneDiskSpaceError` on a real 43GB LTX-2.3 dev-checkpoint clone.
+
 ## 0.38.4 (2026-07-19)
 
 - **gw#593 item 2: `source_include` — explicit source-file selection on the
