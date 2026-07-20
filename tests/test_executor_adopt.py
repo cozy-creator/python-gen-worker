@@ -1605,9 +1605,14 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
         }))
 
 
-def test_w8a8_without_exact_cell_fails_before_pipeline_load_or_handler(
+def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     tmp_path, monkeypatch,
 ):
+    """gw#587: a mandatory-lane miss no longer fail-closes before load — the
+    worker proceeds to load and SELF-MINTS its own cell. In a CUDA-less test
+    env the mint is impossible, so the quantized lane's typed refusal fires
+    from the self-mint exit (never a silent eager serve), and the function
+    still lands in the same compile_cell_failed unavailable class."""
     import gen_worker.executor as executor_mod
 
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
@@ -1620,6 +1625,8 @@ def test_w8a8_without_exact_cell_fails_before_pipeline_load_or_handler(
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     loads = []
+    pipe = _Pipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
 
     async def _download(ref, **kwargs):
         return model_dir
@@ -1628,17 +1635,16 @@ def test_w8a8_without_exact_cell_fails_before_pipeline_load_or_handler(
     monkeypatch.setattr(
         provision,
         "load_slot",
-        lambda *args, **kwargs: loads.append(1) or pytest.fail(
-            "missing W8A8 cell must fail before pipeline/GPU setup"),
+        lambda *args, **kwargs: loads.append(1)
+        or provision.SlotLoad(obj=pipe, is_pipeline=True),
     )
     _ColdEndpoint.setups = _ColdEndpoint.warmups = _ColdEndpoint.runs = 0
 
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="no exact W8A8"):
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="self-mint is unavailable"):
         asyncio.run(ex.ensure_setup(
             spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
-    assert loads == []
-    assert _ColdEndpoint.setups == 0
-    assert _ColdEndpoint.warmups == 0
+    # The load is the mint's precondition now (the boot warmup IS the mint).
+    assert loads == [1]
     assert _ColdEndpoint.runs == 0
     assert ex.unavailable[spec.name][0] == "compile_cell_failed"
 
@@ -1745,12 +1751,23 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
         return model_dir
 
     monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    pipe = _Pipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
     snapshot = pb.Snapshot(digest=MODEL_DIGEST)
     desired = pb.DesiredInstance(
         function_name=spec.name,
         models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
     )
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="no exact W8A8"):
+    # gw#587: the miss proceeds to the self-mint, IGNORING the inherited
+    # local/producer env cells (if the env were honored this would arm and
+    # succeed); in a CUDA-less env the typed quantized refusal fires from
+    # the self-mint exit.
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="self-mint is unavailable"):
         asyncio.run(ex.ensure_desired_instance(
             desired, {model_ref: snapshot},
         ))
@@ -1994,7 +2011,14 @@ def test_desired_plain_cell_change_vacates_then_rebuilds(
             second.active_compile_snapshot_digest) == (cell_b, DIGEST_B)
 
 
-def test_missing_desired_w8a8_cell_removes_old_ready_target(tmp_path, monkeypatch):
+def test_missing_desired_w8a8_cell_keeps_workers_own_armed_target(tmp_path, monkeypatch):
+    """gw#587 flips this outcome BY DESIGN: cells are worker-owned (th#883
+    pull-by-key + self-mint), so a hub delivery that does NOT attach the
+    cell is no longer authority to tear down a worker's own armed, proven
+    target — the worker minted (or can re-mint) that cell itself.
+    Invalidation still flows through the real channels (adoption ops,
+    artifact_drift, cell_selection_bug), never through non-delivery.
+    Pre-gw#587 this asserted the fail-closed teardown."""
     spec = replace(
         _spec(), models={"pipeline": Hub(
             "acme/klein-finetune", flavor="fp8-w8a8")})
@@ -2002,11 +2026,10 @@ def test_missing_desired_w8a8_cell_removes_old_ready_target(tmp_path, monkeypatc
     _active_w8a8_target(ex)
     model_ref = wire_ref(spec.models["pipeline"])
 
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="no exact W8A8"):
-        asyncio.run(ex.ensure_setup(
-            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
-    assert ex.compile_targets() == []
-    assert not ex._classes[spec.instance_key].ready
+    asyncio.run(ex.ensure_setup(
+        spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert len(ex.compile_targets()) == 1
+    assert ex._classes[spec.instance_key].ready
 
 
 def test_concurrent_same_ref_setups_keep_each_loaded_snapshot_identity(

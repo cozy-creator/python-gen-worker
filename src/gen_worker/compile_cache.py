@@ -1922,6 +1922,91 @@ def build(
     return artifact, meta, timings
 
 
+def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -> None:
+    """Cold-compile ``pipe`` over the declared shape table (the only part of
+    a mint that needs CUDA + a toolchain). ``guard=False``: a failing warm
+    call must fail the mint — a silently-eager capture must never be saved."""
+    _say = say if callable(say) else (lambda msg: logger.info("%s", msg))
+    if not apply(pipe, cfg, cache_ready=False, guard=False, allow_cold=True):
+        raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
+    import torch
+
+    decode = any(t.startswith("vae") for t in cfg.targets)
+    for shape in cfg.shapes:
+        torch.cuda.synchronize()
+        t0 = time.monotonic()
+        _warm_call(
+            pipe, shape, steps=steps,
+            prompt="cache warm-up: a lighthouse on a cliff at dawn, detailed",
+            decode=decode,
+            guidance_scales=getattr(cfg, "guidance_scales", ()),
+        )
+        torch.cuda.synchronize()
+        shape_key = "x".join(str(v) for v in shape)
+        _say(f"  compiled {shape_key} in {time.monotonic() - t0:.0f}s")
+
+
+def mint_artifact(
+    pipe: Any,
+    cfg: Any,
+    family: str,
+    target: Path,
+    capture: Path,
+    *,
+    steps: int = 2,
+    say: Any = None,
+) -> Dict[str, Any]:
+    """Self-mint (gw#555/gw#587): compile THIS pipeline over its declared
+    shape table, capture the inductor/triton output, and pack the production
+    artifact atomically at ``target``. Returns the stamped metadata (incl.
+    the cell key its axes describe).
+
+    The capture uses the production artifact recipe end to end
+    (``capture_env`` -> warm the shape table -> ``artifact_metadata`` ->
+    deterministic ``pack``), so the saved cell is byte-compatible with a
+    delivered one and adopts through the identical code path. Shared by the
+    cozy-local store mint and the fleet self-mint
+    (fleet_cells) — ONE mint brain, different publish sinks.
+
+    ``guard=False`` on the warm calls: a failing warm call must fail the
+    mint — a silently-eager capture must never be saved.
+    """
+    _say = say if callable(say) else (lambda msg: logger.info("%s", msg))
+    capture_env(capture)
+    _compile_and_warm(pipe, cfg, steps=steps, say=_say)
+
+    captured = [p for p in (capture / "inductor").rglob("*") if p.is_file()]
+    if not captured:
+        raise RuntimeError(
+            "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR"
+        )
+    from .models.loading import pipeline_weight_lane
+    from .models.memory import low_vram_mode
+
+    # gw#564: record the execution contract exactly like the production
+    # build — w8a8 cells are contract_drift-gated on the graph signature and
+    # weight-lane manifest, so a mint without them can never re-adopt.
+    graph_signature, weight_contract = execution_contract(pipe, cfg)
+    meta = artifact_metadata(
+        family=family,
+        source_ref="self-mint",
+        shapes=cfg.shapes,
+        targets=cfg.targets,
+        guidance_scales=getattr(cfg, "guidance_scales", ()),
+        low_vram_mode=low_vram_mode(pipe),
+        compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
+        weight_lane=pipeline_weight_lane(pipe),
+        lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
+        graph_signature=graph_signature,
+        weight_contract=weight_contract,
+    )
+    tmp = target.with_suffix(".part")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pack(capture, tmp, meta)
+    os.replace(tmp, target)
+    return meta
+
+
 __all__ = [
     "ARTIFACT_FORMAT",
     "AdoptError",
@@ -1953,6 +2038,7 @@ __all__ = [
     "lane_bucket",
     "lane_token",
     "lane_drift",
+    "mint_artifact",
     "mode_drift",
     "pack",
     "prepare",

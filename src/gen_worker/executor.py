@@ -76,6 +76,7 @@ from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 
 if typing.TYPE_CHECKING:
+    from . import fleet_cells
     from .models.hub_client import WorkerResolvedRepo
     from .models.serve_fit import ServePlan
 from .request_context import (
@@ -4064,10 +4065,16 @@ class Executor:
             candidates = trt_candidates or inductor_candidates
         candidates = sorted(candidates, key=lambda item: item[0])
         if want_lane and not candidates:
-            raise compile_cache.CompiledLaneUnavailableError(
-                f"no exact {want_lane.upper()} Forge cell attached for "
-                f"family={family!r} lora_bucket={want_bucket}"
-            )
+            # gw#587: the fail-closed cell WAIT is retired. A mandatory-lane
+            # key with no delivered cell proceeds to load and SELF-MINTS in
+            # _enable_compiled (the boot warmup is the mint); the quantized
+            # lane's typed refusal now fires only when the mint itself is
+            # impossible (fleet_cells._fail_closed).
+            logger.info(
+                "no %s cell attached for family=%r lora_bucket=%d — "
+                "proceeding to self-mint (gw#587)",
+                want_lane.upper(), family, want_bucket)
+            return None
         if len(candidates) > 1:
             refs = ", ".join(ref for ref, _snap in candidates)
             detail = (
@@ -4501,10 +4508,35 @@ class Executor:
         )
         return True
 
+    def _cell_publisher(self) -> "fleet_cells.CellPublisher":
+        """The fleet publish sink for self-minted cells (gw#587/th#910).
+        Built per call: file_base_url arrives with HelloAck and the worker
+        JWT rotates (#561). ``enabled()`` is false until both exist."""
+        from . import fleet_cells
+
+        return fleet_cells.CellPublisher(
+            base_url=self.file_base_url,
+            worker_jwt=self.worker_jwt_provider,
+            image_digest=str(
+                getattr(self._settings, "worker_image_digest", "") or ""),
+        )
+
     def _enable_compiled(self, pipe: Any, cfg: Any, artifact: Optional[Path]) -> bool:
-        """Arm the best available compiled path for a freshly loaded pipeline
-        (shared with the local CLI — provision.enable_compiled)."""
-        return provision.enable_compiled(pipe, cfg, self.store._cache_dir, artifact)
+        """Arm the best available compiled path for a freshly loaded pipeline.
+
+        gw#587: delivered cell first (unchanged semantics incl. the
+        cell_selection_bug invariant), SELF-MINT on miss — the boot warmup
+        compiles the real serving graphs once, serves compiled immediately,
+        and publishes through the hub's attested gate so the next worker on
+        this key is store-served. Eager fallback and the fail-closed cell
+        wait are gone for reachable mints; genuine mint impossibilities
+        keep the old miss policy (plain=eager, quantized=typed refusal)."""
+        from . import fleet_cells
+
+        return fleet_cells.enable_compiled(
+            pipe, cfg, self.store._cache_dir, artifact,
+            publisher=self._cell_publisher(),
+        )
 
     @staticmethod
     def _vram_allocated() -> int:

@@ -323,11 +323,16 @@ def test_hub_delivery_selects_delivered_cell(tmp_path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. w8a8 without a delivered cell fails LOUD, never the silent boot bail
+# 3. w8a8 without a delivered cell still fails LOUD when the arm is unproven
 # ---------------------------------------------------------------------------
 
 
 def test_w8a8_setup_without_cell_fails_loud(tmp_path, monkeypatch) -> None:
+    """gw#587 moved the refusal, not the invariant: a mandatory-lane miss no
+    longer fail-closes BEFORE load (the worker proceeds to self-mint, which
+    requires the loaded pipeline — tenant setup necessarily runs), but an
+    armed compile object that cannot PROVE itself on the warmup still
+    refuses typed and loud — never a silent eager serve."""
     setup_calls: List[str] = []
     ex, _sent, _enables = _harness(tmp_path, monkeypatch,
                                    [_compile_spec(setup_calls)])
@@ -341,7 +346,10 @@ def test_w8a8_setup_without_cell_fails_loud(tmp_path, monkeypatch) -> None:
     with pytest.raises(cc.CompiledLaneUnavailableError, match="W8A8"):
         asyncio.run(ex.ensure_desired_instance(
             desired, {RESOLVED_REF: _snapshot("aa" * 32)}))
-    assert setup_calls == [], "setup must fail before tenant code runs"
+    # The load/setup ran (the self-mint's precondition); the typed refusal
+    # fired at the proof gate, so nothing was ever advertised.
+    assert len(setup_calls) == 1
+    assert "generate" not in ex.available_functions()
 
 
 # ---------------------------------------------------------------------------
