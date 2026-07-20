@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.39.4 (2026-07-20)
+
+- **gw#603: custom-warmup proof attributes to contract-compatible sibling
+  functions; `warmup={...: None}` aliases stay fail-closed.** Live-found by
+  the gw#587 proof rerun: the previous single-name attribution made any
+  custom-warmup class with 2+ warmable mandatory-lane aliases (LTX
+  generate/edit/extend) unbootable compiled on >=0.38.8 — delivered cells
+  included. Proof is now a property of the warmed OBJECT and the graph set
+  actually exercised: a proven object certifies every sibling alias sharing
+  its family, lora bucket, execution-contract digest, and bindings, except
+  explicitly opted-out aliases (the legacy-Turbo carve-out, revert-turns-red
+  pinned). Non-custom (decorator/synthesized) warmup semantics unchanged;
+  per-call guarded degradation + hit/miss telemetry remain the runtime
+  backstop.
+
 ## 0.39.3 (2026-07-20)
 
 - **gw#587 prove-produces-the-mint: the self-mint captures the executor's
