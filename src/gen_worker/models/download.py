@@ -45,8 +45,7 @@ ProgressFn = Callable[[int, Optional[int]], None]
 #
 # ONE keying function (gw#492) normalizes both index keys and lookups —
 # replacing the old raw/stripped/tag-removed fallback chain and its
-# `_binding_canonical_ref` twin. Keys are flavor-granular (a dispatch table
-# may bind two providers to one repo name via different flavors) with a
+# `_binding_canonical_ref` twin. Keys are flavor-granular, with a
 # repo-identity fallback so hub-minted picks of NEW flavors (`#svdq-int4`)
 # still route to their repo's provider.
 # ---------------------------------------------------------------------------
@@ -116,11 +115,6 @@ def _collect_binding_entries(bindings: Any) -> list[dict[str, Any]]:
         return out
     for entry in bindings.values():
         if not isinstance(entry, dict):
-            continue
-        if str(entry.get("kind") or "").strip() == "dispatch":
-            table = entry.get("table")
-            if isinstance(table, dict):
-                out.extend(sub for sub in table.values() if isinstance(sub, dict))
             continue
         if entry.get("ref"):
             out.append(entry)
