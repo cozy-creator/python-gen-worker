@@ -42,6 +42,7 @@ this page covers the worker itself.
 | `HF_HOME` | `hf_home` | HF cache root (also read by huggingface_hub itself) |
 | `TENSORHUB_URL` | `tensorhub_url` | standalone-CLI resolve base URL |
 | `TENSORHUB_CACHE_DIR` / `TENSORHUB_CAS_DIR` | `tensorhub_cache_dir` / `tensorhub_cas_dir` | move cache/CAS off `/tmp` (cozy local persistence); `CAS_DIR` also isolates the `cli/run.py` standalone CLI in tests |
+| `TENSORHUB_FILL_SOURCE_DIR` | `tensorhub_fill_source_dir` | th#850 managed-tier ruling: an endpoint-scoped datacenter-warm CAS mount (RunPod volume), checked before R2 on a blob miss and write-through warmed from R2. Never the CAS root — that always stays `TENSORHUB_CACHE_DIR`/local. tensorhub sets this only when a volume is attached; ismount-guarded, so a plain directory never gets mistaken for it |
 
 ## C2PA Content Credentials (Settings fields, th#714)
 

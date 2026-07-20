@@ -530,7 +530,7 @@ class ModelOp(_message.Message):
     def __init__(self, op: _Optional[_Union[ModelOpKind, str]] = ..., ref: _Optional[str] = ..., snapshot: _Optional[_Union[Snapshot, _Mapping]] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ...) -> None: ...
 
 class ModelEvent(_message.Message):
-    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s", "host_ram_required_bytes", "host_ram_available_before_bytes", "host_ram_available_after_bytes", "host_ram_evicted_refs", "host_ram_capacity_generation", "snapshot_digest", "residency_generation", "operation_id", "target_incarnation_id")
+    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s", "host_ram_required_bytes", "host_ram_available_before_bytes", "host_ram_available_after_bytes", "host_ram_evicted_refs", "host_ram_capacity_generation", "snapshot_digest", "residency_generation", "operation_id", "target_incarnation_id", "network_bytes")
     REF_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -550,6 +550,7 @@ class ModelEvent(_message.Message):
     RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
     TARGET_INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
+    NETWORK_BYTES_FIELD_NUMBER: _ClassVar[int]
     ref: str
     state: ModelState
     vram_bytes: int
@@ -569,7 +570,8 @@ class ModelEvent(_message.Message):
     residency_generation: int
     operation_id: str
     target_incarnation_id: str
-    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ...) -> None: ...
+    network_bytes: int
+    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ..., network_bytes: _Optional[int] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")

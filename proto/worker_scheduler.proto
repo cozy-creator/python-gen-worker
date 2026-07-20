@@ -550,6 +550,15 @@ message ModelEvent {
   // one later causal compiled-runtime FAILED; empty on boot-attached cells and
   // ordinary model events.
   string target_incarnation_id = 19;
+  // th#850 managed-tier fill hierarchy (gw#599): bytes actually fetched over
+  // the network (R2 origin) to produce this ON_DISK transition, as opposed
+  // to bytes served from a warm local-disk or endpoint-volume cache hit. Set
+  // on every fresh materialization's ON_DISK event, including an explicit 0
+  // — pair with the DOWNLOADING events' bytes_total for this ref to read
+  // "warm boot ⇒ ~0 R2 bytes". Additive: old workers never set it, which a
+  // receiver must treat as identity unknown (same convention as
+  // snapshot_digest/residency_generation above), never as a verified zero.
+  int64 network_bytes = 20;
 }
 
 enum ModelState {

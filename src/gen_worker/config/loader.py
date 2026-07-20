@@ -42,6 +42,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "TENSORHUB_TOKEN": "tensorhub_token",
     "TENSORHUB_CACHE_DIR": "tensorhub_cache_dir",
     "TENSORHUB_CAS_DIR": "tensorhub_cas_dir",
+    "TENSORHUB_FILL_SOURCE_DIR": "tensorhub_fill_source_dir",
     "CIVITAI_API_KEY": "civitai_api_key",
     "GEN_WORKER_C2PA_CERT_PATH": "c2pa_cert_path",
     "GEN_WORKER_C2PA_KEY_PATH": "c2pa_key_path",
