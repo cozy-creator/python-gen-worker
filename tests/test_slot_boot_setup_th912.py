@@ -151,3 +151,42 @@ def test_raw_upstream_slot_default_never_queued_on_watcher() -> None:
 
     assert lc._boot_setup_watch is None, "a raw-upstream Slot default must not spawn a boot-setup watcher"
     assert setup_calls == []
+
+
+def test_mixed_slot_defaults_never_queued_on_watcher() -> None:
+    """th#927: a spec with BOTH a raw-upstream slot default (sdxl's Civitai
+    pipeline seed) and a tensorhub one (Hub vae) must not be watched — the
+    watcher would run `ensure_setup` on the unmodified spec once the
+    tensorhub refs land and self-fetch the raw default (mirror-first
+    violation; live civitai_not_found boot crash-loop)."""
+    setup_calls: List[Tuple[str, str]] = []
+
+    class Endpoint:
+        def setup(self, pipeline: str, vae: str) -> None:  # pragma: no cover
+            setup_calls.append(("generate", pipeline))
+
+        def generate(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out(pipeline_path="")
+
+    spec = EndpointSpec(
+        name="generate", method=Endpoint.generate, kind="inference",
+        payload_type=_In, output_mode="single", cls=Endpoint,
+        attr_name="generate",
+        models={
+            "pipeline": HF("th927-fixture/raw-model"),
+            "vae": Hub("th927-fixture/vae", tag="prod"),
+        },
+        slots={
+            "pipeline": Slot(str, selected_by="model",
+                             default_checkpoint=HF("th927-fixture/raw-model")),
+            "vae": Slot(str, default_checkpoint=Hub("th927-fixture/vae", tag="prod")),
+        },
+    )
+    ex = Executor([spec], _noop_send)
+    lc = Lifecycle(Settings(orchestrator_public_addr="localhost:1"), ex)
+    lc.hardware = _hardware()
+
+    asyncio.run(lc.startup())
+
+    assert lc._boot_setup_watch is None, "a mixed-default Slot spec must not spawn a boot-setup watcher"
+    assert setup_calls == []
