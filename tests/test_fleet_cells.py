@@ -100,11 +100,21 @@ def test_miss_mints_adopts_and_publishes(monkeypatch, tmp_path):
     monkeypatch.setattr(cc, "unwrap", lambda pipe: None)
     monkeypatch.setattr(cc, "enable", lambda *a, **k: True)
 
-    assert fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=pub)
+    outcome = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=pub)
+    assert outcome.armed
     assert published.wait(5), "publish attempt must be recorded on every miss"
     (family, artifact, meta) = calls[0]
     assert family == "fam"
     assert meta["cell_key"].startswith("ck1-")
+    # Serving-bootstrap identity (th#910 self-attested fence): the outcome
+    # carries the worker's OWN key ref + a self-attested artifact digest so
+    # the executor can advertise the mint exactly like a delivered cell.
+    mint = outcome.self_mint
+    assert mint is not None
+    assert mint.ref == f"_system/family-fam#{meta['cell_key']}"
+    assert mint.cell_key == meta["cell_key"]
+    assert mint.snapshot_digest.startswith("blake3:")
+    assert len(mint.snapshot_digest) == len("blake3:") + 64
 
 
 def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
@@ -142,7 +152,8 @@ def test_mint_impossible_keeps_quantized_typed_refusal(monkeypatch, tmp_path):
     monkeypatch.setattr(fc, "_cuda_ready", lambda: False)
 
     plain = _Pipe()
-    assert fc.enable_compiled(plain, _Cfg(), tmp_path, None, publisher=None) is False
+    outcome = fc.enable_compiled(plain, _Cfg(), tmp_path, None, publisher=None)
+    assert outcome.armed is False and outcome.self_mint is None
 
     w8a8 = _Pipe()
     setattr(w8a8, "_cozy_weight_lane", "w8a8")

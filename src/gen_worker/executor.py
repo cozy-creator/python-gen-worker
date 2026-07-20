@@ -1385,11 +1385,37 @@ class _CompileTargetRecord:
 
 @dataclass(frozen=True)
 class _CompileArtifactSelection:
-    """One immutable hub-attached cell selected before model setup."""
+    """One immutable compiled-artifact identity active on a pipeline.
+
+    ``self_mint=False``: a hub-attached (store-served) cell selected before
+    model setup — the gw#577 digest receipt governs it. ``self_mint=True``:
+    this worker's OWN boot-warmup mint (gw#587 serving bootstrap) — ref is
+    the worker's self-computed key ref and the digest is self-attested; the
+    warmup proof, not a store receipt, gates serving.
+    """
 
     path: Path
     ref: str
     snapshot_digest: str
+    self_mint: bool = False
+
+
+def _selection_for(
+    delivered: Optional["_CompileArtifactSelection"],
+    mint: Any,
+) -> Optional["_CompileArtifactSelection"]:
+    """The artifact identity a just-armed pipeline actually serves from.
+
+    A self-mint outcome WINS over the boot's delivered family selection —
+    when a delivered artifact failed to arm this object and the fleet policy
+    minted instead, recording the delivered identity would advertise bytes
+    this object does not serve (the gw#586 defect shape).
+    """
+    if mint is not None:
+        return _CompileArtifactSelection(
+            path=Path(mint.artifact), ref=str(mint.ref),
+            snapshot_digest=str(mint.snapshot_digest), self_mint=True)
+    return delivered
 
 
 @dataclass
@@ -3244,6 +3270,7 @@ class Executor:
                 # spec.compile is None.
                 arming_scope = provision.ArmingScope(
                     spec.compile, self.store._cache_dir, compile_artifact,
+                    enable=self._arming_enable,
                 )
                 with arming_scope:
                     if asyncio.iscoroutinefunction(setup):
@@ -3258,19 +3285,26 @@ class Executor:
                     slot for slot in setup_slots
                     if isinstance(inj.kwargs.get(slot), (str, Path))
                 )
+                scope_mints = arming_scope.self_mints
                 for pipe, armed in arming_scope.objects:
                     if not compile_cache.has_compile_target(pipe, spec.compile):
                         continue
                     inj.add_compile_object(pipe, self_loaded_slots)
-                    if armed and compile_selection is not None:
-                        inj.active_compile_artifacts[id(pipe)] = compile_selection
-                        if trt_engine.is_engine_ref(compile_selection.ref):
+                    selection = _selection_for(
+                        compile_selection, scope_mints.get(id(pipe)))
+                    if armed and selection is not None:
+                        inj.active_compile_artifacts[id(pipe)] = selection
+                        if trt_engine.is_engine_ref(selection.ref):
                             inj.trt_execution_before[id(pipe)] = (
                                 trt_engine.execution_count(pipe))
-            proves_inductor = bool(
-                compile_selection
-                and inj.active_compile_artifacts
-                and not trt_engine.is_engine_ref(compile_selection.ref)
+            # gw#587 serving bootstrap: the warmup PROOF gates every inductor
+            # arm — delivered (store-served) AND self-minted alike. Only the
+            # artifact SOURCE differs; a self-mint that does not actually
+            # serve its own warmup graphs must fail closed below exactly
+            # like a delivered cell that doesn't (never silent eager).
+            proves_inductor = any(
+                not trt_engine.is_engine_ref(sel.ref)
+                for sel in inj.active_compile_artifacts.values()
             )
             proof_before = {
                 id(candidate.pipeline): (
@@ -3280,6 +3314,8 @@ class Executor:
                 for candidate in inj.compile_objects
                 if proves_inductor
                 and id(candidate.pipeline) in inj.active_compile_artifacts
+                and not trt_engine.is_engine_ref(
+                    inj.active_compile_artifacts[id(candidate.pipeline)].ref)
             }
             warmup = getattr(instance, "warmup", None)
 
@@ -3407,10 +3443,16 @@ class Executor:
                     if int(getattr(spec.compile, "lora_bucket", 0) or 0):
                         compile_cache.drop_lora_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
-                if proven and compile_seconds >= _STORE_SERVED_COMPILE_ALARM_S:
+                if (
+                    proven
+                    and compile_selection is not None
+                    and compile_seconds >= _STORE_SERVED_COMPILE_ALARM_S
+                ):
                     # gw#587 runtime assertion: this boot ATTACHED a cell
-                    # (compile_selection is set — store-served, never a
-                    # self-mint) and at least one candidate proved a warm
+                    # (compile_selection is set — store-served; a MINTING
+                    # boot has compile_selection=None and legitimately
+                    # compiles, so it is exempt by the explicit gate above)
+                    # and at least one candidate proved a warm
                     # cache hit, yet the process burned real inductor compile
                     # wall time getting there. A delivered cell should cost
                     # ~0 here; this is the gw#586 defect class generalized —
@@ -4427,10 +4469,12 @@ class Executor:
                     from . import compile_cache
 
                     try:
-                        armed = await _to_thread_complete(
+                        outcome = await _to_thread_complete(
                             self._enable_compiled,
                             pipe, spec.compile, compile_artifact,
                         )
+                        armed = outcome.armed
+                        pipe_mint = outcome.self_mint
                     except compile_cache.CellSelectionBugError as exc:
                         # th#883 invariant: a SELF-REQUESTED, identity-
                         # verified cell failed to arm — by construction a
@@ -4466,14 +4510,16 @@ class Executor:
                             raise compile_cache.CompiledLaneUnavailableError(
                                 f"cell_selection_bug: {exc}") from exc
                         armed = False
+                        pipe_mint = None
 
                     if compile_cache.has_compile_target(pipe, spec.compile):
                         result.add_compile_object(pipe, (slot,))
-                        if armed and compile_selection is not None:
-                            result.active_compile_artifacts[id(pipe)] = compile_selection
+                        selection = _selection_for(compile_selection, pipe_mint)
+                        if armed and selection is not None:
+                            result.active_compile_artifacts[id(pipe)] = selection
                             from . import trt_engine
 
-                            if trt_engine.is_engine_ref(compile_selection.ref):
+                            if trt_engine.is_engine_ref(selection.ref):
                                 result.trt_execution_before[id(pipe)] = (
                                     trt_engine.execution_count(pipe))
                 delta = max(0, self._vram_allocated() - before)
@@ -4614,7 +4660,9 @@ class Executor:
                 getattr(self._settings, "worker_image_digest", "") or ""),
         )
 
-    def _enable_compiled(self, pipe: Any, cfg: Any, artifact: Optional[Path]) -> bool:
+    def _enable_compiled(
+        self, pipe: Any, cfg: Any, artifact: Optional[Path],
+    ) -> "fleet_cells.ArmOutcome":
         """Arm the best available compiled path for a freshly loaded pipeline.
 
         gw#587: delivered cell first (unchanged semantics incl. the
@@ -4623,11 +4671,31 @@ class Executor:
         and publishes through the hub's attested gate so the next worker on
         this key is store-served. Eager fallback and the fail-closed cell
         wait are gone for reachable mints; genuine mint impossibilities
-        keep the old miss policy (plain=eager, quantized=typed refusal)."""
+        keep the old miss policy (plain=eager, quantized=typed refusal).
+
+        Returns the fleet ``ArmOutcome``; a ``self_mint`` result is recorded
+        into ``active_compile_artifacts`` exactly like a delivered cell so
+        the warmup proof runs and the target advertises the worker's own
+        key ref (th#910 self-attested dispatch fence)."""
         from . import fleet_cells
 
         return fleet_cells.enable_compiled(
             pipe, cfg, self.store._cache_dir, artifact,
+            publisher=self._cell_publisher(),
+        )
+
+    def _arming_enable(
+        self, pipe: Any, cfg: Any, cache_dir: Optional[Path],
+        artifact: Optional[Path],
+    ) -> "fleet_cells.ArmOutcome":
+        """ArmingScope adapter: a self-loaded pipeline's ``arm_compile()``
+        gets the same fleet policy (delivered cell first, self-mint on miss)
+        as a worker-loaded slot. ``cache_dir`` comes from the scope, which
+        the executor constructed with its own store cache dir."""
+        from . import fleet_cells
+
+        return fleet_cells.enable_compiled(
+            pipe, cfg, cache_dir, artifact,
             publisher=self._cell_publisher(),
         )
 
