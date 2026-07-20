@@ -108,6 +108,16 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         ),
     )
     p.add_argument(
+        "--lane", dest="lane", default="",
+        help=(
+            "Execution lane (th#913 dual-form): a family 'bf16'|'fp8', or a "
+            "full descriptor like 'fp8-w8a8-dynamic+eager'. Default: auto "
+            "(the binding as declared). 'fp8' maps to the local cast lane; "
+            "'fp8-w8a8*' folds the #fp8-w8a8 flavor (must be published); "
+            "4bit lanes need an explicit ref#flavor instead."
+        ),
+    )
+    p.add_argument(
         "--pretty", action="store_true",
         help="Pretty-print the stdout result with newlines + 2-space indent.",
     )
@@ -662,6 +672,39 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
         set_slots(resolved, errors)
 
 
+def _apply_lane_to_bindings(bindings: Dict[str, Any], lane_str: str) -> Dict[str, Any]:
+    """th#913/gw#596: fold a --lane choice into the declared bindings.
+
+    bf16 = the declared base (no transform); fp8 family = the local cast
+    lane (per-layer fp8 storage); an explicit fp8-w8a8 descriptor folds the
+    #fp8-w8a8 flavor (fails loudly if unpublished at resolve time); 4bit
+    lanes need an exact ref#flavor and are refused here."""
+    from ..api.binding import rebind_pick
+    from ..models import lanes as lanespec
+
+    try:
+        req = lanespec.parse_lane_spec(lane_str)
+    except ValueError as e:
+        raise _UsageError(f"--lane: {e}") from None
+    if req.is_zero or req.family == lanespec.FAMILY_BF16:
+        return bindings
+    if req.family == lanespec.FAMILY_4BIT:
+        raise _UsageError(
+            "--lane: 4bit lanes carry rank/engine-specific flavor tokens; "
+            "bind the exact ref#flavor (e.g. '#svdq-int4-r128') instead.")
+    want_w8a8 = req.lane is not None and req.lane.activation == lanespec.ACT_W8A8
+    out: Dict[str, Any] = {}
+    for name, binding in bindings.items():
+        try:
+            if want_w8a8:
+                out[name] = rebind_pick(binding, flavor="fp8-w8a8")
+            else:
+                out[name] = rebind_pick(binding, cast="fp8")
+        except (ValueError, TypeError):
+            out[name] = binding  # non-foldable source (HF flavor etc.) — declared as-is
+    return out
+
+
 def dispatch_request(
     *,
     selected: _SelectedFunction,
@@ -877,6 +920,11 @@ def _run_inner(args: argparse.Namespace) -> int:
         method_name=args.method_name,
         default_name=getattr(mod, "__name__", "").split(".", 1)[0],
     )
+
+    # th#913/gw#596: optional human lane choice, mapped onto the bindings
+    # before resolution (the ladder twin's local expansion).
+    if getattr(args, "lane", ""):
+        selected.bindings = _apply_lane_to_bindings(selected.bindings, args.lane)
 
     # Ergonomic `field=value` tokens -> payload bytes (coerced via the function's
     # msgspec type), merged over any --payload base.

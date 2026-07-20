@@ -50,12 +50,12 @@ def test_apply_model_resolutions_rebinds_flavor_and_cast() -> None:
     assert base_ref == "acme/z-image"
 
     # Stored-flavor pick: the binding folds the resolved flavor.
-    ex.apply_model_resolutions({base_ref: ("acme/z-image#svdq-int4-r128", "")})
+    ex.apply_model_resolutions({base_ref: ("acme/z-image#svdq-int4-r128", "", "")})
     assert wire_ref(spec.models["pipeline"]) == "acme/z-image#svdq-int4-r128"
     assert spec.models["pipeline"].storage_dtype == ""
 
     # Full-replace: a new map with a cast-only pick reverts the flavor.
-    ex.apply_model_resolutions({base_ref: ("acme/z-image", "fp8")})
+    ex.apply_model_resolutions({base_ref: ("acme/z-image", "fp8", "")})
     assert wire_ref(spec.models["pipeline"]) == "acme/z-image"
     assert spec.models["pipeline"].storage_dtype == "fp8"
 
@@ -70,7 +70,7 @@ def test_apply_model_resolutions_rejects_non_roundtrip() -> None:
     spec = ex.specs["generate"]
     # A resolved ref for a DIFFERENT repo can't round-trip through this
     # binding — the declared ref must be kept.
-    ex.apply_model_resolutions({"acme/z-image": ("acme/other#fp8", "")})
+    ex.apply_model_resolutions({"acme/z-image": ("acme/other#fp8", "", "")})
     assert wire_ref(spec.models["pipeline"]) == "acme/z-image"
 
 
@@ -82,7 +82,7 @@ def test_hello_ack_shape_applies() -> None:
             ref="acme/z-image", resolved_ref="acme/z-image#svdq-int4-r128", cast="",
         )],
     )
-    ex.apply_model_resolutions({r.ref: (r.resolved_ref, r.cast) for r in ack.resolutions})
+    ex.apply_model_resolutions({r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions})
     assert wire_ref(ex.specs["generate"].models["pipeline"]) == "acme/z-image#svdq-int4-r128"
 
 
@@ -98,7 +98,7 @@ def test_apply_model_resolutions_rehomes_the_instance_group() -> None:
     assert key_declared in ex._classes
     rec = ex._classes[key_declared]
 
-    ex.apply_model_resolutions({"acme/z-image": ("acme/z-image", "fp8")})
+    ex.apply_model_resolutions({"acme/z-image": ("acme/z-image", "fp8", "")})
     key_cast = spec.instance_key
     assert key_cast != key_declared
     # the SAME record (with any live instance) now lives under the new key

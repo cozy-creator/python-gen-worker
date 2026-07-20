@@ -185,6 +185,10 @@ message ModelResolution {
   string ref          = 1; // declared bare ref (canonical grammar, no #flavor)
   string resolved_ref = 2; // concrete ref to download + load (may carry #flavor)
   string cast         = 3; // load-time transform: "" | "fp8"
+  // th#913: concrete execution-lane descriptor for this pick (e.g.
+  // "fp8-w8a8-dynamic+compiled"). "" = unspecified (worker's own policy,
+  // pre-lane behavior). Additive: old workers ignore it.
+  string lane         = 4;
 }
 
 // Worker -> orchestrator dynamic state. FULL-REPLACE snapshot of every field,
@@ -301,6 +305,12 @@ message RunJob {
   // immediately before execution so replacement or causal runtime revocation
   // returns typed RETRYABLE without GPU work.
   RequiredCompileExecution required_compile = 13;
+  // th#913/gw#596: hub-resolved execution lane for THIS request — a concrete
+  // descriptor ("fp8-w8a8-dynamic+compiled") or a coarse family
+  // ("bf16"|"fp8"|"4bit") the worker expands via its ladder twin. "" = no
+  // instruction (worker's own policy). A worker that cannot serve the named
+  // lane answers a typed refusal naming it — never a silent fallback.
+  string lane = 14;
 }
 
 message RequiredCompileExecution {
@@ -446,6 +456,9 @@ message JobMetrics {
   // for GPU jobs. Both 0 = unmeasured (CPU job, or a pre-gw#516 worker).
   int64 slot_held_ms = 11;
   int64 finalize_wall_ms = 12;
+  // th#913/gw#596: the CONCRETE lane that actually served this request
+  // (e.g. "fp8-w8a8-dynamic+compiled"). "" = unmeasured (pre-lane worker).
+  string lane = 13;
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,
