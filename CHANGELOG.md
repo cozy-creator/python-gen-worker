@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.40.3 (2026-07-20)
+
+- **Release cut for gw#607/gw#587:** first wheel carrying pgw#606/th#938
+  ("Slot fns never boot-setup from the image-baked code default"). Beyond
+  the Slot-default fix, this closes gw#607's store-served gap: the gw#591
+  boot watcher used to run `ensure_setup(spec)` with NO snapshots the
+  moment weights landed, so a compile-declared fn always booted cell-blind
+  and re-minted even when the hub had attached the stored cell to the hot
+  DesiredInstance (live: four consecutive boots). Slot/compile fns now set
+  up ONLY on hub delivery (Hot DesiredInstance / RunJob), which carries the
+  attached cell — store-served boots engage.
+
 ## 0.40.1 (2026-07-20)
 
 - **gw#604: a hub redelivery of the worker's OWN just-published self-mint
