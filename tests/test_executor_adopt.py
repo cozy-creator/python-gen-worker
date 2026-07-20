@@ -1014,6 +1014,127 @@ def test_production_setup_stamps_cold_active_identity_after_warmup(
     assert target.contract_digest == cc.execution_contract_digest(pipe, spec.compile)
 
 
+def test_store_served_boot_with_clean_hits_raises_no_compile_alarm(
+    tmp_path, monkeypatch,
+):
+    """gw#587 runtime assertion: a store-served boot (cell delivered, not
+    self-minted) that proves clean cache hits must NOT alarm — the whole
+    point of a delivered cell is ~0 compile wall time at boot."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec()
+    model_ref = wire_ref(spec.models["pipeline"])
+    sent = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipe = _LoadablePipe()
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    counter = {"hits": 0}
+
+    def _counters():
+        counter["hits"] += 1
+        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
+
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+    # No real torch.compile runs in this fake-guard rig, so
+    # compile_wall_seconds() is naturally ~0 delta across the warmup window —
+    # the quiet path is exercised honestly, not forced.
+    _ColdEndpoint.setups = _ColdEndpoint.warmups = 0
+    snapshots = {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+    }
+
+    instance = asyncio.run(ex.ensure_setup(spec, snapshots))
+    assert isinstance(instance, _ColdEndpoint)
+    adopted = [
+        m for m in sent
+        if m.HasField("model_event")
+        and m.model_event.state == pb.MODEL_STATE_ADOPTED
+    ]
+    assert adopted == [], "a clean store-served boot must not emit any alarm event"
+
+
+def test_store_served_boot_with_hidden_compile_fires_alarm(
+    tmp_path, monkeypatch, caplog,
+):
+    """gw#587 runtime assertion, the poisoned/mismatched-cache half: a
+    store-served boot proves cache hits (the artifact round-tripped) but the
+    process ALSO burns real inductor compile wall time getting there — the
+    gw#586 defect class generalized (a cell that claims to serve while the
+    boot silently recompiles). Must alarm loudly AND report it hub-side via
+    the existing ADOPTED ModelEvent shape."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec()
+    model_ref = wire_ref(spec.models["pipeline"])
+    sent = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipe = _LoadablePipe()
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    # before, after — 45s of real inductor compile wall time hidden behind a
+    # store-served (delivered, not self-minted) boot.
+    wall = iter([0.0, 45.0])
+    monkeypatch.setattr(cc, "compile_wall_seconds", lambda: next(wall))
+    _ColdEndpoint.setups = _ColdEndpoint.warmups = 0
+    snapshots = {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+    }
+
+    with caplog.at_level("ERROR", logger="gen_worker.executor"):
+        instance = asyncio.run(ex.ensure_setup(spec, snapshots))
+    assert isinstance(instance, _ColdEndpoint)
+    assert any(
+        "STORE_SERVED_BOOT_COMPILED" in r.message for r in caplog.records
+    ), "a store-served boot that hid a real compile must alarm loudly"
+    adopted = [
+        m for m in sent
+        if m.HasField("model_event")
+        and m.model_event.state == pb.MODEL_STATE_ADOPTED
+    ]
+    (msg,) = adopted
+    assert msg.model_event.ref == CACHE_REF
+    assert msg.model_event.snapshot_digest == DIGEST_A
+    assert msg.model_event.cache_hits >= 1
+    assert msg.model_event.duration_ms == 45000
+
+
 def test_boot_warmup_proves_each_compile_object_independently(
     tmp_path, monkeypatch,
 ):
