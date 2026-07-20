@@ -2424,6 +2424,11 @@ class Executor:
                 if id(pipeline) in function_proofs
                 else contract_names
             )
+            object_proven_by_custom_warmup = bool(
+                spec.cls is not None
+                and callable(getattr(spec.cls, "warmup", None))
+                and function_proofs.get(id(pipeline))
+            )
             incarnation_id = uuid.uuid4().hex
             target = _CompileTargetRecord(
                 incarnation_id=incarnation_id,
@@ -2469,6 +2474,28 @@ class Executor:
                 if name:
                     compatible_names.add(name)
             expected_names = compatible_names & required_names
+            if object_proven_by_custom_warmup:
+                # gw#603 ruling (2026-07-20, supersedes the ac0bab9 single-
+                # name attribution): proof is a property of the WARMED
+                # OBJECT and the graph set actually exercised, not of the
+                # initiating handler's name — the same identity reasoning as
+                # gw#587 design pt 5. A custom object-level warmup (author
+                # surface 3: "wins outright", e.g. LTX's two-stage synthetic
+                # that warms EVERY declared graph) therefore attributes its
+                # proof to every CONTRACT-COMPATIBLE sibling alias of this
+                # exact object (same family, lora bucket, execution-contract
+                # digest, and bindings — the compatible_names gate above),
+                # EXCEPT aliases whose spec explicitly declares
+                # `warmup={...: None}`: those remain fail-closed (the
+                # SDXL-legacy-Turbo carve-out — an author's explicit "this
+                # handler must not be warmed/served on this lane" is a
+                # contract, never overridden by a sibling's proof). Runtime
+                # backstop stays: every advertised alias serves through the
+                # per-call guarded wrapper with hit/miss counters, so an
+                # attributed alias whose real requests miss is visible and
+                # degrades loudly, never silently.
+                permitted_names = (
+                    compatible_names - self._custom_warmup_optouts(spec))
             target.function_names = tuple(sorted(
                 compatible_names & permitted_names))
             target_quant_lane = next(
@@ -2479,8 +2506,11 @@ class Executor:
             mandatory_quant = bool(target_quant_lane)
             if (
                 (mandatory_quant or candidate_requested_lane)
-                and set(target.function_names) != expected_names
+                and not expected_names <= set(target.function_names)
             ):
+                # Every REQUIRED alias must be proven; a proven superset
+                # (custom-warmup attribution covering a non-required
+                # sibling) is not a defect.
                 raise compile_cache.CompiledLaneUnavailableError(
                     "mandatory quantized-lane function proof incomplete "
                     f"(expected={sorted(expected_names)!r} "
@@ -3130,12 +3160,37 @@ class Executor:
             has_warmup_method=False,
         )
 
+    def _custom_warmup_optouts(self, spec: EndpointSpec) -> set[str]:
+        """Function names whose spec explicitly declares ``warmup={...: None}``.
+
+        gw#603: the explicit-None carve-out from custom-warmup proof
+        attribution — an author's declared skip is a per-handler contract
+        ("never warm/serve this alias on this lane"), so it stays fail-closed
+        even when the object-level proof would otherwise cover it."""
+        if spec.cls is None:
+            return set()
+        from .api.decorators import ATTR as _DECL_ATTR
+
+        decl = getattr(spec.cls, _DECL_ATTR, None)
+        declared = getattr(decl, "warmup", None)
+        if not isinstance(declared, typing.Mapping):
+            return set()
+        skipped_attrs = {a for a, v in declared.items() if v is None}
+        if not skipped_attrs:
+            return set()
+        return {
+            s.name for s in self.specs.values()
+            if s.cls is spec.cls and s.attr_name in skipped_attrs
+        }
+
     def _compile_contract_names(
         self, spec: EndpointSpec, rec: _ClassRecord,
     ) -> set[str]:
         """Handler aliases this setup can attribute its warmup proof to."""
         if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
-            # A custom object-level warmup has no per-handler attribution.
+            # Absent a completed object proof, a custom object-level warmup
+            # has no per-handler attribution (the gw#603 attribution in
+            # _install_compile_targets applies only to a PROVEN object).
             return {spec.name}
         return self._required_compile_names(spec, rec)
 
