@@ -3592,3 +3592,36 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
         assert got == new_dir and calls == [ref]
 
     asyncio.run(run())
+
+
+def test_fresh_boot_advertises_candidate_cell_lookups(monkeypatch):
+    """gw#605 revert-turns-red: a FRESHLY BOOTED worker (no ensure_setup yet
+    — the lazy class records are empty) must advertise its pre-load
+    CANDIDATE cell keys, or the hub can never attach a stored cell before
+    setup starts and every fresh boot re-mints (live-found: the store-served
+    path was structurally dead — the cell only entered the release config
+    after the worker's own mint advertised the key)."""
+    from gen_worker import cell_key as cell_key_mod
+
+    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+
+    computed: list = []
+
+    class _Key:
+        digest = "ck1-" + "5" * 56
+
+    def _compute(family, lane="", bucket=0, **kw):
+        computed.append((family, lane))
+        return _Key()
+
+    monkeypatch.setattr(cell_key_mod, "compute", _compute)
+    lookups = ex.cell_lookups()
+    assert [(lu.family, lu.cell_key) for lu in lookups] == [
+        (FAMILY, _Key.digest)]
+    # The mandatory lane candidate was computed for the declared w8a8 ref.
+    assert (FAMILY, "w8a8") in computed
