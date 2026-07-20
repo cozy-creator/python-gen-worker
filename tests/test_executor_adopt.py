@@ -1727,6 +1727,136 @@ def test_w8a8_partial_handler_proof_fails_loud_without_disabling_skipped_turbo(
     assert ex.compile_targets() == []
 
 
+def _merged_lane_endpoint(record_warm):
+    """Two w8a8 lane pipes behind ONE handler (the qwen merged shape): the
+    declared warmup can only exercise the t2i lane — edit needs an input
+    image, so its object has no warmup modality by design (gw#595)."""
+
+    @endpoint(
+        models={
+            "t2i": Hub("acme/qwen-image", flavor="fp8-w8a8"),
+            "edit": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
+        },
+        resources=Resources(vram_gb=48),
+        compile=Compile(shapes=((1328, 1328),), family="qwen-image"),
+        warmup={"generate": {"prompt": "warmup"}},
+    )
+    class _MergedEndpoint:
+        def setup(self, t2i: _LoadablePipe, edit: _LoadablePipe) -> None:
+            self.t2i = t2i
+            self.edit = edit
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            record_warm(self)
+            return _Out(y="ok")
+
+    return _MergedEndpoint
+
+
+def _wire_merged_lane(ex_cls_specs, tmp_path, monkeypatch):
+    import gen_worker.executor as executor_mod
+
+    family = "qwen-image"
+    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    artifact = _artifact(tmp_path, family=family)
+    model_dir = tmp_path / "merged-lane-model"
+    model_dir.mkdir(exist_ok=True)
+    pipes = {"t2i": _LoadablePipe(), "edit": _LoadablePipe()}
+    for pipe in pipes.values():
+        setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(ex_cls_specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipes[kwargs["slot"]], is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    return ex, pipes, cell_ref
+
+
+def test_w8a8_unexercised_sibling_stays_armed_unproven(
+    tmp_path, monkeypatch, caplog,
+):
+    """gw#595(b): an armed MANDATORY-lane object the warmup has no modality
+    to exercise must not block adoption by the sibling that proves; it stays
+    armed unproven and is logged explicitly."""
+    cls = _merged_lane_endpoint(lambda self: _record_fake_warm(self.t2i))
+    specs = extract_specs(cls)
+    (generate,) = specs
+    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(ex.ensure_setup(generate, {
+            wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
+            wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+
+    targets = {t.model_bindings[0].slot: t for t in ex.compile_targets()}
+    assert set(targets) == {"t2i", "edit"}
+    assert targets["t2i"].active_compile_ref == cell_ref
+    assert targets["t2i"].active_compile_snapshot_digest == DIGEST_A
+    # The edit lane is armed (eager is not a w8a8 lane) but unproven.
+    assert targets["edit"].active_compile_ref == cell_ref
+    assert "armed unproven: no warmup modality" in caplog.text
+    assert generate.name not in ex.unavailable
+
+
+def test_w8a8_exercised_miss_fails_closed_despite_unexercised_sibling(
+    tmp_path, monkeypatch,
+):
+    """gw#595(b) keeps gw#586 shut: an EXERCISED object that misses its own
+    warmup graph disproves the cell and fails closed — the unexercised
+    sibling exemption never launders a genuine parity defect."""
+    cls = _merged_lane_endpoint(
+        lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
+    specs = extract_specs(cls)
+    (generate,) = specs
+    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="did not serve their own warmup graph",
+    ):
+        asyncio.run(ex.ensure_setup(generate, {
+            wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
+            wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+    assert ex.compile_targets() == []
+
+
+def test_w8a8_all_objects_unexercised_fails_closed(tmp_path, monkeypatch):
+    """gw#595(b): with ZERO proven objects the cell is entirely unverified —
+    a warmup that exercises nothing cannot arm anything."""
+    cls = _merged_lane_endpoint(lambda self: None)
+    specs = extract_specs(cls)
+    (generate,) = specs
+    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="did not serve their own warmup graph",
+    ):
+        asyncio.run(ex.ensure_setup(generate, {
+            wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
+            wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+    assert ex.compile_targets() == []
+
+
 def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
     tmp_path, monkeypatch,
 ):

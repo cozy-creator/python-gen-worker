@@ -3310,7 +3310,16 @@ class Executor:
             else:
                 warmed, function_proofs = await run_warmup()
             if proves_inductor:
-                unproven: list[_CompileObjectCandidate] = []
+                # gw#595 per-object provability: the proof scopes to objects
+                # the warmup actually EXERCISED (calls>0). An exercised object
+                # must serve its own cache hit or it disproves the cell. An
+                # unexercised object (the warmup has no modality for it, e.g.
+                # an edit lane needing an input image) neither proves nor
+                # disproves — with a proven sibling it must not block
+                # adoption. Zero proven objects still fails closed (gw#586).
+                disproven: list[_CompileObjectCandidate] = []
+                unexercised: list[_CompileObjectCandidate] = []
+                proven = 0
                 hits = 0
                 misses = 0
                 for candidate in inj.compile_objects:
@@ -3323,10 +3332,18 @@ class Executor:
                     pipe_misses = compile_cache.cache_miss_count(pipe) - before[1]
                     hits += max(0, pipe_hits)
                     misses += max(0, pipe_misses)
-                    if not warmed or calls <= 0 or pipe_hits <= 0:
-                        unproven.append(candidate)
-                    elif callable(warmup):
-                        function_proofs[id(pipe)] = {spec.name}
+                    if not warmed or calls <= 0:
+                        unexercised.append(candidate)
+                    elif pipe_hits <= 0:
+                        disproven.append(candidate)
+                    else:
+                        proven += 1
+                        if callable(warmup):
+                            function_proofs[id(pipe)] = {spec.name}
+                unproven = list(disproven)
+                if not proven:
+                    unproven.extend(unexercised)
+                    unexercised = []
                 if unproven:
                     from .models.loading import pipeline_weight_lane
 
@@ -3351,6 +3368,32 @@ class Executor:
                     if quant_lane:
                         raise compile_cache.CompiledLaneUnavailableError(detail)
                     logger.warning("%s; serving eager", detail)
+                if unexercised:
+                    from .models.loading import pipeline_weight_lane
+                for candidate in unexercised:
+                    pipe = candidate.pipeline
+                    mandatory = pipeline_weight_lane(pipe).startswith(
+                        _MANDATORY_LANES)
+                    if mandatory:
+                        # Eager is not a lane for it and a proven sibling
+                        # vouches for the cell: stays armed unproven. Its
+                        # own graphs, absent from the cell by design, fail
+                        # loud at first use instead of at every boot.
+                        logger.warning(
+                            "compile object (slots=%s) armed unproven: no "
+                            "warmup modality exercised it (calls=0); the "
+                            "proof covers only its exercised siblings",
+                            sorted(candidate.slots))
+                        continue
+                    logger.warning(
+                        "compile object (slots=%s) unproven (no warmup "
+                        "modality, calls=0); serving eager",
+                        sorted(candidate.slots))
+                    function_proofs[id(pipe)] = set()
+                    compile_cache.unwrap(pipe)
+                    if int(getattr(spec.compile, "lora_bucket", 0) or 0):
+                        compile_cache.drop_lora_lane(pipe)
+                    inj.active_compile_artifacts.pop(id(pipe), None)
             if compile_selection and trt_engine.is_engine_ref(compile_selection.ref):
                 trt_candidates = [
                     candidate for candidate in inj.compile_objects
@@ -4942,7 +4985,17 @@ class Executor:
                         return await fail(
                             "no_warmup",
                             "target defines no runnable warmup; cache hits unprovable")
-                    if calls <= 0 or hits <= 0:
+                    if calls <= 0:
+                        # gw#595: distinct from a genuine miss — the warmup
+                        # has no modality that exercises this object at all,
+                        # so the cell is unprovable on this target rather
+                        # than disproven.
+                        await rollback()
+                        return await fail("no_warmup_modality", (
+                            "no warmup modality exercises this object "
+                            f"(calls=0, warmup={warmup_s}s); cell unprovable "
+                            "on this target"))
+                    if hits <= 0:
                         await rollback()
                         return await fail("cache_miss", (
                             "exact target warmup did not execute a cache-hit "
