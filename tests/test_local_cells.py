@@ -133,7 +133,7 @@ def _fake_compile_and_warm(pipe, cfg, **kw):
 
 def test_mint_saves_atomically_and_roundtrips(monkeypatch, tmp_path):
     monkeypatch.setenv(lc.ENV_STORE_DIR, str(tmp_path))
-    monkeypatch.setattr(lc, "_compile_and_warm", _fake_compile_and_warm)
+    monkeypatch.setattr(cc, "_compile_and_warm", _fake_compile_and_warm)
     pipe, cfg = _Pipe(), _Cfg()
     target = lc.cell_path("fam")
 
@@ -146,14 +146,14 @@ def test_mint_saves_atomically_and_roundtrips(monkeypatch, tmp_path):
     # and unpacks through the production consumer machinery
     meta = cc.unpack(target, tmp_path / "seed-root")
     assert meta["family"] == "fam"
-    assert meta["source_ref"] == "local-mint"
+    assert meta["source_ref"] == "self-mint"
     assert (tmp_path / "seed-root" / "inductor" / "graph.so").exists()
     assert cc.verify(meta, family="fam") == ""
 
 
 def test_mint_refuses_empty_capture(monkeypatch, tmp_path):
     monkeypatch.setenv(lc.ENV_STORE_DIR, str(tmp_path))
-    monkeypatch.setattr(lc, "_compile_and_warm", lambda pipe, cfg, **kw: None)
+    monkeypatch.setattr(cc, "_compile_and_warm", lambda pipe, cfg, **kw: None)
     with pytest.raises(RuntimeError, match="captured nothing"):
         lc._mint(_Pipe(), _Cfg(), lc.cell_path("fam"), "fam")
     assert not lc.cell_path("fam").exists()  # nothing saved on failure
@@ -222,7 +222,7 @@ def test_key_mismatch_remints_and_replaces(_local_env, monkeypatch):
 def test_miss_mints_once(_local_env, monkeypatch):
     pipe, cfg = _Pipe(), _Cfg()
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(lc, "_compile_and_warm", _fake_compile_and_warm)
+    monkeypatch.setattr(cc, "_compile_and_warm", _fake_compile_and_warm)
     monkeypatch.setattr(cc, "enable", lambda *a, **k: True)
 
     assert lc.enable_compiled(pipe, cfg) is True
@@ -244,7 +244,7 @@ def test_mint_failure_serves_eager(_local_env, monkeypatch):
     def boom(pipe, cfg, **kw):
         raise RuntimeError("compile exploded")
 
-    monkeypatch.setattr(lc, "_compile_and_warm", boom)
+    monkeypatch.setattr(cc, "_compile_and_warm", boom)
     assert lc.enable_compiled(_Pipe(), _Cfg()) is False
     assert not lc.cell_path("fam").exists()
 
@@ -281,7 +281,7 @@ def _w8a8_env(_local_env, monkeypatch):
 def test_w8a8_delivered_refusal_falls_through_to_mint(_w8a8_env, monkeypatch):
     pipe, cfg = _W8a8Pipe(), _Cfg()
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(lc, "_compile_and_warm", _fake_compile_and_warm)
+    monkeypatch.setattr(cc, "_compile_and_warm", _fake_compile_and_warm)
     monkeypatch.setattr(cc, "enable", lambda *a, **k: True)
 
     assert lc.enable_compiled(pipe, cfg) is True
@@ -302,7 +302,7 @@ def test_w8a8_mint_failure_refusal_stays_typed(_w8a8_env, monkeypatch):
     def boom(pipe, cfg, **kw):
         raise RuntimeError("compile exploded")
 
-    monkeypatch.setattr(lc, "_compile_and_warm", boom)
+    monkeypatch.setattr(cc, "_compile_and_warm", boom)
     with pytest.raises(cc.CompiledLaneUnavailableError, match="mint failed"):
         lc.enable_compiled(_W8a8Pipe(), _Cfg())
     assert not lc.cell_path("fam", "w8a8").exists()
@@ -374,7 +374,7 @@ def test_w8a8_mint_records_execution_contract(_w8a8_env, monkeypatch):
         return key
 
     monkeypatch.setattr(cc, "runtime_key", filled_key)
-    monkeypatch.setattr(lc, "_compile_and_warm", _fake_compile_and_warm)
+    monkeypatch.setattr(cc, "_compile_and_warm", _fake_compile_and_warm)
     pipe, cfg = _quantized_pipe("pertensor"), _Cfg(targets=("unet",))
     target = lc.cell_path("fam", "w8a8")
     lc._mint(pipe, cfg, target, "fam")

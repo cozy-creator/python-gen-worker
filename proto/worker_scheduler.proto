@@ -98,6 +98,12 @@ message WorkerResources {
   // (for example 2.13.0+cu130); consumers compare the major.minor key while
   // artifact metadata remains responsible for stricter compatibility checks.
   string torch_version = 10;
+  // gw#587/th#910: this worker's gen-worker library version (for example
+  // "0.39.0"). Additive: old workers send it unset; the hub's self-mint cell
+  // publish attestation FAILS CLOSED on the gen_worker axis when absent —
+  // which is harmless for old workers, because they never call the publish
+  // route at all.
+  string gen_worker_version = 11;
 }
 
 // Boot host canary (gw#550): the host properties the CPU-bound video tail

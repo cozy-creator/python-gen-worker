@@ -11,7 +11,7 @@ production producer uses), pack the result with the production artifact
 format, and save it in the user's cozy directory. Subsequent boots adopt it
 through the exact delivered-cell code path.
 
-TRUST BOUNDARY — local cells are never uploaded or shared. A compile cell
+TRUST BOUNDARY — LOCAL cells are never uploaded or shared. A compile cell
 is user-generated EXECUTABLE code (compiled kernels + generated C++/Triton
 sources); accepting one from a user machine into shared storage would let
 any user ship arbitrary code into other people's GPU workers. Enforcement
@@ -20,8 +20,14 @@ is structural, not a flag:
 * this module has no publish path — it is not a CAS client, imports no
   upload/transport machinery, and writes only under the local store root;
 * only the local CLI serve path (``cli/run.py``) calls into it — the
-  production executor arms compile exclusively through hub-DELIVERED
-  artifacts (``executor._enable_compiled``) and never imports this module.
+  production executor's fleet self-mint (gw#587) lives in ``fleet_cells``
+  and publishes ONLY through the hub's attested publish gate (hub-side
+  axis attestation + provider trust tier, th#910); user-controlled
+  hardware, by definition untrusted tier, stays local-store-only here.
+
+The mint recipe itself is shared (``compile_cache.mint_artifact``): one
+capture/warm/pack brain for local and fleet, diverging only at the publish
+sink.
 
 Key discipline is unchanged from production: adoption reuses
 ``compile_cache.verify()`` EXACT semantics verbatim (artifact format, SKU,
@@ -153,74 +159,19 @@ def _sweep_stale_mints(root: Path) -> None:
             continue
 
 
-def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2) -> None:
-    """Cold-compile ``pipe`` over the declared shape table (the only part of
-    a mint that needs CUDA + a toolchain). ``guard=False``: a failing warm
-    call must fail the mint — a silently-eager capture must never be saved."""
-    if not cc.apply(pipe, cfg, cache_ready=False, guard=False, allow_cold=True):
-        raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
-    import torch
-
-    decode = any(t.startswith("vae") for t in cfg.targets)
-    for shape in cfg.shapes:
-        torch.cuda.synchronize()
-        t0 = time.monotonic()
-        cc._warm_call(
-            pipe, shape, steps=steps,
-            prompt="cache warm-up: a lighthouse on a cliff at dawn, detailed",
-            decode=decode,
-            guidance_scales=getattr(cfg, "guidance_scales", ()),
-        )
-        torch.cuda.synchronize()
-        key = "x".join(str(v) for v in shape)
-        _say(f"  compiled {key} in {time.monotonic() - t0:.0f}s")
-
-
 def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
     """Compile this pipeline once and save the cell atomically at ``target``.
 
-    The capture uses the production artifact recipe end to end
-    (``capture_env`` -> warm the shape table -> ``artifact_metadata`` ->
-    deterministic ``pack``), so the saved cell is byte-compatible with a
-    delivered one and adopts through the identical code path.
+    The mint brain is shared with the fleet self-mint
+    (``compile_cache.mint_artifact``, gw#587) — one capture/warm/pack recipe,
+    with the LOCAL publish sink (this module writes only under the local
+    store root, never uploads).
     """
     root = store_root()
     _sweep_stale_mints(root)
     capture = root / _MINT_DIR / f"{target.name[: -len('.tar.gz')]}-{os.getpid()}"
-    cc.capture_env(capture)
     started = time.monotonic()
-
-    _compile_and_warm(pipe, cfg)
-
-    captured = [p for p in (capture / "inductor").rglob("*") if p.is_file()]
-    if not captured:
-        raise RuntimeError(
-            "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR"
-        )
-    from .models.loading import pipeline_weight_lane
-    from .models.memory import low_vram_mode
-
-    # gw#564: record the execution contract exactly like the production
-    # build — w8a8 cells are contract_drift-gated on the graph signature and
-    # weight-lane manifest, so a mint without them can never re-adopt.
-    graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
-    meta = cc.artifact_metadata(
-        family=family,
-        source_ref="local-mint",
-        shapes=cfg.shapes,
-        targets=cfg.targets,
-        guidance_scales=getattr(cfg, "guidance_scales", ()),
-        low_vram_mode=low_vram_mode(pipe),
-        compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
-        weight_lane=pipeline_weight_lane(pipe),
-        lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
-        graph_signature=graph_signature,
-        weight_contract=weight_contract,
-    )
-    tmp = target.with_suffix(".part")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    cc.pack(capture, tmp, meta)
-    os.replace(tmp, target)
+    cc.mint_artifact(pipe, cfg, family, target, capture, say=_say)
     _say(
         f"compile cell saved: {target} "
         f"({target.stat().st_size / 1e6:.1f} MB, {time.monotonic() - started:.0f}s total); "

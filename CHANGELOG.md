@@ -1,6 +1,27 @@
 # Changelog
 
-## 0.38.7 (2026-07-19)
+## Unreleased
+
+- **gw#587: fleet worker self-mint — the serving worker compiles its own
+  cell on a store miss, serves compiled immediately, and publishes it
+  through the hub's attested gate (th#910).** The boot warmup IS the mint
+  (right SKU/image/lane/pipeline-class/shapes by construction — the gw#586
+  parity-treadmill class of producer defects becomes unrepresentable).
+  Eager fallback and the fail-closed cell WAIT are retired: a mandatory
+  (W8A8/W4A4) miss now proceeds to load and self-mints instead of refusing
+  before load; the typed quantized refusal remains only at genuine mint
+  impossibilities (no CUDA, no toolchain, mint failure), and plain lanes
+  keep eager there. The `cell_selection_bug` receipt invariant and the
+  post-arm warmup proof are unchanged. New: `fleet_cells` (arming policy +
+  `CellPublisher`: publish-intent → the standard repo-commit flow →
+  publish-complete; refusals are terminal and NEVER affect serving — the
+  triggering request is always served from the local mint), shared mint
+  brain `compile_cache.mint_artifact` (cozy-local `local_cells` delegates;
+  its store stays local-only — cozy-local never publishes to the fleet),
+  additive Hello field `WorkerResources.gen_worker_version` (the hub's
+  attestation basis; absent ⇒ publish refused, harmless for old workers
+  which never call the route). A hub delivery without a cell no longer
+  tears down a worker's own armed, proven target (worker-owned cells).
 
 - **pgw#594: second reserved model-input field, `text_encoder`, for producer
   payloads (te#70 Gemma-TE video-LoRA training).** `source`/`destination`
