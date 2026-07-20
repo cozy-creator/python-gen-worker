@@ -8,13 +8,12 @@ import os
 import re
 import shutil
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
-from .cozy_cas import _blake3_file, _download_one_file as _download_one_file
-from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
+from .cozy_cas import _download_one_file as _download_one_file
+from .cozy_cas import _norm_rel_path, fsync_dir
 from .download import components_present, select_component_paths
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
@@ -197,7 +196,6 @@ class CozySnapshotDownloader:
         base_dir: Path,
         ref: TensorhubRef,
         *,
-        shared_base_dir: Optional[Path] = None,
         resolved: Optional[WorkerResolvedRepo],
         progress: Optional[ProgressFn] = None,
         components: Sequence[str] = (),
@@ -249,15 +247,9 @@ class CozySnapshotDownloader:
 
         try:
             _log.info("snapshot_build_start key=%s files=%d", key[:24], len(res.files))
-            shared_blobs_root = None
-            if shared_base_dir is not None:
-                candidate = Path(shared_base_dir) / "blobs"
-                if candidate.resolve() != blobs_root.resolve():
-                    shared_blobs_root = candidate
             await self._ensure_blobs(
                 blobs_root,
                 res.files,
-                shared_blobs_root=shared_blobs_root,
                 progress=progress,
             )
             # Materialization copies/concatenates multi-GB trees — strictly
@@ -290,16 +282,20 @@ class CozySnapshotDownloader:
         res: WorkerResolvedRepo,
     ) -> None:
         """Blocking build phase (worker thread): reassemble + hardlink into a
-        ``.building`` dir, then atomically rename into place."""
-        tmp = snaps_root / f"{snap_dir.name}.building"
-        if tmp.exists():
-            shutil.rmtree(tmp)
+        writer-unique ``.building-<writer_id>`` dir, then atomically rename
+        into place. Writer-unique (not a fixed ``.building`` name) so two
+        pods racing to materialize the same snapshot key on a SHARED CAS
+        root (e.g. one RunPod volume, th#850) never interleave writes into
+        the same tree — only the atomic rename below, not the build, decides
+        the winner."""
+        writer_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+        tmp = snaps_root / f"{snap_dir.name}.building-{writer_id}"
         tmp.mkdir(parents=True, exist_ok=True)
 
         self._reassemble_chunked(blobs_root, tmp, res.files)
         self._materialize_regular(blobs_root, tmp, res.files)
 
-        # Atomic rename; handle race with concurrent builder.
+        # Atomic rename; a concurrent writer may have already published.
         if snap_dir.exists():
             shutil.rmtree(tmp, ignore_errors=True)
         else:
@@ -310,8 +306,6 @@ class CozySnapshotDownloader:
                 if not snap_dir.exists():
                     raise
             else:
-                from .cozy_cas import fsync_dir
-
                 fsync_dir(snaps_root)  # persist the rename itself (gw#408)
 
     # ------------------------------------------------------------------
@@ -323,7 +317,6 @@ class CozySnapshotDownloader:
         blobs_root: Path,
         files: List[WorkerResolvedRepoFile],
         *,
-        shared_blobs_root: Optional[Path] = None,
         progress: Optional[ProgressFn] = None,
     ) -> None:
         # Deduplicate by digest — same blob referenced by multiple paths (e.g.
@@ -354,12 +347,18 @@ class CozySnapshotDownloader:
 
         total = sum(int(f.size_bytes or 0) for f in unique) or None
         done = total - missing_bytes if total else 0
+        network_bytes = 0  # th#850: bytes actually fetched over the network
+        # this call, as opposed to bytes already present under blobs_root —
+        # the signal a "volume-attached boot ⇒ ~0 network bytes" runtime
+        # assertion needs. Only _dl_locked's real fetch increments it.
         done_lock = threading.Lock()
 
-        def _on_bytes(n: int) -> None:
-            nonlocal done
+        def _on_bytes(n: int, *, network: bool = False) -> None:
+            nonlocal done, network_bytes
             with done_lock:
                 done += n
+                if network:
+                    network_bytes += n
                 d = done if total is None else min(done, total)
             if progress is not None:
                 try:
@@ -391,28 +390,7 @@ class CozySnapshotDownloader:
                     _log.info("blob_shared_inflight path=%s digest=%s (sibling ref downloaded it)",
                               f.path, digest[:16])
                     return
-                if shared_blobs_root is not None:
-                    shared = _blob_path(shared_blobs_root, digest)
-                    started = time.monotonic()
-                    if await asyncio.to_thread(self._copy_verified_blob, shared, dst, f):
-                        _on_bytes(int(f.size_bytes or 0))
-                        _log.info(
-                            "blob_cache_hit source=endpoint_volume digest=%s bytes=%d transfer_ms=%d",
-                            digest[:16], int(f.size_bytes or 0),
-                            int((time.monotonic() - started) * 1000),
-                        )
-                        return
-                    _log.info("blob_cache_miss source=endpoint_volume digest=%s", digest[:16])
                 await _dl_locked(f, digest, dst)
-                if shared_blobs_root is not None:
-                    shared = _blob_path(shared_blobs_root, digest)
-                    published = await asyncio.to_thread(
-                        self._copy_verified_blob, dst, shared, f
-                    )
-                    _log.info(
-                        "blob_cache_publish source=public destination=endpoint_volume digest=%s bytes=%d published=%s",
-                        digest[:16], int(f.size_bytes or 0), published,
-                    )
 
         async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
             async with sem:
@@ -431,7 +409,7 @@ class CozySnapshotDownloader:
                             expected_blake3=digest,
                         ),
                     )
-                    _on_bytes(int(f.size_bytes or 0))
+                    _on_bytes(int(f.size_bytes or 0), network=True)
                 else:
                     assert f.url is not None  # validated above in _ensure_blobs loop
                     await _download_one_file(
@@ -439,67 +417,21 @@ class CozySnapshotDownloader:
                         dst,
                         expected_size=int(f.size_bytes or 0),
                         expected_blake3=digest,
-                        on_bytes=_on_bytes,
+                        on_bytes=lambda n: _on_bytes(n, network=True),
                     )
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
 
         await asyncio.gather(*(_dl(f) for f in unique))
-
-    @staticmethod
-    def _copy_verified_blob(
-        src: Path, dst: Path, f: WorkerResolvedRepoFile,
-    ) -> bool:
-        """Copy one immutable blob through a writer-unique atomic stage.
-
-        The final path is digest-only. Readers never observe partial bytes;
-        racing writers may replace the same final name only after each has
-        independently verified the declared size and BLAKE3.
-        """
-        expected_size = int(f.size_bytes or 0)
-        expected_digest = _strip_blake3_prefix(f.blake3)
-        try:
-            if not src.is_file():
-                return False
-            if expected_size and src.stat().st_size != expected_size:
-                _log.warning(
-                    "blob_cache_corrupt source=%s digest=%s reason=size expected=%d actual=%d",
-                    src, expected_digest[:16], expected_size, src.stat().st_size,
-                )
-                return False
-
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dst.parent / (
-                f".{dst.name}.writer-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
-            )
-            try:
-                with src.open("rb") as source, tmp.open("xb") as staged:
-                    shutil.copyfileobj(source, staged, length=4 * 1024 * 1024)
-                    staged.flush()
-                    os.fsync(staged.fileno())
-                if expected_size and tmp.stat().st_size != expected_size:
-                    _log.warning(
-                        "blob_cache_corrupt source=%s digest=%s reason=staged_size expected=%d actual=%d",
-                        src, expected_digest[:16], expected_size, tmp.stat().st_size,
-                    )
-                    return False
-                if expected_digest and _blake3_file(tmp).lower() != expected_digest.lower():
-                    _log.warning(
-                        "blob_cache_corrupt source=%s digest=%s reason=blake3",
-                        src, expected_digest[:16],
-                    )
-                    return False
-                os.replace(tmp, dst)
-                fsync_file(dst)
-                fsync_dir(dst.parent)
-                return True
-            finally:
-                tmp.unlink(missing_ok=True)
-        except OSError as exc:
-            _log.warning(
-                "blob_cache_copy_failed source=%s destination=%s digest=%s error=%s",
-                src, dst, expected_digest[:16], exc,
-            )
-            return False
+        # th#850 runtime-assertion signal: on a volume-attached boot with
+        # blobs already warm, network_bytes should land near zero. Log-only
+        # for now (deliberately not threaded through the ProgressFn/
+        # ModelEvent wire contract here — that needs a coordinated proto
+        # change with the th#850 owner, see gw#597).
+        cache_hit_pct = 100.0 * (1 - network_bytes / total) if total else 100.0
+        _log.info(
+            "ensure_blobs_summary total_bytes=%s network_bytes=%d cache_hit_pct=%.1f",
+            total, network_bytes, cache_hit_pct,
+        )
 
     @staticmethod
     def _blob_usable(dst: Path, f: WorkerResolvedRepoFile) -> bool:
@@ -626,7 +558,6 @@ def delete_blobs(base_dir: Path, digests: Any) -> None:
 async def ensure_snapshot_async(
     *,
     base_dir: Path,
-    shared_base_dir: Optional[Path] = None,
     ref: TensorhubRef,
     resolved: Optional[WorkerResolvedRepo],
     progress: Optional[ProgressFn] = None,
@@ -634,6 +565,5 @@ async def ensure_snapshot_async(
 ) -> Path:
     dl = CozySnapshotDownloader()
     return await dl.ensure_snapshot(
-        base_dir, ref, shared_base_dir=shared_base_dir,
-        resolved=resolved, progress=progress, components=components,
+        base_dir, ref, resolved=resolved, progress=progress, components=components,
     )

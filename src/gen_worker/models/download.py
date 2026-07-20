@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..api.errors import ValidationError
 from ..config import get_settings
-from .cache_paths import endpoint_shared_cas_dir, tensorhub_cas_dir
+from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
 
 if TYPE_CHECKING:
@@ -232,7 +232,6 @@ async def ensure_local(
 
         return await ensure_snapshot_async(
             base_dir=base,
-            shared_base_dir=endpoint_shared_cas_dir(),
             ref=_snapshot_ref(parsed, ref),
             resolved=snapshot,
             progress=progress,

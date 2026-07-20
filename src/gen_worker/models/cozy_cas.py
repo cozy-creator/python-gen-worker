@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import errno
 import logging
+import os
 import random
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -56,12 +59,20 @@ async def _download_one_file(
     started = time.monotonic()
     transient_failures = 0
     verify_failures = 0
+    # Writer-unique for the lifetime of this call (stable across its own
+    # retries, so HTTP Range resume-on-retry still works) but distinct from
+    # every OTHER writer of this digest — including a different PROCESS.
+    # dst's CAS root may now be a network volume shared by concurrent
+    # same-endpoint pods; a fixed ".part" name would let two pods racing on
+    # the same missing blob interleave writes into the same file (th#850).
+    writer_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
     while True:
         try:
             await loop.run_in_executor(
                 None,
                 lambda: _download_one_file_sync(
-                    url, dst, expected_size, expected_blake3, on_bytes=on_bytes
+                    url, dst, expected_size, expected_blake3,
+                    on_bytes=on_bytes, writer_id=writer_id,
                 ),
             )
             return
@@ -92,14 +103,19 @@ def _download_one_file_sync(
     expected_size: int,
     expected_blake3: str,
     on_bytes: Optional[Callable[[int], None]] = None,
+    writer_id: Optional[str] = None,
 ) -> None:
     """Download a single file with HTTP Range resume, size + blake3 validation.
 
     Caller runs this in a worker thread; the transfer itself uses the same
     requests stack as the Tensorhub control plane fallback path.
-    """
-    import logging
 
+    ``writer_id`` must be unique per concurrent writer (distinct calls, and
+    critically distinct PROCESSES when ``dst``'s CAS root is a network volume
+    shared by several pods) so two writers of the same missing blob never
+    stage into the same temp path. Falls back to a fresh one-off id when not
+    supplied, which loses cross-retry resume but is still collision-safe.
+    """
     log = logging.getLogger("gen_worker.download")
 
     def _human_size(n: int) -> str:
@@ -125,7 +141,9 @@ def _download_one_file_sync(
         except Exception:
             pass  # re-download
 
-    tmp = dst.with_suffix(dst.suffix + ".part")
+    if not writer_id:
+        writer_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+    tmp = dst.parent / f".{dst.name}.part-{writer_id}"
 
     # Resume from partial download if available.
     offset = 0

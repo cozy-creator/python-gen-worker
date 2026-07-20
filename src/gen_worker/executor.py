@@ -911,7 +911,11 @@ class ModelStore:
 
     def rescan_disk(self) -> None:
         """Boot-time truth: re-register still-present downloads from the
-        persisted ref index so Hello.models and GC see what disk holds."""
+        persisted ref index so Hello.models and GC see what disk holds.
+
+        Also sweeps abandoned writer-unique CAS temp artifacts (th#850): on
+        pod-local disk those died with the pod, but a CAS root pointed at a
+        persistent volume keeps them until swept."""
         for ref, ent in self._index.entries().items():
             p = Path(str(ent.get("path") or ""))
             if p.exists():
@@ -919,6 +923,9 @@ class ModelStore:
                     self.residency.track_disk(ref, p)
             else:
                 self._index.remove(ref)
+        removed = disk_gc.sweep_stale_writer_temp(self._cache_dir)
+        if removed:
+            logger.info("disk-gc: swept %d abandoned writer temp artifact(s)", removed)
 
     def lru_disk_refs(self, *, exclude: Tuple[str, ...] = ()) -> List[str]:
         """Idle DISK refs in persisted last-use order, oldest first."""

@@ -215,13 +215,21 @@ def delete_ref_bytes(ref: str, path: Path, cas_dir: Path) -> None:
 
 def sweep_orphan_blobs(cas_dir: Path) -> int:
     """Delete CAS blobs no snapshot links anymore (st_nlink == 1). Snapshot
-    trees hardlink into blobs/, so link count is the reference count."""
+    trees hardlink into blobs/, so link count is the reference count.
+
+    Skips dotfiles: writer-unique in-flight temp artifacts
+    (``.<digest>.part-<writer-id>``, see cozy_cas.py) live in this same
+    directory tree and always have nlink==1 while a download is in
+    progress — treating them as orphans would delete a live writer's bytes
+    out from under it."""
     blobs = Path(cas_dir) / "blobs"
     freed = 0
     if not blobs.is_dir():
         return 0
     for dirpath, _dirs, names in os.walk(blobs):
         for name in names:
+            if name.startswith("."):
+                continue
             fp = os.path.join(dirpath, name)
             try:
                 st = os.stat(fp)
@@ -233,10 +241,61 @@ def sweep_orphan_blobs(cas_dir: Path) -> int:
     return freed
 
 
+# Generous: the largest blobs can legitimately take hours on a slow link.
+# Only genuinely abandoned (crashed/killed writer) temp artifacts are this
+# old — a live writer keeps rewriting its temp, advancing its mtime.
+_STALE_WRITER_TEMP_AGE_S = 6 * 3600
+
+
+def sweep_stale_writer_temp(
+    cas_dir: Path, *, older_than_s: float = _STALE_WRITER_TEMP_AGE_S,
+) -> int:
+    """Remove abandoned writer-unique temp artifacts: blob downloads stage to
+    ``.<name>.part-<writer-id>`` and snapshot builds stage to
+    ``<key>.building-<writer-id>`` (writer-unique so concurrent writers on a
+    SHARED CAS root — several pods on one RunPod volume, th#850 — never
+    collide). A writer that dies mid-transfer leaves its temp behind; on
+    pod-local disk that vanished with the pod, but a persistent volume keeps
+    it forever unless swept. Call at boot (`ModelStore.rescan_disk`) — safe
+    at any time since only artifacts idle past ``older_than_s`` are removed.
+    """
+    removed = 0
+    root = Path(cas_dir)
+    now = time.time()
+    for base_name in ("blobs", "snapshots"):
+        base = root / base_name
+        if not base.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            for name in list(dirnames):
+                if ".building-" not in name:
+                    continue
+                p = Path(dirpath) / name
+                try:
+                    if now - p.stat().st_mtime > older_than_s:
+                        shutil.rmtree(p, ignore_errors=True)
+                        removed += 1
+                        dirnames.remove(name)
+                except OSError:
+                    continue
+            for name in filenames:
+                if ".part-" not in name:
+                    continue
+                p = Path(dirpath) / name
+                try:
+                    if now - p.stat().st_mtime > older_than_s:
+                        p.unlink(missing_ok=True)
+                        removed += 1
+                except OSError:
+                    continue
+    return removed
+
+
 __all__ = [
     "RefIndex",
     "tree_bytes",
     "reclaim_file_cache",
     "delete_ref_bytes",
     "sweep_orphan_blobs",
+    "sweep_stale_writer_temp",
 ]
