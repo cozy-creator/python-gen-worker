@@ -490,10 +490,11 @@ class Lifecycle:
                     # mirror-first (gw#465) still applies; that case is left
                     # to per-dispatch resolution as before.
                     missing = sorted({
-                        wire_ref(binding) for slot in spec.slots
-                        if (binding := spec.models.get(slot)) is not None
-                        and binding.source == "tensorhub"
-                        and self.executor.store.local_path(wire_ref(binding)) is None
+                        wire_ref(slot_binding) for slot in spec.slots
+                        if (slot_binding := spec.models.get(slot)) is not None
+                        and slot_binding.source == "tensorhub"
+                        and self.executor.store.local_path(
+                            wire_ref(slot_binding)) is None
                     })
                     if missing:
                         awaiting_hub[spec.name] = missing
