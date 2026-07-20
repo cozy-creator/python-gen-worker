@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.39.2 (2026-07-20)
+
+- **gw#587 serving bootstrap: self-mint boots advertise their own key and
+  run the warmup proof** (pairs with tensorhub PR #488's hot-prewarm +
+  self-attested dispatch fence; closes the live-proof deadlock). A minting
+  worker now records its mint into `active_compile_artifacts` at BOTH
+  arming sites (`fleet_cells.enable_compiled` returns `ArmOutcome` with the
+  `SelfMint` identity: own key ref `_system/family-<f>#<key>` + blake3
+  self-attested artifact digest; `ArmingScope` gains an executor-routed
+  `enable` seam for self-loaded pipelines), so `_install_compile_targets`
+  advertises the worker's own key instead of raising
+  `CompiledLaneUnavailable`, and `proves_inductor` runs the SAME warmup
+  proof for self-mint and store-served boots — zero-hit self-mints fail
+  closed, never eager. `STORE_SERVED_BOOT_COMPILED` stays delivered-only:
+  a minting boot legitimately compiles and is exempt.
+
 ## 0.39.1 (2026-07-19)
 
 - **gw#595: qwen compiled serve — producer guidance-kwarg parity +
