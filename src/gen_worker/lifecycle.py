@@ -464,51 +464,16 @@ class Lifecycle:
             if spec.name in self.executor.unavailable:
                 continue
             if spec.slots or spec.compile is not None:
-                # pgw#532 (slots) + gw#584 (compile): both a Slot pick and a
-                # compile cell arrive ONLY via hub delivery (HelloAck
-                # resolutions, DesiredResidency, RunJob snapshots) — never a
-                # boot-time default. Eager setup HERE (in this same scan,
-                # before any hub round trip) races HelloAck's rebind and
-                # selects from bare refs with no snapshots (fc157; the
-                # ie#501 W8A8 cell-selection miss).
+                # pgw#532 (slots) + gw#584 (compile): Slot picks and compile
+                # cells are set up ONLY on hub delivery — Hot DesiredInstance
+                # or RunJob, both of which rebind through _effective_spec
+                # with the hub-stamped refs. th#938: th#912's watcher ran
+                # ensure_setup on the class-table spec here, materializing
+                # the image-baked code default over the hub-stamped release
+                # binding (sdxl's Civitai default -> civitai_not_found ->
+                # both fns setup_failed). The code default is the hub-less
+                # bootstrap fallback only.
                 dynamic.append(spec.name)
-                if spec.slots:
-                    # th#912: a Slot's declared default_checkpoint is only a
-                    # SEED for the hub's residency plan (pgw#532) — but once
-                    # the hub actually delivers it to disk (th#911 seeds it
-                    # into DesiredResidency.disk_refs), nothing ever ran
-                    # setup for the no-override/default pick, because this
-                    # scan skips Slot functions entirely and the hub sends
-                    # no DesiredInstance/RunJob to a worker it doesn't yet
-                    # consider available. Watch it exactly like a plain
-                    # tensorhub binding (below): the default pick IS the
-                    # spec._effective_spec degenerate case (no per-request
-                    # override), so `ensure_setup(spec)` on the unmodified
-                    # class-table spec is correct once every tensorhub-
-                    # sourced default is locally resolvable. A non-tensorhub
-                    # (raw upstream) default is never eagerly fetched here —
-                    # mirror-first (gw#465) still applies; that case is left
-                    # to per-dispatch resolution as before.
-                    # A MIXED spec (any raw-upstream slot default alongside
-                    # tensorhub ones, e.g. sdxl's Civitai pipeline seed +
-                    # Hub vae) must not be watched at all: the watcher's
-                    # `ensure_setup` on the unmodified spec would self-fetch
-                    # the raw default the moment the tensorhub refs land
-                    # (th#927 live crash-loop: civitai_not_found at boot).
-                    raw_default = any(
-                        (b := spec.models.get(slot)) is not None
-                        and b.source != "tensorhub"
-                        for slot in spec.slots
-                    )
-                    missing = sorted({
-                        wire_ref(slot_binding) for slot in spec.slots
-                        if (slot_binding := spec.models.get(slot)) is not None
-                        and slot_binding.source == "tensorhub"
-                        and self.executor.store.local_path(
-                            wire_ref(slot_binding)) is None
-                    })
-                    if missing and not raw_default:
-                        awaiting_hub[spec.name] = missing
                 continue
             missing = sorted({
                 wire_ref(b) for b in spec.models.values()
