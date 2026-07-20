@@ -60,6 +60,13 @@ class ModelState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MODEL_STATE_FAILED: _ClassVar[ModelState]
     MODEL_STATE_ADOPTED: _ClassVar[ModelState]
     MODEL_STATE_HOST_CAPACITY_PROGRESS: _ClassVar[ModelState]
+
+class ActivityState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ACTIVITY_STATE_UNSPECIFIED: _ClassVar[ActivityState]
+    ACTIVITY_STATE_RUNNING: _ClassVar[ActivityState]
+    ACTIVITY_STATE_COMPLETED: _ClassVar[ActivityState]
+    ACTIVITY_STATE_FAILED: _ClassVar[ActivityState]
 PROTOCOL_VERSION_UNSPECIFIED: ProtocolVersion
 PROTOCOL_VERSION_CURRENT: ProtocolVersion
 RESIDENCY_TIER_UNSPECIFIED: ResidencyTier
@@ -93,9 +100,13 @@ MODEL_STATE_EVICTED: ModelState
 MODEL_STATE_FAILED: ModelState
 MODEL_STATE_ADOPTED: ModelState
 MODEL_STATE_HOST_CAPACITY_PROGRESS: ModelState
+ACTIVITY_STATE_UNSPECIFIED: ActivityState
+ACTIVITY_STATE_RUNNING: ActivityState
+ACTIVITY_STATE_COMPLETED: ActivityState
+ACTIVITY_STATE_FAILED: ActivityState
 
 class WorkerMessage(_message.Message):
-    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded")
+    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded", "activity_update")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     STATE_DELTA_FIELD_NUMBER: _ClassVar[int]
     JOB_ACCEPTED_FIELD_NUMBER: _ClassVar[int]
@@ -104,6 +115,7 @@ class WorkerMessage(_message.Message):
     MODEL_EVENT_FIELD_NUMBER: _ClassVar[int]
     FN_UNAVAILABLE_FIELD_NUMBER: _ClassVar[int]
     FN_DEGRADED_FIELD_NUMBER: _ClassVar[int]
+    ACTIVITY_UPDATE_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     state_delta: StateDelta
     job_accepted: JobAccepted
@@ -112,7 +124,8 @@ class WorkerMessage(_message.Message):
     model_event: ModelEvent
     fn_unavailable: FnUnavailable
     fn_degraded: FnDegraded
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ...) -> None: ...
+    activity_update: ActivityUpdate
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
     __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh")
@@ -572,6 +585,28 @@ class ModelEvent(_message.Message):
     target_incarnation_id: str
     network_bytes: int
     def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ..., network_bytes: _Optional[int] = ...) -> None: ...
+
+class ActivityUpdate(_message.Message):
+    __slots__ = ("kind", "phase", "step", "total_steps", "seq", "state", "error", "detail", "updated_at_unix_ms")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    PHASE_FIELD_NUMBER: _ClassVar[int]
+    STEP_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_STEPS_FIELD_NUMBER: _ClassVar[int]
+    SEQ_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    kind: str
+    phase: str
+    step: int
+    total_steps: int
+    seq: int
+    state: ActivityState
+    error: str
+    detail: str
+    updated_at_unix_ms: int
+    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")

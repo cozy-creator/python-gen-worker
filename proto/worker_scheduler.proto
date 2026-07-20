@@ -41,14 +41,15 @@ service WorkerScheduler {
 
 message WorkerMessage {
   oneof msg {
-    Hello         hello          = 1;
-    StateDelta    state_delta    = 2;
-    JobAccepted   job_accepted   = 3;
-    JobResult     job_result     = 4;
-    JobProgress   job_progress   = 5;
-    ModelEvent    model_event    = 6;
-    FnUnavailable fn_unavailable = 7;
-    FnDegraded    fn_degraded    = 8;
+    Hello          hello           = 1;
+    StateDelta     state_delta     = 2;
+    JobAccepted    job_accepted    = 3;
+    JobResult      job_result      = 4;
+    JobProgress    job_progress    = 5;
+    ModelEvent     model_event     = 6;
+    FnUnavailable  fn_unavailable  = 7;
+    FnDegraded     fn_degraded     = 8;
+    ActivityUpdate activity_update = 9;
   }
 }
 
@@ -573,6 +574,40 @@ enum ModelState {
   // Measured host headroom now satisfies this ref's remembered failed
   // requirement after owner/pin release. Not a residency tier.
   MODEL_STATE_HOST_CAPACITY_PROGRESS = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Worker activity (th#929 / gw#601)
+// ---------------------------------------------------------------------------
+
+// Worker -> orchestrator: generic progress for the worker's current internal
+// job (self-mint compile, warmup, ...). Liveness contract: while an activity
+// RUNS the worker keeps seq advancing — phase transitions, step advances, or
+// watchdog heartbeats — and the hub enforces ONE generic stall rule on
+// silence; there are no per-activity wall-clock budgets. A silent death is a
+// bug by contract: terminal FAILED carries the exception. Model downloads
+// keep their richer ModelEvent byte shape; the hub folds them into the same
+// last-progress store. Additive proto3 oneof field: old hubs ignore it.
+message ActivityUpdate {
+  string kind  = 1; // "self_mint_compile" | "warmup" | ...
+  string phase = 2; // e.g. "load", "inductor_compile", "warmup_forward", "seal_publish"
+  int64 step        = 3; // k in "phase k/K"; 0 = not stepwise
+  int64 total_steps = 4; // K; 0 = unknown
+  // Monotonic per worker process across all activities. The hub records
+  // last-progress on every increase; heartbeats bump it without changing
+  // phase/step.
+  uint64 seq = 5;
+  ActivityState state = 6;
+  string error  = 7; // set when state = FAILED (the typed activity_failed terminal)
+  string detail = 8; // human-readable elaboration
+  int64 updated_at_unix_ms = 9; // worker clock, informational; hub stamps receipt
+}
+
+enum ActivityState {
+  ACTIVITY_STATE_UNSPECIFIED = 0;
+  ACTIVITY_STATE_RUNNING     = 1;
+  ACTIVITY_STATE_COMPLETED   = 2;
+  ACTIVITY_STATE_FAILED      = 3;
 }
 
 // ---------------------------------------------------------------------------
