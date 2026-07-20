@@ -489,6 +489,17 @@ class Lifecycle:
                     # (raw upstream) default is never eagerly fetched here —
                     # mirror-first (gw#465) still applies; that case is left
                     # to per-dispatch resolution as before.
+                    # A MIXED spec (any raw-upstream slot default alongside
+                    # tensorhub ones, e.g. sdxl's Civitai pipeline seed +
+                    # Hub vae) must not be watched at all: the watcher's
+                    # `ensure_setup` on the unmodified spec would self-fetch
+                    # the raw default the moment the tensorhub refs land
+                    # (th#927 live crash-loop: civitai_not_found at boot).
+                    raw_default = any(
+                        (b := spec.models.get(slot)) is not None
+                        and b.source != "tensorhub"
+                        for slot in spec.slots
+                    )
                     missing = sorted({
                         wire_ref(slot_binding) for slot in spec.slots
                         if (slot_binding := spec.models.get(slot)) is not None
@@ -496,7 +507,7 @@ class Lifecycle:
                         and self.executor.store.local_path(
                             wire_ref(slot_binding)) is None
                     })
-                    if missing:
+                    if missing and not raw_default:
                         awaiting_hub[spec.name] = missing
                 continue
             missing = sorted({
