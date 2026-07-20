@@ -2152,10 +2152,21 @@ def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     assert ex.unavailable[spec.name][0] == "compile_cell_failed"
 
 
-def test_w8a8_partial_handler_proof_fails_loud_without_disabling_skipped_turbo(
+def test_w8a8_custom_warmup_proof_attributes_to_siblings_except_declared_none(
     tmp_path, monkeypatch,
 ):
-    """Every required alias must prove the W8A8 cell; explicit skips do not."""
+    """gw#603 ruling (2026-07-20, rewrites the ac0bab9 pin — see the tracker
+    note in gw#603 for the reversal rationale + gw#595's original reasoning):
+    proof is a property of the WARMED OBJECT and the graph set actually
+    exercised, not of the initiating handler's name. A custom object-level
+    warmup's proof attributes to every contract-compatible sibling alias of
+    the exact proven object — EXCEPT aliases explicitly declared
+    ``warmup={...: None}``, which stay fail-closed (the legacy-Turbo
+    carve-out; this exclusion is the revert-turns-red for the safeguard).
+    Live motivation: LTX serves generate+edit(+extend) from ONE class with
+    ONE custom warmup that warms every declared graph — under the ac0bab9
+    single-name attribution no >=0.38.8 worker could EVER boot it compiled,
+    delivered cells included."""
     import gen_worker.executor as executor_mod
 
     family = "sdxl"
@@ -2214,20 +2225,93 @@ def test_w8a8_partial_handler_proof_fails_loud_without_disabling_skipped_turbo(
     )
     monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
 
-    with pytest.raises(
-        cc.CompiledLaneUnavailableError,
-        match="mandatory quantized-lane function proof incomplete",
-    ):
-        asyncio.run(ex.ensure_setup(generate, {
-            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-            cell_ref: pb.Snapshot(digest=DIGEST_A),
-        }))
+    instance = asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
+    assert isinstance(instance, _SdxlEndpoint)
 
-    required = {by_attr["generate"].name, by_attr["edit"].name}
-    assert set(ex.unavailable) == required
-    assert all(ex.unavailable[name][0] == "compile_cell_failed" for name in required)
-    assert by_attr["generate_turbo"].name not in ex.unavailable
-    assert ex.compile_targets() == []
+    # The object proof covers both compatible siblings...
+    (target,) = ex.compile_targets()
+    proven = set(target.function_names)
+    assert by_attr["generate"].name in proven
+    assert by_attr["edit"].name in proven
+    # ...but NEVER the explicitly opted-out alias (revert-turns-red for the
+    # warmup={...: None} carve-out): Turbo rejects W8A8 by author contract
+    # and must not be advertised as servable on this lane.
+    assert by_attr["generate_turbo"].name not in proven
+    assert not ex.unavailable
+
+
+def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
+    tmp_path, monkeypatch,
+):
+    """The exact live gw#603 shape (LTX): one class, generate+edit aliases,
+    ONE custom warmup() covering every declared graph, NO decorator warmup
+    rows. Under single-name attribution this boot failed closed forever
+    ("expected=['edit','generate'] proven=['edit']") on delivered AND
+    self-mint cells alike; under the gw#603 ruling the proven object
+    certifies both siblings and the boot serves."""
+    import gen_worker.executor as executor_mod
+
+    family = "ltx-shaped"
+    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    artifact = _artifact(tmp_path, family=family)
+    model_dir = tmp_path / "ltx-shaped-model"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/ltx-shaped", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((1024, 1024),), family=family),
+    )
+    class _LtxShapedEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def warmup(self) -> None:
+            # The instance-level synthetic warms EVERY declared graph.
+            _record_fake_warm(self.pipeline)
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            return _Out(y="ok")
+
+    specs = extract_specs(_LtxShapedEndpoint)
+    by_attr = {spec.attr_name: spec for spec in specs}
+    generate = by_attr["generate"]
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    instance = asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
+    assert isinstance(instance, _LtxShapedEndpoint)
+    (target,) = ex.compile_targets()
+    assert set(target.function_names) == {
+        by_attr["generate"].name, by_attr["edit"].name}
+    assert not ex.unavailable
 
 
 def _merged_lane_endpoint(record_warm):
