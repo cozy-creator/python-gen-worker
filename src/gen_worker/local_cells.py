@@ -58,6 +58,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from . import activity as activity_mod
 from . import compile_cache as cc
 
 logger = logging.getLogger(__name__)
@@ -171,7 +172,13 @@ def _mint(pipe: Any, cfg: Any, target: Path, family: str) -> Path:
     _sweep_stale_mints(root)
     capture = root / _MINT_DIR / f"{target.name[: -len('.tar.gz')]}-{os.getpid()}"
     started = time.monotonic()
-    cc.mint_artifact(pipe, cfg, family, target, capture, say=_say)
+    # gw#601: the local mint reports the same activity envelope as the fleet
+    # path — without a transport sink it lands on the logger (the local UI),
+    # heartbeating through the long silent compile.
+    with activity_mod.running(
+        activity_mod.KIND_SELF_MINT_COMPILE, activity_mod.PHASE_INDUCTOR_COMPILE,
+    ) as act, activity_mod.watchdog(act):
+        cc.mint_artifact(pipe, cfg, family, target, capture, say=_say)
     _say(
         f"compile cell saved: {target} "
         f"({target.stat().st_size / 1e6:.1f} MB, {time.monotonic() - started:.0f}s total); "

@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 
+from . import activity as activity_mod
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -2979,6 +2980,10 @@ class Executor:
         if spec.cls is None:
             return None  # function-shaped endpoint: no instance, no setup
         self.store.bind_loop()
+        try:
+            activity_mod.bind_sink(self._send, asyncio.get_running_loop())
+        except RuntimeError:
+            pass
         rec = self._class_record(spec)
         async with rec.lock:
             if rec.ready and not rec.stale:
@@ -3061,9 +3066,20 @@ class Executor:
                     spec.name,
                 )
                 await self._rollback_failed_setup(rec)
+            # gw#601: setup+warmup is one reportable activity. The watchdog
+            # heartbeats through long wire-silent calls (inductor etc.) while
+            # they provably burn CPU; a hang stops the beat within one
+            # interval and the hub's generic stall rule owns termination.
+            act = activity_mod.begin(
+                activity_mod.KIND_SELF_MINT_COMPILE if spec.compile is not None
+                else activity_mod.KIND_WARMUP,
+                activity_mod.PHASE_LOAD,
+            )
             try:
-                instance = await self._setup_locked(spec, rec, snapshots)
+                with activity_mod.watchdog(act):
+                    instance = await self._setup_locked(spec, rec, snapshots)
             except BaseException as exc:
+                act.failed(exc)
                 # Setup is a transaction: endpoint construction, tenant
                 # setup/warmup, residency registration, and compile-target
                 # publication either all reach READY or all ownership is
@@ -3096,6 +3112,7 @@ class Executor:
                     self.unavailable.pop(s.name, None)
             rec.instance = instance
             rec.ready = True
+            act.completed()
             self._clear_recovered_compile_failures(rec)
             self._on_state_change()
             return instance
@@ -3179,7 +3196,9 @@ class Executor:
             logger.info("boot warmup skipped for %s: %s", skip.spec.name, skip.reason)
         objects = tuple({id(obj): obj for obj in proof_objects}.values())
         evidence = _WarmupEvidence()
-        for wj in jobs:
+        for wj_index, wj in enumerate(jobs, start=1):
+            activity_mod.current_phase(
+                activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(jobs))
             before = {
                 id(obj): (
                     compile_cache.execution_count(obj),
@@ -3463,6 +3482,9 @@ class Executor:
                 )
                 return evidence.count, evidence.functions_by_object
 
+            activity_mod.current_phase(
+                activity_mod.PHASE_INDUCTOR_COMPILE if inj.pending_self_mints
+                else activity_mod.PHASE_WARMUP_FORWARD)
             compile_seconds_before = (
                 compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
             if inj.active_compile_artifacts:
@@ -3517,6 +3539,8 @@ class Executor:
                         # advertising/publishing this boot's capture.
                         from . import fleet_cells as fleet_cells_mod
 
+                        activity_mod.current_phase(
+                            activity_mod.PHASE_SEAL_PUBLISH)
                         finalized = fleet_cells_mod.finalize_self_mint(
                             pipe, pending_mint)
                         inj.pending_self_mints.pop(id(pipe), None)
