@@ -1481,11 +1481,25 @@ def _selection_for(
     when a delivered artifact failed to arm this object and the fleet policy
     minted instead, recording the delivered identity would advertise bytes
     this object does not serve (the gw#586 defect shape).
+
+    ``mint`` is either a finalized ``fleet_cells.SelfMint`` (artifact
+    already packed, digest known) or a ``fleet_cells.PendingSelfMint``
+    (gw#587 CORRECT FIX: armed for capture, not yet proven or packed — its
+    ``target`` path exists on disk only once the warmup proof finalizes
+    it, and its ``snapshot_digest`` is empty until then). Either way the
+    ``ref`` is known immediately (computed from static axes, never the
+    traced FX graph bytes), which is what the hub's self-attested dispatch
+    fence needs at advertise time; the proof loop replaces this selection
+    with the fully finalized one once it packs the proven capture.
     """
     if mint is not None:
+        path = getattr(mint, "artifact", None)
+        if path is None:
+            path = mint.target
         return _CompileArtifactSelection(
-            path=Path(mint.artifact), ref=str(mint.ref),
-            snapshot_digest=str(mint.snapshot_digest), self_mint=True)
+            path=Path(path), ref=str(mint.ref),
+            snapshot_digest=str(getattr(mint, "snapshot_digest", "") or ""),
+            self_mint=True)
     return delivered
 
 
@@ -1596,6 +1610,11 @@ class _InjectionResult:
     active_compile_artifacts: Dict[int, _CompileArtifactSelection] = dc_field(
         default_factory=dict)
     trt_execution_before: Dict[int, int] = dc_field(default_factory=dict)
+    # gw#587 CORRECT FIX: id(pipeline) -> fleet_cells.PendingSelfMint for
+    # objects armed from a fresh self-mint capture, not yet proven or
+    # packed. The warmup-proof loop finalizes (packs + publishes) exactly
+    # the proven entries and abandons the rest — never before the proof.
+    pending_self_mints: Dict[int, Any] = dc_field(default_factory=dict)
 
     def add_compile_object(
         self, pipeline: Any, slots: typing.Iterable[str],
@@ -2328,6 +2347,16 @@ class Executor:
             ):
                 self.unavailable.pop(name, None)
                 self._compile_failure_owners.pop(name, None)
+
+    def _abandon_pending_mint(self, inj: "_InjectionResult", pipe: Any) -> None:
+        """Discard an unfinalized self-mint capture for ``pipe`` (gw#587
+        CORRECT FIX): a disproven/unexercised candidate's capture must never
+        be packed or published — only a passed proof produces the mint."""
+        pending = inj.pending_self_mints.pop(id(pipe), None)
+        if pending is not None:
+            from . import fleet_cells as fleet_cells_mod
+
+            fleet_cells_mod.abandon_self_mint(pending)
 
     def _bind_compile_guard(
         self, rec: _ClassRecord, target: _CompileTargetRecord,
@@ -3128,6 +3157,7 @@ class Executor:
         snapshots: Optional[Dict[str, pb.Snapshot]],
         *,
         proof_objects: typing.Iterable[Any] = (),
+        cold_proof_ids: typing.Container[int] = (),
     ) -> _WarmupEvidence:
         """Run the declared per-handler warmup contract pre-READY.
 
@@ -3135,6 +3165,12 @@ class Executor:
         objects served each handler. A sibling handler is never certified by
         another handler's cache hit merely because both share config or an
         instance. Output remains local and discarded.
+
+        ``cold_proof_ids`` (gw#587 CORRECT FIX): object ids armed from a
+        FRESH self-mint capture — for them a successful compiled call is the
+        proof (there is nothing pre-existing on disk to HIT against; the
+        capture this very call populates becomes the cell). Delivered cells
+        keep requiring a real cache hit.
         """
         from . import compile_cache, trt_engine
 
@@ -3182,7 +3218,10 @@ class Executor:
                 calls_before, trt_before = before[id(obj)]
                 inductor_proven = (
                     compile_cache.execution_count(obj) > calls_before
-                    and compile_cache.cache_hit_count(obj) > 0
+                    and (
+                        compile_cache.cache_hit_count(obj) > 0
+                        or id(obj) in cold_proof_ids
+                    )
                 )
                 trt_proven = trt_engine.execution_count(obj) > trt_before
                 if inductor_proven or trt_proven:
@@ -3361,13 +3400,19 @@ class Executor:
                     if not compile_cache.has_compile_target(pipe, spec.compile):
                         continue
                     inj.add_compile_object(pipe, self_loaded_slots)
-                    selection = _selection_for(
-                        compile_selection, scope_mints.get(id(pipe)))
+                    mint = scope_mints.get(id(pipe))
+                    selection = _selection_for(compile_selection, mint)
                     if armed and selection is not None:
                         inj.active_compile_artifacts[id(pipe)] = selection
                         if trt_engine.is_engine_ref(selection.ref):
                             inj.trt_execution_before[id(pipe)] = (
                                 trt_engine.execution_count(pipe))
+                        # gw#587 CORRECT FIX: a PendingSelfMint is not proven
+                        # or packed yet — the warmup proof below finalizes it
+                        # (pack + publish) only after confirming a real
+                        # compiled call, never before.
+                        if hasattr(mint, "capture_dir"):
+                            inj.pending_self_mints[id(pipe)] = mint
             # gw#587 serving bootstrap: the warmup PROOF gates every inductor
             # arm — delivered (store-served) AND self-minted alike. Only the
             # artifact SOURCE differs; a self-mint that does not actually
@@ -3414,6 +3459,7 @@ class Executor:
                         candidate.pipeline for candidate in inj.compile_objects
                         if id(candidate.pipeline) in inj.active_compile_artifacts
                     ),
+                    cold_proof_ids=frozenset(inj.pending_self_mints),
                 )
                 return evidence.count, evidence.functions_by_object
 
@@ -3452,8 +3498,41 @@ class Executor:
                     pipe_misses = compile_cache.cache_miss_count(pipe) - before[1]
                     hits += max(0, pipe_hits)
                     misses += max(0, pipe_misses)
+                    pending_mint = inj.pending_self_mints.get(id(pipe))
                     if not warmed or calls <= 0:
                         unexercised.append(candidate)
+                    elif pending_mint is not None:
+                        # gw#587 CORRECT FIX: a fresh self-mint capture has
+                        # nothing pre-existing on disk to HIT against — its
+                        # own real, successful compiled call (calls>0, no
+                        # guard failure) IS the entire proof; requiring a
+                        # disk hit here would fail every honest self-mint by
+                        # construction. Pack the capture dir that call just
+                        # populated and advertise the real digest — this is
+                        # "prove-produces-the-mint": the published artifact
+                        # is byte-derived from exactly this execution, never
+                        # a second, separately-shaped compile. A pack
+                        # failure never un-serves the request (the compiled
+                        # callable is already live); it only forfeits
+                        # advertising/publishing this boot's capture.
+                        from . import fleet_cells as fleet_cells_mod
+
+                        finalized = fleet_cells_mod.finalize_self_mint(
+                            pipe, pending_mint)
+                        inj.pending_self_mints.pop(id(pipe), None)
+                        if finalized is not None:
+                            proven += 1
+                            if callable(warmup):
+                                function_proofs[id(pipe)] = {spec.name}
+                            inj.active_compile_artifacts[id(pipe)] = (
+                                _CompileArtifactSelection(
+                                    path=Path(finalized.artifact),
+                                    ref=str(finalized.ref),
+                                    snapshot_digest=str(
+                                        finalized.snapshot_digest),
+                                    self_mint=True))
+                        else:
+                            disproven.append(candidate)
                     elif pipe_hits <= 0:
                         disproven.append(candidate)
                     else:
@@ -3479,6 +3558,7 @@ class Executor:
                         if int(getattr(spec.compile, "lora_bucket", 0) or 0):
                             compile_cache.drop_lora_lane(pipe)
                         inj.active_compile_artifacts.pop(id(pipe), None)
+                        self._abandon_pending_mint(inj, pipe)
                     detail = (
                         f"{len(unproven)} attached compile object(s) did not "
                         "serve their own warmup graph "
@@ -3495,6 +3575,43 @@ class Executor:
                     mandatory = pipeline_weight_lane(pipe).startswith(
                         _MANDATORY_LANES)
                     if mandatory:
+                        pending_mint = inj.pending_self_mints.pop(
+                            id(pipe), None)
+                        if pending_mint is not None:
+                            finalized = pending_mint._state.get("minted")
+                            if finalized is not None:
+                                # A proven sibling finalized the SHARED
+                                # capture (same key, one family cell) —
+                                # advertise the finalized identity, not the
+                                # arm-time placeholder.
+                                inj.active_compile_artifacts[id(pipe)] = (
+                                    _CompileArtifactSelection(
+                                        path=Path(finalized.artifact),
+                                        ref=str(finalized.ref),
+                                        snapshot_digest=str(
+                                            finalized.snapshot_digest),
+                                        self_mint=True))
+                            else:
+                                # Its capture was never exercised and no
+                                # sibling finalized it: there is no proven
+                                # artifact to advertise. Drop the target
+                                # loudly rather than advertise bytes
+                                # nothing proved (the gw#586 shape).
+                                from . import fleet_cells as fleet_cells_mod
+
+                                fleet_cells_mod.abandon_self_mint(
+                                    pending_mint)
+                                logger.warning(
+                                    "compile object (slots=%s) self-mint "
+                                    "capture unexercised (calls=0) with no "
+                                    "finalized sibling; dropping its "
+                                    "compile target",
+                                    sorted(candidate.slots))
+                                function_proofs[id(pipe)] = set()
+                                compile_cache.unwrap(pipe)
+                                inj.active_compile_artifacts.pop(
+                                    id(pipe), None)
+                                continue
                         # Eager is not a lane for it and a proven sibling
                         # vouches for the cell: stays armed unproven. Its
                         # own graphs, absent from the cell by design, fail
@@ -3514,6 +3631,7 @@ class Executor:
                     if int(getattr(spec.compile, "lora_bucket", 0) or 0):
                         compile_cache.drop_lora_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
+                    self._abandon_pending_mint(inj, pipe)
                 if (
                     proven
                     and compile_selection is not None
@@ -4593,6 +4711,12 @@ class Executor:
                             if trt_engine.is_engine_ref(selection.ref):
                                 result.trt_execution_before[id(pipe)] = (
                                     trt_engine.execution_count(pipe))
+                            # gw#587 CORRECT FIX: a PendingSelfMint is not
+                            # proven or packed yet — the warmup proof
+                            # finalizes it (pack + publish) only after
+                            # confirming a real compiled call, never before.
+                            if hasattr(pipe_mint, "capture_dir"):
+                                result.pending_self_mints[id(pipe)] = pipe_mint
                 delta = max(0, self._vram_allocated() - before)
                 if slot_share:
                     lane_obj, lane_bytes = self._register_lane(

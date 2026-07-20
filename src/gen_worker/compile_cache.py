@@ -2042,6 +2042,86 @@ def mint_artifact(
     return meta
 
 
+def begin_fleet_mint(pipe: Any, cfg: Any, capture: Path) -> None:
+    """Arm ``pipe`` for a fleet self-mint capture (gw#587 CORRECT FIX).
+
+    Points inductor/triton at a fresh ``capture`` dir and enables the
+    declared compile targets in cold-allowed, GUARDED mode — WITHOUT
+    running any synthetic warm call (the old ``mint_artifact``/
+    ``_warm_call`` producer-style recipe, gw#586's defect class
+    resurfacing inside self-mint, gw#587's root cause).
+
+    The caller's real serving warmup — the executor's own warmup-proof
+    window, running the endpoint's own code (the two-stage/conditioned
+    call LTX and its siblings actually make) — performs the ONLY compile
+    this mint will ever see. Capturing that exact execution instead of a
+    second, separately-shaped call is what makes the published artifact
+    byte-derived from the same execution the proof observed: there is no
+    other code path that could re-create serving's call shape, so the
+    mint can never diverge from what it actually serves.
+
+    Raises if no compile target resolves on ``pipe`` (nothing to prove or
+    publish); the caller's miss policy applies exactly as it did for a
+    failed :func:`mint_artifact` call.
+    """
+    capture_env(capture)
+    if not apply(pipe, cfg, cache_ready=False, guard=True, allow_cold=True):
+        raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
+
+
+def finish_fleet_mint(
+    pipe: Any, cfg: Any, family: str, target: Path, capture: Path,
+) -> Dict[str, Any]:
+    """Pack the capture dir a PASSED warmup proof just populated.
+
+    Callers must invoke this ONLY after the executor's warmup proof has
+    confirmed the real serving call exercised ``pipe``'s attached compile
+    targets (a successful compiled call recorded — never before: packing
+    ahead of the proof would reopen the publish-before-proof window
+    gw#587 closes, and packing an unexercised/failed capture would
+    publish bytes nothing ever proved served).
+
+    Unlike :func:`mint_artifact`, this never compiles anything itself —
+    the compile already happened, inside the proof window, driven by the
+    endpoint's own warmup. This function only packages what that warmup
+    produced.
+    """
+    captured = [p for p in (capture / "inductor").rglob("*") if p.is_file()]
+    if not captured:
+        raise RuntimeError(
+            "self-mint proof passed but captured nothing under "
+            "TORCHINDUCTOR_CACHE_DIR — was inductor already latched to "
+            "another dir in this process?"
+        )
+    from .models.loading import pipeline_weight_lane
+    from .models.memory import low_vram_mode
+
+    # gw#564: record the execution contract exactly like the production
+    # build — w8a8 cells are contract_drift-gated on the graph signature and
+    # weight-lane manifest, so a mint without them can never re-adopt. Both
+    # are STATIC (module structure + declared shapes/targets), computed the
+    # same way whether sampled before or after the real compile.
+    graph_signature, weight_contract = execution_contract(pipe, cfg)
+    meta = artifact_metadata(
+        family=family,
+        source_ref="self-mint",
+        shapes=cfg.shapes,
+        targets=cfg.targets,
+        guidance_scales=getattr(cfg, "guidance_scales", ()),
+        low_vram_mode=low_vram_mode(pipe),
+        compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
+        weight_lane=pipeline_weight_lane(pipe),
+        lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
+        graph_signature=graph_signature,
+        weight_contract=weight_contract,
+    )
+    tmp = target.with_suffix(".part")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pack(capture, tmp, meta)
+    os.replace(tmp, target)
+    return meta
+
+
 __all__ = [
     "ARTIFACT_FORMAT",
     "AdoptError",
@@ -2051,6 +2131,7 @@ __all__ = [
     "apply",
     "apply_lora_lane",
     "artifact_metadata",
+    "begin_fleet_mint",
     "capture_env",
     "drop_lora_lane",
     "cell_lane",
@@ -2063,6 +2144,7 @@ __all__ = [
     "execution_contract",
     "execution_contract_digest",
     "family_from_ref",
+    "finish_fleet_mint",
     "parse_cell_ref",
     "find_artifact",
     "flavor_label",
