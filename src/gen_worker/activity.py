@@ -20,7 +20,8 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from types import TracebackType
+from typing import Any, Callable, Coroutine, Optional
 
 from .pb import worker_scheduler_pb2 as pb
 
@@ -49,7 +50,10 @@ _sink: Optional[Callable[[pb.ActivityUpdate], None]] = None
 _current: Optional["Activity"] = None
 
 
-def bind_sink(emit, loop: asyncio.AbstractEventLoop) -> None:
+def bind_sink(
+    emit: Callable[["pb.WorkerMessage"], Coroutine[Any, Any, None]],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
     """Route reports onto the worker->hub stream: emit is the async
     WorkerMessage sender, loop the transport loop. Thread-safe emission."""
     def sink(update: pb.ActivityUpdate) -> None:
@@ -102,7 +106,7 @@ class Activity:
         self._total = 0
         self._done = False
 
-    def _report(self, state: int, error: str = "", detail: str = "") -> None:
+    def _report(self, state: "pb.ActivityState", error: str = "", detail: str = "") -> None:
         _emit(pb.ActivityUpdate(
             kind=self.kind, phase=self._phase, step=self._step,
             total_steps=self._total, seq=_next_seq(), state=state,
@@ -172,7 +176,12 @@ class running:
         self.activity = begin(self._kind, self._phase)
         return self.activity
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
         assert self.activity is not None
         if exc is not None:
             self.activity.failed(exc)
@@ -228,6 +237,11 @@ class watchdog:
         self._thread.start()
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
