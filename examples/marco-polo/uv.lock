@@ -170,7 +170,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.15.1"
+version = "0.40.0"
 source = { editable = "../../" }
 dependencies = [
     { name = "blake3" },
@@ -194,19 +194,21 @@ requires-dist = [
     { name = "bitsandbytes", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=0.45.0" },
     { name = "blake3", specifier = ">=1.0.0" },
     { name = "boto3", specifier = ">=1.41.0" },
+    { name = "c2pa-python", marker = "extra == 'dev'", specifier = ">=0.36" },
+    { name = "c2pa-python", marker = "extra == 'signing'", specifier = ">=0.36" },
     { name = "diffusers", marker = "extra == 'dev'", specifier = ">=0.39.0" },
     { name = "gguf", specifier = ">=0.10.0" },
-    { name = "grpcio", specifier = ">=1.80.0" },
-    { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.80.0" },
+    { name = "grpcio", specifier = ">=1.82.1" },
+    { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.82.1" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "msgspec", specifier = ">=0.18.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "numpy", marker = "extra == 'audio'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'video'", specifier = ">=1.24" },
+    { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.0" },
     { name = "pillow", marker = "extra == 'images'", specifier = ">=10.0" },
-    { name = "protobuf", specifier = ">=6.30.0" },
+    { name = "protobuf", specifier = ">=7.35.0" },
     { name = "psutil", specifier = ">=7.0.0" },
-    { name = "pyarrow", marker = "extra == 'datasets'", specifier = ">=17.0.0" },
     { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=17.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
@@ -215,15 +217,15 @@ requires-dist = [
     { name = "safetensors", marker = "extra == 'torch'", specifier = ">=0.8.0" },
     { name = "soundfile", marker = "extra == 'audio'", specifier = ">=0.12" },
     { name = "tomli-w", specifier = ">=1.0.0" },
-    { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu129" },
+    { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.13.0" },
-    { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu129" },
+    { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'vision'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.13" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250913" },
 ]
-provides-extras = ["torch", "vision", "datasets", "images", "audio", "video", "dev"]
+provides-extras = ["torch", "vision", "images", "audio", "video", "signing", "dev"]
 
 [[package]]
 name = "gguf"
