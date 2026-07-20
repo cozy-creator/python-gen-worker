@@ -1288,6 +1288,235 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     assert ex.unavailable[spec.name][0] == "compile_cell_failed"
 
 
+def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
+    """Wire the REAL fleet_cells miss path (prove-produces-the-mint) into an
+    Executor boot: delivered arm refuses (mandatory miss), the cold-capture
+    arm opens a real capture dir, and the executor's own warmup proof is the
+    only thing that can finalize/publish it."""
+    from gen_worker import cell_key as cell_key_mod
+    from gen_worker import fleet_cells
+
+    with fleet_cells._PENDING_LOCK:
+        fleet_cells._PENDING.clear()
+
+    def _mandatory_miss(*a, **k):
+        raise cc.CompiledLaneUnavailableError("no delivered cell")
+
+    monkeypatch.setattr(provision, "enable_compiled", _mandatory_miss)
+    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
+
+    class _Key:
+        digest = "ck1-" + "9" * 56
+
+    monkeypatch.setattr(cell_key_mod, "compute", lambda *a, **k: _Key())
+    captured: dict = {}
+
+    def _begin(p, cfg, capture):
+        capture.mkdir(parents=True, exist_ok=True)
+        captured["dir"] = capture
+        _mark_fake_guard(p)
+
+    monkeypatch.setattr(cc, "begin_fleet_mint", _begin)
+    return captured, _Key.digest
+
+
+def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
+    tmp_path, monkeypatch, caplog,
+):
+    """gw#587 CORRECT FIX direction (a), over the real Executor rig: a
+    mandatory-lane miss arms a COLD capture; the endpoint's own warmup —
+    the same execution the proof observes — produces the inductor output;
+    only after the proof certifies a successful compiled call does the boot
+    pack THAT capture, advertise its real digest, and publish those exact
+    bytes. Reverting finalize back into the arm path (mint-then-prove)
+    turns this red: the publish would happen before the warmup."""
+    import gen_worker.executor as executor_mod
+    from gen_worker import fleet_cells
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    events: list = []
+    published: dict = {}
+
+    class _Pub(fleet_cells.CellPublisher):
+        def publish(self, family, artifact, meta):
+            events.append("publish")
+            published["bytes"] = Path(artifact).read_bytes()
+            published["meta"] = dict(meta)
+            published["family"] = family
+            return "cp-1"
+
+    pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
+               image_digest="sha256:img")
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+    captured, mint_key = _pending_mint_rig(
+        tmp_path, monkeypatch, pipe=pipe, publisher=pub)
+
+    class _MintingEndpoint(_ColdEndpoint):
+        def warmup(self) -> None:
+            type(self).warmups += 1
+            events.append("warmup")
+            # THE real serving execution: cold-compiles the serving graphs
+            # into the live capture dir (successful compiled call, all
+            # misses — the honest cold-mint signature).
+            cap = captured["dir"]
+            (cap / "inductor" / "g").mkdir(parents=True, exist_ok=True)
+            (cap / "inductor" / "g" / "serving_graph.py").write_text("real")
+            (cap / "triton").mkdir(exist_ok=True)
+            _record_fake_warm(self.pipeline, hits=0, misses=8)
+
+    spec = EndpointSpec(
+        name="cold-generate", method=_MintingEndpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=_MintingEndpoint,
+        attr_name="run",
+        models={"pipeline": Hub("acme/klein-finetune", flavor="fp8-w8a8")},
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+    model_ref = wire_ref(spec.models["pipeline"])
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(
+        ex, "_enable_compiled",
+        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+            p, cfg, ex.store._cache_dir, artifact, publisher=pub))
+    _MintingEndpoint.setups = _MintingEndpoint.warmups = 0
+
+    with caplog.at_level("ERROR", logger="gen_worker.executor"):
+        instance = asyncio.run(ex.ensure_setup(
+            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert isinstance(instance, _MintingEndpoint)
+    assert _MintingEndpoint.warmups == 1
+
+    # publish is async; join the publisher thread via the recorded event
+    for _ in range(100):
+        if "publish" in events:
+            break
+        import time as _time
+
+        _time.sleep(0.05)
+    assert events.index("warmup") < events.index("publish"), (
+        "prove-produces-the-mint: publish must come from the proven capture, "
+        "never precede the warmup proof")
+
+    (target,) = ex.compile_targets()
+    assert target.active_compile_ref == f"_system/family-{FAMILY}#{mint_key}"
+    digest = target.active_compile_snapshot_digest
+    assert digest.startswith("blake3:")
+    # The advertised digest is the digest of exactly the published bytes,
+    # and those bytes contain the graphs the WARMUP (not any producer warm
+    # loop) compiled.
+    from gen_worker.convert.hub import blake3_file
+
+    copy = tmp_path / "published-copy.tar.gz"
+    copy.write_bytes(published["bytes"])
+    assert digest == "blake3:" + blake3_file(copy)
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(published["bytes"]), mode="r:*") as tar:
+        names = tar.getnames()
+    assert any("serving_graph.py" in n for n in names)
+    assert published["meta"].get("source_ref") == "self-mint"
+    # A minting boot legitimately compiles: no store-served alarm.
+    assert not any(
+        "STORE_SERVED_BOOT_COMPILED" in r.message for r in caplog.records)
+
+
+def test_pending_self_mint_unproven_fails_closed_and_never_publishes(
+    tmp_path, monkeypatch,
+):
+    """gw#587 CORRECT FIX direction (b), revert-turns-red: a mandatory-lane
+    self-mint capture whose warmup never certifies a successful compiled
+    call (the executor ran the warmup, but the compiled targets did not
+    serve it — the gw#586 silent-eager shape) must fail the boot closed,
+    advertise nothing, publish NOTHING, and abandon the capture. If packing
+    or publishing ever moves ahead of the proof again, the publish below
+    fires and this test goes red."""
+    import gen_worker.executor as executor_mod
+    from gen_worker import fleet_cells
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    class _Pub(fleet_cells.CellPublisher):
+        def publish(self, family, artifact, meta):
+            pytest.fail("an unproven self-mint must NEVER publish")
+
+    pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
+               image_digest="sha256:img")
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+    captured, _mint_key = _pending_mint_rig(
+        tmp_path, monkeypatch, pipe=pipe, publisher=pub)
+
+    class _UnprovenEndpoint(_ColdEndpoint):
+        def warmup(self) -> None:
+            type(self).warmups += 1
+            # Warmup runs, but no successful compiled call is ever recorded
+            # on the pipe (calls=0): the capture certifies nothing.
+
+    spec = EndpointSpec(
+        name="cold-generate", method=_UnprovenEndpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=_UnprovenEndpoint,
+        attr_name="run",
+        models={"pipeline": Hub("acme/klein-finetune", flavor="fp8-w8a8")},
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+    model_ref = wire_ref(spec.models["pipeline"])
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(
+        ex, "_enable_compiled",
+        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+            p, cfg, ex.store._cache_dir, artifact, publisher=pub))
+    _UnprovenEndpoint.setups = _UnprovenEndpoint.warmups = 0
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="did not serve their own warmup graph",
+    ):
+        asyncio.run(ex.ensure_setup(
+            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert _UnprovenEndpoint.warmups == 1, "the proof must have actually run"
+    assert ex.compile_targets() == [], "an unproven self-mint must not advertise"
+    assert ex.unavailable[spec.name][0] == "compile_cell_failed"
+    # The capture was abandoned, never packed.
+    mint_root = captured["dir"].parent
+    assert not mint_root.exists(), "an uncertified capture must be discarded"
+    with fleet_cells._PENDING_LOCK:
+        assert fleet_cells._PENDING == {}
+
+
 def test_boot_warmup_proves_each_compile_object_independently(
     tmp_path, monkeypatch,
 ):

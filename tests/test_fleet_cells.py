@@ -2,9 +2,12 @@
 
 The torch.compile capture itself needs a GPU + toolchain and is proven live
 (the gw#587 live proof); these tests pin the POLICY around it: delivered
-cell first, self-mint on miss, publish best-effort and never load-bearing
-for serving, the cell_selection_bug receipt invariant untouched, and the
-typed quantized refusal only at genuine mint impossibilities.
+cell first, PROVE-PRODUCES-THE-MINT on miss (arm cold for capture; only
+the executor's passed warmup proof packs + publishes — the gw#586-class
+fix: no synthetic producer warm loop exists in the fleet path anymore),
+publish best-effort and never load-bearing for serving, the
+cell_selection_bug receipt invariant untouched, and the typed quantized
+refusal only at genuine mint impossibilities.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from gen_worker import cell_key
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker.models import provision
@@ -32,6 +36,40 @@ class _Cfg:
 
 class _Pipe:
     _cozy_low_vram_mode = "off"
+
+
+FAKE_KEY = "ck1-" + "a" * 56
+
+
+@pytest.fixture(autouse=True)
+def _clear_pending():
+    with fc._PENDING_LOCK:
+        fc._PENDING.clear()
+    yield
+    with fc._PENDING_LOCK:
+        fc._PENDING.clear()
+
+
+def _mintable(monkeypatch, *, key=FAKE_KEY):
+    """Route a MISS into the cold-capture arm with no CUDA/toolchain."""
+    monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: False)
+    monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
+
+    class _Key:
+        digest = key
+
+    monkeypatch.setattr(cell_key, "compute", lambda *a, **k: _Key())
+
+    def _begin(pipe, cfg, capture):
+        # the real begin_fleet_mint latches env + arms cold; the capture
+        # content itself arrives during the (real, GPU) warmup — simulate
+        # the layout the proof window would produce.
+        (capture / "inductor" / "g").mkdir(parents=True, exist_ok=True)
+        (capture / "inductor" / "g" / "kernel.py").write_text("compiled")
+        (capture / "triton").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(cc, "begin_fleet_mint", _begin)
 
 
 def _publisher(calls):
@@ -52,9 +90,11 @@ def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
     calls: list = []
     monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: True)
     monkeypatch.setattr(
-        cc, "mint_artifact",
-        lambda *a, **k: pytest.fail("HIT must never mint"))
-    assert fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
+        cc, "begin_fleet_mint",
+        lambda *a, **k: pytest.fail("HIT must never open a mint capture"))
+    outcome = fc.enable_compiled(
+        _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
+    assert outcome and outcome.self_mint is None
     assert calls == []
 
 
@@ -68,58 +108,120 @@ def test_cell_selection_bug_propagates_untouched(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provision, "enable_compiled", _raise)
     monkeypatch.setattr(
-        cc, "mint_artifact",
-        lambda *a, **k: pytest.fail("selection bug must never trigger a mint"))
+        cc, "begin_fleet_mint",
+        lambda *a, **k: pytest.fail("selection bug must never open a capture"))
     with pytest.raises(cc.CellSelectionBugError):
         fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
 
 
-def test_miss_mints_adopts_and_publishes(monkeypatch, tmp_path):
-    """The core gw#587 outcome: MISS -> local mint -> serve compiled ->
-    publish attempt (with the mint's own metadata)."""
+def test_miss_arms_pending_capture_without_packing_or_publishing(
+    monkeypatch, tmp_path,
+):
+    """gw#587 CORRECT FIX direction (b): a MISS opens a cold capture and
+    returns a PENDING mint — nothing is packed, nothing is published, and
+    no synthetic warm call runs (that separate producer-shaped execution
+    was the gw#586-class defect the live proof caught). Publish before the
+    proof reverts this test red."""
+    calls: list = []
+    _mintable(monkeypatch)
+    monkeypatch.setattr(
+        cc, "mint_artifact",
+        lambda *a, **k: pytest.fail(
+            "the fleet miss path must never run the producer warm loop"))
+
+    outcome = fc.enable_compiled(
+        _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
+    assert outcome.armed
+    pending = outcome.self_mint
+    assert isinstance(pending, fc.PendingSelfMint)
+    assert pending.cell_key == FAKE_KEY
+    assert pending.ref == f"_system/family-fam#{FAKE_KEY}"
+    assert not pending.target.exists(), "nothing packed before the proof"
+    assert calls == [], "nothing published before the proof"
+
+
+def test_finalize_packs_the_proven_capture_and_publishes_it(
+    monkeypatch, tmp_path,
+):
+    """gw#587 CORRECT FIX direction (a): after the proof passes, finalize
+    packs EXACTLY the capture the proof window populated and publishes
+    those bytes; the advertised digest is the digest of that packed
+    artifact."""
     calls: list = []
     published = threading.Event()
 
     class _Pub(fc.CellPublisher):
         def publish(self, family, artifact, meta):
-            calls.append((family, Path(artifact), dict(meta)))
+            calls.append((family, artifact.read_bytes(), dict(meta)))
             published.set()
             return "cp-1"
 
-    pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="sha256:img")
-    monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: False)
-    monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
+    pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
+               image_digest="sha256:img")
+    _mintable(monkeypatch)
+    pipe = _Pipe()
+    outcome = fc.enable_compiled(pipe, _Cfg(), tmp_path, None, publisher=pub)
+    pending = outcome.self_mint
+    assert isinstance(pending, fc.PendingSelfMint)
 
-    def _fake_mint(pipe, cfg, family, target, capture, **kw):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"cell-bytes")
-        return {"cell_key": "ck1-" + "a" * 56, "sku": "b200", "gen_worker": "0.39.0"}
-
-    monkeypatch.setattr(cc, "mint_artifact", _fake_mint)
-    monkeypatch.setattr(cc, "unwrap", lambda pipe: None)
-    monkeypatch.setattr(cc, "enable", lambda *a, **k: True)
-
-    outcome = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=pub)
-    assert outcome.armed
-    assert published.wait(5), "publish attempt must be recorded on every miss"
-    (family, artifact, meta) = calls[0]
+    minted = fc.finalize_self_mint(pipe, pending)
+    assert minted is not None
+    assert minted.cell_key == FAKE_KEY
+    assert minted.ref == f"_system/family-fam#{FAKE_KEY}"
+    assert minted.snapshot_digest.startswith("blake3:")
+    assert len(minted.snapshot_digest) == len("blake3:") + 64
+    assert published.wait(5), "a finalized mint must attempt publish"
+    (family, tar_bytes, meta) = calls[0]
     assert family == "fam"
-    assert meta["cell_key"].startswith("ck1-")
-    # Serving-bootstrap identity (th#910 self-attested fence): the outcome
-    # carries the worker's OWN key ref + a self-attested artifact digest so
-    # the executor can advertise the mint exactly like a delivered cell.
-    mint = outcome.self_mint
-    assert mint is not None
-    assert mint.ref == f"_system/family-fam#{meta['cell_key']}"
-    assert mint.cell_key == meta["cell_key"]
-    assert mint.snapshot_digest.startswith("blake3:")
-    assert len(mint.snapshot_digest) == len("blake3:") + 64
+    # The published bytes ARE the packed proven capture, and the advertised
+    # digest is the digest of exactly those bytes.
+    from gen_worker.convert.hub import blake3_file
+
+    copy = tmp_path / "published-copy.tar.gz"
+    copy.write_bytes(tar_bytes)
+    assert minted.snapshot_digest == "blake3:" + blake3_file(copy)
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:*") as tar:
+        names = tar.getnames()
+    assert any("kernel.py" in n for n in names), (
+        "published cell must contain the capture the proof produced")
+    # Finalize is memoized for same-key siblings: no double pack/publish.
+    assert fc.finalize_self_mint(pipe, pending) is minted
+    assert len(calls) == 1
+
+
+def test_abandon_never_publishes(monkeypatch, tmp_path):
+    """A capture whose proof did not certify it is abandoned: nothing
+    packed, nothing published, temp dir removed."""
+    calls: list = []
+    _mintable(monkeypatch)
+    pipe = _Pipe()
+    outcome = fc.enable_compiled(
+        pipe, _Cfg(), tmp_path, None, publisher=_publisher(calls))
+    pending = outcome.self_mint
+    fc.abandon_self_mint(pending)
+    assert calls == []
+    assert not pending.mint_root.exists()
+    with fc._PENDING_LOCK:
+        assert fc._PENDING == {}
+
+
+def test_same_key_sibling_joins_the_pending_capture(monkeypatch, tmp_path):
+    """Two pipes of one record computing the same key share ONE capture
+    (the union family cell); a second mint_root is never created."""
+    _mintable(monkeypatch)
+    a, b = _Pipe(), _Pipe()
+    first = fc.enable_compiled(a, _Cfg(), tmp_path, None).self_mint
+    second = fc.enable_compiled(b, _Cfg(), tmp_path, None).self_mint
+    assert second is first
 
 
 def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
-    """The request that triggered the miss is served from the local mint even
-    when the hub refuses the publish (untrusted tier / forged axis / quota)."""
+    """The request that triggered the miss is served from the proven local
+    capture even when the hub refuses the publish (untrusted tier / forged
+    axis / quota)."""
     refused = threading.Event()
 
     class _Pub(fc.CellPublisher):
@@ -128,20 +230,11 @@ def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
             raise fc.CellPublishRefused("cell_publish_untrusted_tier: community_tier")
 
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="d")
-    monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: False)
-    monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
-
-    def _fake_mint(pipe, cfg, family, target, capture, **kw):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"cell-bytes")
-        return {"cell_key": "ck1-" + "b" * 56}
-
-    monkeypatch.setattr(cc, "mint_artifact", _fake_mint)
-    monkeypatch.setattr(cc, "unwrap", lambda pipe: None)
-    monkeypatch.setattr(cc, "enable", lambda *a, **k: True)
-
-    assert fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=pub)
+    _mintable(monkeypatch)
+    pipe = _Pipe()
+    outcome = fc.enable_compiled(pipe, _Cfg(), tmp_path, None, publisher=pub)
+    minted = fc.finalize_self_mint(pipe, outcome.self_mint)
+    assert minted is not None, "hub refusal must never fail the finalize"
     assert refused.wait(5)
 
 
