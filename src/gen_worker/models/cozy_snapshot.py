@@ -43,12 +43,15 @@ def _inflight_blob_lock(digest: str) -> "asyncio.Lock":
 
 
 # gw#598 / th#850: verify-on-first-use-per-process for REUSED CAS state.
-# The CAS root can now be a persistent volume shared by several pods, so
-# blobs and materialized snapshot trees found on disk may be another pod's
-# bytes of any age — they must pass a full BLAKE3 check once per process
-# before being trusted, exactly like freshly downloaded bytes. Keyed by
-# (resolved root, digest/key) so tests with distinct tmp roots never share
-# trust; in production the root is constant, so this is once per boot.
+# The CAS root persists across pod restarts (cozy-local) and, historically,
+# could itself be a volume shared by several pods (superseded by gw#599's
+# managed-tier ruling — the root is local-only now, but an operator can
+# still point TENSORHUB_CACHE_DIR at a shared path manually). Either way,
+# blobs and materialized snapshot trees found on disk may be bytes from a
+# different process/era — they must pass a full BLAKE3 check once per
+# process before being trusted, exactly like freshly downloaded bytes. Keyed
+# by (resolved root, digest/key) so tests with distinct tmp roots never
+# share trust; in production the root is constant, so this is once per boot.
 _TRUST_CAP = 65536
 _VERIFIED_BLOBS: Set[tuple] = set()
 _TRUSTED_SNAPSHOTS: Set[tuple] = set()
@@ -427,9 +430,10 @@ class CozySnapshotDownloader:
         """Blocking build phase (worker thread): reassemble + hardlink into a
         writer-unique ``.building-<writer_id>`` dir, then atomically rename
         into place. Writer-unique (not a fixed ``.building`` name) so two
-        pods racing to materialize the same snapshot key on a SHARED CAS
-        root (e.g. one RunPod volume, th#850) never interleave writes into
-        the same tree — only the atomic rename below, not the build, decides
+        writers racing to materialize the same snapshot key on the same CAS
+        root (concurrent tasks within one pod, or an operator-configured
+        shared root) never interleave writes into the same tree — only the
+        atomic rename below, not the build, decides
         the winner."""
         writer_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
         tmp = snaps_root / f"{snap_dir.name}.building-{writer_id}"
