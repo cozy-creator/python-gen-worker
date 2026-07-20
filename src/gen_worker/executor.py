@@ -1438,6 +1438,10 @@ class _CompileTargetRecord:
     requested_cell_axes: Tuple[Tuple[str, str], ...] = ()
     active_compile_ref: str = ""
     active_compile_snapshot_digest: str = ""
+    # gw#604: True when the active artifact is this worker's OWN mint (the
+    # advertised digest is then the self-attested tar blake3, not the store's
+    # snapshot manifest digest — same bytes, different transport form).
+    active_self_mint: bool = False
     function_names: Tuple[str, ...] = ()
     model_bindings: Tuple[Tuple[str, str, str], ...] = ()
     # Runtime guard failure is signaled from a handler thread. Guard every
@@ -2576,6 +2580,8 @@ class Executor:
             with target.state_lock:
                 target.active_compile_ref = active_ref
                 target.active_compile_snapshot_digest = active_digest
+                target.active_self_mint = bool(getattr(
+                    active_selection, "self_mint", False))
             rec.compile_targets[incarnation_id] = target
             if active_ref and not self._bind_compile_guard(rec, target):
                 # Production wrappers always expose one of the two guard
@@ -3218,12 +3224,53 @@ class Executor:
                             target_identities.append((
                                 target.active_compile_ref,
                                 target.active_compile_snapshot_digest,
+                                target.active_self_mint,
                             ))
-                    if not target_identities or any(
-                        active_ref != desired_cell.ref
-                        or active_digest != desired_cell.snapshot_digest
-                        for active_ref, active_digest in target_identities
-                    ):
+                    identity_moved = not target_identities
+                    digest_aligned = False
+                    for active_ref, active_digest, is_self_mint in (
+                            target_identities):
+                        if active_ref != desired_cell.ref:
+                            identity_moved = True
+                            break
+                        if active_digest == desired_cell.snapshot_digest:
+                            continue
+                        if not is_self_mint:
+                            # Delivered target: a same-ref digest move is a
+                            # genuine republish (mutable label cells) — the
+                            # pre-gw#604 vacate/rebuild convergence stands
+                            # (the rebuild loads a FRESH pipe, whose re-trace
+                            # produces honest FX lookups).
+                            identity_moved = True
+                            break
+                        # gw#604: for the worker's OWN self-mint, cell
+                        # identity IS the key (gw#581), and the ref encodes
+                        # it — the desired cell is the SAME cell this live
+                        # object already proved, published, and serves; the
+                        # digests differ only in transport FORM
+                        # (self-attested tar blake3 vs the store's snapshot
+                        # manifest digest, th#910 ruling). A passed proof on
+                        # a live object stays valid for that object's
+                        # lifetime; a warm-process re-proof cannot produce
+                        # honest FX lookups (dynamo serves from in-memory
+                        # code, hits stay 0 — the live fail-closed re-arm
+                        # loop). NEVER vacate; align the advertised digest to
+                        # the store's so gw#577 receipts/fences line up
+                        # fleet-wide.
+                        for target in live_targets:
+                            with target.state_lock:
+                                if (target.active_compile_ref
+                                        == desired_cell.ref):
+                                    target.active_compile_snapshot_digest = (
+                                        desired_cell.snapshot_digest)
+                        digest_aligned = True
+                        logger.info(
+                            "self-mint cell %s confirmed by the store; "
+                            "advertised digest aligned %s -> %s (no re-arm)",
+                            desired_cell.ref, active_digest,
+                            desired_cell.snapshot_digest,
+                        )
+                    if identity_moved:
                         logger.info(
                             "desired compile identity moved for %s -> %s@%s; "
                             "vacating stale instance",
@@ -3232,6 +3279,8 @@ class Executor:
                             desired_cell.snapshot_digest,
                         )
                         rec.stale = True
+                    elif digest_aligned:
+                        self._on_state_change()
             if rec.ready and rec.stale:
                 # gw#494: the instance was loaded for a superseded pick —
                 # vacate (releasing its OLD-ref bookings) and set up fresh

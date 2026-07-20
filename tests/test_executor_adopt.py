@@ -1214,6 +1214,107 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     ] == []
 
 
+def test_hub_redelivery_of_own_minted_key_is_a_noop_rearm(
+    tmp_path, monkeypatch,
+):
+    """gw#604 revert-turns-red: after a proven self-mint boot, the hub
+    (now holding the worker's published cell) attaches that SAME KEY back
+    with the store's snapshot digest — a different transport FORM of the
+    identical bytes (store snapshot-manifest digest vs self-attested tar
+    blake3). Cell identity IS the key (gw#581): the worker must NOT vacate
+    or re-prove the live proven object (a warm-process re-proof cannot
+    produce honest FX lookups — live-found death loop), and must align its
+    advertised digest to the store's so fleet-wide receipts line up."""
+    import gen_worker.executor as executor_mod
+    from gen_worker import cell_key as cell_key_mod
+    from gen_worker import fleet_cells
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    model_ref = wire_ref(spec.models["pipeline"])
+    mint_key = "ck1-" + "a1" * 28
+    mint_ref = f"_system/family-{FAMILY}#{mint_key}"
+    mint_digest = "blake3:" + "e" * 64
+    store_digest = "blake3:" + "f" * 64  # the store's snapshot-manifest form
+    mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
+    mint_artifact.parent.mkdir()
+    mint_artifact.write_bytes(b"cell-bytes")
+    # The redelivered snapshot dir must contain a cell artifact for
+    # _fetch_compile_snapshot's find_artifact.
+    store_snap_dir = tmp_path / "store-snap"
+    store_snap_dir.mkdir()
+    (store_snap_dir / "cell.tar.gz").write_bytes(b"cell-bytes")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _download(ref, **kwargs):
+        return model_dir if ref == model_ref else store_snap_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+
+    def _minting_enable(pipeline, *_args):
+        _mark_fake_guard(pipeline)
+        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+            family=FAMILY, cell_key=mint_key, ref=mint_ref,
+            snapshot_digest=mint_digest, artifact=mint_artifact))
+
+    monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
+
+    class _Key:
+        digest = mint_key
+
+    monkeypatch.setattr(cell_key_mod, "compute", lambda *a, **k: _Key())
+    _ColdEndpoint.setups = _ColdEndpoint.warmups = 0
+
+    # Boot 1: fresh key, self-mint, proven, advertised under the own key.
+    asyncio.run(ex.ensure_setup(
+        spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert (_ColdEndpoint.setups, _ColdEndpoint.warmups) == (1, 1)
+    (target,) = ex.compile_targets()
+    assert target.active_compile_snapshot_digest == mint_digest
+
+    # Hub reconcile: the SAME key comes back attached, store digest form.
+    instance = asyncio.run(ex.ensure_setup(spec, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        mint_ref: pb.Snapshot(digest=store_digest),
+    }))
+    assert isinstance(instance, _ColdEndpoint)
+    # No vacate, no reload, no re-proof — the live proof stays valid.
+    assert (_ColdEndpoint.setups, _ColdEndpoint.warmups) == (1, 1), (
+        "same-key redelivery must be a no-op re-arm, never a teardown")
+    (target,) = ex.compile_targets()
+    assert target.active_compile_ref == mint_ref
+    assert target.active_compile_snapshot_digest == store_digest, (
+        "advertised digest must align to the store's form")
+
+    # A genuinely DIFFERENT key still vacates (identity actually moved).
+    other_key = "ck1-" + "b2" * 28
+    other_ref = f"_system/family-{FAMILY}#{other_key}"
+
+    class _OtherKey:
+        digest = other_key
+
+    monkeypatch.setattr(cell_key_mod, "compute", lambda *a, **k: _OtherKey())
+    asyncio.run(ex.ensure_setup(spec, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        other_ref: pb.Snapshot(digest="blake3:" + "9" * 64),
+    }))
+    assert _ColdEndpoint.setups == 2, (
+        "a real identity move must still vacate and re-arm")
+
+
 def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     tmp_path, monkeypatch,
 ):
@@ -2640,8 +2741,12 @@ def test_desired_w8a8_cell_digest_and_ref_changes_vacate_then_rebuild(
 
     monkeypatch.setattr(ex, "_vacate_record", _observed_vacate)
 
-    # Same mutable cell ref, new immutable bytes: no hot unwrap; declarative
-    # reconcile vacates and creates a fresh incarnation against the new digest.
+    # Same mutable cell ref, new immutable bytes: a DELIVERED (label-cell)
+    # republish still vacates and rebuilds against the new digest — the
+    # rebuild loads a fresh pipe whose re-trace produces honest FX lookups.
+    # (The gw#604 no-op re-arm applies ONLY to the worker's own self-mint
+    # under its key ref — see
+    # test_hub_redelivery_of_own_minted_key_is_a_noop_rearm.)
     reconcile(cell_a, DIGEST_B)
     second = ex.compile_targets()[0]
     assert second.incarnation_id != first.incarnation_id
