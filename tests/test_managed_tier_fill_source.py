@@ -19,6 +19,7 @@ from pathlib import Path
 
 from blake3 import blake3
 
+import gen_worker.executor as executor_mod
 import gen_worker.models.cozy_snapshot as snap_mod
 from gen_worker.executor import ModelStore
 from gen_worker.models.cache_paths import tensorhub_fill_source_dir
@@ -244,3 +245,64 @@ def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) 
     assert on_disk2
     assert max(e.network_bytes for e in on_disk2) == 0
     assert calls == []  # no R2 fetch at all — warm from the volume
+
+
+def test_network_bytes_is_a_running_total_on_downloading_ticks(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """tensorhub th#850/PR#493 reads network_bytes off the DOWNLOADING
+    events' running value (WorkerModelDownloadState.NetworkBytes, populated
+    the same way as BytesDownloaded/BytesTotal), not only the terminal
+    ON_DISK event — both must carry it or the hub's accounting silently
+    stays zero. Disable the progress-event debounce so every chunk reaches
+    the wire, and stream the fake download in chunks (not one write) so a
+    mid-flight DOWNLOADING event genuinely sees a PARTIAL network_bytes."""
+    monkeypatch.setattr(executor_mod, "_PROGRESS_EVENT_MIN_INTERVAL_S", 0.0)
+    chunk = _PAYLOAD[: len(_PAYLOAD) // 4]
+    n_chunks = 4
+    assert chunk * n_chunks == _PAYLOAD
+
+    async def _chunked_get(
+        _url: str, dst: Path, expected_size: int, expected_blake3: str,
+        on_bytes=None,
+    ) -> None:
+        del expected_size, expected_blake3
+        with open(dst, "wb") as f:
+            for _ in range(n_chunks):
+                f.write(chunk)
+                if on_bytes is not None:
+                    on_bytes(len(chunk))
+                    await asyncio.sleep(0)  # let the executor's callback run
+
+    monkeypatch.setattr(snap_mod, "_download_one_file", _chunked_get)
+
+    local = tmp_path / "local"
+    sent: list = []
+
+    async def _emit(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    store = ModelStore(_emit, cache_dir=local)
+
+    async def _run() -> None:
+        await store.ensure_local(
+            "org/model",
+            pb.Snapshot(digest=_SNAPSHOT, files=[
+                pb.SnapshotFile(
+                    path="model.safetensors", size_bytes=len(_PAYLOAD),
+                    blake3=_BLAKE3, url="https://tensorhub.invalid/authorized-blob",
+                ),
+            ]),
+        )
+
+    asyncio.run(_run())
+    downloading = [
+        m.model_event for m in sent
+        if m.WhichOneof("msg") == "model_event"
+        and m.model_event.state == pb.MODEL_STATE_DOWNLOADING
+    ]
+    partial = [e.network_bytes for e in downloading if 0 < e.network_bytes < len(_PAYLOAD)]
+    assert partial, (
+        "expected at least one DOWNLOADING event with a PARTIAL running "
+        f"network_bytes total; got {[e.network_bytes for e in downloading]}"
+    )

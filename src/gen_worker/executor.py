@@ -1194,6 +1194,14 @@ class ModelStore:
                     operation_identity,
                 )
             last_progress = 0.0
+            # th#850 managed-tier ruling (gw#599): opened before _progress so
+            # its DOWNLOADING ticks can read the running total, and entered
+            # once for the whole retry loop so it accumulates across
+            # attempts. The hub (tensorhub th#850/PR#493) reads network_bytes
+            # off the DOWNLOADING events' running value (mirrors
+            # bytes_done/bytes_total), not just the terminal ON_DISK one —
+            # both must carry it for the wire contract to actually work.
+            net_scope = cozy_snapshot.NetworkBytesScope()
 
             def _progress(done: int, total: Optional[int]) -> None:
                 nonlocal last_progress
@@ -1205,7 +1213,8 @@ class ModelStore:
                 asyncio.run_coroutine_threadsafe(
                     self._event(ref, pb.MODEL_STATE_DOWNLOADING,
                                 identity=operation_identity,
-                                bytes_done=int(done), bytes_total=int(total or 0)),
+                                bytes_done=int(done), bytes_total=int(total or 0),
+                                network_bytes=net_scope.network_bytes),
                     self._loop,
                 )
 
@@ -1218,12 +1227,7 @@ class ModelStore:
                     resolved = None
                     if snapshot is not None and snapshot.digest:
                         resolved = _snapshot_to_resolved(snapshot)
-                    # th#850 managed-tier ruling (gw#599): scope captures
-                    # bytes this attempt actually fetched from R2 (vs served
-                    # from local/volume cache) for the disk-residency wire
-                    # signal below — a no-op for every caller that doesn't
-                    # read it.
-                    with cozy_snapshot.NetworkBytesScope() as net_scope:
+                    with net_scope:
                         path = await ensure_local(
                             ref,
                             provider=getattr(binding, "source", None),

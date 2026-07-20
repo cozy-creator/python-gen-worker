@@ -503,6 +503,17 @@ class CozySnapshotDownloader:
                 done += n
                 if network:
                     network_bytes += n
+                    # th#850 managed-tier ruling (gw#599): update the
+                    # NetworkBytesScope sink LIVE (not just once at the end
+                    # of this call, see below) so a caller's mid-flight
+                    # `progress()` tick — called synchronously right below,
+                    # still holding nothing but this lock — can read a
+                    # genuinely-running total. tensorhub reads network_bytes
+                    # off the DOWNLOADING events' running value, the same
+                    # way it reads bytes_done/bytes_total.
+                    sink = _NETWORK_BYTES_SINK.get()
+                    if sink is not None:
+                        sink[0] += n
                 d = done if total is None else min(done, total)
             if progress is not None:
                 try:
@@ -634,17 +645,15 @@ class CozySnapshotDownloader:
         await asyncio.gather(*(_dl(f) for f in unique))
         # th#850 managed-tier runtime-assertion signal: on a volume-attached
         # boot with blobs already warm, network_bytes should land near zero.
-        # gw#599 wires this to the caller via NetworkBytesScope (the worker
-        # then reports it on the wire as ModelEvent.network_bytes) as well
-        # as this log line.
+        # _on_bytes above already streamed this total into the caller's
+        # NetworkBytesScope live, chunk by chunk (so mid-flight DOWNLOADING
+        # ticks see a genuine running total, not just the final tally) — this
+        # is a log line only, not a second write to the sink.
         cache_hit_pct = 100.0 * (1 - network_bytes / total) if total else 100.0
         _log.info(
             "ensure_blobs_summary total_bytes=%s network_bytes=%d cache_hit_pct=%.1f",
             total, network_bytes, cache_hit_pct,
         )
-        sink = _NETWORK_BYTES_SINK.get()
-        if sink is not None:
-            sink[0] += network_bytes
 
     @staticmethod
     def _blob_usable(dst: Path, f: WorkerResolvedRepoFile) -> bool:
