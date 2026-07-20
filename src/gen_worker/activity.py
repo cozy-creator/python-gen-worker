@@ -21,7 +21,7 @@ import logging
 import threading
 import time
 from types import TracebackType
-from typing import Any, Callable, Coroutine, Optional
+from typing import Awaitable, Callable, Optional
 
 from .pb import worker_scheduler_pb2 as pb
 
@@ -51,23 +51,22 @@ _current: Optional["Activity"] = None
 
 
 def bind_sink(
-    emit: Callable[["pb.WorkerMessage"], Coroutine[Any, Any, None]],
+    emit: Callable[["pb.WorkerMessage"], Awaitable[None]],
     loop: asyncio.AbstractEventLoop,
 ) -> None:
     """Route reports onto the worker->hub stream: emit is the async
     WorkerMessage sender, loop the transport loop. Thread-safe emission."""
     def sink(update: pb.ActivityUpdate) -> None:
-        coro = emit(pb.WorkerMessage(activity_update=update))
+        async def _ship() -> None:
+            await emit(pb.WorkerMessage(activity_update=update))
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
         if running is loop:
-            loop.create_task(coro)
+            loop.create_task(_ship())
         elif not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(coro, loop)
-        else:
-            coro.close()
+            asyncio.run_coroutine_threadsafe(_ship(), loop)
     global _sink
     with _lock:
         _sink = sink
