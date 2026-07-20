@@ -24,8 +24,14 @@ _BUDGET = 10_000
 
 
 def _snapshot(digest: str, size: int) -> pb.Snapshot:
+    # Truthful digest of what _fake_download actually writes: since gw#598
+    # the executor tree-verifies every fresh materialization before trusting
+    # it, so fixtures must declare the real hash of their fake bytes.
+    from blake3 import blake3
+
     return pb.Snapshot(digest=digest, files=[
-        pb.SnapshotFile(path="w.bin", size_bytes=size, blake3="ab" * 16,
+        pb.SnapshotFile(path="w.bin", size_bytes=size,
+                        blake3=blake3(b"\0" * size).hexdigest(),
                         url="http://example.invalid/w.bin"),
     ])
 

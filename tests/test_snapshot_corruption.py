@@ -118,6 +118,38 @@ def test_clean_snapshot_verified_once_per_boot(tmp_path: Path, monkeypatch) -> N
     assert verifies["n"] == 1 and calls["n"] == 1
 
 
+def test_preseeded_unverified_cas_bytes_are_verified_before_trust(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """gw#598: a ref the residency layer has NEVER tracked whose bytes already
+    exist under the CAS root (another pod's writes on a shared th#850 volume)
+    must be digest-verified before being trusted — the fresh-materialization
+    path used to mark such reuse verified without any hash."""
+    import os
+
+    content = _tiny_safetensors()
+    snap = _snapshot("44" * 32, content)
+    calls = _wire_download(monkeypatch, content)
+
+    # Simulate another pod's CAS state: a corrupt blob (right size, wrong
+    # bytes — every size-only check passes) hardlinked into a fully
+    # materialized snapshot dir; no residency/ref-index record anywhere.
+    digest = blake3(content).hexdigest()
+    blob = tmp_path / "blobs" / "blake3" / digest[:2] / digest[2:4] / digest
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"\0" * len(content))
+    snap_dir = tmp_path / "snapshots" / ("44" * 32)
+    snap_dir.mkdir(parents=True)
+    os.link(blob, snap_dir / "model.safetensors")
+
+    store = ModelStore(_noop_emit, cache_dir=tmp_path)
+    path = asyncio.run(store.ensure_local("e2e/sdxl-c", snap))
+
+    assert calls["n"] == 1  # corrupt reuse detected -> quarantine -> re-download
+    assert (path / "model.safetensors").read_bytes() == content
+    assert blob.read_bytes() == content  # bad blob replaced, not left behind
+
+
 # --------------------------------------------------------------------------- #
 # Load-failure path: digest verify -> quarantine -> re-download -> retry once
 # --------------------------------------------------------------------------- #
