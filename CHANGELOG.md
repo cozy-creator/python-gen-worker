@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.40.0 (2026-07-20)
+
+- **gw#596 instructed-lane contract (th#913 pair).** A lane is the FULL
+  execution descriptor `<weights>-<activation>[-<scale>]+<execution>`
+  (shared vocabulary `gen_worker.models.lanes`, twin of tensorhub's
+  `internal/orchestrator/precision/lane.go`). The worker now honors
+  hub-resolved lanes: `HelloAck.ModelResolution.lane` records each pick's
+  concrete lane; a per-request `RunJob.lane` (family `bf16|fp8|4bit` or
+  full descriptor) rebinds the job's laddered models to the instructed
+  lane on a derived instance key (warm workers keep both variants
+  resident and cycle them via gw#551), an unserveable lane refuses TYPED
+  (`lane_unavailable: <lane>` — never a silent fallback; w8a8 stays
+  compiled-only), and `JobMetrics.lane` reports the CONCRETE lane that
+  served every request. `gen-worker run --lane` gives cozy-local the same
+  dual-form choice (bf16 = declared base, fp8 = cast lane or the
+  `#fp8-w8a8` fold for the full descriptor). Absent instructions leave
+  today's behavior untouched.
+
 ## 0.39.4 (2026-07-20)
 
 - **gw#603: custom-warmup proof attributes to contract-compatible sibling

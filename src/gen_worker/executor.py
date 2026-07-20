@@ -73,6 +73,7 @@ from .models.memory import (
 from .models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .models.download import ensure_local, lookup_provider_for_ref
 from .models.errors import MissingSnapshotError, UrlExpiredError
+from .models.lanes import LaneUnavailableError
 from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
@@ -1648,6 +1649,9 @@ class _Job:
     # gw#516: True while the job is past the decode->finalize handoff (GPU
     # slot terminally released, encode/upload tail running, result unshipped).
     finalizing: bool = False
+    # th#913/gw#596: the CONCRETE lane serving this job (stamped post-setup,
+    # reported on JobMetrics.lane). "" = not yet determined.
+    lane: str = ""
     admitted_at: float = dc_field(default_factory=time.monotonic)
     # One JobProgress seq space per job, shared by stream chunks and ctx
     # events so interleaved sends stay monotonic. itertools.count.__next__
@@ -1818,13 +1822,19 @@ class Executor:
         # needed offload mode X". In-process only; consulted at every load so
         # a doomed fully-resident attempt is never paid twice (ie#369).
         self.degraded_floor: Dict[str, str] = {}
+        # th#913/gw#596: last-applied hub resolutions, keyed by declared wire
+        # ref -> (resolved_ref, cast, lane). Per-request lane instructions
+        # expand family forms through these picks.
+        self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
 
     # ---- precision resolutions (th#697) -----------------------------------
 
-    def apply_model_resolutions(self, resolutions: Dict[str, Tuple[str, str]]) -> None:
+    def apply_model_resolutions(self, resolutions: Dict[str, Tuple[str, str, str]]) -> None:
         """Rebind model slots to the hub's precision-ladder picks.
 
-        ``resolutions`` maps a DECLARED wire ref to ``(resolved_ref, cast)``
+        ``resolutions`` maps a DECLARED wire ref to ``(resolved_ref, cast,
+        lane)`` — lane is the th#913 concrete execution-lane descriptor
+        ("" = unspecified, pre-lane hub)
         (HelloAck full-replace semantics: refs absent from the map revert to
         their authored bindings). Rebinding folds the resolved flavor into
         the binding via :func:`rebind_pick` (THE single fold, shared with the
@@ -1840,6 +1850,7 @@ class Executor:
         """
         from .api.binding import rebind_pick
 
+        self._model_resolutions = dict(resolutions)
         changed = False
         rehomed: List[Tuple[Any, EndpointSpec]] = []
         for spec in self.specs.values():
@@ -1852,7 +1863,7 @@ class Executor:
                 pick = resolutions.get(base_ref)
                 new_binding = base_binding
                 if pick is not None:
-                    resolved_ref, cast = pick
+                    resolved_ref, cast, _lane = pick
                     try:
                         new_binding = rebind_pick(
                             base_binding,
@@ -2905,6 +2916,149 @@ class Executor:
         if effective == spec.models:
             return spec
         return dc_replace(spec, models=effective)
+
+    def _lane_effective_spec(self, spec: EndpointSpec, lane_str: str) -> EndpointSpec:
+        """th#913/gw#596: rebind the spec's declared tensorhub models to the
+        instructed lane. A family instruction expands through the hub's
+        per-card resolution picks (or the local cast lane for fp8-w8a16); a
+        full descriptor demands exactly that lane. An unserveable lane raises
+        :class:`gen_worker.models.lanes.LaneUnavailableError` (typed refusal
+        naming the lane — never a silent fallback). The rebound spec derives
+        a new instance key, so warm workers keep both variants resident and
+        cycle them via the gw#551 lane machinery."""
+        from .api.binding import rebind_pick
+        from .models import lanes as lanespec
+
+        raw = str(lane_str or "").strip()
+        if not raw:
+            return spec
+        try:
+            req = lanespec.parse_lane_spec(raw)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from None
+        if req.is_zero:
+            return spec
+        if (req.lane is not None and req.lane.weights == lanespec.WEIGHTS_FP8
+                and req.lane.activation == lanespec.ACT_W8A8
+                and req.lane.execution == lanespec.EXEC_EAGER):
+            # gw#586: w8a8 serves compiled-only; an eager w8a8 request would
+            # resurrect the silent-eager hole.
+            raise lanespec.LaneUnavailableError(
+                raw, "fp8-w8a8 serves compiled-only on this fleet")
+
+        def pick_lane_of(pick: "Optional[Tuple[str, str, str]]") -> "Optional[Any]":
+            if pick is None or not pick[2]:
+                return None
+            try:
+                return lanespec.parse_lane(pick[2])
+            except ValueError:
+                return None
+
+        # Only hub-LADDERED refs participate: a ref without a resolution pick
+        # (ancillary VAE/encoder, flavor-pinned author override) keeps its
+        # binding — the hub never laddered it, so no lane applies to it.
+        declared = self._declared_models.get(spec.name) or {}
+        effective = dict(spec.models)
+        changed = False
+        # bf16 is trivially serveable (the declared base IS bf16); quantized
+        # lanes must find at least one laddered ref that can serve them.
+        satisfied = req.family == lanespec.FAMILY_BF16
+        want_w8a8 = req.lane is not None and req.lane.activation == lanespec.ACT_W8A8
+        for slot, base_binding in declared.items():
+            if slot not in effective:
+                continue
+            if getattr(base_binding, "source", "") != "tensorhub":
+                continue
+            base_ref = wire_ref(base_binding)
+            pick = self._model_resolutions.get(base_ref)
+            if pick is None:
+                continue
+            plane = pick_lane_of(pick)
+            new_binding = base_binding  # bf16 family: revert to the declared base
+            if req.family == lanespec.FAMILY_BF16:
+                satisfied = True
+            elif req.family == lanespec.FAMILY_FP8:
+                if plane is not None and lanespec.family_of(plane) == lanespec.FAMILY_FP8 and (
+                    req.lane is None or plane.activation == req.lane.activation
+                ):
+                    resolved_ref, cast, _ = pick
+                    new_binding = rebind_pick(
+                        base_binding,
+                        resolved_ref=(resolved_ref if resolved_ref != base_ref else ""),
+                        cast=cast)
+                    satisfied = True
+                elif want_w8a8:
+                    continue  # this ref cannot serve w8a8; refusal decided below
+                else:
+                    # family fp8 / explicit w8a16 without a stored fp8 pick:
+                    # the local cast lane (per-layer upcast at inference).
+                    new_binding = rebind_pick(base_binding, cast="fp8")
+                    satisfied = True
+            elif req.family == lanespec.FAMILY_4BIT:
+                if plane is None or lanespec.family_of(plane) != lanespec.FAMILY_4BIT or (
+                    req.lane is not None and plane.weights != req.lane.weights
+                ):
+                    continue
+                resolved_ref, cast, _ = pick
+                new_binding = rebind_pick(
+                    base_binding,
+                    resolved_ref=(resolved_ref if resolved_ref != base_ref else ""),
+                    cast=cast)
+                satisfied = True
+            if wire_ref(effective[slot]) != wire_ref(new_binding) or (
+                getattr(effective[slot], "storage_dtype", "")
+                != getattr(new_binding, "storage_dtype", "")
+            ):
+                effective[slot] = new_binding
+                self.store.register_binding(wire_ref(new_binding), new_binding)
+                changed = True
+        if not satisfied:
+            raise lanespec.LaneUnavailableError(
+                raw, f"no laddered binding of {spec.name!r} can serve this lane "
+                     "on this worker (flavor never resolved for its card)")
+        if not changed:
+            return spec
+        derived = dc_replace(spec, models=effective)
+        logger.info(
+            "LANE_INSTRUCTION function=%s lane=%s rebound=%s",
+            spec.name, raw,
+            {s: wire_ref(b) for s, b in effective.items()
+             if wire_ref(spec.models[s]) != wire_ref(b)})
+        return derived
+
+    def _served_lane(self, spec: EndpointSpec) -> str:
+        """The CONCRETE lane this spec's instance executes as, for
+        JobMetrics.lane reporting: the most-quantized pipeline binding's lane
+        (table rank), execution axis from the record's live compile state."""
+        from .models import lanes as lanespec
+
+        compiled = False
+        if spec.cls is not None:
+            rec = self._classes.get(spec.instance_key)
+            if rec is not None:
+                compiled = any(
+                    getattr(t, "active_compile_ref", "")
+                    for t in rec.compile_targets.values())
+        # Report the most-quantized binding's lane: quantized lanes always
+        # outrank bf16 (a bf16 VAE riding a w8a16 pipeline is still the
+        # w8a16 lane), ties by table rank.
+        ranked = {body: i for i, body in enumerate(lanespec.known_lanes())}
+        best = None
+        best_key: Tuple[int, int] = (2, len(ranked) + 1)
+        for binding in spec.models.values():
+            lane = lanespec.lane_of_binding(
+                getattr(binding, "flavor", "") or "",
+                getattr(binding, "storage_dtype", "") or "",
+                compiled)
+            quant = 1 if lanespec.family_of(lane) == lanespec.FAMILY_BF16 else 0
+            key = (quant, ranked.get(lanespec.lane_id(lane), len(ranked)))
+            if best is None or key < best_key:
+                best, best_key = lane, key
+        if best is None:
+            best = lanespec.Lane(
+                weights=lanespec.WEIGHTS_BF16, activation=lanespec.ACT_W16A16,
+                execution=lanespec.EXEC_COMPILED if compiled else lanespec.EXEC_EAGER)
+        return lanespec.lane_id(best)
 
     async def ensure_desired_instance(
         self,
@@ -5671,6 +5825,14 @@ class Executor:
             # whole job — pins, setup, adapters, ctx.slots — so every
             # downstream consumer sees the pick, never the code seed.
             spec = job.spec = self._effective_spec(spec, run)
+            # th#913/gw#596: honor a hub-resolved per-request lane. An
+            # unserveable lane is a TYPED refusal naming it (INVALID) —
+            # never a silent fallback.
+            if run.lane:
+                spec = job.spec = self._lane_effective_spec(spec, run.lane)
+        except LaneUnavailableError as exc:
+            await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
+            return
         except Exception as exc:
             status, msg = _map_exception(exc)
             await self._finish(job, status, safe_message=msg)
@@ -5819,6 +5981,8 @@ class Executor:
             if producer:
                 await self._materialize_datasets(ctx, payload)
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
+            # th#913/gw#596: the concrete lane actually serving this job.
+            job.lane = self._served_lane(spec)
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
             ctx.raise_if_cancelled("canceled")
@@ -5919,7 +6083,7 @@ class Executor:
                             self._adapters.deactivate, ref, pipe, run.request_id
                         )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
-                                    output=output)
+                                    output=output, lane=job.lane)
             handler_done = time.monotonic()
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
@@ -5960,7 +6124,8 @@ class Executor:
                 await self._finish(job, pb.JOB_STATUS_OK, inline=inline, blob_ref=blob_ref,
                                    metrics=metrics)
         except _DeadlineExceeded:
-            metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index)
+            metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
+                                    lane=job.lane)
             await self._finish(job, pb.JOB_STATUS_FATAL, safe_message="deadline exceeded",
                                metrics=metrics)
         except BaseException as exc:
@@ -5989,7 +6154,8 @@ class Executor:
             status, msg = _map_exception(exc)
             if status == pb.JOB_STATUS_FATAL:
                 logger.exception("handler %s failed", spec.name)
-            metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index)
+            metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
+                                    lane=job.lane)
             await self._finish(job, status, safe_message=msg, metrics=metrics)
         finally:
             if lease is not None:
@@ -6388,7 +6554,7 @@ class Executor:
 
     def _metrics(
         self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int,
-        output: Any = None,
+        output: Any = None, lane: str = "",
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
         # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
@@ -6416,6 +6582,7 @@ class Executor:
             input_tokens=usage.prompt_tokens if usage is not None else 0,
             input_cached_tokens=usage.cached_tokens if usage is not None else 0,
             output_tokens=usage.completion_tokens if usage is not None else 0,
+            lane=lane,
         )
 
     async def _send_result(

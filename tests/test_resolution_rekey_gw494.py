@@ -89,7 +89,7 @@ def test_repick_rekeys_residency_zero_orphans() -> None:
         spec = ex.specs["generate"]
 
         # HelloAck 1: pick #fp8; instance loads and books under the pick.
-        ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "")})
+        ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "", "")})
         assert wire_ref(spec.models["pipeline"]) == "acme/z-image#fp8"
         old_ref = _simulate_loaded(ex, spec)
         assert old_ref == "acme/z-image#fp8"
@@ -99,7 +99,7 @@ def test_repick_rekeys_residency_zero_orphans() -> None:
         # HelloAck 2: different pick. The record is stale and gets vacated —
         # the OLD key's VRAM booking is released (no orphan), ready drops.
         ex.apply_model_resolutions(
-            {"acme/z-image": ("acme/z-image#svdq-int4-r128", "")})
+            {"acme/z-image": ("acme/z-image#svdq-int4-r128", "", "")})
         assert rec.stale is True
         await asyncio.sleep(0.05)  # let the scheduled revalidate task run
         assert rec.ready is False
@@ -132,7 +132,7 @@ def test_vacate_releases_booked_keys_not_rebound_ones() -> None:
         rec = ex._classes[spec.instance_key]
 
         # Rebind WITHOUT vacating first (simulates the pre-fix window).
-        ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "")})
+        ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "", "")})
         # The rehome carried the live record to the new key; vacate it.
         rec = next(r for r in ex._classes.values() if r is rec)
         await ex._vacate_record(rec)
@@ -151,7 +151,7 @@ def test_hf_binding_resolution_is_rejected_keeps_declared() -> None:
     ))
     spec = ex.specs["generate"]
     ex.apply_model_resolutions(
-        {"bfl/FLUX.2-klein-4B": ("bfl/FLUX.2-klein-4B#fp8", "")})
+        {"bfl/FLUX.2-klein-4B": ("bfl/FLUX.2-klein-4B#fp8", "", "")})
     # HF picks fold flavor -- but HF has no flavor field: rejected, declared kept.
     assert spec.models["pipeline"] == HF("bfl/FLUX.2-klein-4B")
 
@@ -181,7 +181,7 @@ def test_regate_runs_after_resolutions_and_is_idempotent() -> None:
 
     # Resolutions re-run the gates using the remembered probe.
     ex.unavailable.pop("generate")
-    ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "")})
+    ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "", "")})
     assert ex._last_gpu_info is not None
     assert "generate" in ex.serve_plans
 

@@ -200,7 +200,7 @@ class Lifecycle:
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).
         self.executor.apply_model_resolutions({
-            r.ref: (r.resolved_ref, r.cast) for r in ack.resolutions
+            r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
         })
         desired = pb.DesiredResidency()
         desired.CopyFrom(ack.desired_residency)

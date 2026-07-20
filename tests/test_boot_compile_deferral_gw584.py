@@ -236,7 +236,7 @@ def _startup(ex: Executor) -> Lifecycle:
 
 
 def _apply_hello_ack(ex: Executor) -> None:
-    ex.apply_model_resolutions({AUTHORED_REF: (RESOLVED_REF, "")})
+    ex.apply_model_resolutions({AUTHORED_REF: (RESOLVED_REF, "", "")})
     assert wire_ref(ex.specs["generate"].models["pipeline"]) == RESOLVED_REF
 
 

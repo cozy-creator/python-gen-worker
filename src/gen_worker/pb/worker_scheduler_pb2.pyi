@@ -273,14 +273,16 @@ class DesiredInstance(_message.Message):
     def __init__(self, function_name: _Optional[str] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ...) -> None: ...
 
 class ModelResolution(_message.Message):
-    __slots__ = ("ref", "resolved_ref", "cast")
+    __slots__ = ("ref", "resolved_ref", "cast", "lane")
     REF_FIELD_NUMBER: _ClassVar[int]
     RESOLVED_REF_FIELD_NUMBER: _ClassVar[int]
     CAST_FIELD_NUMBER: _ClassVar[int]
+    LANE_FIELD_NUMBER: _ClassVar[int]
     ref: str
     resolved_ref: str
     cast: str
-    def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ...) -> None: ...
+    lane: str
+    def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ...) -> None: ...
 
 class StateDelta(_message.Message):
     __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups")
@@ -354,7 +356,7 @@ class CompileTargetBinding(_message.Message):
     def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ...) -> None: ...
 
 class RunJob(_message.Message):
-    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "tenant", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots", "required_compile")
+    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "tenant", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots", "required_compile", "lane")
     class SnapshotsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -375,6 +377,7 @@ class RunJob(_message.Message):
     MODELS_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOTS_FIELD_NUMBER: _ClassVar[int]
     REQUIRED_COMPILE_FIELD_NUMBER: _ClassVar[int]
+    LANE_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     attempt: int
     function_name: str
@@ -388,7 +391,8 @@ class RunJob(_message.Message):
     models: _containers.RepeatedCompositeFieldContainer[ModelBinding]
     snapshots: _containers.MessageMap[str, Snapshot]
     required_compile: RequiredCompileExecution
-    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., tenant: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ...) -> None: ...
+    lane: str
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., tenant: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ..., lane: _Optional[str] = ...) -> None: ...
 
 class RequiredCompileExecution(_message.Message):
     __slots__ = ("target_incarnation_id", "cell_ref", "cell_snapshot_digest", "contract_digest")
@@ -479,7 +483,7 @@ class JobResult(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
-    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms")
+    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane")
     RUNTIME_MS_FIELD_NUMBER: _ClassVar[int]
     QUEUE_MS_FIELD_NUMBER: _ClassVar[int]
     RSS_AT_END_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -492,6 +496,7 @@ class JobMetrics(_message.Message):
     OUTPUT_COUNT_FIELD_NUMBER: _ClassVar[int]
     SLOT_HELD_MS_FIELD_NUMBER: _ClassVar[int]
     FINALIZE_WALL_MS_FIELD_NUMBER: _ClassVar[int]
+    LANE_FIELD_NUMBER: _ClassVar[int]
     runtime_ms: int
     queue_ms: int
     rss_at_end_bytes: int
@@ -504,7 +509,8 @@ class JobMetrics(_message.Message):
     output_count: int
     slot_held_ms: int
     finalize_wall_ms: int
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ...) -> None: ...
+    lane: str
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ...) -> None: ...
 
 class JobProgress(_message.Message):
     __slots__ = ("request_id", "attempt", "seq", "data", "content_type")
