@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.40.1 (2026-07-20)
+
+- **gw#604: a hub redelivery of the worker's OWN just-published self-mint
+  cell is a no-op re-arm.** Cell identity is the key (gw#581); the store's
+  snapshot digest and the self-attested tar blake3 are two transport forms
+  of the same bytes, so a same-key desired cell no longer vacates a proven
+  serving record (whose warm-process re-proof could never pass honestly —
+  the live fail-closed re-arm loop). The worker aligns its advertised
+  digest to the store's form instead. Delivered/label republish
+  (vacate/rebuild) and hot-adopt convergence are unchanged. Hub half:
+  tensorhub PR #512 (attach skip + th#930 prewarm demand conversion).
+
 ## 0.40.0 (2026-07-20)
 
 - **gw#596 instructed-lane contract (th#913 pair).** A lane is the FULL
