@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.39.3 (2026-07-20)
+
+- **gw#587 prove-produces-the-mint: the self-mint captures the executor's
+  REAL warmup and publishes only after the proof passes.** 0.39.2's
+  self-mint minted via the producer synthetic warm loop
+  (`mint_artifact`/`_warm_call`) before the proof ran; live forensics
+  showed the cell differing from the known-good forge cell in 20/490 FX
+  graph keys (broadcast vs per-token modulation — the gw#586 defect class
+  inside self-mint), so the proof correctly failed closed. Now a cell miss
+  arms COLD into a capture dir (`compile_cache.begin_fleet_mint`, no
+  synthetic call; `fleet_cells.enable_compiled` returns `PendingSelfMint`
+  with the key ref known from static axes), the endpoint's own warmup
+  performs the only compile the mint sees, and the proof loop finalizes
+  (`finish_fleet_mint` pack -> real blake3 digest -> background publish)
+  ONLY proven captures — unproven ones are abandoned, mandatory lanes
+  still fail closed, and the publish-before-proof window is closed. The
+  published artifact is byte-derived from the same execution the proof
+  observed; no second code path re-creates serving's execution. Delivered
+  (store-served) proof semantics, `cell_key`, `cell_selection_bug`, and
+  the `STORE_SERVED_BOOT_COMPILED` alarm are unchanged.
+
 ## 0.39.2 (2026-07-20)
 
 - **gw#587 serving bootstrap: self-mint boots advertise their own key and
