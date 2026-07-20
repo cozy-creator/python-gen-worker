@@ -24,8 +24,14 @@ _BUDGET = 10_000
 
 
 def _snapshot(digest: str, size: int) -> pb.Snapshot:
+    # Truthful digest of what _fake_download actually writes: since gw#598
+    # the executor tree-verifies every fresh materialization before trusting
+    # it, so fixtures must declare the real hash of their fake bytes.
+    from blake3 import blake3
+
     return pb.Snapshot(digest=digest, files=[
-        pb.SnapshotFile(path="w.bin", size_bytes=size, blake3="ab" * 16,
+        pb.SnapshotFile(path="w.bin", size_bytes=size,
+                        blake3=blake3(b"\0" * size).hexdigest(),
                         url="http://example.invalid/w.bin"),
     ])
 
@@ -222,3 +228,37 @@ def test_rescan_restores_disk_baseline_after_restart(tmp_path, _fake_download) -
     assert restarted.residency.tier("t/a") is Tier.DISK
     assert restarted.residency.local_path("t/a") == tmp_path / "snapshots" / "t--a"
     assert restarted.residency.tier("t/b") is None  # stale entry dropped
+
+
+def test_rescan_sweeps_stale_writer_temp_artifacts(tmp_path, _fake_download) -> None:
+    """th#850: a CAS root on a persistent volume (unlike ephemeral pod-local
+    disk) keeps a crashed writer's temp artifacts forever unless boot-time
+    rescan sweeps them. Fresh/live artifacts must survive the sweep."""
+    from gen_worker.models import disk_gc
+
+    store = _store(tmp_path, [])
+    blob_dir = tmp_path / "blobs" / "blake3" / "ab" / "cd"
+    blob_dir.mkdir(parents=True)
+    stale_blob_tmp = blob_dir / ".deadbeef.part-stale-writer"
+    fresh_blob_tmp = blob_dir / ".deadbeef.part-live-writer"
+    stale_blob_tmp.write_bytes(b"partial")
+    fresh_blob_tmp.write_bytes(b"partial")
+
+    snaps_root = tmp_path / "snapshots"
+    stale_building = snaps_root / "abc123.building-stale-writer"
+    fresh_building = snaps_root / "abc123.building-live-writer"
+    stale_building.mkdir(parents=True)
+    fresh_building.mkdir(parents=True)
+    (stale_building / "w.bin").write_bytes(b"x")
+
+    old = time.time() - disk_gc._STALE_WRITER_TEMP_AGE_S - 1
+    import os
+    os.utime(stale_blob_tmp, (old, old))
+    os.utime(stale_building, (old, old))
+
+    store.rescan_disk()
+
+    assert not stale_blob_tmp.exists()
+    assert fresh_blob_tmp.exists()
+    assert not stale_building.exists()
+    assert fresh_building.exists()

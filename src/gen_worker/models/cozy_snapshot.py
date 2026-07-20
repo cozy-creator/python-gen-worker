@@ -8,13 +8,12 @@ import os
 import re
 import shutil
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .cozy_cas import _blake3_file, _download_one_file as _download_one_file
-from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
+from .cozy_cas import _norm_rel_path, fsync_dir
 from .download import components_present, select_component_paths
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
@@ -39,6 +38,24 @@ def _inflight_blob_lock(digest: str) -> "asyncio.Lock":
     if len(_INFLIGHT_BLOB_LOCKS) > _INFLIGHT_BLOB_LOCKS_CAP:
         _INFLIGHT_BLOB_LOCKS.clear()  # bounded memory; races just re-lock
     return _INFLIGHT_BLOB_LOCKS.setdefault(digest, asyncio.Lock())
+
+
+# gw#598 / th#850: verify-on-first-use-per-process for REUSED CAS state.
+# The CAS root can now be a persistent volume shared by several pods, so
+# blobs and materialized snapshot trees found on disk may be another pod's
+# bytes of any age — they must pass a full BLAKE3 check once per process
+# before being trusted, exactly like freshly downloaded bytes. Keyed by
+# (resolved root, digest/key) so tests with distinct tmp roots never share
+# trust; in production the root is constant, so this is once per boot.
+_TRUST_CAP = 65536
+_VERIFIED_BLOBS: Set[tuple] = set()
+_TRUSTED_SNAPSHOTS: Set[tuple] = set()
+
+
+def _mark_trusted(s: Set[tuple], item: tuple) -> None:
+    if len(s) > _TRUST_CAP:
+        s.clear()  # bounded memory; worst case is a re-verify
+    s.add(item)
 
 ProgressFn = Callable[[int, Optional[int]], None]
 
@@ -197,7 +214,6 @@ class CozySnapshotDownloader:
         base_dir: Path,
         ref: TensorhubRef,
         *,
-        shared_base_dir: Optional[Path] = None,
         resolved: Optional[WorkerResolvedRepo],
         progress: Optional[ProgressFn] = None,
         components: Sequence[str] = (),
@@ -223,14 +239,15 @@ class CozySnapshotDownloader:
         # snapshot).
         key = snapshot_dir_key(res.snapshot_digest, components)
         snap_dir = snaps_root / key
-        if snap_dir.exists():
+        trust_key = (str(snaps_root.resolve()), key)
+        if snap_dir.exists() and trust_key in _TRUSTED_SNAPSHOTS:
             _log.info("snapshot_cached key=%s", key[:24])
             return snap_dir
 
         # Coordinate concurrent builders via threading (works across event loops).
         loop = asyncio.get_running_loop()
         with _SNAP_LOCK:
-            if snap_dir.exists():
+            if snap_dir.exists() and trust_key in _TRUSTED_SNAPSHOTS:
                 return snap_dir
             entry = _SNAP_ENTRIES.get(key)
             if entry is None:
@@ -248,16 +265,29 @@ class CozySnapshotDownloader:
             return snap_dir
 
         try:
+            if snap_dir.exists():
+                # gw#598: a materialized tree this process has not produced or
+                # checked (another pod's writes on a shared volume root, or a
+                # previous boot's) is verified ONCE before reuse; corruption
+                # quarantines tree + bad blobs and falls through to a rebuild.
+                ok, bad = await asyncio.to_thread(
+                    _verify_materialized_tree, snap_dir, res.files
+                )
+                if ok:
+                    _mark_trusted(_TRUSTED_SNAPSHOTS, trust_key)
+                    _log.info("snapshot_cached key=%s (verified first use)", key[:24])
+                    return snap_dir
+                _log.warning(
+                    "snapshot_reuse_corrupt key=%s bad_files=%d; quarantining and rebuilding",
+                    key[:24], len(bad),
+                )
+                await asyncio.to_thread(
+                    _quarantine_materialized, snap_dir, blobs_root, bad
+                )
             _log.info("snapshot_build_start key=%s files=%d", key[:24], len(res.files))
-            shared_blobs_root = None
-            if shared_base_dir is not None:
-                candidate = Path(shared_base_dir) / "blobs"
-                if candidate.resolve() != blobs_root.resolve():
-                    shared_blobs_root = candidate
             await self._ensure_blobs(
                 blobs_root,
                 res.files,
-                shared_blobs_root=shared_blobs_root,
                 progress=progress,
             )
             # Materialization copies/concatenates multi-GB trees — strictly
@@ -267,6 +297,10 @@ class CozySnapshotDownloader:
             await asyncio.to_thread(
                 self._materialize_snapshot, blobs_root, snaps_root, snap_dir, res
             )
+            # Every input was verified this process (fresh downloads by the
+            # downloader, reused blobs by _blob_trusted), so the freshly
+            # materialized tree is trustworthy without a second hash pass.
+            _mark_trusted(_TRUSTED_SNAPSHOTS, trust_key)
             _log.info("snapshot_build_done key=%s", key[:24])
             return snap_dir
         except BaseException as exc:
@@ -290,16 +324,20 @@ class CozySnapshotDownloader:
         res: WorkerResolvedRepo,
     ) -> None:
         """Blocking build phase (worker thread): reassemble + hardlink into a
-        ``.building`` dir, then atomically rename into place."""
-        tmp = snaps_root / f"{snap_dir.name}.building"
-        if tmp.exists():
-            shutil.rmtree(tmp)
+        writer-unique ``.building-<writer_id>`` dir, then atomically rename
+        into place. Writer-unique (not a fixed ``.building`` name) so two
+        pods racing to materialize the same snapshot key on a SHARED CAS
+        root (e.g. one RunPod volume, th#850) never interleave writes into
+        the same tree — only the atomic rename below, not the build, decides
+        the winner."""
+        writer_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+        tmp = snaps_root / f"{snap_dir.name}.building-{writer_id}"
         tmp.mkdir(parents=True, exist_ok=True)
 
         self._reassemble_chunked(blobs_root, tmp, res.files)
         self._materialize_regular(blobs_root, tmp, res.files)
 
-        # Atomic rename; handle race with concurrent builder.
+        # Atomic rename; a concurrent writer may have already published.
         if snap_dir.exists():
             shutil.rmtree(tmp, ignore_errors=True)
         else:
@@ -310,8 +348,6 @@ class CozySnapshotDownloader:
                 if not snap_dir.exists():
                     raise
             else:
-                from .cozy_cas import fsync_dir
-
                 fsync_dir(snaps_root)  # persist the rename itself (gw#408)
 
     # ------------------------------------------------------------------
@@ -323,7 +359,6 @@ class CozySnapshotDownloader:
         blobs_root: Path,
         files: List[WorkerResolvedRepoFile],
         *,
-        shared_blobs_root: Optional[Path] = None,
         progress: Optional[ProgressFn] = None,
     ) -> None:
         # Deduplicate by digest — same blob referenced by multiple paths (e.g.
@@ -354,12 +389,18 @@ class CozySnapshotDownloader:
 
         total = sum(int(f.size_bytes or 0) for f in unique) or None
         done = total - missing_bytes if total else 0
+        network_bytes = 0  # th#850: bytes actually fetched over the network
+        # this call, as opposed to bytes already present under blobs_root —
+        # the signal a "volume-attached boot ⇒ ~0 network bytes" runtime
+        # assertion needs. Only _dl_locked's real fetch increments it.
         done_lock = threading.Lock()
 
-        def _on_bytes(n: int) -> None:
-            nonlocal done
+        def _on_bytes(n: int, *, network: bool = False) -> None:
+            nonlocal done, network_bytes
             with done_lock:
                 done += n
+                if network:
+                    network_bytes += n
                 d = done if total is None else min(done, total)
             if progress is not None:
                 try:
@@ -378,45 +419,46 @@ class CozySnapshotDownloader:
 
         max_conc = 4
         sem = asyncio.Semaphore(max_conc)
+        blobs_root_id = str(blobs_root.resolve())
+
+        async def _blob_trusted(dst: Path, f: WorkerResolvedRepoFile, digest: str) -> bool:
+            """Reusable AND digest-trusted (gw#598): size gate as before, plus
+            a full BLAKE3 check once per (root, digest) per process — reused
+            bytes on a shared volume root are another pod's writes of any age
+            and must earn the same trust as a fresh verified download."""
+            if not self._blob_usable(dst, f):
+                return False
+            vkey = (blobs_root_id, digest)
+            if vkey in _VERIFIED_BLOBS:
+                return True
+            got = await asyncio.to_thread(_blake3_file, dst)
+            if got.lower() == digest:
+                _mark_trusted(_VERIFIED_BLOBS, vkey)
+                return True
+            _log.warning(
+                "blob_corrupt path=%s digest=%s blake3 mismatch on reuse; re-downloading",
+                f.path, digest[:16],
+            )
+            dst.unlink(missing_ok=True)
+            return False
 
         async def _dl(f: WorkerResolvedRepoFile) -> None:
             digest = f.blake3.strip().lower()
             dst = _blob_path(blobs_root, digest)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if self._blob_usable(dst, f):
+            if await _blob_trusted(dst, f, digest):
                 _log.info("blob_cached path=%s digest=%s", f.path, digest[:16])
                 return
             async with _inflight_blob_lock(digest):
-                if self._blob_usable(dst, f):
+                if await _blob_trusted(dst, f, digest):
                     _log.info("blob_shared_inflight path=%s digest=%s (sibling ref downloaded it)",
                               f.path, digest[:16])
                     return
-                if shared_blobs_root is not None:
-                    shared = _blob_path(shared_blobs_root, digest)
-                    started = time.monotonic()
-                    if await asyncio.to_thread(self._copy_verified_blob, shared, dst, f):
-                        _on_bytes(int(f.size_bytes or 0))
-                        _log.info(
-                            "blob_cache_hit source=endpoint_volume digest=%s bytes=%d transfer_ms=%d",
-                            digest[:16], int(f.size_bytes or 0),
-                            int((time.monotonic() - started) * 1000),
-                        )
-                        return
-                    _log.info("blob_cache_miss source=endpoint_volume digest=%s", digest[:16])
                 await _dl_locked(f, digest, dst)
-                if shared_blobs_root is not None:
-                    shared = _blob_path(shared_blobs_root, digest)
-                    published = await asyncio.to_thread(
-                        self._copy_verified_blob, dst, shared, f
-                    )
-                    _log.info(
-                        "blob_cache_publish source=public destination=endpoint_volume digest=%s bytes=%d published=%s",
-                        digest[:16], int(f.size_bytes or 0), published,
-                    )
 
         async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
             async with sem:
-                if self._blob_usable(dst, f):
+                if await _blob_trusted(dst, f, digest):
                     return
                 _log.info("blob_download_start path=%s size=%s digest=%s",
                           f.path, f.size_bytes, digest[:16])
@@ -431,7 +473,7 @@ class CozySnapshotDownloader:
                             expected_blake3=digest,
                         ),
                     )
-                    _on_bytes(int(f.size_bytes or 0))
+                    _on_bytes(int(f.size_bytes or 0), network=True)
                 else:
                     assert f.url is not None  # validated above in _ensure_blobs loop
                     await _download_one_file(
@@ -439,67 +481,23 @@ class CozySnapshotDownloader:
                         dst,
                         expected_size=int(f.size_bytes or 0),
                         expected_blake3=digest,
-                        on_bytes=_on_bytes,
+                        on_bytes=lambda n: _on_bytes(n, network=True),
                     )
+                # Both download paths verified size+BLAKE3 before publishing.
+                _mark_trusted(_VERIFIED_BLOBS, (blobs_root_id, digest))
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
 
         await asyncio.gather(*(_dl(f) for f in unique))
-
-    @staticmethod
-    def _copy_verified_blob(
-        src: Path, dst: Path, f: WorkerResolvedRepoFile,
-    ) -> bool:
-        """Copy one immutable blob through a writer-unique atomic stage.
-
-        The final path is digest-only. Readers never observe partial bytes;
-        racing writers may replace the same final name only after each has
-        independently verified the declared size and BLAKE3.
-        """
-        expected_size = int(f.size_bytes or 0)
-        expected_digest = _strip_blake3_prefix(f.blake3)
-        try:
-            if not src.is_file():
-                return False
-            if expected_size and src.stat().st_size != expected_size:
-                _log.warning(
-                    "blob_cache_corrupt source=%s digest=%s reason=size expected=%d actual=%d",
-                    src, expected_digest[:16], expected_size, src.stat().st_size,
-                )
-                return False
-
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dst.parent / (
-                f".{dst.name}.writer-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
-            )
-            try:
-                with src.open("rb") as source, tmp.open("xb") as staged:
-                    shutil.copyfileobj(source, staged, length=4 * 1024 * 1024)
-                    staged.flush()
-                    os.fsync(staged.fileno())
-                if expected_size and tmp.stat().st_size != expected_size:
-                    _log.warning(
-                        "blob_cache_corrupt source=%s digest=%s reason=staged_size expected=%d actual=%d",
-                        src, expected_digest[:16], expected_size, tmp.stat().st_size,
-                    )
-                    return False
-                if expected_digest and _blake3_file(tmp).lower() != expected_digest.lower():
-                    _log.warning(
-                        "blob_cache_corrupt source=%s digest=%s reason=blake3",
-                        src, expected_digest[:16],
-                    )
-                    return False
-                os.replace(tmp, dst)
-                fsync_file(dst)
-                fsync_dir(dst.parent)
-                return True
-            finally:
-                tmp.unlink(missing_ok=True)
-        except OSError as exc:
-            _log.warning(
-                "blob_cache_copy_failed source=%s destination=%s digest=%s error=%s",
-                src, dst, expected_digest[:16], exc,
-            )
-            return False
+        # th#850 runtime-assertion signal: on a volume-attached boot with
+        # blobs already warm, network_bytes should land near zero. Log-only
+        # for now (deliberately not threaded through the ProgressFn/
+        # ModelEvent wire contract here — that needs a coordinated proto
+        # change with the th#850 owner, see gw#597).
+        cache_hit_pct = 100.0 * (1 - network_bytes / total) if total else 100.0
+        _log.info(
+            "ensure_blobs_summary total_bytes=%s network_bytes=%d cache_hit_pct=%.1f",
+            total, network_bytes, cache_hit_pct,
+        )
 
     @staticmethod
     def _blob_usable(dst: Path, f: WorkerResolvedRepoFile) -> bool:
@@ -604,6 +602,66 @@ class CozySnapshotDownloader:
 
 
 
+def _verify_materialized_tree(
+    snap_dir: Path, files: List[WorkerResolvedRepoFile],
+) -> tuple:
+    """Integrity of a reused materialized snapshot (worker thread, blocking).
+
+    Manifest-covered regular files are checked against declared size AND
+    BLAKE3; reassembled chunked originals (which the manifest digests only
+    part-wise) get the structural safetensors check. Returns
+    ``(ok, bad)`` — hex digests in ``bad`` name blobs to quarantine."""
+    from .loading import safetensors_file_valid
+
+    bad: List[str] = []
+    covered: Set[Path] = set()
+    for f in files:
+        if _is_parts_manifest(f.path) or _is_part_file(f.path):
+            continue  # not materialized: parts live only in blobs/
+        try:
+            dst = snap_dir / _norm_rel_path(f.path)
+        except ValueError:
+            continue
+        covered.add(dst)
+        digest = _strip_blake3_prefix((f.blake3 or "").strip().lower())
+        try:
+            if not dst.exists():
+                raise ValueError("missing")
+            if f.size_bytes and dst.stat().st_size != int(f.size_bytes):
+                raise ValueError("size mismatch")
+            if digest and _blake3_file(dst).lower() != digest:
+                raise ValueError("blake3 mismatch")
+        except (OSError, ValueError) as exc:
+            _log.warning("snapshot reuse file %s/%s corrupt: %s", snap_dir.name, f.path, exc)
+            bad.append(digest or f.path)
+    try:
+        candidates = sorted(snap_dir.rglob("*.safetensors"))
+    except OSError:
+        candidates = []
+    for st in candidates:
+        if st in covered:
+            continue
+        if not safetensors_file_valid(st):
+            _log.warning("snapshot reuse file %s structurally invalid (truncated?)", st)
+            bad.append(str(st.relative_to(snap_dir)))
+    return (not bad, bad)
+
+
+def _quarantine_materialized(snap_dir: Path, blobs_root: Path, bad: Any) -> None:
+    """Delete a corrupt reused tree AND the corrupt blobs it links, so the
+    rebuild re-downloads clean bytes instead of re-linking the same rot."""
+    shutil.rmtree(snap_dir, ignore_errors=True)
+    for raw in bad or ():
+        digest = _strip_blake3_prefix(str(raw or "")).strip().lower()
+        if "/" in digest or "." in digest or len(digest) < 4:
+            continue  # path-shaped entry (structural failure), not a digest
+        try:
+            _blob_path(blobs_root, digest).unlink(missing_ok=True)
+        except OSError:
+            continue
+    fsync_dir(snap_dir.parent)
+
+
 def delete_blobs(base_dir: Path, digests: Any) -> None:
     """Remove specific CAS blobs (quarantine of digest-mismatched content,
     gw#408) so a re-materialization re-downloads them instead of re-linking
@@ -626,7 +684,6 @@ def delete_blobs(base_dir: Path, digests: Any) -> None:
 async def ensure_snapshot_async(
     *,
     base_dir: Path,
-    shared_base_dir: Optional[Path] = None,
     ref: TensorhubRef,
     resolved: Optional[WorkerResolvedRepo],
     progress: Optional[ProgressFn] = None,
@@ -634,6 +691,5 @@ async def ensure_snapshot_async(
 ) -> Path:
     dl = CozySnapshotDownloader()
     return await dl.ensure_snapshot(
-        base_dir, ref, shared_base_dir=shared_base_dir,
-        resolved=resolved, progress=progress, components=components,
+        base_dir, ref, resolved=resolved, progress=progress, components=components,
     )
