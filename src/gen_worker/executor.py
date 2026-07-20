@@ -135,6 +135,14 @@ _GiB = 1024 ** 3
 _DISK_GC_MARGIN_BYTES = 2 * _GiB
 # Refs used within the grace window are not disk-GC candidates.
 _DISK_GC_GRACE_S = 300.0
+# gw#587: a store-served boot (a compile cell was ATTACHED, not self-minted)
+# must pay ~0 inductor compile wall time — the whole point of a delivered
+# cell is that the graph is already compiled. This is seconds, not ms: a
+# trivial guard recompile is noise, a real cold compile burns the economic
+# claim the cell system exists to avoid (see gw#587's boot-to-ready value
+# proposition). Fixed floor rather than a learned per-fleet baseline —
+# simple, robust, and every real cold compile clears it by a wide margin.
+_STORE_SERVED_COMPILE_ALARM_S = 30.0
 
 try:  # torch is optional at import time; the executor works without it.
     import torch
@@ -3302,6 +3310,8 @@ class Executor:
                 )
                 return evidence.count, evidence.functions_by_object
 
+            compile_seconds_before = (
+                compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
             if inj.active_compile_artifacts:
                 # Cache-hit counters are process-global. Hold every GPU permit
                 # so each exact guard window can belong to only this warmup.
@@ -3309,6 +3319,9 @@ class Executor:
                     warmed, function_proofs = await run_warmup()
             else:
                 warmed, function_proofs = await run_warmup()
+            compile_seconds = (
+                compile_cache.compile_wall_seconds() - compile_seconds_before
+                if proves_inductor else 0.0)
             if proves_inductor:
                 # gw#595 per-object provability: the proof scopes to objects
                 # the warmup actually EXERCISED (calls>0). An exercised object
@@ -3394,6 +3407,43 @@ class Executor:
                     if int(getattr(spec.compile, "lora_bucket", 0) or 0):
                         compile_cache.drop_lora_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
+                if proven and compile_seconds >= _STORE_SERVED_COMPILE_ALARM_S:
+                    # gw#587 runtime assertion: this boot ATTACHED a cell
+                    # (compile_selection is set — store-served, never a
+                    # self-mint) and at least one candidate proved a warm
+                    # cache hit, yet the process burned real inductor compile
+                    # wall time getting there. A delivered cell should cost
+                    # ~0 here; this is the gw#586 defect class generalized —
+                    # a cell that claims to serve while the boot silently
+                    # recompiles (stale/shape-mismatched artifact, or the
+                    # wrong cell attested through th#910). Loud, greppable,
+                    # and mirrored onto the wire via the existing ADOPTED
+                    # ModelEvent shape (gw#391) so it is visible hub-side —
+                    # boot-attached cells never sent this event before;
+                    # duration_ms carries the measured compile wall here
+                    # specifically (not the ordinary hot-adopt op-wall
+                    # meaning) since this call site only fires on alarm.
+                    family = str(getattr(spec.compile, "family", "") or "")
+                    ref = compile_selection.ref if compile_selection else ""
+                    digest = (
+                        compile_selection.snapshot_digest
+                        if compile_selection else "")
+                    logger.error(
+                        "compile-cache: STORE_SERVED_BOOT_COMPILED family=%s "
+                        "cell=%s digest=%s compile_seconds=%.1fs (>= alarm "
+                        "threshold %.1fs) — a store-served boot should pay "
+                        "~0 compile time (cache_hits=%d cache_misses=%d)",
+                        family, ref, digest, compile_seconds,
+                        _STORE_SERVED_COMPILE_ALARM_S, hits, misses,
+                    )
+                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                        ref=ref,
+                        state=pb.MODEL_STATE_ADOPTED,
+                        snapshot_digest=digest,
+                        cache_hits=hits,
+                        cache_misses=misses,
+                        duration_ms=int(compile_seconds * 1000),
+                    )))
             if compile_selection and trt_engine.is_engine_ref(compile_selection.ref):
                 trt_candidates = [
                     candidate for candidate in inj.compile_objects

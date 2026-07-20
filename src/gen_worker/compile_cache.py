@@ -532,6 +532,24 @@ def counters_delta(before: Dict[str, int], after: Dict[str, int]) -> Dict[str, i
     return {k: int(after.get(k, 0)) - int(before.get(k, 0)) for k in after}
 
 
+def compile_wall_seconds() -> float:
+    """This process's cumulative torch.compile wall time (monotonic, seconds).
+
+    gw#587: the store-served-boot runtime assertion samples this before/after
+    a boot warmup window to measure the actual inductor compile wall (not
+    just a hit/miss count) — a delivered cell should cost ~0 here. Mirrors
+    ``inductor_counters()``: process-global, so callers must scope the
+    before/after sample to a window where no OTHER boot is compiling
+    concurrently (the executor already holds the exclusive GPU permit for
+    exactly this reason)."""
+    try:
+        from torch._dynamo.utils import calculate_time_spent
+
+        return float(calculate_time_spent().get("total_wall_time", 0.0))
+    except Exception:
+        return 0.0
+
+
 def toolchain_present() -> bool:
     return any(shutil.which(c) for c in ("cc", "gcc", "g++", "clang"))
 
