@@ -74,12 +74,11 @@ def _manifest(*binding_blocks: dict) -> dict:
             {"acme/flux:canary#fp8": "tensorhub"},
         ),
         (
-            # Dispatch table: one repo name, two providers per flavor variant.
+            # th#928: retired dispatch-kind entries are ignored, not parsed.
             {"pipeline": {"kind": "dispatch", "field": "variant", "table": {
                 "bf16": {"provider": "hf", "ref": "owner/flux", "flavor": "bf16"},
-                "fp8": {"provider": "tensorhub", "ref": "owner/flux", "flavor": "fp8"},
             }}},
-            {"owner/flux#bf16": "hf", "owner/flux#fp8": "tensorhub"},
+            {"owner/flux#bf16": None},
         ),
     ],
 )
