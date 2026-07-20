@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.39.0 (2026-07-19)
 
 - **gw#587: fleet worker self-mint — the serving worker compiles its own
   cell on a store miss, serves compiled immediately, and publishes it
