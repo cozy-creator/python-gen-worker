@@ -236,6 +236,16 @@ class _ArmingContext:
     # self-loading endpoints participate in object-scoped compile targets;
     # inferring them later from class attributes would be ambiguous.
     objects: list[tuple[Any, bool]]
+    # gw#587: the scope owner's arming policy. The executor routes the fleet
+    # policy (delivered cell first, self-mint on miss) here so an endpoint's
+    # own arm_compile() call gets the SAME behavior as a worker-loaded slot;
+    # None keeps the bare delivered-artifact policy (CLI / unit rigs). The
+    # callable may return a bool or an object with `.armed`/`.self_mint`
+    # (fleet_cells.ArmOutcome) — provision cannot import fleet_cells (cycle).
+    enable: Optional[Callable[[Any, Any, Optional[Path], Optional[Path]], Any]]
+    # id(pipe) -> self-mint identity (fleet_cells.SelfMint) for pipes the
+    # scope's policy armed from their OWN mint rather than a delivered cell.
+    self_mints: dict[int, Any]
 
 
 _ARMING_CTX: "contextvars.ContextVar[Optional[_ArmingContext]]" = contextvars.ContextVar(
@@ -253,14 +263,20 @@ class ArmingScope:
     def __init__(
         self, compile: Any, cache_dir: Optional[Path] = None,
         artifact: Optional[Path] = None,
+        enable: Optional[
+            Callable[[Any, Any, Optional[Path], Optional[Path]], Any]
+        ] = None,
     ) -> None:
         self._objects: list[tuple[Any, bool]] = []
+        self._self_mints: dict[int, Any] = {}
         self._value = (
             _ArmingContext(
                 compile=compile,
                 cache_dir=cache_dir,
                 artifact=artifact,
                 objects=self._objects,
+                enable=enable,
+                self_mints=self._self_mints,
             )
             if compile is not None else None
         )
@@ -280,6 +296,11 @@ class ArmingScope:
     def objects(self) -> tuple[tuple[Any, bool], ...]:
         """Exact ``(pipeline, armed)`` observations from this setup scope."""
         return tuple(self._objects)
+
+    @property
+    def self_mints(self) -> dict[int, Any]:
+        """``id(pipe) -> SelfMint`` for scope pipes armed from their own mint."""
+        return dict(self._self_mints)
 
 
 def arm_compile(pipe: Any) -> bool:
@@ -303,7 +324,12 @@ def arm_compile(pipe: Any) -> bool:
             "when @endpoint(compile=Compile(...)) is declared on that "
             "function/class."
         )
-    armed = enable_compiled(pipe, ctx.compile, ctx.cache_dir, ctx.artifact)
+    enable = ctx.enable if ctx.enable is not None else enable_compiled
+    outcome = enable(pipe, ctx.compile, ctx.cache_dir, ctx.artifact)
+    armed = bool(getattr(outcome, "armed", outcome))
+    mint = getattr(outcome, "self_mint", None)
+    if mint is not None:
+        ctx.self_mints[id(pipe)] = mint
     ctx.objects.append((pipe, armed))
     return armed
 

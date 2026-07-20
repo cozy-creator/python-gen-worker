@@ -143,8 +143,10 @@ def _guarded_apply(pipeline, _cfg, *, cache_ready, guard=True):
 
 
 def _guarded_enable(pipeline, *_args):
+    from gen_worker import fleet_cells
+
     _mark_fake_guard(pipeline)
-    return True
+    return fleet_cells.ArmOutcome(armed=True)
 
 
 def _spec(compile_cfg=None) -> EndpointSpec:
@@ -1133,6 +1135,157 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
     assert msg.model_event.snapshot_digest == DIGEST_A
     assert msg.model_event.cache_hits >= 1
     assert msg.model_event.duration_ms == 45000
+
+
+def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
+    tmp_path, monkeypatch, caplog,
+):
+    """gw#587 serving bootstrap: a mandatory-lane boot with NO delivered cell
+    self-mints, runs the SAME warmup proof as a store-served boot (real
+    cache-hit accounting on the actual serving graphs), and then ADVERTISES
+    its compile target under its own key ref + self-attested digest so the
+    hub's self-attested dispatch fence (th#910 PR #488) can dispatch to it.
+    The minting boot legitimately burns compile wall time — it must NOT trip
+    the STORE_SERVED_BOOT_COMPILED alarm (that line belongs to delivered
+    cells only; the store-served side is proven by the sibling tests above)."""
+    import gen_worker.executor as executor_mod
+    from gen_worker import fleet_cells
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    model_ref = wire_ref(spec.models["pipeline"])
+    mint_key = "ck1-" + "d" * 56
+    mint_ref = f"_system/family-{FAMILY}#{mint_key}"
+    mint_digest = "blake3:" + "e" * 64
+    mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
+    mint_artifact.parent.mkdir()
+    mint_artifact.write_bytes(b"cell-bytes")
+    sent = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+
+    def _minting_enable(pipeline, *_args):
+        _mark_fake_guard(pipeline)
+        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+            family=FAMILY, cell_key=mint_key, ref=mint_ref,
+            snapshot_digest=mint_digest, artifact=mint_artifact))
+
+    monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
+    # The mint's cold compile happened during setup; simulate real compile
+    # wall time visible across the warmup window anyway (regional tails) —
+    # a MINTING boot must stay exempt from the store-served alarm.
+    wall = iter([0.0, 45.0])
+    monkeypatch.setattr(cc, "compile_wall_seconds", lambda: next(wall))
+    _ColdEndpoint.setups = _ColdEndpoint.warmups = 0
+
+    with caplog.at_level("ERROR", logger="gen_worker.executor"):
+        instance = asyncio.run(ex.ensure_setup(
+            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert isinstance(instance, _ColdEndpoint)
+    assert _ColdEndpoint.warmups == 1, "the warmup proof must run for a self-mint"
+    # Advertised exactly like a delivered cell, under the worker's OWN key.
+    (target,) = ex.compile_targets()
+    assert target.active_compile_ref == mint_ref
+    assert target.active_compile_snapshot_digest == mint_digest
+    # No store-served alarm on a minting boot — either loud or on the wire.
+    assert not any(
+        "STORE_SERVED_BOOT_COMPILED" in r.message for r in caplog.records)
+    assert [
+        m for m in sent
+        if m.HasField("model_event")
+        and m.model_event.state == pb.MODEL_STATE_ADOPTED
+    ] == []
+
+
+def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
+    tmp_path, monkeypatch,
+):
+    """Revert-turns-red for the gw#587 serving-bootstrap proof gate: a
+    self-minted mandatory-lane cell whose warmup EXERCISES the pipeline but
+    proves ZERO cache hits (the mint does not actually serve the serving
+    graphs — the gw#586 silent-eager shape) must fail the boot closed
+    (CompiledLaneUnavailable), never advertise a target, never serve eager.
+    If self-mints are dropped from the warmup proof again (the 0.39.0
+    regression this closes), this boot completes and the test goes red."""
+    import gen_worker.executor as executor_mod
+    from gen_worker import fleet_cells
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    class _NoProofEndpoint(_ColdEndpoint):
+        def warmup(self) -> None:
+            type(self).warmups += 1
+            # Exercised, but every lookup misses: calls>0, hits==0.
+            _record_fake_warm(self.pipeline, hits=0, misses=1)
+
+    spec = EndpointSpec(
+        name="cold-generate", method=_NoProofEndpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=_NoProofEndpoint,
+        attr_name="run",
+        models={"pipeline": Hub("acme/klein-finetune", flavor="fp8-w8a8")},
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+    model_ref = wire_ref(spec.models["pipeline"])
+    mint_key = "ck1-" + "f" * 56
+    mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
+    mint_artifact.parent.mkdir()
+    mint_artifact.write_bytes(b"cell-bytes")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+
+    def _minting_enable(pipeline, *_args):
+        _mark_fake_guard(pipeline)
+        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+            family=FAMILY, cell_key=mint_key,
+            ref=f"_system/family-{FAMILY}#{mint_key}",
+            snapshot_digest="blake3:" + "0" * 64, artifact=mint_artifact))
+
+    monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
+    _NoProofEndpoint.setups = _NoProofEndpoint.warmups = _NoProofEndpoint.runs = 0
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="did not serve their own warmup graph",
+    ):
+        asyncio.run(ex.ensure_setup(
+            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert _NoProofEndpoint.warmups == 1, "the proof must have actually run"
+    assert ex.compile_targets() == [], "an unproven self-mint must not advertise"
+    assert ex.unavailable[spec.name][0] == "compile_cell_failed"
 
 
 def test_boot_warmup_proves_each_compile_object_independently(
@@ -2326,7 +2479,11 @@ def test_concurrent_same_ref_setups_keep_each_loaded_snapshot_identity(
         lambda *args, **kwargs: provision.SlotLoad(
             obj=_LoadablePipe(), is_pipeline=True),
     )
-    monkeypatch.setattr(ex, "_enable_compiled", lambda *args: False)
+    from gen_worker import fleet_cells
+
+    monkeypatch.setattr(
+        ex, "_enable_compiled",
+        lambda *args: fleet_cells.ArmOutcome(armed=False))
 
     async def scenario():
         await ex._load_lock.acquire()

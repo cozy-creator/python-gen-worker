@@ -44,6 +44,7 @@ import shutil
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -51,6 +52,41 @@ from . import compile_cache as cc
 from .models import provision
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SelfMint:
+    """Identity of one successfully adopted self-minted cell.
+
+    The serving-bootstrap half of gw#587/th#910: the minting worker must
+    ADVERTISE its armed target under its own key so the hub's self-attested
+    dispatch fence (``ActiveCompileRef == KeyRef(family, requested_cell_key)``)
+    and ``active_compile_artifacts`` accounting treat the mint exactly like a
+    delivered cell — the warmup proof, not the artifact source, gates serving.
+    """
+
+    family: str
+    cell_key: str
+    ref: str  # "_system/family-<f>#<key>" — compile_cache.system_repo + key
+    snapshot_digest: str  # "blake3:<hex>" of the packed artifact (self-attested)
+    artifact: Path
+
+
+@dataclass(frozen=True)
+class ArmOutcome:
+    """Result of the fleet arming policy for one pipeline.
+
+    ``armed`` mirrors the old boolean; ``self_mint`` is set only when the
+    arm was satisfied by this worker's OWN mint (never for a delivered
+    cell), letting the executor synthesize the artifact selection it
+    records/advertises.
+    """
+
+    armed: bool
+    self_mint: Optional[SelfMint] = None
+
+    def __bool__(self) -> bool:
+        return self.armed
 
 _INTENT_TIMEOUT_S = 30
 _COMPLETE_TIMEOUT_S = 30
@@ -206,7 +242,7 @@ def enable_compiled(
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
     publisher: Optional[CellPublisher] = None,
-) -> bool:
+) -> ArmOutcome:
     """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
 
     Replaces the executor's bare ``provision.enable_compiled`` call. HIT
@@ -216,11 +252,16 @@ def enable_compiled(
     exits are genuine mint impossibilities (no CUDA, no C toolchain, the
     mint itself failing), where plain lanes serve eager and quantized lanes
     keep their typed refusal — exactly the cozy-local store policy.
+
+    Returns :class:`ArmOutcome`; ``self_mint`` carries the minted cell's
+    identity so the caller can record/advertise it (serving-bootstrap half
+    of th#910 — the hub's self-attested fence needs the worker to claim its
+    own key as the active compile ref).
     """
     family = str(getattr(cfg, "family", "") or "")
     try:
         if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
-            return True
+            return ArmOutcome(armed=True)
         # Plain-lane miss: no cell delivered / artifact unusable. Fall
         # through to the self-mint instead of the pre-gw#587 silent eager.
     except cc.CellSelectionBugError:
@@ -287,6 +328,26 @@ def enable_compiled(
             cc.drop_lora_lane(pipe)
         return _fail_closed(pipe, "minted cell failed re-adoption")
 
+    # Advertised identity (serving-bootstrap, th#910): the worker's OWN key
+    # ref + a self-attested digest of the packed bytes. Computed BEFORE the
+    # publish thread starts — its cleanup removes the mint dir (adoption
+    # already staged the cache-dir copy, so ``artifact`` is advisory after
+    # this call returns).
+    from .convert.hub import blake3_file
+
+    key = str(meta.get("cell_key") or "").strip()
+    if not key:
+        from . import cell_key
+
+        key = cell_key.from_artifact_metadata(meta).digest
+    minted = SelfMint(
+        family=family,
+        cell_key=key,
+        ref=f"{cc.system_repo(family)}#{key}",
+        snapshot_digest="blake3:" + blake3_file(target),
+        artifact=target,
+    )
+
     # Serve first, publish behind (gw#587: publish failure never blocks the
     # request that triggered the miss). The hub's attested gate decides
     # accept/refuse; cozy-local never reaches here (no publisher).
@@ -301,10 +362,10 @@ def enable_compiled(
         logger.warning(
             "fleet-cells: SELF_MINT_WITHOUT_PUBLISH_SINK family=%s — cell "
             "stays local to this pod; the fleet store gains nothing", family)
-    return True
+    return ArmOutcome(armed=True, self_mint=minted)
 
 
-def _fail_closed(pipe: Any, reason: str) -> bool:
+def _fail_closed(pipe: Any, reason: str) -> ArmOutcome:
     """The quantized-lane policy at every exit that cannot produce a cell:
     plain lanes serve eager (never-raise miss policy), w8a8/w4a4 keep the
     typed refusal (same as the cozy-local store / pre-gw#587 production)."""
@@ -316,7 +377,7 @@ def _fail_closed(pipe: Any, reason: str) -> bool:
             f"{lane[:4].upper()} requires a compile cell and the self-mint "
             f"is unavailable ({reason})")
     logger.info("fleet-cells: serving eager (%s)", reason)
-    return False
+    return ArmOutcome(armed=False)
 
 
 def _cuda_ready() -> bool:
@@ -329,7 +390,9 @@ def _cuda_ready() -> bool:
 
 
 __all__ = [
+    "ArmOutcome",
     "CellPublishRefused",
     "CellPublisher",
+    "SelfMint",
     "enable_compiled",
 ]
