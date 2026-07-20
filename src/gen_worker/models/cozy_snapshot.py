@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -8,12 +9,13 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .cozy_cas import _blake3_file, _download_one_file as _download_one_file
-from .cozy_cas import _norm_rel_path, fsync_dir
+from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
 from .download import components_present, select_component_paths
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
@@ -58,6 +60,43 @@ def _mark_trusted(s: Set[tuple], item: tuple) -> None:
     s.add(item)
 
 ProgressFn = Callable[[int, Optional[int]], None]
+
+# th#850 managed-tier ruling (gw#599): bytes actually fetched over the
+# network (R2 origin), as opposed to bytes served from a warm local/volume
+# cache — the signal a "volume-attached boot ⇒ ~0 network bytes" runtime
+# assertion needs. Carried via a ContextVar (same idiom as
+# provision.py's ArmingScope) scoped to one ensure_local/ensure_snapshot
+# call, so no download/stub call site anywhere needs a new parameter to
+# forward it — a caller that never opens the scope sees no behavior change.
+_NETWORK_BYTES_SINK: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
+    "cozy_snapshot_network_bytes_sink", default=None
+)
+
+
+class NetworkBytesScope:
+    """Capture network-fetched bytes for one download call.
+
+    ``with NetworkBytesScope() as scope: path = await ensure_local(...)``
+    then ``scope.network_bytes`` is the total bytes this call fetched from
+    R2 (0 if every blob was already warm locally or on the volume).
+    """
+
+    def __init__(self) -> None:
+        self._sink: List[int] = [0]
+        self._token: Optional["contextvars.Token"] = None
+
+    def __enter__(self) -> "NetworkBytesScope":
+        self._token = _NETWORK_BYTES_SINK.set(self._sink)
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        if self._token is not None:
+            _NETWORK_BYTES_SINK.reset(self._token)
+            self._token = None
+
+    @property
+    def network_bytes(self) -> int:
+        return self._sink[0]
 
 # Free space that must remain after downloading the missing blobs.
 _DISK_HEADROOM_BYTES = 1 << 30
@@ -107,6 +146,59 @@ def _is_part_file(path: str) -> bool:
 
 def _is_parts_manifest(path: str) -> bool:
     return path.endswith(".parts.json")
+
+
+def _copy_verified_blob(src: Path, dst: Path, digest: str, expected_size: int) -> bool:
+    """Copy one immutable CAS blob through a writer-unique atomic stage,
+    verifying declared size and BLAKE3 before publishing (th#850 managed-tier
+    ruling, gw#599). Used both to fill local CAS from the volume fill source
+    and to write a fresh R2 fetch through to the volume. The final path is
+    digest-only; readers never observe partial bytes, and racing writers may
+    replace the same final name only after each independently verifies size
+    and BLAKE3 (mirrors the multi-writer discipline gw#597 established for
+    ordinary downloads)."""
+    try:
+        if not src.is_file():
+            return False
+        if expected_size and src.stat().st_size != expected_size:
+            _log.warning(
+                "blob_fill_corrupt source=%s digest=%s reason=size expected=%d actual=%d",
+                src, digest[:16], expected_size, src.stat().st_size,
+            )
+            return False
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.parent / (
+            f".{dst.name}.writer-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+        )
+        try:
+            with src.open("rb") as source, tmp.open("xb") as staged:
+                shutil.copyfileobj(source, staged, length=4 * 1024 * 1024)
+                staged.flush()
+                os.fsync(staged.fileno())
+            if expected_size and tmp.stat().st_size != expected_size:
+                _log.warning(
+                    "blob_fill_corrupt source=%s digest=%s reason=staged_size expected=%d actual=%d",
+                    src, digest[:16], expected_size, tmp.stat().st_size,
+                )
+                return False
+            if digest and _blake3_file(tmp).lower() != digest.lower():
+                _log.warning(
+                    "blob_fill_corrupt source=%s digest=%s reason=blake3", src, digest[:16],
+                )
+                return False
+            os.replace(tmp, dst)
+            fsync_file(dst)
+            fsync_dir(dst.parent)
+            return True
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError as exc:
+        _log.warning(
+            "blob_fill_copy_failed source=%s destination=%s digest=%s error=%s",
+            src, dst, digest[:16], exc,
+        )
+        return False
 
 
 def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
@@ -217,11 +309,19 @@ class CozySnapshotDownloader:
         resolved: Optional[WorkerResolvedRepo],
         progress: Optional[ProgressFn] = None,
         components: Sequence[str] = (),
+        fill_source_dir: Optional[Path] = None,
     ) -> Path:
+        """``fill_source_dir`` (th#850 managed-tier ruling, gw#599): an
+        endpoint-scoped datacenter-warm CAS root (RunPod volume mount, same
+        ``blobs/`` layout as ``base_dir``) consulted before R2 on a blob
+        miss. ``None`` is the degenerate cozy-local/no-volume case — fetch
+        goes straight to R2, byte-identical to pre-th#850 behavior. Never
+        the CAS root itself; ``base_dir`` (local disk) always is."""
         blobs_root = base_dir / "blobs"
         snaps_root = base_dir / "snapshots"
         blobs_root.mkdir(parents=True, exist_ok=True)
         snaps_root.mkdir(parents=True, exist_ok=True)
+        fill_blobs_root = fill_source_dir / "blobs" if fill_source_dir is not None else None
 
         if resolved is None:
             # Workers don't resolve via HTTP — the orchestrator pre-resolves
@@ -289,6 +389,7 @@ class CozySnapshotDownloader:
                 blobs_root,
                 res.files,
                 progress=progress,
+                fill_blobs_root=fill_blobs_root,
             )
             # Materialization copies/concatenates multi-GB trees — strictly
             # off the event loop (gw#407: a loop blocked for the duration of
@@ -360,6 +461,7 @@ class CozySnapshotDownloader:
         files: List[WorkerResolvedRepoFile],
         *,
         progress: Optional[ProgressFn] = None,
+        fill_blobs_root: Optional[Path] = None,
     ) -> None:
         # Deduplicate by digest — same blob referenced by multiple paths (e.g.
         # fp16 and normal variants sharing the same part) is downloaded once.
@@ -442,6 +544,45 @@ class CozySnapshotDownloader:
             dst.unlink(missing_ok=True)
             return False
 
+        async def _fill_from_volume(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> bool:
+            """th#850 managed-tier ruling (gw#599): FILL SOURCE #1. A blob
+            present on the endpoint volume is BLAKE3-verified and copied to
+            local CAS — never trusted on size alone (digest-verification of
+            volume-read blobs is mandatory regardless of the local/shared
+            distinction, per Paul's ruling)."""
+            if fill_blobs_root is None:
+                return False
+            src = _blob_path(fill_blobs_root, digest)
+            started = time.monotonic()
+            if await asyncio.to_thread(
+                _copy_verified_blob, src, dst, digest, int(f.size_bytes or 0)
+            ):
+                _on_bytes(int(f.size_bytes or 0))  # not network: volume hit
+                _mark_trusted(_VERIFIED_BLOBS, (blobs_root_id, digest))
+                _log.info(
+                    "blob_cache_hit source=volume digest=%s bytes=%d transfer_ms=%d",
+                    digest[:16], int(f.size_bytes or 0),
+                    int((time.monotonic() - started) * 1000),
+                )
+                return True
+            _log.info("blob_cache_miss source=volume digest=%s", digest[:16])
+            return False
+
+        async def _fill_to_volume(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
+            """Write-through (gw#599): a fresh R2 fetch warms the volume for
+            the next same-endpoint pod. Best-effort — a publish failure never
+            fails the request; the next pod simply falls through to R2 too."""
+            if fill_blobs_root is None:
+                return
+            published = await asyncio.to_thread(
+                _copy_verified_blob, dst, _blob_path(fill_blobs_root, digest),
+                digest, int(f.size_bytes or 0),
+            )
+            _log.info(
+                "blob_fill_publish source=r2 destination=volume digest=%s bytes=%d published=%s",
+                digest[:16], int(f.size_bytes or 0), published,
+            )
+
         async def _dl(f: WorkerResolvedRepoFile) -> None:
             digest = f.blake3.strip().lower()
             dst = _blob_path(blobs_root, digest)
@@ -454,7 +595,10 @@ class CozySnapshotDownloader:
                     _log.info("blob_shared_inflight path=%s digest=%s (sibling ref downloaded it)",
                               f.path, digest[:16])
                     return
+                if await _fill_from_volume(f, digest, dst):
+                    return
                 await _dl_locked(f, digest, dst)
+                await _fill_to_volume(f, digest, dst)
 
         async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
             async with sem:
@@ -488,16 +632,19 @@ class CozySnapshotDownloader:
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
 
         await asyncio.gather(*(_dl(f) for f in unique))
-        # th#850 runtime-assertion signal: on a volume-attached boot with
-        # blobs already warm, network_bytes should land near zero. Log-only
-        # for now (deliberately not threaded through the ProgressFn/
-        # ModelEvent wire contract here — that needs a coordinated proto
-        # change with the th#850 owner, see gw#597).
+        # th#850 managed-tier runtime-assertion signal: on a volume-attached
+        # boot with blobs already warm, network_bytes should land near zero.
+        # gw#599 wires this to the caller via NetworkBytesScope (the worker
+        # then reports it on the wire as ModelEvent.network_bytes) as well
+        # as this log line.
         cache_hit_pct = 100.0 * (1 - network_bytes / total) if total else 100.0
         _log.info(
             "ensure_blobs_summary total_bytes=%s network_bytes=%d cache_hit_pct=%.1f",
             total, network_bytes, cache_hit_pct,
         )
+        sink = _NETWORK_BYTES_SINK.get()
+        if sink is not None:
+            sink[0] += network_bytes
 
     @staticmethod
     def _blob_usable(dst: Path, f: WorkerResolvedRepoFile) -> bool:
@@ -688,8 +835,10 @@ async def ensure_snapshot_async(
     resolved: Optional[WorkerResolvedRepo],
     progress: Optional[ProgressFn] = None,
     components: Sequence[str] = (),
+    fill_source_dir: Optional[Path] = None,
 ) -> Path:
     dl = CozySnapshotDownloader()
     return await dl.ensure_snapshot(
         base_dir, ref, resolved=resolved, progress=progress, components=components,
+        fill_source_dir=fill_source_dir,
     )

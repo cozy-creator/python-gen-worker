@@ -66,6 +66,10 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # models/provision.py::resolve_local_path).
     tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
     tensorhub_cas_dir: str = ""    # TENSORHUB_CAS_DIR
+    # th#850 managed-tier ruling (gw#599): endpoint-scoped datacenter-warm
+    # fill source (RunPod network volume mount), tried before R2. Never the
+    # CAS root itself — see models/cache_paths.py::tensorhub_fill_source_dir.
+    tensorhub_fill_source_dir: str = ""  # TENSORHUB_FILL_SOURCE_DIR
 
     # Civitai provider credential (CIVITAI_API_KEY, alias CIVITAI_TOKEN).
     civitai_api_key: str = ""

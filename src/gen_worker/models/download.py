@@ -197,6 +197,7 @@ async def ensure_local(
     allow_patterns: Sequence[str] = (),
     components: Sequence[str] = (),
     progress: Optional[ProgressFn] = None,
+    fill_source_dir: Optional[Path] = None,
 ) -> Path:
     """Materialize ``ref`` on disk; return its local path.
 
@@ -222,6 +223,12 @@ async def ensure_local(
     for tensorhub refs lands on the hub-less CLI path instead
     (``models/provision.py::_fetch_tensorhub_snapshot``), which owns its own
     resolve+download+materialize loop end to end.
+
+    ``fill_source_dir`` (th#850 managed-tier ruling, gw#599): an
+    endpoint-scoped datacenter-warm CAS mount (RunPod volume) consulted
+    before R2 on the tensorhub-snapshot branch only. ``None`` (the default,
+    and always true for cozy-local / non-tensorhub providers) preserves
+    today's straight-to-R2 behavior exactly.
     """
     base = Path(cache_dir) if cache_dir is not None else tensorhub_cas_dir()
     prov = provider or lookup_provider_for_ref(ref)
@@ -235,6 +242,7 @@ async def ensure_local(
             ref=_snapshot_ref(parsed, ref),
             resolved=snapshot,
             progress=progress,
+            fill_source_dir=fill_source_dir,
         )
 
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:

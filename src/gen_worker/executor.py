@@ -53,6 +53,7 @@ from .capability import (
     InsufficientHostRamError,
 )
 from .input_assets import cleanup_input_assets, materialize_input_assets
+from .models import cozy_snapshot
 from .models import disk_gc
 from .models import provision
 from .models import residency as residency_mod
@@ -68,7 +69,7 @@ from .models.memory import (
     next_offload_rung,
     release_unused_pinned_host_cache,
 )
-from .models.cache_paths import tensorhub_cas_dir
+from .models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .models.download import ensure_local, lookup_provider_for_ref
 from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.residency import Residency
@@ -541,11 +542,19 @@ class ModelStore:
         cache_dir: Optional[Path] = None,
         vram_budget_bytes: Optional[int] = None,
         disk_free_bytes_fn: Optional[Callable[[], int]] = None,
+        fill_source_dir: Optional[Path] = None,
     ) -> None:
         self._emit = emit
         self._hf_home = hf_home or None
         self._hf_token = hf_token or None
         self._cache_dir = cache_dir or tensorhub_cas_dir()
+        # th#850 managed-tier ruling (gw#599): endpoint-scoped datacenter-warm
+        # fill source (RunPod volume mount), consulted before R2 on a blob
+        # miss — resolved once at boot like _cache_dir; never the CAS root.
+        # Same `or` shape as _cache_dir above: an explicit path (tests) wins,
+        # otherwise resolve from env (production/tensorhub; unset -> None,
+        # the cozy-local/no-volume degenerate case).
+        self._fill_source_dir = fill_source_dir or tensorhub_fill_source_dir()
         self.residency = Residency(
             on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
         )
@@ -585,6 +594,14 @@ class ModelStore:
         # Cold-ref waiters (th#763): ensure_local blocks here until the
         # hub's re-minted DOWNLOAD banks a snapshot for the ref.
         self._snapshot_waiters: Dict[str, asyncio.Event] = {}
+        # th#850 managed-tier ruling (gw#599): network_bytes for the NEXT
+        # ON_DISK transition of this ref, handed off to
+        # _on_residency_event so the one authoritative wire event Residency
+        # emits carries it — set immediately before track_disk(), consumed
+        # (popped) by _on_residency_event if it fires, cleared defensively
+        # otherwise. Avoids a second, redundant ON_DISK event and avoids
+        # widening EventFn's arity (Residency has other direct callers).
+        self._pending_network_bytes: Dict[str, int] = {}
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -625,6 +642,9 @@ class ModelStore:
                 )
                 if identity[0]:
                     self._resident_identities[ref] = identity
+            pending_network_bytes = self._pending_network_bytes.pop(ref, None)
+            if pending_network_bytes is not None:
+                kw["network_bytes"] = int(pending_network_bytes)
         else:
             identity = self.resident_identity(ref)
         coro = self._event(ref, pb_state, identity=identity, **kw)
@@ -965,6 +985,10 @@ class ModelStore:
         keep: Tuple[str, ...],
         keep_rank: Dict[str, int],
     ) -> List[str]:
+        """The evictable SET for one gc_disk pass: hard invariants only
+        (never exclude/in-use — no policy ever overrides these), plus this
+        pass's keep-membership/grace filter. Ordering within that set is a
+        separate seam, see ``_disk_eviction_order``."""
         now = time.time()
         out: List[Tuple[float, str]] = []
         for ref in self.residency.refs_in(residency_mod.Tier.DISK):
@@ -976,11 +1000,28 @@ class ModelStore:
             if honor_grace and (now - last) < _DISK_GC_GRACE_S:
                 continue
             out.append((last, ref))
+        return self._disk_eviction_order(out, include_keep, keep_rank)
+
+    # th#850 managed-tier ruling (gw#599): the eviction POLICY (ranking one
+    # pass's evictable set) is a distinct seam from the evictable SET itself
+    # (``_gc_candidates`` above, which owns the hard never-evict invariants).
+    # Default is the LRU-oldest-first/keep-priority-escape-hatch ordering
+    # this store has always used — an instance may swap this attribute for a
+    # scheduler-intent-aware policy without touching gc_disk's free-space
+    # loop or the invariant filter. Building that policy is a follow-on
+    # (Paul ruled the seam only here); the default below is exactly today's
+    # behavior, byte-for-byte.
+    @staticmethod
+    def _default_disk_eviction_order(
+        entries: List[Tuple[float, str]], include_keep: bool, keep_rank: Dict[str, int],
+    ) -> List[str]:
         if include_keep:
-            out.sort(key=lambda item: (-keep_rank[item[1]], item[0], item[1]))
+            ordered = sorted(entries, key=lambda item: (-keep_rank[item[1]], item[0], item[1]))
         else:
-            out.sort()
-        return [r for _, r in out]
+            ordered = sorted(entries)
+        return [ref for _, ref in ordered]
+
+    _disk_eviction_order = _default_disk_eviction_order
 
     def _evict_disk_ref(self, ref: str) -> None:
         path = self.residency.local_path(ref) or self._index.path(ref)
@@ -1177,17 +1218,24 @@ class ModelStore:
                     resolved = None
                     if snapshot is not None and snapshot.digest:
                         resolved = _snapshot_to_resolved(snapshot)
-                    path = await ensure_local(
-                        ref,
-                        provider=getattr(binding, "source", None),
-                        snapshot=resolved,
-                        cache_dir=self._cache_dir,
-                        hf_home=self._hf_home,
-                        hf_token=self._hf_token,
-                        allow_patterns=tuple(getattr(binding, "files", ()) or ()),
-                        components=tuple(getattr(binding, "components", ()) or ()),
-                        progress=_progress,
-                    )
+                    # th#850 managed-tier ruling (gw#599): scope captures
+                    # bytes this attempt actually fetched from R2 (vs served
+                    # from local/volume cache) for the disk-residency wire
+                    # signal below — a no-op for every caller that doesn't
+                    # read it.
+                    with cozy_snapshot.NetworkBytesScope() as net_scope:
+                        path = await ensure_local(
+                            ref,
+                            provider=getattr(binding, "source", None),
+                            snapshot=resolved,
+                            cache_dir=self._cache_dir,
+                            hf_home=self._hf_home,
+                            hf_token=self._hf_token,
+                            allow_patterns=tuple(getattr(binding, "files", ()) or ()),
+                            components=tuple(getattr(binding, "components", ()) or ()),
+                            progress=_progress,
+                            fill_source_dir=self._fill_source_dir,
+                        )
                     tier_before = self.residency.tier(ref)
                     with self._identity_lock:
                         identity_changed = (
@@ -1198,13 +1246,25 @@ class ModelStore:
                             self._disk_identities[ref] = operation_identity
                             if tier_before in (None, residency_mod.Tier.DISK):
                                 self._resident_identities[ref] = operation_identity
+                    # th#850 managed-tier ruling (gw#599): handed off to
+                    # _on_residency_event so the ON_DISK event Residency
+                    # emits for a genuinely fresh registration carries the
+                    # bytes this materialization fetched over the network
+                    # (0 included — pairs with the DOWNLOADING events'
+                    # bytes_total for the "warm boot ⇒ ~0 R2 bytes" signal).
+                    self._pending_network_bytes[ref] = net_scope.network_bytes
                     self.residency.track_disk(ref, path)
+                    self._pending_network_bytes.pop(ref, None)  # defensive: unconsumed if no event fired
                     if tier_before is residency_mod.Tier.DISK and identity_changed:
-                        # Residency suppresses same-tier event spam. A digest
-                        # move is nevertheless a semantic ON_DISK transition.
+                        # Residency suppresses same-tier event spam (track_disk
+                        # above did not consume the pending value above). A
+                        # digest move is nevertheless a semantic ON_DISK
+                        # transition — carries network_bytes directly since
+                        # this is our own explicit event, not Residency's.
                         await self._event(
                             ref, pb.MODEL_STATE_ON_DISK,
                             identity=operation_identity,
+                            network_bytes=net_scope.network_bytes,
                         )
                     # tree_bytes stats every file — off-loop (gw#407: no
                     # multi-GB directory walks on the event loop).
