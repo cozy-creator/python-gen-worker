@@ -24,10 +24,14 @@ _VRAM_QUANTUM_FRACTION = 0.05  # quantize free-VRAM deltas to 5% of total
 # functions the startup scan left awaiting (store lookups are local + cheap).
 _BOOT_SETUP_WATCH_INTERVAL_S = 2.0
 
-# pgw#610: periodic measured-disk refresh. Each tick recomputes the cheap
-# statvfs/ref-index report; maybe_send_state_delta ships it only when the
-# quantized shape actually changed.
-_DISK_REPORT_INTERVAL_S = 30.0
+# th#965 layer 2: universal app-level heartbeat cadence, declared in Hello.
+# The beat task lives on the asyncio event loop — the control loop that owes
+# all progress, never a detached timer thread — so beats stop exactly when
+# that loop wedges. Each tick force-sends the full StateDelta (unchanged
+# bytes included) and refreshes the pgw#610 measured-disk report that rides
+# every delta. A stuck coroutine leaves the loop (and beats) alive; the
+# hub's layer-3 obligation invariant covers that mode.
+HEARTBEAT_INTERVAL_MS = 30_000
 
 
 def probe_hardware() -> Dict[str, Any]:
@@ -106,7 +110,7 @@ class Lifecycle:
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
-        self._disk_report_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._drain_deadline_at: Optional[float] = None
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
@@ -202,6 +206,9 @@ class Lifecycle:
                 pb.InFlightJob(request_id=rid, attempt=att)
                 for rid, att in sorted(in_flight)
             ],
+            # th#965 layer 2: promise the beat cadence; the hub reaps after
+            # 3 consecutive misses. Hello counts as the first beat.
+            heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
@@ -360,12 +367,16 @@ class Lifecycle:
             return
         await self.transport.send(message)
 
-    async def maybe_send_state_delta(self, *, hello_ack: bool = False) -> None:
+    async def maybe_send_state_delta(
+        self, *, hello_ack: bool = False, force: bool = False,
+    ) -> None:
         if self.transport is None or not self.transport.connected:
             return
         delta = self._state_delta()
         raw = delta.SerializeToString(deterministic=True)
-        if raw != self._last_delta:
+        # force (th#965 layer 2): the heartbeat tick re-sends an unchanged
+        # snapshot — receipt IS the beat the hub timestamps.
+        if force or raw != self._last_delta:
             self._last_delta = raw
             await self._send_state_message(
                 pb.WorkerMessage(state_delta=delta), hello_ack=hello_ack,
@@ -432,6 +443,12 @@ class Lifecycle:
         """Gate functions, prefetch worker-fetchable models with retry/backoff,
         set up endpoints, advance phases. Never raises: failures gate
         individual functions, not the process."""
+        # th#965 layer 2: the beat starts BEFORE any boot work so a hang
+        # anywhere in setup is still covered — the task shares this event
+        # loop, so it beats iff the loop is servicing tasks.
+        if self._heartbeat_task is None:
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name="heartbeat")
         # Disk truth first: after a restart the CAS dir is full while Residency
         # starts empty — rescan so Hello.models (and disk GC) see reality.
         self.executor.store.rescan_disk()
@@ -524,18 +541,14 @@ class Lifecycle:
                 name="boot-setup-watch")
 
         await self.set_phase(pb.WORKER_PHASE_READY)
-        # pgw#610: periodic measured-disk report. Edge-suppressed: a tick
-        # whose quantized measurement is unchanged ships nothing.
-        if self._disk_report_task is None:
-            self._disk_report_task = asyncio.create_task(
-                self._disk_report_loop(), name="disk-report")
 
-    async def _disk_report_loop(self) -> None:
-        while not self.draining:
-            await asyncio.sleep(_DISK_REPORT_INTERVAL_S)
-            if self.draining:
-                return
-            await self.maybe_send_state_delta()
+    async def _heartbeat_loop(self) -> None:
+        """th#965 layer 2 + pgw#610: force-send the full StateDelta (which
+        carries the refreshed measured-disk report) every beat, in EVERY
+        state including drain — the beat only ends when the process does."""
+        while not self.drained.is_set():
+            await asyncio.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)
+            await self.maybe_send_state_delta(force=True)
 
     async def _setup_awaiting_functions(
         self, awaiting: Dict[str, List[str]]
@@ -587,10 +600,9 @@ class Lifecycle:
         self.draining = True
         self.executor.draining = True
         self._cancel_residency_reconcile()
-        report_task = getattr(self, "_disk_report_task", None)
-        if report_task is not None:
-            report_task.cancel()
-            self._disk_report_task = None
+        # th#965: the heartbeat deliberately keeps beating through drain — a
+        # worker hung mid-drain must still be detectable as dead. It is
+        # cancelled after the stream closes in _finish_drain.
         logger.info("drain started (deadline_ms=%d)", deadline_ms)
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
@@ -611,4 +623,10 @@ class Lifecycle:
             flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
             await self.transport.close_after_flush(timeout=flush_timeout)
         self.drained.set()
+        # getattr: stubbed Lifecycles skip __init__ (same convention as
+        # _cancel_residency_reconcile, pgw#610).
+        beat_task = getattr(self, "_heartbeat_task", None)
+        if beat_task is not None:
+            beat_task.cancel()
+            self._heartbeat_task = None
         logger.info("drain complete")
