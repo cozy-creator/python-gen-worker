@@ -26,7 +26,7 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec, extract_specs
 
 FAMILY = "flux2-klein-4b"
-CACHE_REF = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
+CACHE_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 MODEL_REF = "acme/klein-finetune:latest"
 DIGEST_A = "blake3:" + "a" * 64
 DIGEST_B = "blake3:" + "b" * 64
@@ -292,13 +292,13 @@ def _adopt(
 
 def test_family_from_ref_and_is_cache_ref():
     assert cc.family_from_ref(CACHE_REF) == FAMILY
-    assert cc.family_from_ref(f"_system/family-{FAMILY}:latest@blake3:aa#inductor-x") == FAMILY
+    assert cc.family_from_ref(f"root/family-{FAMILY}:latest@blake3:aa#inductor-x") == FAMILY
     assert cc.family_from_ref("acme/model:latest") == ""
-    assert cc.family_from_ref("_system/other-repo#inductor-x") == ""
+    assert cc.family_from_ref("root/other-repo#inductor-x") == ""
     assert cc.is_cache_ref(CACHE_REF)
     assert cc.is_cache_ref(CACHE_REF, FAMILY)
     assert not cc.is_cache_ref(CACHE_REF, "sdxl")
-    assert not cc.is_cache_ref(f"_system/family-{FAMILY}")  # no inductor flavor
+    assert not cc.is_cache_ref(f"root/family-{FAMILY}")  # no inductor flavor
     assert not cc.is_cache_ref("acme/model#inductor-x")
 
 
@@ -1156,7 +1156,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
     model_ref = wire_ref(spec.models["pipeline"])
     mint_key = "ck1-" + "d" * 56
-    mint_ref = f"_system/family-{FAMILY}#{mint_key}"
+    mint_ref = f"root/family-{FAMILY}#{mint_key}"
     mint_digest = "blake3:" + "e" * 64
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
     mint_artifact.parent.mkdir()
@@ -1234,7 +1234,7 @@ def test_hub_redelivery_of_own_minted_key_is_a_noop_rearm(
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
     model_ref = wire_ref(spec.models["pipeline"])
     mint_key = "ck1-" + "a1" * 28
-    mint_ref = f"_system/family-{FAMILY}#{mint_key}"
+    mint_ref = f"root/family-{FAMILY}#{mint_key}"
     mint_digest = "blake3:" + "e" * 64
     store_digest = "blake3:" + "f" * 64  # the store's snapshot-manifest form
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
@@ -1301,7 +1301,7 @@ def test_hub_redelivery_of_own_minted_key_is_a_noop_rearm(
 
     # A genuinely DIFFERENT key still vacates (identity actually moved).
     other_key = "ck1-" + "b2" * 28
-    other_ref = f"_system/family-{FAMILY}#{other_key}"
+    other_ref = f"root/family-{FAMILY}#{other_key}"
 
     class _OtherKey:
         digest = other_key
@@ -1372,7 +1372,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
         _mark_fake_guard(pipeline)
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
             family=FAMILY, cell_key=mint_key,
-            ref=f"_system/family-{FAMILY}#{mint_key}",
+            ref=f"root/family-{FAMILY}#{mint_key}",
             snapshot_digest="blake3:" + "0" * 64, artifact=mint_artifact))
 
     monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
@@ -1516,7 +1516,7 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
         "never precede the warmup proof")
 
     (target,) = ex.compile_targets()
-    assert target.active_compile_ref == f"_system/family-{FAMILY}#{mint_key}"
+    assert target.active_compile_ref == f"root/family-{FAMILY}#{mint_key}"
     digest = target.active_compile_snapshot_digest
     assert digest.startswith("blake3:")
     # The advertised digest is the digest of exactly the published bytes,
@@ -1695,7 +1695,7 @@ def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
     import gen_worker.executor as executor_mod
 
     family = "sdxl"
-    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path, family=family)
     model_dir = tmp_path / "sdxl-model"
     model_dir.mkdir()
@@ -2271,7 +2271,7 @@ def test_w8a8_custom_warmup_proof_attributes_to_siblings_except_declared_none(
     import gen_worker.executor as executor_mod
 
     family = "sdxl"
-    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path, family=family)
     model_dir = tmp_path / "partial-proof-model"
     model_dir.mkdir()
@@ -2356,7 +2356,7 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
     import gen_worker.executor as executor_mod
 
     family = "ltx-shaped"
-    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path, family=family)
     model_dir = tmp_path / "ltx-shaped-model"
     model_dir.mkdir()
@@ -2445,7 +2445,7 @@ def _wire_merged_lane(ex_cls_specs, tmp_path, monkeypatch):
     import gen_worker.executor as executor_mod
 
     family = "qwen-image"
-    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path, family=family)
     model_dir = tmp_path / "merged-lane-model"
     model_dir.mkdir(exist_ok=True)
@@ -2680,7 +2680,7 @@ def test_desired_w8a8_cell_digest_and_ref_changes_vacate_then_rebuild(
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
     model_ref = wire_ref(spec.models["pipeline"])
     cell_a = CACHE_REF + "-w8a8"
-    cell_b = f"_system/family-{FAMILY}#inductor-rtx-5090-torch2.9-w8a8"
+    cell_b = f"root/family-{FAMILY}#inductor-rtx-5090-torch2.9-w8a8"
 
     async def _send(_msg):
         return None
@@ -2689,7 +2689,7 @@ def test_desired_w8a8_cell_digest_and_ref_changes_vacate_then_rebuild(
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref.startswith("_system/") else model_dir
+        return artifact.parent if ref.startswith("root/") else model_dir
 
     monkeypatch.setattr(executor_mod, "ensure_local", _download)
 
@@ -2776,7 +2776,7 @@ def test_desired_plain_cell_change_vacates_then_rebuilds(
     spec = _cold_spec()
     model_ref = wire_ref(spec.models["pipeline"])
     cell_a = CACHE_REF
-    cell_b = f"_system/family-{FAMILY}#inductor-rtx-5090-torch2.9"
+    cell_b = f"root/family-{FAMILY}#inductor-rtx-5090-torch2.9"
 
     async def _send(_msg):
         return None
@@ -2785,7 +2785,7 @@ def test_desired_plain_cell_change_vacates_then_rebuilds(
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref.startswith("_system/") else model_dir
+        return artifact.parent if ref.startswith("root/") else model_dir
 
     monkeypatch.setattr(executor_mod, "ensure_local", _download)
     monkeypatch.setattr(
@@ -3482,7 +3482,7 @@ def test_fetch_compile_snapshot_finds_family_cache_and_ignores_others(tmp_path):
     assert got.ref == CACHE_REF
     assert got.snapshot_digest == "blake3:bb"
     # Other families' cells and an absent snapshot map both resolve to None.
-    other = {"_system/family-sdxl#inductor-rtx-4090-torch2.9": pb.Snapshot()}
+    other = {"root/family-sdxl#inductor-rtx-4090-torch2.9": pb.Snapshot()}
     assert asyncio.run(ex._fetch_compile_snapshot(spec, other)) is None
     assert asyncio.run(ex._fetch_compile_snapshot(spec, None)) is None
 
@@ -3514,7 +3514,7 @@ def test_fetch_compile_snapshot_selects_exact_lane(tmp_path, lane):
         return w8a8 if ref.endswith("-w8a8") else plain
 
     ex.store.ensure_local = _ensure  # type: ignore[method-assign]
-    plain_ref = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
+    plain_ref = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
     w8a8_ref = plain_ref + "-w8a8"
     snapshots = {
         plain_ref: pb.Snapshot(digest=DIGEST_A),
@@ -3572,7 +3572,7 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
         store = executor_mod.ModelStore(_noop_send, cache_dir=tmp_path)
         old_dir = tmp_path / "snapshots" / "aa11"
         old_dir.mkdir(parents=True)
-        ref = "_system/family-fam#inductor-rtx-4090-torch2.9"
+        ref = "root/family-fam#inductor-rtx-4090-torch2.9"
         store.residency.track_disk(ref, old_dir)
 
         new_dir = tmp_path / "snapshots" / "bb22"

@@ -27,7 +27,7 @@ from test_executor_adopt import (  # noqa: F401 — shared harness
     _wire_executor,
 )
 
-TRT_REF = f"_system/family-{FAMILY}#trt-rtx-4090-trt10.16-fp16"
+TRT_REF = f"root/family-{FAMILY}#trt-rtx-4090-trt10.16-fp16"
 
 RUNTIME = {"sku": "rtx-4090", "trt": "10.16.0.14", "cuda": "12.8"}
 

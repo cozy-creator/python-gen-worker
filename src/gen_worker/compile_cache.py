@@ -17,7 +17,7 @@ W8A8. The compile job itself opts into cold compilation through the explicit
 Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
 the traced graph + shapes, not the weights, so one artifact serves every
 fine-tune of a model family. They live in a system-owned repo per family
-(``_system/family-<family>``), one flavor per (SKU, torch) cell — and they
+(``root/family-<family>``), one flavor per (SKU, torch) cell — and they
 are CODE: only the platform's first-party compile job publishes shared ones.
 
 Artifact = deterministic ``.tar.gz``::
@@ -234,12 +234,12 @@ def system_repo(family: str) -> str:
     fam = str(family or "").strip()
     if not fam:
         raise ValueError("compile-cache family must be non-empty")
-    return f"_system/family-{fam}"
+    return f"root/family-{fam}"
 
 
 def parse_cell_ref(ref: str) -> Tuple[str, str]:
     """(family, flavor) from a system cell ref
-    (``_system/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
+    (``root/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
     grammar (gw#492); ('', '') when the ref is not a system-family ref."""
     from .models.refs import parse_model_ref
 
@@ -248,7 +248,7 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
     except ValueError:
         return "", ""
     th = parsed.tensorhub
-    if th is None or th.owner != "_system" or not th.repo.startswith("family-"):
+    if th is None or th.owner != "root" or not th.repo.startswith("family-"):
         return "", ""
     return th.repo[len("family-"):], th.flavor or ""
 

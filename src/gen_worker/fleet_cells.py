@@ -82,7 +82,7 @@ class SelfMint:
 
     family: str
     cell_key: str
-    ref: str  # "_system/family-<f>#<key>" — compile_cache.system_repo + key
+    ref: str  # "root/family-<f>#<key>" — compile_cache.system_repo + key
     snapshot_digest: str  # "blake3:<hex>" of the packed artifact (self-attested)
     artifact: Path
 
@@ -238,7 +238,7 @@ class CellPublisher:
         try:
             from .convert.hub import CommitFile, HubClient
 
-            client = HubClient(base_url=self.base_url, token=token, owner="_system")
+            client = HubClient(base_url=self.base_url, token=token, owner="root")
             result = client.commit(
                 destination_repo=repo,
                 files=[CommitFile(path=artifact.name, local_path=artifact)],

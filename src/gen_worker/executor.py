@@ -442,7 +442,7 @@ def _ref_mandatory_lane(ref: str) -> str:
         parsed = parse_model_ref(ref).tensorhub
     except ValueError:
         return ""
-    if parsed is None or parsed.owner == "_system":
+    if parsed is None or parsed.owner == "root":
         return ""
     flavor = parsed.flavor or ""
     if flavor == "fp8-w8a8" or flavor.startswith("fp8-w8a8-"):

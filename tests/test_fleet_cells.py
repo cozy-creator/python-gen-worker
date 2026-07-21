@@ -135,7 +135,7 @@ def test_miss_arms_pending_capture_without_packing_or_publishing(
     pending = outcome.self_mint
     assert isinstance(pending, fc.PendingSelfMint)
     assert pending.cell_key == FAKE_KEY
-    assert pending.ref == f"_system/family-fam#{FAKE_KEY}"
+    assert pending.ref == f"root/family-fam#{FAKE_KEY}"
     assert not pending.target.exists(), "nothing packed before the proof"
     assert calls == [], "nothing published before the proof"
 
@@ -167,7 +167,7 @@ def test_finalize_packs_the_proven_capture_and_publishes_it(
     minted = fc.finalize_self_mint(pipe, pending)
     assert minted is not None
     assert minted.cell_key == FAKE_KEY
-    assert minted.ref == f"_system/family-fam#{FAKE_KEY}"
+    assert minted.ref == f"root/family-fam#{FAKE_KEY}"
     assert minted.snapshot_digest.startswith("blake3:")
     assert len(minted.snapshot_digest) == len("blake3:") + 64
     assert published.wait(5), "a finalized mint must attempt publish"
@@ -279,7 +279,7 @@ def test_publisher_drives_intent_commit_complete(monkeypatch, tmp_path):
         if url.endswith("/publish-intent"):
             return _FakeResp(200, {
                 "capability_token": "cap-token",
-                "repo": "_system/family-fam",
+                "repo": "root/family-fam",
                 "cell_key": key,
             })
         return _FakeResp(200, {"recorded": True})
@@ -325,7 +325,7 @@ def test_publisher_drives_intent_commit_complete(monkeypatch, tmp_path):
     assert kind == "client" and kw["token"] == "cap-token"
     kind, kw = committed[1]
     assert kind == "commit"
-    assert kw["destination_repo"] == "_system/family-fam"
+    assert kw["destination_repo"] == "root/family-fam"
     assert kw["mode"] == "replace"
     assert kw["flavor"] == key
     assert "tags" not in kw  # a cell publish never binds tags
@@ -359,7 +359,7 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
         posts.append((url, json))
         if url.endswith("/publish-intent"):
             return _FakeResp(200, {
-                "capability_token": "cap", "repo": "_system/family-fam"})
+                "capability_token": "cap", "repo": "root/family-fam"})
         return _FakeResp(200, {"recorded": True})
 
     import requests

@@ -9,7 +9,7 @@ split:
   compiles the declared shape set, and publishes the captured
   `TORCHINDUCTOR_CACHE_DIR` + `TRITON_CACHE_DIR` as ONE deterministic
   `.tar.gz` flavor `#inductor-<sku>-torch<maj.min>` of the family system repo
-  `_system/family-<family>`.
+  `root/family-<family>`.
 - **Consumer** — an endpoint opts in with
   `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024))))`.
   At load the worker seeds a VERIFIED artifact (exact-match on family, SKU,
@@ -29,8 +29,9 @@ cold compilation through an explicit library argument. There is no serving
 environment fallback that can bypass scheduler attachment or W8A8 fencing.
 
 Trust: compiled artifacts are CODE. Only platform jobs may publish to
-`_system/*` (invoke-time destination-write preflight + cap-token repo+owner
-gate + the tenant slug grammar bars `_system`). Tenant custom-code endpoints
+`root/*` (invoke-time destination-write preflight + cap-token repo+owner
+gate + `root` is a platform-reserved slug tenants cannot claim). Tenant
+custom-code endpoints
 get per-release private caches (same-principal rule) — not implemented yet.
 
 Family keying: caches key on the traced graph + shapes, not weights — one
