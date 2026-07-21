@@ -19,6 +19,13 @@ class ResidencyTier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     RESIDENCY_TIER_RAM: _ClassVar[ResidencyTier]
     RESIDENCY_TIER_VRAM: _ClassVar[ResidencyTier]
 
+class StorageTier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    STORAGE_TIER_UNSPECIFIED: _ClassVar[StorageTier]
+    STORAGE_TIER_CONTAINER: _ClassVar[StorageTier]
+    STORAGE_TIER_VOLUME: _ClassVar[StorageTier]
+    STORAGE_TIER_NFS: _ClassVar[StorageTier]
+
 class WorkerPhase(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     WORKER_PHASE_UNSPECIFIED: _ClassVar[WorkerPhase]
@@ -73,6 +80,10 @@ RESIDENCY_TIER_UNSPECIFIED: ResidencyTier
 RESIDENCY_TIER_DISK: ResidencyTier
 RESIDENCY_TIER_RAM: ResidencyTier
 RESIDENCY_TIER_VRAM: ResidencyTier
+STORAGE_TIER_UNSPECIFIED: StorageTier
+STORAGE_TIER_CONTAINER: StorageTier
+STORAGE_TIER_VOLUME: StorageTier
+STORAGE_TIER_NFS: StorageTier
 WORKER_PHASE_UNSPECIFIED: WorkerPhase
 WORKER_PHASE_BOOTING: WorkerPhase
 WORKER_PHASE_DOWNLOADING_MODELS: WorkerPhase
@@ -285,7 +296,7 @@ class ModelResolution(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ...) -> None: ...
 
 class StateDelta(_message.Message):
-    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups")
+    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups", "disk_usage")
     PHASE_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
@@ -294,6 +305,7 @@ class StateDelta(_message.Message):
     OBSERVED_RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     COMPILE_TARGETS_FIELD_NUMBER: _ClassVar[int]
     CELL_LOOKUPS_FIELD_NUMBER: _ClassVar[int]
+    DISK_USAGE_FIELD_NUMBER: _ClassVar[int]
     phase: WorkerPhase
     available_functions: _containers.RepeatedScalarFieldContainer[str]
     loading_functions: _containers.RepeatedScalarFieldContainer[str]
@@ -302,7 +314,32 @@ class StateDelta(_message.Message):
     observed_residency_generation: int
     compile_targets: _containers.RepeatedCompositeFieldContainer[CompileTarget]
     cell_lookups: _containers.RepeatedCompositeFieldContainer[CellLookup]
-    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ..., cell_lookups: _Optional[_Iterable[_Union[CellLookup, _Mapping]]] = ...) -> None: ...
+    disk_usage: DiskUsageReport
+    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ..., cell_lookups: _Optional[_Iterable[_Union[CellLookup, _Mapping]]] = ..., disk_usage: _Optional[_Union[DiskUsageReport, _Mapping]] = ...) -> None: ...
+
+class StorageTierUsage(_message.Message):
+    __slots__ = ("tier", "mount_path", "total_bytes", "free_bytes", "used_bytes", "reclaimable_bytes")
+    TIER_FIELD_NUMBER: _ClassVar[int]
+    MOUNT_PATH_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_BYTES_FIELD_NUMBER: _ClassVar[int]
+    FREE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    USED_BYTES_FIELD_NUMBER: _ClassVar[int]
+    RECLAIMABLE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    tier: StorageTier
+    mount_path: str
+    total_bytes: int
+    free_bytes: int
+    used_bytes: int
+    reclaimable_bytes: int
+    def __init__(self, tier: _Optional[_Union[StorageTier, str]] = ..., mount_path: _Optional[str] = ..., total_bytes: _Optional[int] = ..., free_bytes: _Optional[int] = ..., used_bytes: _Optional[int] = ..., reclaimable_bytes: _Optional[int] = ...) -> None: ...
+
+class DiskUsageReport(_message.Message):
+    __slots__ = ("tiers", "capacity_generation")
+    TIERS_FIELD_NUMBER: _ClassVar[int]
+    CAPACITY_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    tiers: _containers.RepeatedCompositeFieldContainer[StorageTierUsage]
+    capacity_generation: int
+    def __init__(self, tiers: _Optional[_Iterable[_Union[StorageTierUsage, _Mapping]]] = ..., capacity_generation: _Optional[int] = ...) -> None: ...
 
 class CellLookup(_message.Message):
     __slots__ = ("family", "cell_key")
