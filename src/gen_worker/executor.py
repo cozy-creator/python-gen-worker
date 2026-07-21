@@ -24,7 +24,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
 
 import msgspec
@@ -769,7 +769,8 @@ class ModelStore:
             ))
         report = pb.DiskUsageReport(tiers=[
             pb.StorageTierUsage(
-                tier=t.tier, mount_path=t.mount_path,
+                tier=cast(Any, t.tier),  # proto enum value carried as int
+                mount_path=t.mount_path,
                 total_bytes=t.total_bytes, free_bytes=t.free_bytes,
                 used_bytes=t.used_bytes, reclaimable_bytes=t.reclaimable_bytes,
             )
