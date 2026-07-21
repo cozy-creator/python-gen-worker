@@ -270,3 +270,65 @@ def test_undeclared_model_slot_warns_and_serves(tmp_path, caplog) -> None:
             assert any("lora" in r.getMessage() for r in warnings)
     finally:
         blobs.shutdown()
+
+
+def test_bare_ref_prefetch_picks_up_declared_binding_files_and_provider(
+    monkeypatch, tmp_path,
+) -> None:
+    """Absorbed from test_executor_prefetch_binding.py (#377): a bare ref's
+    residency download (DesiredResidency carries only ref+snapshot) picks up
+    the endpoint's DECLARED binding's files/provider allowlist; an explicit
+    per-call binding overrides it; a wholly unbound ref downloads
+    unrestricted. Network boundary faked (ensure_local), real Executor/
+    ModelStore — no hub_double round trip needed for a pure binding-
+    resolution decision."""
+    import asyncio
+
+    import gen_worker.executor as executor_mod
+    from gen_worker.api.binding import HF
+    from gen_worker.executor import Executor
+
+    binding = HF(
+        "stable-diffusion-v1-5/stable-diffusion-v1-5",
+        dtype="fp16", files=("*.json", "*.txt", "*.fp16.safetensors"),
+    )
+    ref = "stable-diffusion-v1-5/stable-diffusion-v1-5"
+    calls: list = []
+
+    async def _fake_ensure_local(r: str, **kwargs: object) -> object:
+        calls.append({"ref": r, **kwargs})
+        return tmp_path
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
+
+    def _spec():
+        class _Ep:
+            def setup(self, model: str) -> None:  # pragma: no cover
+                pass
+
+            def run(self, ctx, payload: EchoIn) -> EchoOut:  # pragma: no cover
+                return EchoOut(response="")
+
+        from gen_worker.registry import EndpointSpec
+
+        return EndpointSpec(
+            name="sd15", method=_Ep.run, kind="inference", payload_type=EchoIn,
+            output_mode="single", cls=_Ep, attr_name="run", models={"model": binding},
+        )
+
+    override = HF(ref, files=("only-this.safetensors",))
+
+    async def _run() -> None:
+        await Executor([_spec()], _noop_send).store.ensure_local(ref)
+        await Executor([_spec()], _noop_send).store.ensure_local(ref, binding=override)
+        await Executor([_spec()], _noop_send).store.ensure_local("acme/unbound")
+
+    async def _noop_send(msg) -> None:  # pragma: no cover
+        pass
+
+    asyncio.run(_run())
+    assert calls[0]["provider"] == "huggingface"
+    assert calls[0]["allow_patterns"] == binding.files
+    assert calls[1]["allow_patterns"] == ("only-this.safetensors",)
+    assert calls[2]["provider"] is None
+    assert calls[2]["allow_patterns"] == ()

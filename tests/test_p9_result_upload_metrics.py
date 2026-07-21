@@ -100,3 +100,44 @@ def test_large_output_ships_blob_ref_with_typed_usage_intact() -> None:
     finally:
         httpd.shutdown()
         _DedupUploadSink.requests_seen = []
+
+
+def test_save_bytes_targets_token_bound_owner_not_dispatch_slug() -> None:
+    """Absorbed from test_media_upload_owner.py (J19 run34): the capability
+    token's `tenant` claim — NOT the dispatch-stamped ctx.owner (which can
+    be a slug) — is the owner segment tensorhub's upload_media grant
+    authorizes. A worker that used ctx.owner directly 403'd every upload
+    whose owner resolved to a different org."""
+    import base64
+    import json as json_mod
+
+    from gen_worker import RequestContext
+
+    def _unsigned_jwt(claims: Dict[str, Any]) -> str:
+        def seg(obj: Dict[str, Any]) -> str:
+            raw = json_mod.dumps(obj).encode("utf-8")
+            return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+        return f"{seg({'alg': 'none', 'typ': 'JWT'})}.{seg(claims)}.sig"
+
+    owner_uuid = "019f4c33-f3a5-705b-9848-0b3b0863c416"
+    httpd, base_url = _serve()
+    try:
+        token = _unsigned_jwt({"tenant": owner_uuid, "request_id": "req-run34"})
+        # ctx.owner is the dispatch-stamped SLUG — the run34 failure mode.
+        ctx = RequestContext(
+            request_id="req-run34", owner="tensorhub",
+            file_api_base_url=base_url, worker_capability_token=token,
+        )
+        asset = ctx.save_bytes("samples/pair-000.bin", b"payload")
+
+        assert asset.ref
+        assert _DedupUploadSink.requests_seen
+        path, body = _DedupUploadSink.requests_seen[-1]
+        assert path == f"/api/v1/media/{owner_uuid}/uploads", (
+            "must ride the TOKEN-bound owner, never the dispatch slug"
+        )
+        assert body["ref"] == "samples/pair-000.bin"
+    finally:
+        httpd.shutdown()
+        _DedupUploadSink.requests_seen = []

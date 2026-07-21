@@ -102,6 +102,14 @@ def _result_msg(rid: str, attempt: int = 1) -> pb.WorkerMessage:
         request_id=rid, attempt=attempt, status=pb.JOB_STATUS_OK))
 
 
+def _host_capacity_msg(ref: str, state: int, generation: int) -> pb.WorkerMessage:
+    return pb.WorkerMessage(model_event=pb.ModelEvent(
+        ref=ref, state=state,
+        error="insufficient_host_ram" if state == pb.MODEL_STATE_FAILED else "",
+        host_ram_capacity_generation=generation,
+    ))
+
+
 def test_send_queue_drops_oldest_progress_never_results() -> None:
     async def _run() -> None:
         q = SendQueue(maxsize=2)
@@ -162,5 +170,39 @@ def test_send_queue_slow_consumer_backpressure_bounds_progress_not_results() -> 
             kind, _msg = await q.get()
             drained.append(kind)
         assert drained == ["progress", "result"]
+
+    asyncio.run(_run())
+
+
+def test_send_queue_capacity_generation_fencing_rejects_stale() -> None:
+    """Absorbed from test_worker_grpc_e2e.py: typed host-RAM-capacity events
+    bypass the ordinary bound and a NEWER generation always wins — a stale
+    blocked write can never wake up and clobber a newer capacity signal.
+    Load-bearing for th#807-class host-RAM admission reporting."""
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        ordinary = pb.WorkerMessage(model_event=pb.ModelEvent(
+            ref="acme/on-disk", state=pb.MODEL_STATE_ON_DISK))
+        failure = _host_capacity_msg("acme/blocked", pb.MODEL_STATE_FAILED, 1)
+        await q.put(ordinary)
+        capacity_put = asyncio.create_task(q.put(failure))
+        await asyncio.sleep(0)
+        assert capacity_put.done(), "capacity events bypass the ordinary bound"
+
+        progress = _host_capacity_msg(
+            "acme/blocked", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2)
+        await q.prepend_reconnect([progress])
+        selected = await q.get()
+        assert selected[1] == progress, "the newer generation wins over the stale FAILED"
+
+        # A stale selected write is fenced from shipping once superseded.
+        q2 = SendQueue(maxsize=1)
+        await q2.put(failure)
+        stale_selected = await q2.get()
+        await q2.prepend_reconnect([progress])
+        assert await q2.should_ship_capacity(stale_selected[1]) is False
+        current = await q2.get()
+        assert current[1] == progress
+        assert await q2.should_ship_capacity(current[1]) is True
 
     asyncio.run(_run())
