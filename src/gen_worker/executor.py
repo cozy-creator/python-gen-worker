@@ -4059,7 +4059,9 @@ class Executor:
                             logger.error(
                                 "compile-cache: FX-key forensics: %s",
                                 forensics)
-                            detail += f"; fx divergence: {forensics}"
+                            # The activity error is capped at 2000 chars on
+                            # the wire; keep the first divergence intact.
+                            detail += f"; fx divergence: {forensics[:1500]}"
                     if quant_lane:
                         if mint_by_id:
                             from . import fleet_cells as fleet_cells_mod
