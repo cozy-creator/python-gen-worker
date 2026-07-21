@@ -1307,3 +1307,80 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
             entry.env_value_force = old_force
         else:
             entry.__dict__.pop("env_value_force", None)
+
+
+# ---------------------------------------------------------------------------
+# FX-key forensics (gw#608)
+# ---------------------------------------------------------------------------
+
+
+class _FakeFxEntry:
+    """Pickle-roundtrippable stand-in for a torch CompiledFxGraph entry."""
+
+    def __init__(self, key: str, lines: list) -> None:
+        self._fx_graph_cache_key = key
+        self._fx_graph_cache_debug_lines = lines
+
+
+def _fx_lines(config_value: str) -> list:
+    return [
+        "[gmhash] gm: <lambda>()\n\n\n\ndef forward(self, arg0_1):\n    ...",
+        "[inphash] example_inputs[0]: TensorMetadata(dtype=torch.bfloat16)",
+        f"[cfg-{config_value}] inductor_config[foo]: {config_value}",
+    ]
+
+
+def _write_fx_entry(root, key: str, lines: list) -> None:
+    import pickle
+
+    subdir = root / "fxgraph" / key[1:3] / key
+    subdir.mkdir(parents=True, exist_ok=True)
+    (subdir / "entry0").write_bytes(pickle.dumps(_FakeFxEntry(key, lines)))
+
+
+def test_fx_key_forensics_names_the_diverging_component(tmp_path):
+    """gw#608: a store-served boot that recompiled must be able to name the
+    exact FxGraphHashDetails component its fresh keys diverge on, by diffing
+    its own saved entries against the seeded cell's."""
+    capture = tmp_path / "capture"
+    _write_fx_entry(capture / "inductor", "fseededkey111", _fx_lines("cell-value"))
+    (capture / "triton").mkdir()
+    artifact = cc.pack(capture, tmp_path / "cell.tar.gz", {"format": 2})
+
+    live = tmp_path / "live-inductor"
+    _write_fx_entry(live, "ffreshkey2222", _fx_lines("boot-value"))
+
+    seeded = cc.artifact_fx_lines(artifact)
+    observed = cc.live_fx_lines(live)
+    assert set(seeded) == {"fseededkey111"}
+    assert set(observed) == {"ffreshkey2222"}
+
+    report = cc.fx_key_forensics(seeded, observed)
+    assert "inductor_config[foo]" in report
+    assert "cell=cell-value" in report and "boot=boot-value" in report
+    # Matching components are noise — never reported.
+    assert "example_inputs[0]" not in report
+    assert "1 differing component(s)" in report
+
+
+def test_fx_key_forensics_silent_when_the_cell_served(tmp_path):
+    """Every live key present in the cell => nothing fresh => no report."""
+    lines = _fx_lines("same")
+    seeded = {"fkey1": lines}
+    assert cc.fx_key_forensics(seeded, {"fkey1": lines}) == ""
+    assert cc.fx_key_forensics({}, {"fkey1": lines}) == ""
+    assert cc.fx_key_forensics(seeded, {}) == ""
+
+
+def test_fx_key_forensics_matches_nearest_seeded_key(tmp_path):
+    """Each fresh key pairs with the seeded key sharing the most component
+    hashes — counterpart graphs, minimal diff — not an arbitrary one."""
+    far = [
+        "[othergm] gm: <lambda>() completely different graph",
+        "[otherin] example_inputs[0]: TensorMetadata(dtype=torch.float32)",
+        "[cfg-x] inductor_config[foo]: x",
+    ]
+    seeded = {"fnearkey": _fx_lines("cell-value"), "ffarkey": far}
+    observed = {"ffreshkey": _fx_lines("boot-value")}
+    report = cc.fx_key_forensics(seeded, observed)
+    assert "fnearkey" in report and "ffarkey" not in report

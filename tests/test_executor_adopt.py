@@ -2522,13 +2522,57 @@ def test_w8a8_exercised_miss_fails_closed_despite_unexercised_sibling(
     with pytest.raises(
         cc.CompiledLaneUnavailableError,
         match="did not serve their own warmup graph",
-    ):
+    ) as excinfo:
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
             wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
             cell_ref: pb.Snapshot(digest=DIGEST_A),
         }))
     assert ex.compile_targets() == []
+    # gw#608: the wire-visible detail must self-discriminate crediting bugs
+    # (~0s) from real recompiles (minutes) with zero pod-log access.
+    assert "compile_seconds=" in str(excinfo.value)
+
+
+def test_store_served_failure_names_diverging_fx_key_component(
+    tmp_path, monkeypatch,
+):
+    """gw#608 forensics wiring: a store-served warmup-proof failure diffs the
+    boot's freshly saved FX entries against the seeded cell's and puts the
+    diverging FxGraphHashDetails component in the CompiledLaneUnavailable
+    detail. Revert the executor wiring and this goes red."""
+    cls = _merged_lane_endpoint(
+        lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
+    specs = extract_specs(cls)
+    (generate,) = specs
+    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+
+    cell_lines = [
+        "[gmhash] gm: <lambda>()",
+        "[cfg-cell] inductor_config[foo]: cell-value",
+    ]
+    boot_lines = [
+        "[gmhash] gm: <lambda>()",
+        "[cfg-boot] inductor_config[foo]: boot-value",
+    ]
+    monkeypatch.setattr(
+        cc, "artifact_fx_lines", lambda path: {"fseededkey": cell_lines})
+    monkeypatch.setattr(
+        cc, "live_fx_lines", lambda *a, **k: {"ffreshkey": boot_lines})
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="did not serve their own warmup graph",
+    ) as excinfo:
+        asyncio.run(ex.ensure_setup(generate, {
+            wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
+            wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+    detail = str(excinfo.value)
+    assert "fx divergence" in detail
+    assert "inductor_config[foo]" in detail
+    assert "cell=cell-value" in detail and "boot=boot-value" in detail
 
 
 def test_w8a8_all_objects_unexercised_fails_closed(tmp_path, monkeypatch):

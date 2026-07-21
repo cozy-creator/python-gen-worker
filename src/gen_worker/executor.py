@@ -3930,6 +3930,7 @@ class Executor:
                     mint_sharers.setdefault(id(_pending), []).append(_obj_id)
                 proven_mint_objs: set[int] = set()
                 calls_by_obj: Dict[int, int] = {}
+                proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
                     before = proof_before.get(id(pipe))
@@ -3939,6 +3940,7 @@ class Executor:
                     calls_by_obj[id(pipe)] = calls
                     pipe_hits = compile_cache.cache_hit_count(pipe)
                     pipe_misses = compile_cache.cache_miss_count(pipe) - before[1]
+                    proof_by_obj[id(pipe)] = (calls, pipe_hits, pipe_misses)
                     hits += max(0, pipe_hits)
                     misses += max(0, pipe_misses)
                     pending_mint = inj.pending_self_mints.get(id(pipe))
@@ -4019,12 +4021,45 @@ class Executor:
                     # the only forensic surface).
                     unproven_calls = sum(
                         calls_by_obj.get(id(c.pipeline), 0) for c in unproven)
+                    # gw#608: compile_seconds discriminates crediting bugs
+                    # (~0s) from real recompiles (minutes) without pod logs;
+                    # per-object calls/hits/misses scope a multi-object boot.
+                    per_object = ""
+                    if len(proof_by_obj) > 1:
+                        per_object = ", objects=[" + ", ".join(
+                            f"{c}/{h}/{m}"
+                            for c, h, m in proof_by_obj.values()) + "]"
                     detail = (
                         f"{len(unproven)} attached compile object(s) did not "
                         "serve their own warmup graph "
                         f"(warmups={warmed}, calls={unproven_calls}, "
-                        f"cache_hits={hits}, cache_misses={misses})"
+                        f"cache_hits={hits}, cache_misses={misses}, "
+                        f"compile_seconds={compile_seconds:.1f}{per_object})"
                     )
+                    # gw#608 FX-key forensics: this boot's recompiles already
+                    # saved their entries (with embedded FxGraphHashDetails
+                    # lines) into the live cache dir — diff them against the
+                    # seeded cell's and name the diverging key component in
+                    # the wire-visible error. Store-served boots only (a
+                    # minting boot has no seeded cell to diverge from).
+                    if compile_selection is not None and not (
+                        trt_engine.is_engine_ref(compile_selection.ref)
+                    ):
+                        try:
+                            forensics = compile_cache.fx_key_forensics(
+                                compile_cache.artifact_fx_lines(
+                                    compile_selection.path),
+                                compile_cache.live_fx_lines(),
+                            )
+                        except Exception:
+                            forensics = ""
+                            logger.debug(
+                                "fx-key forensics unavailable", exc_info=True)
+                        if forensics:
+                            logger.error(
+                                "compile-cache: FX-key forensics: %s",
+                                forensics)
+                            detail += f"; fx divergence: {forensics}"
                     if quant_lane:
                         if mint_by_id:
                             from . import fleet_cells as fleet_cells_mod
@@ -4158,6 +4193,21 @@ class Executor:
                         family, ref, digest, compile_seconds,
                         _STORE_SERVED_COMPILE_ALARM_S, hits, misses,
                     )
+                    try:
+                        # gw#608: name the diverging FX-key component(s) for
+                        # the partial-recompile shape too.
+                        forensics = compile_cache.fx_key_forensics(
+                            compile_cache.artifact_fx_lines(
+                                compile_selection.path),
+                            compile_cache.live_fx_lines(),
+                        )
+                        if forensics:
+                            logger.error(
+                                "compile-cache: FX-key forensics: %s",
+                                forensics)
+                    except Exception:
+                        logger.debug(
+                            "fx-key forensics unavailable", exc_info=True)
                     await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
                         ref=ref,
                         state=pb.MODEL_STATE_ADOPTED,

@@ -612,6 +612,140 @@ def toolchain_present() -> bool:
     return any(shutil.which(c) for c in ("cc", "gcc", "g++", "clang"))
 
 
+# ---------------------------------------------------------------------------
+# FX-key forensics (gw#608)
+#
+# torch 2.13 CompiledFxGraph entries embed ``_fx_graph_cache_debug_lines`` —
+# the complete FxGraphHashDetails per-component dump behind their own key.
+# A store-served boot that recompiles (the gw#608 signature) SAVES its fresh
+# entries into the live cache dir before the warmup proof fails, so at
+# failure time both sides of the divergence are on disk: the seeded cell's
+# key inputs (inside the artifact tar) and this boot's (freshly written).
+# Diffing them names the exact diverging key component in the wire-visible
+# error — no pod-log access needed. Pure observability: every helper
+# degrades to empty on any error.
+# ---------------------------------------------------------------------------
+
+
+def _fx_entry_lines(data: bytes) -> Tuple[str, list]:
+    """(key, hash-details lines) from one pickled FxGraphCache entry."""
+    import pickle
+
+    obj = pickle.loads(data)
+    key = str(getattr(obj, "_fx_graph_cache_key", "") or "")
+    lines = list(getattr(obj, "_fx_graph_cache_debug_lines", None) or [])
+    return key, lines
+
+
+def artifact_fx_lines(artifact: Path) -> Dict[str, list]:
+    """key -> FxGraphHashDetails lines for every fxgraph entry in a cell."""
+    out: Dict[str, list] = {}
+    try:
+        with tarfile.open(Path(artifact), mode="r:*") as tar:
+            for member in tar:
+                parts = PurePosixPath(member.name).parts
+                if (
+                    len(parts) < 4
+                    or parts[:2] != ("inductor", "fxgraph")
+                    or not member.isfile()
+                ):
+                    continue
+                f = tar.extractfile(member)
+                if f is None:
+                    continue
+                try:
+                    key, lines = _fx_entry_lines(f.read())
+                except Exception:
+                    continue
+                if key and lines:
+                    out.setdefault(key, lines)
+    except Exception:
+        logger.debug("fx forensics: artifact unreadable", exc_info=True)
+    return out
+
+
+def live_fx_lines(inductor_dir: Optional[Path] = None) -> Dict[str, list]:
+    """key -> FxGraphHashDetails lines from the live inductor cache dir
+    (defaults to the seeded ``TORCHINDUCTOR_CACHE_DIR``)."""
+    out: Dict[str, list] = {}
+    base = Path(inductor_dir) if inductor_dir else Path(
+        os.environ.get("TORCHINDUCTOR_CACHE_DIR", ""))
+    fx_root = base / "fxgraph"
+    if not str(base) or not fx_root.is_dir():
+        return out
+    for entry in sorted(fx_root.glob("*/*/*")):
+        if not entry.is_file() or entry.name.startswith("."):
+            continue
+        try:
+            key, lines = _fx_entry_lines(entry.read_bytes())
+        except Exception:
+            continue
+        if key and lines:
+            out.setdefault(key, lines)
+    return out
+
+
+_FX_COMPONENT_RE = re.compile(r"\A\[(\S+)\]\s+([^:]+):\s?(.*)\Z", re.DOTALL)
+
+
+def _fx_components(lines: list) -> Dict[str, Tuple[str, str]]:
+    """component name -> (hash, value text) from one entry's debug lines."""
+    out: Dict[str, Tuple[str, str]] = {}
+    for line in lines:
+        m = _FX_COMPONENT_RE.match(str(line))
+        if m:
+            out[m.group(2).strip()] = (m.group(1), m.group(3).strip())
+    return out
+
+
+def _clip(value: str, limit: int = 120) -> str:
+    flat = " ".join(str(value).split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def fx_key_forensics(
+    seeded: Dict[str, list],
+    observed: Dict[str, list],
+    *,
+    max_fresh: int = 2,
+    max_components: int = 4,
+) -> str:
+    """Name the FxGraphHashDetails components on which this boot's freshly
+    compiled FX entries diverge from the seeded cell's (gw#608). Each fresh
+    key (present live, absent from the cell) is matched to the seeded key
+    with the fewest differing component hashes — the graphs are counterparts,
+    so the minimal diff IS the key defect. '' when there is nothing to say."""
+    fresh = {k: v for k, v in observed.items() if k not in seeded}
+    if not seeded or not fresh:
+        return ""
+    seeded_components = {k: _fx_components(v) for k, v in seeded.items()}
+    reports = []
+    for key, lines in sorted(fresh.items())[:max_fresh]:
+        fresh_c = _fx_components(lines)
+        best_key = ""
+        best_diff: Optional[list] = None
+        for skey, sc in seeded_components.items():
+            diffs = [
+                name for name in sorted(set(fresh_c) | set(sc))
+                if fresh_c.get(name, ("", ""))[0] != sc.get(name, ("", ""))[0]
+            ]
+            if best_diff is None or len(diffs) < len(best_diff):
+                best_key, best_diff = skey, diffs
+        if best_diff is None:
+            continue
+        sc = seeded_components[best_key]
+        named = "; ".join(
+            f"{name}: cell={_clip(sc.get(name, ('', '<absent>'))[1])} != "
+            f"boot={_clip(fresh_c.get(name, ('', '<absent>'))[1])}"
+            for name in best_diff[:max_components]
+        )
+        reports.append(
+            f"fresh key {key} vs nearest cell key {best_key}: "
+            f"{len(best_diff)} differing component(s): {named or 'none'}"
+        )
+    return " | ".join(reports)
+
+
 class AdoptError(RuntimeError):
     """Classified adoption failure (ModelEvent ``adopt_failed:<reason>``)."""
 
@@ -2222,6 +2356,7 @@ __all__ = [
     "build",
     "apply",
     "apply_lora_lane",
+    "artifact_fx_lines",
     "artifact_metadata",
     "begin_fleet_mint",
     "capture_env",
@@ -2240,6 +2375,7 @@ __all__ = [
     "parse_cell_ref",
     "find_artifact",
     "flavor_label",
+    "fx_key_forensics",
     "gen_worker_version",
     "has_compile_target",
     "inductor_counters",
@@ -2247,6 +2383,7 @@ __all__ = [
     "lane_bucket",
     "lane_token",
     "lane_drift",
+    "live_fx_lines",
     "mint_artifact",
     "mode_drift",
     "pack",
