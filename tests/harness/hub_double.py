@@ -111,11 +111,14 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
     inbound WorkerMessage per connection, and can reject the handshake
     outright (auth-rejection test rows)."""
 
-    def __init__(self, *, reject_unauthenticated: bool = False) -> None:
+    def __init__(
+        self, *, reject_unauthenticated: bool = False,
+        file_base_url: str = "http://127.0.0.1:1/files",
+    ) -> None:
         self.connections: List[Conn] = []
         self._conn_cond = threading.Condition()
         self.reject_unauthenticated = reject_unauthenticated
-        self.file_base_url = "http://127.0.0.1:1/files"
+        self.file_base_url = file_base_url
 
     def Connect(self, request_iterator: Any, context: grpc.ServicerContext) -> Any:
         if self.reject_unauthenticated:
@@ -237,6 +240,7 @@ def hub_double(
     backoff_cap_s: float = 0.2,
     max_workers: int = 16,
     cache_dir: Optional[Path] = None,
+    file_base_url: str = "http://127.0.0.1:1/files",
 ) -> Iterator[Tuple[FakeScheduler, WorkerHarness]]:
     """Stand up one hub-double gRPC server + one real Worker against it.
     Tears both down on exit even if the body raises. ``cache_dir`` defaults
@@ -252,7 +256,9 @@ def hub_double(
     boot-precedence test: without this, every hub-double test on a dev box
     shares (and pollutes) ``/tmp/tensorhub-cache``."""
     prior_env = os.environ.get("TENSORHUB_CACHE_DIR")
-    scheduler = FakeScheduler(reject_unauthenticated=reject_unauthenticated)
+    scheduler = FakeScheduler(
+        reject_unauthenticated=reject_unauthenticated, file_base_url=file_base_url,
+    )
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
     pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
     port = server.add_insecure_port("127.0.0.1:0")
