@@ -164,15 +164,28 @@ ie#501 run 26's hung worker answered HTTP/2 pings for 2.5h.
 
 **Layer 2 — universal app-level heartbeat (hung process).**
 
-W declares its cadence in `Hello.heartbeat_interval_ms` (30s; 0 = no promise,
+W declares its cadence in `Hello.heartbeat_interval_ms` (10s; 0 = no promise,
 pre-th#965 builds are never heartbeat-reaped). The beat is a full `StateDelta`
 re-send emitted by W's application control loop (the asyncio event loop that
 owes all progress — NEVER a detached timer thread) in EVERY state: idle,
 loading, serving, mid-activity, draining. Edge-triggered StateDeltas count as
 beats too; O stamps last-beat on every StateDelta receipt (Hello is the first
-beat). Miss `DefaultHeartbeatMissLimit` (3) consecutive beats and O declares
+beat). Miss `DefaultHeartbeatMissLimit` (6) consecutive beats and O declares
 the worker dead — typed `worker_heartbeat_lost` pod_event, pod recycle,
 bounded re-dispatch, exactly the `worker_disappeared` enforcement path.
+10s x 6 (Paul, 2026-07-21): detection in ~60s, while a single missed beat
+costs only 10s of slack — a transient stall (GC pause, scheduler hiccup)
+never reads as death. Disk stats (pgw#610) ride every beat but are measured
+at most every 30s.
+
+**Event-loop discipline (W).** Because the beat is emitted from the event
+loop that owes progress, worker code must NEVER block that loop for longer
+than the miss window (~60s): long synchronous work — torch.compile, model
+loads, warmups, CUDA syncs, checkpoint IO, GC/eviction scans — runs in
+executor threads (`asyncio.to_thread` / `_to_thread_complete`), keeping the
+loop free to beat. A synchronous span exceeding the miss window reads as
+death BY DESIGN: a process that cannot service its control loop for a
+minute is indistinguishable from a hung one and is recycled.
 
 **Layer 3 — obligation invariant (hung work behind a healthy loop).**
 
@@ -210,7 +223,7 @@ Sent once per connection, first message.
 | `state` | W lifecycle | O availability/supply | initial dynamic state (same shape as StateDelta) |
 | `models` | W model cache | O residency index (cache-aware routing baseline) | full residency snapshot; replaces any prior state O held for this worker |
 | `in_flight` | W executor + result buffer | O reconcile (§1) | jobs W still owns |
-| `heartbeat_interval_ms` | W constant (30000) | O layer-2 miss enforcement (§3) | promised app-level beat cadence; 0 = no promise, never heartbeat-reaped |
+| `heartbeat_interval_ms` | W constant (10000) | O layer-2 miss enforcement (§3) | promised app-level beat cadence; 0 = no promise, never heartbeat-reaped |
 
 ### WorkerResources (embedded in Hello)
 Static per-boot facts. Never re-sent mid-connection.

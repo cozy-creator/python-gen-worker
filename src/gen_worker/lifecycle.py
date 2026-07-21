@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from .config import Settings
@@ -28,10 +29,21 @@ _BOOT_SETUP_WATCH_INTERVAL_S = 2.0
 # The beat task lives on the asyncio event loop — the control loop that owes
 # all progress, never a detached timer thread — so beats stop exactly when
 # that loop wedges. Each tick force-sends the full StateDelta (unchanged
-# bytes included) and refreshes the pgw#610 measured-disk report that rides
-# every delta. A stuck coroutine leaves the loop (and beats) alive; the
+# bytes included). A stuck coroutine leaves the loop (and beats) alive; the
 # hub's layer-3 obligation invariant covers that mode.
-HEARTBEAT_INTERVAL_MS = 30_000
+# 10s beat / 6 misses (Paul, 2026-07-21): one missed beat costs 10s of slack
+# and a transient stall (GC pause, scheduler hiccup) never reads as death,
+# while detection stays ~60s. CONTRACT §3 event-loop discipline follows:
+# worker code must never block the loop longer than the miss window — long
+# synchronous work (torch.compile, model loads, CUDA sync) runs in executor
+# threads (executor._to_thread_complete / asyncio.to_thread).
+HEARTBEAT_INTERVAL_MS = 10_000
+
+# pgw#610 disk stats keep their original 30s measurement cadence: the report
+# rides every beat, but the statvfs/ref-index scan is recomputed at most
+# every _DISK_REPORT_TTL_S — a beat between refreshes re-ships the cached
+# report (identical bytes, generation unchanged).
+_DISK_REPORT_TTL_S = 30.0
 
 
 def probe_hardware() -> Dict[str, Any]:
@@ -111,6 +123,8 @@ class Lifecycle:
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._disk_report_cache: Optional[pb.DiskUsageReport] = None
+        self._disk_report_at = 0.0
         self._drain_deadline_at: Optional[float] = None
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
@@ -136,10 +150,19 @@ class Lifecycle:
             # up in its store (boot attach) — never hub-side selection input.
             cell_lookups=self.executor.cell_lookups(),
             # pgw#610/th#962: measured per-tier disk telemetry. Rides every
-            # StateDelta (and thus Hello.state); the periodic refresher below
-            # re-ships it only when the measured shape changed.
-            disk_usage=self.executor.store.disk_usage_report(),
+            # StateDelta (and thus Hello.state); measured at most every
+            # _DISK_REPORT_TTL_S so the 10s beat never turns the statvfs/
+            # ref-index scan into a hot loop.
+            disk_usage=self._disk_usage_report(),
         )
+
+    def _disk_usage_report(self) -> pb.DiskUsageReport:
+        now = time.monotonic()
+        if (self._disk_report_cache is None
+                or now - self._disk_report_at >= _DISK_REPORT_TTL_S):
+            self._disk_report_cache = self.executor.store.disk_usage_report()
+            self._disk_report_at = now
+        return self._disk_report_cache
 
     def build_resources(self) -> pb.WorkerResources:
         hw = self.hardware
@@ -207,7 +230,7 @@ class Lifecycle:
                 for rid, att in sorted(in_flight)
             ],
             # th#965 layer 2: promise the beat cadence; the hub reaps after
-            # 3 consecutive misses. Hello counts as the first beat.
+            # 6 consecutive misses (~60s). Hello counts as the first beat.
             heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
         )
 

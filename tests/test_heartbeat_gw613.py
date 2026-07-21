@@ -56,7 +56,31 @@ def _lifecycle(tmp_path: Path) -> tuple[Lifecycle, _FakeTransport]:
 def test_hello_declares_heartbeat_cadence(tmp_path: Path) -> None:
     lc, _ = _lifecycle(tmp_path)
     hello = lc.build_hello()
-    assert hello.heartbeat_interval_ms == HEARTBEAT_INTERVAL_MS == 30_000
+    assert hello.heartbeat_interval_ms == HEARTBEAT_INTERVAL_MS == 10_000
+
+
+def test_disk_report_measured_on_ttl_not_per_beat(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """10s beats must not turn the statvfs/ref-index scan into a hot loop:
+    the report rides every delta but is recomputed only past the TTL."""
+    lc, _ = _lifecycle(tmp_path)
+    calls = 0
+    real = lc.executor.store.disk_usage_report
+
+    def counting():
+        nonlocal calls
+        calls += 1
+        return real()
+
+    monkeypatch.setattr(lc.executor.store, "disk_usage_report", counting)
+    first = lc._state_delta()
+    second = lc._state_delta()
+    assert calls == 1
+    assert first.disk_usage.SerializeToString() == second.disk_usage.SerializeToString()
+    lc._disk_report_at = 0.0  # age past the TTL
+    lc._state_delta()
+    assert calls == 2
 
 
 def test_beat_force_sends_unchanged_delta(tmp_path: Path) -> None:
