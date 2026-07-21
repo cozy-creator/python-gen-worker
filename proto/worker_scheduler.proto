@@ -217,6 +217,46 @@ message StateDelta {
   // live. Full-replace. Store-lookup hints ONLY (boot attach rides these);
   // forge demand comes exclusively from compile_targets' exact keys.
   repeated CellLookup cell_lookups = 8;
+  // th#962/pgw#610: MEASURED per-tier disk telemetry. Present in every
+  // StateDelta (and thus in Hello.state). The hub budgets residency plans
+  // against these measured numbers only; release-declared disk sizes are
+  // pod-creation priors, never a planning budget.
+  DiskUsageReport disk_usage = 9;
+}
+
+// th#962/pgw#610: storage tiers a worker measures. CONTAINER is the pod-local
+// disk holding the CAS root (the only tier residency bytes land on, th#850);
+// VOLUME is the attached provider volume used as a fill source; NFS is a
+// shared datacenter cache mount when one is present.
+enum StorageTier {
+  STORAGE_TIER_UNSPECIFIED = 0;
+  STORAGE_TIER_CONTAINER   = 1;
+  STORAGE_TIER_VOLUME      = 2;
+  STORAGE_TIER_NFS         = 3;
+}
+
+// One measured mount point (statvfs on the real path, never a declared size).
+message StorageTierUsage {
+  StorageTier tier  = 1;
+  string mount_path = 2;
+  int64 total_bytes = 3;
+  int64 free_bytes  = 4;
+  int64 used_bytes  = 5;
+  // Bytes of ref-index entries on this tier that are inactive AND not in the
+  // current desired set — exactly the disk-GC LRU's eligible set, i.e. the
+  // evictions the hub may cause without touching live or desired work.
+  int64 reclaimable_bytes = 6;
+}
+
+// Measured disk capacity snapshot. capacity_generation is monotonic within
+// one worker process and bumps only when the measured shape materially
+// changes (quantized free space, reclaimable set, tier layout). The hub
+// clears an insufficient-disk target failure ONLY on an observed EVICTED
+// event or a generation change — never merely because it edited desired
+// state.
+message DiskUsageReport {
+  repeated StorageTierUsage tiers = 1;
+  uint64 capacity_generation = 2;
 }
 
 // One worker-computed cell identity the hub may look up in its store. The

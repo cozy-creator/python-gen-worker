@@ -24,6 +24,11 @@ _VRAM_QUANTUM_FRACTION = 0.05  # quantize free-VRAM deltas to 5% of total
 # functions the startup scan left awaiting (store lookups are local + cheap).
 _BOOT_SETUP_WATCH_INTERVAL_S = 2.0
 
+# pgw#610: periodic measured-disk refresh. Each tick recomputes the cheap
+# statvfs/ref-index report; maybe_send_state_delta ships it only when the
+# quantized shape actually changed.
+_DISK_REPORT_INTERVAL_S = 30.0
+
 
 def probe_hardware() -> Dict[str, Any]:
     """Static hardware facts + gate inputs. torch is optional."""
@@ -101,6 +106,7 @@ class Lifecycle:
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
+        self._disk_report_task: Optional[asyncio.Task] = None
         self._drain_deadline_at: Optional[float] = None
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
@@ -125,6 +131,10 @@ class Lifecycle:
             # th#883 pull-by-key: worker-computed cell keys the hub may look
             # up in its store (boot attach) — never hub-side selection input.
             cell_lookups=self.executor.cell_lookups(),
+            # pgw#610/th#962: measured per-tier disk telemetry. Rides every
+            # StateDelta (and thus Hello.state); the periodic refresher below
+            # re-ships it only when the measured shape changed.
+            disk_usage=self.executor.store.disk_usage_report(),
         )
 
     def build_resources(self) -> pb.WorkerResources:
@@ -514,6 +524,18 @@ class Lifecycle:
                 name="boot-setup-watch")
 
         await self.set_phase(pb.WORKER_PHASE_READY)
+        # pgw#610: periodic measured-disk report. Edge-suppressed: a tick
+        # whose quantized measurement is unchanged ships nothing.
+        if self._disk_report_task is None:
+            self._disk_report_task = asyncio.create_task(
+                self._disk_report_loop(), name="disk-report")
+
+    async def _disk_report_loop(self) -> None:
+        while not self.draining:
+            await asyncio.sleep(_DISK_REPORT_INTERVAL_S)
+            if self.draining:
+                return
+            await self.maybe_send_state_delta()
 
     async def _setup_awaiting_functions(
         self, awaiting: Dict[str, List[str]]
@@ -565,6 +587,10 @@ class Lifecycle:
         self.draining = True
         self.executor.draining = True
         self._cancel_residency_reconcile()
+        report_task = getattr(self, "_disk_report_task", None)
+        if report_task is not None:
+            report_task.cancel()
+            self._disk_report_task = None
         logger.info("drain started (deadline_ms=%d)", deadline_ms)
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
