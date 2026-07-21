@@ -53,7 +53,7 @@ from .capability import (
     InsufficientDiskError,
     InsufficientHostRamError,
 )
-from .input_assets import cleanup_input_assets, materialize_input_assets
+from .input_assets import cleanup_input_assets, manifest_from_run_job, materialize_input_assets
 from .models import cozy_snapshot
 from .models import disk_gc
 from .models import disk_telemetry
@@ -6265,16 +6265,20 @@ class Executor:
             )
 
         try:
-            # Tensorhub #871 owns canonical stored-ref authorization and
-            # presigning. RunJob must therefore contain only ephemeral
-            # HTTP(S) Asset transport refs. Validate/materialize that whole
-            # payload before any source/model acquisition or tenant handler
-            # work; opaque refs and caller local_path values fail closed.
+            # th#886 v4: canonical payload keeps the caller's opaque stored
+            # refs; RunJob.input_assets is the ordered credential-free
+            # manifest. Validate/materialize the whole payload (one resolver
+            # POST for private refs) before any source/model acquisition or
+            # tenant handler work; manifest drift and caller local_path
+            # values fail closed.
             await _to_thread_complete(
                 materialize_input_assets,
                 payload,
                 run.request_id,
                 attempt=run.attempt,
+                manifest=manifest_from_run_job(run.input_assets),
+                file_base_url=self.file_base_url or "",
+                capability_token=run.capability_token or "",
                 cancel_check=lambda: ctx.cancelled,
             )
             ctx.raise_if_cancelled("canceled")
