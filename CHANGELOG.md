@@ -30,8 +30,10 @@
 
 - **gw#613/th#965: universal app-level heartbeat (liveness layer 2).**
   ie#501 run 26 proved transport keepalive validates the gRPC library's
-  threads, not the application: a hung worker answered HTTP/2 pings for
-  2.5h while `generate` never left loading. The worker now declares
+  threads, not the application: a worker answered HTTP/2 pings through
+  2.5h of app-level silence, indistinguishable from a hung one (it was in
+  fact healthy-idle with no idle beat, starved by a hub fence bug — the
+  beat makes that diagnosis instant). The worker now declares
   `Hello.heartbeat_interval_ms=10000` and force-re-sends the full
   StateDelta every 10s from the asyncio event loop (the pgw#610
   disk-report task, promoted to the beat — never a detached thread), in

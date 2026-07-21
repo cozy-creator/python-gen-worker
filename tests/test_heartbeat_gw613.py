@@ -2,9 +2,10 @@
 
 Real Lifecycle + Executor over a fake transport: the beat is a force-sent,
 byte-unchanged StateDelta emitted from the asyncio event loop in every state
-— boot, idle, a stalled startup coroutine, and drain. ie#501 run 26: a hung
-worker answered transport keepalive for 2.5h; the beat is the app-level
-signal the hub reaps on instead.
+— boot, idle, a stalled startup coroutine, and drain. ie#501 run 26: a
+worker answered transport keepalive through 2.5h of app-level silence,
+indistinguishable from a hung one; the beat is the app-level signal that
+makes the distinction (and the reap) possible.
 """
 
 from __future__ import annotations

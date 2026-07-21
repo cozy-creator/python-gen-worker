@@ -160,7 +160,11 @@ that worker's assigned requests (attempt+1) unless the worker returns and
 re-claims them via `Hello.in_flight` reconcile first. A pod-backed worker
 that never reconnects within the stall window is enforced as
 `worker_disappeared`. Keepalive proves ONLY the gRPC library's threads:
-ie#501 run 26's hung worker answered HTTP/2 pings for 2.5h.
+ie#501 run 26's worker answered HTTP/2 pings through 2.5h of app-level
+silence — a silent worker is indistinguishable from a hung one at the
+transport (run 26's turned out to be healthy-idle with no idle beat,
+starved by a hub fence bug; the beat makes the two cases distinguishable
+in seconds instead of hours).
 
 **Layer 2 — universal app-level heartbeat (hung process).**
 
@@ -193,9 +197,10 @@ Heartbeats arriving but ANY function still in `loading_functions` with NO
 open activity (no running ActivityUpdate kind, no active model download) for
 `DefaultActivityStallAfter` (10min) → `worker_activity_stalled` with reason
 `loading_no_open_activity`, same enforcement. Completing an activity without
-starting the next one or declaring readiness is silence, not health. This
-closes the run-26 blind spot: activity-coverage gaps (gw#612 class) degrade
-the stall reason, never the detection.
+starting the next one or declaring readiness is silence, not health.
+Activity-coverage gaps (gw#612 class) degrade the stall reason, never the
+detection — a worker genuinely stuck between its last activity and
+readiness can no longer ride unbounded.
 
 **Load balancer requirements.** Any proxy/LB between W and O's gRPC port MUST:
 - forward HTTP/2 PING frames end-to-end (no PING termination at the proxy —
