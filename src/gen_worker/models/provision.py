@@ -358,7 +358,6 @@ def resolve_bindings(
     runs a Slot's ``default_checkpoint`` ref locally.
     """
     from ..api.binding import ModelRef, wire_ref
-    from .gguf_local import maybe_rebind_gguf
 
     out: Dict[str, str] = {}
     for param_name, binding in bindings.items():
@@ -379,7 +378,7 @@ def resolve_bindings(
                 f"unknown binding type for param {param_name!r}: "
                 f"{type(binding).__name__}"
             )
-        selected = binding if offline else maybe_rebind_gguf(binding)
+        selected = binding if offline else _local_flavor_fold(binding, slot)
         out[param_name] = resolve_local_path(
             ref=wire_ref(selected), provider=selected.source,
             offline=offline, emit=emit,
@@ -388,6 +387,50 @@ def resolve_bindings(
             civitai_version_id=str(getattr(selected, "version", "") or ""),
         )
     return out
+
+
+def _local_flavor_fold(binding: Any, slot: Any) -> Any:
+    """Local AUTO flavor folds over ONE shared resolve: family fp8 (th#964)
+    first, then the GGUF small-VRAM pick (cl#27). Fail-open — any resolve or
+    probe error keeps the binding as declared. Production stays hub-owned."""
+    from ..api.binding import wire_ref
+    from .gguf_local import maybe_rebind_gguf
+    from .ladder import maybe_rebind_family_fp8
+    from .refs import parse_model_ref
+
+    if (
+        getattr(binding, "source", "") != "tensorhub"
+        or getattr(binding, "flavor", "")
+        or getattr(binding, "storage_dtype", "")
+        or getattr(binding, "components", ())
+    ):
+        return binding
+    try:
+        thref = parse_model_ref(wire_ref(binding)).tensorhub
+        if thref is None or thref.digest or thref.flavor:
+            return binding
+        from .hub_client import resolve_repo
+        from .hub_policy import detect_worker_capabilities
+        from .memory import get_available_vram_gb
+
+        resolved = resolve_repo(thref)
+        caps = detect_worker_capabilities()
+        free = get_available_vram_gb()
+    except Exception as exc:
+        logger.debug("local flavor fold failed open: %s", exc)
+        return binding
+    picked = maybe_rebind_family_fp8(
+        binding, resolved=resolved,
+        slot_family=str(getattr(slot, "family", "") or ""),
+        gpu_sm=caps.gpu_sm, free_vram_gb=free,
+        installed_libs=tuple(caps.installed_libs),
+    )
+    if picked is not binding:
+        return picked
+    return maybe_rebind_gguf(
+        binding, resolved=resolved, gpu_sm=caps.gpu_sm,
+        free_vram_gb=free, installed_libs=tuple(caps.installed_libs),
+    )
 
 
 def _hub_ref_map_path(cache_dir: Path, thref: Any) -> Path:

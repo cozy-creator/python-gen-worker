@@ -41,6 +41,9 @@ class WorkerResolvedRepo:
     # local precision ladder's candidate set. Empty on older hubs.
     size_bytes: int = 0
     sibling_flavors: List[WorkerResolvedFlavor] = field(default_factory=list)
+    # th#964: the resolved checkpoint's architecture family ("sdxl-pony",
+    # ...) — drives the local family lane policy. "" on hubs not sending it.
+    model_family: str = ""
 
 
 class HubResolveError(RuntimeError):
@@ -157,4 +160,5 @@ def resolve_repo(
         snapshot_digest=digest, files=files,
         size_bytes=int(body.get("size_bytes") or 0),
         sibling_flavors=siblings,
+        model_family=str(body.get("model_family") or "").strip(),
     )

@@ -100,11 +100,21 @@ def select_gguf(
     if base_gb <= free or base_gb * FP8_STORAGE_FIT_FACTOR <= free:
         return None
 
-    from .ladder import placement_for_flavor, placement_from_metadata
+    from .ladder import (
+        placement_for_flavor,
+        placement_from_metadata,
+        w8a8_excluded_for_family,
+    )
+    from .lanes import is_w8a8_flavor
 
+    # th#964: w8a8 rows of conv-UNet families are AUTO-ineligible — they
+    # must not count as a fitting native rung that suppresses the GGUF pick.
+    skip_w8a8 = w8a8_excluded_for_family(resolved.model_family)
     libs = frozenset(installed_libs)
     for row in resolved.sibling_flavors:
         if gguf_qtype(row.flavor) or row.size_bytes <= 0:
+            continue
+        if skip_w8a8 and is_w8a8_flavor(row.flavor):
             continue
         placement = placement_from_metadata(row.placement) or placement_for_flavor(row.flavor)
         if placement is None:
