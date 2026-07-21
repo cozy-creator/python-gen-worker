@@ -1,27 +1,33 @@
-"""Fail-closed materialization of RunJob input ``Asset`` values.
+"""Fail-closed materialization of RunJob input ``Asset`` values (v4).
 
-Tensorhub owns stored-ref authorization and presigning. The worker accepts only
-the resulting HTTP(S) transport refs, downloads each distinct ref once into a
-fresh worker-owned directory, and writes that local path back to every ordered
-occurrence. Opaque stored refs and caller-provided filesystem paths never cross
-this trust boundary.
+Canonical MessagePack keeps the caller's opaque stored refs. Tensorhub ships an
+ordered, credential-free ``RunJob.input_assets`` manifest; the assigned worker
+validates the payload's private refs against it, resolves fresh transport URLs
+once per attempt via the worker capability, downloads and verifies the exact
+attested bytes, and sets only worker-local ``local_path`` on every occurrence.
+Caller HTTP(S) refs stay public transports and never enter the manifest.
+Capabilities, URLs, opaque refs, and resolver bodies never enter errors/logs.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import shutil
 import tempfile
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
+import blake3 as blake3_mod
 import msgspec
 
 from .api.errors import CanceledError, RetryableError, ValidationError
@@ -32,9 +38,14 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_BYTES = 50 << 20  # matches tensorhub's default media cap
 _DOWNLOAD_TIMEOUT_S = 120
+_RESOLVE_TIMEOUT_S = 30
+_MAX_RESOLVE_BODY = 8 << 20
 _MAX_WALK_DEPTH = 32
 _CHUNK = 1 << 20
 _INPUT_DIR_PREFIX = "gen-worker-inputs-"
+_RESOLVE_PATH = "/api/v1/worker/input-assets/resolve"
+_MANIFEST_KINDS = ("media", "image", "video", "audio")
+_HEX = set("0123456789abcdef")
 
 _EXT_BY_MIME = {
     "image/png": ".png",
@@ -46,11 +57,62 @@ _EXT_BY_MIME = {
     "audio/wav": ".wav",
 }
 
+# (url, headers, body) -> (http_status, response_body). Injectable for tests.
+ResolveTransport = Callable[[str, Mapping[str, str], bytes], tuple[int, bytes]]
+
+
+class InputManifestEntry(msgspec.Struct, frozen=True):
+    """One dispatched ``RunJob.input_assets`` entry (immutable identity)."""
+
+    asset_id: str
+    source_ref: str
+    blake3: str
+    size_bytes: int
+    kind: str
+    mime_type: str
+
+
+class _ResolvedInputAsset(msgspec.Struct, forbid_unknown_fields=True):
+    asset_id: str
+    source_ref: str
+    blake3: str
+    size_bytes: int
+    kind: str
+    mime_type: str
+    url: str
+    url_expires_at: str
+
+
+class _ResolveResponse(msgspec.Struct, forbid_unknown_fields=True):
+    assets: list[_ResolvedInputAsset]
+
+
+def manifest_from_run_job(entries: Any) -> tuple[InputManifestEntry, ...]:
+    """Convert ``RunJob.input_assets`` proto rows to typed manifest entries."""
+    return tuple(
+        InputManifestEntry(
+            asset_id=str(e.asset_id),
+            source_ref=str(e.source_ref),
+            blake3=str(e.blake3),
+            size_bytes=int(e.size_bytes),
+            kind=str(e.kind),
+            mime_type=str(e.mime_type),
+        )
+        for e in entries or ()
+    )
+
 
 @dataclass(frozen=True)
 class _AssetOccurrence:
     path: str
     asset: Asset
+
+
+@dataclass
+class _DownloadUnit:
+    occurrences: list[_AssetOccurrence]
+    entry: InputManifestEntry | None = None  # None = public caller transport
+    url: str = ""  # transport ref (public) or resolver-minted URL (private)
 
 
 @dataclass
@@ -81,6 +143,10 @@ def inputs_dir_for_request(request_id: str, attempt: int = 0) -> Path:
 def _iter_asset_occurrences(
     obj: Any, path: str = "$", depth: int = 0
 ) -> Iterator[_AssetOccurrence]:
+    """Deterministic traversal: msgspec struct declaration order, list/tuple
+    index, lexicographically sorted string map keys. Unordered containers and
+    non-string map keys are defensively rejected (build discovery already
+    refuses such schemas)."""
     if depth > _MAX_WALK_DEPTH:
         raise ValidationError("input_asset_payload_too_deep: nested Asset walk exceeded its limit")
     if isinstance(obj, Asset):
@@ -92,11 +158,27 @@ def _iter_asset_occurrences(
     elif isinstance(obj, (list, tuple)):
         for index, item in enumerate(obj):
             yield from _iter_asset_occurrences(item, f"{path}[{index}]", depth + 1)
+    elif isinstance(obj, (set, frozenset)):
+        for item in obj:
+            for _ in _iter_asset_occurrences(item, f"{path}[*]", depth + 1):
+                raise ValidationError(
+                    f"input_asset_unordered_container: {path} carries an Asset "
+                    "inside an unordered set/frozenset"
+                )
     elif isinstance(obj, dict):
-        # Dict keys may contain caller data. Use stable insertion positions in
-        # causal errors while preserving the value traversal order exactly.
-        for index, item in enumerate(obj.values()):
-            yield from _iter_asset_occurrences(item, f"{path}[{index}]", depth + 1)
+        # Map keys may contain caller data: error paths use sorted positions,
+        # never the keys themselves.
+        for index, key in enumerate(_sorted_string_keys(obj, path)):
+            yield from _iter_asset_occurrences(obj[key], f"{path}[{index}]", depth + 1)
+
+
+def _sorted_string_keys(obj: dict, path: str) -> list[str]:
+    for key in obj:
+        if not isinstance(key, str):
+            raise ValidationError(
+                f"input_asset_map_key_invalid: {path} mapping key is not a string"
+            )
+    return sorted(obj)
 
 
 def _iter_assets(obj: Any, depth: int = 0) -> Iterator[Asset]:
@@ -105,24 +187,53 @@ def _iter_assets(obj: Any, depth: int = 0) -> Iterator[Asset]:
         yield occurrence.asset
 
 
-def _transport_url(ref: str, path: str) -> str:
-    value = str(ref or "").strip()
+def _declared_kind(asset: Asset) -> str:
+    if isinstance(asset, ImageAsset):
+        return "image"
+    if isinstance(asset, VideoAsset):
+        return "video"
+    if isinstance(asset, AudioAsset):
+        return "audio"
+    return "media"
+
+
+def _classify_ref(ref: str, path: str) -> bool:
+    """True = private opaque stored ref; False = public HTTP(S) transport.
+
+    Mirrors tensorhub's submit-time classifier so ``input_payload`` and the
+    manifest can never disagree: padded/empty refs and every non-HTTP scheme
+    are invalid.
+    """
+    value = str(ref or "")
+    if not value or value != value.strip():
+        raise ValidationError(f"invalid_input_asset_ref: {path} ref is empty or padded")
     try:
         parsed = urllib.parse.urlsplit(value)
     except ValueError:
-        raise ValidationError(
-            f"invalid_input_asset_url: {path} has an invalid transport URL"
-        ) from None
+        raise ValidationError(f"invalid_input_asset_ref: {path} ref is not parseable") from None
     scheme = parsed.scheme.lower()
-    if not scheme:
+    if scheme in ("http", "https"):
+        if not parsed.netloc or parsed.hostname is None:
+            raise ValidationError(f"invalid_input_asset_url: {path} has an invalid transport URL")
+        return False
+    if scheme or value.startswith("//"):
         raise ValidationError(
-            f"unresolved_input_asset: {path} requires an authorized HTTP(S) transport URL"
+            f"unsupported_input_asset_scheme: {path} requires HTTP(S) or an opaque stored ref"
         )
-    if scheme not in ("http", "https"):
-        raise ValidationError(f"unsupported_input_asset_scheme: {path} requires HTTP(S)")
-    if not parsed.netloc or parsed.hostname is None:
-        raise ValidationError(f"invalid_input_asset_url: {path} has an invalid transport URL")
-    return value
+    return True
+
+
+def _manifest_entry_valid(entry: InputManifestEntry) -> bool:
+    return (
+        bool(entry.asset_id.strip())
+        and bool(entry.source_ref)
+        and entry.source_ref == entry.source_ref.strip()
+        and entry.size_bytes > 0
+        and entry.kind in _MANIFEST_KINDS
+        and bool(entry.mime_type.strip())
+        and len(entry.blake3) == 64
+        and set(entry.blake3) <= _HEX
+    )
 
 
 def _mime_allowed(mime: str, allowed: tuple[str, ...]) -> bool:
@@ -149,6 +260,12 @@ def _declared_kind_allows(asset: Asset, mime: str) -> bool:
     if isinstance(asset, AudioAsset):
         return normalized.startswith("audio/")
     return True
+
+
+def _entry_kind_allows(kind: str, mime: str) -> bool:
+    if kind == "media":
+        return True
+    return str(mime or "").lower().startswith(f"{kind}/")
 
 
 def _requires_image_decode(occurrences: list[_AssetOccurrence]) -> bool:
@@ -225,16 +342,142 @@ def _effective_size_cap(occurrences: list[_AssetOccurrence]) -> int:
     return min(caps) if caps else _DEFAULT_MAX_BYTES
 
 
+def _default_resolve_transport(
+    url: str, headers: Mapping[str, str], body: bytes
+) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=_RESOLVE_TIMEOUT_S) as response:
+            return int(response.status), response.read(_MAX_RESOLVE_BODY + 1)
+    except urllib.error.HTTPError as err:
+        try:
+            payload = err.read(_MAX_RESOLVE_BODY + 1)
+        except Exception:
+            payload = b""
+        return int(err.code), payload
+
+
+def _resolve_private_urls(
+    manifest: Sequence[InputManifestEntry],
+    *,
+    request_id: str,
+    attempt: int,
+    file_base_url: str,
+    capability_token: str,
+    resolve_transport: ResolveTransport | None,
+    cancel_check: Callable[[], bool] | None,
+) -> list[str]:
+    """Exactly one bounded resolver POST per attempt. Returns URLs aligned to
+    ``manifest`` order. Response identity must byte-match the dispatched
+    manifest; anything else is a platform malfunction (retryable)."""
+    _check_cancel(cancel_check)
+    if not file_base_url or not capability_token:
+        raise RetryableError(
+            "input_asset_resolution_unavailable: worker has no resolver credentials"
+        )
+    transport = resolve_transport or _default_resolve_transport
+    url = file_base_url.rstrip("/") + _RESOLVE_PATH
+    body = json.dumps({"request_id": request_id, "attempt": int(attempt)}).encode()
+    headers = {
+        "Authorization": f"Bearer {capability_token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        status, raw = transport(url, headers, body)
+    except CanceledError:
+        raise
+    except Exception:
+        raise RetryableError(
+            "input_asset_resolution_unavailable: resolver request failed"
+        ) from None
+    _check_cancel(cancel_check)
+    if status == 409:
+        # This attempt is no longer the assigned one (or its manifest moved):
+        # stop without publishing anything; the hub owns the successor.
+        raise CanceledError("canceled")
+    if status != 200:
+        raise RetryableError(
+            "input_asset_resolution_unavailable: resolver refused the request"
+        )
+    if len(raw) > _MAX_RESOLVE_BODY:
+        raise RetryableError(
+            "input_asset_response_mismatch: resolver response exceeds its size bound"
+        )
+    try:
+        decoded = msgspec.json.decode(raw, type=_ResolveResponse, strict=True)
+    except (msgspec.DecodeError, msgspec.ValidationError):
+        raise RetryableError(
+            "input_asset_response_mismatch: resolver response is malformed"
+        ) from None
+    if len(decoded.assets) != len(manifest):
+        raise RetryableError(
+            "input_asset_response_mismatch: resolver response does not match the manifest"
+        )
+    urls: list[str] = []
+    for entry, resolved in zip(manifest, decoded.assets):
+        if (
+            resolved.asset_id != entry.asset_id
+            or resolved.source_ref != entry.source_ref
+            or resolved.blake3 != entry.blake3
+            or resolved.size_bytes != entry.size_bytes
+            or resolved.kind != entry.kind
+            or resolved.mime_type != entry.mime_type
+        ):
+            raise RetryableError(
+                "input_asset_response_mismatch: resolver response does not match the manifest"
+            )
+        if not resolved.url or not _parse_rfc3339(resolved.url_expires_at):
+            raise RetryableError(
+                "input_asset_response_mismatch: resolver response is malformed"
+            )
+        urls.append(resolved.url)
+    return urls
+
+
+def _parse_rfc3339(value: str) -> bool:
+    try:
+        datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_transport_url(url: str, path: str) -> None:
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+    except ValueError:
+        raise ValidationError(
+            f"invalid_input_asset_url: {path} has an invalid transport URL"
+        ) from None
+    if parsed.scheme.lower() not in ("http", "https") or parsed.hostname is None:
+        raise ValidationError(f"invalid_input_asset_url: {path} has an invalid transport URL")
+    try:
+        blocked = _url_is_blocked(url)
+    except Exception:
+        raise RetryableError(
+            "input_asset_validation_failed: transport policy check failed"
+        ) from None
+    if blocked:
+        raise ValidationError(f"input_asset_url_not_allowed: {path} transport is blocked")
+
+
 def _download(
-    url: str,
-    occurrences: list[_AssetOccurrence],
+    unit: _DownloadUnit,
     dest_dir: Path,
     index: int,
     cancel_check: Callable[[], bool] | None,
 ) -> tuple[Path, int, str]:
     _check_cancel(cancel_check)
+    occurrences = unit.occurrences
+    entry = unit.entry
     cap = _effective_size_cap(occurrences)
-    req = urllib.request.Request(url, headers={"User-Agent": "gen-worker"})
+    if entry is not None:
+        if entry.size_bytes > cap:
+            raise ValidationError(
+                f"input_asset_too_large: {occurrences[0].path} exceeds its byte cap"
+            )
+        cap = entry.size_bytes
+    req = urllib.request.Request(unit.url, headers={"User-Agent": "gen-worker"})
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=f"input-{index}-", suffix=".part", dir=dest_dir)
     except OSError:
@@ -244,6 +487,7 @@ def _download(
     tmp = Path(tmp_name)
     total = 0
     head = b""
+    hasher = blake3_mod.blake3() if entry is not None else None
     try:
         try:
             with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT_S) as response:
@@ -264,9 +508,16 @@ def _download(
                             head = chunk[:64]
                         total += len(chunk)
                         if total > cap:
+                            if entry is not None:
+                                raise RetryableError(
+                                    "input_asset_integrity_failed: "
+                                    f"{occurrences[0].path} bytes exceed their attested size"
+                                )
                             raise ValidationError(
                                 f"input_asset_too_large: {occurrences[0].path} exceeds its byte cap"
                             )
+                        if hasher is not None:
+                            hasher.update(chunk)
                         output.write(chunk)
                 if expected_length and total != expected_length:
                     raise RetryableError(
@@ -280,10 +531,27 @@ def _download(
             ) from None
 
         _check_cancel(cancel_check)
-        mime = _infer_mime_type(url, head)
+        if entry is not None:
+            if total != entry.size_bytes:
+                raise RetryableError(
+                    f"input_asset_integrity_failed: {occurrences[0].path} bytes do not "
+                    "match their attested size"
+                )
+            assert hasher is not None
+            if hasher.hexdigest() != entry.blake3:
+                raise RetryableError(
+                    f"input_asset_integrity_failed: {occurrences[0].path} bytes do not "
+                    "match their attested BLAKE3"
+                )
+        mime = _infer_mime_type(unit.url, head)
         if _requires_image_decode(occurrences):
             mime = _decode_image(tmp, occurrences)
         _check_cancel(cancel_check)
+        if entry is not None and not _entry_kind_allows(entry.kind, mime):
+            raise ValidationError(
+                f"input_asset_kind_mismatch: {occurrences[0].path} content is not its "
+                "manifest media kind"
+            )
         for occurrence in occurrences:
             asset = occurrence.asset
             if not _declared_kind_allows(asset, mime):
@@ -325,7 +593,11 @@ def _remove_scope_state(state: _ScopeState) -> None:
 
 
 def cleanup_input_assets(request_id: str, attempt: int = 0) -> None:
-    """Remove one attempt's materialized inputs and clear every assigned path."""
+    """Remove one attempt's materialized inputs and clear every assigned path.
+
+    Scopes are keyed by (request_id, attempt): cleaning attempt N+1 can never
+    remove attempt N's directory, and vice versa.
+    """
     key = _scope_key(request_id, attempt)
     with _scope_lock:
         state = _scope_states.pop(key, None)
@@ -354,19 +626,70 @@ def _start_scope(request_id: str, attempt: int, assets: tuple[Asset, ...]) -> _S
     return state
 
 
+def _collect_units(
+    occurrences: list[_AssetOccurrence],
+    manifest: Sequence[InputManifestEntry],
+) -> list[_DownloadUnit]:
+    """Classify occurrences, fence the private sequence against the dispatched
+    manifest, and return download units in payload first-occurrence order."""
+    units: list[_DownloadUnit] = []
+    public_by_url: dict[str, _DownloadUnit] = {}
+    private_by_key: dict[tuple[str, str], _DownloadUnit] = {}
+    for occurrence in occurrences:
+        ref = str(occurrence.asset.ref or "")
+        if _classify_ref(ref, occurrence.path):
+            key = (ref, _declared_kind(occurrence.asset))
+            unit = private_by_key.get(key)
+            if unit is None:
+                unit = _DownloadUnit(occurrences=[])
+                private_by_key[key] = unit
+                units.append(unit)
+            unit.occurrences.append(occurrence)
+        else:
+            unit = public_by_url.get(ref)
+            if unit is None:
+                unit = _DownloadUnit(occurrences=[], url=ref)
+                public_by_url[ref] = unit
+                units.append(unit)
+            unit.occurrences.append(occurrence)
+
+    # The ordered unique private sequence must equal the dispatched manifest
+    # exactly (count, order, ref, kind) with valid immutable metadata BEFORE
+    # any resolver call or GET. A mismatch is a non-retryable contract breach.
+    private_sequence = list(private_by_key)
+    manifest_sequence = [(entry.source_ref, entry.kind) for entry in manifest]
+    if private_sequence != manifest_sequence:
+        raise ValidationError(
+            "input_asset_manifest_mismatch: dispatched manifest does not match "
+            "the payload's private inputs"
+        )
+    for entry, key in zip(manifest, private_sequence):
+        if not _manifest_entry_valid(entry):
+            raise ValidationError(
+                "input_asset_manifest_invalid: dispatched manifest entry is malformed"
+            )
+        private_by_key[key].entry = entry
+    return units
+
+
 def materialize_input_assets(
     payload: Any,
     request_id: str,
     *,
     attempt: int = 0,
+    manifest: Sequence[InputManifestEntry] = (),
+    file_base_url: str = "",
+    capability_token: str = "",
     cancel_check: Callable[[], bool] | None = None,
+    resolve_transport: ResolveTransport | None = None,
 ) -> int:
     """Materialize all ordered input assets transactionally.
 
-    The return value is the number of distinct HTTP(S) downloads. Duplicate
-    occurrences retain their payload positions and share one worker-owned
-    path. Any failure clears assigned paths and removes the whole attempt
-    directory before propagating a stable causal error.
+    Returns the number of distinct downloads. Duplicate occurrences retain
+    their payload positions and share one worker-owned path. Every decoded
+    Asset field is preserved — only ``local_path`` is assigned. Any failure
+    clears assigned paths and removes the whole attempt directory before
+    propagating a stable causal error.
     """
     cleanup_input_assets(request_id, attempt)
     occurrences = list(_iter_asset_occurrences(payload))
@@ -375,28 +698,44 @@ def materialize_input_assets(
         # use it as evidence that the asset was materialized.
         occurrence.asset.local_path = None
     _check_cancel(cancel_check)
+    manifest = tuple(manifest)
     if not occurrences:
+        if manifest:
+            raise ValidationError(
+                "input_asset_manifest_mismatch: dispatched manifest does not match "
+                "the payload's private inputs"
+            )
         return 0
 
-    grouped: dict[str, list[_AssetOccurrence]] = {}
-    for occurrence in occurrences:
-        url = _transport_url(occurrence.asset.ref, occurrence.path)
-        grouped.setdefault(url, []).append(occurrence)
+    units = _collect_units(occurrences, manifest)
+    private_units = [unit for unit in units if unit.entry is not None]
+    if private_units and int(attempt) <= 0:
+        raise ValidationError(
+            "input_asset_attempt_invalid: private inputs require a positive attempt"
+        )
 
-    # Validate the complete transport set before downloading the first item,
-    # so a later opaque/blocked ref cannot cause partial materialization work.
-    for occurrences_for_url in grouped.values():
-        url = str(occurrences_for_url[0].asset.ref).strip()
-        try:
-            blocked = _url_is_blocked(url)
-        except Exception:
-            raise RetryableError(
-                "input_asset_validation_failed: transport policy check failed"
-            ) from None
-        if blocked:
-            raise ValidationError(
-                f"input_asset_url_not_allowed: {occurrences_for_url[0].path} transport is blocked"
-            )
+    # Validate the complete public transport set before the resolver call and
+    # before downloading the first item, so a later blocked ref cannot cause
+    # partial materialization work.
+    for unit in units:
+        if unit.entry is None:
+            _validate_transport_url(unit.url, unit.occurrences[0].path)
+
+    if private_units:
+        urls = _resolve_private_urls(
+            manifest,
+            request_id=request_id,
+            attempt=int(attempt),
+            file_base_url=file_base_url,
+            capability_token=capability_token,
+            resolve_transport=resolve_transport,
+            cancel_check=cancel_check,
+        )
+        by_entry = dict(zip(manifest, urls))
+        for unit in private_units:
+            assert unit.entry is not None
+            unit.url = by_entry[unit.entry]
+            _validate_transport_url(unit.url, unit.occurrences[0].path)
 
     state = _start_scope(
         request_id,
@@ -404,30 +743,28 @@ def materialize_input_assets(
         tuple(occurrence.asset for occurrence in occurrences),
     )
     try:
-        for index, (url, duplicates) in enumerate(grouped.items()):
-            local_path, size_bytes, mime_type = _download(
-                url, duplicates, state.path, index, cancel_check
-            )
-            for occurrence in duplicates:
-                asset = occurrence.asset
-                asset.local_path = str(local_path)
-                asset.size_bytes = size_bytes
-                asset.mime_type = mime_type
+        for index, unit in enumerate(units):
+            local_path, size_bytes, mime_type = _download(unit, state.path, index, cancel_check)
+            for occurrence in unit.occurrences:
+                occurrence.asset.local_path = str(local_path)
             logger.info(
-                "materialized input asset index=%d aliases=%d bytes=%d mime=%s",
+                "materialized input asset index=%d aliases=%d bytes=%d mime=%s private=%s",
                 index,
-                len(duplicates),
+                len(unit.occurrences),
                 size_bytes,
                 mime_type,
+                unit.entry is not None,
             )
-        return len(grouped)
+        return len(units)
     except BaseException:
         cleanup_input_assets(request_id, attempt)
         raise
 
 
 __all__ = [
+    "InputManifestEntry",
     "cleanup_input_assets",
     "inputs_dir_for_request",
+    "manifest_from_run_job",
     "materialize_input_assets",
 ]
