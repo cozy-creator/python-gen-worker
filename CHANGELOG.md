@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.43.0 (2026-07-21)
+
+- **gw#585: tensorhub v4 private-input manifests — gRPC protocol v3 -> v4
+  HARD CUT (th#886).** The hub no longer rewrites canonical payload bytes
+  with presigned URLs. `RunJob.input_assets` (field 15) carries the ordered
+  credential-free manifest; the worker resolves fresh transport URLs itself
+  with one strict `POST /worker/input-assets/resolve` under its
+  attempt-scoped capability, verifies exact size/BLAKE3/MIME/kind, preserves
+  opaque `Asset.ref`, sets only `local_path`, and cleans attempt-owned temp
+  files on every terminal path. Endpoint build now rejects Asset-bearing
+  `set`/`frozenset` and non-string-keyed mappings (unordered containers have
+  no manifest order); base `Asset`/`MediaAsset` discover as `kind=media`.
+  A v0.43 worker cannot serve a v3 hub and vice versa — deploy in lockstep
+  with the tensorhub v4 release.
+- **`GEN_WORKER_INTERNAL_OBJECT_HOSTS`**: exact-host allowlist that exempts
+  resolver-minted private-input URLs from the private-IP SSRF gate for
+  deployments whose object store lives on an internal network. Caller public
+  transports always face the full SSRF policy.
+- marco-polo example: `marco-polo-attach` private-input echo probe (e2e).
+
 ## 0.42.0 (2026-07-21)
 
 - **gw#615: disk telemetry can no longer freeze the event loop (0.40.7
