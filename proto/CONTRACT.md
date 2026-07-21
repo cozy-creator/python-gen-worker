@@ -252,6 +252,22 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `finalizing_jobs` | W executor (gw#516) | O drain/retire gating + worker status display | jobs past the decode→finalize handoff: GPU slot released, encode/upload tail running, `JobResult` unshipped. GPU-idle alone is NOT work-idle |
 | `observed_residency_generation` | W desired-state receiver | O controller status | latest non-stale generation accepted; not a convergence claim — `ModelEvent`/`Hello.models` report actual state |
 | `compile_targets` | W executor | O compile-cell planner + dispatch fence | full-replace snapshot of exact READY live pipeline incarnations; omission removes the old address immediately |
+| `disk_usage` | W statvfs + ref-index | O residency planner + dispatch capacity fence | measured per-tier disk (th#962/pgw#610); see DiskUsageReport below |
+
+### DiskUsageReport (embedded in StateDelta)
+
+Measured disk capacity, never a declared size (declarations remain
+pod-creation priors only). A ~30s worker-side refresh re-evaluates the cheap
+statvfs/ref-index snapshot; the delta still ships only on change
+(edge-triggered). O budgets residency plans and request-driven desired
+appends against container-tier `free + reclaimable`.
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `tiers[].tier` | W mounts | O budget/economics | CONTAINER = CAS root (the only tier residency bytes land on, th#850); VOLUME = attached fill-source mount; NFS = shared cache mount when present |
+| `tiers[].total/free/used_bytes` | W statvfs | O capacity budget | measured on the real mount; free/used quantized to 64 MiB |
+| `tiers[].reclaimable_bytes` | W ref-index | O eviction budget | bytes of refs inactive AND not in the desired set — evictions O may cause without touching live work |
+| `capacity_generation` | W | O failure fencing | monotonic per process; bumps only on measured shape change. O clears an insufficient_disk failure ONLY on an observed EVICTED event or a generation advance — never on its own desired edits |
 
 ### CompileTarget (embedded in StateDelta)
 
