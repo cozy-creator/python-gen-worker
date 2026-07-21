@@ -1,5 +1,6 @@
 # source-hash bust: 2026-07-03 (#368: @endpoint API rewrite)
 import asyncio
+import os
 import time
 from typing import AsyncIterator
 
@@ -86,7 +87,7 @@ class MarcoPolo:
 
         if str(data.text or "").strip().lower() != "marco":
             raise ValidationError(f"expected 'marco', got {data.text!r}")
-        path = data.image.path()
+        path = os.fspath(data.image)
         with open(path, "rb") as f:
             raw = f.read()
         waited = 0.0
