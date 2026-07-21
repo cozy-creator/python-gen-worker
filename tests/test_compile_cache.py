@@ -1267,3 +1267,43 @@ def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
     # must already have happened (it precedes every compile decision).
     cc.apply(_P(), _Cfg(), cache_ready=False)
     assert fconf.enable_autograd_cache is False
+
+
+def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
+    """gw#608 residual (live-disproven 0.40.5, B200, 2026-07-21): torch>=2.13
+    config user overrides are ContextVars — THREAD-LOCAL. The arming thread's
+    ``enable_autograd_cache = False`` was invisible to the warmup thread that
+    actually compiled, so the mint still packed ASLR-keyed AOT entries and the
+    store-served sibling still missed 8/8. The disable must bind EVERY thread
+    (entry-level env force), not just the caller's."""
+    import threading
+
+    import torch._functorch.config as fconf
+
+    entry = fconf._config["enable_autograd_cache"]
+    had_force = "env_value_force" in entry.__dict__
+    old_force = entry.__dict__.get("env_value_force")
+    monkeypatch.delenv("TORCHINDUCTOR_AUTOGRAD_CACHE", raising=False)
+    monkeypatch.setattr(fconf, "enable_autograd_cache", True)
+    try:
+        entry.__dict__.pop("env_value_force", None)  # simulate no pre-import env
+        cc.capture_env(tmp_path / "cap")
+
+        seen: dict = {}
+
+        def probe() -> None:
+            seen["value"] = fconf.enable_autograd_cache
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+        assert seen["value"] is False, (
+            "AOT autograd cache still enabled on a sibling thread — the "
+            "warmup/compile thread would repack ASLR-keyed AOT entries and "
+            "consumers would miss 8/8 (gw#608)"
+        )
+    finally:
+        if had_force:
+            entry.env_value_force = old_force
+        else:
+            entry.__dict__.pop("env_value_force", None)
