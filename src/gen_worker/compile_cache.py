@@ -505,7 +505,20 @@ def _disable_aot_autograd_cache() -> None:
     requires the FX cache to be the lookup surface: disable the AOT layer
     symmetrically for producer capture and consumer seeding. Costs a cheap
     AOT re-analysis per fresh process; the expensive inductor compile still
-    serves from the (portable) FX entries."""
+    serves from the (portable) FX entries.
+
+    LIVE DISPROOF of the 0.40.4/0.40.5 shape (2026-07-21, B200 pods,
+    gen-worker 0.40.5): the mint capture still packed 8 ASLR-keyed
+    ``aotautograd/`` entries and the store-served sibling still failed 8/8
+    — because in torch 2.13 ``ConfigModule`` user overrides are a
+    ContextVar, i.e. THREAD-LOCAL: the assignment below ran on the arming
+    thread while the warmup compile ran on another thread that still saw
+    the default True. The env var is no rescue post-import
+    (``env_name_force`` is read once at config install). Process-global
+    disable therefore needs BOTH: the pre-torch-import env in the
+    entrypoint (fresh processes, incl. compile-worker subprocesses) and
+    the installed config entry's ``env_value_force`` mutated here (torch
+    already imported — tools, tests, embedders)."""
     os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "0"
     import sys
 
@@ -514,7 +527,11 @@ def _disable_aot_autograd_cache() -> None:
     try:
         import torch._functorch.config as fconf
 
-        fconf.enable_autograd_cache = False
+        fconf.enable_autograd_cache = False  # this thread (fast path, public API)
+        # Process-global: user overrides are thread-local ContextVars in
+        # torch>=2.13; the entry-level env force is consulted by every
+        # thread with top precedence.
+        fconf._config["enable_autograd_cache"].env_value_force = False  # type: ignore[attr-defined]
     except Exception:
         logger.debug("compile-cache: AOT autograd cache disable unavailable", exc_info=True)
 

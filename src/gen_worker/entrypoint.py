@@ -23,6 +23,15 @@ import os
 # https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+# gw#608: compile-cell portability requires the (portable) FxGraphCache to be
+# the lookup surface — the AOTAutogradCache key embeds a process memory
+# address (ASLR) and can never hit across pods. TORCHINDUCTOR_AUTOGRAD_CACHE
+# is an `env_name_force` config read ONCE at torch import, and runtime config
+# assignments are thread-local (ContextVar) in torch>=2.13, so this must be
+# set here, before any torch import, to bind every thread and every
+# compile-worker subprocess. See compile_cache._disable_aot_autograd_cache.
+os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
+
 import json
 import logging
 import sys
