@@ -628,6 +628,43 @@ def test_blocked_resolved_url_rejected_without_download(
     assert_no_leak(caught.value, REF_A, http_root.base_url)
 
 
+def test_internal_object_host_allowlist_only_for_resolver_minted(
+    http_root: HTTPRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Deployment-declared internal object store: resolver-minted URLs to the
+    # exact host pass; the same host stays blocked without the declaration.
+    monkeypatch.setattr(input_assets, "_url_is_blocked", lambda _url: True)
+    host = "127.0.0.1"
+    payload = Payload(extra=[Asset(ref=REF_A)])
+    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+
+    monkeypatch.delenv("GEN_WORKER_INTERNAL_OBJECT_HOSTS", raising=False)
+    resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
+    with pytest.raises(ValidationError, match="^input_asset_url_not_allowed"):
+        materialize(payload, "req-internal-denied", manifest=manifest, resolver=resolver)
+
+    monkeypatch.setenv("GEN_WORKER_INTERNAL_OBJECT_HOSTS", host)
+    resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
+    count = materialize(
+        Payload(extra=[Asset(ref=REF_A)]),
+        "req-internal-allowed",
+        manifest=manifest,
+        resolver=resolver,
+    )
+    assert count == 1
+
+
+def test_internal_object_host_never_unblocks_caller_public_urls(
+    http_root: HTTPRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(input_assets, "_url_is_blocked", lambda _url: True)
+    monkeypatch.setenv("GEN_WORKER_INTERNAL_OBJECT_HOSTS", "127.0.0.1")
+    payload = Payload(extra=[Asset(ref=http_root.url("pub.png"))])
+    with pytest.raises(ValidationError, match="^input_asset_url_not_allowed"):
+        materialize(payload, "req-public-still-blocked")
+    assert http_root.hits == {}
+
+
 # ---------------------------------------------------------------------------
 # Download verification
 # ---------------------------------------------------------------------------

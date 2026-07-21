@@ -442,7 +442,16 @@ def _parse_rfc3339(value: str) -> bool:
     return True
 
 
-def _validate_transport_url(url: str, path: str) -> None:
+def _internal_object_hosts() -> frozenset[str]:
+    """GEN_WORKER_INTERNAL_OBJECT_HOSTS: exact hostnames of a deployment's
+    internal object store (datacenter MinIO/NFS gateway). Honored ONLY for
+    resolver-minted private-input URLs; caller public transports always face
+    the full SSRF policy."""
+    raw = os.environ.get("GEN_WORKER_INTERNAL_OBJECT_HOSTS", "")
+    return frozenset(host.strip().lower() for host in raw.split(",") if host.strip())
+
+
+def _validate_transport_url(url: str, path: str, *, resolver_minted: bool = False) -> None:
     try:
         parsed = urllib.parse.urlsplit(str(url or ""))
     except ValueError:
@@ -451,6 +460,8 @@ def _validate_transport_url(url: str, path: str) -> None:
         ) from None
     if parsed.scheme.lower() not in ("http", "https") or parsed.hostname is None:
         raise ValidationError(f"invalid_input_asset_url: {path} has an invalid transport URL")
+    if resolver_minted and parsed.hostname.lower() in _internal_object_hosts():
+        return
     try:
         blocked = _url_is_blocked(url)
     except Exception:
@@ -735,7 +746,7 @@ def materialize_input_assets(
         for unit in private_units:
             assert unit.entry is not None
             unit.url = by_entry[unit.entry]
-            _validate_transport_url(unit.url, unit.occurrences[0].path)
+            _validate_transport_url(unit.url, unit.occurrences[0].path, resolver_minted=True)
 
     state = _start_scope(
         request_id,
