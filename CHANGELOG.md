@@ -1,11 +1,90 @@
 # Changelog
 
+## 0.42.0 (2026-07-21)
+
+- **gw#615: disk telemetry can no longer freeze the event loop (0.40.7
+  post-seal_publish hang).** `_state_delta()` now reads only ModelStore's
+  cached `disk_usage_report()`; the actual statvfs/ref-index measurement
+  runs as a fire-and-forget `asyncio.to_thread` refresh gated to the
+  report TTL. A stalled provider volume mount leaves telemetry stale
+  instead of blocking StateDeltas, the th#965 heartbeat, and serving —
+  the 0.40.7 LTX boots that sealed+published then never served.
+- **th#767: `gen_worker.families.wan` — WanDefaults registered under
+  `wan22`** (wan-2.2 slot migration surface for inference-endpoints).
+- **gw#614: synthesized media-modality warmup coverage — multi-lane family
+  cells mint complete.** gw#612's publish gate left any endpoint whose
+  input-routed sibling lane needs media (qwen edit: an input image) unable
+  to ever publish its family cell — the declared/synthesized warmup fills
+  only required payload fields, the edit lane records calls=0, publish is
+  withheld, and every second boot re-mints (~24 min). The synthesized
+  warmup now runs a coverage pass: when a compile-target object is still
+  unexercised after the planned jobs, media VARIANTS of the same base
+  payloads (base = declared warmup payload when present, else the
+  synthesized default; exactly ONE optional image/audio field filled with
+  a generated asset, nothing else drifts) exercise the remaining lanes.
+  Driven by payload schema + compile-object coverage, no endpoint-name
+  switch; applies to mint (union cell publishes) and adopt (the sibling
+  lane proves against the cell instead of arming unproven). New
+  `warmup.media_variants`; real-inductor fresh-subprocess proof that a
+  two-lane union cell serves BOTH lanes as FX hits
+  (tests/test_cell_portability_gw611.py).
+- **gw#614: on_hello_ack model-set-diff cancel (th#961 defense in
+  depth).** Every HelloAck used to cancel + restart the residency-
+  reconcile task, killing any in-flight self_mint_compile at phase=load
+  (th#961: 4,602 cancels in 19 min). The worker now diffs the ack's
+  semantic model set (resolutions + disk_refs + snapshots + hot) against
+  the running reconcile's target: identical set → keep the task, apply
+  non-model deltas only; changed set → cancel as before.
+- **gw#612: multi-lane self-mint — publish gated on full capture coverage;
+  post-proof activity phase.** ie#501 run 26's "post-seal_publish hang" is
+  DISPROVEN on evidence: the qwen 2-lane minting worker completed setup,
+  advertised readiness (`newly_available=[generate]` hub-side 20:00:50),
+  and idled; the 2.5h wedge was hub-side — the singular compile fence saw
+  the record's TWO same-identity self-attested targets (t2i + edit riding
+  one family cell) as ambiguous and starved dispatch forever (tensorhub
+  lockstep fix: same-identity siblings collapse to one deterministic
+  pick). Worker-side real defect fixed here: the shared capture packs
+  only the graphs the warmup compiled, so a mandatory sibling lane the
+  warmup never exercised (qwen edit — no warmup modality) left the
+  published "family cell" lane-1-only, bricking every adopting boot at
+  the gw#607 per-object proof (gw#611 qwen variant, hits=1/misses=1 →
+  compile_cell_failed → release broken). `finalize_self_mint` now only
+  packs; the executor decides after the whole proof pass:
+  `publish_self_mint` when every capture-sharing object proved into the
+  cell, `withhold_self_mint_publish` (typed, loud:
+  `SELF_MINT_PUBLISH_WITHHELD`) when any sharer went unexercised — the
+  boot still serves compiled locally and re-mints next boot instead of
+  poisoning the store. New `finalize` activity phase covers the
+  post-proof tail (sibling resolution, publish decision, bookkeeping
+  through readiness) so completed activities stop reporting a stale
+  `seal_publish`.
+- **gw#611: adopt-proof counter blindness fixed; portability contract
+  pinned.** Measured (torch 2.13): with the AOT autograd cache in BUNDLED
+  mode an AOT hit serves the compiled artifact with the fxgraph counters
+  fully silent — a healthy serving adopt read `cache_hits=0,
+  cache_misses=0` to the warmup proof and fail-closed BRICKED the release
+  (th#954 SDXL second boot). `inductor_counters` now reports
+  `aot_cache_hit`/`aot_cache_miss` and the guard wrapper credits AOT-layer
+  hits as serving evidence (production pins the AOT layer off per gw#608,
+  so these stay 0 unless a config regression re-enables it — which now
+  degrades to a proven boot instead of a bricked release). The fail-closed
+  detail gains `calls=` so an orphaned/never-invoked wrapper (calls=0) is
+  distinguishable from counter-blind serving (calls>0) on the wire. New
+  real-codepath repro (tests/test_cell_portability_gw611.py): mint ->
+  pack -> fresh-process adopt -> warmup counts >=1 FX hit (CPU inductor,
+  real subprocesses), plus the bundled-AOT 0/0 mechanism pin. Hub lockstep
+  (tensorhub chaos 9e7dca8e): cells that fail their own adopt proof are
+  QUARANTINED (unattachable; next boot self-mints) instead of bricking
+  the release via model_load_failure_streak.
+
 ## 0.41.0 (2026-07-21)
 
 - **gw#613/th#965: universal app-level heartbeat (liveness layer 2).**
   ie#501 run 26 proved transport keepalive validates the gRPC library's
-  threads, not the application: a hung worker answered HTTP/2 pings for
-  2.5h while `generate` never left loading. The worker now declares
+  threads, not the application: a worker answered HTTP/2 pings through
+  2.5h of app-level silence, indistinguishable from a hung one (it was in
+  fact healthy-idle with no idle beat, starved by a hub fence bug — the
+  beat makes that diagnosis instant). The worker now declares
   `Hello.heartbeat_interval_ms=10000` and force-re-sends the full
   StateDelta every 10s from the asyncio event loop (the pgw#610
   disk-report task, promoted to the beat — never a detached thread), in

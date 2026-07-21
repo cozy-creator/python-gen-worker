@@ -34,10 +34,10 @@ def test_flavor_label():
 
 def test_cell_lane_is_exact_and_checkpoint_free():
     assert cc.cell_lane(
-        "_system/family-sdxl#inductor-rtx-4090-torch2.13-w8a8"
+        "root/family-sdxl#inductor-rtx-4090-torch2.13-w8a8"
     ) == "w8a8"
     assert cc.cell_lane(
-        "_system/family-sdxl#inductor-rtx-4090-torch2.13"
+        "root/family-sdxl#inductor-rtx-4090-torch2.13"
     ) == ""
     assert cc.cell_lane("owner/checkpoint#fp8-w8a8") == ""
 
@@ -407,7 +407,7 @@ def test_artifact_metadata_records_compile_mode():
 
 
 def test_system_repo():
-    assert cc.system_repo("sd15") == "_system/family-sd15"
+    assert cc.system_repo("sd15") == "root/family-sd15"
     with pytest.raises(ValueError):
         cc.system_repo("")
 
@@ -1050,7 +1050,7 @@ def test_flavor_label_carries_weight_lane_gw534() -> None:
     assert flavor_label("rtx-4090", "2.9.1", "fp8-hooks") == (
         "inductor-rtx-4090-torch2.9-w8a16")
     assert lane_token("") == "" and lane_token("w8a8") == "w8a8"
-    assert is_cache_ref("_system/family-qwen-image#inductor-h100-80gb-hbm3-torch2.13-w8a8")
+    assert is_cache_ref("root/family-qwen-image#inductor-h100-80gb-hbm3-torch2.13-w8a8")
 
 
 def test_resolve_pipeline_class_gw586() -> None:

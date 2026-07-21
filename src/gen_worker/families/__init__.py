@@ -20,6 +20,7 @@ from .base import (
     schema_filename,
 )
 from .sdxl import SdxlDefaults, SdxlLoraDefaults, SdxlScheduler
+from .wan import WanDefaults
 
 __all__ = [
     "KIND_CHECKPOINT",
@@ -28,6 +29,7 @@ __all__ = [
     "SdxlDefaults",
     "SdxlLoraDefaults",
     "SdxlScheduler",
+    "WanDefaults",
     "export_all_schemas",
     "export_json_schema",
     "family",

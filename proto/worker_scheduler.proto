@@ -555,7 +555,7 @@ enum ModelOpKind {
   reserved 1, 2, 3;
   reserved "MODEL_OP_KIND_DOWNLOAD", "MODEL_OP_KIND_LOAD", "MODEL_OP_KIND_UNLOAD";
   // Hot-adopt a torch.compile cache artifact: ref is a compile-cache flavor
-  // ref (`_system/family-<f>#inductor-<sku>-torch<maj.min>`). The worker
+  // ref (`root/family-<f>#inductor-<sku>-torch<maj.min>`). The worker
   // downloads+verifies+seeds the cache, re-wraps the already-resident modules
   // of endpoints declaring compile family <f>, runs one warmup trace, and
   // answers ModelEvent{ADOPTED, duration_ms}. ANY failure => stay eager and

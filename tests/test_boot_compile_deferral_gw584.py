@@ -97,8 +97,8 @@ FAMILY = "gw584-fam"
 AUTHORED = Hub("acme/qwen-image", tag="prod")           # bare authored binding
 AUTHORED_REF = "acme/qwen-image:prod"
 RESOLVED_REF = "acme/qwen-image:prod#fp8-w8a8"          # HelloAck ladder pick
-CELL_REF = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
-PLAIN_CELL_REF = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
+CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
+PLAIN_CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 
 
 def _compile_spec(setup_calls: List[str]) -> EndpointSpec:
@@ -185,7 +185,7 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
     async def _fake_download(ref: str, **kwargs: Any) -> Path:
         p = tmp_path / ref.replace("/", "_").replace(":", "_").replace("#", "_")
         p.mkdir(parents=True, exist_ok=True)
-        if ref.startswith("_system/"):
+        if ref.startswith("root/"):
             shutil.copy(artifact, p / artifact.name)
         return p
 
