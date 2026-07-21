@@ -99,6 +99,54 @@ class ModelBoundEndpoint:
         return EchoOut(response=weights.read_text())
 
 
+# Toggled by P2's setup-failure test: True => BrokenSetupEndpoint.setup
+# raises (the ernie-on-pod shape: import fine, pipeline load fails).
+BREAK_SETUP = threading.Event()
+BREAK_SETUP.set()
+
+
+@endpoint(model=Hub("harness/residency-broken"))
+class BrokenSetupEndpoint:
+    """Setup raises while BREAK_SETUP is set; desired-state retry recovers."""
+
+    def setup(self, model: str) -> None:
+        if BREAK_SETUP.is_set():
+            raise RuntimeError("pipeline exploded: cannot import FakePipeline")
+        self.model_path = model
+
+    def broken_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        weights = Path(self.model_path) / "model.safetensors"
+        return EchoOut(response=weights.read_text())
+
+
+class _RamPressurePipeline:
+    """Pipeline-shaped annotation for the P2 host-RAM admission wire test."""
+
+    @classmethod
+    def from_pretrained(cls, path: str, **kwargs: object) -> "_RamPressurePipeline":
+        return cls()
+
+    def to(self, device: str) -> "_RamPressurePipeline":
+        return self
+
+
+@endpoint(models={
+    "pipeline": Hub("harness/ram-pressure-pipeline"),
+    "vae": Hub("harness/ram-pressure-shared-vae"),
+})
+class RamPressureEndpoint:
+    """Two staged refs: only the larger pipeline may fail RAM admission."""
+
+    def setup(
+        self, pipeline: _RamPressurePipeline, vae: _RamPressurePipeline,
+    ) -> None:
+        self.pipeline = pipeline
+        self.vae = vae
+
+    def ram_pressure(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        return EchoOut(response="unexpectedly loaded")
+
+
 # ---------------------------------------------------------------------------
 # P3: Slot-declared endpoints (pgw#606/th#938 precedence + pgw#583 identity).
 # ---------------------------------------------------------------------------

@@ -203,6 +203,89 @@ def test_classifier_refuses_oversized_unclassifiable_repo() -> None:
         classify_repo(["random_blob.bin"] * 3, sizes={"random_blob.bin": 200 * 1024**3})
 
 
+# th#960/pgw#609 Phase 2b: distinct classifier bug-classes with real incident
+# history, absorbed from tests/convert/test_classifier.py before its deletion
+# (its ~20 other tests cover shapes with no incident pin — collapsed here to
+# the ones that map to a real production failure or refusal-path regression).
+
+
+def test_diffusers_skips_root_allinone_checkpoints() -> None:
+    """e2e J7 live: SD1.5's component tree + all-in-one root checkpoints
+    (12GB) on top — an ingest that doesn't skip the root files selected
+    14.7GB instead of 2.75GB and ENOSPC'd the pod."""
+    files = [
+        "model_index.json", "scheduler/scheduler_config.json",
+        "text_encoder/config.json", "text_encoder/model.fp16.safetensors",
+        "vae/config.json", "vae/diffusion_pytorch_model.safetensors",
+        "unet/config.json", "unet/diffusion_pytorch_model.fp16.safetensors",
+        "v1-5-pruned.safetensors", "v1-5-pruned-emaonly.safetensors",
+    ]
+    c = classify_repo(files, dtype_pref=("fp16",))
+    assert c.strategy == "diffusers"
+    allow = set(c.allow_patterns)
+    assert "v1-5-pruned.safetensors" not in allow
+    assert "v1-5-pruned-emaonly.safetensors" not in allow
+    assert "unet/diffusion_pytorch_model.fp16.safetensors" in allow
+
+
+def test_standalone_diffusers_component_selects_canonical_weight_only() -> None:
+    """gw#426: madebyollin's SDXL VAE is a Diffusers component (not
+    Transformers), and its A1111-alias root files are not extra logical
+    weights the classifier should also select."""
+    files = [
+        ".gitattributes", "README.md", "config.json",
+        "diffusion_pytorch_model.bin", "diffusion_pytorch_model.safetensors",
+        "sdxl.vae.safetensors", "sdxl_vae.safetensors",
+    ]
+    c = classify_repo(files, config_json={
+        "_class_name": "AutoencoderKL", "_diffusers_version": "0.18.0.dev0",
+    })
+    assert c.strategy == "diffusers_component"
+    assert set(c.allow_patterns) == {
+        "README.md", "config.json", "diffusion_pytorch_model.safetensors",
+    }
+
+
+def test_transformers_sharded_index_excludes_onnx_and_pickle() -> None:
+    files = [
+        "config.json", "generation_config.json", "tokenizer.json",
+        "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors",
+        "model.safetensors.index.json", "onnx/model.onnx", "pytorch_model.bin",
+    ]
+    c = classify_repo(files, config_json={"architectures": ["LlamaForCausalLM"]})
+    assert c.strategy == "transformers"
+    allow = set(c.allow_patterns)
+    assert "model-00001-of-00002.safetensors" in allow
+    assert "onnx/model.onnx" not in allow
+    assert "pytorch_model.bin" not in allow
+
+
+def test_gguf_explicit_quant_pick_and_not_found_refusal() -> None:
+    files = ["model.Q4_K_M.gguf", "model.Q8_0.gguf", "README.md"]
+    picked = classify_repo(files, gguf_quant="q4_k_m")
+    assert [p for p in picked.allow_patterns if p.endswith(".gguf")] == ["model.Q4_K_M.gguf"]
+    with pytest.raises(RepoRefusal) as exc:
+        classify_repo(files, gguf_quant="q2_k")
+    assert exc.value.reason == "gguf_quant_not_found"
+
+
+@pytest.mark.parametrize("files,reason", [
+    (["pytorch_model.bin"], "pickle_only"),
+    (["model.onnx"], "onnx_only"),
+    (["tf_model.h5"], "tf_only"),
+    (["flax_model.msgpack"], "flax_only"),
+    (["weights.mlpackage"], "coreml_only"),
+    (["model.engine"], "tensorrt_only"),
+])
+def test_classifier_refuses_non_safetensors_only_repos(files: list, reason: str) -> None:
+    """A repo shipping ONLY a non-safetensors weight format must refuse
+    typed, not silently misclassify into an empty/wrong selection — the
+    contract every producer flavor decision depends on."""
+    with pytest.raises(RepoRefusal) as exc:
+        classify_repo(files)
+    assert exc.value.reason == reason
+
+
 # ---------------------------------------------------------------------------
 # pgw#566 (test-first, fix open): kohya-SGM SDXL adapter normalization.
 # ---------------------------------------------------------------------------

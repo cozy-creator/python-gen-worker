@@ -13,6 +13,7 @@ against until they land.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import grpc
@@ -21,8 +22,17 @@ import pytest
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-from harness.hub_double import hub_double, is_accept_for, is_ready, is_result_for
+from harness.hub_double import (
+    FakeScheduler,
+    custom_scheduler_server,
+    hub_double,
+    is_accept_for,
+    is_ready,
+    is_result_for,
+)
 from harness.toy_endpoints import EchoIn, EchoOut
+
+_TIMEOUT = 15.0
 
 
 def _msgpack(text: str) -> bytes:
@@ -194,6 +204,143 @@ def test_protocol_mismatch_is_failed_precondition() -> None:
         assert exit_code == 1
     finally:
         server.stop(grace=0)
+
+
+# ---------------------------------------------------------------------------
+# th#960/pgw#609 Phase 2b: auth-rejection/precondition/redirect family,
+# absorbed from test_worker_grpc_e2e.py (#372) before that file's deletion —
+# the worker's handshake-failure taxonomy (transient vs permanent, redirect
+# vs exit) is squarely P1's boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_auth_rejection_exits_instead_of_spinning(monkeypatch) -> None:
+    # UNAUTHENTICATED can be transient hub-side; the fatal exit is gated on
+    # BOTH a failure count and an elapsed window (#372). Shrink the window
+    # so the test observes the exit quickly.
+    import gen_worker.transport as transport_mod
+
+    monkeypatch.setattr(transport_mod, "_AUTH_FAILURE_EXIT_WINDOW_S", 0.3)
+    with custom_scheduler_server(
+        lambda: FakeScheduler(reject_unauthenticated=True),
+    ) as (_scheduler, harness, _port):
+        assert harness.join(timeout=_TIMEOUT) == 1
+
+
+def test_auth_rejection_within_window_keeps_retrying() -> None:
+    """3 quick UNAUTHENTICATED strikes must NOT kill the worker while the
+    exit window has not elapsed — a hub pg blip is survivable (#372)."""
+    with custom_scheduler_server(
+        lambda: FakeScheduler(reject_unauthenticated=True),
+    ) as (_scheduler, harness, _port):
+        deadline = time.monotonic() + 3.0
+        while len(harness.worker.transport.reconnect_delays) < 4:
+            assert harness._thread.is_alive(), "worker exited inside the auth window"
+            assert time.monotonic() < deadline, "worker never retried"
+            time.sleep(0.02)
+        assert harness.exit_code is None
+        harness.stop()
+
+
+def test_permanent_precondition_exits_fast() -> None:
+    """worker_id_mismatch cannot heal by retrying: exit for reap immediately
+    instead of retrying forever (#372)."""
+
+    class _Mismatch(FakeScheduler):
+        def Connect(self, request_iterator, context):  # noqa: N802
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION,
+                          "worker_id_mismatch: hello=w1 jwt_sub=w2")
+
+    with custom_scheduler_server(_Mismatch) as (_scheduler, harness, _port):
+        assert harness.join(timeout=_TIMEOUT) == 1
+
+
+def test_hello_ack_deadline_reconnects_instead_of_hanging(monkeypatch) -> None:
+    """A hub that accepts the stream but never sends HelloAck must not hang
+    the worker forever (#372): the handshake deadline fires and the worker
+    reconnects with backoff."""
+    import gen_worker.transport as transport_mod
+
+    monkeypatch.setattr(transport_mod, "_HELLO_ACK_TIMEOUT_S", 0.3)
+    stalls = {"n": 0}
+
+    class _Stall(FakeScheduler):
+        def Connect(self, request_iterator, context):  # noqa: N802
+            stalls["n"] += 1
+            if stalls["n"] == 1:
+                next(request_iterator)  # read Hello, then say nothing
+                time.sleep(5.0)         # stall well past the deadline
+                return iter(())
+            return super().Connect(request_iterator, context)
+
+    with custom_scheduler_server(_Stall) as (scheduler, _harness, _port):
+        conn = scheduler.wait_connection(0)
+        assert conn.hello is not None
+        assert stalls["n"] >= 2
+
+
+def test_not_leader_redirect_is_followed() -> None:
+    """FAILED_PRECONDITION not_leader:<addr> redirects the worker to the
+    leader immediately; schemeless targets keep the dialing TLS mode (#372,
+    plaintext here on both ends)."""
+    with custom_scheduler_server(FakeScheduler) as (real, _real_harness, real_port):
+        class _NotLeader(FakeScheduler):
+            def Connect(self, request_iterator, context):  # noqa: N802
+                context.abort(grpc.StatusCode.FAILED_PRECONDITION,
+                              f"not_leader:127.0.0.1:{real_port}")
+
+        with custom_scheduler_server(_NotLeader) as (_stale, _stale_harness, _port):
+            conn = real.wait_connection(0)
+            assert conn.hello is not None and conn.hello.worker_id == "hub-double-worker"
+
+
+def test_worker_survives_hub_restart_and_reconnects(tmp_path, monkeypatch) -> None:
+    """The hub process dying mid-connection must not kill the worker: it
+    keeps reconnecting with backoff, and picks up a REPLACEMENT server bound
+    to the same address once one appears (#372)."""
+    from concurrent import futures
+
+    from gen_worker.config import load_settings
+    from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
+    from gen_worker.worker import Worker
+
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path / "cache"))
+    scheduler = FakeScheduler()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    settings = load_settings(
+        orchestrator_public_addr=f"127.0.0.1:{port}", worker_id="p1-restart", worker_jwt="",
+    )
+    worker = Worker(settings, ["harness.toy_endpoints"], backoff_base_s=0.05, backoff_cap_s=0.2)
+    thread = threading.Thread(target=worker.run, daemon=True)
+    thread.start()
+    replacement = None
+    try:
+        scheduler.wait_connection(0)
+        before = len(worker.transport.reconnect_delays)
+        assert server.stop(grace=0).wait(_TIMEOUT)
+
+        deadline = time.monotonic() + _TIMEOUT
+        while len(worker.transport.reconnect_delays) < before + 4:
+            assert thread.is_alive(), "worker exited while hub was down"
+            assert time.monotonic() < deadline, "worker did not keep reconnecting"
+            time.sleep(0.02)
+
+        replacement_scheduler = FakeScheduler()
+        replacement = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        pb_grpc.add_WorkerSchedulerServicer_to_server(replacement_scheduler, replacement)
+        assert replacement.add_insecure_port(f"127.0.0.1:{port}") == port
+        replacement.start()
+
+        assert replacement_scheduler.wait_connection(0).hello is not None
+    finally:
+        worker.stop()
+        thread.join(_TIMEOUT)
+        server.stop(grace=0)
+        if replacement is not None:
+            replacement.stop(grace=0)
 
 
 @pytest.mark.skip(

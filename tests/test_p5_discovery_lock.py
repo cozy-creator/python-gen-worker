@@ -185,3 +185,65 @@ def test_payload_meta_bounds_compile_into_the_input_schema(tmp_pkg: Path) -> Non
     steps_schema = fn["input_schema"]["$defs"]["In_"]["properties"]["steps"]
     assert steps_schema["minimum"] == 1
     assert steps_schema["maximum"] == 150
+
+
+def test_discovery_stubs_missing_heavy_deps_but_fails_loud_on_touch(tmp_pkg: Path) -> None:
+    """Absorbed from test_discovery_heavy_deps.py (pgw#506): a module-top
+    ``import torch`` must be free during discovery (build-time walks never
+    have torch installed for CPU-only build images) — imports as a stub —
+    but any ACTUAL attribute use at module scope fails loud with an
+    actionable error, not a silent wrong schema."""
+    from gen_worker.discovery.discover import discover_functions
+
+    fake_heavy_dep = "gw_p5_fake_heavy_dep"
+    pkg = tmp_pkg / "ep_p5_heavy"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(
+        f"import {fake_heavy_dep}\nfrom {fake_heavy_dep} import nn\n" + textwrap.dedent("""
+        import msgspec
+        from gen_worker import RequestContext, endpoint
+
+        class In_(msgspec.Struct):
+            text: str = ""
+
+        class Out_(msgspec.Struct):
+            reply: str
+
+        @endpoint
+        class Gen:
+            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(reply=data.text)
+    """))
+
+    fns = discover_functions(
+        tmp_pkg, main_module="ep_p5_heavy.main", extra_heavy_deps=(fake_heavy_dep,),
+    )
+    assert [f["name"] for f in fns] == ["generate"]
+    assert fns[0]["input_schema"]  # schemas still build against the stub
+
+    # A DIFFERENT package (import caching would otherwise mask a re-walk of
+    # the same module name): module-scope USE of the missing dep fails loud.
+    pkg2 = tmp_pkg / "ep_p5_heavy_use"
+    pkg2.mkdir()
+    (pkg2 / "__init__.py").write_text("")
+    (pkg2 / "main.py").write_text(
+        f"import {fake_heavy_dep}\nDTYPE = {fake_heavy_dep}.bfloat16\n" + textwrap.dedent("""
+        import msgspec
+        from gen_worker import RequestContext, endpoint
+
+        class In_(msgspec.Struct):
+            text: str = ""
+
+        class Out_(msgspec.Struct):
+            reply: str
+
+        @endpoint
+        class Gen:
+            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(reply=data.text)
+    """))
+    with pytest.raises(ValueError, match=f"{fake_heavy_dep}.bfloat16"):
+        discover_functions(
+            tmp_pkg, main_module="ep_p5_heavy_use.main", extra_heavy_deps=(fake_heavy_dep,),
+        )

@@ -285,6 +285,49 @@ def hub_double(
             get_settings.cache_clear()
 
 
+@contextmanager
+def custom_scheduler_server(
+    servicer_factory: Callable[[], Any],
+    *,
+    modules: Sequence[str] = ("harness.toy_endpoints",),
+    worker_id: str = "hub-double-worker",
+    backoff_base_s: float = 0.05,
+    backoff_cap_s: float = 0.2,
+    max_workers: int = 8,
+    port: Optional[int] = None,
+) -> Iterator[Tuple[Any, WorkerHarness, int]]:
+    """Like ``hub_double()`` but for a BESPOKE ``WorkerSchedulerServicer``
+    (auth-reject/precondition/redirect/stall scenarios) instead of the
+    ordinary ``FakeScheduler``. ``port`` lets a caller rebind a second
+    server onto the SAME address a worker already dialed (redirect tests).
+    Callers own the servicer's own connection-tracking; only cache-dir
+    isolation and worker lifecycle are handled here."""
+    prior_env = os.environ.get("TENSORHUB_CACHE_DIR")
+    servicer = servicer_factory()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(servicer, server)
+    bound_port = server.add_insecure_port(f"127.0.0.1:{port or 0}")
+    server.start()
+    with tempfile.TemporaryDirectory(prefix="pgw-hub-double-cache-") as tmp:
+        os.environ["TENSORHUB_CACHE_DIR"] = tmp
+        get_settings.cache_clear()
+        harness = WorkerHarness(
+            servicer, bound_port, cache_dir=Path(tmp), modules=modules, worker_id=worker_id,
+            backoff_base_s=backoff_base_s, backoff_cap_s=backoff_cap_s,
+        )
+        harness.start()
+        try:
+            yield servicer, harness, bound_port
+        finally:
+            harness.stop()
+            server.stop(grace=0)
+            if prior_env is None:
+                os.environ.pop("TENSORHUB_CACHE_DIR", None)
+            else:
+                os.environ["TENSORHUB_CACHE_DIR"] = prior_env
+            get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # Predicate helpers shared across P1/P2/P3/P6/P9.
 # ---------------------------------------------------------------------------
