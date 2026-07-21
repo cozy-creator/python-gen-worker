@@ -2,6 +2,15 @@
 
 ## 0.42.0 (2026-07-21)
 
+- **gw#615: disk telemetry can no longer freeze the event loop (0.40.7
+  post-seal_publish hang).** `_state_delta()` now reads only ModelStore's
+  cached `disk_usage_report()`; the actual statvfs/ref-index measurement
+  runs as a fire-and-forget `asyncio.to_thread` refresh gated to the
+  report TTL. A stalled provider volume mount leaves telemetry stale
+  instead of blocking StateDeltas, the th#965 heartbeat, and serving —
+  the 0.40.7 LTX boots that sealed+published then never served.
+- **th#767: `gen_worker.families.wan` — WanDefaults registered under
+  `wan22`** (wan-2.2 slot migration surface for inference-endpoints).
 - **gw#614: synthesized media-modality warmup coverage — multi-lane family
   cells mint complete.** gw#612's publish gate left any endpoint whose
   input-routed sibling lane needs media (qwen edit: an input image) unable
