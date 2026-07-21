@@ -15,8 +15,10 @@ option go_package = "github.com/cozy-creator/tensorhub/internal/orchestrator/grp
 // release_id) are authoritative; Hello echoes them only for the no-auth dev
 // mode and for cross-checking.
 //
-// Liveness is gRPC HTTP/2 keepalive ONLY. There are no application-level
-// heartbeats; StateDelta is edge-triggered, never periodic.
+// Liveness is a 3-layer contract (th#965, CONTRACT.md §3): transport
+// keepalive (dead peer), a periodic app-level StateDelta beat emitted from
+// the worker's control loop (hung process), and the hub-side obligation
+// invariant (loading function with no open activity = stalled).
 //
 // Fencing is a single `attempt` integer bumped only by the orchestrator.
 //
@@ -78,6 +80,12 @@ message Hello {
   StateDelta      state     = 5;   // initial dynamic state snapshot
   repeated ModelResidency models = 6; // full residency snapshot (reconcile baseline)
   repeated InFlightJob in_flight = 7; // running + completed-with-unshipped-result
+  // th#965 layer 2: the worker's promised heartbeat cadence. A worker that
+  // declares it MUST re-send StateDelta at least this often in EVERY state
+  // (idle, loading, serving, mid-activity); K consecutive misses and the hub
+  // declares the worker dead (worker_heartbeat_lost). 0 = no promise: the
+  // worker is never heartbeat-reaped (pre-th#965 builds).
+  uint64 heartbeat_interval_ms = 8;
 }
 
 // Static per-boot facts. Sent once in Hello; never updated mid-connection.
@@ -191,8 +199,11 @@ message ModelResolution {
   string lane         = 4;
 }
 
-// Worker -> orchestrator dynamic state. FULL-REPLACE snapshot of every field,
-// sent only when at least one field changed (edge-triggered, never periodic).
+// Worker -> orchestrator dynamic state. FULL-REPLACE snapshot of every field.
+// Sent when a field changed (edge-triggered) AND on the periodic heartbeat
+// tick (th#965 layer 2): every Hello.heartbeat_interval_ms the worker's
+// control loop re-sends the current snapshot even when unchanged — receipt
+// is the app-level liveness beat the hub timestamps.
 message StateDelta {
   WorkerPhase phase = 1;
   repeated string available_functions = 2; // dispatchable now

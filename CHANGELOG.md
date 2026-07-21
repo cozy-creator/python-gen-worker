@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.41.0 (2026-07-21)
+
+- **gw#613/th#965: universal app-level heartbeat (liveness layer 2).**
+  ie#501 run 26 proved transport keepalive validates the gRPC library's
+  threads, not the application: a hung worker answered HTTP/2 pings for
+  2.5h while `generate` never left loading. The worker now declares
+  `Hello.heartbeat_interval_ms=30000` and force-re-sends the full
+  StateDelta every 30s from the asyncio event loop (the pgw#610
+  disk-report task, promoted to the beat — never a detached thread), in
+  every state including drain; the hub declares the worker dead after 3
+  consecutive misses (`worker_heartbeat_lost`) and recycles it on the
+  worker_disappeared enforcement path. A stuck coroutine that leaves the
+  loop beating is caught hub-side by layer 3 (loading function with no
+  open activity for 10min). Lockstep with tensorhub chaos c03a531d;
+  contract §3 rewritten in both repos.
+
 ## 0.40.4 (2026-07-21)
 
 - **gw#608: compiled-cell cross-pod portability.** The AOTAutogradCache key

@@ -155,7 +155,7 @@ class SchedulerMessage(_message.Message):
     def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., token_refresh: _Optional[_Union[TokenRefresh, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("protocol_version", "worker_id", "release_id", "resources", "state", "models", "in_flight")
+    __slots__ = ("protocol_version", "worker_id", "release_id", "resources", "state", "models", "in_flight", "heartbeat_interval_ms")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
@@ -163,6 +163,7 @@ class Hello(_message.Message):
     STATE_FIELD_NUMBER: _ClassVar[int]
     MODELS_FIELD_NUMBER: _ClassVar[int]
     IN_FLIGHT_FIELD_NUMBER: _ClassVar[int]
+    HEARTBEAT_INTERVAL_MS_FIELD_NUMBER: _ClassVar[int]
     protocol_version: ProtocolVersion
     worker_id: str
     release_id: str
@@ -170,7 +171,8 @@ class Hello(_message.Message):
     state: StateDelta
     models: _containers.RepeatedCompositeFieldContainer[ModelResidency]
     in_flight: _containers.RepeatedCompositeFieldContainer[InFlightJob]
-    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., state: _Optional[_Union[StateDelta, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelResidency, _Mapping]]] = ..., in_flight: _Optional[_Iterable[_Union[InFlightJob, _Mapping]]] = ...) -> None: ...
+    heartbeat_interval_ms: int
+    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., state: _Optional[_Union[StateDelta, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelResidency, _Mapping]]] = ..., in_flight: _Optional[_Iterable[_Union[InFlightJob, _Mapping]]] = ..., heartbeat_interval_ms: _Optional[int] = ...) -> None: ...
 
 class WorkerResources(_message.Message):
     __slots__ = ("gpu_count", "vram_total_bytes", "gpu_name", "gpu_sm", "installed_libs", "image_digest", "git_commit", "instance_id", "host_canary", "torch_version", "gen_worker_version")
