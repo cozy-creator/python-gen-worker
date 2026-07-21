@@ -49,3 +49,15 @@ def _fresh_settings_cache():
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_delivered_seed_flag():
+    """The gw#608 delivered-cell seed latch is process-lifetime in
+    production; tests seeding artifacts must not leak it into later
+    self-mint tests."""
+    from gen_worker import compile_cache as _cc
+
+    _cc._DELIVERED_SEEDED = False
+    yield
+    _cc._DELIVERED_SEEDED = False
+
+
