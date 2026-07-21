@@ -587,8 +587,9 @@ class Lifecycle:
         self.draining = True
         self.executor.draining = True
         self._cancel_residency_reconcile()
-        if self._disk_report_task is not None:
-            self._disk_report_task.cancel()
+        report_task = getattr(self, "_disk_report_task", None)
+        if report_task is not None:
+            report_task.cancel()
             self._disk_report_task = None
         logger.info("drain started (deadline_ms=%d)", deadline_ms)
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
