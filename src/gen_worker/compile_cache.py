@@ -554,6 +554,16 @@ def _reset_inductor_latch() -> None:
 # seeding reuses the same env contract
 seed_env = capture_env
 
+# gw#608: True once this process seeded a verified DELIVERED cell into the
+# live cache root. The inductor/triton cache dirs are process-global, so a
+# self-mint capture in the same process would re-point them away from the
+# seeded entries; fleet arming declines the mint instead.
+_DELIVERED_SEEDED = False
+
+
+def delivered_cell_seeded() -> bool:
+    return _DELIVERED_SEEDED
+
 
 def inductor_counters() -> Dict[str, int]:
     """This process's compiled-artifact cache counters (monotonic). The delta
@@ -1006,10 +1016,15 @@ def stage_artifact(
 
 def _activate_staged(staged: _StagedArtifact) -> Dict[str, Any]:
     """Publish a verified staging tree while holding ``_SEED_ARM_LOCK``."""
+    global _DELIVERED_SEEDED
     if not staged.activated:
         _merge_staged_cache(staged.staged_root, staged.live_root)
         staged.activated = True
     seed_env(staged.live_root)
+    # gw#608: the process now serves from a seeded delivered cell; any later
+    # self-mint capture would re-point the ONE process-global cache dir away
+    # from it and every seeded lookup would miss (the LTX consumer shape).
+    _DELIVERED_SEEDED = True
     return staged.metadata
 
 
@@ -2408,10 +2423,38 @@ def begin_fleet_mint(pipe: Any, cfg: Any, capture: Path) -> None:
     Raises if no compile target resolves on ``pipe`` (nothing to prove or
     publish); the caller's miss policy applies exactly as it did for a
     failed :func:`mint_artifact` call.
+
+    gw#608 ROOT CAUSE lived here: the cache-dir env is PROCESS-GLOBAL, and
+    this function re-pointed it BEFORE knowing the arm could succeed. On a
+    store-served LTX boot the no-compile-target upsampler sibling reached
+    this path after the distilled lane had seeded its delivered cell: the
+    env moved to a throwaway capture dir, the arm failed, the dir was
+    deleted — and the real warmup then looked up FX graphs in an empty
+    resurrected tmp dir (8/8 misses, live-proven; mint boots were immune
+    because their own capture registers first and the sibling is declined
+    BEFORE this call). The arm is therefore transactional now: nothing to
+    arm never touches the env, and an arm failure restores it exactly.
     """
+    if not has_compile_target(pipe, cfg):
+        raise RuntimeError(
+            f"no compile targets resolved on {type(pipe).__name__}")
+    prior = {
+        env: os.environ.get(env)
+        for env in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR")
+    }
     capture_env(capture)
-    if not apply(pipe, cfg, cache_ready=False, guard=True, allow_cold=True):
-        raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
+    try:
+        if not apply(pipe, cfg, cache_ready=False, guard=True, allow_cold=True):
+            raise RuntimeError(
+                f"no compile targets resolved on {type(pipe).__name__}")
+    except BaseException:
+        for env, value in prior.items():
+            if value is None:
+                os.environ.pop(env, None)
+            else:
+                os.environ[env] = value
+        _reset_inductor_latch()
+        raise
 
 
 def finish_fleet_mint(
@@ -2506,6 +2549,7 @@ __all__ = [
     "cell_lane",
     "contract_drift",
     "counters_delta",
+    "delivered_cell_seeded",
     "cache_hit_count",
     "cache_miss_count",
     "enable",

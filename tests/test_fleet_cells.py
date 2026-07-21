@@ -13,6 +13,7 @@ refusal only at genuine mint impossibilities.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -34,8 +35,19 @@ class _Cfg:
         self.lora_bucket = 0
 
 
+class _Denoiser:
+    def forward(self, *args, **kwargs):  # pragma: no cover - never called
+        return None
+
+
 class _Pipe:
     _cozy_low_vram_mode = "off"
+
+    def __init__(self):
+        # A resolvable compile target: the gw#608 gate declines the
+        # self-mint (BEFORE any process-global cache-dir mutation) for
+        # slot objects that could never arm.
+        self.transformer = _Denoiser()
 
 
 FAKE_KEY = "ck1-" + "a" * 56
@@ -437,3 +449,74 @@ def test_finalize_refuses_capture_without_fx_entries(monkeypatch, tmp_path):
     assert fc.finalize_self_mint(pipe, pending) is None, (
         "an artifact without FX entries must be refused")
     assert calls == [], "nothing may publish from a refused capture"
+
+
+# ---------------------------------------------------------------------------
+# gw#608 root cause: the self-mint arm must never strand the process-global
+# cache dir away from a seeded delivered cell.
+# ---------------------------------------------------------------------------
+
+
+def test_no_target_pipe_never_touches_cache_env(tmp_path, monkeypatch):
+    """A slot object with no resolvable compile target (the LTX upsampler
+    shape) must be declined BEFORE any cache-dir mutation. Pre-fix,
+    begin_fleet_mint re-pointed TORCHINDUCTOR_CACHE_DIR to a throwaway
+    capture dir before discovering there was nothing to arm — every seeded
+    lookup of the SIBLING lane then missed (the live 8/8 shape)."""
+    _mintable(monkeypatch)
+    seeded = tmp_path / "seeded-live"
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(seeded))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(seeded / "triton"))
+
+    class _NoTargetPipe:
+        _cozy_low_vram_mode = "off"
+
+    outcome = fc.enable_compiled(
+        _NoTargetPipe(), _Cfg(), tmp_path, None, publisher=None)
+    assert not outcome.armed and outcome.self_mint is None
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(seeded)
+    assert os.environ["TRITON_CACHE_DIR"] == str(seeded / "triton")
+    with fc._PENDING_LOCK:
+        assert fc._PENDING == {}
+
+
+def test_begin_fleet_mint_arm_failure_restores_cache_env(tmp_path, monkeypatch):
+    """An arm failure AFTER capture_env must restore the prior env exactly
+    (transactional): a dangling env on a deleted capture dir is the gw#608
+    consumer signature."""
+    seeded = tmp_path / "seeded-live"
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(seeded))
+    monkeypatch.setenv("TRITON_CACHE_DIR", str(seeded / "triton"))
+    # A real pipe with a real target; apply() fails on this box (no CUDA),
+    # driving the genuine post-capture_env failure path.
+    with pytest.raises(RuntimeError):
+        cc.begin_fleet_mint(_Pipe(), _Cfg(), tmp_path / "capture")
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(seeded)
+    assert os.environ["TRITON_CACHE_DIR"] == str(seeded / "triton")
+
+
+def test_delivered_seed_declines_later_self_mint(tmp_path, monkeypatch):
+    """Once a delivered cell is seeded in this process, a sibling self-mint
+    must be declined (plain lane -> eager): its capture would re-point the
+    ONE global cache dir away from the seeded entries mid-boot."""
+    _mintable(monkeypatch)
+    monkeypatch.setattr(cc, "_DELIVERED_SEEDED", True)
+    seeded = tmp_path / "seeded-live"
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(seeded))
+
+    began: list = []
+    monkeypatch.setattr(
+        cc, "begin_fleet_mint", lambda *a, **k: began.append(a))
+    outcome = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None)
+    assert not outcome.armed and outcome.self_mint is None
+    assert began == [], "a seeded process must never open a mint capture"
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(seeded)
+
+
+def test_delivered_seed_mandatory_lane_keeps_typed_refusal(tmp_path, monkeypatch):
+    _mintable(monkeypatch)
+    monkeypatch.setattr(cc, "_DELIVERED_SEEDED", True)
+    pipe = _Pipe()
+    pipe._cozy_weight_lane = "w8a8"
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="delivered cell"):
+        fc.enable_compiled(pipe, _Cfg(), tmp_path, None)
