@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.40.4 (2026-07-21)
+
+- **gw#608: compiled-cell cross-pod portability.** The AOTAutogradCache key
+  hashes the decomposition-table function's repr — including its process
+  memory address — so AOT entries can never hit across pods, and an AOT
+  miss recompiled without consulting the (byte-portable, proven-identical)
+  on-disk FX-graph entries: store-served boots failed closed 8/8 on
+  perfectly good cells. The worker now disables the AOT autograd cache
+  symmetrically at capture/seed/apply time; the FX cache is the lookup
+  surface. Hardening: `finish_fleet_mint` refuses to publish a capture with
+  zero (or fewer-than-proven) FX-graph entries — a minting boot now proves
+  its artifact, not just its execution.
+
 ## 0.40.3 (2026-07-20)
 
 - **Release cut for gw#607/gw#587:** first wheel carrying pgw#606/th#938

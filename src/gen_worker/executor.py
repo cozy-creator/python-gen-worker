@@ -3800,7 +3800,8 @@ class Executor:
                         activity_mod.current_phase(
                             activity_mod.PHASE_SEAL_PUBLISH)
                         finalized = fleet_cells_mod.finalize_self_mint(
-                            pipe, pending_mint)
+                            pipe, pending_mint,
+                            expected_graphs=max(0, pipe_misses))
                         inj.pending_self_mints.pop(id(pipe), None)
                         if finalized is not None:
                             proven += 1
