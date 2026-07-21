@@ -144,8 +144,8 @@ class Lifecycle:
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
-        self._disk_report_cache: Optional[pb.DiskUsageReport] = None
         self._disk_report_at = 0.0
+        self._disk_report_refresh_task: Optional[asyncio.Task] = None
         self._drain_deadline_at: Optional[float] = None
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
@@ -171,19 +171,45 @@ class Lifecycle:
             # up in its store (boot attach) — never hub-side selection input.
             cell_lookups=self.executor.cell_lookups(),
             # pgw#610/th#962: measured per-tier disk telemetry. Rides every
-            # StateDelta (and thus Hello.state); measured at most every
-            # _DISK_REPORT_TTL_S so the 10s beat never turns the statvfs/
-            # ref-index scan into a hot loop.
-            disk_usage=self._disk_usage_report(),
+            # StateDelta (and thus Hello.state). boothang fix: this ONLY
+            # reads ModelStore's cache (never blocks) — the actual statvfs
+            # measurement is a fire-and-forget background task kicked by
+            # _kick_disk_usage_refresh_if_stale, gated to at most every
+            # _DISK_REPORT_TTL_S. A synchronous (or awaited-inline) refresh
+            # here could freeze the event loop — and thus the th#965
+            # heartbeat sharing the same loop — for as long as a stalled
+            # provider VOLUME mount's statvfs() call blocks (the 0.40.7
+            # LTX post-seal_publish hang).
+            disk_usage=self.executor.store.disk_usage_report(),
         )
 
-    def _disk_usage_report(self) -> pb.DiskUsageReport:
+    def _kick_disk_usage_refresh_if_stale(self) -> None:
+        """FIRE-AND-FORGET off-loop (asyncio.to_thread) disk-usage refresh,
+        gated to at most every _DISK_REPORT_TTL_S. Called from
+        maybe_send_state_delta — never awaited there and never inline in
+        _state_delta() (see boothang fix note above): a send must not wait
+        on the measurement any more than the event loop should. A stalled
+        provider VOLUME mount just means this boot's disk telemetry stays
+        stale until the mount recovers — every StateDelta/heartbeat/RunJob
+        keeps flowing on schedule regardless."""
         now = time.monotonic()
-        if (self._disk_report_cache is None
-                or now - self._disk_report_at >= _DISK_REPORT_TTL_S):
-            self._disk_report_cache = self.executor.store.disk_usage_report()
-            self._disk_report_at = now
-        return self._disk_report_cache
+        if self._disk_report_at and now - self._disk_report_at < _DISK_REPORT_TTL_S:
+            return
+        if (self._disk_report_refresh_task is not None
+                and not self._disk_report_refresh_task.done()):
+            return  # a refresh is already in flight
+        self._disk_report_at = now
+
+        async def _run() -> None:
+            try:
+                await self.executor.store.refresh_disk_usage_report()
+            except Exception:
+                logger.warning(
+                    "disk-usage measurement failed; keeping the last "
+                    "cached report", exc_info=True)
+
+        self._disk_report_refresh_task = asyncio.create_task(
+            _run(), name="disk-usage-refresh")
 
     def build_resources(self) -> pb.WorkerResources:
         hw = self.hardware
@@ -432,6 +458,7 @@ class Lifecycle:
     ) -> None:
         if self.transport is None or not self.transport.connected:
             return
+        self._kick_disk_usage_refresh_if_stale()
         delta = self._state_delta()
         raw = delta.SerializeToString(deterministic=True)
         # force (th#965 layer 2): the heartbeat tick re-sends an unchanged

@@ -611,6 +611,21 @@ class ModelStore:
         self._disk_report_lock = threading.Lock()
         self._disk_capacity_generation = 0
         self._last_disk_shape: Optional[bytes] = None
+        # boothang fix: disk_usage_report() rides EVERY StateDelta build
+        # (_state_delta() is a plain sync method called directly from many
+        # call sites, some outside an await — never itself offloaded to a
+        # thread). Measuring here means statvfs()/stat() on a real mount —
+        # the provider-attached VOLUME fill-source is a network-backed
+        # mount that can stall for minutes under load, exactly what a
+        # self-mint's weight download + cell pack produce right before the
+        # first post-publish delta. A stalled statvfs on the event loop
+        # thread freezes the ENTIRE worker (including the th#965 heartbeat,
+        # which shares the same loop): every StateDelta, RunJob dispatch,
+        # and drain signal stops until the syscall returns. Cache the
+        # measurement and refresh it off-loop (refresh_disk_usage_report,
+        # driven by Lifecycle's TTL gate); disk_usage_report() only ever
+        # reads the cache, so the hot state-delta path never blocks on I/O.
+        self._cached_disk_usage_report = pb.DiskUsageReport()
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -739,15 +754,32 @@ class ModelStore:
         return out
 
     def disk_usage_report(self) -> pb.DiskUsageReport:
-        """Measured per-tier disk telemetry (pgw#610/th#962).
+        """Cached measured per-tier disk telemetry (pgw#610/th#962).
 
-        statvfs on the real mounts (CAS root = container tier; attached
-        endpoint volume = volume tier; a shared NFS mount joins as TIER_NFS
-        when the worker grows one) plus safely-reclaimable bytes: ref-index
-        entries at DISK tier that are inactive AND not in the desired set —
-        the disk-GC LRU's eligible set. Reuses ref-index bytes; never a tree
-        rescan. capacity_generation bumps only on a measured shape change.
-        """
+        Never measures directly — returns whatever
+        :meth:`refresh_disk_usage_report` last computed. ``_state_delta()``
+        calls this synchronously from many places (some with no event loop
+        at all, e.g. the initial ``build_hello()``); it must never touch a
+        filesystem. Empty/zeroed until the first refresh completes (boot's
+        first StateDelta may ship no tiers — informational telemetry, never
+        a dispatch gate on its own)."""
+        return self._cached_disk_usage_report
+
+    def _measure_disk_usage_report(self) -> pb.DiskUsageReport:
+        """Blocking measurement — statvfs on the real mounts (CAS root =
+        container tier; attached endpoint volume = volume tier; a shared
+        NFS mount joins as TIER_NFS when the worker grows one) plus safely-
+        reclaimable bytes: ref-index entries at DISK tier that are inactive
+        AND not in the desired set — the disk-GC LRU's eligible set. Reuses
+        ref-index bytes; never a tree rescan. capacity_generation bumps
+        only on a measured shape change.
+
+        Callers MUST run this off the event loop (``refresh_disk_usage_
+        report``, or a thread pool in tests) — the attached VOLUME
+        fill-source is a provider network mount that can stall for minutes
+        under load; a blocking statvfs on the event loop thread freezes the
+        whole worker, INCLUDING the th#965 heartbeat that shares the same
+        loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
         entries = self._index.entries()
         reclaimable: List[Tuple[str, int]] = []
@@ -782,6 +814,15 @@ class ModelStore:
                 self._last_disk_shape = shape
                 self._disk_capacity_generation += 1
             report.capacity_generation = self._disk_capacity_generation
+        return report
+
+    async def refresh_disk_usage_report(self) -> pb.DiskUsageReport:
+        """Off-loop refresh of the cached report (Lifecycle's TTL-gated
+        refresh, driven off the heartbeat/state-delta path + once at boot).
+        Never called from the hot StateDelta-build path — that path only
+        reads the cache."""
+        report = await asyncio.to_thread(self._measure_disk_usage_report)
+        self._cached_disk_usage_report = report
         return report
 
     def local_path(self, ref: str) -> Optional[Path]:
