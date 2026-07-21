@@ -139,11 +139,14 @@ resume epochs.
 
 ---
 
-## 3. Liveness
+## 3. Liveness — the 3-layer contract (th#965)
 
-gRPC HTTP/2 keepalive is the ONLY liveness mechanism. No app-level heartbeats,
-no padded keepalive envelopes, no inbound-silence watchdogs, no external
-lease refresh.
+Liveness is THREE layers, each detecting a distinct death mode. Every layer
+detects SILENCE, never slowness: no layer ever budgets how long honest work
+may take (th#929; the 6h backstop alarm is the only wall-clock and it should
+never fire).
+
+**Layer 1 — transport keepalive (dead process / dead network).**
 
 - **O (server):** `KeepaliveParams{Time: 20s, Timeout: 10s}` (no
   MaxConnectionIdle/Age), `EnforcementPolicy{MinTime: 5s, PermitWithoutStream: true}`.
@@ -154,12 +157,50 @@ lease refresh.
 A dead peer is detected within ≤30s on both sides; detection surfaces as a
 stream error → W reconnects (§1), O treats the worker as gone: it requeues
 that worker's assigned requests (attempt+1) unless the worker returns and
-re-claims them via `Hello.in_flight` reconcile first. Stream state is the
-worker-liveness authority — there is no heartbeat-timestamp pruner.
+re-claims them via `Hello.in_flight` reconcile first. A pod-backed worker
+that never reconnects within the stall window is enforced as
+`worker_disappeared`. Keepalive proves ONLY the gRPC library's threads:
+ie#501 run 26's hung worker answered HTTP/2 pings for 2.5h.
+
+**Layer 2 — universal app-level heartbeat (hung process).**
+
+W declares its cadence in `Hello.heartbeat_interval_ms` (10s; 0 = no promise,
+pre-th#965 builds are never heartbeat-reaped). The beat is a full `StateDelta`
+re-send emitted by W's application control loop (the asyncio event loop that
+owes all progress — NEVER a detached timer thread) in EVERY state: idle,
+loading, serving, mid-activity, draining. Edge-triggered StateDeltas count as
+beats too; O stamps last-beat on every StateDelta receipt (Hello is the first
+beat). Miss `DefaultHeartbeatMissLimit` (6) consecutive beats and O declares
+the worker dead — typed `worker_heartbeat_lost` pod_event, pod recycle,
+bounded re-dispatch, exactly the `worker_disappeared` enforcement path.
+10s x 6 (Paul, 2026-07-21): detection in ~60s, while a single missed beat
+costs only 10s of slack — a transient stall (GC pause, scheduler hiccup)
+never reads as death. Disk stats (pgw#610) ride every beat but are measured
+at most every 30s.
+
+**Event-loop discipline (W).** Because the beat is emitted from the event
+loop that owes progress, worker code must NEVER block that loop for longer
+than the miss window (~60s): long synchronous work — torch.compile, model
+loads, warmups, CUDA syncs, checkpoint IO, GC/eviction scans — runs in
+executor threads (`asyncio.to_thread` / `_to_thread_complete`), keeping the
+loop free to beat. A synchronous span exceeding the miss window reads as
+death BY DESIGN: a process that cannot service its control loop for a
+minute is indistinguishable from a hung one and is recycled.
+
+**Layer 3 — obligation invariant (hung work behind a healthy loop).**
+
+Heartbeats arriving but ANY function still in `loading_functions` with NO
+open activity (no running ActivityUpdate kind, no active model download) for
+`DefaultActivityStallAfter` (10min) → `worker_activity_stalled` with reason
+`loading_no_open_activity`, same enforcement. Completing an activity without
+starting the next one or declaring readiness is silence, not health. This
+closes the run-26 blind spot: activity-coverage gaps (gw#612 class) degrade
+the stall reason, never the detection.
 
 **Load balancer requirements.** Any proxy/LB between W and O's gRPC port MUST:
 - forward HTTP/2 PING frames end-to-end (no PING termination at the proxy —
-  keepalive is the ONLY liveness mechanism and must observe the real peer);
+  layer 1 must observe the real peer; an edge that answers pings itself
+  hides a dead backend until layer 2's miss window);
 - impose no idle/stream timeout below 30s (the keepalive detection window);
   long-lived idle bidi streams are the steady state, not an anomaly;
 - not multiplex/round-robin frames of one TCP connection across backends —
@@ -182,6 +223,7 @@ Sent once per connection, first message.
 | `state` | W lifecycle | O availability/supply | initial dynamic state (same shape as StateDelta) |
 | `models` | W model cache | O residency index (cache-aware routing baseline) | full residency snapshot; replaces any prior state O held for this worker |
 | `in_flight` | W executor + result buffer | O reconcile (§1) | jobs W still owns |
+| `heartbeat_interval_ms` | W constant (10000) | O layer-2 miss enforcement (§3) | promised app-level beat cadence; 0 = no promise, never heartbeat-reaped |
 
 ### WorkerResources (embedded in Hello)
 Static per-boot facts. Never re-sent mid-connection.
@@ -241,7 +283,9 @@ Reply to Hello; re-sent on config change (full replace).
 Full-replace snapshot of ALL dynamic worker state. Edge-triggered: sent
 whenever any field changes (function becomes available, phase advances,
 free VRAM shifts materially — quantize to ≥5% of total or a residency change
-to avoid chatter). Never periodic. O overwrites its copy wholesale.
+to avoid chatter). ALSO re-sent unchanged on every heartbeat tick (§3
+layer 2, `Hello.heartbeat_interval_ms`): receipt is the app-level beat O
+timestamps. O overwrites its copy wholesale.
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
