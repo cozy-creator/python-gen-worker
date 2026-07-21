@@ -1442,10 +1442,13 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
 
     class _Pub(fleet_cells.CellPublisher):
         def publish(self, family, artifact, meta):
-            events.append("publish")
+            # Fill `published` BEFORE the event: the main thread's wait loop
+            # keys on the event and immediately reads `published` (a publish
+            # event must mean the publish is observable, not merely started).
             published["bytes"] = Path(artifact).read_bytes()
             published["meta"] = dict(meta)
             published["family"] = family
+            events.append("publish")
             return "cp-1"
 
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
