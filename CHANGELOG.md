@@ -25,6 +25,24 @@
   post-proof tail (sibling resolution, publish decision, bookkeeping
   through readiness) so completed activities stop reporting a stale
   `seal_publish`.
+- **gw#611: adopt-proof counter blindness fixed; portability contract
+  pinned.** Measured (torch 2.13): with the AOT autograd cache in BUNDLED
+  mode an AOT hit serves the compiled artifact with the fxgraph counters
+  fully silent — a healthy serving adopt read `cache_hits=0,
+  cache_misses=0` to the warmup proof and fail-closed BRICKED the release
+  (th#954 SDXL second boot). `inductor_counters` now reports
+  `aot_cache_hit`/`aot_cache_miss` and the guard wrapper credits AOT-layer
+  hits as serving evidence (production pins the AOT layer off per gw#608,
+  so these stay 0 unless a config regression re-enables it — which now
+  degrades to a proven boot instead of a bricked release). The fail-closed
+  detail gains `calls=` so an orphaned/never-invoked wrapper (calls=0) is
+  distinguishable from counter-blind serving (calls>0) on the wire. New
+  real-codepath repro (tests/test_cell_portability_gw611.py): mint ->
+  pack -> fresh-process adopt -> warmup counts >=1 FX hit (CPU inductor,
+  real subprocesses), plus the bundled-AOT 0/0 mechanism pin. Hub lockstep
+  (tensorhub chaos 9e7dca8e): cells that fail their own adopt proof are
+  QUARANTINED (unattachable; next boot self-mints) instead of bricking
+  the release via model_load_failure_streak.
 
 ## 0.41.0 (2026-07-21)
 

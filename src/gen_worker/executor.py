@@ -3830,12 +3830,14 @@ class Executor:
                     mint_by_id[id(_pending)] = _pending
                     mint_sharers.setdefault(id(_pending), []).append(_obj_id)
                 proven_mint_objs: set[int] = set()
+                calls_by_obj: Dict[int, int] = {}
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
                     before = proof_before.get(id(pipe))
                     if before is None:
                         continue
                     calls = compile_cache.execution_count(pipe) - before[0]
+                    calls_by_obj[id(pipe)] = calls
                     pipe_hits = compile_cache.cache_hit_count(pipe)
                     pipe_misses = compile_cache.cache_miss_count(pipe) - before[1]
                     hits += max(0, pipe_hits)
@@ -3910,11 +3912,19 @@ class Executor:
                             compile_cache.drop_lora_lane(pipe)
                         inj.active_compile_artifacts.pop(id(pipe), None)
                         self._abandon_pending_mint(inj, pipe)
+                    # gw#611: `calls` discriminates the failure classes on the
+                    # wire — calls=0 is an orphaned/never-invoked wrapper (or
+                    # no warmup modality), calls>0 with 0/0 counters is a
+                    # compiled call served by a cache layer the counters
+                    # don't watch (pod logs are unreachable; this line is
+                    # the only forensic surface).
+                    unproven_calls = sum(
+                        calls_by_obj.get(id(c.pipeline), 0) for c in unproven)
                     detail = (
                         f"{len(unproven)} attached compile object(s) did not "
                         "serve their own warmup graph "
-                        f"(warmups={warmed}, cache_hits={hits}, "
-                        f"cache_misses={misses})"
+                        f"(warmups={warmed}, calls={unproven_calls}, "
+                        f"cache_hits={hits}, cache_misses={misses})"
                     )
                     if quant_lane:
                         if mint_by_id:
