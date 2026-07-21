@@ -92,6 +92,27 @@ def free_vram_bytes() -> int:
     return 0
 
 
+def _semantic_model_key(
+    ack: "pb.HelloAck", desired: "pb.DesiredResidency",
+) -> tuple:
+    """gw#614: order-independent identity of the MODEL content of an ack —
+    resolutions, disk refs, snapshots, hot instances. Generation and other
+    non-model fields are excluded so benign plan rewrites compare equal."""
+    return (
+        tuple(sorted(
+            (r.ref, r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
+        )),
+        tuple(sorted(ref for ref in desired.disk_refs if ref)),
+        tuple(sorted(
+            (ref, snap.SerializeToString(deterministic=True))
+            for ref, snap in desired.snapshots.items()
+        )),
+        tuple(sorted(
+            inst.SerializeToString(deterministic=True) for inst in desired.hot
+        )),
+    )
+
+
 class Lifecycle:
     """Transport handlers + worker state machine. One instance per process."""
 
@@ -256,7 +277,8 @@ class Lifecycle:
             self.executor.store.replace_desired_snapshots(
                 dict(desired.snapshots), generation=generation,
             )
-            self._replace_residency_reconcile(desired)
+            self._replace_residency_reconcile(
+                desired, model_key=_semantic_model_key(ack, desired))
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello. Capacity evidence has causal priority over retained results;
         # other finite baseline messages follow it in the same prepend lane.
@@ -278,7 +300,22 @@ class Lifecycle:
         self._last_delta = None
         await self.maybe_send_state_delta(hello_ack=True)
 
-    def _replace_residency_reconcile(self, desired: "pb.DesiredResidency") -> None:
+    def _replace_residency_reconcile(
+        self, desired: "pb.DesiredResidency", *, model_key: Any = None,
+    ) -> None:
+        # gw#614 (th#961 defense in depth): an ack whose semantic model set
+        # is unchanged must not kill an in-flight reconcile — a running
+        # self_mint_compile needs its full window. Non-model deltas were
+        # already applied by the caller; changed sets cancel as before.
+        task = getattr(self, "_residency_task", None)
+        if (
+            model_key is not None
+            and task is not None and not task.done()
+            and getattr(self, "_residency_model_key", None) == model_key
+        ):
+            self._desired_residency = desired
+            return
+        self._residency_model_key = model_key
         self._cancel_residency_reconcile()
         self._desired_residency = desired
         self._resume_residency_reconcile()

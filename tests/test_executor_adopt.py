@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import msgspec
 import pytest
 
-from gen_worker import Compile, RequestContext, Resources, endpoint
+from gen_worker import Compile, ImageAsset, RequestContext, Resources, endpoint
 from gen_worker import compile_cache as cc
 from gen_worker.models import provision
 from gen_worker.api.binding import Hub
@@ -3813,3 +3813,167 @@ def test_two_lane_mint_fully_exercised_publishes_the_union_cell(
     targets = ex.compile_targets()
     assert len(targets) == 2
     assert len({t.active_compile_snapshot_digest for t in targets}) == 1
+
+
+# ---------------------------------------------------------------------------
+# gw#614: synthesized media-modality warmup coverage — an input-routed sibling
+# lane (edit needs an input image) gets exercised at mint, so the family cell
+# publishes COMPLETE instead of withholding forever (qwen second-boot shape).
+# ---------------------------------------------------------------------------
+
+
+class _RoutedIn(msgspec.Struct):
+    """The qwen merged-endpoint payload shape: optional media routes lanes."""
+
+    prompt: str = ""
+    images: list[ImageAsset] = []
+
+
+def _routed_mint_boot(tmp_path, monkeypatch, *, publisher):
+    """Real ensure_setup over the REAL qwen shape (no custom warmup()):
+    one input-routed handler, declared warmup payload without media, TWO
+    mandatory-lane pipes sharing ONE pending self-mint capture. Only a
+    synthesized media-variant forward can exercise the edit lane."""
+    import gen_worker.executor as executor_mod
+    from gen_worker import fleet_cells
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    pipes = {"first": _LoadablePipe(), "second": _LoadablePipe()}
+    for p in pipes.values():
+        setattr(p, "_cozy_weight_lane", "w8a8")
+    captured, mint_key = _pending_mint_rig(
+        tmp_path, monkeypatch, pipe=pipes["first"], publisher=publisher)
+
+    @endpoint(
+        models={
+            "first": Hub("acme/qwen-image", flavor="fp8-w8a8"),
+            "second": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
+        },
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={"run": {"prompt": "warmup"}},
+    )
+    class _RoutedMerged:
+        edit_payloads: list = []
+
+        def setup(self, first: _LoadablePipe, second: _LoadablePipe) -> None:
+            self.first = first
+            self.second = second
+
+        def run(self, ctx: RequestContext, payload: _RoutedIn) -> _Out:
+            cap = captured["dir"]
+            (cap / "inductor" / "g").mkdir(parents=True, exist_ok=True)
+            (cap / "triton").mkdir(exist_ok=True)
+            if payload.images:
+                type(self).edit_payloads.append(
+                    (payload, Path(payload.images[0].local_path).is_file()))
+                (cap / "inductor" / "g" / "edit_graph.py").write_text("real")
+                _record_fake_warm(self.second, hits=0, misses=8)
+            else:
+                fx = cap / "inductor" / "fxgraph"
+                for i in range(8):
+                    (fx / f"g{i}").mkdir(parents=True, exist_ok=True)
+                    (fx / f"g{i}" / "entry").write_text("fx")
+                (cap / "inductor" / "g" / "t2i_graph.py").write_text("real")
+                _record_fake_warm(self.first, hits=0, misses=8)
+            return _Out()
+
+    _RoutedMerged.edit_payloads = []
+    spec = EndpointSpec(
+        name="generate", method=_RoutedMerged.run, kind="inference",
+        payload_type=_RoutedIn, output_mode="single", cls=_RoutedMerged,
+        attr_name="run", resources=Resources(gpu=True),
+        models={
+            "first": Hub("acme/qwen-image", flavor="fp8-w8a8"),
+            "second": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
+        },
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipes[kwargs["slot"]], is_pipeline=True),
+    )
+    monkeypatch.setattr(
+        ex, "_enable_compiled",
+        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+            p, cfg, ex.store._cache_dir, artifact, publisher=publisher))
+    snapshots = {
+        wire_ref(spec.models["first"]): pb.Snapshot(digest=MODEL_DIGEST),
+        wire_ref(spec.models["second"]): pb.Snapshot(digest=DIGEST_B),
+    }
+    return ex, spec, pipes, _RoutedMerged, snapshots
+
+
+def test_routed_two_lane_mint_synthesized_media_coverage_publishes_union(
+    tmp_path, monkeypatch, caplog,
+):
+    """gw#614 red-first: the declared warmup carries no media, so pre-fix the
+    edit pipe records calls=0, publish is WITHHELD, and qwen self-mints on
+    every boot forever. The synthesized media-variant forward must exercise
+    the edit lane at mint so the union cell publishes once, complete."""
+    import io
+    import tarfile
+    import threading as _threading
+
+    from gen_worker import fleet_cells
+
+    published = _threading.Event()
+    calls: list = []
+
+    class _Pub(fleet_cells.CellPublisher):
+        def publish(self, family, artifact, meta):
+            calls.append((family, Path(artifact).read_bytes()))
+            published.set()
+            return "cp-1"
+
+    pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
+               image_digest="sha256:img")
+    ex, spec, pipes, cls, snapshots = _routed_mint_boot(
+        tmp_path, monkeypatch, publisher=pub)
+
+    with caplog.at_level("WARNING"):
+        instance = asyncio.run(
+            asyncio.wait_for(ex.ensure_setup(spec, snapshots), timeout=60))
+    assert instance is not None
+    assert ex._classes[spec.instance_key].ready
+
+    assert published.wait(5), (
+        "the media-variant warmup must complete lane coverage so the "
+        "family cell publishes (pre-gw#614: withheld, second boots "
+        "self-mint forever)")
+    assert len(calls) == 1
+    with tarfile.open(fileobj=io.BytesIO(calls[0][1]), mode="r:*") as tar:
+        names = tar.getnames()
+    assert any("t2i_graph.py" in n for n in names)
+    assert any("edit_graph.py" in n for n in names), (
+        "the published family cell must contain BOTH lanes' graphs")
+
+    targets = ex.compile_targets()
+    assert len(targets) == 2
+    assert len({t.active_compile_snapshot_digest for t in targets}) == 1
+    assert not any(
+        "SELF_MINT_PUBLISH_WITHHELD" in r.message for r in caplog.records)
+    assert not any("armed unproven" in r.message for r in caplog.records), (
+        "the edit lane must be PROVEN at mint, not armed-unproven")
+
+    # Key fidelity: the variant IS the declared base payload + one
+    # synthesized image — nothing else may drift, or the minted graphs
+    # would not match a real edit request's compile keys.
+    ((edit_payload, image_was_real),) = cls.edit_payloads
+    assert edit_payload.prompt == "warmup"
+    assert len(edit_payload.images) == 1
+    assert image_was_real, "the synthesized input image must exist on disk"

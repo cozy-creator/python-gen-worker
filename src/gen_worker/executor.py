@@ -3507,9 +3507,16 @@ class Executor:
             logger.info("boot warmup skipped for %s: %s", skip.spec.name, skip.reason)
         objects = tuple({id(obj): obj for obj in proof_objects}.values())
         evidence = _WarmupEvidence()
-        for wj_index, wj in enumerate(jobs, start=1):
-            activity_mod.current_phase(
-                activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(jobs))
+        start_counts = {
+            id(obj): (
+                compile_cache.execution_count(obj),
+                trt_engine.execution_count(obj),
+            )
+            for obj in objects
+        }
+
+        async def _one(wj: Any, build: Any, mode: str, *, variant: bool) -> bool:
+            """One warmup forward; False = OOM, stop warming."""
             before = {
                 id(obj): (
                     compile_cache.execution_count(obj),
@@ -3520,7 +3527,19 @@ class Executor:
             handler_kwargs = await self._handler_kwargs(wj.spec, snapshots or {})
             t0 = time.monotonic()
             with tempfile.TemporaryDirectory(prefix="gw-warmup-") as tmp:
-                payload = wj.build(tmp)
+                try:
+                    payload = build(tmp)
+                except Exception as exc:
+                    if not variant:
+                        raise
+                    # A variant that cannot construct a valid payload is a
+                    # schema mismatch, never a boot failure.
+                    logger.warning(
+                        "coverage warmup %s (%s) skipped: %s",
+                        wj.spec.name, mode, exc)
+                    return True
+                if payload is None:
+                    return True  # variant base already carries media
                 ctx = RequestContext(
                     request_id=f"boot-warmup-{wj.spec.name}",
                     local_output_dir=tmp,
@@ -3542,7 +3561,7 @@ class Executor:
                         wj.spec.name, exc)
                     if torch is not None and torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    return evidence
+                    return False
             evidence.count += 1
             for obj in objects:
                 calls_before, trt_before = before[id(obj)]
@@ -3559,8 +3578,47 @@ class Executor:
                         wj.spec.name)
             logger.info(
                 "boot warmup %s (%s): %.1fs",
-                wj.spec.name, "declared" if wj.declared else "synthesized",
-                time.monotonic() - t0)
+                wj.spec.name, mode, time.monotonic() - t0)
+            return True
+
+        for wj_index, wj in enumerate(jobs, start=1):
+            activity_mod.current_phase(
+                activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(jobs))
+            mode = "declared" if wj.declared else "synthesized"
+            if not await _one(wj, wj.build, mode, variant=False):
+                return evidence
+
+        def _unexercised() -> list[Any]:
+            return [
+                obj for obj in objects
+                if compile_cache.execution_count(obj) == start_counts[id(obj)][0]
+                and trt_engine.execution_count(obj) == start_counts[id(obj)][1]
+            ]
+
+        # gw#614 coverage pass: an input-routed sibling lane the planned
+        # warmups never reached (e.g. edit needing an input image) leaves a
+        # compile object at calls=0 — the mint then withholds publish
+        # (gw#612) and an adopt arms it unproven. Synthesized media variants
+        # of the same base payloads exercise those lanes with matching
+        # compile-key derivation (only the media field differs).
+        if jobs and _unexercised():
+            from . import warmup as warmup_mod
+
+            variant_jobs = [
+                (wj, label, build)
+                for wj in jobs
+                for label, build in warmup_mod.media_variants(
+                    wj.spec.payload_type, wj.build)
+            ]
+            total = len(jobs) + len(variant_jobs)
+            for v_index, (wj, label, build) in enumerate(
+                    variant_jobs, start=len(jobs) + 1):
+                if not _unexercised():
+                    break
+                activity_mod.current_phase(
+                    activity_mod.PHASE_WARMUP_FORWARD, v_index, total)
+                if not await _one(wj, build, label, variant=True):
+                    return evidence
         return evidence
 
     async def _invoke_warmup(

@@ -2,6 +2,30 @@
 
 ## 0.42.0 (2026-07-21)
 
+- **gw#614: synthesized media-modality warmup coverage — multi-lane family
+  cells mint complete.** gw#612's publish gate left any endpoint whose
+  input-routed sibling lane needs media (qwen edit: an input image) unable
+  to ever publish its family cell — the declared/synthesized warmup fills
+  only required payload fields, the edit lane records calls=0, publish is
+  withheld, and every second boot re-mints (~24 min). The synthesized
+  warmup now runs a coverage pass: when a compile-target object is still
+  unexercised after the planned jobs, media VARIANTS of the same base
+  payloads (base = declared warmup payload when present, else the
+  synthesized default; exactly ONE optional image/audio field filled with
+  a generated asset, nothing else drifts) exercise the remaining lanes.
+  Driven by payload schema + compile-object coverage, no endpoint-name
+  switch; applies to mint (union cell publishes) and adopt (the sibling
+  lane proves against the cell instead of arming unproven). New
+  `warmup.media_variants`; real-inductor fresh-subprocess proof that a
+  two-lane union cell serves BOTH lanes as FX hits
+  (tests/test_cell_portability_gw611.py).
+- **gw#614: on_hello_ack model-set-diff cancel (th#961 defense in
+  depth).** Every HelloAck used to cancel + restart the residency-
+  reconcile task, killing any in-flight self_mint_compile at phase=load
+  (th#961: 4,602 cancels in 19 min). The worker now diffs the ack's
+  semantic model set (resolutions + disk_refs + snapshots + hot) against
+  the running reconcile's target: identical set → keep the task, apply
+  non-model deltas only; changed set → cancel as before.
 - **gw#612: multi-lane self-mint — publish gated on full capture coverage;
   post-proof activity phase.** ie#501 run 26's "post-seal_publish hang" is
   DISPROVEN on evidence: the qwen 2-lane minting worker completed setup,

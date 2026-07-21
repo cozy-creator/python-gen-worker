@@ -77,12 +77,26 @@ _CHILD = textwrap.dedent(
             compiled(torch.ones(2, 16))
         return cc.counters_delta(before, cc.inductor_counters())
 
+    def compile_two_lanes():
+        # gw#614: two distinct graphs sharing ONE capture — the t2i lane and
+        # the (synthesized-warmup-exercised) edit lane of a family cell.
+        torch.manual_seed(0)
+        t2i = torch.nn.Sequential(torch.nn.Linear(16, 16), torch.nn.ReLU())
+        edit = torch.nn.Sequential(torch.nn.Linear(32, 8), torch.nn.Tanh())
+        t2i.eval(); edit.eval()
+        ct, ce = torch.compile(t2i, dynamic=False), torch.compile(edit, dynamic=False)
+        before = cc.inductor_counters()
+        with torch.no_grad():
+            ct(torch.ones(2, 16))
+            ce(torch.ones(2, 32))
+        return cc.counters_delta(before, cc.inductor_counters())
+
     if role == "mint":
         cap = workdir / "capture"
         cc.capture_env(cap)
         if mode == "bundled_aot":
             enable_bundled_aot()
-        delta = compile_once()
+        delta = compile_two_lanes() if mode == "twolane" else compile_once()
         entries = [p for p in (cap / "inductor").rglob("*") if p.is_file()]
         meta = cc.artifact_metadata(
             family=FAMILY, shapes=((16, 16),), targets=("0",))
@@ -93,7 +107,7 @@ _CHILD = textwrap.dedent(
             workdir / "cell.tar.gz", FAMILY, cache_dir=workdir / "adopt-cache")
         if mode == "bundled_aot":
             enable_bundled_aot()
-        delta = compile_once()
+        delta = compile_two_lanes() if mode == "twolane" else compile_once()
         print(json.dumps({"delta": delta, "family": str(meta.get("family"))}))
     """
 )
@@ -137,6 +151,28 @@ def test_fresh_process_adopt_serves_from_the_packed_cell(tmp_path):
     assert hits >= 1 and misses == 0, (
         f"fresh-process adopt must SERVE from the cell (delta={adopt['delta']})"
         " — the gw#611 release-bricking shape is hits=0"
+    )
+
+
+def test_union_cell_serves_both_lanes_in_a_fresh_process(tmp_path):
+    """gw#614: a family cell minted with BOTH lanes' graphs (the synthesized
+    media-variant warmup exercises the sibling lane, so the union publishes)
+    must serve BOTH lanes as FX hits in a fresh adopting process — zero
+    recompiles. Pre-gw#614 mints packed lane-1-only cells; this is the
+    complete-cell counterpart of the gw#611 single-lane contract."""
+    mint = _run_child(tmp_path, "mint", mode="twolane")
+    assert mint["delta"].get("fxgraph_cache_miss", 0) >= 2, (
+        "the two-lane mint cold-compiles one graph per lane"
+    )
+    assert mint["fx_entries"] > 0
+
+    adopt = _run_child(tmp_path, "adopt", mode="twolane")
+    hits = adopt["delta"].get("fxgraph_cache_hit", 0)
+    misses = adopt["delta"].get("fxgraph_cache_miss", 0)
+    assert hits >= 2 and misses == 0, (
+        f"the union cell must serve BOTH lanes cross-process "
+        f"(delta={adopt['delta']}) — one lane missing is the gw#611 qwen "
+        "hits=1/misses=1 release-bricker"
     )
 
 
