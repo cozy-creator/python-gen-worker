@@ -35,6 +35,10 @@ PHASE_TRACE_GRAPH = "trace_graph"
 PHASE_INDUCTOR_COMPILE = "inductor_compile"
 PHASE_WARMUP_FORWARD = "warmup_forward"
 PHASE_SEAL_PUBLISH = "seal_publish"
+# gw#612: post-proof tail — sibling-lane resolution, publish decision,
+# residency/target bookkeeping through readiness. Phases are logged
+# verbatim hub-side (only kinds are enumerated in worker_activity.go).
+PHASE_FINALIZE = "finalize"
 
 # Default watchdog cadence; the hub's stall rule (~10 min) tolerates many
 # missed beats.

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.42.0 (2026-07-21)
+
+- **gw#612: multi-lane self-mint — publish gated on full capture coverage;
+  post-proof activity phase.** ie#501 run 26's "post-seal_publish hang" is
+  DISPROVEN on evidence: the qwen 2-lane minting worker completed setup,
+  advertised readiness (`newly_available=[generate]` hub-side 20:00:50),
+  and idled; the 2.5h wedge was hub-side — the singular compile fence saw
+  the record's TWO same-identity self-attested targets (t2i + edit riding
+  one family cell) as ambiguous and starved dispatch forever (tensorhub
+  lockstep fix: same-identity siblings collapse to one deterministic
+  pick). Worker-side real defect fixed here: the shared capture packs
+  only the graphs the warmup compiled, so a mandatory sibling lane the
+  warmup never exercised (qwen edit — no warmup modality) left the
+  published "family cell" lane-1-only, bricking every adopting boot at
+  the gw#607 per-object proof (gw#611 qwen variant, hits=1/misses=1 →
+  compile_cell_failed → release broken). `finalize_self_mint` now only
+  packs; the executor decides after the whole proof pass:
+  `publish_self_mint` when every capture-sharing object proved into the
+  cell, `withhold_self_mint_publish` (typed, loud:
+  `SELF_MINT_PUBLISH_WITHHELD`) when any sharer went unexercised — the
+  boot still serves compiled locally and re-mints next boot instead of
+  poisoning the store. New `finalize` activity phase covers the
+  post-proof tail (sibling resolution, publish decision, bookkeeping
+  through readiness) so completed activities stop reporting a stale
+  `seal_publish`.
+
 ## 0.41.0 (2026-07-21)
 
 - **gw#613/th#965: universal app-level heartbeat (liveness layer 2).**

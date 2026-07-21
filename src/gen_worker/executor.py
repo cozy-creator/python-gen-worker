@@ -3821,6 +3821,15 @@ class Executor:
                 proven = 0
                 hits = 0
                 misses = 0
+                # gw#612: snapshot capture-sharing BEFORE the loop pops
+                # pending entries. The publish decision needs to know, per
+                # shared capture, whether EVERY sharer's graphs made it in.
+                mint_by_id: Dict[int, Any] = {}
+                mint_sharers: Dict[int, List[int]] = {}
+                for _obj_id, _pending in inj.pending_self_mints.items():
+                    mint_by_id[id(_pending)] = _pending
+                    mint_sharers.setdefault(id(_pending), []).append(_obj_id)
+                proven_mint_objs: set[int] = set()
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
                     before = proof_before.get(id(pipe))
@@ -3858,6 +3867,7 @@ class Executor:
                         inj.pending_self_mints.pop(id(pipe), None)
                         if finalized is not None:
                             proven += 1
+                            proven_mint_objs.add(id(pipe))
                             if callable(warmup):
                                 function_proofs[id(pipe)] = {spec.name}
                             inj.active_compile_artifacts[id(pipe)] = (
@@ -3875,6 +3885,11 @@ class Executor:
                         proven += 1
                         if callable(warmup):
                             function_proofs[id(pipe)] = {spec.name}
+                # gw#612: everything after the per-object proof — unproven
+                # handling, sibling resolution, the publish decision, and
+                # the bookkeeping down to readiness — reports an honest
+                # phase instead of a stale seal_publish.
+                activity_mod.current_phase(activity_mod.PHASE_FINALIZE)
                 unproven = list(disproven)
                 if not proven:
                     unproven.extend(unexercised)
@@ -3902,6 +3917,12 @@ class Executor:
                         f"cache_misses={misses})"
                     )
                     if quant_lane:
+                        if mint_by_id:
+                            from . import fleet_cells as fleet_cells_mod
+
+                            for pending in mint_by_id.values():
+                                fleet_cells_mod.withhold_self_mint_publish(
+                                    pending, f"boot failed closed ({detail})")
                         raise compile_cache.CompiledLaneUnavailableError(detail)
                     logger.warning("%s; serving eager", detail)
                 if unexercised:
@@ -3968,6 +3989,31 @@ class Executor:
                         compile_cache.drop_lora_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
                     self._abandon_pending_mint(inj, pipe)
+                if mint_by_id:
+                    # gw#612 publish gate: a shared capture packs only the
+                    # graphs the warmup compiled. Publish the family cell
+                    # only when EVERY sharer proved into it; otherwise the
+                    # store would gain a partial cell that fails gw#607's
+                    # per-object adopt proof on every later boot (the
+                    # gw#611 qwen hits=1/misses=1 release-breaker). The
+                    # local mint keeps serving this process either way.
+                    from . import fleet_cells as fleet_cells_mod
+
+                    for pending in mint_by_id.values():
+                        sharers = mint_sharers.get(id(pending), [])
+                        gap = [
+                            oid for oid in sharers
+                            if oid not in proven_mint_objs
+                        ]
+                        if gap:
+                            fleet_cells_mod.withhold_self_mint_publish(
+                                pending,
+                                f"{len(gap)}/{len(sharers)} capture-sharing "
+                                "compile object(s) were never exercised by "
+                                "the warmup, so their graphs are absent "
+                                "from the packed cell")
+                        else:
+                            fleet_cells_mod.publish_self_mint(pending)
                 if (
                     proven
                     and compile_selection is not None

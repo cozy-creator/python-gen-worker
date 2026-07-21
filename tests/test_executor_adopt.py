@@ -3631,3 +3631,185 @@ def test_fresh_boot_advertises_candidate_cell_lookups(monkeypatch):
         (FAMILY, _Key.digest)]
     # The mandatory lane candidate was computed for the declared w8a8 ref.
     assert (FAMILY, "w8a8") in computed
+
+
+# ---------------------------------------------------------------------------
+# gw#612: multi-lane self-mint — sibling handoff must complete, publish gated
+# on full capture coverage (ie#501 run 26 / gw#611 qwen variant)
+# ---------------------------------------------------------------------------
+
+
+def _dual_mint_boot(tmp_path, monkeypatch, *, publisher, warm_second: bool):
+    """Real ensure_setup over the qwen shape: TWO mandatory-lane pipes of one
+    record share ONE pending self-mint capture (same computed key); the
+    warmup exercises the first lane always, the second only when
+    ``warm_second``."""
+    import gen_worker.executor as executor_mod
+    from gen_worker import fleet_cells
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    pipes = {"first": _LoadablePipe(), "second": _LoadablePipe()}
+    for p in pipes.values():
+        setattr(p, "_cozy_weight_lane", "w8a8")
+    captured, mint_key = _pending_mint_rig(
+        tmp_path, monkeypatch, pipe=pipes["first"], publisher=publisher)
+
+    class _MergedEndpoint:
+        warmups = 0
+
+        def setup(self, first: _LoadablePipe, second: _LoadablePipe) -> None:
+            self.first = first
+            self.second = second
+
+        def warmup(self) -> None:
+            type(self).warmups += 1
+            cap = captured["dir"]
+            (cap / "inductor" / "g").mkdir(parents=True, exist_ok=True)
+            (cap / "inductor" / "g" / "t2i_graph.py").write_text("real")
+            fx = cap / "inductor" / "fxgraph"
+            for i in range(8):
+                (fx / f"g{i}").mkdir(parents=True, exist_ok=True)
+                (fx / f"g{i}" / "entry").write_text("fx")
+            (cap / "triton").mkdir(exist_ok=True)
+            _record_fake_warm(self.first, hits=0, misses=8)
+            if warm_second:
+                (cap / "inductor" / "g" / "edit_graph.py").write_text("real")
+                _record_fake_warm(self.second, hits=0, misses=8)
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = EndpointSpec(
+        name="generate", method=_MergedEndpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=_MergedEndpoint,
+        attr_name="run",
+        models={
+            "first": Hub("acme/qwen-image", flavor="fp8-w8a8"),
+            "second": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
+        },
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipes[kwargs["slot"]], is_pipeline=True),
+    )
+    monkeypatch.setattr(
+        ex, "_enable_compiled",
+        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+            p, cfg, ex.store._cache_dir, artifact, publisher=publisher))
+    snapshots = {
+        wire_ref(spec.models["first"]): pb.Snapshot(digest=MODEL_DIGEST),
+        wire_ref(spec.models["second"]): pb.Snapshot(digest=DIGEST_B),
+    }
+    return ex, spec, pipes, mint_key, snapshots
+
+
+def test_two_lane_mint_with_unexercised_sibling_completes_and_withholds_publish(
+    tmp_path, monkeypatch, caplog,
+):
+    """gw#612 regression, the ie#501 run-26 qwen shape: a two-lane
+    mandatory-lane record mints via a warmup that exercises only lane 1.
+
+    Filed as a post-seal_publish HANG; the sibling handoff is synchronous
+    (``pending._state['minted']``) and must COMPLETE — the timeout guard
+    here is the proof (it trips if any of this path ever parks). The real
+    defect this pins: the shared capture holds only lane 1's graphs, so
+    publishing it as the family cell bricks every adopting boot at the
+    gw#607 per-object proof (gw#611 qwen variant, hits=1/misses=1).
+    Publish must be WITHHELD, typed and loud, while the boot itself still
+    reaches READY and advertises both targets under the minted identity."""
+    from gen_worker import fleet_cells
+
+    class _Pub(fleet_cells.CellPublisher):
+        def publish(self, family, artifact, meta):
+            pytest.fail(
+                "an incomplete family cell (unexercised mandatory sibling) "
+                "must never be published")
+
+    pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
+               image_digest="sha256:img")
+    ex, spec, pipes, mint_key, snapshots = _dual_mint_boot(
+        tmp_path, monkeypatch, publisher=pub, warm_second=False)
+
+    async def _boot():
+        # The filed gw#612 shape: this MUST complete (never park forever).
+        return await asyncio.wait_for(
+            ex.ensure_setup(spec, snapshots), timeout=60)
+
+    with caplog.at_level("WARNING"):
+        instance = asyncio.run(_boot())
+    assert instance is not None
+    assert ex._classes[spec.instance_key].ready, "boot must reach READY"
+
+    targets = ex.compile_targets()
+    assert len(targets) == 2, "both lanes advertise (family-cell union design)"
+    refs = {t.active_compile_ref for t in targets}
+    digests = {t.active_compile_snapshot_digest for t in targets}
+    assert len(refs) == 1 and len(digests) == 1, (
+        "sibling rides the SAME minted identity — the hub fence must "
+        "collapse same-identity targets (th-side lockstep fix)")
+    assert next(iter(digests)).startswith("blake3:")
+
+    assert any(
+        "SELF_MINT_PUBLISH_WITHHELD" in r.message for r in caplog.records
+    ), "withheld publish must be typed and loud"
+    assert any(
+        "armed unproven" in r.message for r in caplog.records
+    ), "the unexercised sibling still reports its unproven arming"
+    with fleet_cells._PENDING_LOCK:
+        assert fleet_cells._PENDING == {}
+
+
+def test_two_lane_mint_fully_exercised_publishes_the_union_cell(
+    tmp_path, monkeypatch,
+):
+    """Coverage-complete counterpart: when the warmup exercises BOTH lanes,
+    the packed cell holds the union and the publish gate ships it once."""
+    import threading as _threading
+
+    from gen_worker import fleet_cells
+
+    published = _threading.Event()
+    calls: list = []
+
+    class _Pub(fleet_cells.CellPublisher):
+        def publish(self, family, artifact, meta):
+            calls.append((family, Path(artifact).read_bytes()))
+            published.set()
+            return "cp-1"
+
+    pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
+               image_digest="sha256:img")
+    ex, spec, pipes, mint_key, snapshots = _dual_mint_boot(
+        tmp_path, monkeypatch, publisher=pub, warm_second=True)
+
+    instance = asyncio.run(
+        asyncio.wait_for(ex.ensure_setup(spec, snapshots), timeout=60))
+    assert instance is not None
+    assert published.wait(5), "a fully-covered family cell must publish"
+    assert len(calls) == 1
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(calls[0][1]), mode="r:*") as tar:
+        names = tar.getnames()
+    assert any("t2i_graph.py" in n for n in names)
+    assert any("edit_graph.py" in n for n in names), (
+        "the published family cell must contain BOTH lanes' graphs")
+    targets = ex.compile_targets()
+    assert len(targets) == 2
+    assert len({t.active_compile_snapshot_digest for t in targets}) == 1

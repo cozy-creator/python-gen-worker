@@ -440,15 +440,17 @@ def enable_compiled(
 def finalize_self_mint(
     pipe: Any, pending: "PendingSelfMint", *, expected_graphs: int = 0,
 ) -> Optional[SelfMint]:
-    """Pack + publish a self-mint AFTER the executor's warmup proof passes.
+    """Pack a self-mint AFTER the executor's warmup proof passes.
 
     Called from the executor's warmup-proof loop, per proven candidate —
     never before the proof confirms a real, successful compiled call on
     ``pipe``. Memoized on the pending object: when several sibling pipes
-    share one capture (same key), the first proven candidate packs and
-    publishes; later siblings receive the same finalized identity without
-    re-packing (the pack runs after the WHOLE warmup, so it already holds
-    every sibling's graphs).
+    share one capture (same key), the first proven candidate packs; later
+    siblings receive the same finalized identity without re-packing. The
+    capture holds ONLY graphs the warmup actually compiled, so the executor
+    decides publish/withhold separately (:func:`publish_self_mint` /
+    :func:`withhold_self_mint_publish`) once sibling coverage is known
+    (gw#612: an unexercised mandatory sibling means an incomplete cell).
 
     Packing failure never un-serves the request (``pipe``'s compiled
     callables are already live in-process); it only means this boot cannot
@@ -485,10 +487,11 @@ def finalize_self_mint(
         artifact=pending.target,
     )
     state["minted"] = minted
+    state["meta"] = dict(meta)
     _unregister(pending)
     logger.info(
         "fleet-cells: self-mint proof passed for %s (key=%s, %.1f MB) — "
-        "serving compiled, publishing",
+        "serving compiled; publish decided after sibling coverage is known",
         pending.family, key, pending.target.stat().st_size / 1e6)
 
     # Hygiene: fold the proven capture into the live compile-cache root and
@@ -508,12 +511,26 @@ def finalize_self_mint(
             "fleet-cells: live-cache fold of the proven capture failed",
             exc_info=True)
 
-    # Serve first, publish behind (gw#587: publish failure never blocks the
-    # request that triggered the miss). The hub's attested gate decides
-    # accept/refuse; cozy-local never reaches here (no publisher).
+    return minted
+
+
+def publish_self_mint(pending: "PendingSelfMint") -> None:
+    """Ship a FINALIZED mint to the fleet store, once (gw#612 restructure).
+
+    The executor calls this AFTER the whole warmup-proof pass, when sibling
+    coverage of the shared capture is known: a family cell is only published
+    when every sharer's graphs are inside it. Serve first, publish behind
+    (gw#587: publish failure never blocks the request that triggered the
+    miss); the hub's attested gate decides accept/refuse."""
+    state = pending._state
+    if state.get("minted") is None or state.get("publish_resolved"):
+        return
+    state["publish_resolved"] = True
     publisher = pending.publisher
     if publisher is not None and publisher.enabled():
-        _publish_async(publisher, pending.family, pending.target, meta)
+        _publish_async(
+            publisher, pending.family, pending.target,
+            dict(state.get("meta") or {}))
     else:
         # Runtime assertion (gw#587): every fleet cell miss must produce a
         # publish attempt. A fleet worker minting with no usable sink is a
@@ -525,7 +542,28 @@ def finalize_self_mint(
             "stays local to this pod; the fleet store gains nothing",
             pending.family)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
-    return minted
+
+
+def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
+    """Refuse to publish a finalized-but-INCOMPLETE family cell (gw#612).
+
+    A shared capture packs only the graphs the warmup actually compiled: a
+    mandatory sibling lane the warmup never exercised contributes nothing,
+    and publishing that partial pack as the family cell bricks every
+    adopting boot at the gw#607 per-object proof (the gw#611 qwen shape:
+    hits=1/misses=1 -> compile_cell_failed -> release broken). The mint
+    keeps serving THIS process (compiled callables live, identity
+    advertised self-attested); only the store publish is withheld, so the
+    next boot re-mints instead of adopting a poisoned cell."""
+    state = pending._state
+    if state.get("minted") is None or state.get("publish_resolved"):
+        return
+    state["publish_resolved"] = True
+    logger.error(
+        "fleet-cells: SELF_MINT_PUBLISH_WITHHELD family=%s key=%s — %s; "
+        "cell stays local to this pod",
+        pending.family, pending.cell_key, reason)
+    shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
 def abandon_self_mint(pending: "PendingSelfMint") -> None:
@@ -579,4 +617,6 @@ __all__ = [
     "abandon_self_mint",
     "enable_compiled",
     "finalize_self_mint",
+    "publish_self_mint",
+    "withhold_self_mint_publish",
 ]
