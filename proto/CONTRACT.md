@@ -3,7 +3,7 @@
 Proto: `worker_scheduler.proto`, package `cozy.scheduler`, service
 `WorkerScheduler`, one RPC: `Connect(stream WorkerMessage) returns (stream SchedulerMessage)`.
 This REPLACES the old `scheduler.v1` proto entirely. No compat, no negotiation:
-`ProtocolVersion.PROTOCOL_VERSION_CURRENT = 3` is the only accepted version.
+`ProtocolVersion.PROTOCOL_VERSION_CURRENT = 4` is the only accepted version.
 
 Roles: **W** = gen-worker (Python), **O** = orchestrator (tensorhub Go).
 Every field below names its producer and consumer; anything without both was deleted.
@@ -269,7 +269,7 @@ Reply to Hello; re-sent on config change (full replace).
 |---|---|---|---|
 | `protocol_version` | O constant | W version gate | symmetric validation |
 | `file_base_url` | O config (`FileAPIBaseURL`) | W upload stack / blob-ref PUT flow (§8) | tensorhub HTTP base for capability-token calls |
-| `keep` | legacy v2 release config | none in v3 | retained field number only; v3 W ignores it |
+| `keep` | legacy v2 release config | none in v4 | retained field number only; v4 W ignores it |
 | `resolutions` | O precision resolver | W endpoint bindings | full-replace declared-ref to worker-specific ref/cast picks |
 | `desired_residency` | O scheduler/controller | W model reconciler | full-replace per-worker disk and hot-instance goal (§7) |
 
@@ -355,7 +355,7 @@ not inherit another alias's proof.
 | `request_id` | O | W executor | unique request id |
 | `attempt` | O fencing (§2) | W (echoed on all replies) | dispatch fence |
 | `function_name` | O from client submit | W registry lookup | dispatch key; unknown fn ⇒ immediate `JobResult{INVALID}` |
-| `input_payload` | O assignment payload derived from `/invoke` | W deserializes, validates against the fn payload type | MessagePack bytes; O keeps canonical stored refs in durable request identity but replaces typed Asset refs only in this ephemeral payload with fresh authorized HTTP(S) URLs. W rejects opaque refs and caller `local_path`, downloads distinct URLs once in payload order, assigns that single fresh attempt-local path to every duplicate occurrence, and cleans it on every terminal path before model/handler work can observe a failure |
+| `input_payload` | O copies the canonical `/invoke` payload byte-for-byte | W deserializes, materializes, then validates against the fn payload type | MessagePack bytes. Stored Asset refs remain opaque `source_ref` values; transport URLs never enter canonical bytes. Caller HTTP(S) refs remain in this payload and are absent from `input_assets`. W rejects caller `local_path` values, downloads each distinct input once in deterministic payload order, assigns one fresh attempt-local path to every duplicate occurrence, and cleans it on every terminal path |
 | `timeout_ms` | O from endpoint config | W deadline watchdog | 0 = none; on expiry W aborts and sends `JobResult{FATAL, safe_message:"deadline exceeded"}` |
 | `tenant` | O request state | W upload scoping + structured logs | invoking owner slug |
 | `invoker_id` | O request state | W `ctx.invoker_id` (read-only tenant surface) | optional |
@@ -365,6 +365,46 @@ not inherit another alias's proof.
 | `models` | O binding resolver (endpoint defaults + `_models` envelope) | W model injection (`ensure_local` + typed path/pipeline) + per-request LoRA overlays | slot → ref (+ optional `loras`) |
 | `snapshots` | O resolver | W download stack | presigned snapshots for tensorhub-CAS refs in `models` (including LoRA overlay refs) that O doesn't know to be on this worker's disk; W ignores entries already local (digest match). hf/civitai refs need no snapshot |
 | `required_compile` | O unique target selection | W pre-setup + pre-execution fence | exact target/cell/contract required for this attempt; mandatory for W8A8 and fail-closed whenever present |
+| `input_assets` | O submit-time stored-asset inspector | W private-input materializer | Unique by `(source_ref, kind)` in deterministic schema traversal order: endpoint field declaration, then list index, with `*` map keys sorted; the first traversal occurrence of a duplicate wins. Each entry is exactly `asset_id`, `source_ref`, lowercase BLAKE3 hex, `size_bytes`, `kind`, and lowercase `mime_type`; it contains no URL, path, auth, schema, or count field. |
+
+### Input-asset manifests (RunJob.input_assets)
+
+The endpoint contract must expose Asset-bearing collections through ordered
+`list`/`tuple` shapes. Asset-bearing `set`/`frozenset` shapes and mappings with
+non-string keys are rejected by the worker's schema discovery at build time:
+they have no stable occurrence order, and O does not invent a sorting rule.
+Generic `Asset`/`MediaAsset` fields use `kind = "media"`; typed
+image/video/audio fields use their exact kind. Leading or trailing whitespace
+in a typed Asset `ref` is invalid, so `input_payload` and
+`input_assets[].source_ref` cannot disagree.
+
+W derives the ordered unique private sequence by `(ref, declared kind)` from
+the decoded payload and requires exact count/order/ref/kind plus valid
+immutable metadata against `input_assets` BEFORE any resolver call or GET; a
+mismatch is a non-retryable failure. For non-empty `input_assets`, the
+capability JWT carries `attempt` and the signed manifest digest, and W resolves
+the whole list with exactly one bounded strict request per attempt:
+
+`POST {file_base_url}/api/v1/worker/input-assets/resolve`
+
+`Authorization: Bearer <RunJob.capability_token>`
+
+`{"request_id":"<RunJob.request_id>","attempt":<RunJob.attempt>}`
+
+The response is `{"assets":[...]}` with the same six manifest fields plus
+`url` and `url_expires_at`. W rejects a missing, extra, reordered, changed,
+unknown, or malformed entry, validates every URL before downloading, downloads
+each unique input once, verifies exact byte count, streaming BLAKE3, media
+kind, caller limits, and real image decode where applicable, keeps every
+decoded Asset field (`ref` stays the opaque `source_ref`), and sets only the
+worker-local `local_path`. URLs never replace `ref` and are never persisted. A
+resolver `409` means the attempt is stale ⇒ W stops as CANCELED without
+publishing; `503`/network failures and malformed platform responses are
+RETRYABLE. Capabilities, URLs, opaque refs, and response bodies never appear in
+errors or logs. Materialized inputs are attempt-scoped and transactional:
+success, handler failure, cancellation, and supersession each clean exactly
+their own attempt's directory — attempt N+1 never deletes N's scope and a
+superseded attempt never publishes its result.
 
 ### RequiredCompileExecution (embedded in RunJob)
 
@@ -572,7 +612,7 @@ There is no queued-only/item-level cancel.
 
 ### ModelOp (O → W)
 Producer: compile-cache adoption only. Model download/load/unload lifecycle is
-declarative through `HelloAck.desired_residency`; v3 O MUST NOT send the legacy
+declarative through `HelloAck.desired_residency`; v4 O MUST NOT send the legacy
 DOWNLOAD/LOAD/UNLOAD enum values.
 
 | field | producer | consumer | semantics |

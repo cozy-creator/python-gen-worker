@@ -48,9 +48,6 @@ def _is_msgspec_struct(t: Any) -> bool:
         return False
 
 
-_MEDIA_ASSET_TYPES = (MediaAsset, ImageAsset, VideoAsset, AudioAsset)
-
-
 def _media_kind(t: type) -> str:
     if issubclass(t, ImageAsset):
         return "image"
@@ -59,6 +56,46 @@ def _media_kind(t: type) -> str:
     if issubclass(t, AudioAsset):
         return "audio"
     return "media"
+
+
+def _annotation_carries_asset(ann: Any, _seen: Optional[Set[type]] = None) -> bool:
+    """True when the annotation subtree can hold an input ``Asset``."""
+    seen = _seen if _seen is not None else set()
+    origin = typing.get_origin(ann)
+    if origin is typing.Annotated:
+        args = typing.get_args(ann)
+        return bool(args) and _annotation_carries_asset(args[0], seen)
+    if origin in (typing.Union, py_types.UnionType):
+        return any(
+            _annotation_carries_asset(arg, seen)
+            for arg in typing.get_args(ann)
+            if arg is not type(None)
+        )
+    if origin in (list, tuple, set, frozenset):
+        args = typing.get_args(ann)
+        return bool(args) and _annotation_carries_asset(args[0], seen)
+    if origin is dict:
+        args = typing.get_args(ann)
+        return len(args) == 2 and _annotation_carries_asset(args[1], seen)
+    if isinstance(ann, type):
+        if issubclass(ann, Asset):
+            return True
+        if issubclass(ann, Tensors):
+            return False
+        if _is_msgspec_struct(ann):
+            if ann in seen:
+                return False
+            seen.add(ann)
+            try:
+                hints = typing.get_type_hints(ann, include_extras=True)
+            except Exception:
+                hints = getattr(ann, "__annotations__", {})
+            return any(
+                _annotation_carries_asset(hints[field], seen)
+                for field in getattr(ann, "__struct_fields__", ()) or ()
+                if field in hints
+            )
+    return False
 
 
 def _collect_payload_moderation_metadata(payload_type: type) -> Dict[str, Any]:
@@ -90,7 +127,20 @@ def _collect_payload_moderation_metadata(payload_type: type) -> Dict[str, Any]:
                     walk(arg, path)
             return
 
-        if origin in (list, tuple, set, frozenset):
+        if origin in (set, frozenset):
+            # th#886: input-asset manifests are ordered; unordered containers
+            # have no stable occurrence order, so an Asset here is a build error.
+            args = typing.get_args(ann)
+            if args and _annotation_carries_asset(args[0]):
+                raise ValueError(
+                    f"{path}: Asset fields cannot ride unordered set/frozenset "
+                    "containers; use list or tuple"
+                )
+            if args:
+                walk(args[0], f"{path}[]")
+            return
+
+        if origin in (list, tuple):
             args = typing.get_args(ann)
             if args:
                 walk(args[0], f"{path}[]")
@@ -99,14 +149,20 @@ def _collect_payload_moderation_metadata(payload_type: type) -> Dict[str, Any]:
         if origin is dict:
             args = typing.get_args(ann)
             if len(args) == 2:
+                if args[0] is not str and _annotation_carries_asset(args[1]):
+                    raise ValueError(
+                        f"{path}: Asset-bearing mappings require string keys"
+                    )
                 walk(args[1], f"{path}.*")
             return
 
         if isinstance(ann, type):
-            if issubclass(ann, _MEDIA_ASSET_TYPES):
-                out["media"].append({"field": path, "kind": _media_kind(ann)})
+            if issubclass(ann, Tensors):
                 return
-            if issubclass(ann, (Asset, Tensors)):
+            if issubclass(ann, Asset):
+                # Base Asset/MediaAsset = kind "media"; typed subclasses carry
+                # their exact kind (th#886 manifest vocabulary).
+                out["media"].append({"field": path, "kind": _media_kind(ann)})
                 return
             if _is_msgspec_struct(ann):
                 if ann in seen_structs:
