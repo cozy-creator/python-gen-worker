@@ -437,7 +437,9 @@ def enable_compiled(
     return ArmOutcome(armed=True, self_mint=pending)
 
 
-def finalize_self_mint(pipe: Any, pending: "PendingSelfMint") -> Optional[SelfMint]:
+def finalize_self_mint(
+    pipe: Any, pending: "PendingSelfMint", *, expected_graphs: int = 0,
+) -> Optional[SelfMint]:
     """Pack + publish a self-mint AFTER the executor's warmup proof passes.
 
     Called from the executor's warmup-proof loop, per proven candidate —
@@ -462,7 +464,7 @@ def finalize_self_mint(pipe: Any, pending: "PendingSelfMint") -> Optional[SelfMi
     try:
         meta = cc.finish_fleet_mint(
             pipe, pending.cfg, pending.family, pending.target,
-            pending.capture_dir)
+            pending.capture_dir, expected_graphs=expected_graphs)
     except Exception as exc:  # noqa: BLE001 — pack failure => caller disproves
         logger.warning(
             "fleet-cells: self-mint pack failed after a passed proof (%s) — "

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 import threading
 
@@ -1235,3 +1236,34 @@ def test_reconcile_resident_mode_unit():
 
     # already converged: True, no-op
     assert reconcile_resident_mode(pipe, "off") is True
+
+
+def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
+    """gw#608 revert-turns-red: the AOTAutogradCache key embeds the decomp
+    table function's process memory address (ASLR), so its entries can never
+    hit across pods and an AOT miss skips the portable on-disk FX entries
+    (live: 8/8 misses on byte-identical FX keys, two hosts). Both the
+    capture/seed env contract and apply() must pin the AOT layer OFF so the
+    FX cache is the lookup surface, symmetrically for producer and consumer."""
+    import torch._functorch.config as fconf
+
+    monkeypatch.delenv("TORCHINDUCTOR_AUTOGRAD_CACHE", raising=False)
+    monkeypatch.setattr(fconf, "enable_autograd_cache", True)
+    cc.capture_env(tmp_path / "cap")
+    assert os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] == "0"
+    assert fconf.enable_autograd_cache is False
+
+    monkeypatch.setattr(fconf, "enable_autograd_cache", True)
+
+    class _P:
+        pass
+
+    class _Cfg:
+        shapes = ((64, 64),)
+        targets = ("transformer",)
+        regional = False
+
+    # CPU box: apply() exits eager after the CUDA check — the AOT disable
+    # must already have happened (it precedes every compile decision).
+    cc.apply(_P(), _Cfg(), cache_ready=False)
+    assert fconf.enable_autograd_cache is False

@@ -64,9 +64,12 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
     def _begin(pipe, cfg, capture):
         # the real begin_fleet_mint latches env + arms cold; the capture
         # content itself arrives during the (real, GPU) warmup — simulate
-        # the layout the proof window would produce.
+        # the layout the proof window would produce (incl. the fxgraph
+        # store the gw#608 artifact assertion requires).
         (capture / "inductor" / "g").mkdir(parents=True, exist_ok=True)
         (capture / "inductor" / "g" / "kernel.py").write_text("compiled")
+        (capture / "inductor" / "fxgraph" / "aa").mkdir(parents=True, exist_ok=True)
+        (capture / "inductor" / "fxgraph" / "aa" / "entry").write_text("fx")
         (capture / "triton").mkdir(exist_ok=True)
 
     monkeypatch.setattr(cc, "begin_fleet_mint", _begin)
@@ -166,8 +169,12 @@ def test_finalize_packs_the_proven_capture_and_publishes_it(
 
     minted = fc.finalize_self_mint(pipe, pending)
     assert minted is not None
-    assert minted.cell_key == FAKE_KEY
-    assert minted.ref == f"root/family-fam#{FAKE_KEY}"
+    # The packed metadata's stamped key wins when the box's axes are
+    # key-complete (identical to the arm-time key in production; they only
+    # diverge here because compute is faked). Identity self-consistency is
+    # the pin, not the fake value.
+    assert minted.cell_key.startswith("ck1-")
+    assert minted.ref == f"root/family-fam#{minted.cell_key}"
     assert minted.snapshot_digest.startswith("blake3:")
     assert len(minted.snapshot_digest) == len("blake3:") + 64
     assert published.wait(5), "a finalized mint must attempt publish"
@@ -385,3 +392,21 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
     complete_url, complete_body = posts[-1]
     assert complete_url.endswith("/publish-complete")
     assert complete_body["ok"] is False and "upload exploded" in complete_body["error"]
+
+
+def test_finalize_refuses_capture_without_fx_entries(monkeypatch, tmp_path):
+    """gw#608 hardening (revert-turns-red): a minting boot proves its
+    EXECUTION; the pack must also prove its ARTIFACT. A capture whose
+    fxgraph store is empty (inductor latched elsewhere / cache-layer
+    redirect miss) must never publish — it can never serve any consumer."""
+    calls: list = []
+    _mintable(monkeypatch)
+    pipe = _Pipe()
+    outcome = fc.enable_compiled(pipe, _Cfg(), tmp_path, None, publisher=_publisher(calls))
+    pending = outcome.self_mint
+    # the _mintable fixture creates inductor files but NO fxgraph entries
+    import shutil as _sh
+    _sh.rmtree(pending.capture_dir / "inductor" / "fxgraph", ignore_errors=True)
+    assert fc.finalize_self_mint(pipe, pending) is None, (
+        "an artifact without FX entries must be refused")
+    assert calls == [], "nothing may publish from a refused capture"
