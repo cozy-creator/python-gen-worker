@@ -1461,10 +1461,16 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
             events.append("warmup")
             # THE real serving execution: cold-compiles the serving graphs
             # into the live capture dir (successful compiled call, all
-            # misses — the honest cold-mint signature).
+            # misses — the honest cold-mint signature). A real cold compile
+            # writes one fxgraph store entry per miss — the gw#608 artifact
+            # assertion (finish_fleet_mint) requires them before publish.
             cap = captured["dir"]
             (cap / "inductor" / "g").mkdir(parents=True, exist_ok=True)
             (cap / "inductor" / "g" / "serving_graph.py").write_text("real")
+            fx = cap / "inductor" / "fxgraph"
+            for i in range(8):
+                (fx / f"g{i}").mkdir(parents=True, exist_ok=True)
+                (fx / f"g{i}" / "entry").write_text("fx")
             (cap / "triton").mkdir(exist_ok=True)
             _record_fake_warm(self.pipeline, hits=0, misses=8)
 
