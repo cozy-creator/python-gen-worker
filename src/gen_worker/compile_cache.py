@@ -489,8 +489,34 @@ def capture_env(root: Path) -> Path:
         d = root / sub
         d.mkdir(parents=True, exist_ok=True)
         os.environ[env] = str(d)
+    _disable_aot_autograd_cache()
     _reset_inductor_latch()
     return root
+
+
+def _disable_aot_autograd_cache() -> None:
+    """gw#608: the AOTAutogradCache key hashes ``fx_kwargs[get_decomp_fn]``
+    via the function's REPR — which embeds the process memory address
+    (ASLR), so AOT keys can NEVER match across processes/pods. On the
+    consumer, the AOT-layer miss recompiles without consulting the on-disk
+    FX entries, so a byte-portable cell reports cache_hits=0 (live: two
+    hosts, 8/8 misses on graphs whose FxGraphCache keys were bit-identical
+    across three independent mints). Compiled-cell portability therefore
+    requires the FX cache to be the lookup surface: disable the AOT layer
+    symmetrically for producer capture and consumer seeding. Costs a cheap
+    AOT re-analysis per fresh process; the expensive inductor compile still
+    serves from the (portable) FX entries."""
+    os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "0"
+    import sys
+
+    if "torch" not in sys.modules:
+        return
+    try:
+        import torch._functorch.config as fconf
+
+        fconf.enable_autograd_cache = False
+    except Exception:
+        logger.debug("compile-cache: AOT autograd cache disable unavailable", exc_info=True)
 
 
 def _reset_inductor_latch() -> None:
@@ -1314,6 +1340,9 @@ def apply(
         import torch
     except Exception:
         return False
+    # gw#608: cross-pod cell portability requires the (portable) FX graph
+    # cache to be the lookup surface — see _disable_aot_autograd_cache.
+    _disable_aot_autograd_cache()
     if not torch.cuda.is_available():
         logger.info("compile-cache: no CUDA; staying eager")
         return False
@@ -2071,6 +2100,7 @@ def begin_fleet_mint(pipe: Any, cfg: Any, capture: Path) -> None:
 
 def finish_fleet_mint(
     pipe: Any, cfg: Any, family: str, target: Path, capture: Path,
+    *, expected_graphs: int = 0,
 ) -> Dict[str, Any]:
     """Pack the capture dir a PASSED warmup proof just populated.
 
@@ -2092,6 +2122,28 @@ def finish_fleet_mint(
             "self-mint proof passed but captured nothing under "
             "TORCHINDUCTOR_CACHE_DIR — was inductor already latched to "
             "another dir in this process?"
+        )
+    # gw#608 hardening: a minting boot proves its EXECUTION; this asserts
+    # its ARTIFACT. The pack must contain the FX-graph entries the proof's
+    # compiled set implies — an empty/partial fxgraph store (e.g. inductor
+    # latched elsewhere mid-process, or a cache-layer redirect miss) would
+    # publish a cell that can never serve any consumer, and the fleet would
+    # only find out one fail-closed boot at a time.
+    fx_entries = 0
+    fx_root = capture / "inductor" / "fxgraph"
+    if fx_root.is_dir():
+        fx_entries = sum(1 for p in fx_root.rglob("*") if p.is_file())
+    if fx_entries <= 0:
+        raise RuntimeError(
+            "self-mint capture contains NO FX-graph cache entries — the "
+            "compile output landed outside the capture dir; refusing to "
+            "publish an unservable cell"
+        )
+    if expected_graphs > 0 and fx_entries < expected_graphs:
+        raise RuntimeError(
+            f"self-mint capture holds {fx_entries} FX-graph entrie(s) but "
+            f"the warmup proof compiled {expected_graphs} graph(s) — "
+            "partial capture, refusing to publish"
         )
     from .models.loading import pipeline_weight_lane
     from .models.memory import low_vram_mode
