@@ -2547,18 +2547,11 @@ def test_store_served_failure_names_diverging_fx_key_component(
     (generate,) = specs
     ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
 
-    cell_lines = [
-        "[gmhash] gm: <lambda>()",
-        "[cfg-cell] inductor_config[foo]: cell-value",
-    ]
-    boot_lines = [
-        "[gmhash] gm: <lambda>()",
-        "[cfg-boot] inductor_config[foo]: boot-value",
-    ]
     monkeypatch.setattr(
-        cc, "artifact_fx_lines", lambda path: {"fseededkey": cell_lines})
-    monkeypatch.setattr(
-        cc, "live_fx_lines", lambda *a, **k: {"ffreshkey": boot_lines})
+        cc, "fx_cache_failure_report",
+        lambda path: ("cell_keys=1; live_keys=2; fresh_keys=1; divergence: "
+                      "inductor_config[foo]: cell=cell-value != "
+                      "boot=boot-value"))
 
     with pytest.raises(
         cc.CompiledLaneUnavailableError,
@@ -2570,7 +2563,7 @@ def test_store_served_failure_names_diverging_fx_key_component(
             cell_ref: pb.Snapshot(digest=DIGEST_A),
         }))
     detail = str(excinfo.value)
-    assert "fx divergence" in detail
+    assert "fx forensics" in detail
     assert "inductor_config[foo]" in detail
     assert "cell=cell-value" in detail and "boot=boot-value" in detail
 

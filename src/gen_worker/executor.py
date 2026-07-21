@@ -4038,19 +4038,20 @@ class Executor:
                     )
                     # gw#608 FX-key forensics: this boot's recompiles already
                     # saved their entries (with embedded FxGraphHashDetails
-                    # lines) into the live cache dir — diff them against the
-                    # seeded cell's and name the diverging key component in
-                    # the wire-visible error. Store-served boots only (a
-                    # minting boot has no seeded cell to diverge from).
+                    # lines) into the live cache dir. The report ALWAYS
+                    # carries the cache-state counts — fresh_keys>0 names the
+                    # diverging key component (B1); fresh_keys=0 with
+                    # same-key re-saves proves the keys MATCH and the miss is
+                    # in torch's candidate-load path (B2), with the sibling
+                    # guards/extern-libs diff and load probes naming the
+                    # failing step. Store-served boots only (a minting boot
+                    # has no seeded cell to diverge from).
                     if compile_selection is not None and not (
                         trt_engine.is_engine_ref(compile_selection.ref)
                     ):
                         try:
-                            forensics = compile_cache.fx_key_forensics(
-                                compile_cache.artifact_fx_lines(
-                                    compile_selection.path),
-                                compile_cache.live_fx_lines(),
-                            )
+                            forensics = compile_cache.fx_cache_failure_report(
+                                compile_selection.path)
                         except Exception:
                             forensics = ""
                             logger.debug(
@@ -4060,8 +4061,9 @@ class Executor:
                                 "compile-cache: FX-key forensics: %s",
                                 forensics)
                             # The activity error is capped at 2000 chars on
-                            # the wire; keep the first divergence intact.
-                            detail += f"; fx divergence: {forensics[:1500]}"
+                            # the wire; keep the leading counts + first
+                            # divergence intact.
+                            detail += f"; fx forensics: {forensics[:1500]}"
                     if quant_lane:
                         if mint_by_id:
                             from . import fleet_cells as fleet_cells_mod
@@ -4196,17 +4198,12 @@ class Executor:
                         _STORE_SERVED_COMPILE_ALARM_S, hits, misses,
                     )
                     try:
-                        # gw#608: name the diverging FX-key component(s) for
-                        # the partial-recompile shape too.
-                        forensics = compile_cache.fx_key_forensics(
-                            compile_cache.artifact_fx_lines(
-                                compile_selection.path),
-                            compile_cache.live_fx_lines(),
-                        )
-                        if forensics:
-                            logger.error(
-                                "compile-cache: FX-key forensics: %s",
-                                forensics)
+                        # gw#608: full cache-state report for the
+                        # partial-recompile shape too.
+                        logger.error(
+                            "compile-cache: FX-key forensics: %s",
+                            compile_cache.fx_cache_failure_report(
+                                compile_selection.path))
                     except Exception:
                         logger.debug(
                             "fx-key forensics unavailable", exc_info=True)
