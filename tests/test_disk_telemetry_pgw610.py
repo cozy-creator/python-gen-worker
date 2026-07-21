@@ -13,7 +13,6 @@ import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List
 
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.lifecycle import Lifecycle
