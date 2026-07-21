@@ -21,7 +21,13 @@ import msgspec
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.blob_host import BlobHost, CorruptingBlobHost
-from harness.hub_double import hub_double, is_model_event, is_ready, is_result_for
+from harness.hub_double import (
+    hub_double,
+    is_exact_model_event,
+    is_model_event,
+    is_ready,
+    is_result_for,
+)
 from harness.toy_endpoints import EchoIn, EchoOut
 
 _MODEL_REF = "harness/residency-tiny"
@@ -122,11 +128,7 @@ def test_mutable_tag_move_fences_events_by_digest_and_generation(tmp_path) -> No
             # A late RunJob may legitimately still ask for A while desired
             # residency has moved to B/gen2; afterward the resumed
             # declarative loop restores B WITH generation 2, not gen0.
-            resumed_b = lambda m: (
-                is_model_event(_MODEL_REF, pb.MODEL_STATE_ON_DISK)(m)
-                and m.model_event.snapshot_digest == "snap-b"
-                and m.model_event.residency_generation == 2
-            )
+            resumed_b = is_exact_model_event(_MODEL_REF, pb.MODEL_STATE_ON_DISK, "snap-b", 2)
             b_events_before = conn.count(resumed_b)
             conn.send(run_job=pb.RunJob(
                 request_id="r-priority-a", attempt=1, function_name="model-echo",

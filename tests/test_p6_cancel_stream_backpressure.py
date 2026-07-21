@@ -9,12 +9,11 @@ import asyncio
 import time
 
 import msgspec
-import pytest
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.transport import SendQueue
 
-from harness.hub_double import hub_double, is_accept_for, is_ready, is_result_for
+from harness.hub_double import hub_double, is_ready, is_result_for
 from harness.toy_endpoints import EchoIn
 
 
