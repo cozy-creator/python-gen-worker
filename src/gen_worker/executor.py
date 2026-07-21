@@ -56,6 +56,7 @@ from .capability import (
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import cozy_snapshot
 from .models import disk_gc
+from .models import disk_telemetry
 from .models import provision
 from .models import residency as residency_mod
 from .models.memory import (
@@ -604,6 +605,12 @@ class ModelStore:
         # otherwise. Avoids a second, redundant ON_DISK event and avoids
         # widening EventFn's arity (Residency has other direct callers).
         self._pending_network_bytes: Dict[str, int] = {}
+        # pgw#610/th#962 measured disk telemetry: generation bumps only when
+        # the measured (quantized) shape changes, so the hub can fence
+        # insufficient-disk failure clears on real capacity change.
+        self._disk_report_lock = threading.Lock()
+        self._disk_capacity_generation = 0
+        self._last_disk_shape: Optional[bytes] = None
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -730,6 +737,51 @@ class ModelStore:
                     residency_generation=generation,
                 ))
         return out
+
+    def disk_usage_report(self) -> pb.DiskUsageReport:
+        """Measured per-tier disk telemetry (pgw#610/th#962).
+
+        statvfs on the real mounts (CAS root = container tier; attached
+        endpoint volume = volume tier; a shared NFS mount joins as TIER_NFS
+        when the worker grows one) plus safely-reclaimable bytes: ref-index
+        entries at DISK tier that are inactive AND not in the desired set —
+        the disk-GC LRU's eligible set. Reuses ref-index bytes; never a tree
+        rescan. capacity_generation bumps only on a measured shape change.
+        """
+        keep = set(self.keep)
+        entries = self._index.entries()
+        reclaimable: List[Tuple[str, int]] = []
+        for ref in self.residency.refs_in(residency_mod.Tier.DISK):
+            if ref in keep or self.residency.in_use(ref):
+                continue
+            ent = entries.get(ref)
+            if not ent:
+                continue
+            reclaimable.append(
+                (str(ent.get("path") or ""), int(ent.get("bytes") or 0))
+            )
+        mounts = [disk_telemetry.MountSpec(
+            tier=disk_telemetry.TIER_CONTAINER, path=str(self._cache_dir),
+        )]
+        if self._fill_source_dir is not None:
+            mounts.append(disk_telemetry.MountSpec(
+                tier=disk_telemetry.TIER_VOLUME, path=str(self._fill_source_dir),
+            ))
+        report = pb.DiskUsageReport(tiers=[
+            pb.StorageTierUsage(
+                tier=t.tier, mount_path=t.mount_path,
+                total_bytes=t.total_bytes, free_bytes=t.free_bytes,
+                used_bytes=t.used_bytes, reclaimable_bytes=t.reclaimable_bytes,
+            )
+            for t in disk_telemetry.measure_tiers(mounts, reclaimable)
+        ])
+        shape = report.SerializeToString(deterministic=True)
+        with self._disk_report_lock:
+            if shape != self._last_disk_shape:
+                self._last_disk_shape = shape
+                self._disk_capacity_generation += 1
+            report.capacity_generation = self._disk_capacity_generation
+        return report
 
     def local_path(self, ref: str) -> Optional[Path]:
         return self.residency.local_path(ref)
