@@ -1,23 +1,14 @@
 name: CI
 
-# th#960/pgw#609 Phase 4: one suite, one lane. Manual dispatch + PR-into-master
-# only — CI spend is metered (WORKSPACE-GIT-POLICY.md); no on-push trigger.
 on:
-  workflow_dispatch: {}
+  push:
+    branches: [master]
   pull_request:
     branches: [master]
-    paths-ignore:
-      - "**.md"
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   test:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -65,8 +56,6 @@ jobs:
           echo "$HOME/llama-b9964" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=$HOME/llama-b9964" >> "$GITHUB_ENV"
 
-      # th#960/pgw#609 greenfield suite (P1-P10 + harness), whole tests/ dir
-      # so late additions run automatically without a CI edit.
       - name: Run tests
         run: uv run pytest tests/ -v
 
