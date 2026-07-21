@@ -49,6 +49,18 @@ class MarcoPolo:
 
         raise ValidationError(f"expected 'marco', got {data.text!r}")
 
+    async def marco_polo_wedge(
+        self, ctx: RequestContext, data: MarcoPoloInput
+    ) -> MarcoPoloOutput:
+        """th#965 layer-2 liveness probe: an ASYNC handler that BLOCKS the
+        event loop with a synchronous sleep — the control loop that owes
+        heartbeats goes silent while the gRPC transport threads keep
+        answering keepalive pings. A th#965 hub must fire
+        worker_heartbeat_lost within its miss window and recycle the pod;
+        this handler never returns inside any sane enforcement window."""
+        time.sleep(1800)
+        return MarcoPoloOutput(response="unreachable")
+
     async def marco_polo_stream(
         self, ctx: RequestContext, data: MarcoPoloInput
     ) -> AsyncIterator[MarcoPoloOutput]:
