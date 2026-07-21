@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.43.1 (2026-07-21)
+
+- **gw#608 CLOSED: self-mint arm is transactional over the process-global
+  cache env — cells are cross-host portable end to end.** The store-served
+  8/8-miss root cause: a no-target sibling slot (or a delivered-cell-seeded
+  process) could open a fleet self-mint capture and repoint
+  TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR away from the seeded cache
+  before the real warmup traced. Now: no-target siblings decline BEFORE
+  any process-global env mutation, `begin_fleet_mint` restores the prior
+  env on arm failure, and a delivered-cell-seeded process never opens a
+  capture (mandatory lanes keep the typed refusal). Four
+  revert-turns-red tests. Live-verified: first end-to-end store-served
+  LTX boot (release 587…970) — consumer warmup served from the delivered
+  cell, ~0s compile, no re-publish.
+- **gw#608: FX-cache failure forensics.** A store-served proof failure now
+  carries `fx_cache_failure_report` in the CompiledLaneUnavailableError
+  detail: hit/miss/bypass counts, compile_seconds, per-object proof
+  counts, a component-level FxGraphHashDetails key diff against the
+  delivered cell, and same-key re-save/load probes — clamped under the
+  2000-char activity error cap. Failure-path only; no serving overhead.
+
 ## 0.43.0 (2026-07-21)
 
 - **gw#585: tensorhub v4 private-input manifests — gRPC protocol v3 -> v4
