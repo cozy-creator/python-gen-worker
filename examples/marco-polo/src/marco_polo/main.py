@@ -5,6 +5,7 @@ from typing import AsyncIterator
 
 import msgspec
 from gen_worker import RequestContext, ValidationError, endpoint
+from gen_worker.api.types import Asset
 
 
 class MarcoPoloInput(msgspec.Struct):
@@ -13,6 +14,19 @@ class MarcoPoloInput(msgspec.Struct):
 
 class MarcoPoloOutput(msgspec.Struct):
     response: str
+
+
+class MarcoAttachInput(msgspec.Struct):
+    image: Asset
+    text: str = ""
+    delay_s: float = 0.0
+
+
+class MarcoAttachOutput(msgspec.Struct):
+    response: str
+    blake3: str
+    size_bytes: int
+    local_path: str
 
 
 @endpoint
@@ -60,6 +74,32 @@ class MarcoPolo:
         this handler never returns inside any sane enforcement window."""
         time.sleep(1800)
         return MarcoPoloOutput(response="unreachable")
+
+    async def marco_polo_attach(
+        self, ctx: RequestContext, data: MarcoAttachInput
+    ) -> MarcoAttachOutput:
+        """th#886 v4 private-input probe: echoes the materialized attachment's
+        BLAKE3/size/attempt-local path so the harness can verify exact bytes
+        and post-terminal temp cleanup. delay_s>0 holds the job in flight for
+        disconnect/retry chaos."""
+        import blake3
+
+        if str(data.text or "").strip().lower() != "marco":
+            raise ValidationError(f"expected 'marco', got {data.text!r}")
+        path = data.image.path()
+        with open(path, "rb") as f:
+            raw = f.read()
+        waited = 0.0
+        while waited < float(data.delay_s or 0.0):
+            ctx.raise_if_cancelled()
+            await asyncio.sleep(0.15)
+            waited += 0.15
+        return MarcoAttachOutput(
+            response="polo",
+            blake3=blake3.blake3(raw).hexdigest(),
+            size_bytes=len(raw),
+            local_path=path,
+        )
 
     async def marco_polo_stream(
         self, ctx: RequestContext, data: MarcoPoloInput
