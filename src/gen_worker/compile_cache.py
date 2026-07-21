@@ -703,6 +703,148 @@ def _clip(value: str, limit: int = 120) -> str:
     return flat if len(flat) <= limit else flat[:limit] + "…"
 
 
+def fx_cache_failure_report(artifact: Optional[Path] = None) -> str:
+    """Exhaustive FX-cache state for a failed store-served warmup proof
+    (gw#608). ALWAYS returns a non-empty report — counts alone discriminate
+    the failure classes with zero pod-log access:
+
+    - fresh_keys>0            => the boot computed DIFFERENT keys (B1); the
+                                 per-component divergence is appended.
+    - fresh_keys=0 with
+      samekey_resave rows     => the boot computed the SAME keys and torch
+                                 re-saved next to the seeded entries — the
+                                 miss is in the candidate LOAD path (B2:
+                                 unpickle / extern-libs guard), which only
+                                 ever executes on consumers (a mint has
+                                 nothing to iterate); the sibling diff and
+                                 probes below name the failing step.
+    - cell_keys=0             => the artifact itself was unreadable here.
+
+    Every sub-probe degrades to an err token; this never raises."""
+    import pickle
+
+    out: list = []
+    seeded_lines: Dict[str, list] = {}
+    seeded_names: Dict[str, set] = {}
+    cell_extern = None
+    cell_guards = "<none>"
+    if artifact is not None:
+        try:
+            with tarfile.open(Path(artifact), mode="r:*") as tar:
+                for member in tar:
+                    parts = PurePosixPath(member.name).parts
+                    if (
+                        len(parts) < 5
+                        or parts[:2] != ("inductor", "fxgraph")
+                        or not member.isfile()
+                    ):
+                        continue
+                    key, entry_name = parts[3], parts[4]
+                    seeded_names.setdefault(key, set()).add(entry_name)
+                    f = tar.extractfile(member)
+                    if f is None:
+                        continue
+                    try:
+                        obj = pickle.loads(f.read())
+                    except Exception as exc:  # noqa: BLE001
+                        out.append(
+                            f"cell_unpickle=EXC:{type(exc).__name__}:"
+                            f"{_clip(str(exc), 80)}")
+                        continue
+                    if cell_extern is None:
+                        cell_extern = str(
+                            getattr(obj, "extern_libs_key", None))
+                        cell_guards = repr(
+                            getattr(obj, "guards_expr", None))
+                    lines = list(getattr(
+                        obj, "_fx_graph_cache_debug_lines", None) or [])
+                    if lines:
+                        seeded_lines.setdefault(key, lines)
+        except Exception as exc:  # noqa: BLE001
+            out.append(f"cell_read=EXC:{type(exc).__name__}")
+    out.insert(0, f"cell_keys={len(seeded_names)}")
+    out.append(f"cell_guards={cell_guards}")
+    out.append(f"cell_extern={_clip(str(cell_extern), 90)}")
+
+    base = Path(os.environ.get("TORCHINDUCTOR_CACHE_DIR", "") or "")
+    fx_root = base / "fxgraph"
+    live_files: Dict[str, list] = {}
+    if str(base) and fx_root.is_dir():
+        for keydir in sorted(fx_root.glob("*/*")):
+            if keydir.is_dir():
+                files = sorted(
+                    p for p in keydir.iterdir()
+                    if p.is_file() and not p.name.startswith("."))
+                if files:
+                    live_files[keydir.name] = files
+    else:
+        out.append(f"live_dir_missing={str(fx_root) or '<unset>'}")
+    fresh = sorted(k for k in live_files if k not in seeded_names)
+    out.append(f"live_keys={len(live_files)}")
+    out.append(f"fresh_keys={len(fresh)}")
+
+    # Same-key re-save: seeded entry FILENAMES are their content sha, so any
+    # other file inside a seeded key dir is THIS boot's save of the same key.
+    resaves = 0
+    for key, files in sorted(live_files.items()):
+        names = seeded_names.get(key)
+        if not names:
+            continue
+        fresh_sibs = [p for p in files if p.name not in names]
+        seed_sibs = [p for p in files if p.name in names]
+        if not fresh_sibs or not seed_sibs:
+            continue
+        resaves += 1
+        if resaves == 1:
+            try:
+                a = pickle.loads(seed_sibs[0].read_bytes())
+                b = pickle.loads(fresh_sibs[0].read_bytes())
+                out.append(
+                    f"samekey_resave[{key[:12]}]: guards "
+                    f"cell={getattr(a, 'guards_expr', None)!r} "
+                    f"boot={getattr(b, 'guards_expr', None)!r}; extern "
+                    f"cell={_clip(str(getattr(a, 'extern_libs_key', None)), 90)} "
+                    f"boot={_clip(str(getattr(b, 'extern_libs_key', None)), 90)}")
+            except Exception as exc:  # noqa: BLE001
+                out.append(
+                    f"samekey_probe=EXC:{type(exc).__name__}:"
+                    f"{_clip(str(exc), 80)}")
+    out.append(f"samekey_resaves={resaves}")
+
+    # Emulate torch's candidate-load preconditions on one seeded live entry.
+    probe = next(
+        ((k, v) for k, v in live_files.items() if k in seeded_names), None)
+    if probe is not None:
+        try:
+            pickle.loads(probe[1][0].read_bytes())
+            out.append("live_cell_entry_unpickle=ok")
+        except Exception as exc:  # noqa: BLE001
+            out.append(
+                f"live_cell_entry_unpickle=EXC:{type(exc).__name__}:"
+                f"{_clip(str(exc), 80)}")
+    try:
+        import torch.utils._triton as _tu
+
+        out.append("extern_current=" + _clip(
+            _tu._extern_libs_key(_tu.triton_backend()) or "<empty>", 90))
+    except Exception as exc:  # noqa: BLE001
+        out.append(
+            f"extern_current=EXC:{type(exc).__name__}:{_clip(str(exc), 80)}")
+
+    if fresh:
+        try:
+            observed = {
+                k: _fx_entry_lines(live_files[k][0].read_bytes())[1]
+                for k in fresh[:2]
+            }
+            divergence = fx_key_forensics(seeded_lines, observed)
+            if divergence:
+                out.append("divergence: " + divergence)
+        except Exception as exc:  # noqa: BLE001
+            out.append(f"divergence=EXC:{type(exc).__name__}")
+    return "; ".join(str(v) for v in out)
+
+
 def fx_key_forensics(
     seeded: Dict[str, list],
     observed: Dict[str, list],
@@ -2375,6 +2517,7 @@ __all__ = [
     "parse_cell_ref",
     "find_artifact",
     "flavor_label",
+    "fx_cache_failure_report",
     "fx_key_forensics",
     "gen_worker_version",
     "has_compile_target",

@@ -1384,3 +1384,58 @@ def test_fx_key_forensics_matches_nearest_seeded_key(tmp_path):
     observed = {"ffreshkey": _fx_lines("boot-value")}
     report = cc.fx_key_forensics(seeded, observed)
     assert "fnearkey" in report and "ffarkey" not in report
+
+
+def test_fx_cache_failure_report_names_b1_divergence(tmp_path, monkeypatch):
+    """fresh_keys>0: the report carries the counts AND the component diff."""
+    capture = tmp_path / "capture"
+    _write_fx_entry(capture / "inductor", "fseededkey111", _fx_lines("cell-value"))
+    (capture / "triton").mkdir()
+    artifact = cc.pack(capture, tmp_path / "cell.tar.gz", {"format": 2})
+
+    live = tmp_path / "live-inductor"
+    _write_fx_entry(live, "fseededkey111", _fx_lines("cell-value"))
+    _write_fx_entry(live, "ffreshkey2222", _fx_lines("boot-value"))
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(live))
+
+    report = cc.fx_cache_failure_report(artifact)
+    assert "cell_keys=1" in report
+    assert "live_keys=2" in report
+    assert "fresh_keys=1" in report
+    assert "samekey_resaves=0" in report
+    assert "inductor_config[foo]" in report
+    assert "cell=cell-value" in report and "boot=boot-value" in report
+
+
+def test_fx_cache_failure_report_names_b2_samekey_resave(tmp_path, monkeypatch):
+    """fresh_keys=0 with a second entry file in a seeded key dir proves the
+    boot computed the SAME key and torch's candidate-load path refused the
+    seeded entry — the report says so and diffs the siblings."""
+    import pickle
+
+    key = "fseededkey111"
+    capture = tmp_path / "capture"
+    _write_fx_entry(capture / "inductor", key, _fx_lines("same"))
+    (capture / "triton").mkdir()
+    artifact = cc.pack(capture, tmp_path / "cell.tar.gz", {"format": 2})
+
+    live = tmp_path / "live-inductor"
+    _write_fx_entry(live, key, _fx_lines("same"))
+    # torch names entry files by content sha; any OTHER name in the key dir
+    # is this boot's re-save of the same key.
+    resave = live / "fxgraph" / key[1:3] / key / "boot-resave"
+    resave.write_bytes(pickle.dumps(_FakeFxEntry(key, _fx_lines("same"))))
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(live))
+
+    report = cc.fx_cache_failure_report(artifact)
+    assert "fresh_keys=0" in report
+    assert "samekey_resaves=1" in report
+    assert "samekey_resave[fseededkey11" in report
+    assert "live_cell_entry_unpickle=ok" in report
+
+
+def test_fx_cache_failure_report_never_raises_without_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "nope"))
+    report = cc.fx_cache_failure_report(None)
+    assert "cell_keys=0" in report
+    assert "live_dir_missing" in report
