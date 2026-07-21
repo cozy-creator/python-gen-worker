@@ -337,7 +337,7 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
     )
     model_ref = wire_ref(spec.models["model"])
     cell_ref = (
-        f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
+        f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
     )
     snap = tmp_path / "snap"
     snap.mkdir()

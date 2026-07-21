@@ -17,7 +17,7 @@ W8A8. The compile job itself opts into cold compilation through the explicit
 Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
 the traced graph + shapes, not the weights, so one artifact serves every
 fine-tune of a model family. They live in a system-owned repo per family
-(``_system/family-<family>``), one flavor per (SKU, torch) cell — and they
+(``root/family-<family>``), one flavor per (SKU, torch) cell — and they
 are CODE: only the platform's first-party compile job publishes shared ones.
 
 Artifact = deterministic ``.tar.gz``::
@@ -234,12 +234,12 @@ def system_repo(family: str) -> str:
     fam = str(family or "").strip()
     if not fam:
         raise ValueError("compile-cache family must be non-empty")
-    return f"_system/family-{fam}"
+    return f"root/family-{fam}"
 
 
 def parse_cell_ref(ref: str) -> Tuple[str, str]:
     """(family, flavor) from a system cell ref
-    (``_system/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
+    (``root/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
     grammar (gw#492); ('', '') when the ref is not a system-family ref."""
     from .models.refs import parse_model_ref
 
@@ -248,7 +248,7 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
     except ValueError:
         return "", ""
     th = parsed.tensorhub
-    if th is None or th.owner != "_system" or not th.repo.startswith("family-"):
+    if th is None or th.owner != "root" or not th.repo.startswith("family-"):
         return "", ""
     return th.repo[len("family-"):], th.flavor or ""
 
@@ -556,17 +556,32 @@ seed_env = capture_env
 
 
 def inductor_counters() -> Dict[str, int]:
-    """This process's inductor FX-graph cache counters (monotonic). The delta
+    """This process's compiled-artifact cache counters (monotonic). The delta
     across a warmup is the honest adopted-vs-silently-eager signal (gw#391):
-    zero hits means the seeded cell never served the trace."""
+    zero hits means the seeded cell never served the trace.
+
+    gw#611: the AOT-autograd layer is a SECOND serving surface. In bundled
+    mode an AOT hit loads the compiled artifact without ever consulting
+    FxGraphCache (measured on torch 2.13: fxgraph counters fully silent on a
+    served call), so a proof reading only fxgraph_* sees hits=0/misses=0 on
+    a healthy serving cell and fail-closes it — the th#954 SDXL second-boot
+    release-bricking shape. AOT hits are therefore reported alongside
+    (``aot_cache_hit``/``aot_cache_miss``) and count as serving evidence.
+    Production pins the AOT layer OFF (gw#608 portability), so these stay 0
+    unless a config regression re-enables it — in which case a served
+    warmup must still prove, never brick."""
     try:
         from torch._dynamo.utils import counters
 
         c = counters["inductor"]
-        return {
+        out = {
             k: int(c.get(k, 0))
             for k in ("fxgraph_cache_hit", "fxgraph_cache_miss", "fxgraph_cache_bypass")
         }
+        a = counters["aot_autograd"]
+        out["aot_cache_hit"] = int(a.get("autograd_cache_hit", 0))
+        out["aot_cache_miss"] = int(a.get("autograd_cache_miss", 0))
+        return out
     except Exception:
         return {}
 
@@ -1185,8 +1200,12 @@ def _guarded(
         stats = counters_delta(before, inductor_counters()) if before is not None else {}
         with lock:
             signal["successful_calls"] = int(signal.get("successful_calls", 0)) + 1
+            # gw#611: an AOT-layer hit serves the artifact without an
+            # FxGraphCache lookup (bundled mode: fxgraph counters silent);
+            # it is serving evidence, never a disproof.
             signal["cache_hits"] = int(signal.get("cache_hits", 0)) + max(
-                0, int(stats.get("fxgraph_cache_hit", 0)))
+                0, int(stats.get("fxgraph_cache_hit", 0))) + max(
+                0, int(stats.get("aot_cache_hit", 0)))
             signal["cache_misses"] = int(signal.get("cache_misses", 0)) + max(
                 0, int(stats.get("fxgraph_cache_miss", 0)))
 
@@ -1267,8 +1286,12 @@ def _guarded_regional(
         stats = counters_delta(before, inductor_counters()) if before is not None else {}
         with lock:
             signal["successful_calls"] = int(signal.get("successful_calls", 0)) + 1
+            # gw#611: an AOT-layer hit serves the artifact without an
+            # FxGraphCache lookup (bundled mode: fxgraph counters silent);
+            # it is serving evidence, never a disproof.
             signal["cache_hits"] = int(signal.get("cache_hits", 0)) + max(
-                0, int(stats.get("fxgraph_cache_hit", 0)))
+                0, int(stats.get("fxgraph_cache_hit", 0))) + max(
+                0, int(stats.get("aot_cache_hit", 0)))
             signal["cache_misses"] = int(signal.get("cache_misses", 0)) + max(
                 0, int(stats.get("fxgraph_cache_miss", 0)))
 

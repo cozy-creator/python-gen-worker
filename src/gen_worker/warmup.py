@@ -187,6 +187,63 @@ def synthesize_factory(payload_type: type) -> Tuple[Optional[_Factory], str]:
     return _struct_factory(payload_type, 0)
 
 
+def _media_value_factory(t: Any) -> Optional[_Factory]:
+    """Synthesized-media factory for an OPTIONAL field's type, or None."""
+    t = _unwrap(t)
+    origin = typing.get_origin(t)
+    if origin in (typing.Union, py_types.UnionType):
+        for arm in typing.get_args(t):
+            if arm is type(None):
+                continue
+            fac = _media_value_factory(arm)
+            if fac is not None:
+                return fac
+        return None
+    if isinstance(t, type):
+        if issubclass(t, ImageAsset):
+            return _image_asset
+        if issubclass(t, AudioAsset):
+            return _audio_asset
+        return None
+    if origin in (list, typing.List, Sequence, typing.Sequence, tuple, typing.Tuple):
+        args = tuple(a for a in typing.get_args(t) if a is not Ellipsis)
+        if len(args) == 1:
+            inner = _media_value_factory(args[0])
+            if inner is not None:
+                if origin in (tuple, typing.Tuple):
+                    return lambda d: (inner(d),)
+                return lambda d: [inner(d)]
+    return None
+
+
+def media_variants(
+    payload_type: type, base_build: _Factory,
+) -> List[Tuple[str, _Factory]]:
+    """gw#614: (label, factory) variants adding synthesized media to optional
+    media-capable fields the base payload leaves empty — the modality an
+    input-routed sibling lane (e.g. edit needing an input image) requires.
+    Each variant differs from the base in EXACTLY one field, so the lane
+    token / guidance / shape derivation matches a real request of that
+    modality. A variant factory returns None when the base already carries
+    media in its field."""
+    variants: List[Tuple[str, _Factory]] = []
+    for f in msgspec.structs.fields(payload_type):
+        if f.required:
+            continue
+        fac = _media_value_factory(f.type)
+        if fac is None:
+            continue
+
+        def build(d: str, _name: str = f.name, _fac: _Factory = fac) -> Any:
+            payload = base_build(d)
+            if getattr(payload, _name, None):
+                return None
+            return msgspec.structs.replace(payload, **{_name: _fac(d)})
+
+        variants.append((f"media:{f.name}", build))
+    return variants
+
+
 @dataclass(frozen=True)
 class WarmupJob:
     """One planned synthetic invocation: ``build(tmp_dir)`` -> payload."""

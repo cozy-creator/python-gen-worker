@@ -443,7 +443,7 @@ def _ref_mandatory_lane(ref: str) -> str:
         parsed = parse_model_ref(ref).tensorhub
     except ValueError:
         return ""
-    if parsed is None or parsed.owner == "_system":
+    if parsed is None or parsed.owner == "root":
         return ""
     flavor = parsed.flavor or ""
     if flavor == "fp8-w8a8" or flavor.startswith("fp8-w8a8-"):
@@ -611,6 +611,21 @@ class ModelStore:
         self._disk_report_lock = threading.Lock()
         self._disk_capacity_generation = 0
         self._last_disk_shape: Optional[bytes] = None
+        # boothang fix: disk_usage_report() rides EVERY StateDelta build
+        # (_state_delta() is a plain sync method called directly from many
+        # call sites, some outside an await — never itself offloaded to a
+        # thread). Measuring here means statvfs()/stat() on a real mount —
+        # the provider-attached VOLUME fill-source is a network-backed
+        # mount that can stall for minutes under load, exactly what a
+        # self-mint's weight download + cell pack produce right before the
+        # first post-publish delta. A stalled statvfs on the event loop
+        # thread freezes the ENTIRE worker (including the th#965 heartbeat,
+        # which shares the same loop): every StateDelta, RunJob dispatch,
+        # and drain signal stops until the syscall returns. Cache the
+        # measurement and refresh it off-loop (refresh_disk_usage_report,
+        # driven by Lifecycle's TTL gate); disk_usage_report() only ever
+        # reads the cache, so the hot state-delta path never blocks on I/O.
+        self._cached_disk_usage_report = pb.DiskUsageReport()
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -739,15 +754,32 @@ class ModelStore:
         return out
 
     def disk_usage_report(self) -> pb.DiskUsageReport:
-        """Measured per-tier disk telemetry (pgw#610/th#962).
+        """Cached measured per-tier disk telemetry (pgw#610/th#962).
 
-        statvfs on the real mounts (CAS root = container tier; attached
-        endpoint volume = volume tier; a shared NFS mount joins as TIER_NFS
-        when the worker grows one) plus safely-reclaimable bytes: ref-index
-        entries at DISK tier that are inactive AND not in the desired set —
-        the disk-GC LRU's eligible set. Reuses ref-index bytes; never a tree
-        rescan. capacity_generation bumps only on a measured shape change.
-        """
+        Never measures directly — returns whatever
+        :meth:`refresh_disk_usage_report` last computed. ``_state_delta()``
+        calls this synchronously from many places (some with no event loop
+        at all, e.g. the initial ``build_hello()``); it must never touch a
+        filesystem. Empty/zeroed until the first refresh completes (boot's
+        first StateDelta may ship no tiers — informational telemetry, never
+        a dispatch gate on its own)."""
+        return self._cached_disk_usage_report
+
+    def _measure_disk_usage_report(self) -> pb.DiskUsageReport:
+        """Blocking measurement — statvfs on the real mounts (CAS root =
+        container tier; attached endpoint volume = volume tier; a shared
+        NFS mount joins as TIER_NFS when the worker grows one) plus safely-
+        reclaimable bytes: ref-index entries at DISK tier that are inactive
+        AND not in the desired set — the disk-GC LRU's eligible set. Reuses
+        ref-index bytes; never a tree rescan. capacity_generation bumps
+        only on a measured shape change.
+
+        Callers MUST run this off the event loop (``refresh_disk_usage_
+        report``, or a thread pool in tests) — the attached VOLUME
+        fill-source is a provider network mount that can stall for minutes
+        under load; a blocking statvfs on the event loop thread freezes the
+        whole worker, INCLUDING the th#965 heartbeat that shares the same
+        loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
         entries = self._index.entries()
         reclaimable: List[Tuple[str, int]] = []
@@ -782,6 +814,15 @@ class ModelStore:
                 self._last_disk_shape = shape
                 self._disk_capacity_generation += 1
             report.capacity_generation = self._disk_capacity_generation
+        return report
+
+    async def refresh_disk_usage_report(self) -> pb.DiskUsageReport:
+        """Off-loop refresh of the cached report (Lifecycle's TTL-gated
+        refresh, driven off the heartbeat/state-delta path + once at boot).
+        Never called from the hot StateDelta-build path — that path only
+        reads the cache."""
+        report = await asyncio.to_thread(self._measure_disk_usage_report)
+        self._cached_disk_usage_report = report
         return report
 
     def local_path(self, ref: str) -> Optional[Path]:
@@ -3507,9 +3548,16 @@ class Executor:
             logger.info("boot warmup skipped for %s: %s", skip.spec.name, skip.reason)
         objects = tuple({id(obj): obj for obj in proof_objects}.values())
         evidence = _WarmupEvidence()
-        for wj_index, wj in enumerate(jobs, start=1):
-            activity_mod.current_phase(
-                activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(jobs))
+        start_counts = {
+            id(obj): (
+                compile_cache.execution_count(obj),
+                trt_engine.execution_count(obj),
+            )
+            for obj in objects
+        }
+
+        async def _one(wj: Any, build: Any, mode: str, *, variant: bool) -> bool:
+            """One warmup forward; False = OOM, stop warming."""
             before = {
                 id(obj): (
                     compile_cache.execution_count(obj),
@@ -3520,7 +3568,19 @@ class Executor:
             handler_kwargs = await self._handler_kwargs(wj.spec, snapshots or {})
             t0 = time.monotonic()
             with tempfile.TemporaryDirectory(prefix="gw-warmup-") as tmp:
-                payload = wj.build(tmp)
+                try:
+                    payload = build(tmp)
+                except Exception as exc:
+                    if not variant:
+                        raise
+                    # A variant that cannot construct a valid payload is a
+                    # schema mismatch, never a boot failure.
+                    logger.warning(
+                        "coverage warmup %s (%s) skipped: %s",
+                        wj.spec.name, mode, exc)
+                    return True
+                if payload is None:
+                    return True  # variant base already carries media
                 ctx = RequestContext(
                     request_id=f"boot-warmup-{wj.spec.name}",
                     local_output_dir=tmp,
@@ -3542,7 +3602,7 @@ class Executor:
                         wj.spec.name, exc)
                     if torch is not None and torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    return evidence
+                    return False
             evidence.count += 1
             for obj in objects:
                 calls_before, trt_before = before[id(obj)]
@@ -3559,8 +3619,47 @@ class Executor:
                         wj.spec.name)
             logger.info(
                 "boot warmup %s (%s): %.1fs",
-                wj.spec.name, "declared" if wj.declared else "synthesized",
-                time.monotonic() - t0)
+                wj.spec.name, mode, time.monotonic() - t0)
+            return True
+
+        for wj_index, wj in enumerate(jobs, start=1):
+            activity_mod.current_phase(
+                activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(jobs))
+            mode = "declared" if wj.declared else "synthesized"
+            if not await _one(wj, wj.build, mode, variant=False):
+                return evidence
+
+        def _unexercised() -> list[Any]:
+            return [
+                obj for obj in objects
+                if compile_cache.execution_count(obj) == start_counts[id(obj)][0]
+                and trt_engine.execution_count(obj) == start_counts[id(obj)][1]
+            ]
+
+        # gw#614 coverage pass: an input-routed sibling lane the planned
+        # warmups never reached (e.g. edit needing an input image) leaves a
+        # compile object at calls=0 — the mint then withholds publish
+        # (gw#612) and an adopt arms it unproven. Synthesized media variants
+        # of the same base payloads exercise those lanes with matching
+        # compile-key derivation (only the media field differs).
+        if jobs and _unexercised():
+            from . import warmup as warmup_mod
+
+            variant_jobs = [
+                (wj, label, build)
+                for wj in jobs
+                for label, build in warmup_mod.media_variants(
+                    wj.spec.payload_type, wj.build)
+            ]
+            total = len(jobs) + len(variant_jobs)
+            for v_index, (wj, label, build) in enumerate(
+                    variant_jobs, start=len(jobs) + 1):
+                if not _unexercised():
+                    break
+                activity_mod.current_phase(
+                    activity_mod.PHASE_WARMUP_FORWARD, v_index, total)
+                if not await _one(wj, build, label, variant=True):
+                    return evidence
         return evidence
 
     async def _invoke_warmup(
@@ -3821,12 +3920,23 @@ class Executor:
                 proven = 0
                 hits = 0
                 misses = 0
+                # gw#612: snapshot capture-sharing BEFORE the loop pops
+                # pending entries. The publish decision needs to know, per
+                # shared capture, whether EVERY sharer's graphs made it in.
+                mint_by_id: Dict[int, Any] = {}
+                mint_sharers: Dict[int, List[int]] = {}
+                for _obj_id, _pending in inj.pending_self_mints.items():
+                    mint_by_id[id(_pending)] = _pending
+                    mint_sharers.setdefault(id(_pending), []).append(_obj_id)
+                proven_mint_objs: set[int] = set()
+                calls_by_obj: Dict[int, int] = {}
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
                     before = proof_before.get(id(pipe))
                     if before is None:
                         continue
                     calls = compile_cache.execution_count(pipe) - before[0]
+                    calls_by_obj[id(pipe)] = calls
                     pipe_hits = compile_cache.cache_hit_count(pipe)
                     pipe_misses = compile_cache.cache_miss_count(pipe) - before[1]
                     hits += max(0, pipe_hits)
@@ -3858,6 +3968,7 @@ class Executor:
                         inj.pending_self_mints.pop(id(pipe), None)
                         if finalized is not None:
                             proven += 1
+                            proven_mint_objs.add(id(pipe))
                             if callable(warmup):
                                 function_proofs[id(pipe)] = {spec.name}
                             inj.active_compile_artifacts[id(pipe)] = (
@@ -3875,6 +3986,11 @@ class Executor:
                         proven += 1
                         if callable(warmup):
                             function_proofs[id(pipe)] = {spec.name}
+                # gw#612: everything after the per-object proof — unproven
+                # handling, sibling resolution, the publish decision, and
+                # the bookkeeping down to readiness — reports an honest
+                # phase instead of a stale seal_publish.
+                activity_mod.current_phase(activity_mod.PHASE_FINALIZE)
                 unproven = list(disproven)
                 if not proven:
                     unproven.extend(unexercised)
@@ -3895,13 +4011,27 @@ class Executor:
                             compile_cache.drop_lora_lane(pipe)
                         inj.active_compile_artifacts.pop(id(pipe), None)
                         self._abandon_pending_mint(inj, pipe)
+                    # gw#611: `calls` discriminates the failure classes on the
+                    # wire — calls=0 is an orphaned/never-invoked wrapper (or
+                    # no warmup modality), calls>0 with 0/0 counters is a
+                    # compiled call served by a cache layer the counters
+                    # don't watch (pod logs are unreachable; this line is
+                    # the only forensic surface).
+                    unproven_calls = sum(
+                        calls_by_obj.get(id(c.pipeline), 0) for c in unproven)
                     detail = (
                         f"{len(unproven)} attached compile object(s) did not "
                         "serve their own warmup graph "
-                        f"(warmups={warmed}, cache_hits={hits}, "
-                        f"cache_misses={misses})"
+                        f"(warmups={warmed}, calls={unproven_calls}, "
+                        f"cache_hits={hits}, cache_misses={misses})"
                     )
                     if quant_lane:
+                        if mint_by_id:
+                            from . import fleet_cells as fleet_cells_mod
+
+                            for pending in mint_by_id.values():
+                                fleet_cells_mod.withhold_self_mint_publish(
+                                    pending, f"boot failed closed ({detail})")
                         raise compile_cache.CompiledLaneUnavailableError(detail)
                     logger.warning("%s; serving eager", detail)
                 if unexercised:
@@ -3968,6 +4098,31 @@ class Executor:
                         compile_cache.drop_lora_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
                     self._abandon_pending_mint(inj, pipe)
+                if mint_by_id:
+                    # gw#612 publish gate: a shared capture packs only the
+                    # graphs the warmup compiled. Publish the family cell
+                    # only when EVERY sharer proved into it; otherwise the
+                    # store would gain a partial cell that fails gw#607's
+                    # per-object adopt proof on every later boot (the
+                    # gw#611 qwen hits=1/misses=1 release-breaker). The
+                    # local mint keeps serving this process either way.
+                    from . import fleet_cells as fleet_cells_mod
+
+                    for pending in mint_by_id.values():
+                        sharers = mint_sharers.get(id(pending), [])
+                        gap = [
+                            oid for oid in sharers
+                            if oid not in proven_mint_objs
+                        ]
+                        if gap:
+                            fleet_cells_mod.withhold_self_mint_publish(
+                                pending,
+                                f"{len(gap)}/{len(sharers)} capture-sharing "
+                                "compile object(s) were never exercised by "
+                                "the warmup, so their graphs are absent "
+                                "from the packed cell")
+                        else:
+                            fleet_cells_mod.publish_self_mint(pending)
                 if (
                     proven
                     and compile_selection is not None

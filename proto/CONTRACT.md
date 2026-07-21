@@ -160,7 +160,11 @@ that worker's assigned requests (attempt+1) unless the worker returns and
 re-claims them via `Hello.in_flight` reconcile first. A pod-backed worker
 that never reconnects within the stall window is enforced as
 `worker_disappeared`. Keepalive proves ONLY the gRPC library's threads:
-ie#501 run 26's hung worker answered HTTP/2 pings for 2.5h.
+ie#501 run 26's worker answered HTTP/2 pings through 2.5h of app-level
+silence — a silent worker is indistinguishable from a hung one at the
+transport (run 26's turned out to be healthy-idle with no idle beat,
+starved by a hub fence bug; the beat makes the two cases distinguishable
+in seconds instead of hours).
 
 **Layer 2 — universal app-level heartbeat (hung process).**
 
@@ -193,9 +197,10 @@ Heartbeats arriving but ANY function still in `loading_functions` with NO
 open activity (no running ActivityUpdate kind, no active model download) for
 `DefaultActivityStallAfter` (10min) → `worker_activity_stalled` with reason
 `loading_no_open_activity`, same enforcement. Completing an activity without
-starting the next one or declaring readiness is silence, not health. This
-closes the run-26 blind spot: activity-coverage gaps (gw#612 class) degrade
-the stall reason, never the detection.
+starting the next one or declaring readiness is silence, not health.
+Activity-coverage gaps (gw#612 class) degrade the stall reason, never the
+detection — a worker genuinely stuck between its last activity and
+readiness can no longer ride unbounded.
 
 **Load balancer requirements.** Any proxy/LB between W and O's gRPC port MUST:
 - forward HTTP/2 PING frames end-to-end (no PING termination at the proxy —
@@ -586,7 +591,7 @@ A missing/empty operation ID or digest fails closed as
 before any download, cache seeding, pipeline wrapping, or resident-state mutation.
 
 **ADOPT_COMPILE_CACHE** (hot adoption, #567): `ref` is a compile-cache flavor
-ref — `_system/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
+ref — `root/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
 artifact snapshot, verifies its key (family/SKU/torch/triton/libs/producer
 gen-worker version + low-VRAM prep mode, gw#391 — the prep flags are traced
 into the graphs) against its own runtime and resident pipelines, seeds the
@@ -674,7 +679,7 @@ re-baselines. A positive `residency_generation` plus non-empty
 manufactures observed identity from desired config or a mutable tag target.
 `ADOPTED` is also not a residency tier: it reports one-shot success of ADOPT_COMPILE_CACHE for
 a compile-cache ref (whose bytes independently report DOWNLOADING/ON_DISK
-like any snapshot download). O MUST NOT feed `_system/family-*` compile-cache
+like any snapshot download). O MUST NOT feed `root/family-*` compile-cache
 refs into ordinary model-failure availability handling. An optional lane may
 stay eager; mandatory W8A8 remains unavailable until exact compiled evidence
 changes and must never be marked function-ready from the failed cell.
@@ -782,9 +787,9 @@ stale instance, and only then promotes the newer disk identity.
 **Compile-cache snapshots (#569).** When a release's endpoint declares
 `compile=Compile(family=...)` and boot-attach is enabled (opt-in; default OFF
 — boot-time attach worsens TTFI, hot adoption is the primary path), O MAY add
-the resolved `_system/family-<f>#inductor-<sku>-torch<maj.min>` snapshot to
+the resolved `root/family-<f>#inductor-<sku>-torch<maj.min>` snapshot to
 `RunJob.snapshots` keyed by that ref, alongside the model snapshots. W
-recognizes the key by the `_system/family-<f>#inductor-` prefix for the
+recognizes the key by the `root/family-<f>#inductor-` prefix for the
 declared family, downloads it like any snapshot, and seeds it before pipeline
 load; verification failure ⇒ eager, never an error. The same ref may arrive
 via `ModelOp{ADOPT_COMPILE_CACHE}` (hot adoption, §4).

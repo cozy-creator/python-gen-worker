@@ -6,9 +6,9 @@ engine captures the optimized graph + tactics (~1% of a weight-full plan);
 the consumer REFITs it with the weights of whatever family member is already
 resident, then swaps the module's ``forward`` behind a guard. Same trust
 model, storage, and delivery as inductor caches — cells live as flavors of
-``_system/family-<family>``:
+``root/family-<family>``:
 
-    _system/family-<f>#trt-<sku>-trt<maj.min>-<precision>
+    root/family-<f>#trt-<sku>-trt<maj.min>-<precision>
 
 Artifact = deterministic ``.tar.gz``::
 
