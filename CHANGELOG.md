@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.44.0 (2026-07-21)
+
+- **pgw#617: hierarchical slot bindings (th#980 companion).**
+  `RunJob.ModelBinding` gains `components` (field 5, component name ->
+  canonical tensorhub ref). The worker loads the base composition and
+  substitutes each named component from its OWN materialized snapshot via
+  the gw#479 `components=` from_pretrained injection (load-then-substitute).
+  The composition (base + sorted component refs) is the instance/residency
+  identity — a component-only rebind derives a new instance and reconcile
+  reloads it; flat bindings (empty map) are byte-identical to 0.43.x.
+  Unknown component names, non-CAS override refs, and overrides on
+  self-loading (str/Path) slots refuse typed (`ComponentSubstitutionError`)
+  at setup, never mid-denoise. Override refs join job pins, held refs/
+  digests, and compile-cell binding facts.
+- **pgw#617: `selected_by=` slots may omit `default_checkpoint`.** Deploy-
+  time bindings (th#980) seed the hub mapping now, so the registry's
+  author-time requirement is dropped (mirror of tensorhub's relaxed
+  registration rule). Unblocks the ie#524 de-hardcode sweep of
+  request-branching endpoints (wan-2.2, sdxl slot-model, z-image).
+
 ## 0.43.1 (2026-07-21)
 
 - **gw#608 CLOSED: self-mint arm is transactional over the process-global

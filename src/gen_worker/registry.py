@@ -129,12 +129,10 @@ def _validate_slot_selected_by(
     """pgw#520: a Slot's ``selected_by`` must name a plain-``str`` (or
     ``str | ModelRef``, pgw#524 item 5) field on THIS handler's payload —
     validated per-handler (not per-class) because one ``models=`` decl can
-    be shared by methods with different payload types. Also enforces pgw#524
-    item 4: a request-branching slot (``selected_by`` set) with no
-    ``default_checkpoint`` has nothing to seed the hub mapping or bootstrap
-    placement with — tensorhub rejects it at manifest registration
-    (``builder.normalizeManifestSlot``), so fail here at AUTHOR time instead
-    of at publish time. Fails at spec-construction time (discovery walk /
+    be shared by methods with different payload types. ``selected_by``
+    slots may omit ``default_checkpoint`` (pgw#617: deploy-time bindings
+    seed the hub mapping — tensorhub relaxed the mirrored registration
+    rule in th#980). Fails at spec-construction time (discovery walk /
     CLI collection / executor boot), never at first invoke."""
     if not slots:
         return
@@ -145,14 +143,6 @@ def _validate_slot_selected_by(
     for slot_name, slot in slots.items():
         if not slot.selected_by:
             continue
-        if slot.default_checkpoint is None:
-            raise ValueError(
-                f"{owner}: Slot({slot_name!r}).selected_by={slot.selected_by!r} "
-                "requires default_checkpoint=... — a request-branching slot "
-                "with no code-side default has nothing to seed the hub "
-                "mapping/bootstrap placement with (the hub rejects this at "
-                "registration; fail here instead)"
-            )
         if slot.selected_by not in hints:
             raise ValueError(
                 f"{owner}: Slot({slot_name!r}).selected_by={slot.selected_by!r} "
