@@ -720,6 +720,23 @@ message ActivityUpdate {
   string error  = 7; // set when state = FAILED (the typed activity_failed terminal)
   string detail = 8; // human-readable elaboration
   int64 updated_at_unix_ms = 9; // worker clock, informational; hub stamps receipt
+
+  // gw#621/th#994: progress-registry snapshot riding the worker's 10s app
+  // beat. A named monotonic counter for the current phase (download bytes,
+  // watchdog evidence, warmup jobs, upload bytes). When a counter is
+  // present the hub judges liveness by counter ADVANCEMENT — a heartbeat
+  // with a frozen counter is not progress. Counterless updates keep
+  // seq-freshness semantics (old workers). Additive: old hubs ignore.
+  string counter       = 10; // name; family prefix before ":" maps to a patience window
+  string counter_unit  = 11; // bytes | steps | graphs | evidence
+  double counter_done  = 12; // monotonic within one counter name
+  double counter_total = 13; // 0 = unknown
+  double rate_per_s    = 14; // worker-computed recent rate, display only
+  // Self-diagnosis (kill on confession, gw#621): the worker's own per-phase
+  // window saw no counter advance for stalled_for_ms; the hub recycles the
+  // pod without waiting out its own stall window.
+  bool  self_stalled   = 15;
+  int64 stalled_for_ms = 16;
 }
 
 enum ActivityState {

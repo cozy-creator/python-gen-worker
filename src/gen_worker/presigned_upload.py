@@ -63,6 +63,8 @@ from ._upload_transport import (
     optimal_part_concurrency,
     upload_part_to_presigned_url,
 )
+from . import activity as _activity
+from . import progress as _progress
 from .api.errors import ArtifactTransferError, AuthError, CanceledError
 
 logger = logging.getLogger(__name__)
@@ -559,6 +561,14 @@ def _upload_parts_to_s3(
     etags: List[Tuple[int, str]] = []
     file_size = os.path.getsize(file_path)
 
+    def _feed(n: int) -> None:
+        # gw#621: uploaded bytes are visible on the 10s beat while a
+        # seal_publish-class activity is open, and proof-of-life either way.
+        act = _activity.current()
+        if act is not None:
+            act.counter("upload:bytes", _progress.UNIT_BYTES).add(n)
+        _activity.note_progress()
+
     def _upload_one_part(part_index: int) -> Tuple[int, str, int]:
         part_number = part_index + 1
         presigned_url = part_urls[part_index]
@@ -597,6 +607,7 @@ def _upload_parts_to_s3(
             etags.append((pn, et))
             parts_done += 1
             bytes_uploaded += n
+            _feed(n)
             if on_progress:
                 on_progress(parts_done, total_parts, bytes_uploaded)
     else:
@@ -608,6 +619,7 @@ def _upload_parts_to_s3(
                 etags.append((pn, et))
                 parts_done += 1
                 bytes_uploaded += n
+                _feed(n)
                 if on_progress:
                     on_progress(parts_done, total_parts, min(bytes_uploaded, file_size))
 

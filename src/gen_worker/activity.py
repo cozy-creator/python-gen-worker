@@ -127,6 +127,18 @@ class Activity:
         self._step = 0
         self._total = 0
         self._done = False
+        self._counters: list[progress_mod.Counter] = []
+
+    def counter(
+        self, name: str, unit: str, total: float = 0.0,
+    ) -> progress_mod.Counter:
+        """Register-or-get a progress counter owned by this activity —
+        finished automatically when the activity ends, so a reused name
+        never carries a stale age into the next activity (gw#621)."""
+        c = progress_mod.counter(name, unit, total)
+        if c not in self._counters:
+            self._counters.append(c)
+        return c
 
     def _report(self, state: "pb.ActivityState", error: str = "", detail: str = "") -> None:
         _emit(pb.ActivityUpdate(
@@ -201,6 +213,9 @@ def _end(act: Activity) -> None:
     with _lock:
         if _current is act:
             _current = None
+    for c in act._counters:
+        c.finish()
+    act._counters = []
 
 
 def current() -> Optional[Activity]:
@@ -365,9 +380,9 @@ class watchdog:
 
     def _run(self) -> None:
         try:
-            last = self._evidence()
+            base = last = self._evidence()
         except Exception:
-            last = 0.0
+            base = last = 0.0
         while not self._stop.wait(self._interval):
             try:
                 now = self._evidence()
@@ -375,9 +390,15 @@ class watchdog:
                 continue
             if now - last >= _EVIDENCE_EPS:
                 last = now
+                # gw#621: evidence advance is ALSO a registry counter, so the
+                # 10s beat reports it and the hub sees a moving number
+                # instead of inferring health.
+                self._counter.set_done(now - base)
                 self._act.heartbeat()
 
     def __enter__(self) -> "watchdog":
+        self._counter = progress_mod.counter(
+            f"evidence:{self._act.kind}", progress_mod.UNIT_EVIDENCE)
         self._thread.start()
         return self
 
@@ -389,3 +410,4 @@ class watchdog:
     ) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
+        self._counter.finish()
