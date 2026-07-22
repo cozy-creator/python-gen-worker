@@ -120,6 +120,12 @@ async def _to_thread_complete(func: Callable[..., Any], /, *args: Any, **kwargs:
             await work
         except BaseException:
             pass
+        # gw#624: the joined thread's result (possibly a fully-loaded
+        # multi-GB pipeline) lives on the Task. This frame rides the
+        # propagating CancelledError's traceback through rollback — keeping
+        # ``work`` referenced here would pin the whole discarded load in
+        # memory across the retry.
+        del work
         raise
 
 
@@ -1885,6 +1891,9 @@ class Executor:
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
+        # gw#624: set by a rolled-back setup; the next attempt gc-purges the
+        # cancelled load's cycle-held modules before allocating.
+        self._pending_alloc_purge = False
         # Compile-cache adoption mutates already-resident modules in place.
         # Serialize the whole operation (download through terminal evidence),
         # not only its GPU warmup, so two commands can never cross wraps or
@@ -3841,16 +3850,51 @@ class Executor:
         staging buffers in PyTorch's pinned-host cache, so return those unused
         blocks after the owners have gone.
         """
+        # gw#624: even with no record ownership (cancellation landed inside
+        # _injection_kwargs before the load finished), the aborted attempt's
+        # partially built modules are almost always in reference cycles and
+        # can be pinned by the propagating exception's traceback until it
+        # dies — schedule a purge so the NEXT attempt provably starts from
+        # baseline instead of stacking a fresh multi-GB load on top
+        # (observed live: 5 cancelled retries climbed one worker to 83.86GB
+        # VRAM / 97% container RAM on an 80GB card).
+        self._pending_alloc_purge = True
         if not self._record_has_setup_ownership(rec):
             return
         async with self._load_lock:
             released = await self._vacate_record(rec)
+        await asyncio.to_thread(gc.collect)
+        if torch is not None and torch.cuda.is_available():
+            try:
+                await asyncio.to_thread(torch.cuda.empty_cache)
+            except Exception:
+                pass
         released_pinned = await asyncio.to_thread(
             release_unused_pinned_host_cache)
         logger.info(
             "rolled back incomplete setup refs=%s pinned_host_bytes=%d",
             released,
             released_pinned,
+        )
+
+    async def _purge_cancelled_setup_allocations(self) -> None:
+        """gw#624: run once at the start of a setup attempt that follows a
+        rolled-back one. By now the previous attempt's exception has died,
+        so a full gc pass actually frees its cycle-held modules; only then
+        can empty_cache return their VRAM to the allocator."""
+        if not getattr(self, "_pending_alloc_purge", False):
+            return
+        self._pending_alloc_purge = False
+        freed_before = time.monotonic()
+        await asyncio.to_thread(gc.collect)
+        if torch is not None and torch.cuda.is_available():
+            try:
+                await asyncio.to_thread(torch.cuda.empty_cache)
+            except Exception:
+                pass
+        logger.info(
+            "purged prior cancelled-setup allocations in %.1fs",
+            time.monotonic() - freed_before,
         )
 
     async def _setup_locked(
@@ -3899,6 +3943,10 @@ class Executor:
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._load_lock:
+            # gw#624: a prior cancelled attempt's cycle-held modules must be
+            # collected BEFORE this attempt allocates, or retries stack
+            # partial loads until OOM.
+            await self._purge_cancelled_setup_allocations()
             await self._make_room_for(spec, setup_slots)
             # VRAM make-room may demote the old pipeline into host RAM. Admit
             # the incoming load only AFTER that transition so the probe sees
@@ -5243,235 +5291,250 @@ class Executor:
             for pname, ann in hints.items():
                 if ann is ServerHandle:
                     kwargs[pname] = server
-        for slot, path in paths.items():
-            ann = hints.get(slot)
-            overrides = dict((component_paths or {}).get(slot) or {})
-            if overrides and not (
-                isinstance(ann, type)
-                and callable(getattr(ann, "from_pretrained", None))
-            ):
-                # pgw#617: substitution requires a worker-loaded pipeline
-                # slot; a self-loading str/Path slot never sees components.
-                raise ComponentSubstitutionError(
-                    spec.name, slot, sorted(overrides)[0],
-                    detail="slot is not worker-loaded (no pipeline-class "
-                           "annotation); components cannot substitute")
-            if ann is None or ann is str:
-                kwargs[slot] = path
-            elif ann is Path:
-                kwargs[slot] = Path(path)
-            elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
-                binding = spec.models.get(slot)
-                # Worker-owned placement/offload policy: one decider for the
-                # whole worker; endpoints never write device/offload code.
-                # Plan-time offload verdicts and the learned degraded floor
-                # pick the starting rung so a doomed fully-resident attempt
-                # is never paid (gw#463 / ie#369); a CUDA OOM inside is a
-                # ladder transition, not a failure.
-                ref = wire_ref(binding) if binding is not None else ""
-                mode = self._placement_mode(spec, ref)
-                slot_share = dict((share_plan or {}).get(slot) or {})
-                if slot_share and mode != "auto":
-                    # Offload hooks on a shared module would poison sibling
-                    # lanes; a planned-offload record loads monolithically.
-                    logger.warning(
-                        "content-keyed sharing disabled for %s slot %s: "
-                        "placement mode %s", spec.name, slot, mode)
-                    slot_share = {}
-                res = self.store.residency
-                injected: Dict[str, Any] = {}
-                if overrides:
-                    # pgw#617 load-then-substitute: each override component
-                    # loads from its OWN materialized tree and rides the
-                    # same from_pretrained components= injection as gw#479
-                    # shared modules. Unknown names refuse typed at setup.
-                    valid = self._model_index_components(path)
-                    unknown = sorted(set(overrides) - valid)
-                    if unknown:
-                        raise ComponentSubstitutionError(
-                            spec.name, slot, unknown[0],
-                            detail=f"base composition {ref!r} declares "
-                                   f"components {sorted(valid)}")
-                    for comp in overrides:
-                        # An overridden component never rides the shared
-                        # cache: its bytes differ from the base's.
-                        slot_share.pop(comp, None)
-                    from .models.loading import load_component_override
-
-                    for comp, comp_path in sorted(overrides.items()):
-                        injected[comp] = await _to_thread_complete(
-                            load_component_override, path, comp, comp_path,
-                            dtype=str(getattr(binding, "dtype", "") or ""))
-                if slot_share:
-                    valid = self._model_index_components(path)
-                    for comp, key in list(slot_share.items()):
-                        if comp not in valid:
-                            del slot_share[comp]
-                            continue
-                        if res.shared_obj(key) is not None:
-                            injected[comp] = res.acquire_shared(
-                                key, _shared_loader_must_hit)
-                            result.shared_keys.append(key)
-                    # Exclusive-weights headroom BEFORE the load: demote idle
-                    # LRU lanes now so placement never has to walk the
-                    # offload ladder mid-lane (dual-resident when the budget
-                    # admits, swap-mode otherwise — existing make_room path).
-                    sizes = self.store.component_sizes(ref)
-                    excl_bytes = sum(
-                        b for comp, b in sizes.items() if comp not in injected)
-                    if excl_bytes > 0:
-                        await _to_thread_complete(res.make_room, excl_bytes)
-                before = self._vram_allocated()
-                try:
-                    sl = await _to_thread_complete(
-                        provision.load_slot, ann, path, binding=binding,
-                        slot=slot, ref=ref, mode=mode, components=injected,
-                        declared_vram_gb=float(
-                            getattr(spec.resources, "vram_gb", 0) or 0),
-                    )
-                except Exception as exc:
-                    # Corruption-shaped load failure (gw#408): digest-verify
-                    # the snapshot; quarantine + re-materialize + retry ONCE
-                    # when corruption is confirmed, re-raise otherwise.
-                    fresh: Optional[Path] = None
-                    if binding is not None and _is_corrupt_load_error(exc):
-                        fresh = await self.store.refetch_corrupt(
-                            ref, (snapshots or {}).get(ref), binding=binding
-                        )
-                    if fresh is None:
-                        raise
-                    logger.warning(
-                        "weights load for slot %r failed on a corrupt snapshot "
-                        "(%s: %s); retrying once after re-materialization",
-                        slot, type(exc).__name__, exc,
-                    )
-                    path = str(fresh)
-                    paths[slot] = path
-                    sl = await _to_thread_complete(
-                        provision.load_slot, ann, path, binding=binding,
-                        slot=slot, ref=ref, mode=mode, components=injected,
-                        declared_vram_gb=float(
-                            getattr(spec.resources, "vram_gb", 0) or 0),
-                    )
-                pipe = sl.obj
-                # Reconcile the load outcomes into ServePlan/FnDegraded via
-                # the state-delta path — the shared core decides WHAT
-                # degraded (details non-empty), the executor reports it.
-                if sl.pre_drop_detail:
-                    self._record_cast_drop(
-                        spec, ref=ref, wanted=sl.pre_drop_wanted,
-                        ran=sl.ran, detail=sl.pre_drop_detail)
-                if sl.rung_detail:
-                    self._record_adaptive_rung(
-                        spec, ref=ref, rung=sl.rung, detail=sl.rung_detail)
-                elif sl.cast_fail_detail:
-                    self._record_cast_drop(
-                        spec, ref=ref, wanted=sl.cast_fail_wanted,
-                        ran=sl.ran, detail=sl.cast_fail_detail)
-                placed = sl.placed
-                if placed.get("oom_demotions"):
-                    self._record_demotion(
-                        spec, ref=ref, phase="load",
-                        from_rung=str(placed.get("requested_mode") or mode),
-                        to_rung=str(placed.get("mode") or ""),
-                        needed_gb=estimate_pipeline_size_gb(pipe),
-                        detail="CUDA OOM at load; pipeline placed offloaded",
-                    )
-                if slot_share and str(placed.get("mode") or "") not in (
-                    "", "off", "vae_only", "cpu",
+        try:
+            for slot, path in paths.items():
+                ann = hints.get(slot)
+                overrides = dict((component_paths or {}).get(slot) or {})
+                if overrides and not (
+                    isinstance(ann, type)
+                    and callable(getattr(ann, "from_pretrained", None))
                 ):
-                    raise RetryableError(
-                        f"lane {slot!r} of {spec.name} placed "
-                        f"{placed.get('mode')!r}: shared-component lanes "
-                        "require resident placement; retrying")
-                if spec.compile is not None:
-                    # Opt-in acceleration against a pre-built per-SKU artifact:
-                    # a TRT engine (#390, refit with this pipeline's weights)
-                    # or an inductor cache (#384). No verified artifact =>
-                    # stays eager. ``compile_artifact`` is hub-attached (#569).
-                    from . import compile_cache
+                    # pgw#617: substitution requires a worker-loaded pipeline
+                    # slot; a self-loading str/Path slot never sees components.
+                    raise ComponentSubstitutionError(
+                        spec.name, slot, sorted(overrides)[0],
+                        detail="slot is not worker-loaded (no pipeline-class "
+                               "annotation); components cannot substitute")
+                if ann is None or ann is str:
+                    kwargs[slot] = path
+                elif ann is Path:
+                    kwargs[slot] = Path(path)
+                elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
+                    binding = spec.models.get(slot)
+                    # Worker-owned placement/offload policy: one decider for the
+                    # whole worker; endpoints never write device/offload code.
+                    # Plan-time offload verdicts and the learned degraded floor
+                    # pick the starting rung so a doomed fully-resident attempt
+                    # is never paid (gw#463 / ie#369); a CUDA OOM inside is a
+                    # ladder transition, not a failure.
+                    ref = wire_ref(binding) if binding is not None else ""
+                    mode = self._placement_mode(spec, ref)
+                    slot_share = dict((share_plan or {}).get(slot) or {})
+                    if slot_share and mode != "auto":
+                        # Offload hooks on a shared module would poison sibling
+                        # lanes; a planned-offload record loads monolithically.
+                        logger.warning(
+                            "content-keyed sharing disabled for %s slot %s: "
+                            "placement mode %s", spec.name, slot, mode)
+                        slot_share = {}
+                    res = self.store.residency
+                    injected: Dict[str, Any] = {}
+                    if overrides:
+                        # pgw#617 load-then-substitute: each override component
+                        # loads from its OWN materialized tree and rides the
+                        # same from_pretrained components= injection as gw#479
+                        # shared modules. Unknown names refuse typed at setup.
+                        valid = self._model_index_components(path)
+                        unknown = sorted(set(overrides) - valid)
+                        if unknown:
+                            raise ComponentSubstitutionError(
+                                spec.name, slot, unknown[0],
+                                detail=f"base composition {ref!r} declares "
+                                       f"components {sorted(valid)}")
+                        for comp in overrides:
+                            # An overridden component never rides the shared
+                            # cache: its bytes differ from the base's.
+                            slot_share.pop(comp, None)
+                        from .models.loading import load_component_override
 
+                        for comp, comp_path in sorted(overrides.items()):
+                            injected[comp] = await _to_thread_complete(
+                                load_component_override, path, comp, comp_path,
+                                dtype=str(getattr(binding, "dtype", "") or ""))
+                    if slot_share:
+                        valid = self._model_index_components(path)
+                        for comp, key in list(slot_share.items()):
+                            if comp not in valid:
+                                del slot_share[comp]
+                                continue
+                            if res.shared_obj(key) is not None:
+                                injected[comp] = res.acquire_shared(
+                                    key, _shared_loader_must_hit)
+                                result.shared_keys.append(key)
+                        # Exclusive-weights headroom BEFORE the load: demote idle
+                        # LRU lanes now so placement never has to walk the
+                        # offload ladder mid-lane (dual-resident when the budget
+                        # admits, swap-mode otherwise — existing make_room path).
+                        sizes = self.store.component_sizes(ref)
+                        excl_bytes = sum(
+                            b for comp, b in sizes.items() if comp not in injected)
+                        if excl_bytes > 0:
+                            await _to_thread_complete(res.make_room, excl_bytes)
+                    before = self._vram_allocated()
                     try:
-                        outcome = await _to_thread_complete(
-                            self._enable_compiled,
-                            pipe, spec.compile, compile_artifact,
+                        sl = await _to_thread_complete(
+                            provision.load_slot, ann, path, binding=binding,
+                            slot=slot, ref=ref, mode=mode, components=injected,
+                            declared_vram_gb=float(
+                                getattr(spec.resources, "vram_gb", 0) or 0),
                         )
-                        armed = outcome.armed
-                        pipe_mint = outcome.self_mint
-                    except compile_cache.CellSelectionBugError as exc:
-                        # th#883 invariant: a SELF-REQUESTED, identity-
-                        # verified cell failed to arm — by construction a
-                        # bug in the one selection brain. Loud event class
-                        # on the wire; never a silent eager fallback.
-                        bug_ref = (
-                            compile_selection.ref
-                            if compile_selection is not None else ""
-                        )
-                        bug_digest = (
-                            compile_selection.snapshot_digest
-                            if compile_selection is not None else ""
-                        )
-                        logger.error(
-                            "cell_selection_bug on %s (%s): %s",
-                            spec.name, bug_ref, exc)
-                        await self._send(pb.WorkerMessage(
-                            model_event=self.store.model_event(
-                                bug_ref,
-                                pb.MODEL_STATE_FAILED,
-                                identity=(
-                                    (bug_digest, 0) if bug_digest else None),
-                                error=(
-                                    f"cell_selection_bug: {str(exc)[:300]}"),
+                    except Exception as exc:
+                        # Corruption-shaped load failure (gw#408): digest-verify
+                        # the snapshot; quarantine + re-materialize + retry ONCE
+                        # when corruption is confirmed, re-raise otherwise.
+                        fresh: Optional[Path] = None
+                        if binding is not None and _is_corrupt_load_error(exc):
+                            fresh = await self.store.refetch_corrupt(
+                                ref, (snapshots or {}).get(ref), binding=binding
                             )
-                        ))
-                        from .models.loading import pipeline_weight_lane
+                        if fresh is None:
+                            raise
+                        logger.warning(
+                            "weights load for slot %r failed on a corrupt snapshot "
+                            "(%s: %s); retrying once after re-materialization",
+                            slot, type(exc).__name__, exc,
+                        )
+                        path = str(fresh)
+                        paths[slot] = path
+                        sl = await _to_thread_complete(
+                            provision.load_slot, ann, path, binding=binding,
+                            slot=slot, ref=ref, mode=mode, components=injected,
+                            declared_vram_gb=float(
+                                getattr(spec.resources, "vram_gb", 0) or 0),
+                        )
+                    pipe = sl.obj
+                    # Reconcile the load outcomes into ServePlan/FnDegraded via
+                    # the state-delta path — the shared core decides WHAT
+                    # degraded (details non-empty), the executor reports it.
+                    if sl.pre_drop_detail:
+                        self._record_cast_drop(
+                            spec, ref=ref, wanted=sl.pre_drop_wanted,
+                            ran=sl.ran, detail=sl.pre_drop_detail)
+                    if sl.rung_detail:
+                        self._record_adaptive_rung(
+                            spec, ref=ref, rung=sl.rung, detail=sl.rung_detail)
+                    elif sl.cast_fail_detail:
+                        self._record_cast_drop(
+                            spec, ref=ref, wanted=sl.cast_fail_wanted,
+                            ran=sl.ran, detail=sl.cast_fail_detail)
+                    placed = sl.placed
+                    if placed.get("oom_demotions"):
+                        self._record_demotion(
+                            spec, ref=ref, phase="load",
+                            from_rung=str(placed.get("requested_mode") or mode),
+                            to_rung=str(placed.get("mode") or ""),
+                            needed_gb=estimate_pipeline_size_gb(pipe),
+                            detail="CUDA OOM at load; pipeline placed offloaded",
+                        )
+                    if slot_share and str(placed.get("mode") or "") not in (
+                        "", "off", "vae_only", "cpu",
+                    ):
+                        raise RetryableError(
+                            f"lane {slot!r} of {spec.name} placed "
+                            f"{placed.get('mode')!r}: shared-component lanes "
+                            "require resident placement; retrying")
+                    if spec.compile is not None:
+                        # Opt-in acceleration against a pre-built per-SKU artifact:
+                        # a TRT engine (#390, refit with this pipeline's weights)
+                        # or an inductor cache (#384). No verified artifact =>
+                        # stays eager. ``compile_artifact`` is hub-attached (#569).
+                        from . import compile_cache
 
-                        if pipeline_weight_lane(pipe).startswith(
-                                _MANDATORY_LANES):
-                            # Quantized lanes stay fail-closed: surface as
-                            # the retryable lane refusal, cause preserved.
-                            raise compile_cache.CompiledLaneUnavailableError(
-                                f"cell_selection_bug: {exc}") from exc
-                        armed = False
-                        pipe_mint = None
+                        try:
+                            outcome = await _to_thread_complete(
+                                self._enable_compiled,
+                                pipe, spec.compile, compile_artifact,
+                            )
+                            armed = outcome.armed
+                            pipe_mint = outcome.self_mint
+                        except compile_cache.CellSelectionBugError as exc:
+                            # th#883 invariant: a SELF-REQUESTED, identity-
+                            # verified cell failed to arm — by construction a
+                            # bug in the one selection brain. Loud event class
+                            # on the wire; never a silent eager fallback.
+                            bug_ref = (
+                                compile_selection.ref
+                                if compile_selection is not None else ""
+                            )
+                            bug_digest = (
+                                compile_selection.snapshot_digest
+                                if compile_selection is not None else ""
+                            )
+                            logger.error(
+                                "cell_selection_bug on %s (%s): %s",
+                                spec.name, bug_ref, exc)
+                            await self._send(pb.WorkerMessage(
+                                model_event=self.store.model_event(
+                                    bug_ref,
+                                    pb.MODEL_STATE_FAILED,
+                                    identity=(
+                                        (bug_digest, 0) if bug_digest else None),
+                                    error=(
+                                        f"cell_selection_bug: {str(exc)[:300]}"),
+                                )
+                            ))
+                            from .models.loading import pipeline_weight_lane
 
-                    if compile_cache.has_compile_target(pipe, spec.compile):
-                        result.add_compile_object(pipe, (slot,))
-                        selection = _selection_for(compile_selection, pipe_mint)
-                        if armed and selection is not None:
-                            result.active_compile_artifacts[id(pipe)] = selection
-                            from . import trt_engine
+                            if pipeline_weight_lane(pipe).startswith(
+                                    _MANDATORY_LANES):
+                                # Quantized lanes stay fail-closed: surface as
+                                # the retryable lane refusal, cause preserved.
+                                raise compile_cache.CompiledLaneUnavailableError(
+                                    f"cell_selection_bug: {exc}") from exc
+                            armed = False
+                            pipe_mint = None
 
-                            if trt_engine.is_engine_ref(selection.ref):
-                                result.trt_execution_before[id(pipe)] = (
-                                    trt_engine.execution_count(pipe))
-                            # gw#587 CORRECT FIX: a PendingSelfMint is not
-                            # proven or packed yet — the warmup proof
-                            # finalizes it (pack + publish) only after
-                            # confirming a real compiled call, never before.
-                            if hasattr(pipe_mint, "capture_dir"):
-                                result.pending_self_mints[id(pipe)] = pipe_mint
-                delta = max(0, self._vram_allocated() - before)
-                if slot_share:
-                    lane_obj, lane_bytes = self._register_lane(
-                        slot,
-                        ref,
-                        pipe,
-                        slot_share,
-                        injected,
-                        delta,
-                        result,
-                        (slot_identities or {}).get(slot, ("", 0)),
-                    )
-                    loaded[slot] = (lane_obj, lane_bytes)
-                    result.lane_slots.add(slot)
+                        if compile_cache.has_compile_target(pipe, spec.compile):
+                            result.add_compile_object(pipe, (slot,))
+                            selection = _selection_for(compile_selection, pipe_mint)
+                            if armed and selection is not None:
+                                result.active_compile_artifacts[id(pipe)] = selection
+                                from . import trt_engine
+
+                                if trt_engine.is_engine_ref(selection.ref):
+                                    result.trt_execution_before[id(pipe)] = (
+                                        trt_engine.execution_count(pipe))
+                                # gw#587 CORRECT FIX: a PendingSelfMint is not
+                                # proven or packed yet — the warmup proof
+                                # finalizes it (pack + publish) only after
+                                # confirming a real compiled call, never before.
+                                if hasattr(pipe_mint, "capture_dir"):
+                                    result.pending_self_mints[id(pipe)] = pipe_mint
+                    delta = max(0, self._vram_allocated() - before)
+                    if slot_share:
+                        lane_obj, lane_bytes = self._register_lane(
+                            slot,
+                            ref,
+                            pipe,
+                            slot_share,
+                            injected,
+                            delta,
+                            result,
+                            (slot_identities or {}).get(slot, ("", 0)),
+                        )
+                        loaded[slot] = (lane_obj, lane_bytes)
+                        result.lane_slots.add(slot)
+                    else:
+                        loaded[slot] = (pipe, delta)
+                        if self._arm_lane_gate(pipe, ref, spec=spec):
+                            result.gated_slots.add(slot)
+                    kwargs[slot] = pipe
                 else:
-                    loaded[slot] = (pipe, delta)
-                    if self._arm_lane_gate(pipe, ref, spec=spec):
-                        result.gated_slots.add(slot)
-                kwargs[slot] = pipe
-            else:
-                kwargs[slot] = path
+                    kwargs[slot] = path
+        except BaseException:
+            # gw#624: a failed/cancelled injection never reached
+            # ``rec.shared_keys.extend`` — roll back the shared-component
+            # holds acquired so far or their refcounts leak forever (the
+            # components become permanently unevictable, and each retry
+            # re-acquires on top).
+            for key in result.shared_keys:
+                try:
+                    self.store.residency.release_shared(key)
+                except Exception:
+                    logger.exception(
+                        "failed to release shared hold %r after aborted "
+                        "injection", key)
+            raise
         return result
 
     def _register_lane(
