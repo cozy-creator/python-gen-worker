@@ -46,6 +46,28 @@ def probe_cuda(device_index: int = 0) -> CudaProbeResult:
     return CudaProbeResult(ok=True)
 
 
+def classify_probe_failure(reason: str) -> str:
+    """Typed vocabulary for ``CudaProbeResult.reason`` (gw#619) — the wire
+    class the hub's pod_events row and death-taxonomy correlation key on.
+    Never free-form: torch_unavailable | cuda_unavailable | driver_too_old |
+    cuda_error | unknown. ``driver_too_old`` matches torch's own CUDA
+    initialization message ("driver too old (found version ...)", the exact
+    th#591/th#979 signature) — a strictly stronger, in-container-measured
+    version of the same fact th#979's pre-rent provider-telemetry floor
+    infers from the outside.
+    """
+    r = (reason or "").strip().lower()
+    if not r:
+        return "unknown"
+    if "torch unavailable" in r:
+        return "torch_unavailable"
+    if "is_available() is false" in r:
+        return "cuda_unavailable"
+    if "driver too old" in r or "found version" in r:
+        return "driver_too_old"
+    return "cuda_error"
+
+
 def manifest_needs_cuda(manifest: Optional[dict[str, Any]]) -> bool:
     """True iff any function in the discovery manifest declares
     ``resources.gpu`` — the only build-time-known signal of whether this

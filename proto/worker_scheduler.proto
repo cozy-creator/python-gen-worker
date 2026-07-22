@@ -43,15 +43,22 @@ service WorkerScheduler {
 
 message WorkerMessage {
   oneof msg {
-    Hello          hello           = 1;
-    StateDelta     state_delta     = 2;
-    JobAccepted    job_accepted    = 3;
-    JobResult      job_result      = 4;
-    JobProgress    job_progress    = 5;
-    ModelEvent     model_event     = 6;
-    FnUnavailable  fn_unavailable  = 7;
-    FnDegraded     fn_degraded     = 8;
-    ActivityUpdate activity_update = 9;
+    Hello              hello               = 1;
+    StateDelta         state_delta         = 2;
+    JobAccepted        job_accepted        = 3;
+    JobResult          job_result          = 4;
+    JobProgress        job_progress        = 5;
+    ModelEvent         model_event         = 6;
+    FnUnavailable      fn_unavailable      = 7;
+    FnDegraded         fn_degraded         = 8;
+    ActivityUpdate     activity_update     = 9;
+    // gw#619/th#988: sent INSTEAD OF Hello, as the only message on the
+    // stream, when the worker's boot-time hardware probe (gen_worker
+    // cuda_probe, gw#529) fails. Authenticated identically to Hello (worker
+    // JWT in Connect metadata, checked before the first message is read);
+    // the worker exits immediately after this send (or after a bounded
+    // retry budget if the hub is unreachable/rejects the connection).
+    HardwareUnsuitable hardware_unsuitable = 10;
   }
 }
 
@@ -113,6 +120,35 @@ message WorkerResources {
   // which is harmless for old workers, because they never call the publish
   // route at all.
   string gen_worker_version = 11;
+}
+
+// Worker -> orchestrator: this worker's boot-time hardware suitability probe
+// failed and it is reporting WHY before it exits (gw#619/th#988), instead of
+// dying silently pre-hello (the th#986/gw#618 blindness — a pod that never
+// says hello left the orchestrator with zero attributable evidence). Sent as
+// the ONLY message on a Connect stream, in place of Hello; the orchestrator
+// persists it as a pod_events row and closes the stream (no reply message —
+// the worker owns exiting on its own timeline after the send completes).
+message HardwareUnsuitable {
+  string worker_id  = 1; // must equal JWT `sub` when auth is enabled, as Hello
+  string release_id = 2; // must equal JWT `release_id` claim when auth is enabled
+  // Typed probe-failure class, derived by the worker from its own probe
+  // result — never free-form. Vocabulary: torch_unavailable |
+  // cuda_unavailable | driver_too_old | cuda_error | unknown.
+  string reason_class = 3;
+  string detail       = 4; // the probe's raw human-readable reason, verbatim
+  // Machine-visible context for reschedule/blacklist decisions. Read
+  // independently of a working CUDA runtime (nvidia-smi/NVML, not
+  // torch.cuda) so a "driver too old" report still carries real driver/gpu
+  // identity — exactly the evidence a broken CUDA runtime cannot self-report.
+  string driver_version     = 5; // nvidia-smi/NVML driver version, "" if unread
+  string gpu_name           = 6;
+  string torch_version      = 7;
+  string torch_cuda_version = 8; // torch.version.cuda (the build's CUDA runtime)
+  string gen_worker_version = 9;
+  string image_digest       = 10; // docker image sha256
+  string instance_id        = 11; // cloud provider instance id (e.g. runpod pod id)
+  int64  reported_at_unix_ms = 12; // worker clock, informational
 }
 
 // Boot host canary (gw#550): the host properties the CPU-bound video tail
