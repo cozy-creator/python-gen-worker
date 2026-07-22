@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.46.0 (2026-07-22)
+
+- **th#1017: inference regimes — checkpoints whose weights demand a specific
+  inference configuration.** New per-method `regimes=` on `@endpoint`
+  ("standard" | "v_prediction" | "distilled"; per-method dict on class
+  handlers mirroring `warmup=`, bare tuple on the function form; absent =
+  ("standard",)), exported per-function in the discovery manifest (key
+  omitted for the default). `ResolvedSlot` gains `.regime` (from the hub
+  resolve response's `inference_regime`; "standard" on older hubs) so
+  handlers can branch — e.g. a dual-mode turbo lane skips its distillation
+  LoRA for an already-distilled (fused DMD/Lightning/LCM) checkpoint. The
+  executor enforces a `RegimeMismatchError` backstop (hub gates enforce
+  upstream at deploy + request time; the wire carries no real regime yet,
+  so every dispatch resolves "standard" — never declare a tuple excluding
+  it). `SdxlScheduler` vocab gains "lcm" and "euler_trailing"; the
+  converter stamps regime-correct scheduler config into produced diffusers
+  snapshots (v_prediction -> prediction_type + rescale_betas_zero_snr,
+  distilled -> trailing timestep spacing) via an `inference_regime` hint on
+  clone/convert.
+
 ## 0.45.0 (2026-07-22)
 
 - **pgw#622: eager-while-compiling with hot-swap — a novel request shape
