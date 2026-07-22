@@ -44,6 +44,10 @@ class WorkerResolvedRepo:
     # th#964: the resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
     model_family: str = ""
+    # th#1017: the resolved checkpoint's hub-classified inference regime
+    # ("standard" | "v_prediction" | "distilled"). "" on hubs not sending
+    # it — callers treat that the same as "standard".
+    inference_regime: str = ""
 
 
 class HubResolveError(RuntimeError):
@@ -161,4 +165,5 @@ def resolve_repo(
         size_bytes=int(body.get("size_bytes") or 0),
         sibling_flavors=siblings,
         model_family=str(body.get("model_family") or "").strip(),
+        inference_regime=str(body.get("inference_regime") or "").strip(),
     )

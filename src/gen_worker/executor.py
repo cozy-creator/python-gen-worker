@@ -260,12 +260,18 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dic
     errors: Dict[str, str] = {}
     for name, slot in spec.slots.items():
         try:
+            # th#1017: allowed_regimes is the backstop, not primary
+            # enforcement (the hub gates checkpoint<->function regime
+            # compatibility at deploy/dispatch time) — RunJob.ModelBinding
+            # has no wire field for the resolved checkpoint's regime yet, so
+            # inference_regime stays "standard" here until that lands.
             resolved[name] = resolve_slot(
                 name, slot,
                 ref=spec.models.get(name),
                 family=spec.slot_family.get(name, ""),
                 raw_metadata_json=raw_defaults.get(name, ""),
                 lora_metadata_json=lora_defaults.get(name, ()),
+                allowed_regimes=spec.regimes,
             )
         except ValueError as exc:
             errors[name] = str(exc)
