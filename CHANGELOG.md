@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.45.0 (2026-07-22)
+
+- **pgw#622: eager-while-compiling with hot-swap — a novel request shape
+  serves immediately.** A compiled target's first call at an unseen input
+  signature no longer stalls 30-60s behind Dynamo+Inductor: the consumer
+  guard serves the request (and followups at that signature) through the
+  EAGER original, one background thread warms the compiled callable with a
+  zero-filled dummy batch of the same signature (separate CUDA stream,
+  thread nice +10), and a successful warm atomically hot-swaps the
+  signature onto the compiled path. Each completed warm repacks the live
+  inductor/triton cache root and republishes the cell under the same key
+  (mode=replace) so no other worker ever compiles that (shape, GPU, lane)
+  again. Sequential compile-then-serve is preserved for: the boot
+  warmup-proof window, mandatory quantized lanes (w8a8/w4a4 — eager is not
+  a production lane there), tight VRAM headroom (degrade, never OOM),
+  regional mode, and signature-vocabulary explosions (per-request scalar
+  leaking into signatures disables concurrent routing loudly).
+
 ## 0.44.0 (2026-07-21)
 
 - **pgw#617: hierarchical slot bindings (th#980 companion).**
