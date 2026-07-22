@@ -156,9 +156,13 @@ class _StubPipe:
     pass
 
 
-def test_arm_compile_outside_any_scope_raises() -> None:
-    with pytest.raises(RuntimeError, match="no active compile-arming scope"):
-        provision.arm_compile(_StubPipe())
+def test_arm_compile_outside_any_scope_is_a_noop() -> None:
+    """ie#522 (Paul's ruling, 2026-07-22): an eager registration (no
+    compile=Compile(...) declared) opens ArmingScope(None, ...) — already a
+    documented no-op. arm_compile() must agree: every self-loading
+    setup() (sdxl, wan-2.2, ...) calls it unconditionally, and each must
+    keep working eager, not crash. REVERT-TURNS-RED: this used to raise."""
+    assert provision.arm_compile(_StubPipe()) is False
 
 
 def test_arm_compile_inside_scope_reaches_enable_compiled(monkeypatch, tmp_path) -> None:
@@ -174,15 +178,15 @@ def test_arm_compile_inside_scope_reaches_enable_compiled(monkeypatch, tmp_path)
         assert provision.arm_compile(pipe) is True
     assert seen == [(pipe, cfg, tmp_path, None)]
     assert scope.objects == ((pipe, True),)
-    # the scope closed: arming outside it raises again
-    with pytest.raises(RuntimeError, match="no active compile-arming scope"):
-        provision.arm_compile(pipe)
+    # the scope closed: arming outside it is a no-op again (never armed),
+    # not a raise — a compiled release's setup() calling arm_compile() a
+    # second time after its own scope exits must not crash either.
+    assert provision.arm_compile(pipe) is False
 
 
 def test_arming_scope_is_a_noop_when_compile_is_none() -> None:
     with provision.ArmingScope(None, Path("."), None):
-        with pytest.raises(RuntimeError, match="no active compile-arming scope"):
-            provision.arm_compile(_StubPipe())
+        assert provision.arm_compile(_StubPipe()) is False
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +250,48 @@ def test_executor_arms_self_loaded_pipeline_via_arm_compile(
         assert cfg is compile_cfg
         # no hub-attached artifact / no local cache seeded -> stays eager.
         assert cache_ready is False
+
+    asyncio.run(_go())
+
+
+def test_executor_eager_registration_arm_compile_no_raise_setup_completes(
+    tmp_path, monkeypatch
+) -> None:
+    """ie#522 (Paul's ruling, 2026-07-22) — REVERT-TURNS-RED: an EAGER
+    registration (no compile=Compile(...) on the EndpointSpec, exactly the
+    gw#556 recipe's "no compile payload" release) whose setup() calls
+    arm_compile() unconditionally (the real wan-2.2/sdxl style — never
+    special-cased with try/except) must complete ensure_setup() cleanly:
+    no raise, warmup proceeds, the pipeline is simply never armed. Live
+    repro: wan-2.2's eager smoke crashed with `RuntimeError: ... no active
+    compile-arming scope` at warmup/phase=load before this fix."""
+    applied: list[tuple] = []
+    monkeypatch.setattr(cc, "apply", lambda *a, **k: applied.append(1) or True)
+
+    class Endpoint:
+        def setup(self, model: str) -> None:
+            self.pipe = _StubPipe()
+            self.armed = gen_worker.arm_compile(self.pipe)  # unconditional, no guard
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = EndpointSpec(
+        name="wan-generate", method=Endpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=Endpoint, attr_name="run",
+        models={"model": Hub("acme/wan")}, resources=Resources(vram_gb=1.0),
+        compile=None,  # the eager registration: no compile grid declared
+    )
+    sent: list = []
+
+    async def _go() -> None:
+        ex = _executor(spec, tmp_path, sent, monkeypatch)
+        inst = await ex.ensure_setup(spec, {
+            wire_ref(spec.models["model"]): pb.Snapshot(
+                digest="blake3:" + "a" * 64),
+        })
+        assert inst.armed is False
+        assert applied == []
 
     asyncio.run(_go())
 
