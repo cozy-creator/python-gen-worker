@@ -864,6 +864,30 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
         _link_or_copy(f, out_dir / rel)
 
 
+# th#1017: scheduler config overrides per checkpoint-declared inference
+# regime. v_prediction needs zero-terminal-SNR v-prediction sampling;
+# distilled needs trailing timestep spacing (few-step, near-zero CFG).
+_REGIME_SCHEDULER_OVERRIDES: dict[str, dict[str, Any]] = {
+    "v_prediction": {"prediction_type": "v_prediction", "rescale_betas_zero_snr": True},
+    "distilled": {"timestep_spacing": "trailing"},
+}
+
+
+def apply_regime_scheduler_config(out_dir: Path, inference_regime: str) -> None:
+    """Stamp ``inference_regime``'s scheduler overrides into a produced
+    diffusers snapshot's ``scheduler/config.json``. No-op for "standard" or
+    a tree with no scheduler component (e.g. singlefile output)."""
+    overrides = _REGIME_SCHEDULER_OVERRIDES.get(inference_regime)
+    if not overrides:
+        return
+    cfg_path = Path(out_dir) / "scheduler" / "config.json"
+    if not cfg_path.is_file():
+        return
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg.update(overrides)
+    cfg_path.write_text(json.dumps(cfg, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def _group_shard_prefix(entry: Path) -> str:
     stem = entry.name
     for suffix in (".safetensors.index.json", ".safetensors"):
