@@ -10,7 +10,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
 from .config import Settings
@@ -93,25 +93,53 @@ def free_vram_bytes() -> int:
     return 0
 
 
+def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
+    """Snapshot CONTENT identity: digest + per-file (path, size, blake3).
+
+    Presigned URL bytes are deliberately excluded — the hub refreshes
+    expiring snapshot URLs on every release-config rebuild (~15s TTL) and
+    its own HelloAck semantic hash excludes them for exactly this reason
+    (tensorhub desiredResidencySemanticHash). Hashing URLs made every
+    URL rotation look like a model change and cancelled in-flight warmup
+    loads at ~15s / ~10min cadence (gw#623)."""
+    if snap is None:
+        return ()
+    return (
+        snap.digest,
+        tuple(sorted(
+            (f.path, f.size_bytes, f.blake3) for f in snap.files
+        )),
+    )
+
+
 def _semantic_model_key(
     ack: "pb.HelloAck", desired: "pb.DesiredResidency",
 ) -> tuple:
     """gw#614: order-independent identity of the MODEL content of an ack —
-    resolutions, disk refs, snapshots, hot instances. Generation and other
-    non-model fields are excluded so benign plan rewrites compare equal."""
+    resolutions, disk refs, snapshot content, hot instances. Generation,
+    presigned URL bytes, and other non-model fields are excluded so benign
+    plan rewrites compare equal."""
     return (
         tuple(sorted(
             (r.ref, r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
         )),
         tuple(sorted(ref for ref in desired.disk_refs if ref)),
         tuple(sorted(
-            (ref, snap.SerializeToString(deterministic=True))
+            (ref, _snapshot_content_key(snap))
             for ref, snap in desired.snapshots.items()
         )),
         tuple(sorted(
             inst.SerializeToString(deterministic=True) for inst in desired.hot
         )),
     )
+
+
+def _instance_refs(instance: "pb.DesiredInstance") -> list:
+    refs = []
+    for model in instance.models:
+        refs.append(model.ref)
+        refs.extend(lora.ref for lora in model.loras)
+    return refs
 
 
 class Lifecycle:
@@ -151,6 +179,12 @@ class Lifecycle:
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
         self._observed_residency_generation = 0
+        # gw#623: the reconcile loop's currently-loading work item
+        # ((kind, identity, context)) + the level-trigger that re-runs a
+        # convergence pass instead of cancelling an in-flight load.
+        self._reconcile_active: Optional[tuple] = None
+        self._residency_restart: Optional[asyncio.Event] = None
+        self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
 
     # ---- snapshots -----------------------------------------------------------
 
@@ -287,9 +321,13 @@ class Lifecycle:
         self.executor.file_base_url = ack.file_base_url or ""
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).
-        self.executor.apply_model_resolutions({
+        resolutions = {
             r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
-        })
+        }
+        self.executor.apply_model_resolutions(resolutions)
+        # gw#623: the reconcile's active-work context compares against the
+        # resolutions actually applied to the executor.
+        self._model_resolutions = resolutions
         desired = pb.DesiredResidency()
         desired.CopyFrom(ack.desired_residency)
         generation = int(desired.generation)
@@ -332,20 +370,74 @@ class Lifecycle:
     ) -> None:
         # gw#614 (th#961 defense in depth): an ack whose semantic model set
         # is unchanged must not kill an in-flight reconcile — a running
-        # self_mint_compile needs its full window. Non-model deltas were
-        # already applied by the caller; changed sets cancel as before.
+        # self_mint_compile needs its full window.
         task = getattr(self, "_residency_task", None)
+        running = task is not None and not task.done()
         if (
             model_key is not None
-            and task is not None and not task.done()
+            and running
             and getattr(self, "_residency_model_key", None) == model_key
         ):
             self._desired_residency = desired
             return
         self._residency_model_key = model_key
-        self._cancel_residency_reconcile()
         self._desired_residency = desired
+        if running and self._active_work_still_desired(desired):
+            # gw#623: the set changed, but the model this reconcile is
+            # loading RIGHT NOW is still wanted with the same identity and
+            # resolution. Cancelling would discard minutes of load over a
+            # benign update (sibling ref added/removed, plan rewrite);
+            # signal the level-triggered loop to re-converge against the
+            # new set once the current item completes.
+            self._signal_residency_restart()
+            if not task.done():  # type: ignore[union-attr]
+                return
+            # The loop finished before observing the signal; fall through
+            # and start a fresh reconcile against the new desired state.
+        self._cancel_residency_reconcile()
         self._resume_residency_reconcile()
+
+    def _signal_residency_restart(self) -> None:
+        event = getattr(self, "_residency_restart", None)
+        if event is None:
+            event = self._residency_restart = asyncio.Event()
+        event.set()
+
+    def _work_context(
+        self, refs: Any, desired: "pb.DesiredResidency",
+    ) -> tuple:
+        """Identity facts an in-flight load depends on, per involved ref:
+        snapshot content (URL-free) + the applied precision resolution."""
+        resolutions = getattr(self, "_model_resolutions", {})
+        return tuple(
+            (
+                ref,
+                _snapshot_content_key(desired.snapshots.get(ref)),
+                resolutions.get(ref),
+            )
+            for ref in sorted({r for r in refs if r})
+        )
+
+    def _active_work_still_desired(
+        self, desired: "pb.DesiredResidency",
+    ) -> bool:
+        """Whether the reconcile loop's CURRENT work item survives ``desired``
+        unchanged — the gw#623 cancel test: only cancel an in-flight load
+        when the model it is FOR left the set (or changed identity or
+        resolution), never on unrelated set churn."""
+        active = getattr(self, "_reconcile_active", None)
+        if active is None:
+            return True  # between items: the restart signal re-converges
+        kind, ident, ctx = active
+        if kind == "disk":
+            if ident not in set(desired.disk_refs):
+                return False
+            return ctx == self._work_context((ident,), desired)
+        for instance in desired.hot:
+            if instance.SerializeToString(deterministic=True) == ident:
+                return ctx == self._work_context(
+                    _instance_refs(instance), desired)
+        return False
 
     def _cancel_residency_reconcile(self) -> None:
         task = getattr(self, "_residency_task", None)
@@ -358,45 +450,82 @@ class Lifecycle:
         if desired is None or self.draining:
             return
         self._residency_task = asyncio.create_task(
-            self._reconcile_residency(desired),
+            self._reconcile_residency(),
             name=f"residency-{int(desired.generation)}",
         )
 
-    async def _reconcile_residency(self, desired: "pb.DesiredResidency") -> None:
-        """Converge in declared order while tenant work has first claim."""
-        snapshots = dict(desired.snapshots)
+    async def _reconcile_residency(self) -> None:
+        """Converge to the LATEST desired state while tenant work has first
+        claim. Level-triggered (gw#623): each pass reads the freshest set; a
+        benign mid-load update re-runs the pass instead of cancelling the
+        in-flight item (already-satisfied refs/instances short-circuit
+        through the ordinary dedupe paths, so a re-pass is cheap)."""
+        restart = getattr(self, "_residency_restart", None)
+        if restart is None:
+            restart = self._residency_restart = asyncio.Event()
         try:
-            for ref in desired.disk_refs:
-                if not ref:
-                    continue
-                await self.executor.wait_idle()
-                if self.draining:
+            while True:
+                restart.clear()
+                desired = self._desired_residency
+                if desired is None or self.draining:
                     return
-                try:
-                    await self.executor.revalidate_snapshot_identity(
-                        ref, snapshots.get(ref)
-                    )
-                    await self.executor.store.ensure_local(ref, snapshots.get(ref))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning("desired disk residency failed for %s: %s", ref, exc)
-
-            for instance in desired.hot:
-                await self.executor.wait_idle()
-                if self.draining:
+                await self._reconcile_pass(desired, restart)
+                if self.draining or not restart.is_set():
                     return
-                try:
-                    await self.executor.ensure_desired_instance(instance, snapshots)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "desired hot residency failed for %s: %s",
-                        instance.function_name, exc,
-                    )
         except asyncio.CancelledError:
             return
+        finally:
+            self._reconcile_active = None
+
+    async def _reconcile_pass(
+        self, desired: "pb.DesiredResidency", restart: asyncio.Event,
+    ) -> None:
+        """One convergence pass over ``desired`` in declared order."""
+        snapshots = dict(desired.snapshots)
+        for ref in desired.disk_refs:
+            if not ref:
+                continue
+            if restart.is_set():
+                return
+            await self.executor.wait_idle()
+            if self.draining:
+                return
+            self._reconcile_active = (
+                "disk", ref, self._work_context((ref,), desired))
+            try:
+                await self.executor.revalidate_snapshot_identity(
+                    ref, snapshots.get(ref)
+                )
+                await self.executor.store.ensure_local(ref, snapshots.get(ref))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("desired disk residency failed for %s: %s", ref, exc)
+            finally:
+                self._reconcile_active = None
+
+        for instance in desired.hot:
+            if restart.is_set():
+                return
+            await self.executor.wait_idle()
+            if self.draining:
+                return
+            self._reconcile_active = (
+                "hot",
+                instance.SerializeToString(deterministic=True),
+                self._work_context(_instance_refs(instance), desired),
+            )
+            try:
+                await self.executor.ensure_desired_instance(instance, snapshots)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "desired hot residency failed for %s: %s",
+                    instance.function_name, exc,
+                )
+            finally:
+                self._reconcile_active = None
 
     async def on_message(self, msg: pb.SchedulerMessage) -> None:
         which = msg.WhichOneof("msg")
