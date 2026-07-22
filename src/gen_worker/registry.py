@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 import msgspec
 
 from .api.binding import Binding, ModelRef
-from .api.decorators import ATTR, Compile, EndpointDecl, Resources
+from .api.decorators import ATTR, VARIANT_ATTR, Compile, EndpointDecl, Resources, VariantDecl
 from .api.slot import Slot
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
@@ -71,6 +71,10 @@ class EndpointSpec:
     # th#826: the function makes endpoint-to-endpoint child calls; emitted
     # into the discovery manifest so the hub mints the invoke_child grant.
     child_calls: bool = False
+    # th#1004 @variant_of: this function is the variant_kind variant of the
+    # sibling function variant_of (both slugs). Empty = not a variant.
+    variant_of: str = ""
+    variant_kind: str = ""
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -262,6 +266,20 @@ def _spec_for_handler(
     if not slug:
         raise ValueError(f"{owner}: function name {fn_name!r} cannot be normalized")
 
+    variant: Optional[VariantDecl] = getattr(method, VARIANT_ATTR, None)
+    variant_of_slug = ""
+    variant_kind = ""
+    if variant is not None:
+        variant_of_slug = slugify_name(variant.of)
+        variant_kind = slugify_name(variant.kind)
+        if not variant_of_slug or not variant_kind:
+            raise ValueError(
+                f"{owner}: @variant_of({variant.of!r}, kind={variant.kind!r}) "
+                "cannot be normalized to slugs"
+            )
+        if variant_of_slug == slug:
+            raise ValueError(f"{owner}: @variant_of cannot target itself")
+
     return EndpointSpec(
         name=slug,
         method=method,
@@ -285,6 +303,8 @@ def _spec_for_handler(
         runtime=decl.runtime,
         compile=decl.compile,
         child_calls=decl.child_calls,
+        variant_of=variant_of_slug,
+        variant_kind=variant_kind,
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )

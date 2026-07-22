@@ -633,7 +633,31 @@ def discover_functions(
                 functions.append(entry)
 
     _assert_unique_function_names(functions)
+    _validate_variant_targets(functions)
     return functions
+
+
+def _validate_variant_targets(functions: List[Dict[str, Any]]) -> None:
+    """th#1004: every ``@variant_of`` must target another discovered function
+    on this endpoint, and the target must not itself be a variant (no
+    chains). Build-time gate — a dangling pairing never ships."""
+    by_name = {str(f.get("name") or ""): f for f in functions}
+    for f in functions:
+        target = str(f.get("variant_of") or "")
+        if not target:
+            continue
+        name = str(f.get("name") or "")
+        target_fn = by_name.get(target)
+        if target_fn is None:
+            raise ValueError(
+                f"{name!r}: @variant_of targets unknown function {target!r} "
+                f"(discovered: {sorted(by_name)})"
+            )
+        if target_fn.get("variant_of"):
+            raise ValueError(
+                f"{name!r}: @variant_of target {target!r} is itself a "
+                "variant — chains are not allowed"
+            )
 
 
 def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
@@ -728,6 +752,11 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # capability grant only for declaring functions. Omitted when false.
         if es.child_calls:
             fn["child_calls"] = True
+        # th#1004 @variant_of: the base<->variant pairing rides into the
+        # manifest so the hub's public endpoint info can advertise it.
+        if es.variant_of:
+            fn["variant_of"] = es.variant_of
+            fn["variant"] = es.variant_kind
         if model_key is not None:
             fn["model"] = model_key
         if slots_block:

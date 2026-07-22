@@ -266,6 +266,54 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
 
 
 ATTR = "__gen_worker_endpoint__"
+VARIANT_ATTR = "__gen_worker_variant__"
+
+
+class VariantDecl(msgspec.Struct, frozen=True):
+    """``@variant_of`` marker (th#1004): this handler is the ``kind`` variant
+    of sibling function ``of`` on the same endpoint."""
+
+    of: str
+    kind: str
+
+    def __post_init__(self) -> None:
+        force = msgspec.structs.force_setattr
+        of = str(self.of or "").strip()
+        kind = str(self.kind or "").strip().lower()
+        if not of:
+            raise ValueError("@variant_of requires a target function name")
+        if not kind:
+            raise ValueError("@variant_of requires a non-empty kind")
+        force(self, "of", of)
+        force(self, "kind", kind)
+
+
+def variant_of(of: str, *, kind: str = "turbo") -> Callable[[T], T]:
+    """Declare a handler as a variant of a sibling function (th#1004).
+
+    The pairing is emitted into the discovery manifest (``variant_of`` /
+    ``variant``) and surfaced on tensorhub's public endpoint info, so a
+    platform can render e.g. a regular/turbo toggle instead of modeling the
+    variant as a separate product::
+
+        @variant_of("generate")  # kind="turbo"
+        def generate_turbo(self, ctx, payload: TurboInput) -> ImageOutput: ...
+
+    The target must be another function on the same endpoint and must not
+    itself be a variant (validated at discovery time).
+    """
+    decl = VariantDecl(of=of, kind=kind)
+
+    def apply(fn: T) -> T:
+        if not inspect.isfunction(fn):
+            raise TypeError(
+                f"@variant_of decorates handler functions/methods, got "
+                f"{type(fn).__name__}"
+            )
+        setattr(fn, VARIANT_ATTR, decl)
+        return fn
+
+    return apply
 
 
 def _handler_params(fn: Callable[..., Any], *, is_method: bool) -> list[inspect.Parameter]:
@@ -622,4 +670,7 @@ def endpoint(
     return apply
 
 
-__all__ = ["Compile", "EndpointDecl", "NoWarmup", "Resources", "SlotLike", "WarmupDecl", "endpoint"]
+__all__ = [
+    "Compile", "EndpointDecl", "NoWarmup", "Resources", "SlotLike",
+    "VariantDecl", "WarmupDecl", "endpoint", "variant_of",
+]
