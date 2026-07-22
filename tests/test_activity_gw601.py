@@ -238,17 +238,33 @@ def test_note_progress_heartbeats_current_activity_rate_limited():
     activity.note_progress()
 
 
-def test_watchdog_survives_zero_cpu_download_via_note_progress():
+def test_watchdog_survives_zero_cpu_download_via_note_progress(monkeypatch):
     """REVERT-TURNS-RED (failure mode a): a fake download that advances
     ONLY via note_progress() ticks — zero CPU burn on this thread or any
     child, exactly a network-bound fill — must keep the activity alive
-    under the REAL default watchdog evidence function. A pre-fix watchdog
-    (process_time() only) goes silent here and the hub kills it at 10min;
-    this activity must never go silent while download ticks keep arriving."""
+    while the watchdog's evidence sees nothing at all. A pre-fix worker
+    (CPU-evidence watchdog only, no note_progress channel) goes silent
+    here and the hub kills it at 10min; this activity must never go
+    silent while download ticks keep arriving.
+
+    De-flaked (ie#522): the original real-clock version (0.3s window,
+    real default evidence) let note_progress() land exactly ONE beat (the
+    5s rate-limit floor swallowed the rest) and silently depended on
+    incidental watchdog CPU/IO noise for the second — present on a
+    32-core dev box, absent on 2-core CI runners. Determinism now comes
+    from three changes that keep the intent intact: the rate-limit floor
+    is dropped for this test (the floor itself is covered by
+    test_note_progress_heartbeats_current_activity_rate_limited), the
+    watchdog evidence is pinned to a constant zero (a perfectly silent
+    download — and every counted beat is attributable to note_progress()
+    alone, so the revert-turns-red property is airtight), and the wait is
+    event-driven on beat count with a generous deadline instead of a
+    fixed wall-clock window."""
     reports: List[pb.ActivityUpdate] = []
     with activity._lock:
         activity._sink = reports.append
         activity._last_progress_heartbeat = 0.0
+    monkeypatch.setattr(activity, "_PROGRESS_HEARTBEAT_MIN_INTERVAL_S", 0.0)
 
     act = activity.begin(activity.KIND_SELF_MINT_COMPILE, activity.PHASE_LOAD)
     baseline = len(reports)
@@ -260,23 +276,24 @@ def test_watchdog_survives_zero_cpu_download_via_note_progress():
         # network fetch.
         while not stop.is_set():
             activity.note_progress()
-            time.sleep(0.02)
+            time.sleep(0.01)
 
     ticker = threading.Thread(target=_fake_download_ticker, daemon=True)
     ticker.start()
     try:
-        # Use the REAL default evidence (no override) with a short interval
-        # so the test is fast; the default evidence alone (CPU-only) would
-        # see nothing advance here since the ticker burns no CPU.
-        with activity.watchdog(act, interval_s=0.05):
-            time.sleep(0.3)
+        # Constant evidence: the watchdog thread can never heartbeat, so
+        # every beat below is proof-of-life from note_progress() ticks.
+        with activity.watchdog(act, interval_s=0.05, evidence=lambda: 0.0):
+            deadline = time.monotonic() + 10.0
+            while len(reports) - baseline < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
             beats_during = len(reports) - baseline
     finally:
         stop.set()
         ticker.join(timeout=2)
     act.completed()
 
-    assert beats_during >= 2, (
+    assert beats_during >= 3, (
         f"activity went silent during a zero-CPU download tick stream "
         f"(beats={beats_during}) — note_progress() must keep it alive "
         f"independent of the CPU watchdog"
