@@ -1,7 +1,77 @@
 # Changelog
 
+## 0.44.0 (2026-07-21)
+
+- **pgw#617: hierarchical slot bindings (th#980 companion).**
+  `RunJob.ModelBinding` gains `components` (field 5, component name ->
+  canonical tensorhub ref). The worker loads the base composition and
+  substitutes each named component from its OWN materialized snapshot via
+  the gw#479 `components=` from_pretrained injection (load-then-substitute).
+  The composition (base + sorted component refs) is the instance/residency
+  identity — a component-only rebind derives a new instance and reconcile
+  reloads it; flat bindings (empty map) are byte-identical to 0.43.x.
+  Unknown component names, non-CAS override refs, and overrides on
+  self-loading (str/Path) slots refuse typed (`ComponentSubstitutionError`)
+  at setup, never mid-denoise. Override refs join job pins, held refs/
+  digests, and compile-cell binding facts.
+- **pgw#617: `selected_by=` slots may omit `default_checkpoint`.** Deploy-
+  time bindings (th#980) seed the hub mapping now, so the registry's
+  author-time requirement is dropped (mirror of tensorhub's relaxed
+  registration rule). Unblocks the ie#524 de-hardcode sweep of
+  request-branching endpoints (wan-2.2, sdxl slot-model, z-image).
+
+## 0.43.1 (2026-07-21)
+
+- **gw#608 CLOSED: self-mint arm is transactional over the process-global
+  cache env — cells are cross-host portable end to end.** The store-served
+  8/8-miss root cause: a no-target sibling slot (or a delivered-cell-seeded
+  process) could open a fleet self-mint capture and repoint
+  TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR away from the seeded cache
+  before the real warmup traced. Now: no-target siblings decline BEFORE
+  any process-global env mutation, `begin_fleet_mint` restores the prior
+  env on arm failure, and a delivered-cell-seeded process never opens a
+  capture (mandatory lanes keep the typed refusal). Four
+  revert-turns-red tests. Live-verified: first end-to-end store-served
+  LTX boot (release 587…970) — consumer warmup served from the delivered
+  cell, ~0s compile, no re-publish.
+- **gw#608: FX-cache failure forensics.** A store-served proof failure now
+  carries `fx_cache_failure_report` in the CompiledLaneUnavailableError
+  detail: hit/miss/bypass counts, compile_seconds, per-object proof
+  counts, a component-level FxGraphHashDetails key diff against the
+  delivered cell, and same-key re-save/load probes — clamped under the
+  2000-char activity error cap. Failure-path only; no serving overhead.
+
+## 0.43.0 (2026-07-21)
+
+- **gw#585: tensorhub v4 private-input manifests — gRPC protocol v3 -> v4
+  HARD CUT (th#886).** The hub no longer rewrites canonical payload bytes
+  with presigned URLs. `RunJob.input_assets` (field 15) carries the ordered
+  credential-free manifest; the worker resolves fresh transport URLs itself
+  with one strict `POST /worker/input-assets/resolve` under its
+  attempt-scoped capability, verifies exact size/BLAKE3/MIME/kind, preserves
+  opaque `Asset.ref`, sets only `local_path`, and cleans attempt-owned temp
+  files on every terminal path. Endpoint build now rejects Asset-bearing
+  `set`/`frozenset` and non-string-keyed mappings (unordered containers have
+  no manifest order); base `Asset`/`MediaAsset` discover as `kind=media`.
+  A v0.43 worker cannot serve a v3 hub and vice versa — deploy in lockstep
+  with the tensorhub v4 release.
+- **`GEN_WORKER_INTERNAL_OBJECT_HOSTS`**: exact-host allowlist that exempts
+  resolver-minted private-input URLs from the private-IP SSRF gate for
+  deployments whose object store lives on an internal network. Caller public
+  transports always face the full SSRF policy.
+- marco-polo example: `marco-polo-attach` private-input echo probe (e2e).
+
 ## 0.42.0 (2026-07-21)
 
+- **gw#615: disk telemetry can no longer freeze the event loop (0.40.7
+  post-seal_publish hang).** `_state_delta()` now reads only ModelStore's
+  cached `disk_usage_report()`; the actual statvfs/ref-index measurement
+  runs as a fire-and-forget `asyncio.to_thread` refresh gated to the
+  report TTL. A stalled provider volume mount leaves telemetry stale
+  instead of blocking StateDeltas, the th#965 heartbeat, and serving —
+  the 0.40.7 LTX boots that sealed+published then never served.
+- **th#767: `gen_worker.families.wan` — WanDefaults registered under
+  `wan22`** (wan-2.2 slot migration surface for inference-endpoints).
 - **gw#614: synthesized media-modality warmup coverage — multi-lane family
   cells mint complete.** gw#612's publish gate left any endpoint whose
   input-routed sibling lane needs media (qwen edit: an input image) unable
