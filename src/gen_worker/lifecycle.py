@@ -12,6 +12,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+from . import activity as activity_mod
 from .config import Settings
 from .executor import Executor
 from .pb import worker_scheduler_pb2 as pb
@@ -636,6 +637,10 @@ class Lifecycle:
         while not self.drained.is_set():
             await asyncio.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)
             await self.maybe_send_state_delta(force=True)
+            # gw#621: progress counters piggyback on the same beat — one
+            # counter-carrying ActivityUpdate per tick while an activity is
+            # open, plus the typed self-diagnosis on a stalled registry.
+            activity_mod.on_beat()
 
     async def _setup_awaiting_functions(
         self, awaiting: Dict[str, List[str]]

@@ -6,8 +6,12 @@ activity_failed terminal (an induced crash never dies silently)."""
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import List
 
 import msgspec
@@ -34,6 +38,7 @@ def _reset_activity_sink():
     with activity._lock:
         activity._sink = None
         activity._current = None
+        activity._last_progress_heartbeat = 0.0
 
 
 def _updates(sent: List[pb.WorkerMessage]) -> List[pb.ActivityUpdate]:
@@ -170,3 +175,200 @@ def test_running_context_manager_reports_failed_with_exception():
     # terminal cleared the current activity: later phase reports are no-ops
     activity.current_phase(activity.PHASE_SEAL_PUBLISH)
     assert reports[-1].state == pb.ActivityState.ACTIVITY_STATE_FAILED
+
+
+# ---------------------------------------------------------------------------
+# ie#522: default evidence must not blind-spot two honest liveness sources —
+# live subprocess CPU (inductor's async_compile workers) and I/O-bound
+# download-byte progress (large model fills, CPU-light by design). Both
+# were reproduced live killing a healthy worker at ~9.5-10min (th#965 layer
+# 3), twice, on two different hosts.
+# ---------------------------------------------------------------------------
+
+
+def test_process_cpu_evidence_counts_live_child_process_cpu():
+    """A LIVE (still-running) child process burning real CPU must move the
+    default evidence function even though this process's own
+    time.process_time() barely moves — resource.RUSAGE_CHILDREN only
+    accounts for already-reaped children, which is exactly wrong for an
+    in-flight inductor compile subprocess."""
+    before_self = time.process_time()
+    before_combined = activity._process_cpu_evidence()
+
+    # A real child process that busy-loops burning CPU for ~1s wall time —
+    # never reaped until after we've sampled evidence while it's alive.
+    proc = subprocess.Popen([
+        sys.executable, "-c",
+        "import time\nt=time.process_time()\n"
+        "while time.process_time() - t < 1.0: pass",
+    ])
+    try:
+        time.sleep(0.5)  # let the child accrue real CPU while still running
+        mid_self = time.process_time()
+        mid_combined = activity._process_cpu_evidence()
+    finally:
+        proc.wait(timeout=5)
+
+    self_delta = mid_self - before_self
+    combined_delta = mid_combined - before_combined
+    assert combined_delta > self_delta + 0.1, (
+        f"child CPU not counted: self_delta={self_delta}, "
+        f"combined_delta={combined_delta}"
+    )
+
+
+def test_note_progress_heartbeats_current_activity_rate_limited():
+    reports: List[pb.ActivityUpdate] = []
+    with activity._lock:
+        activity._sink = reports.append
+
+    act = activity.begin(activity.KIND_SELF_MINT_COMPILE, activity.PHASE_LOAD)
+    baseline = len(reports)
+
+    activity.note_progress()
+    after_first = len(reports)
+    activity.note_progress()  # inside the rate-limit floor: must not double-report
+    after_second = len(reports)
+
+    assert after_first == baseline + 1, "note_progress() did not heartbeat"
+    assert after_second == after_first, "note_progress() ignored the rate limit"
+
+    act.completed()
+    # no current activity: must be a safe no-op, not an error
+    activity.note_progress()
+
+
+def test_watchdog_survives_zero_cpu_download_via_note_progress():
+    """REVERT-TURNS-RED (failure mode a): a fake download that advances
+    ONLY via note_progress() ticks — zero CPU burn on this thread or any
+    child, exactly a network-bound fill — must keep the activity alive
+    under the REAL default watchdog evidence function. A pre-fix watchdog
+    (process_time() only) goes silent here and the hub kills it at 10min;
+    this activity must never go silent while download ticks keep arriving."""
+    reports: List[pb.ActivityUpdate] = []
+    with activity._lock:
+        activity._sink = reports.append
+        activity._last_progress_heartbeat = 0.0
+
+    act = activity.begin(activity.KIND_SELF_MINT_COMPILE, activity.PHASE_LOAD)
+    baseline = len(reports)
+    stop = threading.Event()
+
+    def _fake_download_ticker() -> None:
+        # No CPU work at all — just sleeps and calls note_progress(), the
+        # exact shape of cozy_snapshot.py's _on_bytes hook during a real
+        # network fetch.
+        while not stop.is_set():
+            activity.note_progress()
+            time.sleep(0.02)
+
+    ticker = threading.Thread(target=_fake_download_ticker, daemon=True)
+    ticker.start()
+    try:
+        # Use the REAL default evidence (no override) with a short interval
+        # so the test is fast; the default evidence alone (CPU-only) would
+        # see nothing advance here since the ticker burns no CPU.
+        with activity.watchdog(act, interval_s=0.05):
+            time.sleep(0.3)
+            beats_during = len(reports) - baseline
+    finally:
+        stop.set()
+        ticker.join(timeout=2)
+    act.completed()
+
+    assert beats_during >= 2, (
+        f"activity went silent during a zero-CPU download tick stream "
+        f"(beats={beats_during}) — note_progress() must keep it alive "
+        f"independent of the CPU watchdog"
+    )
+
+
+def test_watchdog_survives_zero_cpu_disk_load_via_io_evidence():
+    """REVERT-TURNS-RED (failure mode a, part 2): the on-disk model-LOAD
+    step (safetensors mmap + tensor materialization, AFTER any network
+    download has already finished) is third-party diffusers/torch/
+    safetensors code gen-worker has no progress hook into — no
+    note_progress() call reaches it. Reproduced live: the kill landed at
+    `phase=load` on a retry whose download evidence should have been
+    fine, i.e. the SAME phase covers a second CPU-light sub-step this test
+    isolates. Proves the DEFAULT watchdog evidence (_default_evidence, not
+    a synthetic override) stays alive from REAL disk I/O bytes alone —
+    zero CPU burn, zero note_progress() calls — via psutil.io_counters()."""
+    reports: List[pb.ActivityUpdate] = []
+    with activity._lock:
+        activity._sink = reports.append
+
+    act = activity.begin(activity.KIND_SELF_MINT_COMPILE, activity.PHASE_LOAD)
+    baseline = len(reports)
+    stop = threading.Event()
+
+    def _fake_disk_load() -> None:
+        # Real disk writes (page cache I/O the kernel actually counts),
+        # deliberately with no CPU-heavy work and no activity/note_progress
+        # calls at all — exactly the shape of a third-party mmap-based
+        # loader gen-worker cannot instrument.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "fake_shard.bin"
+            chunk = b"\0" * (1 << 20)  # 1 MiB
+            with open(path, "wb") as f:
+                while not stop.is_set():
+                    f.write(chunk)
+                    f.flush()
+                    os_fsync_safe(f)
+                    time.sleep(0.02)
+
+    ticker = threading.Thread(target=_fake_disk_load, daemon=True)
+    ticker.start()
+    try:
+        with activity.watchdog(act, interval_s=0.05):
+            time.sleep(0.3)
+            beats_during = len(reports) - baseline
+    finally:
+        stop.set()
+        ticker.join(timeout=2)
+    act.completed()
+
+    assert beats_during >= 1, (
+        f"activity went silent during real (zero-CPU) disk I/O "
+        f"(beats={beats_during}) — the default evidence must pick up "
+        f"process io_counters(), not just CPU time"
+    )
+
+
+def os_fsync_safe(f) -> None:
+    """fsync forces the write to actually land (bumping io_counters
+    reliably) instead of possibly sitting in a page-cache buffer the OS
+    hasn't accounted as I/O yet; best-effort on filesystems that reject it."""
+    import os
+
+    try:
+        os.fsync(f.fileno())
+    except OSError:
+        pass
+
+
+def test_watchdog_still_detects_a_genuinely_dead_activity():
+    """REVERT-TURNS-RED (failure mode b): with NEITHER CPU work NOR
+    note_progress() ticks, the activity must still go silent and stay
+    silent — the fix must not make the stall detector toothless."""
+    reports: List[pb.ActivityUpdate] = []
+    with activity._lock:
+        activity._sink = reports.append
+        activity._last_progress_heartbeat = 0.0
+
+    act = activity.begin(activity.KIND_SELF_MINT_COMPILE, activity.PHASE_LOAD)
+    baseline = len(reports)
+    with activity.watchdog(act, interval_s=0.05):
+        time.sleep(0.3)  # truly idle: no CPU burn, no note_progress() calls
+        beats = len(reports) - baseline
+    act.completed()
+
+    # ~6 watchdog ticks fit in this window; a healthy stop-on-hang detector
+    # heartbeats on effectively none of them. Allow <=1 for incidental
+    # background CPU noise in the test process itself (interpreter/pytest
+    # housekeeping can tick time.process_time() a hair over _EVIDENCE_EPS
+    # once) — the real bug this guards is "heartbeats every tick regardless
+    # of evidence", which test_watchdog_survives_zero_cpu_download's
+    # beats_during>=2-out-of-similar-ticks would NOT distinguish from this
+    # if this threshold were toothless.
+    assert beats <= 1, f"a dead activity heartbeated repeatedly (beats={beats})"

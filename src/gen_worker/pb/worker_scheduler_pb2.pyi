@@ -117,7 +117,7 @@ ACTIVITY_STATE_COMPLETED: ActivityState
 ACTIVITY_STATE_FAILED: ActivityState
 
 class WorkerMessage(_message.Message):
-    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded", "activity_update")
+    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded", "activity_update", "hardware_unsuitable")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     STATE_DELTA_FIELD_NUMBER: _ClassVar[int]
     JOB_ACCEPTED_FIELD_NUMBER: _ClassVar[int]
@@ -127,6 +127,7 @@ class WorkerMessage(_message.Message):
     FN_UNAVAILABLE_FIELD_NUMBER: _ClassVar[int]
     FN_DEGRADED_FIELD_NUMBER: _ClassVar[int]
     ACTIVITY_UPDATE_FIELD_NUMBER: _ClassVar[int]
+    HARDWARE_UNSUITABLE_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     state_delta: StateDelta
     job_accepted: JobAccepted
@@ -136,7 +137,8 @@ class WorkerMessage(_message.Message):
     fn_unavailable: FnUnavailable
     fn_degraded: FnDegraded
     activity_update: ActivityUpdate
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ...) -> None: ...
+    hardware_unsuitable: HardwareUnsuitable
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ..., hardware_unsuitable: _Optional[_Union[HardwareUnsuitable, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
     __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh")
@@ -199,6 +201,34 @@ class WorkerResources(_message.Message):
     torch_version: str
     gen_worker_version: str
     def __init__(self, gpu_count: _Optional[int] = ..., vram_total_bytes: _Optional[int] = ..., gpu_name: _Optional[str] = ..., gpu_sm: _Optional[str] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., instance_id: _Optional[str] = ..., host_canary: _Optional[_Union[HostCanary, _Mapping]] = ..., torch_version: _Optional[str] = ..., gen_worker_version: _Optional[str] = ...) -> None: ...
+
+class HardwareUnsuitable(_message.Message):
+    __slots__ = ("worker_id", "release_id", "reason_class", "detail", "driver_version", "gpu_name", "torch_version", "torch_cuda_version", "gen_worker_version", "image_digest", "instance_id", "reported_at_unix_ms")
+    WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_CLASS_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    DRIVER_VERSION_FIELD_NUMBER: _ClassVar[int]
+    GPU_NAME_FIELD_NUMBER: _ClassVar[int]
+    TORCH_VERSION_FIELD_NUMBER: _ClassVar[int]
+    TORCH_CUDA_VERSION_FIELD_NUMBER: _ClassVar[int]
+    GEN_WORKER_VERSION_FIELD_NUMBER: _ClassVar[int]
+    IMAGE_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]
+    REPORTED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    worker_id: str
+    release_id: str
+    reason_class: str
+    detail: str
+    driver_version: str
+    gpu_name: str
+    torch_version: str
+    torch_cuda_version: str
+    gen_worker_version: str
+    image_digest: str
+    instance_id: str
+    reported_at_unix_ms: int
+    def __init__(self, worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., reason_class: _Optional[str] = ..., detail: _Optional[str] = ..., driver_version: _Optional[str] = ..., gpu_name: _Optional[str] = ..., torch_version: _Optional[str] = ..., torch_cuda_version: _Optional[str] = ..., gen_worker_version: _Optional[str] = ..., image_digest: _Optional[str] = ..., instance_id: _Optional[str] = ..., reported_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class HostCanary(_message.Message):
     __slots__ = ("memcpy_gbps", "h2d_gbps", "d2h_gbps", "pinned_alloc_ok", "cpu_single_mbps", "cpu_multi_mbps", "vcpus", "ram_total_gb", "duration_ms")
@@ -659,7 +689,7 @@ class ModelEvent(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ..., network_bytes: _Optional[int] = ...) -> None: ...
 
 class ActivityUpdate(_message.Message):
-    __slots__ = ("kind", "phase", "step", "total_steps", "seq", "state", "error", "detail", "updated_at_unix_ms")
+    __slots__ = ("kind", "phase", "step", "total_steps", "seq", "state", "error", "detail", "updated_at_unix_ms", "counter", "counter_unit", "counter_done", "counter_total", "rate_per_s", "self_stalled", "stalled_for_ms")
     KIND_FIELD_NUMBER: _ClassVar[int]
     PHASE_FIELD_NUMBER: _ClassVar[int]
     STEP_FIELD_NUMBER: _ClassVar[int]
@@ -669,6 +699,13 @@ class ActivityUpdate(_message.Message):
     ERROR_FIELD_NUMBER: _ClassVar[int]
     DETAIL_FIELD_NUMBER: _ClassVar[int]
     UPDATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    COUNTER_FIELD_NUMBER: _ClassVar[int]
+    COUNTER_UNIT_FIELD_NUMBER: _ClassVar[int]
+    COUNTER_DONE_FIELD_NUMBER: _ClassVar[int]
+    COUNTER_TOTAL_FIELD_NUMBER: _ClassVar[int]
+    RATE_PER_S_FIELD_NUMBER: _ClassVar[int]
+    SELF_STALLED_FIELD_NUMBER: _ClassVar[int]
+    STALLED_FOR_MS_FIELD_NUMBER: _ClassVar[int]
     kind: str
     phase: str
     step: int
@@ -678,7 +715,14 @@ class ActivityUpdate(_message.Message):
     error: str
     detail: str
     updated_at_unix_ms: int
-    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ...) -> None: ...
+    counter: str
+    counter_unit: str
+    counter_done: float
+    counter_total: float
+    rate_per_s: float
+    self_stalled: bool
+    stalled_for_ms: int
+    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")

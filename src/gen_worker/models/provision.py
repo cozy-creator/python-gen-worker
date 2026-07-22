@@ -312,18 +312,25 @@ def arm_compile(pipe: Any) -> bool:
     compiled artifact for (family, SKU, torch, triton) is seeded, otherwise
     stays eager. Returns whether a compiled path was armed.
 
-    Raises ``RuntimeError`` if called with no active arming scope — i.e.
-    outside a ``setup()`` whose endpoint declares ``compile=Compile(...)``.
-    Compile is a setup-time-only concern; there is deliberately no way to
-    call this per-request."""
+    ie#522 (Paul's ruling, 2026-07-22): the endpoint's own ``setup()`` call
+    is a fixed declaration of intent ("this pipeline is compile-eligible");
+    whether that intent is ACTIVE is the release's decision (an eager
+    registration declares no ``compile=Compile(...)`` at all, so the
+    executor's ``ArmingScope`` opens as a no-op — see ``ArmingScope``'s own
+    "no-op when compile is None" contract above). A no-op scope must mean a
+    no-op ``arm_compile()``, not a crash: every ``@endpoint`` with a
+    self-loading setup() calls this unconditionally (sdxl, wan-2.2, ...),
+    and each of those must keep working under an eager registration exactly
+    like the automatic worker-loaded path already does. No active scope ->
+    log once at info and return False (never armed) — never raise."""
     ctx = _ARMING_CTX.get()
     if ctx is None:
-        raise RuntimeError(
-            "gen_worker.arm_compile() called with no active compile-arming "
-            "scope. It only works inside an endpoint's setup(), and only "
-            "when @endpoint(compile=Compile(...)) is declared on that "
-            "function/class."
+        logger.info(
+            "gen_worker.arm_compile(): no active compile-arming scope "
+            "(this release is eager — no compile=Compile(...) declared); "
+            "staying eager for %r", type(pipe).__name__,
         )
+        return False
     enable = ctx.enable if ctx.enable is not None else enable_compiled
     outcome = enable(pipe, ctx.compile, ctx.cache_dir, ctx.artifact)
     armed = bool(getattr(outcome, "armed", outcome))

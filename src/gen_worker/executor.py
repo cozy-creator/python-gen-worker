@@ -30,6 +30,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 import msgspec
 
 from . import activity as activity_mod
+from . import progress as progress_mod
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -1323,8 +1324,21 @@ class ModelStore:
             # both must carry it for the wire contract to actually work.
             net_scope = cozy_snapshot.NetworkBytesScope()
 
+            # gw#621: per-ref bytes as a registry counter (visible on every
+            # 10s beat while an activity is open); snapshot sizes make the
+            # total known up front, so the wire never shows total=0 for
+            # tensorhub refs.
+            known_total = (
+                sum(int(f.size_bytes) for f in snapshot.files)
+                if snapshot is not None and snapshot.files else 0)
+            dl_counter = progress_mod.counter(
+                f"download:{ref}", progress_mod.UNIT_BYTES, total=known_total)
+
             def _progress(done: int, total: Optional[int]) -> None:
                 nonlocal last_progress
+                dl_counter.set_done(float(done))
+                if total:
+                    dl_counter.set_total(float(total))
                 now = time.monotonic()
                 if now - last_progress < _PROGRESS_EVENT_MIN_INTERVAL_S:
                     return
@@ -1340,83 +1354,87 @@ class ModelStore:
 
             await self._event(
                 ref, pb.MODEL_STATE_DOWNLOADING, identity=operation_identity,
+                bytes_total=known_total,
             )
-            delay = 1.0
-            for attempt in range(1, _DOWNLOAD_RETRIES + 1):
-                try:
-                    resolved = None
-                    if snapshot is not None and snapshot.digest:
-                        resolved = _snapshot_to_resolved(snapshot)
-                    with net_scope:
-                        path = await ensure_local(
-                            ref,
-                            provider=getattr(binding, "source", None),
-                            snapshot=resolved,
-                            cache_dir=self._cache_dir,
-                            hf_home=self._hf_home,
-                            hf_token=self._hf_token,
-                            allow_patterns=tuple(getattr(binding, "files", ()) or ()),
-                            components=tuple(getattr(binding, "components", ()) or ()),
-                            progress=_progress,
-                            fill_source_dir=self._fill_source_dir,
-                        )
-                    tier_before = self.residency.tier(ref)
-                    with self._identity_lock:
-                        identity_changed = (
-                            bool(operation_identity[0])
-                            and self._disk_identities.get(ref) != operation_identity
-                        )
-                        if operation_identity[0]:
-                            self._disk_identities[ref] = operation_identity
-                            if tier_before in (None, residency_mod.Tier.DISK):
-                                self._resident_identities[ref] = operation_identity
-                    # th#850 managed-tier ruling (gw#599): handed off to
-                    # _on_residency_event so the ON_DISK event Residency
-                    # emits for a genuinely fresh registration carries the
-                    # bytes this materialization fetched over the network
-                    # (0 included — pairs with the DOWNLOADING events'
-                    # bytes_total for the "warm boot ⇒ ~0 R2 bytes" signal).
-                    self._pending_network_bytes[ref] = net_scope.network_bytes
-                    self.residency.track_disk(ref, path)
-                    self._pending_network_bytes.pop(ref, None)  # defensive: unconsumed if no event fired
-                    if tier_before is residency_mod.Tier.DISK and identity_changed:
-                        # Residency suppresses same-tier event spam (track_disk
-                        # above did not consume the pending value above). A
-                        # digest move is nevertheless a semantic ON_DISK
-                        # transition — carries network_bytes directly since
-                        # this is our own explicit event, not Residency's.
-                        await self._event(
-                            ref, pb.MODEL_STATE_ON_DISK,
-                            identity=operation_identity,
-                            network_bytes=net_scope.network_bytes,
-                        )
-                    # tree_bytes stats every file — off-loop (gw#407: no
-                    # multi-GB directory walks on the event loop).
-                    size = await asyncio.to_thread(disk_gc.tree_bytes, path)
-                    self._index.record(ref, path, size)
-                    # Fresh downloads were digest-verified by the downloader.
-                    self._verified.add(ref)
-                    return complete(path)
-                except Exception as exc:
-                    terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
-                    if terminal:
-                        vocab = self._error_vocab(exc)
-                        if vocab == "download_failed":
-                            # th#757: the generic bucket must carry the root
-                            # cause — pods are often unreachable and the hub
-                            # log is the only forensic surface (J24M run11:
-                            # a starved request was undiagnosable hub-side).
-                            vocab = f"download_failed: {_sanitize(f'{type(exc).__name__}: {exc}')[:200]}"
-                        await self._event(
-                            ref, pb.MODEL_STATE_FAILED,
-                            identity=operation_identity, error=vocab,
-                        )
-                        raise
-                    logger.warning("download of %s failed (attempt %d): %s; retrying in %.1fs",
-                                   ref, attempt, exc, delay)
-                    await asyncio.sleep(delay)
-                    delay *= 4
-            raise RuntimeError("unreachable")
+            try:
+                delay = 1.0
+                for attempt in range(1, _DOWNLOAD_RETRIES + 1):
+                    try:
+                        resolved = None
+                        if snapshot is not None and snapshot.digest:
+                            resolved = _snapshot_to_resolved(snapshot)
+                        with net_scope:
+                            path = await ensure_local(
+                                ref,
+                                provider=getattr(binding, "source", None),
+                                snapshot=resolved,
+                                cache_dir=self._cache_dir,
+                                hf_home=self._hf_home,
+                                hf_token=self._hf_token,
+                                allow_patterns=tuple(getattr(binding, "files", ()) or ()),
+                                components=tuple(getattr(binding, "components", ()) or ()),
+                                progress=_progress,
+                                fill_source_dir=self._fill_source_dir,
+                            )
+                        tier_before = self.residency.tier(ref)
+                        with self._identity_lock:
+                            identity_changed = (
+                                bool(operation_identity[0])
+                                and self._disk_identities.get(ref) != operation_identity
+                            )
+                            if operation_identity[0]:
+                                self._disk_identities[ref] = operation_identity
+                                if tier_before in (None, residency_mod.Tier.DISK):
+                                    self._resident_identities[ref] = operation_identity
+                        # th#850 managed-tier ruling (gw#599): handed off to
+                        # _on_residency_event so the ON_DISK event Residency
+                        # emits for a genuinely fresh registration carries the
+                        # bytes this materialization fetched over the network
+                        # (0 included — pairs with the DOWNLOADING events'
+                        # bytes_total for the "warm boot ⇒ ~0 R2 bytes" signal).
+                        self._pending_network_bytes[ref] = net_scope.network_bytes
+                        self.residency.track_disk(ref, path)
+                        self._pending_network_bytes.pop(ref, None)  # defensive: unconsumed if no event fired
+                        if tier_before is residency_mod.Tier.DISK and identity_changed:
+                            # Residency suppresses same-tier event spam (track_disk
+                            # above did not consume the pending value above). A
+                            # digest move is nevertheless a semantic ON_DISK
+                            # transition — carries network_bytes directly since
+                            # this is our own explicit event, not Residency's.
+                            await self._event(
+                                ref, pb.MODEL_STATE_ON_DISK,
+                                identity=operation_identity,
+                                network_bytes=net_scope.network_bytes,
+                            )
+                        # tree_bytes stats every file — off-loop (gw#407: no
+                        # multi-GB directory walks on the event loop).
+                        size = await asyncio.to_thread(disk_gc.tree_bytes, path)
+                        self._index.record(ref, path, size)
+                        # Fresh downloads were digest-verified by the downloader.
+                        self._verified.add(ref)
+                        return complete(path)
+                    except Exception as exc:
+                        terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
+                        if terminal:
+                            vocab = self._error_vocab(exc)
+                            if vocab == "download_failed":
+                                # th#757: the generic bucket must carry the root
+                                # cause — pods are often unreachable and the hub
+                                # log is the only forensic surface (J24M run11:
+                                # a starved request was undiagnosable hub-side).
+                                vocab = f"download_failed: {_sanitize(f'{type(exc).__name__}: {exc}')[:200]}"
+                            await self._event(
+                                ref, pb.MODEL_STATE_FAILED,
+                                identity=operation_identity, error=vocab,
+                            )
+                            raise
+                        logger.warning("download of %s failed (attempt %d): %s; retrying in %.1fs",
+                                       ref, attempt, exc, delay)
+                        await asyncio.sleep(delay)
+                        delay *= 4
+                raise RuntimeError("unreachable")
+            finally:
+                dl_counter.finish()
 
     def activate_load_identity(
         self, ref: str, identity: _ResidencyIdentity,
@@ -2287,6 +2305,18 @@ class Executor:
                 # resident instance the worker cannot create by itself.
                 out.append(name)
                 continue
+            if spec.kind != "inference":
+                # ie#522 finding: non-inference (e.g. conversion) functions
+                # are dispatched and set up per-request — _warmup_plan (see
+                # below) never schedules them for boot warmup, so a declared-
+                # but-never-yet-dispatched conversion function must not read
+                # as "awaiting readiness" (that bucket is loading_functions()
+                # below, which th#965 layer 3 stall-watches: a conversion
+                # function that simply hasn't been invoked yet was tripping
+                # a 10m worker_activity_stalled kill on an otherwise-healthy
+                # worker mid-job, taking down unrelated in-flight requests).
+                out.append(name)
+                continue
             rec = self._classes[spec.instance_key]
             if rec.ready or (not spec.models and rec.failed is None):
                 out.append(name)
@@ -2298,6 +2328,7 @@ class Executor:
             name for name, spec in self.specs.items()
             if name not in avail and name not in self.unavailable
             and spec.cls is not None and not spec.slots
+            and spec.kind == "inference"
             and self._classes[spec.instance_key].failed is None
         )
 
@@ -3686,6 +3717,10 @@ class Executor:
         for wj_index, wj in enumerate(jobs, start=1):
             activity_mod.current_phase(
                 activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(jobs))
+            act = activity_mod.current()
+            if act is not None:
+                act.counter("warmup:jobs", progress_mod.UNIT_STEPS,
+                            total=len(jobs)).set_done(wj_index)
             mode = "declared" if wj.declared else "synthesized"
             if not await _one(wj, wj.build, mode, variant=False):
                 return evidence
@@ -3719,6 +3754,10 @@ class Executor:
                     break
                 activity_mod.current_phase(
                     activity_mod.PHASE_WARMUP_FORWARD, v_index, total)
+                act = activity_mod.current()
+                if act is not None:
+                    act.counter("warmup:jobs", progress_mod.UNIT_STEPS,
+                                total=total).set_done(v_index)
                 if not await _one(wj, build, label, variant=True):
                     return evidence
         return evidence
@@ -6925,6 +6964,12 @@ class Executor:
         def _emit(event: Dict[str, Any]) -> None:
             if job.finished:
                 return
+            # gw#621: a ctx event is real forward progress — feed the open
+            # activity's step counter (warmup forwards run GPU-bound with a
+            # quiet CPU; watchdog evidence alone would read stalled).
+            act = activity_mod.current()
+            if act is not None:
+                act.counter("infer:steps", progress_mod.UNIT_STEPS).add(1)
             try:
                 data = msgspec.json.encode(event)
             except Exception:

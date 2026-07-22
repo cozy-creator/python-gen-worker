@@ -12,6 +12,22 @@ Kind/phase strings are wire-shared with tensorhub
 
 Without a bound transport sink (cozy-local, tests) reports land on the
 logger, which IS the local progress UI.
+
+ie#522 (2026-07-21): the watchdog's default liveness evidence was process
+CPU seconds ONLY. Two real activities are honestly alive while burning
+near-zero CPU on the reporting process: (1) an I/O-bound network model
+fill (large composite checkpoints, tens of GB, minutes over a real link —
+CPU-light by design); (2) inductor compile phases that fork subprocess
+compile workers (torch's async_compile) — their CPU burn never showed up
+in this process's own `time.process_time()`. Both read as "stalled" to the
+hub's th#965 layer-3 rule after 10 minutes of no heartbeat, even mid
+genuine progress. Reproduced live twice (ie#522 wan-2.2 animegen boot
+warmup, two different RunPod hosts, identical ~9.5min self_mint_compile
+CancelledError at phase=load). Fixed two ways below: `_process_cpu_evidence`
+now sums live (not just reaped) child-process CPU via psutil, and
+`note_progress()` lets an I/O callback (model-download byte ticks) heartbeat
+the current activity directly — proof-of-life from genuine external
+progress, independent of the CPU-sampling watchdog thread entirely.
 """
 
 from __future__ import annotations
@@ -23,6 +39,9 @@ import time
 from types import TracebackType
 from typing import Awaitable, Callable, Optional
 
+import psutil
+
+from . import progress as progress_mod
 from .pb import worker_scheduler_pb2 as pb
 
 logger = logging.getLogger(__name__)
@@ -108,6 +127,18 @@ class Activity:
         self._step = 0
         self._total = 0
         self._done = False
+        self._counters: list[progress_mod.Counter] = []
+
+    def counter(
+        self, name: str, unit: str, total: float = 0.0,
+    ) -> progress_mod.Counter:
+        """Register-or-get a progress counter owned by this activity —
+        finished automatically when the activity ends, so a reused name
+        never carries a stale age into the next activity (gw#621)."""
+        c = progress_mod.counter(name, unit, total)
+        if c not in self._counters:
+            self._counters.append(c)
+        return c
 
     def _report(self, state: "pb.ActivityState", error: str = "", detail: str = "") -> None:
         _emit(pb.ActivityUpdate(
@@ -124,6 +155,25 @@ class Activity:
     def heartbeat(self) -> None:
         """Re-report the current phase with a fresh seq (liveness proof)."""
         self._report(pb.ActivityState.ACTIVITY_STATE_RUNNING)
+
+    def progress_beat(
+        self, snap: "progress_mod.Snapshot", self_stalled: bool = False,
+    ) -> None:
+        """One counter-carrying RUNNING update (gw#621), emitted from the
+        10s app beat. The hub judges liveness by counter advancement; a
+        self_stalled=True beat is the typed confession it kills on."""
+        if self._done:  # racing completion: never re-open a terminal activity
+            return
+        _emit(pb.ActivityUpdate(
+            kind=self.kind, phase=self._phase, step=self._step,
+            total_steps=self._total, seq=_next_seq(),
+            state=pb.ActivityState.ACTIVITY_STATE_RUNNING,
+            counter=snap.name, counter_unit=snap.unit,
+            counter_done=snap.done, counter_total=snap.total,
+            rate_per_s=snap.rate_per_s, self_stalled=self_stalled,
+            stalled_for_ms=int(snap.age_s * 1000) if self_stalled else 0,
+            updated_at_unix_ms=int(time.time() * 1000),
+        ))
 
     def completed(self) -> None:
         if not self._done:
@@ -165,6 +215,61 @@ def _end(act: Activity) -> None:
     with _lock:
         if _current is act:
             _current = None
+    for c in act._counters:
+        c.finish()
+    act._counters = []
+
+
+def current() -> Optional[Activity]:
+    with _lock:
+        act = _current
+    return act if act is not None and not act._done else None
+
+
+def on_beat() -> None:
+    """Ride the 10s app heartbeat (lifecycle._heartbeat_loop, gw#621): while
+    an activity is open and the progress registry has counters, emit one
+    counter-carrying update per beat — frozen counters included (the hub's
+    stall clock runs on non-advancement) — plus the typed self-diagnosis
+    when even the freshest counter is stale past its per-phase window.
+    Never raises; without a sink reports land on the logger."""
+    try:
+        act = current()
+        if act is None:
+            return
+        snap = progress_mod.freshest()
+        if snap is None:
+            return
+        act.progress_beat(
+            snap, self_stalled=progress_mod.self_diagnosis() is not None)
+    except Exception:
+        logger.debug("progress beat dropped", exc_info=True)
+
+
+# Floor between note_progress()-driven heartbeats: an active download can
+# tick every few seconds (executor.py's _PROGRESS_EVENT_MIN_INTERVAL_S=5s);
+# no need to re-report that often, just comfortably inside the hub's 10min
+# stall window.
+_PROGRESS_HEARTBEAT_MIN_INTERVAL_S = 5.0
+_last_progress_heartbeat = 0.0
+
+
+def note_progress() -> None:
+    """Proof-of-life for the CURRENT activity from an external progress
+    signal (model-download byte ticks, etc.) — an I/O-bound fill is
+    CPU-light by design, so the watchdog's CPU-time evidence alone would
+    read a healthy, slow-but-progressing network download as a stalled
+    activity. Safe to call unconditionally from generic download code: a
+    no-op when no activity is running, rate-limited otherwise."""
+    global _last_progress_heartbeat
+    now = time.monotonic()
+    with _lock:
+        if now - _last_progress_heartbeat < _PROGRESS_HEARTBEAT_MIN_INTERVAL_S:
+            return
+        _last_progress_heartbeat = now
+        act = _current
+    if act is not None and not act._done:
+        act.heartbeat()
 
 
 class running:
@@ -193,8 +298,60 @@ class running:
         _end(self.activity)
 
 
+_this_process = psutil.Process()
+
+
 def _process_cpu_evidence() -> float:
-    return time.process_time()
+    """Process CPU seconds, including LIVE (not just reaped) child
+    processes. torch's async_compile forks subprocess compile workers for
+    inductor phases — resource.getrusage(RUSAGE_CHILDREN) only accounts for
+    children that have already exited, which is useless for an in-flight
+    compile burning real CPU in a still-running child. psutil reads /proc
+    directly, so a live child's usage counts immediately. Best-effort: a
+    child that can't be inspected (raced exit, permissions) just doesn't
+    contribute — never fatal to the heartbeat."""
+    total = time.process_time()
+    try:
+        children = _this_process.children(recursive=True)
+    except psutil.Error:
+        children = []
+    for child in children:
+        try:
+            ct = child.cpu_times()
+        except psutil.Error:
+            continue
+        total += ct.user + ct.system
+    return total
+
+
+def _process_io_evidence() -> float:
+    """Process disk I/O bytes (read+write), MB granularity. Covers the
+    on-disk model-LOAD phase (safetensors mmap/read + tensor
+    materialization) — reproduced live: a worker was killed at
+    `phase=load` after its network download had already finished, i.e.
+    during the local-disk-to-GPU step, which is diffusers/torch/safetensors
+    code gen-worker has no progress hook into. Process-level I/O accounting
+    is a universal, non-invasive signal instead: real bytes move through
+    the kernel's counters for this process regardless of which library
+    triggered the read, so it needs no app-level instrumentation of
+    third-party loading code at all. Unsupported platforms (no
+    io_counters(), e.g. macOS) contribute 0 — never fatal."""
+    try:
+        io = _this_process.io_counters()
+    except (psutil.Error, AttributeError, NotImplementedError):
+        return 0.0
+    return (io.read_bytes + io.write_bytes) / (1 << 20)
+
+
+def _default_evidence() -> float:
+    """Combined default watchdog evidence: process+live-children CPU
+    seconds PLUS process disk I/O megabytes. Either source alone advancing
+    proves genuine life: a network download followed by on-disk model load
+    is CPU-light throughout but moves real bytes the whole way (covers
+    both halves of "load"); an inductor compile subprocess burns real
+    (child) CPU while GPU sits idle and I/O sits flat; a true hang
+    advances neither."""
+    return _process_cpu_evidence() + _process_io_evidence()
 
 
 class watchdog:
@@ -204,8 +361,9 @@ class watchdog:
     call stops accruing evidence, the beat stops within one interval, and the
     hub's stall rule takes it from there.
 
-    Default evidence is process CPU seconds; pass a monotonic callable
-    (e.g. compile-wall-seconds) for calls with better signals."""
+    Default evidence is process+children CPU seconds plus process disk I/O
+    (see _default_evidence); pass a monotonic callable (e.g.
+    compile-wall-seconds) for calls with a better signal."""
 
     def __init__(
         self,
@@ -216,7 +374,7 @@ class watchdog:
     ) -> None:
         self._act = act
         self._interval = interval_s
-        self._evidence = evidence or _process_cpu_evidence
+        self._evidence = evidence or _default_evidence
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="activity-watchdog", daemon=True,
@@ -224,9 +382,9 @@ class watchdog:
 
     def _run(self) -> None:
         try:
-            last = self._evidence()
+            base = last = self._evidence()
         except Exception:
-            last = 0.0
+            base = last = 0.0
         while not self._stop.wait(self._interval):
             try:
                 now = self._evidence()
@@ -234,9 +392,15 @@ class watchdog:
                 continue
             if now - last >= _EVIDENCE_EPS:
                 last = now
+                # gw#621: evidence advance is ALSO a registry counter, so the
+                # 10s beat reports it and the hub sees a moving number
+                # instead of inferring health.
+                self._counter.set_done(now - base)
                 self._act.heartbeat()
 
     def __enter__(self) -> "watchdog":
+        self._counter = progress_mod.counter(
+            f"evidence:{self._act.kind}", progress_mod.UNIT_EVIDENCE)
         self._thread.start()
         return self
 
@@ -248,3 +412,4 @@ class watchdog:
     ) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
+        self._counter.finish()

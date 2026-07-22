@@ -18,14 +18,14 @@ def test_wan_defaults_registered_under_wan22_root() -> None:
     # model_family column, shared by every wan22-envelope checkpoint.
     assert family_for("wan22") is WanDefaults
     d = WanDefaults()
-    assert (d.steps, d.guidance, d.guidance_2, d.max_guidance) == (40, 4.0, 3.0, None)
+    assert (d.steps, d.guidance, d.guidance_2, d.max_guidance, d.shift) == (40, 4.0, 3.0, None, None)
     assert d.family == "wan22"
 
 
 def test_wan_defaults_schema_exports_closed_object() -> None:
     schema = export_json_schema("wan22")
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) >= {"steps", "guidance", "guidance_2", "max_guidance"}
+    assert set(schema["properties"]) >= {"steps", "guidance", "guidance_2", "max_guidance", "shift"}
 
 
 def test_resolve_slot_prefers_repo_metadata_over_default_config() -> None:

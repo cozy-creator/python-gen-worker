@@ -43,6 +43,7 @@ import msgspec
 
 from .config import get_settings
 from .cuda_probe import CUDA_PROBE_FAILED_MARKER, probe_cuda, should_probe_cuda
+from .hardware_report import report_hardware_unsuitable
 from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker
@@ -228,6 +229,20 @@ def _run_main() -> int:
         probe = probe_cuda()
         if not probe.ok:
             logger.error("%s: %s", CUDA_PROBE_FAILED_MARKER, probe.reason)
+            # gw#619/th#988: dial the hub with a typed hardware-unsuitable
+            # report BEFORE exiting — closes the th#986 blindness where this
+            # exit was previously silent pre-hello. Best-effort/bounded: the
+            # exit below happens regardless of whether the hub is reachable.
+            try:
+                delivered = report_hardware_unsuitable(settings, probe)
+                _log_startup_phase(
+                    "cuda_probe_hardware_report",
+                    status="ok" if delivered else "error",
+                    level=logging.INFO if delivered else logging.WARNING,
+                    delivered=delivered,
+                )
+            except Exception:
+                logger.warning("hardware-unsuitable report raised unexpectedly", exc_info=True)
             _log_worker_fatal("cuda_probe", RuntimeError(probe.reason), exit_code=1)
             return 1
         _log_startup_phase("cuda_probe_ok", status="ok")
