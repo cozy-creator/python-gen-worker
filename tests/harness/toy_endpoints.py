@@ -216,6 +216,68 @@ class SlotIdentityCatalogEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# pgw#617: hierarchical component bindings (load-then-substitute).
+# ---------------------------------------------------------------------------
+
+
+class ToyVae:
+    """Component class named by the composed base's model_index.json."""
+
+    def __init__(self, content: str, source: str) -> None:
+        self.content = content
+        self.source = source
+
+    @classmethod
+    def from_pretrained(cls, path: str, **_kw: object) -> "ToyVae":
+        return cls((Path(path) / "weights.txt").read_text(), source=str(path))
+
+
+class ToyComposedPipeline:
+    """Diffusers-shaped fake: from_pretrained loads components from the tree
+    unless a preloaded module is injected via kwargs (the gw#479/pgw#617
+    ``components=`` mechanism)."""
+
+    def __init__(self, base_weights: str, vae: ToyVae, injected: bool) -> None:
+        self.base_weights = base_weights
+        self.vae = vae
+        self.vae_injected = injected
+
+    @classmethod
+    def from_pretrained(cls, path: str, **kwargs: object) -> "ToyComposedPipeline":
+        base = (Path(path) / "transformer" / "weights.txt").read_text()
+        vae = kwargs.get("vae")
+        if isinstance(vae, ToyVae):
+            return cls(base, vae, injected=True)
+        return cls(base, ToyVae.from_pretrained(str(Path(path) / "vae")), injected=False)
+
+    def to(self, device: str) -> "ToyComposedPipeline":
+        return self
+
+
+COMPOSED_DECLARED = Hub("harness/composed-base", tag="prod")
+COMPOSED_SETUPS: list = []  # one entry per setup() run (identity-change proof)
+
+
+@endpoint(models={
+    "pipeline": Slot(
+        ToyComposedPipeline, default_checkpoint=COMPOSED_DECLARED,
+        default_config=_ToyDefaults(),
+    ),
+})
+class ComposedEndpoint:
+    def setup(self, pipeline: ToyComposedPipeline) -> None:
+        COMPOSED_SETUPS.append(id(self))
+        self.pipe = pipeline
+
+    def composed_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        p = self.pipe
+        return EchoOut(response=(
+            f"base={p.base_weights}|vae={p.vae.content}"
+            f"|injected={p.vae_injected}|setups={len(COMPOSED_SETUPS)}"
+        ))
+
+
+# ---------------------------------------------------------------------------
 # P9: typed billing usage on JobMetrics, inline vs blob_ref by size alone.
 # ---------------------------------------------------------------------------
 

@@ -86,6 +86,12 @@ class ModelRef(msgspec.Struct, frozen=True):
     version: str = ""
     files: tuple[str, ...] = ()
     components: tuple[str, ...] = ()
+    # pgw#617 hierarchical bindings (tensorhub only): sorted (component name,
+    # canonical ref) substitutions on the base composition — stamped from
+    # ModelBinding.components at dispatch, never declared by endpoint code.
+    # Part of the binding's identity: a component-only rebind derives a new
+    # instance/residency identity.
+    component_overrides: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         # msgspec.structs.force_setattr, NOT object.__setattr__: the latter
@@ -103,8 +109,17 @@ class ModelRef(msgspec.Struct, frozen=True):
         force(self, "version", _clean(self.version))
         force(self, "files", tuple(_clean(p) for p in self.files if _clean(p)))
         force(self, "components", tuple(_clean(p) for p in self.components if _clean(p)))
+        force(self, "component_overrides", tuple(sorted(
+            (_clean(k), _clean(v))
+            for k, v in self.component_overrides if _clean(k) and _clean(v)
+        )))
         force(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
 
+        if self.component_overrides and self.source != "tensorhub":
+            raise ValueError(
+                "component_overrides= is tensorhub-only (pgw#617: refs are "
+                "tensorhub-CAS, mirror-first)"
+            )
         if self.source == "tensorhub":
             if not self.tag:
                 msgspec.structs.force_setattr(self, "tag", "latest")

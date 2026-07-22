@@ -417,6 +417,13 @@ message ModelBinding {
   // (precedence: explicit payload value > this > endpoint fallback preset).
   // Additive: old workers ignore this field.
   string inference_defaults = 4;
+  // th#980 hierarchical slots: per-component repo substitutions on the base
+  // composition, component name -> canonical tensorhub ref (normal form,
+  // same grammar as `ref`). The worker loads the base composition then
+  // substitutes each named component from its materialized snapshot
+  // (pgw#617). Snapshots for these refs ride RunJob.snapshots /
+  // DesiredResidency exactly like base refs. Additive: old workers ignore.
+  map<string, string> components = 5;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
