@@ -103,6 +103,30 @@ class ModelSlotIdentityError(WorkerError):
         )
 
 
+class ComponentSubstitutionError(WorkerError):
+    """A dispatched component substitution cannot apply to the slot's base
+    composition (pgw#617/th#980 hierarchical bindings).
+
+    Named-axis refusal: the message carries function, slot, component name
+    and the base's known component vocabulary (or the failing override ref).
+    Raised at setup/injection time, never mid-denoise.
+    """
+
+    def __init__(
+        self, function: str, slot: str, component: str, *, detail: str = "",
+    ) -> None:
+        self.function = str(function or "")
+        self.slot = str(slot or "")
+        self.component = str(component or "")
+        msg = (
+            f"{self.function!r} slot {self.slot!r}: component substitution "
+            f"{self.component!r} cannot apply"
+        )
+        if detail:
+            msg = f"{msg}: {detail}"
+        super().__init__(msg)
+
+
 class RefCompatibilitySurprise(ValidationError):
     """Post-download runtime mismatch on a caller-supplied PAYLOAD_REF.
 

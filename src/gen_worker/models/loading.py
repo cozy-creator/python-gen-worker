@@ -845,6 +845,63 @@ def model_index_components(path: str | Path) -> set:
         return set()
 
 
+def model_index_entry(path: str | Path, component: str) -> Optional[tuple]:
+    """``(library, class_name)`` the tree's model_index.json declares for
+    ``component``, or None when absent/unreadable."""
+    try:
+        with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
+            index = json.load(f)
+        entry = index.get(component)
+        if (isinstance(entry, (list, tuple)) and len(entry) == 2
+                and all(isinstance(e, str) and e for e in entry)):
+            return (entry[0], entry[1])
+    except Exception:
+        pass
+    return None
+
+
+def load_component_override(
+    base_path: str | Path, component: str, override_path: str | Path,
+    *, dtype: str = "",
+) -> Any:
+    """Load one named pipeline component from an OVERRIDE snapshot tree
+    (pgw#617 hierarchical bindings). The module class comes from the BASE
+    tree's model_index.json; weights come from the override tree's
+    ``<component>/`` subtree when present, else its root. ``dtype`` (the
+    base binding's) wins; otherwise the override's on-disk dtype is
+    honored. Blocking; callers on an event loop run it off-thread."""
+    import importlib
+
+    entry = model_index_entry(base_path, component)
+    if entry is None:
+        raise ValueError(
+            f"component {component!r} is not in the base composition "
+            f"(model_index components: "
+            f"{sorted(model_index_components(base_path))})"
+        )
+    library, class_name = entry
+    module = importlib.import_module(library)
+    cls = getattr(module, class_name, None)
+    if cls is None or not callable(getattr(cls, "from_pretrained", None)):
+        raise ValueError(
+            f"{library}.{class_name} declares no from_pretrained loader"
+        )
+    src = Path(override_path) / component
+    if not src.is_dir():
+        src = Path(override_path)
+    kwargs: Dict[str, Any] = {}
+    wanted = dtype or detect_on_disk_dtype(src)
+    if wanted in ("bf16", "fp16", "bfloat16", "float16", "fp32", "float32"):
+        try:
+            kwargs["torch_dtype"] = get_torch_dtype(wanted)
+        except ImportError:
+            pass  # torch-less environment: loader fails on its own terms
+    try:
+        return cls.from_pretrained(str(src), **kwargs)
+    except TypeError:
+        return cls.from_pretrained(str(src))
+
+
 def _safetensors_data_bytes(p: Path) -> int:
     import struct
 

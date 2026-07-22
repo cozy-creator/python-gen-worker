@@ -472,16 +472,25 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref", "loras", "inference_defaults")
+    __slots__ = ("slot", "ref", "loras", "inference_defaults", "components")
+    class ComponentsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
     SLOT_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     LORAS_FIELD_NUMBER: _ClassVar[int]
     INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
+    COMPONENTS_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
     loras: _containers.RepeatedCompositeFieldContainer[LoraOverlay]
     inference_defaults: str
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
+    components: _containers.ScalarMap[str, str]
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., components: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
     __slots__ = ("ref", "weight", "inference_defaults")
