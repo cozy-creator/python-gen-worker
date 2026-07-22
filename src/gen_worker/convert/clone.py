@@ -39,6 +39,7 @@ from .writer import (
     FP8_DEFAULT_COMPONENTS,
     MAX_SAFETENSORS_SHARD_BYTES,
     VARIANT_WEIGHT_NAME_RE as _VARIANT_WEIGHT_NAME_RE,
+    apply_regime_scheduler_config,
     copy_non_weight_files,
     normalize_variant_filenames as _normalize_variant_filenames,
     shard_safetensors_by_offset,
@@ -297,12 +298,17 @@ def build_flavor_tree(
     out_dir: Path,
     *,
     quantize_components: list[str] | None = None,
+    inference_regime: str = "standard",
 ) -> tuple[Path, dict[str, str]]:
     """Materialize one output flavor as a local file tree.
 
     Passthrough (dtype/layout/container match the source) hardlinks the
     snapshot. Otherwise: optional layout repackage, then per-weight-set
     cast / quant / gguf via :mod:`gen_worker.convert.convert`.
+
+    ``inference_regime`` (th#1017) stamps regime-correct scheduler config
+    into the produced tree's ``scheduler/config.json`` (no-op for
+    "standard" or a layout with no scheduler component).
 
     Returns ``(tree_root, attrs)``. Raises ``InlineConversionNotPossible``
     for calibrated dtypes.
@@ -336,6 +342,7 @@ def build_flavor_tree(
         _stage_oversize_safetensors(out_dir)
         if source_dtype in _CAST_NORMALIZE_DTYPES:
             _normalize_variant_filenames(out_dir)
+        apply_regime_scheduler_config(out_dir, inference_regime)
         return out_dir, attrs
 
     # GGUF: single-artifact container.
@@ -384,6 +391,7 @@ def build_flavor_tree(
         _stage_oversize_safetensors(out_dir)
         if spec.dtype in _CAST_NORMALIZE_DTYPES:
             _normalize_variant_filenames(out_dir)
+        apply_regime_scheduler_config(out_dir, inference_regime)
         return out_dir, attrs
 
     # Dtype conversion per weight set.
@@ -439,6 +447,7 @@ def build_flavor_tree(
     _stage_oversize_safetensors(out_dir)
     if spec.dtype in _CAST_NORMALIZE_DTYPES:
         _normalize_variant_filenames(out_dir)
+    apply_regime_scheduler_config(out_dir, inference_regime)
     if work_root is not source_dir:
         shutil.rmtree(work_root, ignore_errors=True)
     return out_dir, attrs
@@ -848,13 +857,19 @@ def run_clone(
     hf_token: str | None = None,
     civitai_api_key: str | None = None,
     source_include: Any = None,
+    inference_regime: str | None = None,
 ) -> CloneResult:
+    from ..api.slot import REGIMES
+
     provider = str(provider or "").strip().lower()
     destination = normalize_destination_ref(destination_repo)
     tags = normalize_tags(destination_repo_tags)
     layout_hint = str(target_layout or "diffusers").strip().lower() or "diffusers"
     specs = normalize_outputs(outputs, layout_hint=layout_hint)
     include = normalize_source_include(source_include)
+    regime = str(inference_regime or "standard").strip().lower() or "standard"
+    if regime not in REGIMES:
+        raise ValueError(f"inference_regime must be one of {REGIMES}, got {inference_regime!r}")
     if include and provider != "huggingface":
         raise ValueError("source_include is only supported for provider='huggingface'")
     # th#901: normalize_outputs collapses "caller asked for nothing" onto a
@@ -1061,6 +1076,7 @@ def run_clone(
                         tree, attrs = build_flavor_tree(
                             source, cast_spec, flavor_dir,
                             quantize_components=quantize_components,
+                            inference_regime=regime,
                         )
                         flavor_label = str(attrs.get("dtype") or spec.dtype)
                     else:
@@ -1085,6 +1101,7 @@ def run_clone(
                     tree, attrs = build_flavor_tree(
                         source, spec, flavor_dir,
                         quantize_components=quantize_components,
+                        inference_regime=regime,
                     )
                     # dtype="source" resolves to the detected on-disk dtype.
                     flavor_label = str(attrs.get("dtype") or spec.dtype)
@@ -1248,6 +1265,7 @@ def from_huggingface(ctx: Any, payload: Any, *, hf_token: str | None = None) -> 
         gguf_quant=getattr(payload, "gguf_quant", None),
         hf_token=hf_token,
         source_include=getattr(payload, "source_include", None),
+        inference_regime=getattr(payload, "inference_regime", None),
     )
 
 
@@ -1268,6 +1286,7 @@ def from_civitai(ctx: Any, payload: Any, *, civitai_api_key: str | None = None) 
         overwrite_repo=bool(getattr(payload, "overwrite_repo", False)),
         gguf_quant=getattr(payload, "gguf_quant", None),
         civitai_api_key=civitai_api_key,
+        inference_regime=getattr(payload, "inference_regime", None),
     )
 
 
