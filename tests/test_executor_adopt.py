@@ -1442,10 +1442,13 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
 
     class _Pub(fleet_cells.CellPublisher):
         def publish(self, family, artifact, meta):
-            events.append("publish")
+            # Fill `published` BEFORE the event: the main thread's wait loop
+            # keys on the event and immediately reads `published` (a publish
+            # event must mean the publish is observable, not merely started).
             published["bytes"] = Path(artifact).read_bytes()
             published["meta"] = dict(meta)
             published["family"] = family
+            events.append("publish")
             return "cp-1"
 
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
@@ -2522,13 +2525,50 @@ def test_w8a8_exercised_miss_fails_closed_despite_unexercised_sibling(
     with pytest.raises(
         cc.CompiledLaneUnavailableError,
         match="did not serve their own warmup graph",
-    ):
+    ) as excinfo:
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
             wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
             cell_ref: pb.Snapshot(digest=DIGEST_A),
         }))
     assert ex.compile_targets() == []
+    # gw#608: the wire-visible detail must self-discriminate crediting bugs
+    # (~0s) from real recompiles (minutes) with zero pod-log access.
+    assert "compile_seconds=" in str(excinfo.value)
+
+
+def test_store_served_failure_names_diverging_fx_key_component(
+    tmp_path, monkeypatch,
+):
+    """gw#608 forensics wiring: a store-served warmup-proof failure diffs the
+    boot's freshly saved FX entries against the seeded cell's and puts the
+    diverging FxGraphHashDetails component in the CompiledLaneUnavailable
+    detail. Revert the executor wiring and this goes red."""
+    cls = _merged_lane_endpoint(
+        lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
+    specs = extract_specs(cls)
+    (generate,) = specs
+    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        cc, "fx_cache_failure_report",
+        lambda path: ("cell_keys=1; live_keys=2; fresh_keys=1; divergence: "
+                      "inductor_config[foo]: cell=cell-value != "
+                      "boot=boot-value"))
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="did not serve their own warmup graph",
+    ) as excinfo:
+        asyncio.run(ex.ensure_setup(generate, {
+            wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
+            wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+    detail = str(excinfo.value)
+    assert "fx forensics" in detail
+    assert "inductor_config[foo]" in detail
+    assert "cell=cell-value" in detail and "boot=boot-value" in detail
 
 
 def test_w8a8_all_objects_unexercised_fails_closed(tmp_path, monkeypatch):

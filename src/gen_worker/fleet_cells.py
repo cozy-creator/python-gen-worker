@@ -339,6 +339,24 @@ def enable_compiled(
         return _fail_closed(pipe, "CUDA unavailable")
     if not cc.toolchain_present():
         return _fail_closed(pipe, "no C compiler for the self-mint")
+    # gw#608 ROOT CAUSE gates (order matters — BEFORE any process-global
+    # cache-dir mutation):
+    # (a) a slot object with no resolvable compile target (the LTX upsampler
+    #     shape) must never open a capture — begin_fleet_mint's env re-point
+    #     used to happen before its no-target raise, leaving the process
+    #     cache dir on a deleted tmp path and every seeded lookup missing;
+    # (b) once this process serves from a SEEDED delivered cell, any sibling
+    #     self-mint capture would re-point the one global cache dir away
+    #     from it — decline via the ordinary miss policy instead (plain
+    #     lanes eager, mandatory lanes typed refusal).
+    if not cc.has_compile_target(pipe, cfg):
+        return _fail_closed(pipe, "no compile target resolves on this pipeline")
+    if cc.delivered_cell_seeded():
+        return _fail_closed(
+            pipe,
+            "a delivered cell is seeded in this process; a self-mint "
+            "capture would re-point the process-global inductor cache dir "
+            "away from it (gw#608)")
 
     from .models.loading import pipeline_weight_lane
 
