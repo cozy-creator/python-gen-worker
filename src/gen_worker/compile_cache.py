@@ -1508,10 +1508,20 @@ def _guarded(
             if fail_closed:
                 raise CompiledLaneUnavailableError(state["detail"])
             return original(*args, **kwargs)
+        # pgw#622: a novel input signature serves EAGER immediately while a
+        # background thread warms the compiled path, then hot-swaps.
+        router = (failure_signal or {}).get("router")
+        sig = None
+        if router is not None:
+            verdict, sig = router.route(label, compiled, args, kwargs)
+            if verdict == "eager":
+                return original(*args, **kwargs)
         before = proof_before()
         try:
             result = compiled(*args, **kwargs)
             record_success(before)
+            if router is not None:
+                router.mark_warm(sig)
             return result
         except Exception as exc:  # noqa: BLE001 — optional lanes may use eager
             state["failed"] = True
@@ -1708,12 +1718,17 @@ def apply(
     from .models.loading import pipeline_weight_lane
 
     fail_closed = pipeline_weight_lane(pipeline).startswith(("w8a8", "w4a4"))
+    from . import hot_swap
+
     failure_signal: Dict[str, Any] = {
         "callback": None,
         "lock": threading.Lock(),
         "successful_calls": 0,
         "cache_hits": 0,
         "cache_misses": 0,
+        # pgw#622: whole-graph consumer guards route novel signatures
+        # through this; sequential until hot_swap.enable() post-proof.
+        "router": hot_swap.Router(fail_closed=fail_closed) if guard else None,
     }
     applied: list[str] = []
     originals: list[Tuple[Any, str, Callable[..., Any]]] = []
@@ -1833,6 +1848,11 @@ def unwrap(pipeline: Any) -> bool:
     marker = getattr(pipeline, _MARKER_ATTR, None)
     if marker is None:
         return False
+    signal = marker.get("failure_signal")
+    if isinstance(signal, dict):
+        router = signal.get("router")
+        if router is not None:
+            router.close()  # pgw#622: in-flight background warms discard
     for owner, attr, fn in marker.get("originals") or ():
         try:
             setattr(owner, attr, fn)
