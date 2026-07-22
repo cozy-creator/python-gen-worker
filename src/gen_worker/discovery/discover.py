@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker.api.binding import Binding
-from gen_worker.api.slot import Slot
+from gen_worker.api.slot import DEFAULT_REGIMES, Slot
 from gen_worker.api.types import (
     Asset,
     AudioAsset,
@@ -757,6 +757,10 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         if es.variant_of:
             fn["variant_of"] = es.variant_of
             fn["variant"] = es.variant_kind
+        # th#1017: declared inference regimes — omitted when it's just the
+        # default (absent = ["standard"]).
+        if tuple(es.regimes) != DEFAULT_REGIMES:
+            fn["regimes"] = list(es.regimes)
         if model_key is not None:
             fn["model"] = model_key
         if slots_block:

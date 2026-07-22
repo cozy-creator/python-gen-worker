@@ -17,7 +17,7 @@ import msgspec
 
 from .api.binding import Binding, ModelRef
 from .api.decorators import ATTR, VARIANT_ATTR, Compile, EndpointDecl, Resources, VariantDecl
-from .api.slot import Slot
+from .api.slot import DEFAULT_REGIMES, Slot
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
 
@@ -75,6 +75,9 @@ class EndpointSpec:
     # sibling function variant_of (both slugs). Empty = not a variant.
     variant_of: str = ""
     variant_kind: str = ""
+    # th#1017: this handler's declared inference regimes (from @endpoint's
+    # regimes=); ("standard",) when undeclared.
+    regimes: tuple = DEFAULT_REGIMES
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -305,6 +308,7 @@ def _spec_for_handler(
         child_calls=decl.child_calls,
         variant_of=variant_of_slug,
         variant_kind=variant_kind,
+        regimes=decl.regimes.get(attr_name, DEFAULT_REGIMES),
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )
