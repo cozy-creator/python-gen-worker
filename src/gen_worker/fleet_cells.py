@@ -584,6 +584,66 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
+def republish_after_shape_warm(
+    pipe: Any,
+    cfg: Any,
+    family: str,
+    publisher: Optional["CellPublisher"],
+    live_root: Path,
+) -> bool:
+    """Replace the fleet cell with the live cache root's grown contents
+    (pgw#622): after a background novel-shape warm, the root holds the
+    adopted/minted graphs PLUS the fresh signature's, so republishing under
+    the same key means no other worker ever compiles that (shape, GPU,
+    lane) again. Synchronous (callers run it off the serving path); every
+    failure is non-fatal to serving."""
+    if publisher is None or not publisher.enabled():
+        logger.warning(
+            "hot-swap: SHAPE_WARM_WITHOUT_PUBLISH_SINK family=%s — the "
+            "novel-shape graphs stay local to this pod", family)
+        return False
+    if not (Path(live_root) / "inductor").is_dir():
+        logger.warning(
+            "hot-swap: live cache root %s has no inductor tree; nothing to "
+            "republish", live_root)
+        return False
+    from .models.loading import pipeline_weight_lane
+    from .models.memory import low_vram_mode
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="cellrepub-"))
+    try:
+        graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
+        meta = cc.artifact_metadata(
+            family=family,
+            source_ref="shape-warm",
+            shapes=cfg.shapes,
+            targets=cfg.targets,
+            guidance_scales=getattr(cfg, "guidance_scales", ()),
+            low_vram_mode=low_vram_mode(pipe),
+            compile_mode=(
+                "regional" if getattr(cfg, "regional", False) else "whole"),
+            weight_lane=pipeline_weight_lane(pipe),
+            lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
+            graph_signature=graph_signature,
+            weight_contract=weight_contract,
+        )
+        label = cc.flavor_label(
+            meta["sku"], meta["torch"], meta.get("weight_lane", ""))
+        artifact = cc.pack(Path(live_root), tmp_root / f"{label}.tar.gz", meta)
+        publisher.publish(family, artifact, meta)
+        return True
+    except CellPublishRefused as exc:
+        logger.warning("hot-swap: cell republish refused (hub decision): %s", exc)
+        return False
+    except Exception:
+        logger.warning(
+            "hot-swap: cell republish failed; the fleet keeps the previous "
+            "cell", exc_info=True)
+        return False
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
 def abandon_self_mint(pending: "PendingSelfMint") -> None:
     """Discard a self-mint capture the proof did not certify (disproven or
     genuinely unexercised with no proven sibling). Never packed, never
@@ -636,5 +696,6 @@ __all__ = [
     "enable_compiled",
     "finalize_self_mint",
     "publish_self_mint",
+    "republish_after_shape_warm",
     "withhold_self_mint_publish",
 ]

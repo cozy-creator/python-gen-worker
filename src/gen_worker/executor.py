@@ -2749,6 +2749,20 @@ class Executor:
                     "compile target %s has no runtime guard revocation signal; "
                     "advertising eager", incarnation_id,
                 )
+            if target.active_compile_ref:
+                # pgw#622: post-proof, novel request shapes serve eager while
+                # the compiled path warms in the background; each completed
+                # warm republishes the grown cell for the fleet.
+                from . import hot_swap
+
+                if hot_swap.enable(
+                    pipeline,
+                    on_warmed=hot_swap.Debounce(
+                        self._shape_warm_republisher(spec, pipeline)),
+                ):
+                    logger.info(
+                        "hot-swap: eager-while-compiling enabled for %s",
+                        spec.name)
         if requested_lane and not rec.compile_targets:
             raise compile_cache.CompiledLaneUnavailableError(
                 f"{requested_lane.upper()} setup for {spec.name!r} produced "
@@ -5568,6 +5582,27 @@ class Executor:
             image_digest=str(
                 getattr(self._settings, "worker_image_digest", "") or ""),
         )
+
+    def _shape_warm_republisher(
+        self, spec: EndpointSpec, pipeline: Any,
+    ) -> Callable[[], None]:
+        """Republish the grown cell after a background novel-shape warm
+        (pgw#622). Runs on the Debounce thread, never the serving path."""
+        cfg = spec.compile
+        family = str(getattr(cfg, "family", "") or "")
+
+        def republish() -> None:
+            from . import fleet_cells
+
+            cache_dir = self.store._cache_dir
+            live_root = (
+                Path(cache_dir) if cache_dir
+                else Path.home() / ".cache" / "gen-worker"
+            ) / "compile-cache"
+            fleet_cells.republish_after_shape_warm(
+                pipeline, cfg, family, self._cell_publisher(), live_root)
+
+        return republish
 
     def _enable_compiled(
         self, pipe: Any, cfg: Any, artifact: Optional[Path],
