@@ -9,7 +9,11 @@ from typing import Literal, Optional, Tuple
 
 from .base import FamilyDefaults, family
 
-SdxlScheduler = Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"]
+SdxlScheduler = Literal[
+    "euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras",
+    # th#1017: distilled-regime schedulers (few-step, near-zero CFG).
+    "lcm", "euler_trailing",
+]
 
 
 @family("sdxl")
