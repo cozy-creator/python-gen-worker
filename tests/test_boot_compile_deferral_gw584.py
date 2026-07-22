@@ -459,3 +459,32 @@ def test_plain_lane_runjob_cold_setup_after_deferral(tmp_path, monkeypatch) -> N
     assert fetches[0][1].ref == PLAIN_CELL_REF
     (target,) = ex.compile_targets()
     assert target.active_compile_ref == PLAIN_CELL_REF
+
+
+def test_conversion_kind_never_reports_loading(tmp_path, monkeypatch):
+    """ie#522 (live, 2026-07-21): a conversion-kind function that has never
+    been dispatched must read as available, never "loading". _warmup_plan
+    already never schedules non-inference kinds for boot warmup (spec.kind
+    != "inference", see the compile-target setup path); available_functions
+    / loading_functions must agree, or a declared-but-idle conversion
+    function (one release can bundle many; only a few are ever dispatched)
+    sits in loading_functions() forever. The hub's th#965 layer-3 stall
+    watchdog takes that at face value and, after 10 minutes of "no open
+    activity" on a function nothing was ever going to warm, kills the WHOLE
+    pod — including an unrelated, actively-progressing conversion job on the
+    same worker. Reproduced live: a wan-2.2 conversion release bundling
+    z-image-w8a8-quantization alongside clone-huggingface got its pod killed
+    at 10m15s three times running, on three different hosts, mid a
+    legitimate multi-GB clone-huggingface transfer."""
+    class Endpoint:
+        def convert(self, ctx: Any, payload: _In) -> _Out:
+            return _Out()
+
+    spec = EndpointSpec(
+        name="z-image-w8a8-quantization", method=Endpoint.convert,
+        kind="conversion", payload_type=_In, output_mode="single",
+        cls=Endpoint, attr_name="convert", models={"pipeline": AUTHORED},
+    )
+    ex, _sent, _enables = _harness(tmp_path, monkeypatch, [spec])
+    assert ex.available_functions() == ["z-image-w8a8-quantization"]
+    assert ex.loading_functions() == []

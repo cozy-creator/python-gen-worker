@@ -2287,6 +2287,18 @@ class Executor:
                 # resident instance the worker cannot create by itself.
                 out.append(name)
                 continue
+            if spec.kind != "inference":
+                # ie#522 finding: non-inference (e.g. conversion) functions
+                # are dispatched and set up per-request — _warmup_plan (see
+                # below) never schedules them for boot warmup, so a declared-
+                # but-never-yet-dispatched conversion function must not read
+                # as "awaiting readiness" (that bucket is loading_functions()
+                # below, which th#965 layer 3 stall-watches: a conversion
+                # function that simply hasn't been invoked yet was tripping
+                # a 10m worker_activity_stalled kill on an otherwise-healthy
+                # worker mid-job, taking down unrelated in-flight requests).
+                out.append(name)
+                continue
             rec = self._classes[spec.instance_key]
             if rec.ready or (not spec.models and rec.failed is None):
                 out.append(name)
@@ -2298,6 +2310,7 @@ class Executor:
             name for name, spec in self.specs.items()
             if name not in avail and name not in self.unavailable
             and spec.cls is not None and not spec.slots
+            and spec.kind == "inference"
             and self._classes[spec.instance_key].failed is None
         )
 
