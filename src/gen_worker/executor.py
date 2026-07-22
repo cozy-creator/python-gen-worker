@@ -3057,9 +3057,9 @@ class Executor:
         for slot in spec.slots:
             binding = self._slot_dispatch_binding(
                 spec, slot, run_refs.get(slot, ""))
-            comps = run_comps.get(slot)
-            if comps:
-                for comp, comp_ref in comps.items():
+            slot_comps = run_comps.get(slot) or {}
+            if slot_comps:
+                for comp, comp_ref in slot_comps.items():
                     try:
                         self._hub_binding(comp_ref)
                     except ValueError:
@@ -3068,7 +3068,7 @@ class Executor:
                             detail=f"override ref {comp_ref!r} is not a "
                                    "tensorhub-CAS ref") from None
                 binding = msgspec.structs.replace(
-                    binding, component_overrides=tuple(sorted(comps.items())))
+                    binding, component_overrides=tuple(sorted(slot_comps.items())))
             effective[slot] = binding
         if effective == spec.models:
             return spec
