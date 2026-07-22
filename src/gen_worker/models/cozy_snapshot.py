@@ -19,6 +19,7 @@ from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
 from .download import components_present, select_component_paths
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
+from .. import activity as _activity
 from ..capability import InsufficientDiskError
 from ..s3_transfer import S3TransferGrant, download_file_with_grant
 
@@ -518,6 +519,12 @@ class CozySnapshotDownloader:
                     sink = _NETWORK_BYTES_SINK.get()
                     if sink is not None:
                         sink[0] += n
+                    # ie#522: a real network byte is honest proof the
+                    # activity (self-mint compile's load phase, etc.) is
+                    # alive — heartbeat it directly, independent of the
+                    # CPU-sampling watchdog thread (I/O-bound fills are
+                    # CPU-light by design and would otherwise starve it).
+                    _activity.note_progress()
                 d = done if total is None else min(done, total)
             if progress is not None:
                 try:
