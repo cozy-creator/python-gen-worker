@@ -35,12 +35,22 @@ class WanDefaults(FamilyDefaults, frozen=True):
     the endpoint's resolution site rather than relying on that internal
     defaulting, so a distilled lineage's CFG ceiling holds regardless of
     which field a caller overrides.
+
+    ``shift`` (ie#522 live finding #3): a step-distilled lineage (e.g. a
+    lightx2v/Wan2.2-Lightning fuse) is picky about the flow-matching
+    scheduler's ``shift`` — the AnimeGen card's own recipe pins
+    ``FlowMatchEulerDiscreteScheduler(shift=3.0)`` alongside its 8-step/
+    guidance=1.0 settings. ``None`` (the default, and every non-distilled
+    repo's metadata) leaves the pipeline's own scheduler config untouched;
+    only a repo that explicitly publishes a ``shift`` value gets one
+    applied at the endpoint's resolution site.
     """
 
     steps: int = 40
     guidance: float = 4.0
     guidance_2: float = 3.0
     max_guidance: Optional[float] = None
+    shift: Optional[float] = None
 
 
 __all__ = ["WanDefaults"]
