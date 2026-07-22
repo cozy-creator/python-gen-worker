@@ -162,6 +162,8 @@ class Activity:
         """One counter-carrying RUNNING update (gw#621), emitted from the
         10s app beat. The hub judges liveness by counter advancement; a
         self_stalled=True beat is the typed confession it kills on."""
+        if self._done:  # racing completion: never re-open a terminal activity
+            return
         _emit(pb.ActivityUpdate(
             kind=self.kind, phase=self._phase, step=self._step,
             total_steps=self._total, seq=_next_seq(),
