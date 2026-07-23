@@ -17,6 +17,7 @@ import msgspec
 
 from .api.binding import Binding, ModelRef
 from .api.decorators import ATTR, VARIANT_ATTR, Compile, EndpointDecl, Resources, VariantDecl
+from .api.formula import RuntimeFormula
 from .api.slot import DEFAULT_REGIMES, Slot
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
@@ -78,6 +79,12 @@ class EndpointSpec:
     # th#1017: this handler's declared inference regimes (from @endpoint's
     # regimes=); ("standard",) when undeclared.
     regimes: tuple = DEFAULT_REGIMES
+    # th#1050: declared lane bodies this endpoint's code branches on
+    # (ctx.lane). Empty = platform-managed only.
+    handles: tuple = ()
+    # th#1051: declared compute-time formula for this handler; None =
+    # undeclared (scalar EWMA fall-through hub-side).
+    runtime_formula: Optional["RuntimeFormula"] = None
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -283,6 +290,12 @@ def _spec_for_handler(
         if variant_of_slug == slug:
             raise ValueError(f"{owner}: @variant_of cannot target itself")
 
+    # th#1051: resolve + validate this handler's declared compute-time
+    # formula now that the payload type is known.
+    runtime_formula = decl.runtime_formula.get(attr_name)
+    if runtime_formula is not None:
+        runtime_formula.validate_for_payload(payload_type, owner)
+
     return EndpointSpec(
         name=slug,
         method=method,
@@ -309,6 +322,8 @@ def _spec_for_handler(
         variant_of=variant_of_slug,
         variant_kind=variant_kind,
         regimes=decl.regimes.get(attr_name, DEFAULT_REGIMES),
+        handles=tuple(decl.handles),
+        runtime_formula=runtime_formula,
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )

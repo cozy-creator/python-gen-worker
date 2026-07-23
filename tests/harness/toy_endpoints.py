@@ -282,6 +282,20 @@ class ComposedEndpoint:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# th#1050: opt-in declared lane — the endpoint's code BRANCHES on ctx.lane.
+# ---------------------------------------------------------------------------
+
+
+@endpoint(handles=["fp8-w8a8-dynamic"])
+class LaneAwareEndpoint:
+    def lane_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        # The divergence the declaration marks: an author kernel branch.
+        if ctx.lane.startswith("fp8-w8a8-dynamic"):
+            return EchoOut(response=f"author-kernel:{ctx.lane}")
+        return EchoOut(response=f"reference:{ctx.lane}")
+
+
 @endpoint
 class BillableEndpoint:
     def small_usage(self, ctx: RequestContext, data: EchoIn) -> StreamResult:

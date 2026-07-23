@@ -173,6 +173,7 @@ class RequestContext:
             self._deadline = self._started_at + (timeout_ms / 1000.0)
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
+        self._lane = ""  # th#1050: executing lane, set by the executor
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
@@ -215,6 +216,18 @@ class RequestContext:
     def deadline(self) -> Optional[float]:
         """Absolute unix-time deadline, or None when the request is unbounded."""
         return self._deadline
+
+    @property
+    def lane(self) -> str:
+        """The EXECUTING precision lane of this call (th#1050), a full
+        descriptor id like ``"fp8-w8a8-dynamic+compiled"`` — post-degrade
+        truth, the same value JobMetrics.lane reports (th#1043 consistent).
+        Read-only; always available. Handlers that declared
+        ``handles=[...]`` branch on it; everyone else may ignore it."""
+        return self._lane or "bf16-w16a16+eager"
+
+    def _set_lane(self, lane: str) -> None:
+        self._lane = str(lane or "").strip()
 
     @property
     def models(self) -> Dict[str, str]:

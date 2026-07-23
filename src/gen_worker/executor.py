@@ -362,6 +362,19 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
 
 
+def _runtime_term_values(spec: Any, payload: Any) -> "Optional[Dict[str, float]]":
+    """th#1051: evaluate the declared runtime formula's terms on the EXECUTED
+    payload (defaults already applied by msgspec decode). None = undeclared
+    or unevaluable — the hub then evaluates from the raw payload itself."""
+    rf = getattr(spec, "runtime_formula", None)
+    if rf is None:
+        return None
+    try:
+        return rf.term_values_from_struct(payload)
+    except Exception:
+        return None
+
+
 def _scan_output_assets(output: Any) -> Tuple[float, int]:
     """One walk over the job output: (summed MEDIA seconds, count of output
     ``Asset``s). Billing sources for ``per_output_second`` (th#572) and
@@ -3183,7 +3196,16 @@ class Executor:
             raise ValidationError(str(exc)) from None
         if req.is_zero:
             return spec
-        if (req.lane is not None and req.lane.weights == lanespec.WEIGHTS_FP8
+        # th#1050: a lane the endpoint DECLARES (handles=) is served by the
+        # author's own code branching on ctx.lane — satisfiable with no
+        # laddered rebind (custom loaders/kernels have nothing to rebind),
+        # and exempt from the platform-kernel compiled-only rule.
+        declared_lane = (
+            req.lane is not None
+            and lanespec.lane_body_id(req.lane) in getattr(spec, "handles", ())
+        )
+        if not declared_lane and (
+                req.lane is not None and req.lane.weights == lanespec.WEIGHTS_FP8
                 and req.lane.activation == lanespec.ACT_W8A8
                 and req.lane.execution == lanespec.EXEC_EAGER):
             # gw#586: w8a8 serves compiled-only; an eager w8a8 request would
@@ -3206,8 +3228,9 @@ class Executor:
         effective = dict(spec.models)
         changed = False
         # bf16 is trivially serveable (the declared base IS bf16); quantized
-        # lanes must find at least one laddered ref that can serve them.
-        satisfied = req.family == lanespec.FAMILY_BF16
+        # lanes must find at least one laddered ref that can serve them —
+        # unless the endpoint declares the lane (author code serves it).
+        satisfied = req.family == lanespec.FAMILY_BF16 or declared_lane
         want_w8a8 = req.lane is not None and req.lane.activation == lanespec.ACT_W8A8
         for slot, base_binding in declared.items():
             if slot not in effective:
@@ -3271,10 +3294,28 @@ class Executor:
              if wire_ref(spec.models[s]) != wire_ref(b)})
         return derived
 
-    def _served_lane(self, spec: EndpointSpec) -> str:
+    def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
+        """th#1050: the instructed lane's body when the endpoint DECLARES it
+        (handles=) — the author's code, not binding surgery, serves it."""
+        from .models import lanes as lanespec
+
+        if not instructed or not getattr(spec, "handles", ()):
+            return ""
+        try:
+            req = lanespec.parse_lane_spec(instructed)
+        except ValueError:
+            return ""
+        if req.lane is None:
+            return ""
+        body = lanespec.lane_body_id(req.lane)
+        return body if body in spec.handles else ""
+
+    def _served_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
         """The CONCRETE lane this spec's instance executes as, for
-        JobMetrics.lane reporting: the most-quantized pipeline binding's lane
-        (table rank), execution axis from the record's live compile state."""
+        JobMetrics.lane and ctx.lane reporting: the most-quantized pipeline
+        binding's lane (table rank), execution axis from the record's live
+        compile state. A declared (handles=) instructed lane wins outright —
+        the author's kernels execute it regardless of binding surgery."""
         from .models import lanes as lanespec
 
         compiled = False
@@ -3284,6 +3325,10 @@ class Executor:
                 compiled = any(
                     getattr(t, "active_compile_ref", "")
                     for t in rec.compile_targets.values())
+        handled = self._handled_lane_body(spec, instructed)
+        if handled:
+            exec_axis = lanespec.EXEC_COMPILED if compiled else lanespec.EXEC_EAGER
+            return f"{handled}+{exec_axis}"
         # Report the most-quantized binding's lane: quantized lanes always
         # outrank bf16 (a bf16 VAE riding a w8a16 pipeline is still the
         # w8a16 lane), ties by table rank.
@@ -3737,6 +3782,7 @@ class Executor:
                     **_resolve_slots_kwargs(wj.spec, None),
                     boot_warmup=True,
                 )
+                ctx._set_lane(self._served_lane(wj.spec))
                 try:
                     await self._invoke_warmup(wj.spec, instance, ctx, payload, handler_kwargs)
                 except Exception as exc:
@@ -6594,7 +6640,10 @@ class Executor:
                 await self._materialize_datasets(ctx, payload)
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
             # th#913/gw#596: the concrete lane actually serving this job.
-            job.lane = self._served_lane(spec)
+            # th#1050: ctx.lane exposes the same post-degrade truth to the
+            # handler (declared-lane endpoints branch on it).
+            job.lane = self._served_lane(spec, instructed=run.lane)
+            ctx._set_lane(job.lane)
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
             ctx.raise_if_cancelled("canceled")
@@ -6695,7 +6744,8 @@ class Executor:
                             self._adapters.deactivate, ref, pipe, run.request_id
                         )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
-                                    output=output, lane=job.lane)
+                                    output=output, lane=job.lane,
+                                    runtime_terms=_runtime_term_values(spec, payload))
             handler_done = time.monotonic()
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
@@ -7173,6 +7223,7 @@ class Executor:
     def _metrics(
         self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int,
         output: Any = None, lane: str = "",
+        runtime_terms: "Optional[Dict[str, float]]" = None,
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
         # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
@@ -7201,6 +7252,9 @@ class Executor:
             input_cached_tokens=usage.cached_tokens if usage is not None else 0,
             output_tokens=usage.completion_tokens if usage is not None else 0,
             lane=lane,
+            # th#1051: declared-formula term features from the EXECUTED
+            # payload (defaults applied); empty = no declared formula.
+            runtime_terms=runtime_terms or {},
         )
 
     async def _send_result(

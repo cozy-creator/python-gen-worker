@@ -39,6 +39,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar, Union
 import msgspec
 
 from .binding import BINDING_TYPES, Binding
+from .formula import RuntimeFormula
 from .slot import DEFAULT_REGIMES, REGIMES, Slot
 
 T = TypeVar("T")
@@ -212,6 +213,47 @@ def _validate_function_regimes(
     return _validate_regime_tuple(owner, regimes)
 
 
+def _validate_handles(owner: str, handles: Any) -> Tuple[str, ...]:
+    """th#1050 opt-in lane declaration: `handles=["fp8-w8a8-dynamic"]` marks
+    that this endpoint's code BRANCHES on the executing lane (ctx.lane) —
+    behavioral divergence only, never inventory. Tokens are concrete lane
+    BODIES (no `+eager|+compiled`: execution is platform-managed). Nothing
+    declared = fully platform-managed lanes, exactly as before."""
+    from ..models import lanes as lanespec
+
+    if handles is None:
+        return ()
+    if isinstance(handles, str) or not isinstance(handles, (list, tuple)):
+        raise TypeError(
+            f"@endpoint {owner}: handles= must be a list/tuple of lane body "
+            f"strings, got {type(handles).__name__}"
+        )
+    known = lanespec.known_lane_bodies()
+    out: list[str] = []
+    for token in handles:
+        t = str(token or "").strip().lower()
+        if "+" in t:
+            raise ValueError(
+                f"@endpoint {owner}: handles= token {token!r} carries an "
+                "execution axis; declare the lane body (execution is "
+                "platform-managed)"
+            )
+        if t in lanespec.FAMILIES:
+            raise ValueError(
+                f"@endpoint {owner}: handles= token {token!r} is a coarse "
+                f"family; declare a concrete lane body (one of {known})"
+            )
+        if t not in known:
+            raise ValueError(
+                f"@endpoint {owner}: handles= token {token!r} is not a known "
+                f"lane body (known: {known})"
+            )
+        if t in out:
+            raise ValueError(f"@endpoint {owner}: handles= repeats {token!r}")
+        out.append(t)
+    return tuple(out)
+
+
 class Compile(msgspec.Struct, frozen=True):
     """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
 
@@ -324,6 +366,14 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # th#1017: per-handler declared regimes, attr_name -> (regime, ...).
     # Function-shaped endpoints key their single handler under "".
     regimes: Mapping[str, Tuple[str, ...]] = msgspec.field(default_factory=dict)
+    # th#1050: opt-in declared lane bodies this endpoint's code branches on
+    # (ctx.lane). Empty = platform-managed behavior only.
+    handles: Tuple[str, ...] = ()
+    # th#1051: declared compute-time formulas, attr_name -> RuntimeFormula
+    # (function-shaped endpoints key their single handler under "").
+    # Declared via the runtime= kwarg overload; payload-field validation
+    # happens at registry walk time when payload types are resolved.
+    runtime_formula: Mapping[str, RuntimeFormula] = msgspec.field(default_factory=dict)
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -565,6 +615,57 @@ def _validate_class_models(
             )
 
 
+def _split_runtime_kwarg(
+    owner: str, runtime: Any,
+) -> Tuple[Optional[str], Dict[str, RuntimeFormula]]:
+    """th#1051 runtime= overload: a str selects an engine runtime (vllm /
+    llama-server, classes only); a RuntimeFormula declares the compute-time
+    formula for every handler ("*"); a mapping declares per-handler formulas
+    (classes only). Returns (engine_runtime, {attr_or_"*": formula})."""
+    if runtime is None:
+        return None, {}
+    if isinstance(runtime, str):
+        return runtime, {}
+    if isinstance(runtime, RuntimeFormula):
+        return None, {"*": runtime}
+    if isinstance(runtime, Mapping):
+        out: Dict[str, RuntimeFormula] = {}
+        for attr, rf in runtime.items():
+            if not isinstance(attr, str) or not isinstance(rf, RuntimeFormula):
+                raise TypeError(
+                    f"@endpoint {owner}: runtime= mapping must be "
+                    f"{{handler_name: RuntimeFormula}}"
+                )
+            out[attr] = rf
+        return None, out
+    raise TypeError(
+        f"@endpoint {owner}: runtime= must be an engine runtime string, a "
+        f"RuntimeFormula, or a mapping of handler name -> RuntimeFormula, "
+        f"got {type(runtime).__name__}"
+    )
+
+
+def _expand_formula_map(
+    owner: str, formulas: Dict[str, RuntimeFormula], handler_attrs: "list[str]",
+) -> Dict[str, RuntimeFormula]:
+    if not formulas:
+        return {}
+    if "*" in formulas:
+        if len(formulas) > 1:
+            raise ValueError(
+                f"@endpoint {owner}: runtime= cannot mix a bare RuntimeFormula "
+                f"with per-handler entries"
+            )
+        return {attr: formulas["*"] for attr in handler_attrs}
+    unknown = [a for a in formulas if a not in handler_attrs]
+    if unknown:
+        raise ValueError(
+            f"@endpoint {owner}: runtime= names unknown handler(s) {unknown} "
+            f"(handlers: {sorted(handler_attrs)})"
+        )
+    return dict(formulas)
+
+
 def _decorate_class(
     cls: type,
     *,
@@ -573,10 +674,12 @@ def _decorate_class(
     models: Dict[str, Binding],
     slots: Dict[str, Slot],
     runtime: Optional[str],
+    runtime_formula: Optional[Dict[str, RuntimeFormula]] = None,
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
+    handles: Optional[Any] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -596,6 +699,10 @@ def _decorate_class(
         warmup=_validate_warmup_decl(cls.__name__, warmup),
         regimes=_validate_class_regimes(
             cls.__name__, regimes, {attr for attr, _ in handlers}
+        ),
+        handles=_validate_handles(cls.__name__, handles),
+        runtime_formula=_expand_formula_map(
+            cls.__name__, runtime_formula or {}, [attr for attr, _ in handlers]
         ),
     )
     setattr(cls, ATTR, decl)
@@ -617,11 +724,13 @@ def _decorate_function(
     models: Dict[str, Binding],
     slots: Dict[str, Slot],
     runtime: Optional[str],
+    runtime_formula: Optional[Dict[str, RuntimeFormula]] = None,
     name: Optional[str],
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
+    handles: Optional[Any] = None,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
@@ -640,19 +749,27 @@ def _decorate_function(
             slots[slot_name] = slots.pop("")
     if runtime is not None:
         raise ValueError(
-            f"@endpoint function {fn.__name__!r}: runtime= requires a class "
-            "with setup() (the engine server outlives single calls)."
+            f"@endpoint function {fn.__name__!r}: an engine runtime= requires "
+            "a class with setup() (the engine server outlives single calls)."
         )
     if warmup is not None:
         raise ValueError(
             f"@endpoint function {fn.__name__!r}: warmup= requires a class "
             "with setup() (stateless functions hold nothing to warm)."
         )
+    formulas = runtime_formula or {}
+    if set(formulas) - {"*"}:
+        raise ValueError(
+            f"@endpoint function {fn.__name__!r}: runtime= takes a bare "
+            "RuntimeFormula (per-handler mappings are for classes)"
+        )
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=None, name=(name or fn.__name__), is_function=True,
         compile=compile, child_calls=child_calls,
         regimes={"": _validate_function_regimes(fn.__name__, regimes)},
+        handles=_validate_handles(fn.__name__, handles),
+        runtime_formula={"": formulas["*"]} if "*" in formulas else {},
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -669,12 +786,13 @@ def endpoint(
     model: Optional[SlotLike] = ...,
     models: Optional[Mapping[str, SlotLike]] = ...,
     resources: Optional[Resources] = ...,
-    runtime: Optional[str] = ...,
+    runtime: Union[str, RuntimeFormula, Mapping[str, RuntimeFormula], None] = ...,
     name: Optional[str] = ...,
     compile: Optional[Compile] = ...,
     child_calls: bool = ...,
     warmup: Optional[WarmupDecl] = ...,
     regimes: Optional[RegimesDecl] = ...,
+    handles: Optional[Any] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -685,12 +803,13 @@ def endpoint(
     model: Optional[SlotLike] = None,
     models: Optional[Mapping[str, SlotLike]] = None,
     resources: Optional[Resources] = None,
-    runtime: Optional[str] = None,
+    runtime: Union[str, RuntimeFormula, Mapping[str, RuntimeFormula], None] = None,
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
+    handles: Optional[Any] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -713,6 +832,8 @@ def endpoint(
             f"@endpoint compile= must be a Compile, got {type(compile).__name__}"
         )
     model_map, slot_map = _normalize_models(model, models)
+    owner = getattr(target, "__name__", "<endpoint>") if target is not None else "<endpoint>"
+    engine_runtime, runtime_formulas = _split_runtime_kwarg(owner, runtime)
 
     def apply(obj: Any) -> Any:
         if inspect.isclass(obj):
@@ -721,14 +842,18 @@ def endpoint(
                                  "class handlers route by method name")
             return _decorate_class(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
-                slots=dict(slot_map), runtime=runtime, compile=compile,
+                slots=dict(slot_map), runtime=engine_runtime,
+                runtime_formula=runtime_formulas, compile=compile,
                 child_calls=child_calls, warmup=warmup, regimes=regimes,
+                handles=handles,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
-                slots=dict(slot_map), runtime=runtime, name=name, compile=compile,
+                slots=dict(slot_map), runtime=engine_runtime,
+                runtime_formula=runtime_formulas, name=name, compile=compile,
                 child_calls=child_calls, warmup=warmup, regimes=regimes,
+                handles=handles,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
