@@ -78,6 +78,9 @@ class EndpointSpec:
     # th#1017: this handler's declared inference regimes (from @endpoint's
     # regimes=); ("standard",) when undeclared.
     regimes: tuple = DEFAULT_REGIMES
+    # th#1050: declared lane bodies this endpoint's code branches on
+    # (ctx.lane). Empty = platform-managed only.
+    handles: tuple = ()
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -309,6 +312,7 @@ def _spec_for_handler(
         variant_of=variant_of_slug,
         variant_kind=variant_kind,
         regimes=decl.regimes.get(attr_name, DEFAULT_REGIMES),
+        handles=tuple(decl.handles),
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )

@@ -761,6 +761,9 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # default (absent = ["standard"]).
         if tuple(es.regimes) != DEFAULT_REGIMES:
             fn["regimes"] = list(es.regimes)
+        # th#1050: opt-in declared lane bodies (behavioral divergence marker).
+        if es.handles:
+            fn["handles"] = list(es.handles)
         if model_key is not None:
             fn["model"] = model_key
         if slots_block:

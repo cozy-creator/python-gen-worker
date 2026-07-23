@@ -197,6 +197,7 @@ class _SelectedFunction:
         bindings: Dict[str, Any],
         resources: Any = None,
         slots: Optional[Dict[str, Any]] = None,
+        handles: Tuple[str, ...] = (),
     ) -> None:
         self.cls = cls
         self.attr_name = attr_name
@@ -209,6 +210,7 @@ class _SelectedFunction:
         self.bindings = bindings
         self.resources = resources
         self.slots = slots or {}
+        self.handles = tuple(handles)
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
@@ -230,6 +232,7 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
             bindings=dict(es.models),
             resources=es.resources,
             slots=dict(es.slots),
+            handles=es.handles,
         )
         for es in collect_from_namespace(mod)
     ]
@@ -672,6 +675,34 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
         set_slots(resolved, errors)
 
 
+def _local_executing_lane(
+    bindings: Dict[str, Any], lane_str: str, handles: Tuple[str, ...]
+) -> str:
+    """th#1050 ctx.lane for local runs: a --lane the endpoint DECLARES wins
+    (author kernels execute it); otherwise the most-quantized binding's lane
+    (the local twin of Executor._served_lane, eager execution)."""
+    from ..models import lanes as lanespec
+
+    if lane_str and handles:
+        try:
+            req = lanespec.parse_lane_spec(lane_str)
+            if req.lane is not None and lanespec.lane_body_id(req.lane) in handles:
+                return lanespec.lane_id(req.lane)
+        except ValueError:
+            pass
+    ranked = {b: i for i, b in enumerate(lanespec.known_lanes())}
+    best, best_key = None, (2, len(ranked) + 1)
+    for b in (bindings or {}).values():
+        lane = lanespec.lane_of_binding(
+            getattr(b, "flavor", "") or "",
+            getattr(b, "storage_dtype", "") or "", False)
+        quant = 1 if lanespec.family_of(lane) == lanespec.FAMILY_BF16 else 0
+        key = (quant, ranked.get(lanespec.lane_id(lane), len(ranked)))
+        if best is None or key < best_key:
+            best, best_key = lane, key
+    return lanespec.lane_id(best) if best is not None else "bf16-w16a16+eager"
+
+
 def _apply_lane_to_bindings(bindings: Dict[str, Any], lane_str: str) -> Dict[str, Any]:
     """th#913/gw#596: fold a --lane choice into the declared bindings.
 
@@ -952,6 +983,8 @@ def _run_inner(args: argparse.Namespace) -> int:
         kind=selected.kind,
         allow_publish=bool(args.allow_publish),
     )
+    ctx._set_lane(_local_executing_lane(
+        selected.bindings, getattr(args, "lane", ""), selected.handles))
     if source_path is not None:
         set_source = getattr(ctx, "_set_source_path", None)
         if not callable(set_source):
