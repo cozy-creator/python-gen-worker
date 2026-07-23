@@ -43,6 +43,19 @@ from ..families.base import KIND_LORA, FamilyDefaults, family_for
 
 D = TypeVar("D", bound=FamilyDefaults)
 
+# th#1017 inference regimes: a checkpoint-level fact about what inference
+# configuration the WEIGHTS demand. "distilled" routes (CFG-off contract
+# only); "v_prediction" configures (scheduler prediction_type) — both are
+# hub-classified at ingest; the SDK only consumes.
+REGIMES = ("standard", "v_prediction", "distilled")
+DEFAULT_REGIMES = ("standard",)
+
+
+class RegimeMismatchError(ValueError):
+    """A resolved checkpoint's inference_regime is outside the invoked
+    function's declared ``regimes=`` (th#1017). Hub routing enforces this
+    upstream; reaching here means version skew or a hub bug."""
+
 
 class Slot(Generic[D]):
     """One ``models={}`` slot as a hub-resolved value.
@@ -125,16 +138,26 @@ class ResolvedSlot(Generic[D]):
     Explicit PAYLOAD values still win over ``.defaults`` — that precedence
     is handler logic; this object only carries the merged HUB-vs-CODE
     result.
+
+    ``regime`` (th#1017) is the resolved checkpoint's inference regime —
+    ``"standard"`` unless the hub classified the weights otherwise
+    (``"v_prediction"`` | ``"distilled"``). Handlers branch on it (e.g. a
+    dual-mode turbo lane skips its distillation LoRA for an
+    already-distilled checkpoint).
     """
 
-    __slots__ = ("ref", "defaults")
+    __slots__ = ("ref", "defaults", "regime")
 
-    def __init__(self, ref: ModelRef, defaults: D) -> None:
+    def __init__(self, ref: ModelRef, defaults: D, regime: str = "standard") -> None:
         self.ref = ref
         self.defaults = defaults
+        self.regime = regime
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return f"ResolvedSlot(ref={self.ref!r}, defaults={self.defaults!r})"
+        return (
+            f"ResolvedSlot(ref={self.ref!r}, defaults={self.defaults!r}, "
+            f"regime={self.regime!r})"
+        )
 
 
 def _apply_lora_overrides(
@@ -187,6 +210,28 @@ def _apply_lora_overrides(
     return result
 
 
+def _finish_resolved(
+    name: str,
+    ref: ModelRef,
+    defaults: D,
+    *,
+    inference_regime: str,
+    allowed_regimes: Optional[Sequence[str]],
+) -> "ResolvedSlot[D]":
+    """Build the ``ResolvedSlot`` and, when the caller knows the invoked
+    function's declared regimes, enforce the th#1017 backstop: the hub
+    enforces checkpoint-regime/function-regime compatibility at deploy and
+    request time upstream — reaching a mismatch here means version skew or
+    a hub bug, never a normal-path outcome."""
+    resolved = ResolvedSlot(ref=ref, defaults=defaults, regime=inference_regime)
+    if allowed_regimes is not None and resolved.regime not in allowed_regimes:
+        raise RegimeMismatchError(
+            f"slot {name!r}: resolved checkpoint regime {resolved.regime!r} is "
+            f"not in the invoked function's declared regimes {tuple(allowed_regimes)!r}"
+        )
+    return resolved
+
+
 def resolve_slot(
     name: str,
     slot: "Slot[D]",
@@ -195,6 +240,8 @@ def resolve_slot(
     family: str = "",
     raw_metadata_json: str = "",
     lora_metadata_json: Sequence[str] = (),
+    inference_regime: str = "standard",
+    allowed_regimes: Optional[Sequence[str]] = None,
 ) -> "ResolvedSlot[D]":
     """Merge repo-metadata inference defaults over ``slot.default_config``,
     then apply per-lora FIELD-LEVEL overrides — the pgw#520/pgw#516
@@ -213,6 +260,11 @@ def resolve_slot(
     ``ModelBinding.loras[i].inference_defaults`` on the wire) applies LAST,
     field by field, on top of whichever recipe precedence above picked — see
     :func:`_apply_lora_overrides`.
+
+    ``inference_regime`` (th#1017) is the resolved checkpoint's hub-
+    classified regime ("standard" on hubs/paths that don't send one).
+    ``allowed_regimes``, when given, is the invoked function's declared
+    ``regimes=`` — see :func:`_finish_resolved`.
     """
     if ref is None:
         raise ValueError(
@@ -240,10 +292,16 @@ def resolve_slot(
                 f"{defaults_cls.__name__} validation: {exc}"
             ) from exc
         defaults = _apply_lora_overrides(name, defaults, fam, lora_metadata_json)
-        return ResolvedSlot(ref=ref, defaults=defaults)
+        return _finish_resolved(
+            name, ref, defaults,
+            inference_regime=inference_regime, allowed_regimes=allowed_regimes,
+        )
     if slot.default_config is not None:
         merged = _apply_lora_overrides(name, slot.default_config, fam, lora_metadata_json)
-        return ResolvedSlot(ref=ref, defaults=merged)
+        return _finish_resolved(
+            name, ref, merged,
+            inference_regime=inference_regime, allowed_regimes=allowed_regimes,
+        )
     raise ValueError(
         f"slot {name!r}: no repo inference-defaults metadata for the "
         "resolved model and no Slot(default_config=...) on the endpoint — "
@@ -258,12 +316,15 @@ def resolve_slots(
     families: Mapping[str, str] = {},
     raw_metadata: Mapping[str, str] = {},
     lora_metadata: Mapping[str, Sequence[str]] = {},
+    regimes: Mapping[str, str] = {},
+    allowed_regimes: Optional[Sequence[str]] = None,
 ) -> Dict[str, "ResolvedSlot[Any]" | Exception]:
     """Resolve every declared slot, collecting per-slot failures instead of
     raising — callers (RequestContext) surface each failure lazily, only
     when the handler actually reads that slot ("clear error at request
     time", not a blanket dispatch-time failure for slots the handler never
-    touches)."""
+    touches). ``allowed_regimes`` (th#1017), when given, applies to every
+    slot: one invoked function has one declared ``regimes=`` set."""
     out: Dict[str, "ResolvedSlot[Any]" | Exception] = {}
     for name, slot in slots.items():
         try:
@@ -273,10 +334,15 @@ def resolve_slots(
                 family=families.get(name, ""),
                 raw_metadata_json=raw_metadata.get(name, ""),
                 lora_metadata_json=lora_metadata.get(name, ()),
+                inference_regime=regimes.get(name, "standard"),
+                allowed_regimes=allowed_regimes,
             )
         except ValueError as exc:
             out[name] = exc
     return out
 
 
-__all__ = ["ResolvedSlot", "Slot", "resolve_slot", "resolve_slots"]
+__all__ = [
+    "DEFAULT_REGIMES", "REGIMES", "RegimeMismatchError", "ResolvedSlot",
+    "Slot", "resolve_slot", "resolve_slots",
+]

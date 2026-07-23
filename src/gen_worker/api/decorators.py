@@ -39,7 +39,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar, Union
 import msgspec
 
 from .binding import BINDING_TYPES, Binding
-from .slot import Slot
+from .slot import DEFAULT_REGIMES, REGIMES, Slot
 
 T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
@@ -154,6 +154,64 @@ def _validate_warmup_decl(owner: str, warmup: Optional[WarmupDecl]) -> Optional[
     )
 
 
+# th#1017 inference regimes: what checkpoint(s) a handler's CFG/scheduling
+# code path was written for. Class handlers declare a {method_name:
+# (regime, ...)} mapping (mirrors warmup=); the function form (one handler)
+# declares a bare tuple. A method/function absent from the declaration gets
+# DEFAULT_REGIMES ("standard",).
+RegimesDecl = Union[Tuple[str, ...], Mapping[str, Tuple[str, ...]]]
+
+
+def _validate_regime_tuple(owner: str, value: Any) -> Tuple[str, ...]:
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise TypeError(
+            f"@endpoint {owner}: regimes= entries must be a tuple of regime "
+            f"strings, got {type(value).__name__}"
+        )
+    regimes = tuple(str(v).strip() for v in value)
+    if not regimes:
+        raise ValueError(f"@endpoint {owner}: regimes= entry must not be empty")
+    bad = [r for r in regimes if r not in REGIMES]
+    if bad:
+        raise ValueError(
+            f"@endpoint {owner}: unknown regime(s) {bad!r} (valid: {REGIMES})"
+        )
+    return regimes
+
+
+def _validate_class_regimes(
+    owner: str, regimes: Optional[RegimesDecl], handler_names: "set[str]"
+) -> Dict[str, Tuple[str, ...]]:
+    if regimes is None:
+        return {}
+    if not isinstance(regimes, Mapping):
+        raise TypeError(
+            f"@endpoint {owner}: class regimes= must be a "
+            "{method_name: (regime, ...)} mapping, got "
+            f"{type(regimes).__name__}"
+        )
+    unknown = set(regimes) - handler_names
+    if unknown:
+        raise ValueError(
+            f"@endpoint {owner}: regimes= names unknown handler method(s) "
+            f"{sorted(unknown)} (known: {sorted(handler_names)})"
+        )
+    return {k: _validate_regime_tuple(f"{owner}.{k}", v) for k, v in regimes.items()}
+
+
+def _validate_function_regimes(
+    owner: str, regimes: Optional[RegimesDecl]
+) -> Tuple[str, ...]:
+    if regimes is None:
+        return DEFAULT_REGIMES
+    if isinstance(regimes, Mapping):
+        raise TypeError(
+            f"@endpoint function {owner!r}: regimes= must be a tuple of "
+            "regime strings (functions have one handler, no per-method mapping)"
+        )
+    return _validate_regime_tuple(owner, regimes)
+
+
 class Compile(msgspec.Struct, frozen=True):
     """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
 
@@ -263,6 +321,9 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # schema; {method: payload-or-None} = declared warmup payloads (None
     # skips that method); NoWarmup(reason) = class-level opt-out.
     warmup: Optional[WarmupDecl] = None
+    # th#1017: per-handler declared regimes, attr_name -> (regime, ...).
+    # Function-shaped endpoints key their single handler under "".
+    regimes: Mapping[str, Tuple[str, ...]] = msgspec.field(default_factory=dict)
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -515,6 +576,7 @@ def _decorate_class(
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
+    regimes: Optional[RegimesDecl] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -532,6 +594,9 @@ def _decorate_class(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=runtime, compile=compile, child_calls=child_calls,
         warmup=_validate_warmup_decl(cls.__name__, warmup),
+        regimes=_validate_class_regimes(
+            cls.__name__, regimes, {attr for attr, _ in handlers}
+        ),
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -556,6 +621,7 @@ def _decorate_function(
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
+    regimes: Optional[RegimesDecl] = None,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
@@ -586,6 +652,7 @@ def _decorate_function(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=None, name=(name or fn.__name__), is_function=True,
         compile=compile, child_calls=child_calls,
+        regimes={"": _validate_function_regimes(fn.__name__, regimes)},
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -607,6 +674,7 @@ def endpoint(
     compile: Optional[Compile] = ...,
     child_calls: bool = ...,
     warmup: Optional[WarmupDecl] = ...,
+    regimes: Optional[RegimesDecl] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -622,6 +690,7 @@ def endpoint(
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
+    regimes: Optional[RegimesDecl] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -653,13 +722,13 @@ def endpoint(
             return _decorate_class(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, compile=compile,
-                child_calls=child_calls, warmup=warmup,
+                child_calls=child_calls, warmup=warmup, regimes=regimes,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, name=name, compile=compile,
-                child_calls=child_calls, warmup=warmup,
+                child_calls=child_calls, warmup=warmup, regimes=regimes,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
@@ -671,6 +740,6 @@ def endpoint(
 
 
 __all__ = [
-    "Compile", "EndpointDecl", "NoWarmup", "Resources", "SlotLike",
-    "VariantDecl", "WarmupDecl", "endpoint", "variant_of",
+    "Compile", "EndpointDecl", "NoWarmup", "RegimesDecl", "Resources",
+    "SlotLike", "VariantDecl", "WarmupDecl", "endpoint", "variant_of",
 ]
