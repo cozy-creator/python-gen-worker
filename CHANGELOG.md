@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.50.1 (2026-07-23)
+## 0.50.2 (2026-07-23)
 
 - **th#1055: desired-hot warm works on slot-only endpoints; failures are
   loud.** `ensure_desired_instance` demanded the instance's binding set
