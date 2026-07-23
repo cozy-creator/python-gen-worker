@@ -132,10 +132,21 @@ class ArmOutcome:
     or, from callers that already hold a finalized identity, a
     :class:`SelfMint` — letting the executor synthesize the artifact
     selection it records/advertises.
+
+    ``selection_bug`` carries a caught :class:`CellSelectionBugError`
+    (th#1031): the th#883 invariant is a self-requested, identity-verified
+    cell that never OUGHT to fail, so it stays a loud, wire-visible event —
+    but a live cell key can legitimately collide across two structurally
+    different graphs (cell_key has no graph-shape axis), so a caught
+    instance no longer aborts arming. The caller reports it (ModelEvent /
+    pod_events, unchanged) while this same call proceeds to self-mint —
+    the ordinary MISS recovery — instead of leaving the pipeline stuck
+    retrying the identical unusable cell on every subsequent request.
     """
 
     armed: bool
     self_mint: Optional[Any] = None
+    selection_bug: Optional["cc.CellSelectionBugError"] = None
 
     def __bool__(self) -> bool:
         return self.armed
@@ -304,12 +315,19 @@ def enable_compiled(
     """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
 
     Replaces the executor's bare ``provision.enable_compiled`` call. HIT
-    keeps today's semantics exactly (incl. ``CellSelectionBugError``
-    propagation — the th#883 receipt invariant is untouched). MISS
-    self-mints and serves compiled; the ONLY remaining eager/fail-closed
-    exits are genuine mint impossibilities (no CUDA, no C toolchain, the
-    mint itself failing), where plain lanes serve eager and quantized lanes
-    keep their typed refusal — exactly the cozy-local store policy.
+    keeps today's semantics for a genuine match. A ``CellSelectionBugError``
+    (th#1031: a self-requested, identity-verified cell that STILL refuses to
+    arm — cell_key has no graph-shape axis, so two structurally different
+    graphs can legitimately collide on one key) no longer aborts arming: it
+    is captured onto the returned :class:`ArmOutcome` for the caller to
+    report loudly (unchanged wire event), and this call falls through to
+    self-mint exactly like an ordinary miss — a live worker must recover
+    into a working compiled state instead of retrying the identical
+    unusable cell forever. MISS self-mints and serves compiled; the ONLY
+    remaining eager/fail-closed exits are genuine mint impossibilities (no
+    CUDA, no C toolchain, the mint itself failing), where plain lanes serve
+    eager and quantized lanes keep their typed refusal — exactly the
+    cozy-local store policy.
 
     Returns :class:`ArmOutcome`; ``self_mint`` carries the minted cell's
     identity so the caller can record/advertise it (serving-bootstrap half
@@ -317,16 +335,20 @@ def enable_compiled(
     own key as the active compile ref).
     """
     family = str(getattr(cfg, "family", "") or "")
+    selection_bug: Optional[cc.CellSelectionBugError] = None
     try:
         if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
             return ArmOutcome(armed=True)
         # Plain-lane miss: no cell delivered / artifact unusable. Fall
         # through to the self-mint instead of the pre-gw#587 silent eager.
-    except cc.CellSelectionBugError:
-        # Self-requested, identity-verified cell refused to arm — the loud
-        # invariant propagates verbatim; a re-mint would mask a selection
-        # bug.
-        raise
+    except cc.CellSelectionBugError as exc:
+        # Self-requested, identity-verified cell refused to arm — always
+        # reported loudly (the caller sends the wire event), but no longer
+        # fatal: fall through and self-mint a cell this runtime can prove.
+        logger.warning(
+            "fleet-cells: cell_selection_bug (%s); self-minting instead of "
+            "retrying the same unusable cell", exc)
+        selection_bug = exc
     except cc.CompiledLaneUnavailableError:
         # Mandatory (w8a8/w4a4) miss: production used to fail closed here.
         # The whole point of self-mint is that this worker can produce the
@@ -334,11 +356,11 @@ def enable_compiled(
         logger.info("fleet-cells: no delivered cell for mandatory lane; self-minting")
 
     if not family:
-        return _fail_closed(pipe, "Compile decl has no family")
+        return _fail_closed(pipe, "Compile decl has no family", selection_bug)
     if not _cuda_ready():
-        return _fail_closed(pipe, "CUDA unavailable")
+        return _fail_closed(pipe, "CUDA unavailable", selection_bug)
     if not cc.toolchain_present():
-        return _fail_closed(pipe, "no C compiler for the self-mint")
+        return _fail_closed(pipe, "no C compiler for the self-mint", selection_bug)
     # gw#608 ROOT CAUSE gates (order matters — BEFORE any process-global
     # cache-dir mutation):
     # (a) a slot object with no resolvable compile target (the LTX upsampler
@@ -350,13 +372,14 @@ def enable_compiled(
     #     from it — decline via the ordinary miss policy instead (plain
     #     lanes eager, mandatory lanes typed refusal).
     if not cc.has_compile_target(pipe, cfg):
-        return _fail_closed(pipe, "no compile target resolves on this pipeline")
+        return _fail_closed(
+            pipe, "no compile target resolves on this pipeline", selection_bug)
     if cc.delivered_cell_seeded():
         return _fail_closed(
             pipe,
             "a delivered cell is seeded in this process; a self-mint "
             "capture would re-point the process-global inductor cache dir "
-            "away from it (gw#608)")
+            "away from it (gw#608)", selection_bug)
 
     from .models.loading import pipeline_weight_lane
 
@@ -381,7 +404,8 @@ def enable_compiled(
         logger.warning("fleet-cells: self-mint key computation failed (%s)", exc)
         if bucket:
             cc.drop_lora_lane(pipe)
-        return _fail_closed(pipe, f"self-mint key computation failed: {exc}")
+        return _fail_closed(
+            pipe, f"self-mint key computation failed: {exc}", selection_bug)
 
     # gw#587 CORRECT FIX (the defect this replaces: the old design minted
     # via a separate producer-style ``mint_artifact``/``_warm_call`` BEFORE
@@ -412,7 +436,8 @@ def enable_compiled(
         if bucket:
             cc.drop_lora_lane(pipe)
         return _fail_closed(
-            pipe, f"another self-mint capture is pending (key {conflict})")
+            pipe, f"another self-mint capture is pending (key {conflict})",
+            selection_bug)
 
     if existing is not None:
         mint_root, capture_dir = existing.mint_root, existing.capture_dir
@@ -433,13 +458,15 @@ def enable_compiled(
             shutil.rmtree(mint_root, ignore_errors=True)
         if bucket:
             cc.drop_lora_lane(pipe)
-        return _fail_closed(pipe, f"self-mint arm failed: {exc}")
+        return _fail_closed(
+            pipe, f"self-mint arm failed: {exc}", selection_bug)
 
     if existing is not None:
         logger.info(
             "fleet-cells: joined pending self-mint capture for %s (key=%s)",
             family, key)
-        return ArmOutcome(armed=True, self_mint=existing)
+        return ArmOutcome(
+            armed=True, self_mint=existing, selection_bug=selection_bug)
 
     pending = PendingSelfMint(
         family=family, cell_key=key, ref=f"{cc.system_repo(family)}#{key}",
@@ -452,7 +479,8 @@ def enable_compiled(
         "fleet-cells: armed self-mint capture for %s (key=%s) — the real "
         "warmup proof performs the only compile this mint will see",
         family, key)
-    return ArmOutcome(armed=True, self_mint=pending)
+    return ArmOutcome(
+        armed=True, self_mint=pending, selection_bug=selection_bug)
 
 
 def finalize_self_mint(
@@ -662,19 +690,28 @@ def _unregister(pending: "PendingSelfMint") -> None:
             del _PENDING[pending.cell_key]
 
 
-def _fail_closed(pipe: Any, reason: str) -> ArmOutcome:
+def _fail_closed(
+    pipe: Any, reason: str,
+    selection_bug: Optional["cc.CellSelectionBugError"] = None,
+) -> ArmOutcome:
     """The quantized-lane policy at every exit that cannot produce a cell:
     plain lanes serve eager (never-raise miss policy), w8a8/w4a4 keep the
-    typed refusal (same as the cozy-local store / pre-gw#587 production)."""
+    typed refusal (same as the cozy-local store / pre-gw#587 production).
+    ``selection_bug``, when set, is a genuine mint-impossibility exit that
+    ALSO followed a caught cell_selection_bug (th#1031) — chained onto the
+    raised refusal so the caller's report is never dropped."""
     from .models.loading import pipeline_weight_lane
 
     lane = pipeline_weight_lane(pipe)
     if lane.startswith(("w8a8", "w4a4")):
-        raise cc.CompiledLaneUnavailableError(
+        refusal = cc.CompiledLaneUnavailableError(
             f"{lane[:4].upper()} requires a compile cell and the self-mint "
             f"is unavailable ({reason})")
+        if selection_bug is not None:
+            raise refusal from selection_bug
+        raise refusal
     logger.info("fleet-cells: serving eager (%s)", reason)
-    return ArmOutcome(armed=False)
+    return ArmOutcome(armed=False, selection_bug=selection_bug)
 
 
 def _cuda_ready() -> bool:

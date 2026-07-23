@@ -3985,6 +3985,12 @@ class Executor:
                     if isinstance(inj.kwargs.get(slot), (str, Path))
                 )
                 scope_mints = arming_scope.self_mints
+                for bug in arming_scope.selection_bugs.values():
+                    # th#1031: the fleet policy already self-minted a working
+                    # cell instead of aborting — still report the th#883
+                    # invariant loudly.
+                    await self._report_cell_selection_bug(
+                        spec, compile_selection, bug)
                 for pipe, armed in arming_scope.objects:
                     if not compile_cache.has_compile_target(pipe, spec.compile):
                         continue
@@ -5396,44 +5402,27 @@ class Executor:
                             self._enable_compiled,
                             pipe, spec.compile, compile_artifact,
                         )
-                        armed = outcome.armed
-                        pipe_mint = outcome.self_mint
-                    except compile_cache.CellSelectionBugError as exc:
-                        # th#883 invariant: a SELF-REQUESTED, identity-
-                        # verified cell failed to arm — by construction a
-                        # bug in the one selection brain. Loud event class
-                        # on the wire; never a silent eager fallback.
-                        bug_ref = (
-                            compile_selection.ref
-                            if compile_selection is not None else ""
-                        )
-                        bug_digest = (
-                            compile_selection.snapshot_digest
-                            if compile_selection is not None else ""
-                        )
-                        logger.error(
-                            "cell_selection_bug on %s (%s): %s",
-                            spec.name, bug_ref, exc)
-                        await self._send(pb.WorkerMessage(
-                            model_event=self.store.model_event(
-                                bug_ref,
-                                pb.MODEL_STATE_FAILED,
-                                identity=(
-                                    (bug_digest, 0) if bug_digest else None),
-                                error=(
-                                    f"cell_selection_bug: {str(exc)[:300]}"),
-                            )
-                        ))
-                        from .models.loading import pipeline_weight_lane
-
-                        if pipeline_weight_lane(pipe).startswith(
-                                _MANDATORY_LANES):
-                            # Quantized lanes stay fail-closed: surface as
-                            # the retryable lane refusal, cause preserved.
-                            raise compile_cache.CompiledLaneUnavailableError(
-                                f"cell_selection_bug: {exc}") from exc
-                        armed = False
-                        pipe_mint = None
+                    except compile_cache.CompiledLaneUnavailableError as exc:
+                        # Mandatory (w8a8/w4a4) lane: self-mint also hit a
+                        # genuine impossibility (no CUDA/toolchain/target).
+                        # When this refusal was chained from a caught
+                        # cell_selection_bug (th#1031), report it — the
+                        # lane refusal must not silently swallow the
+                        # loud invariant event.
+                        bug = exc.__cause__
+                        if isinstance(bug, compile_cache.CellSelectionBugError):
+                            await self._report_cell_selection_bug(
+                                spec, compile_selection, bug)
+                        raise
+                    armed = outcome.armed
+                    pipe_mint = outcome.self_mint
+                    if outcome.selection_bug is not None:
+                        # th#1031: no longer fatal — this SAME call
+                        # already fell through to self-mint (or, for a
+                        # plain lane, eager); still reported loudly so
+                        # the th#883 invariant stays wire-visible.
+                        await self._report_cell_selection_bug(
+                            spec, compile_selection, outcome.selection_bug)
 
                     if compile_cache.has_compile_target(pipe, spec.compile):
                         result.add_compile_object(pipe, (slot,))
@@ -5610,18 +5599,45 @@ class Executor:
 
         return republish
 
+    async def _report_cell_selection_bug(
+        self,
+        spec: EndpointSpec,
+        compile_selection: Optional["_CompileArtifactSelection"],
+        exc: BaseException,
+    ) -> None:
+        """th#883 invariant: a SELF-REQUESTED, identity-verified cell failed
+        to arm — by construction a bug in the one selection brain. Loud
+        event class on the wire (th#1031: no longer fatal to serving — the
+        fleet policy already fell through to self-mint; this only makes
+        sure the invariant stays wire-visible)."""
+        bug_ref = compile_selection.ref if compile_selection is not None else ""
+        bug_digest = (
+            compile_selection.snapshot_digest
+            if compile_selection is not None else "")
+        logger.error("cell_selection_bug on %s (%s): %s", spec.name, bug_ref, exc)
+        await self._send(pb.WorkerMessage(
+            model_event=self.store.model_event(
+                bug_ref,
+                pb.MODEL_STATE_FAILED,
+                identity=((bug_digest, 0) if bug_digest else None),
+                error=f"cell_selection_bug: {str(exc)[:300]}",
+            )
+        ))
+
     def _enable_compiled(
         self, pipe: Any, cfg: Any, artifact: Optional[Path],
     ) -> "fleet_cells.ArmOutcome":
         """Arm the best available compiled path for a freshly loaded pipeline.
 
-        gw#587: delivered cell first (unchanged semantics incl. the
-        cell_selection_bug invariant), SELF-MINT on miss — the boot warmup
-        compiles the real serving graphs once, serves compiled immediately,
-        and publishes through the hub's attested gate so the next worker on
-        this key is store-served. Eager fallback and the fail-closed cell
-        wait are gone for reachable mints; genuine mint impossibilities
-        keep the old miss policy (plain=eager, quantized=typed refusal).
+        gw#587: delivered cell first — a th#1031 ``cell_selection_bug``
+        (self-requested cell fails contract_drift) is reported loudly but no
+        longer fatal: this falls through to SELF-MINT exactly like an
+        ordinary miss. The boot warmup compiles the real serving graphs
+        once, serves compiled immediately, and publishes through the hub's
+        attested gate so the next worker on this key is store-served. Eager
+        fallback and the fail-closed cell wait are gone for reachable mints;
+        genuine mint impossibilities keep the old miss policy (plain=eager,
+        quantized=typed refusal).
 
         Returns the fleet ``ArmOutcome``; a ``self_mint`` result is recorded
         into ``active_compile_artifacts`` exactly like a delivered cell so
