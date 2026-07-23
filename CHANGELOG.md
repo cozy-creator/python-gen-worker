@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.47.0 (2026-07-23)
+
+- **th#1031: `cell_selection_bug` recovers via self-mint instead of
+  retry-blocking every request.** A self-requested compile cell whose graph
+  signature drifts from this runtime's own (`cell_key` has no graph-shape
+  axis, so structurally different graphs can collide on one key) used to
+  raise `CellSelectionBugError` straight out of `fleet_cells.enable_compiled`
+  — fatal on a mandatory w8a8/w4a4 lane, so setup failed and retried from
+  scratch against the identical stale cell forever, paying a full
+  `self_mint_compile` cycle on every request. It now falls through to
+  self-mint (the ordinary MISS recovery) while still reporting the th#883
+  invariant loudly (unchanged `cell_selection_bug` ModelEvent/pod_event);
+  a genuine mint impossibility on a mandatory lane still fails closed.
+
 ## 0.46.0 (2026-07-22)
 
 - **th#1017: inference regimes — checkpoints whose weights demand a specific
