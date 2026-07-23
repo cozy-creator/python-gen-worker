@@ -764,6 +764,10 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
+        # th#1051: declared compute-time formula — the hub learns the
+        # constants per physics cell; the source string is the contract.
+        if es.runtime_formula is not None:
+            fn["runtime_formula"] = es.runtime_formula.source
         if model_key is not None:
             fn["model"] = model_key
         if slots_block:

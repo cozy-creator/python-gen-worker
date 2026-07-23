@@ -565,6 +565,12 @@ message JobMetrics {
   // th#913/gw#596: the CONCRETE lane that actually served this request
   // (e.g. "fp8-w8a8-dynamic+compiled"). "" = unmeasured (pre-lane worker).
   string lane = 13;
+  // th#1051: the declared runtime formula's term feature values, evaluated
+  // worker-side on the EXECUTED payload (defaults applied), keyed by
+  // canonical term key (e.g. "num_inference_steps", "1"). Empty = no
+  // declared formula (or a pre-formula worker) — the hub falls back to
+  // evaluating terms from the raw payload + schema defaults.
+  map<string, double> runtime_terms = 14;
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,
