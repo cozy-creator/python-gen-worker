@@ -505,6 +505,43 @@ def _model_failure_vocab(exc: BaseException) -> str:
     return "load_failed"
 
 
+def _shared_lanes_need_fp8(
+    slot_sizes: Dict[str, Dict[str, int]],
+    shared_components: typing.Iterable[str],
+    free_vram_bytes: int,
+    *,
+    margin_bytes: int = 2 * (1 << 30),
+) -> bool:
+    """Joint VRAM-fit decision for a shared-component multi-lane record
+    (th#1043): loading each lane's precision reactively, one at a time,
+    lets the FIRST lane to load consume all free VRAM at native precision
+    — the shared-component invariant then refuses the offload placement
+    the STARVED lane needs, hard-failing a fit that was achievable all
+    along. Decide precision for the WHOLE group against its combined
+    footprint (shared components counted once) before any lane loads.
+
+    True when native precision doesn't fit the group but fp8-storage
+    (denoiser weights ~halved) does — every lane in the group should force
+    fp8 storage. False when native precision already fits (no forcing
+    needed) or fp8 storage still wouldn't fit (per-lane reactive sizing
+    makes its own honest call instead).
+    """
+    shared = list(shared_components)
+    if len(slot_sizes) < 2 or not shared:
+        return False
+    first = next(iter(slot_sizes.values()))
+    shared_bytes = sum(first.get(c, 0) for c in shared)
+    exclusive_bytes = sum(
+        b for sizes in slot_sizes.values()
+        for comp, b in sizes.items() if comp not in shared
+    )
+    needed = shared_bytes + exclusive_bytes
+    if needed + margin_bytes <= free_vram_bytes:
+        return False
+    fp8_needed = shared_bytes + 0.5 * exclusive_bytes
+    return fp8_needed + margin_bytes <= free_vram_bytes
+
+
 def _is_corrupt_load_error(exc: BaseException) -> bool:
     """Errors a truncated/corrupt snapshot produces at weights-load time
     (gw#408). Broad on purpose: the digest re-verify gate downstream
@@ -5201,6 +5238,34 @@ class Executor:
         )
         return plan
 
+    def _shared_group_force_fp8(
+        self, spec: EndpointSpec, share_plan: Optional[Dict[str, Dict[str, Any]]],
+    ) -> set:
+        """Slots that must force fp8 denoiser storage to fit their shared-
+        component group jointly resident (th#1043) — empty when the group
+        fits at native precision, or fits nobody's precision at all."""
+        plan = share_plan or {}
+        slots = [s for s, m in plan.items() if m]
+        if len(slots) < 2:
+            return set()
+        shared_components = sorted({c for m in plan.values() for c in m})
+        slot_sizes: Dict[str, Dict[str, int]] = {}
+        for slot in slots:
+            binding = spec.models.get(slot)
+            if binding is None:
+                return set()
+            slot_sizes[slot] = self.store.component_sizes(wire_ref(binding))
+        free = self.store.residency.free_vram_bytes()
+        if not _shared_lanes_need_fp8(slot_sizes, shared_components, free):
+            return set()
+        logger.info(
+            "th#1043: shared-lane group %s for %s doesn't fit resident at "
+            "native precision (free=%.1fGiB) — forcing fp8 storage on every "
+            "lane before any of them loads",
+            slots, spec.name, free / (1 << 30),
+        )
+        return set(slots)
+
     @staticmethod
     def _model_index_components(path: str) -> set:
         """Component names the snapshot's model_index.json declares — the
@@ -5245,6 +5310,7 @@ class Executor:
         result = _InjectionResult(kwargs=kwargs, loaded=loaded)
         compile_artifact = compile_selection.path if compile_selection else None
         share_plan = self._component_share_plan(spec, paths, hints)
+        force_fp8_slots = self._shared_group_force_fp8(spec, share_plan)
         if server is not None:
             for pname, ann in hints.items():
                 if ann is ServerHandle:
@@ -5334,6 +5400,8 @@ class Executor:
                         slot=slot, ref=ref, mode=mode, components=injected,
                         declared_vram_gb=float(
                             getattr(spec.resources, "vram_gb", 0) or 0),
+                        force_storage_dtype=(
+                            "fp8" if slot in force_fp8_slots else ""),
                     )
                 except Exception as exc:
                     # Corruption-shaped load failure (gw#408): digest-verify
@@ -5358,6 +5426,8 @@ class Executor:
                         slot=slot, ref=ref, mode=mode, components=injected,
                         declared_vram_gb=float(
                             getattr(spec.resources, "vram_gb", 0) or 0),
+                        force_storage_dtype=(
+                            "fp8" if slot in force_fp8_slots else ""),
                     )
                 pipe = sl.obj
                 # Reconcile the load outcomes into ServePlan/FnDegraded via
