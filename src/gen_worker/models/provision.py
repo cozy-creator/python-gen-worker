@@ -84,6 +84,7 @@ def load_slot(
     components: Optional[Dict[str, Any]] = None,
     device: str = "",
     declared_vram_gb: float = 0.0,
+    force_storage_dtype: str = "",
 ) -> SlotLoad:
     """Typed slot injection: the slot receives exactly what its ``setup``
     annotation says — a ``str``/``Path`` local path, or a constructed
@@ -96,7 +97,11 @@ def load_slot(
     degraded floors — the executor's knowledge; the CLI passes ``auto``).
     ``device="cpu"`` (CLI ``--device cpu``) skips placement entirely.
     ``components`` are preloaded shared modules (gw#479) forwarded to
-    ``from_pretrained``.
+    ``from_pretrained``. ``force_storage_dtype`` overrides the binding's own
+    storage_dtype (th#1043): a joint multi-lane fit decision made BEFORE any
+    lane in a shared-component group loads, so the first lane to load never
+    greedily consumes free VRAM at native precision and starves a sibling
+    lane into an offload placement the shared-component invariant refuses.
     """
     if annotation is None or annotation is str:
         return SlotLoad(obj=path)
@@ -110,7 +115,7 @@ def load_slot(
     from .memory import place_pipeline
 
     dtype = str(getattr(binding, "dtype", "") or "")
-    storage_dtype = str(getattr(binding, "storage_dtype", "") or "")
+    storage_dtype = force_storage_dtype or str(getattr(binding, "storage_dtype", "") or "")
     out = SlotLoad(obj=None, is_pipeline=True, ran=(dtype or "bf16"))
 
     # th#737: a cast directive on a denoiser-less diffusers tree is a
