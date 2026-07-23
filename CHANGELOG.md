@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.50.1 (2026-07-23)
+
+- **pgw#626 / th#1059 twin: mandatory-lane admission follows the hub-resolved
+  EXECUTION lane, not the flavor token.** The `#fp8-w8a8` flavor names the
+  STORAGE format; SDXL's mixed variant serves the w8a16 upcast lane (plain
+  graphs). `_validate_required_compile` (and every other mandatory-lane
+  derivation) refused hub dispatches for the mixed lane with
+  `required_compile_missing` — the worker half of the 2026-07-23 sdxl P0
+  (Paul's live jobs failed at 21:54Z). Mandatory-ness now derives from the
+  HelloAck resolution lane when known (w8a8/w4a4 activations stay
+  fail-closed; plain activations admit and JIT-warm like bf16); the flavor
+  token remains the fallback without lane evidence, and conflicting
+  evidence fails closed.
+
 ## 0.48.2 (2026-07-23)
 
 - **th#1043: the forced group-fit fp8 downgrade reports structurally.**
