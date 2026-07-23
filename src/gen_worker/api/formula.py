@@ -232,7 +232,7 @@ def _canonical(node: ast.expr) -> str:
     tensorhub internal/formula's Expr.Canonical for the same source."""
     if isinstance(node, ast.Name):
         return node.id
-    if isinstance(node, ast.Constant):
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         v = float(node.value)
         if v == math.trunc(v) and abs(v) < 1e15:
             return str(int(v))
@@ -267,6 +267,8 @@ def _eval(node: ast.expr, values: Mapping[str, Any]) -> Optional[float]:
         f = float(v)
         return None if (math.isnan(f) or math.isinf(f)) else f
     if isinstance(node, ast.Constant):
+        if not isinstance(node.value, (int, float)):
+            return None
         return float(node.value)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         v = _eval(node.operand, values)
