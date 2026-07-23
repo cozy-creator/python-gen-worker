@@ -164,6 +164,16 @@ def load_slot(
         out.cast_fail_detail = (
             f"fp8 storage failed on every component of slot {slot!r} "
             f"({type(pipe).__name__}); serving at base precision")
+    elif (force_storage_dtype and not rung
+          and getattr(pipe, "_cozy_fp8_storage_requested", False)
+          and getattr(pipe, "_cozy_fp8_storage_ok", True)):
+        # th#1043: a joint shared-lane fit forced fp8 storage the binding
+        # never asked for — report it structurally (FnDegraded) exactly like
+        # an adaptive rung; a silent precision downgrade lies to placement.
+        out.rung = "fp8"
+        out.rung_detail = (
+            f"joint shared-lane fit forced fp8 storage for slot {slot!r} "
+            f"({type(pipe).__name__}); sibling lanes share the VRAM budget")
 
     # Worker-owned placement/offload policy: one decider for the whole
     # worker; endpoints never write device/offload code. A CUDA OOM inside
