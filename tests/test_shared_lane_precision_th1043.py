@@ -98,3 +98,7 @@ def test_forced_group_fp8_survives_the_resident_upcast_check(tmp_path, monkeypat
                    force_storage_dtype="fp8")
     assert getattr(sl.obj, "_cozy_weight_lane", "") != "bf16-resident"
     assert getattr(sl.obj, "_cozy_fp8_storage_requested", False) is True
+    # th#1043 (0.48.2): the forced downgrade is reported structurally, not
+    # served silently as a native bf16 plan.
+    assert sl.rung == "fp8"
+    assert "shared-lane" in sl.rung_detail
