@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.48.1 (2026-07-23)
+
+- **th#1043 second layer: a forced group-fit fp8 survives the gw#534
+  bf16-resident upcast.** Found live on the first 0.48.0 pod: the joint
+  group decision forced fp8, but `load_from_pretrained`'s single-lane
+  resident-upcast check saw the FIRST lane fitting current free VRAM and
+  silently upgraded it back to bf16 residency — re-starving the sibling
+  lane into the refused offload placement. `force_storage_dtype` now
+  disables the local upgrade (`allow_bf16_resident_upgrade=False`): the
+  headroom belongs to the group, not the first lane to load.
+
+## 0.48.0 (2026-07-23)
+
+- **th#1043: joint precision fit for shared-component multi-lane loads.**
+  A `gw#479` shared-component multi-lane record (e.g. qwen-image's t2i/edit
+  lanes: a shared text encoder + VAE, an exclusive transformer per lane)
+  decided each lane's resident precision reactively, one lane at a time,
+  against whatever free VRAM happened to be measured at that moment. The
+  first lane to load could consume all headroom at native precision,
+  starving a sibling shared lane into an offload placement the shared-
+  component invariant then refused outright (`RetryableError:
+  shared-component lanes require resident placement`). Precision for the
+  whole shared-component group is now decided jointly, against its
+  combined footprint (shared components counted once), before any lane
+  loads — every lane in a starved group forces fp8 storage together
+  instead of one lane greedily grabbing headroom another lane needs.
+
+## 0.47.0 (2026-07-23)
+
+- **th#1031: `cell_selection_bug` recovers via self-mint instead of
+  retry-blocking every request.** A self-requested compile cell whose graph
+  signature drifts from this runtime's own (`cell_key` has no graph-shape
+  axis, so structurally different graphs can collide on one key) used to
+  raise `CellSelectionBugError` straight out of `fleet_cells.enable_compiled`
+  — fatal on a mandatory w8a8/w4a4 lane, so setup failed and retried from
+  scratch against the identical stale cell forever, paying a full
+  `self_mint_compile` cycle on every request. It now falls through to
+  self-mint (the ordinary MISS recovery) while still reporting the th#883
+  invariant loudly (unchanged `cell_selection_bug` ModelEvent/pod_event);
+  a genuine mint impossibility on a mandatory lane still fails closed.
+
 ## 0.46.0 (2026-07-22)
 
 - **th#1017: inference regimes — checkpoints whose weights demand a specific

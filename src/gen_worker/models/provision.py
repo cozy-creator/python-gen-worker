@@ -137,6 +137,9 @@ def load_slot(
     pipe = load_from_pretrained(
         annotation, path, dtype=dtype, storage_dtype=storage_dtype,
         components=components or None, declared_vram_gb=declared_vram_gb,
+        # A forced group-fit fp8 (th#1043) must never locally upgrade back
+        # to bf16 residency — the headroom belongs to sibling lanes.
+        allow_bf16_resident_upgrade=not force_storage_dtype,
     )
     out.obj = pipe
 
