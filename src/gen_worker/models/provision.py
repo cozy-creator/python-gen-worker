@@ -85,6 +85,7 @@ def load_slot(
     device: str = "",
     declared_vram_gb: float = 0.0,
     force_storage_dtype: str = "",
+    strict_vram: bool = False,
 ) -> SlotLoad:
     """Typed slot injection: the slot receives exactly what its ``setup``
     annotation says — a ``str``/``Path`` local path, or a constructed
@@ -165,7 +166,7 @@ def load_slot(
     # worker; endpoints never write device/offload code. A CUDA OOM inside
     # is a ladder transition, not a failure.
     if device.strip().lower() != "cpu":
-        out.placed = place_pipeline(pipe, mode=mode, ref=ref)
+        out.placed = place_pipeline(pipe, mode=mode, ref=ref, strict_vram=strict_vram)
     return out
 
 

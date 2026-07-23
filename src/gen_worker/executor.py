@@ -5451,6 +5451,8 @@ class Executor:
                                 getattr(spec.resources, "vram_gb", 0) or 0),
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
+                            strict_vram=bool(
+                                getattr(spec.resources, "strict_vram", False)),
                         )
                     except Exception as exc:
                         # Corruption-shaped load failure (gw#408): digest-verify
@@ -5477,6 +5479,8 @@ class Executor:
                                 getattr(spec.resources, "vram_gb", 0) or 0),
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
+                            strict_vram=bool(
+                                getattr(spec.resources, "strict_vram", False)),
                         )
                     pipe = sl.obj
                     # Reconcile the load outcomes into ServePlan/FnDegraded via
