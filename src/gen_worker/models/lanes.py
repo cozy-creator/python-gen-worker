@@ -85,6 +85,24 @@ def known_lanes() -> list[str]:
     return out
 
 
+def lane_body_id(lane: Lane) -> str:
+    """The lane id without the execution axis (verdict/declaration token)."""
+    body = f"{lane.weights}-{lane.activation}"
+    if lane.scale:
+        body += f"-{lane.scale}"
+    return body
+
+
+def known_lane_bodies() -> list[str]:
+    """Every concrete lane BODY token, ranked (table order). These are the
+    valid `handles=` declaration tokens (th#1050) — execution axis excluded:
+    author kernels declare the quant scheme, the platform owns eager/compiled."""
+    return [
+        lane_body_id(Lane(weights=w, activation=a, scale=s, execution=EXEC_EAGER))
+        for w, a, s in _KNOWN_BODIES
+    ]
+
+
 def valid_lane(lane: Lane) -> bool:
     if lane.execution not in (EXEC_EAGER, EXEC_COMPILED):
         return False
@@ -219,7 +237,9 @@ __all__ = [
     "WEIGHTS_SVDQ_INT4",
     "family_of",
     "is_w8a8_flavor",
+    "known_lane_bodies",
     "known_lanes",
+    "lane_body_id",
     "lane_id",
     "lane_of_binding",
     "parse_lane",

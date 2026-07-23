@@ -212,6 +212,47 @@ def _validate_function_regimes(
     return _validate_regime_tuple(owner, regimes)
 
 
+def _validate_handles(owner: str, handles: Any) -> Tuple[str, ...]:
+    """th#1050 opt-in lane declaration: `handles=["fp8-w8a8-dynamic"]` marks
+    that this endpoint's code BRANCHES on the executing lane (ctx.lane) —
+    behavioral divergence only, never inventory. Tokens are concrete lane
+    BODIES (no `+eager|+compiled`: execution is platform-managed). Nothing
+    declared = fully platform-managed lanes, exactly as before."""
+    from ..models import lanes as lanespec
+
+    if handles is None:
+        return ()
+    if isinstance(handles, str) or not isinstance(handles, (list, tuple)):
+        raise TypeError(
+            f"@endpoint {owner}: handles= must be a list/tuple of lane body "
+            f"strings, got {type(handles).__name__}"
+        )
+    known = lanespec.known_lane_bodies()
+    out: list[str] = []
+    for token in handles:
+        t = str(token or "").strip().lower()
+        if "+" in t:
+            raise ValueError(
+                f"@endpoint {owner}: handles= token {token!r} carries an "
+                "execution axis; declare the lane body (execution is "
+                "platform-managed)"
+            )
+        if t in lanespec.FAMILIES:
+            raise ValueError(
+                f"@endpoint {owner}: handles= token {token!r} is a coarse "
+                f"family; declare a concrete lane body (one of {known})"
+            )
+        if t not in known:
+            raise ValueError(
+                f"@endpoint {owner}: handles= token {token!r} is not a known "
+                f"lane body (known: {known})"
+            )
+        if t in out:
+            raise ValueError(f"@endpoint {owner}: handles= repeats {token!r}")
+        out.append(t)
+    return tuple(out)
+
+
 class Compile(msgspec.Struct, frozen=True):
     """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
 
@@ -324,6 +365,9 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # th#1017: per-handler declared regimes, attr_name -> (regime, ...).
     # Function-shaped endpoints key their single handler under "".
     regimes: Mapping[str, Tuple[str, ...]] = msgspec.field(default_factory=dict)
+    # th#1050: opt-in declared lane bodies this endpoint's code branches on
+    # (ctx.lane). Empty = platform-managed behavior only.
+    handles: Tuple[str, ...] = ()
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -577,6 +621,7 @@ def _decorate_class(
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
+    handles: Optional[Any] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -597,6 +642,7 @@ def _decorate_class(
         regimes=_validate_class_regimes(
             cls.__name__, regimes, {attr for attr, _ in handlers}
         ),
+        handles=_validate_handles(cls.__name__, handles),
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -622,6 +668,7 @@ def _decorate_function(
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
+    handles: Optional[Any] = None,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
@@ -653,6 +700,7 @@ def _decorate_function(
         runtime=None, name=(name or fn.__name__), is_function=True,
         compile=compile, child_calls=child_calls,
         regimes={"": _validate_function_regimes(fn.__name__, regimes)},
+        handles=_validate_handles(fn.__name__, handles),
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -675,6 +723,7 @@ def endpoint(
     child_calls: bool = ...,
     warmup: Optional[WarmupDecl] = ...,
     regimes: Optional[RegimesDecl] = ...,
+    handles: Optional[Any] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -691,6 +740,7 @@ def endpoint(
     child_calls: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
+    handles: Optional[Any] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -723,12 +773,14 @@ def endpoint(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, compile=compile,
                 child_calls=child_calls, warmup=warmup, regimes=regimes,
+                handles=handles,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, name=name, compile=compile,
                 child_calls=child_calls, warmup=warmup, regimes=regimes,
+                handles=handles,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
