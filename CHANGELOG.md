@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.50.2 (2026-07-23)
+
+- **th#1055: desired-hot warm works on slot-only endpoints; failures are
+  loud.** `ensure_desired_instance` demanded the instance's binding set
+  equal `spec.models`, but deploy-bound Slots (ie#524/th#980) carry no code
+  default so `spec.models` is empty on every fleet endpoint — every hub hot
+  intent (gw#587 self-mint prewarm, th#912 slot-default seeding, #567
+  compile-cell reload) was refused with a ValidationError swallowed as one
+  pod-local warning: no warmup, no self-mint, w8a8 fence never opened
+  (qwen/sdxl/ltx serving deadlocks), precompiled cells never armed.
+  Validation now accepts exactly the declared slots (code defaults may fill
+  their own), declared-space bindings remap through the HelloAck precision
+  picks (th#697 contract), and every desired-instance failure — including
+  pre-setup refusals — emits MODEL_STATE_FAILED for the instance refs so a
+  stalled warm is fleet-visible.
+
 ## 0.50.1 (2026-07-23)
 
 - **pgw#626 / th#1059 twin: mandatory-lane admission follows the hub-resolved

@@ -3396,51 +3396,96 @@ class Executor:
         desired: "pb.DesiredInstance",
         snapshots: Dict[str, "pb.Snapshot"],
     ) -> None:
-        """Best-effort warm of one declarative, fully bound instance."""
-        spec = self.specs.get(desired.function_name)
-        if spec is None:
-            raise ValidationError(f"unknown function {desired.function_name!r}")
-        if spec.cls is None:
-            raise ValidationError(
-                f"function {desired.function_name!r} has no persistent instance to warm"
-            )
+        """Best-effort warm of one declarative, fully bound instance.
 
-        pairs = [(m.slot.strip(), m.ref.strip()) for m in desired.models]
-        bindings = dict(pairs)
-        expected = set(spec.models)
-        if any(not slot or not ref for slot, ref in pairs):
-            raise ValidationError(
-                f"desired instance {desired.function_name!r} has an empty slot or ref"
-            )
-        if len(bindings) != len(pairs) or set(bindings) != expected:
-            raise ValidationError(
-                f"desired instance {desired.function_name!r} must bind exactly "
-                f"{sorted(expected)!r}; got {sorted(bindings)!r}"
-            )
-
-        run = pb.RunJob(function_name=desired.function_name, models=desired.models)
-        effective = self._effective_spec(spec, run)
-        resolved = {slot: wire_ref(binding) for slot, binding in effective.models.items()}
-        if resolved != bindings:
-            raise ValidationError(
-                f"desired instance {desired.function_name!r} does not match the "
-                "worker's resolved bindings"
-            )
+        Every failure — including a binding-shape refusal before setup —
+        emits MODEL_STATE_FAILED for the instance's refs (th#1055: the old
+        pre-setup ValidationErrors were pod-local only, so a refused hot
+        intent stalled the worker fleet-invisibly forever)."""
+        instance_refs = [
+            r for r in dict.fromkeys(m.ref.strip() for m in desired.models) if r
+        ]
         try:
-            await self.ensure_setup(effective, snapshots)
+            spec = self.specs.get(desired.function_name)
+            if spec is None:
+                raise ValidationError(
+                    f"unknown function {desired.function_name!r}")
+            await self._ensure_desired_instance_validated(spec, desired, snapshots)
         except Exception as exc:
             # Host-RAM admission already emitted the precise largest staged
             # ref(s) that caused the capacity failure. Do not overwrite that
             # signal by failing smaller shared refs such as an SDXL VAE.
             if not isinstance(exc, InsufficientHostRamError):
                 error = _model_failure_vocab(exc)
-                for ref in dict.fromkeys(bindings.values()):
+                for ref in instance_refs:
                     await self._send(pb.WorkerMessage(
                         model_event=self.store.model_event(
                             ref, pb.MODEL_STATE_FAILED, error=error,
                         )
                     ))
             raise
+
+    async def _ensure_desired_instance_validated(
+        self,
+        spec: EndpointSpec,
+        desired: "pb.DesiredInstance",
+        snapshots: Dict[str, "pb.Snapshot"],
+    ) -> None:
+        if spec.cls is None:
+            raise ValidationError(
+                f"function {desired.function_name!r} has no persistent instance to warm"
+            )
+        # th#697/hello_ack contract: hot bindings may arrive in DECLARED ref
+        # space; remap through the hub's precision picks so the warm instance
+        # derives the SAME per-pick key a laddered dispatch derives.
+        remapped: List[pb.ModelBinding] = []
+        for m in desired.models:
+            binding = pb.ModelBinding()
+            binding.CopyFrom(m)
+            binding.slot = m.slot.strip()
+            ref = m.ref.strip()
+            pick = self._model_resolutions.get(ref)
+            if pick is not None and pick[0]:
+                ref = pick[0]
+            binding.ref = ref
+            remapped.append(binding)
+        pairs = [(m.slot, m.ref) for m in remapped]
+        bindings = dict(pairs)
+        if any(not slot or not ref for slot, ref in pairs):
+            raise ValidationError(
+                f"desired instance {desired.function_name!r} has an empty slot or ref"
+            )
+        # th#1055: deploy-bound Slots (ie#524/th#980) carry NO code default,
+        # so spec.models does not name them — demanding set-equality against
+        # spec.models refused EVERY hot intent on slot-only endpoints. The
+        # instance must cover exactly the declared slots, where a missing
+        # slot is acceptable only when a code default can fill it (the same
+        # fallback dispatch uses).
+        declared = set(spec.models) | set(spec.slots)
+        undeclared = sorted(set(bindings) - declared)
+        unbound = sorted(
+            s for s in declared if s not in bindings and s not in spec.models
+        )
+        if len(bindings) != len(pairs) or undeclared or unbound:
+            raise ValidationError(
+                f"desired instance {desired.function_name!r} must bind the "
+                f"declared slots {sorted(declared)!r} (code defaults exist for "
+                f"{sorted(spec.models)!r}); got {sorted(bindings)!r}"
+            )
+
+        run = pb.RunJob(function_name=desired.function_name, models=remapped)
+        effective = self._effective_spec(spec, run)
+        mismatched = {
+            slot: wire_ref(effective.models[slot])
+            for slot, ref in bindings.items()
+            if slot in effective.models and wire_ref(effective.models[slot]) != ref
+        }
+        if mismatched:
+            raise ValidationError(
+                f"desired instance {desired.function_name!r} does not match the "
+                f"worker's resolved bindings: {mismatched!r}"
+            )
+        await self.ensure_setup(effective, snapshots)
 
     def _job_pin_refs(self, spec: EndpointSpec, slots: List[str]) -> List[str]:
         """Wire refs a job pins for its whole lifetime: every routed slot
