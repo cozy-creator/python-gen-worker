@@ -113,20 +113,51 @@ def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_cell_selection_bug_propagates_untouched(monkeypatch, tmp_path):
-    """th#883 receipt invariant: a self-requested, identity-verified cell
-    that refuses to arm is a BUG — self-mint must never mask it by
-    re-minting over it. Revert-turns-red for the invariant."""
+def test_cell_selection_bug_reports_and_self_mints(monkeypatch, tmp_path):
+    """th#1031: a self-requested, identity-verified cell that refuses to
+    arm is still a BUG — reported to the caller via ``ArmOutcome.
+    selection_bug`` (unchanged wire visibility) — but no longer aborts
+    arming. cell_key has no graph-shape axis, so two structurally different
+    graphs can legitimately collide on one key; a worker stuck retrying the
+    identical unusable cell forever is worse than a loud report + recovery.
+    This call falls through to self-mint exactly like an ordinary miss."""
+    bug = cc.CellSelectionBugError("self-requested cell refused to arm")
+
+    def _raise(*a, **k):
+        raise bug
+
+    _mintable(monkeypatch)
+    monkeypatch.setattr(provision, "enable_compiled", _raise)
+
+    outcome = fc.enable_compiled(
+        _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
+    assert outcome.armed
+    assert isinstance(outcome.self_mint, fc.PendingSelfMint)
+    assert outcome.selection_bug is bug
+
+
+def test_cell_selection_bug_still_fail_closed_when_mint_impossible(
+    monkeypatch, tmp_path,
+):
+    """A caught selection bug does not weaken the quantized-lane refusal at
+    a GENUINE mint impossibility (no CUDA here) — the typed refusal still
+    raises, chained from the selection bug so the report is never dropped."""
 
     def _raise(*a, **k):
         raise cc.CellSelectionBugError("self-requested cell refused to arm")
 
     monkeypatch.setattr(provision, "enable_compiled", _raise)
+    monkeypatch.setattr(fc, "_cuda_ready", lambda: False)
+
+    class _W8A8Pipe(_Pipe):
+        pass
+
     monkeypatch.setattr(
-        cc, "begin_fleet_mint",
-        lambda *a, **k: pytest.fail("selection bug must never open a capture"))
-    with pytest.raises(cc.CellSelectionBugError):
-        fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
+        "gen_worker.models.loading.pipeline_weight_lane", lambda pipe: "w8a8")
+    with pytest.raises(cc.CompiledLaneUnavailableError) as exc:
+        fc.enable_compiled(
+            _W8A8Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
+    assert isinstance(exc.value.__cause__, cc.CellSelectionBugError)
 
 
 def test_miss_arms_pending_capture_without_packing_or_publishing(

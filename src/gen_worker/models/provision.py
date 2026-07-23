@@ -246,6 +246,10 @@ class _ArmingContext:
     # id(pipe) -> self-mint identity (fleet_cells.SelfMint) for pipes the
     # scope's policy armed from their OWN mint rather than a delivered cell.
     self_mints: dict[int, Any]
+    # id(pipe) -> caught CellSelectionBugError (th#1031): the fleet policy
+    # no longer raises this (it self-mints instead), so the executor reads
+    # it here to still send the loud th#883 wire event after setup() returns.
+    selection_bugs: dict[int, Any]
 
 
 _ARMING_CTX: "contextvars.ContextVar[Optional[_ArmingContext]]" = contextvars.ContextVar(
@@ -269,6 +273,7 @@ class ArmingScope:
     ) -> None:
         self._objects: list[tuple[Any, bool]] = []
         self._self_mints: dict[int, Any] = {}
+        self._selection_bugs: dict[int, Any] = {}
         self._value = (
             _ArmingContext(
                 compile=compile,
@@ -277,6 +282,7 @@ class ArmingScope:
                 objects=self._objects,
                 enable=enable,
                 self_mints=self._self_mints,
+                selection_bugs=self._selection_bugs,
             )
             if compile is not None else None
         )
@@ -301,6 +307,12 @@ class ArmingScope:
     def self_mints(self) -> dict[int, Any]:
         """``id(pipe) -> SelfMint`` for scope pipes armed from their own mint."""
         return dict(self._self_mints)
+
+    @property
+    def selection_bugs(self) -> dict[int, Any]:
+        """``id(pipe) -> CellSelectionBugError`` caught (and recovered from
+        via self-mint) for scope pipes, th#1031."""
+        return dict(self._selection_bugs)
 
 
 def arm_compile(pipe: Any) -> bool:
@@ -337,6 +349,9 @@ def arm_compile(pipe: Any) -> bool:
     mint = getattr(outcome, "self_mint", None)
     if mint is not None:
         ctx.self_mints[id(pipe)] = mint
+    bug = getattr(outcome, "selection_bug", None)
+    if bug is not None:
+        ctx.selection_bugs[id(pipe)] = bug
     ctx.objects.append((pipe, armed))
     return armed
 
