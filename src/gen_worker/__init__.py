@@ -16,6 +16,7 @@ subclass from ``@endpoint(kind=...)`` before dispatch.
 from . import io
 from .api.binding import Civitai, HF, Hub, ModelRef, ModelScope
 from .api.decorators import Compile, NoWarmup, Resources, endpoint, variant_of
+from .api.formula import RuntimeFormula
 from .api.model import Model, ModelChoice, ModelDefaults
 from .api.slot import ResolvedSlot, Slot
 from .families import FamilyDefaults

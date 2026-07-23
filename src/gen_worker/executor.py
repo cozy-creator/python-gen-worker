@@ -368,6 +368,19 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
 
 
+def _runtime_term_values(spec: Any, payload: Any) -> "Optional[Dict[str, float]]":
+    """th#1051: evaluate the declared runtime formula's terms on the EXECUTED
+    payload (defaults already applied by msgspec decode). None = undeclared
+    or unevaluable — the hub then evaluates from the raw payload itself."""
+    rf = getattr(spec, "runtime_formula", None)
+    if rf is None:
+        return None
+    try:
+        return rf.term_values_from_struct(payload)
+    except Exception:
+        return None
+
+
 def _scan_output_assets(output: Any) -> Tuple[float, int]:
     """One walk over the job output: (summed MEDIA seconds, count of output
     ``Asset``s). Billing sources for ``per_output_second`` (th#572) and
@@ -6798,7 +6811,8 @@ class Executor:
                             self._adapters.deactivate, ref, pipe, run.request_id
                         )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
-                                    output=output, lane=job.lane)
+                                    output=output, lane=job.lane,
+                                    runtime_terms=_runtime_term_values(spec, payload))
             handler_done = time.monotonic()
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
@@ -7276,6 +7290,7 @@ class Executor:
     def _metrics(
         self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int,
         output: Any = None, lane: str = "",
+        runtime_terms: "Optional[Dict[str, float]]" = None,
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
         # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
@@ -7304,6 +7319,9 @@ class Executor:
             input_cached_tokens=usage.cached_tokens if usage is not None else 0,
             output_tokens=usage.completion_tokens if usage is not None else 0,
             lane=lane,
+            # th#1051: declared-formula term features from the EXECUTED
+            # payload (defaults applied); empty = no declared formula.
+            runtime_terms=runtime_terms or {},
         )
 
     async def _send_result(

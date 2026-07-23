@@ -579,7 +579,14 @@ class JobResult(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
-    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane")
+    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms")
+    class RuntimeTermsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: float
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[float] = ...) -> None: ...
     RUNTIME_MS_FIELD_NUMBER: _ClassVar[int]
     QUEUE_MS_FIELD_NUMBER: _ClassVar[int]
     RSS_AT_END_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -593,6 +600,7 @@ class JobMetrics(_message.Message):
     SLOT_HELD_MS_FIELD_NUMBER: _ClassVar[int]
     FINALIZE_WALL_MS_FIELD_NUMBER: _ClassVar[int]
     LANE_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_TERMS_FIELD_NUMBER: _ClassVar[int]
     runtime_ms: int
     queue_ms: int
     rss_at_end_bytes: int
@@ -606,7 +614,8 @@ class JobMetrics(_message.Message):
     slot_held_ms: int
     finalize_wall_ms: int
     lane: str
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ...) -> None: ...
+    runtime_terms: _containers.ScalarMap[str, float]
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ...) -> None: ...
 
 class JobProgress(_message.Message):
     __slots__ = ("request_id", "attempt", "seq", "data", "content_type")
