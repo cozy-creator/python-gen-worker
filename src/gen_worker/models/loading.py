@@ -1178,6 +1178,7 @@ def load_from_pretrained(
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
     declared_vram_gb: float = 0.0,
+    allow_bf16_resident_upgrade: bool = True,
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
@@ -1315,9 +1316,12 @@ def load_from_pretrained(
     fp8_storage = storage_dtype in ("fp8", "fp8+te") or sniffed == "fp8"
     fp8_text_encoders = storage_dtype == "fp8+te"
     bf16_resident = False
-    if fp8_storage and bf16_resident_fits(
+    # th#1043: a joint multi-lane fit decision (force_storage_dtype) budgets
+    # free VRAM for SIBLING lanes too — the single-lane resident-upcast
+    # check below would greedily un-force it and re-starve the group.
+    if (allow_bf16_resident_upgrade and fp8_storage and bf16_resident_fits(
             Path(path), text_encoders=fp8_text_encoders,
-            declared_vram_gb=declared_vram_gb):
+            declared_vram_gb=declared_vram_gb)):
         # gw#534 rung 2: fp8 download, bf16 resident — skip the cast hooks
         # (never voluntary W8A16); from_pretrained's torch_dtype upcasts once.
         fp8_storage = False

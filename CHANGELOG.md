@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.48.1 (2026-07-23)
+
+- **th#1043 second layer: a forced group-fit fp8 survives the gw#534
+  bf16-resident upcast.** Found live on the first 0.48.0 pod: the joint
+  group decision forced fp8, but `load_from_pretrained`'s single-lane
+  resident-upcast check saw the FIRST lane fitting current free VRAM and
+  silently upgraded it back to bf16 residency — re-starving the sibling
+  lane into the refused offload placement. `force_storage_dtype` now
+  disables the local upgrade (`allow_bf16_resident_upgrade=False`): the
+  headroom belongs to the group, not the first lane to load.
+
 ## 0.48.0 (2026-07-23)
 
 - **th#1043: joint precision fit for shared-component multi-lane loads.**

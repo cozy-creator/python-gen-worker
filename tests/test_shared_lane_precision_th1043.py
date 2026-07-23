@@ -52,3 +52,49 @@ def test_single_lane_group_never_forces():
 
 def test_no_shared_components_never_forces():
     assert _shared_lanes_need_fp8(_QWEN_SIZES, [], 1 * _GiB) is False
+
+
+# ---------------------------------------------------------------------------
+# th#1043 second layer (found live, pod 4xh4m999n26u5f): the gw#534
+# bf16-resident upcast made a SINGLE-lane fit call against current free VRAM
+# and silently un-forced the group's fp8 decision — the first lane loaded
+# full bf16 again and re-starved its sibling. A forced group fit must
+# disable the local upgrade.
+# ---------------------------------------------------------------------------
+
+
+def test_forced_group_fp8_survives_the_resident_upcast_check(tmp_path, monkeypatch):
+    import pytest
+
+    pytest.importorskip("torch")
+    pytest.importorskip("diffusers")
+    pytest.importorskip("accelerate")
+    from diffusers import DDPMPipeline, DDPMScheduler, UNet2DModel
+
+    from gen_worker.models import loading
+    from gen_worker.models.provision import load_slot
+
+    root = tmp_path / "src"
+    unet = UNet2DModel(
+        sample_size=8, in_channels=3, out_channels=3,
+        block_out_channels=(32, 32), layers_per_block=1,
+        down_block_types=("DownBlock2D", "AttnDownBlock2D"),
+        up_block_types=("AttnUpBlock2D", "UpBlock2D"), norm_num_groups=8,
+    )
+    DDPMPipeline(unet=unet, scheduler=DDPMScheduler()).save_pretrained(str(root))
+
+    # A card with plenty of free VRAM for ONE lane: the single-lane check
+    # says "upgrade to bf16-resident".
+    monkeypatch.setattr(loading, "bf16_resident_fits", lambda *a, **k: True)
+
+    # Unforced fp8: the upgrade applies (existing gw#534 behavior).
+    sl = load_slot(DDPMPipeline, str(root), slot="t2i", device="cpu",
+                   binding=type("B", (), {"dtype": "", "storage_dtype": "fp8"})())
+    assert getattr(sl.obj, "_cozy_weight_lane", "") == "bf16-resident"
+
+    # Forced group fp8 (th#1043): the upgrade must NOT fire — fp8 storage
+    # hooks stay armed so sibling lanes keep their budgeted headroom.
+    sl = load_slot(DDPMPipeline, str(root), slot="t2i", device="cpu",
+                   force_storage_dtype="fp8")
+    assert getattr(sl.obj, "_cozy_weight_lane", "") != "bf16-resident"
+    assert getattr(sl.obj, "_cozy_fp8_storage_requested", False) is True
