@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.48.0 (2026-07-23)
+
+- **th#1043: joint precision fit for shared-component multi-lane loads.**
+  A `gw#479` shared-component multi-lane record (e.g. qwen-image's t2i/edit
+  lanes: a shared text encoder + VAE, an exclusive transformer per lane)
+  decided each lane's resident precision reactively, one lane at a time,
+  against whatever free VRAM happened to be measured at that moment. The
+  first lane to load could consume all headroom at native precision,
+  starving a sibling shared lane into an offload placement the shared-
+  component invariant then refused outright (`RetryableError:
+  shared-component lanes require resident placement`). Precision for the
+  whole shared-component group is now decided jointly, against its
+  combined footprint (shared components counted once), before any lane
+  loads — every lane in a starved group forces fp8 storage together
+  instead of one lane greedily grabbing headroom another lane needs.
+
 ## 0.47.0 (2026-07-23)
 
 - **th#1031: `cell_selection_bug` recovers via self-mint instead of
