@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.48.2 (2026-07-23)
+
+- **th#1043: the forced group-fit fp8 downgrade reports structurally.**
+  A joint shared-lane fit that forces fp8 storage now stamps the same
+  rung outcome as the adaptive ladder (`FnDegraded` wanted=bf16
+  ran=fp8_storage) instead of serving a silent precision downgrade the
+  hub believes is native bf16.
+
 ## 0.48.1 (2026-07-23)
 
 - **th#1043 second layer: a forced group-fit fp8 survives the gw#534
