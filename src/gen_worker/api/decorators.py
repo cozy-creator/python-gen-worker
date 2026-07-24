@@ -524,6 +524,12 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # child calls (ctx.call_endpoint / ctx.workflow_checkpoint). The hub
     # mints the invoke_child credential ONLY for declaring functions.
     child_calls: bool = False
+    # pgw#647 concurrency contract: handlers on ONE live instance run
+    # SINGLE-FLIGHT by default (one binding set = one materialized graph
+    # with mutable buffers — e.g. a resident LoRA branch; two concurrent
+    # requests would corrupt each other). ``reentrant=True`` is the explicit
+    # opt-in for classes whose handlers genuinely mutate no instance state.
+    reentrant: bool = False
     # gw#470 boot warmup: None = auto-synthesize from each handler's payload
     # schema; {method: payload-or-None} = declared warmup payloads (None
     # skips that method); NoWarmup(reason) = class-level opt-out.
@@ -846,6 +852,7 @@ def _decorate_class(
     runtime_formula: Optional[Dict[str, RuntimeFormula]] = None,
     compile: Optional[Compile] = None,
     child_calls: bool = False,
+    reentrant: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
@@ -867,6 +874,7 @@ def _decorate_class(
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=runtime, compile=compile, child_calls=child_calls,
+        reentrant=reentrant,
         warmup=_validate_warmup_decl(cls.__name__, warmup),
         regimes=_validate_class_regimes(
             cls.__name__, regimes, {attr for attr, _ in handlers}
@@ -901,12 +909,19 @@ def _decorate_function(
     name: Optional[str],
     compile: Optional[Compile] = None,
     child_calls: bool = False,
+    reentrant: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
 ) -> Callable[..., Any]:
+    if reentrant:
+        raise ValueError(
+            f"@endpoint function {fn.__name__!r}: reentrant= applies to "
+            "class endpoints only (stateless functions hold no instance "
+            "state to single-flight)."
+        )
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
     if "" in models or "" in slots:
@@ -967,6 +982,7 @@ def endpoint(
     name: Optional[str] = ...,
     compile: Optional[Compile] = ...,
     child_calls: bool = ...,
+    reentrant: bool = ...,
     warmup: Optional[WarmupDecl] = ...,
     regimes: Optional[RegimesDecl] = ...,
     handles: Optional[Any] = ...,
@@ -986,6 +1002,7 @@ def endpoint(
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
     child_calls: bool = False,
+    reentrant: bool = False,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
@@ -1025,16 +1042,16 @@ def endpoint(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=engine_runtime,
                 runtime_formula=runtime_formulas, compile=compile,
-                child_calls=child_calls, warmup=warmup, regimes=regimes,
-                handles=handles, config=config, env=env,
+                child_calls=child_calls, reentrant=reentrant, warmup=warmup,
+                regimes=regimes, handles=handles, config=config, env=env,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=engine_runtime,
                 runtime_formula=runtime_formulas, name=name, compile=compile,
-                child_calls=child_calls, warmup=warmup, regimes=regimes,
-                handles=handles, config=config, env=env,
+                child_calls=child_calls, reentrant=reentrant, warmup=warmup,
+                regimes=regimes, handles=handles, config=config, env=env,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"

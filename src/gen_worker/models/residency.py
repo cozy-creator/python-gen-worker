@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 from .memory import (
     device_mismatches,
@@ -89,6 +89,51 @@ class HostRamHeadroom:
         return self.available_bytes >= self.required_bytes
 
 
+@dataclass(frozen=True)
+class DeviceGroup:
+    """The unit of placement (pgw#648, WORKER-RESIDENCY-DESIGN "Multi-GPU").
+
+    A device-group is the set of CUDA devices one materialization may span
+    (size 1 today; a TP mesh later). VRAM accounting is PER GROUP and never
+    summed across groups — VRAM is not fungible between cards: a 3x24GB pod
+    has three 24GB pools, not one 72GB pool. One :class:`Residency` registry
+    accounts for exactly one group's pool; the future multi-group agent owns
+    one registry per executor/device-group, sharing only the disk tier.
+    """
+
+    devices: Tuple[int, ...] = (0,)
+
+    def __post_init__(self) -> None:
+        if not self.devices:
+            raise ValueError("DeviceGroup needs at least one device")
+        if len(set(self.devices)) != len(self.devices):
+            raise ValueError(f"DeviceGroup devices must be unique: {self.devices}")
+        if any(int(d) < 0 for d in self.devices):
+            raise ValueError(f"DeviceGroup devices must be >= 0: {self.devices}")
+
+    @property
+    def primary(self) -> int:
+        return self.devices[0]
+
+    def free_vram_bytes(self) -> int:
+        """Measured free VRAM across THIS group's devices only. Devices the
+        host does not actually have contribute 0 (a group is a plan; the
+        probe reports physics)."""
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return 0
+            count = int(torch.cuda.device_count())
+            return sum(
+                int(torch.cuda.mem_get_info(d)[0])
+                for d in self.devices
+                if 0 <= int(d) < count
+            )
+        except Exception:
+            return 0
+
+
 @dataclass
 class _Entry:
     ref: str
@@ -123,20 +168,11 @@ class _Entry:
         )
 
 
-def _default_free_vram_bytes() -> int:
-    """Free VRAM summed across ALL CUDA devices (multi-GPU workers spread
-    jobs across cards; a device-0-only probe under-reports)."""
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return sum(
-                int(torch.cuda.mem_get_info(i)[0])
-                for i in range(torch.cuda.device_count())
-            )
-    except Exception:
-        pass
-    return 0
+def _default_free_vram_bytes(group: Optional[DeviceGroup] = None) -> int:
+    """Free VRAM of ONE device-group (pgw#648). The previous all-device SUM
+    was the live accounting bug: a 3x24GB pod reported 72GB free and admitted
+    a 30GB model that fits on no single card."""
+    return (group or DeviceGroup()).free_vram_bytes()
 
 
 def _obj_manages_own_device(obj: Any) -> bool:
@@ -176,6 +212,43 @@ def _move_obj(obj: Any, device: str) -> None:
         to(device)
 
 
+class Lease:
+    """Admission lease (pgw#641 Stage 2): the set of refs one job needs,
+    taken BEFORE the job starts and held for its whole lifetime.
+
+    While live, every named ref is excluded from eviction/demotion victim
+    selection — including refs whose entries do not exist yet, which closes
+    the window where a freshly created entry could be demoted between its
+    ``track_vram`` and the execution-time pin. Refs not yet VRAM-resident
+    additionally carry a byte RESERVATION so concurrent admissions cannot
+    double-book the same free bytes; a reservation is consumed the moment
+    the ref actually books VRAM, and any unconsumed remainder dies with the
+    lease."""
+
+    __slots__ = ("_registry", "refs", "_released")
+
+    def __init__(self, registry: "Residency", refs: Tuple[str, ...]) -> None:
+        self._registry = registry
+        self.refs = refs
+        self._released = False
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._registry._release_lease(self)
+
+    def __enter__(self) -> "Lease":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
+
+
 class Residency:
     """LRU-tiered model registry. Thread-safe."""
 
@@ -186,11 +259,16 @@ class Residency:
         vram_budget_bytes: Optional[int] = None,
         free_vram_bytes_fn: Optional[Callable[[], int]] = None,
         move_fn: Callable[[Any, str], None] = _move_obj,
+        device_group: Optional[DeviceGroup] = None,
     ) -> None:
         self._on_event = on_event
         self._vram_budget = vram_budget_bytes
         self._free_vram_fn = free_vram_bytes_fn
         self._move = move_fn
+        # The one device-group whose VRAM pool this registry accounts for
+        # (pgw#648). Admission, make_room and the free probe all speak this
+        # group; nothing here ever sums VRAM across groups.
+        self.device_group = device_group or DeviceGroup()
         # Called with (ref, obj) before a VRAM->RAM demotion moves the object
         # (executor wires adapter detach here, gw#399). Must never raise.
         self.pre_demote: Optional[Callable[[str, Any], None]] = None
@@ -198,6 +276,13 @@ class Residency:
         self._lock = threading.RLock()
         self._shared_hits = 0
         self._shared_misses = 0
+        # Admission leases (pgw#641 Stage 2). Live lease objects, plus a
+        # per-ref map of outstanding byte reservations: ref -> {lease id ->
+        # reserved bytes}. The outstanding claim for a ref is the MAX across
+        # leases (two jobs cold-needing the same ref share ONE future load),
+        # and it is consumed by the ref's actual track_vram booking.
+        self._leases: Dict[int, Lease] = {}
+        self._ref_reservations: Dict[str, Dict[int, int]] = {}
         log_ram_budget_once(floor_gb=_effective_ram_floor_gb())
 
     # ---- events -------------------------------------------------------------
@@ -219,7 +304,7 @@ class Residency:
             return max(0, int(self._vram_budget) - used)
         if self._free_vram_fn is not None:
             return int(self._free_vram_fn())
-        return _default_free_vram_bytes()
+        return _default_free_vram_bytes(self.device_group)
 
     def host_ram_headroom(self, needed_bytes: int) -> HostRamHeadroom:
         """Observed capacity for one incoming host-staged model load."""
@@ -377,6 +462,9 @@ class Residency:
             if pinned:
                 e.pinned = True
             e.last_used = time.monotonic()
+            # The booked bytes are now IN the measured pool — any admission
+            # reservation for this ref is satisfied, not outstanding.
+            self._consume_reservation_locked(ref)
         self._emit(ref, IN_VRAM, max(0, measured))
 
     def demote(self, ref: str) -> bool:
@@ -389,6 +477,8 @@ class Residency:
             e = self._entries.get(ref)
             if e is None or e.tier is not Tier.VRAM or e.pinned or e.refcount > 0:
                 return False
+            if self._leased_locked(ref):
+                return False  # an admitted job needs it (pgw#641 Stage 2)
             if not e.movable:
                 return False
             # Size-aware RAM floor (gw#407): demoting a pipeline of size X
@@ -513,7 +603,7 @@ class Residency:
             # pipelines into ~2GB free and OOMed mid-move, gw#409).
             hint = int(estimate_pipeline_size_gb(obj) * _GiB)
         t0 = time.monotonic()  # swap wall incl. the make_room demote (gw#479)
-        if not self.make_room(hint):
+        if not self.make_room(hint, for_refs=(ref,)):
             # Refuse FAST instead of paying a doomed multi-GB partial move +
             # rollback (gw#551). Gate on the hard physical minimum — actual
             # weight bytes — never the bookkeeping hint (which can inflate
@@ -550,7 +640,7 @@ class Residency:
             e = self._entries.get(ref)
             if e is None:
                 return False
-            if e.refcount > 0 or e.holders > 0:
+            if e.refcount > 0 or e.holders > 0 or self._leased_locked(ref):
                 return False
             was_loaded = e.tier in (Tier.VRAM, Tier.RAM)
             e.obj = None
@@ -574,7 +664,7 @@ class Residency:
             e = self._entries.get(ref)
             if e is None:
                 return False
-            if (e.refcount > 0 or e.holders > 0) and not force:
+            if (e.refcount > 0 or e.holders > 0 or self._leased_locked(ref)) and not force:
                 return False
             was_loaded = e.tier in (Tier.VRAM, Tier.RAM)
             del self._entries[ref]
@@ -608,7 +698,106 @@ class Residency:
     def in_use(self, ref: str) -> bool:
         with self._lock:
             e = self._entries.get(ref)
-            return bool(e and e.refcount > 0)
+            return bool(e and e.refcount > 0) or self._leased_locked(ref)
+
+    # ---- admission leases (pgw#641 Stage 2) -----------------------------------
+
+    def _leased_locked(self, ref: str) -> bool:
+        return bool(self._ref_leases.get(ref))
+
+    @property
+    def _ref_leases(self) -> Dict[str, set]:
+        # Derived view: ref -> live lease ids naming it. Small (few in-flight
+        # jobs x few refs); rebuilt on demand to keep one source of truth.
+        view: Dict[str, set] = {}
+        for lid, lease in self._leases.items():
+            for ref in lease.refs:
+                view.setdefault(ref, set()).add(lid)
+        return view
+
+    def _outstanding_reserved_bytes(self, exclude_refs: frozenset = frozenset()) -> int:
+        total = 0
+        for ref, by_lease in self._ref_reservations.items():
+            if ref in exclude_refs or not by_lease:
+                continue
+            total += max(by_lease.values())
+        return total
+
+    def admit(self, sizes: Mapping[str, int]) -> Lease:
+        """Take an admission lease over one job's refs (pgw#641 Stage 2).
+
+        ``sizes`` maps ref -> expected VRAM bytes (0 = unknown; the ref is
+        still lease-protected, it just books no reservation). Admission never
+        REFUSES here — the adaptive-fit ladder downstream absorbs genuine
+        overcommit — but from this moment on (a) no eviction/demotion path
+        may pick any named ref as a victim, and (b) concurrent admissions
+        see the not-yet-loaded bytes as claimed (:meth:`fits`,
+        :meth:`make_room`), so two jobs can no longer book the same free
+        bytes and OOM each other mid-load."""
+        with self._lock:
+            lease = Lease(self, tuple(dict.fromkeys(str(r) for r in sizes if str(r))))
+            lid = id(lease)
+            self._leases[lid] = lease
+            for ref in lease.refs:
+                expect = max(0, int(sizes.get(ref, 0) or 0))
+                e = self._entries.get(ref)
+                if e is not None and e.tier is Tier.VRAM:
+                    continue  # already booked in the pool; nothing to claim
+                if e is not None and expect <= 0:
+                    expect = e.vram_hint
+                if expect > 0:
+                    self._ref_reservations.setdefault(ref, {})[lid] = expect
+                if e is not None:
+                    e.last_used = time.monotonic()
+            return lease
+
+    def _release_lease(self, lease: Lease) -> None:
+        with self._lock:
+            lid = id(lease)
+            self._leases.pop(lid, None)
+            for ref in lease.refs:
+                by_lease = self._ref_reservations.get(ref)
+                if by_lease is not None:
+                    by_lease.pop(lid, None)
+                    if not by_lease:
+                        del self._ref_reservations[ref]
+
+    def _consume_reservation_locked(self, ref: str) -> None:
+        """The ref's bytes just became real (track_vram) — its future claim
+        is no longer outstanding for ANY lease."""
+        self._ref_reservations.pop(ref, None)
+
+    def fits(self, sizes: Mapping[str, int]) -> bool:
+        """Cheap honest admission query: could this ref set be served now —
+        counting measured free VRAM, minus other jobs' outstanding claims,
+        plus what LRU demotion of unprotected entries could reclaim. Read
+        only; takes nothing."""
+        with self._lock:
+            needed = 0
+            for ref, expect in sizes.items():
+                e = self._entries.get(str(ref))
+                if e is not None and e.tier is Tier.VRAM:
+                    continue
+                size = max(0, int(expect or 0))
+                if size <= 0 and e is not None:
+                    size = e.vram_hint
+                needed += size
+            if needed <= 0:
+                return True
+            reserved = self._outstanding_reserved_bytes(
+                exclude_refs=frozenset(str(r) for r in sizes))
+            ref_leases = self._ref_leases
+            reclaimable = sum(
+                e.vram_bytes for e in self._entries.values()
+                if e.tier is Tier.VRAM and e.movable and not e.pinned
+                and e.refcount <= 0 and not ref_leases.get(e.ref)
+            )
+        available = self.free_vram_bytes() - reserved + reclaimable
+        return needed + _VRAM_MARGIN_BYTES <= available
+
+    def leased_refs(self) -> List[str]:
+        with self._lock:
+            return sorted(self._ref_leases)
 
     # ---- pressure -------------------------------------------------------------
 
@@ -620,36 +809,54 @@ class Residency:
         every sibling a re-promote, so exclusive entries (per-pick UNets,
         single-holder components) always go first."""
         with self._lock:
+            ref_leases = self._ref_leases
             candidates = [
                 e for e in self._entries.values()
                 if e.tier is Tier.VRAM and not e.pinned and e.refcount <= 0
+                and not ref_leases.get(e.ref)
             ]
             candidates.sort(key=lambda e: (1 if e.holders >= 2 else 0, e.last_used))
             return [e.ref for e in candidates]
 
-    def make_room(self, needed_bytes: int) -> bool:
+    def make_room(
+        self, needed_bytes: int, *, for_refs: Iterable[str] = (),
+    ) -> bool:
         """Demote LRU VRAM entries until measured free VRAM covers
         ``needed_bytes`` + margin. True when the headroom was reached.
         Only movable entries are demoted here; when this returns False the
-        caller (executor) tears down non-movable LRU victims itself."""
+        caller (executor) tears down non-movable LRU victims itself.
+
+        Free bytes CLAIMED by other admissions' outstanding reservations
+        (pgw#641 Stage 2) do not count as available; ``for_refs`` names the
+        refs this call is making room FOR, whose own reservations are the
+        very demand being satisfied and are therefore excluded."""
+        exclude = frozenset(str(r) for r in for_refs)
+
+        def _headroom() -> int:
+            with self._lock:
+                reserved = self._outstanding_reserved_bytes(exclude_refs=exclude)
+            return self.free_vram_bytes() - reserved
+
         target = int(needed_bytes) + _VRAM_MARGIN_BYTES
-        if self.free_vram_bytes() >= target:
+        if _headroom() >= target:
             return True
         for ref in self.lru_vram_victims():
             if not self.demote(ref):
                 continue
             logger.info("residency: demoted LRU %s for %d bytes headroom", ref, needed_bytes)
-            if self.free_vram_bytes() >= target:
+            if _headroom() >= target:
                 return True
-        return self.free_vram_bytes() >= target
+        return _headroom() >= target
 
     def lru_ram_victims(self) -> List[str]:
         """Droppable warm RAM-tier refs, LRU first (pinned/executing excluded)."""
         with self._lock:
+            ref_leases = self._ref_leases
             candidates = [
                 e for e in self._entries.values()
                 if e.tier is Tier.RAM and e.obj is not None
                 and not e.pinned and e.refcount <= 0 and e.holders <= 0
+                and not ref_leases.get(e.ref)
             ]
             candidates.sort(key=lambda e: e.last_used)
             return [e.ref for e in candidates]
@@ -864,6 +1071,8 @@ class LoadedComponentKey:
 __all__ = [
     "Residency",
     "Tier",
+    "DeviceGroup",
+    "Lease",
     "HostRamHeadroom",
     "LoadedComponentKey",
     "content_set_digest",

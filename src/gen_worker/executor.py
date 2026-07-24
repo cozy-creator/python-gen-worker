@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 import gc
 import itertools
 import logging
@@ -22,7 +23,7 @@ import threading
 import time
 import typing
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
@@ -2014,6 +2015,13 @@ class _ClassRecord:
     ready: bool = False
     failed: Optional[str] = None
     lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
+    # pgw#647 concurrency contract: one live instance == one binding set with
+    # mutable buffers (resident LoRA branches, adapter attach state), so
+    # handler execution on it is SINGLE-FLIGHT by default. Held across
+    # adapter activation + handler + deactivation; skipped only when the
+    # endpoint class declared ``reentrant=True``. One-job-per-GPU used to
+    # mask this; multi-GPU permits and multi-residency do not.
+    run_lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
     # Content-keyed shared components this record holds (gw#479): released
     # (refcount--) at vacate so the entries become LRU/drain candidates.
     shared_keys: List[Any] = dc_field(default_factory=list)
@@ -4011,6 +4019,28 @@ class Executor:
             + shared_ids
         ))
 
+    def _job_admission_sizes(
+        self, spec: EndpointSpec, slots: List[str], run: "pb.RunJob",
+    ) -> Dict[str, int]:
+        """ref -> expected VRAM bytes for one job's admission lease (pgw#641
+        Stage 2). Same ref set as :meth:`_job_pin_refs`; bytes follow the
+        pgw#636 ask ladder — a prior MEASURED hint wins, else the dispatch's
+        own snapshot byte total (honest for a never-seen pick), else the
+        banked snapshot's total, else 0 (lease-protected, no reservation)."""
+        res = self.store.residency
+        run_snapshots = dict(run.snapshots) if run.snapshots else {}
+
+        def _expect(ref: str) -> int:
+            hint = res.vram_hint(ref)
+            if hint > 0:
+                return hint
+            snap = run_snapshots.get(ref)
+            if snap is not None:
+                return sum(int(f.size_bytes) for f in snap.files)
+            return sum(self.store.component_sizes(ref).values())
+
+        return {ref: _expect(ref) for ref in self._job_pin_refs(spec, slots)}
+
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
         """Instance-group record for ``spec``, created on first sight for
         DERIVED (per-pick) specs. Never removed: records are tiny and the
@@ -5839,7 +5869,10 @@ class Executor:
         # CPU-only workers do not have a VRAM tier to admit against.
         if torch is None or not torch.cuda.is_available():
             return
-        if await asyncio.to_thread(res.make_room, needed):
+        # This job's own reservations are the demand being satisfied here —
+        # exclude them from the outstanding-claim accounting (pgw#641 Stage 2).
+        make_room = functools.partial(res.make_room, needed, for_refs=refs)
+        if await asyncio.to_thread(make_room):
             self._on_state_change()
             return
         # Movable demotions weren't enough: tear down idle records holding
@@ -5854,7 +5887,7 @@ class Executor:
             if self._record_in_use(rec, reclaim_ref=ref):
                 continue
             await self._vacate_record(rec)
-            if await asyncio.to_thread(res.make_room, needed):
+            if await asyncio.to_thread(make_room):
                 self._on_state_change()
                 return
         # No arbitrary refusal at the recommendation boundary: vram_gb names
@@ -6244,7 +6277,8 @@ class Executor:
                         excl_bytes = sum(
                             b for comp, b in sizes.items() if comp not in injected)
                         if excl_bytes > 0:
-                            await _to_thread_complete(res.make_room, excl_bytes)
+                            await _to_thread_complete(functools.partial(
+                                res.make_room, excl_bytes, for_refs=(ref,)))
                     before = self._vram_allocated()
                     try:
                         sl = await _to_thread_complete(
@@ -7492,17 +7526,21 @@ class Executor:
             await self._finish(job, status, safe_message=msg)
             return
         routed = list(spec.models)
-        # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
-        # between ensure_setup's promote and the execution-time pin let a
-        # concurrent job's make_room demote a just-promoted pipeline. Refs
-        # without entries yet are no-ops; the inner pin still covers adapters.
-        # Lane refs are NOT job-pinned (gw#551): lane dispatch is handler-side,
-        # so pinning every declared lane would make the idle sibling
-        # un-demotable and the used lane un-promotable on an overcommitted
-        # card; the LaneGate pins exactly the lane it executes, at call time.
+        # Admission lease over this job's model refs for its WHOLE lifetime
+        # (pgw#641 Stage 2, superseding the gw#409 whole-job executing() pin):
+        # from admission on, no eviction/demotion path may victim these refs —
+        # including refs whose entries do not exist yet (the executing() pin
+        # no-op'd on those, leaving a freshly created entry demotable between
+        # its track_vram and the execution-time pin) — and bytes for
+        # not-yet-loaded refs are RESERVED so concurrent admissions cannot
+        # book the same free VRAM and OOM each other mid-load. Lane refs are
+        # NOT leased (gw#551): lane dispatch is handler-side, so leasing every
+        # declared lane would make the idle sibling un-demotable and the used
+        # lane un-promotable on an overcommitted card; the LaneGate pins
+        # exactly the lane it executes, at call time.
         try:
-            with self.store.residency.executing(
-                *self._job_pin_refs(spec, routed)
+            with self.store.residency.admit(
+                self._job_admission_sizes(spec, routed, run)
             ):
                 await self._run_job_pinned(job, run, payload, routed)
         finally:
@@ -7733,46 +7771,62 @@ class Executor:
             # gate's promote against its own job's pins.
             exec_refs = self._job_pin_refs(spec, routed)
             adapter_refs = [a.ref for group in adapters.values() for a in group]
-            with self.store.residency.executing(*exec_refs, *adapter_refs):
-                active: List[Tuple[str, Any]] = []
-                try:
-                    for slot, prepared in adapters.items():
-                        pipe = self._adapter_target(spec, slot)
-                        ref = wire_ref(spec.models[slot])
-                        await asyncio.to_thread(
-                            self._adapters.activate, ref, pipe, prepared, run.request_id
-                        )
-                        active.append((ref, pipe))
-                    # Explicit activation (gw#399): a slot this request names
-                    # no adapters for must run bare even if a previous
-                    # request's teardown failed and left adapters enabled.
-                    for slot in spec.models:
-                        if slot in adapters:
-                            continue
-                        ref = wire_ref(spec.models[slot])
-                        if self._adapters.needs_deactivation(ref):
-                            pipe = self.store.residency.obj(ref)
-                            if pipe is not None:
-                                await asyncio.to_thread(
-                                    self._adapters.deactivate, ref, pipe, run.request_id
-                                )
-                    ctx.raise_if_cancelled("canceled")
+            # pgw#647: SINGLE-FLIGHT per live instance. Adapter attach and the
+            # handler itself mutate the instance's materialized graph (LoRA
+            # buffers, adapter enable state); two concurrent requests on one
+            # instance corrupt each other — one-job-per-GPU used to mask
+            # this; multi-GPU permits and multi-residency do not. The lock is
+            # per-_ClassRecord, so jobs on DIFFERENT instances (different
+            # picks) still run concurrently; ``reentrant=True`` classes opt
+            # out. Ordering: acquired AFTER the GPU permit and never held
+            # while acquiring one — no cycle.
+            async with AsyncExitStack() as run_gate:
+                if spec.cls is not None and not spec.reentrant:
+                    await run_gate.enter_async_context(
+                        self._classes[spec.instance_key].run_lock)
+                with self.store.residency.executing(*exec_refs, *adapter_refs):
+                    active: List[Tuple[str, Any]] = []
                     try:
-                        output = await self._execute(job, spec, instance, ctx, payload, kwargs,
-                                                     timeout_ms=timeout_ms, gpu_index=gpu_index)
-                    except BaseException as exc:
-                        # A mid-inference CUDA OOM learns a per-ref floor, but
-                        # the live object is quarantined. The hub retries only
-                        # after ensure_setup reloads it cleanly at that rung.
-                        await self._quarantine_for_oom(spec, ctx, exc)
-                        raise
-                finally:
-                    # Guaranteed-inactive on every exit (OK / cancel /
-                    # deadline / handler error); attachments stay resident.
-                    for ref, pipe in active:
-                        await asyncio.to_thread(
-                            self._adapters.deactivate, ref, pipe, run.request_id
-                        )
+                        for slot, prepared in adapters.items():
+                            pipe = self._adapter_target(spec, slot)
+                            ref = wire_ref(spec.models[slot])
+                            await asyncio.to_thread(
+                                self._adapters.activate, ref, pipe, prepared, run.request_id
+                            )
+                            active.append((ref, pipe))
+                        # Explicit activation (gw#399): a slot this request
+                        # names no adapters for must run bare even if a
+                        # previous request's teardown failed and left adapters
+                        # enabled.
+                        for slot in spec.models:
+                            if slot in adapters:
+                                continue
+                            ref = wire_ref(spec.models[slot])
+                            if self._adapters.needs_deactivation(ref):
+                                pipe = self.store.residency.obj(ref)
+                                if pipe is not None:
+                                    await asyncio.to_thread(
+                                        self._adapters.deactivate, ref, pipe, run.request_id
+                                    )
+                        ctx.raise_if_cancelled("canceled")
+                        try:
+                            output = await self._execute(
+                                job, spec, instance, ctx, payload, kwargs,
+                                timeout_ms=timeout_ms, gpu_index=gpu_index)
+                        except BaseException as exc:
+                            # A mid-inference CUDA OOM learns a per-ref floor,
+                            # but the live object is quarantined. The hub
+                            # retries only after ensure_setup reloads it
+                            # cleanly at that rung.
+                            await self._quarantine_for_oom(spec, ctx, exc)
+                            raise
+                    finally:
+                        # Guaranteed-inactive on every exit (OK / cancel /
+                        # deadline / handler error); attachments stay resident.
+                        for ref, pipe in active:
+                            await asyncio.to_thread(
+                                self._adapters.deactivate, ref, pipe, run.request_id
+                            )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output, lane=job.lane,
                                     runtime_terms=_runtime_term_values(spec, payload))
