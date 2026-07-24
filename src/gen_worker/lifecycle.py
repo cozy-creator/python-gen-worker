@@ -15,9 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import activity as activity_mod
 from .config import Settings
 from .executor import Executor
+from .lifecycle_shadow import LifecycleShadow
 from .pb import worker_scheduler_pb2 as pb
 from .runtime_config import extract_config_push
-from .transport import PROTOCOL_VERSION, Transport
+from .transport import FatalTransportError, PROTOCOL_VERSION, Transport
 
 logger = logging.getLogger(__name__)
 
@@ -162,11 +163,16 @@ class Lifecycle:
             or f"py-worker-{os.getpid()}"
         )
         self.release_id = str(claims.get("release_id") or "").strip()
+        self.lifecycle_shadow = LifecycleShadow(
+            self.release_id,
+            executor.specs.keys(),
+        )
         self.phase = pb.WORKER_PHASE_BOOTING
         self.hardware = probe_hardware()
         self.draining = False
         self.drained = asyncio.Event()  # set when drain completed -> exit 0
         self._last_delta: Optional[bytes] = None
+        self._last_lifecycle_snapshot: Optional[bytes] = None
         self._emitted_unavailable: set[str] = set()
         # fn name -> the "ran" rung last reported. Keyed on the rung (not
         # mere membership) so a runtime ladder demotion (gw#463) re-emits.
@@ -301,6 +307,11 @@ class Lifecycle:
         in_flight = {k for k in self.executor.in_flight_keys()}
         if self.transport is not None:
             in_flight.update(self.transport.queue.pending_result_keys)
+        self.lifecycle_shadow.refresh_projection(
+            self.executor,
+            self._desired_residency,
+            self._model_resolutions,
+        )
         return pb.Hello(
             protocol_version=PROTOCOL_VERSION,
             worker_id=self.worker_id,
@@ -315,9 +326,30 @@ class Lifecycle:
             # th#965 layer 2: promise the beat cadence; the hub reaps after
             # 6 consecutive misses (~60s). Hello counts as the first beat.
             heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
+            worker_session_id=self.lifecycle_shadow.worker_session_id,
+            lifecycle_snapshot=self.lifecycle_shadow.snapshot(),
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
+        if ack.HasField("desired_state_command"):
+            receipt = self.lifecycle_shadow.apply_command(
+                ack.desired_state_command,
+                current_config_generation=self.executor.runtime_config.generation,
+            )
+            await self._send_state_message(
+                pb.WorkerMessage(goal_receipt=receipt),
+                hello_ack=True,
+            )
+            if receipt.status == pb.GOAL_RECEIPT_STATUS_REJECTED:
+                # A rejected v5 command never silently falls through to the
+                # colocated legacy DesiredResidency. Mandatory rejection also
+                # withdraws aggregate readiness until the pod is replaced.
+                if self.lifecycle_shadow.protocol_rejected:
+                    self.phase = pb.WORKER_PHASE_ERROR
+                await self._send_lifecycle_snapshot(hello_ack=True, force=True)
+                self._last_delta = None
+                await self.maybe_send_state_delta(hello_ack=True)
+                return
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
         # th#1087: the desired state advertises (release_id, config_gen).
@@ -542,6 +574,14 @@ class Lifecycle:
     async def on_message(self, msg: pb.SchedulerMessage) -> None:
         which = msg.WhichOneof("msg")
         if which == "run_job":
+            if self.lifecycle_shadow.protocol_rejected:
+                await self.executor._send_result(
+                    msg.run_job.request_id,
+                    msg.run_job.attempt,
+                    pb.JOB_STATUS_RETRYABLE,
+                    safe_message="worker rejected mandatory desired state",
+                )
+                return
             # A tenant request preempts unrelated background transfer/setup.
             # Re-running desired state after idle is cheap: local refs and
             # ready instances short-circuit through the existing dedupe paths.
@@ -557,6 +597,10 @@ class Lifecycle:
             asyncio.create_task(self._adopt_compile_cache_then_delta(msg.model_op))
         elif which == "drain":
             self.start_drain(int(msg.drain.deadline_ms or 0))
+        elif which is None:
+            raise FatalTransportError("scheduler sent an unknown mandatory command")
+        else:
+            raise FatalTransportError(f"scheduler sent unsupported command {which!r}")
 
     async def _adopt_compile_cache_then_delta(self, op: pb.ModelOp) -> None:
         try:
@@ -566,6 +610,7 @@ class Lifecycle:
 
     async def on_disconnect(self) -> None:
         self._last_delta = None
+        self._last_lifecycle_snapshot = None
         self._emitted_unavailable.clear()
         self._emitted_degraded.clear()
 
@@ -600,6 +645,11 @@ class Lifecycle:
     ) -> None:
         if self.transport is None or not self.transport.connected:
             return
+        self.lifecycle_shadow.refresh_projection(
+            self.executor,
+            self._desired_residency,
+            self._model_resolutions,
+        )
         self._kick_disk_usage_refresh_if_stale()
         delta = self._state_delta()
         raw = delta.SerializeToString(deterministic=True)
@@ -610,10 +660,29 @@ class Lifecycle:
             await self._send_state_message(
                 pb.WorkerMessage(state_delta=delta), hello_ack=hello_ack,
             )
+        await self._send_lifecycle_snapshot(
+            hello_ack=hello_ack,
+            force=force,
+        )
         # Deduped internally; must run even on an unchanged delta — a runtime
         # ladder demotion (gw#463) changes the ServePlan, not the delta bytes.
         await self._emit_unavailable(hello_ack=hello_ack)
         await self._emit_degraded(hello_ack=hello_ack)
+
+    async def _send_lifecycle_snapshot(
+        self,
+        *,
+        hello_ack: bool = False,
+        force: bool = False,
+    ) -> None:
+        snapshot = self.lifecycle_shadow.snapshot()
+        raw = snapshot.SerializeToString(deterministic=True)
+        if force or raw != self._last_lifecycle_snapshot:
+            self._last_lifecycle_snapshot = raw
+            await self._send_state_message(
+                pb.WorkerMessage(lifecycle_snapshot=snapshot),
+                hello_ack=hello_ack,
+            )
 
     async def _emit_unavailable(self, *, hello_ack: bool = False) -> None:
         if self.transport is None:
@@ -840,6 +909,14 @@ class Lifecycle:
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
         self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
+        self.lifecycle_shadow.set_drain(
+            pb.DRAIN_LIFECYCLE_STATUS_DRAINING,
+            deadline_at_unix_ms=(
+                int(time.time() * 1000) + deadline_ms
+                if deadline_ms > 0 else 0
+            ),
+        )
+
     async def _finish_drain(self) -> None:
         deadline_at = self._drain_deadline_at
         loop = asyncio.get_running_loop()
@@ -851,10 +928,21 @@ class Lifecycle:
             logger.warning("drain deadline expired; aborting remaining jobs as RETRYABLE")
             await self.executor.abort_all(safe_message="worker draining")
 
+        self.lifecycle_shadow.set_drain(
+            pb.DRAIN_LIFECYCLE_STATUS_FINALIZING,
+        )
+        await self.maybe_send_state_delta()
         await self.executor.shutdown_instances()
         if self.transport is not None:
+            self.lifecycle_shadow.set_drain(
+                pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
+            )
+            await self.maybe_send_state_delta()
             flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
             await self.transport.close_after_flush(timeout=flush_timeout)
+        self.lifecycle_shadow.set_drain(
+            pb.DRAIN_LIFECYCLE_STATUS_DRAINED,
+        )
         self.drained.set()
         # getattr: stubbed Lifecycles skip __init__ (same convention as
         # _cancel_residency_reconcile, pgw#610).

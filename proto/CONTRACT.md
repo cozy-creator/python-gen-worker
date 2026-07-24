@@ -3,7 +3,7 @@
 Proto: `worker_scheduler.proto`, package `cozy.scheduler`, service
 `WorkerScheduler`, one RPC: `Connect(stream WorkerMessage) returns (stream SchedulerMessage)`.
 This REPLACES the old `scheduler.v1` proto entirely. No compat, no negotiation:
-`ProtocolVersion.PROTOCOL_VERSION_CURRENT = 4` is the only accepted version.
+`ProtocolVersion.PROTOCOL_VERSION_CURRENT = 5` is the only accepted version.
 
 Roles: **W** = gen-worker (Python), **O** = orchestrator (tensorhub Go).
 Every field below names its producer and consumer; anything without both was deleted.
@@ -52,7 +52,8 @@ reconnect, and a superseded stream is never an auth failure.
 **Reconnect.** On any stream error/close (except Drain-initiated) W reconnects
 with jittered exponential backoff: `delay = rand(0, min(30s, 1s * 2^n))`
 (full jitter), reset after a connection survives 60s. Every reconnect starts
-from scratch: new `Hello` with full snapshots.
+from scratch: new `Hello` with full legacy snapshots plus the complete current
+protocol-v5 lifecycle projection for the same process session.
 
 **Worker JWT rotation (kubelet model).** The worker JWT is SHORT-lived (4h
 default) and W never handles its expiry: O tracks each connected worker's
@@ -229,6 +230,8 @@ Sent once per connection, first message.
 | `models` | W model cache | O residency index (cache-aware routing baseline) | full residency snapshot; replaces any prior state O held for this worker |
 | `in_flight` | W executor + result buffer | O reconcile (§1) | jobs W still owns |
 | `heartbeat_interval_ms` | W constant (10000) | O layer-2 miss enforcement (§3) | promised app-level beat cadence; 0 = no promise, never heartbeat-reaped |
+| `worker_session_id` | W process boot | O command and state fence | stable for this worker process across transport reconnects |
+| `lifecycle_snapshot` | W lifecycle shadow registry | O current projection store | full replacement of active/recent-terminal intents, exact capabilities, config application, receipts, and drain state; replayed on every Hello |
 
 ### WorkerResources (embedded in Hello)
 Static per-boot facts. Never re-sent mid-connection.
@@ -269,9 +272,10 @@ Reply to Hello; re-sent on config change (full replace).
 |---|---|---|---|
 | `protocol_version` | O constant | W version gate | symmetric validation |
 | `file_base_url` | O config (`FileAPIBaseURL`) | W upload stack / blob-ref PUT flow (§8) | tensorhub HTTP base for capability-token calls |
-| `keep` | legacy v2 release config | none in v4 | retained field number only; v4 W ignores it |
+| `keep` | legacy v2 release config | none in current W | retained field number only |
 | `resolutions` | O precision resolver | W endpoint bindings | full-replace declared-ref to worker-specific ref/cast picks |
-| `desired_residency` | O scheduler/controller | W model reconciler | full-replace per-worker disk and hot-instance goal (§7) |
+| `desired_residency` | O scheduler/controller | W model reconciler | legacy full-replace per-worker disk and hot-instance goal (§7); remains authoritative during shadowing |
+| `desired_state_command` | O lifecycle projector | W protocol-v5 validator/shadow registry | causally identified shadow goal; malformed or unsupported mandatory work is rejected and never falls through to `desired_residency` |
 
 ### DesiredResidency / DesiredInstance (embedded in HelloAck)
 
@@ -283,6 +287,26 @@ Reply to Hello; re-sent on config change (full replace).
 | `snapshots` | O resolver | W downloader | snapshots for every disk/hot ref that needs one; same semantics as `RunJob.snapshots` |
 | `hot[].function_name` | O release manifest | W registry lookup | endpoint function whose persistent instance should be warm |
 | `hot[].models` | O binding resolver | W existing RunJob binding path | complete slot to immutable-ref map; incomplete or mismatched maps are rejected |
+
+### Protocol-v5 lifecycle shadow
+
+`DesiredStateCommand` carries one process-fenced `command_seq`, stable
+`goal_id`, and independently identified intents. W returns a typed
+`GoalReceipt` within two seconds. An exact resend is idempotent; a sequence
+regression/conflict, session or release mismatch, missing identity, unknown
+function, missing snapshot identity, or unsupported mandatory intent is a
+typed rejection. Mandatory rejection withdraws readiness and cannot silently
+apply the colocated legacy desired state.
+
+`LifecycleSnapshot` is finite current state, not a ledger. It is a
+full-replacement projection keyed by `worker_session_id` and monotonic
+`state_seq`, containing active plus bounded terminal-relevant `IntentState`
+rows, recent receipts, exact `FunctionCapability` tuples, one current
+`ConfigApplication`, and one typed `DrainProjection`. O stores this projection
+in shadow only during th#1085 Slice 1; legacy residency, availability,
+dispatch, and remediation remain authoritative until their explicit cutover.
+W replays the full projection in every reconnect Hello, so edge messages are
+not required to reconstruct current state.
 
 ### StateDelta (W → O)
 Full-replace snapshot of ALL dynamic worker state. Edge-triggered: sent
@@ -613,7 +637,7 @@ There is no queued-only/item-level cancel.
 
 ### ModelOp (O → W)
 Producer: compile-cache adoption only. Model download/load/unload lifecycle is
-declarative through `HelloAck.desired_residency`; v4 O MUST NOT send the legacy
+declarative through `HelloAck.desired_residency`; current O MUST NOT send the legacy
 DOWNLOAD/LOAD/UNLOAD enum values.
 
 | field | producer | consumer | semantics |

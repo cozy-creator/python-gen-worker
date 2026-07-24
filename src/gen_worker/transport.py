@@ -150,6 +150,10 @@ class SendQueue:
             return (which, msg.fn_unavailable.function_name)
         if which == "fn_degraded":
             return (which, msg.fn_degraded.function_name)
+        if which == "goal_receipt":
+            return (which, msg.goal_receipt.goal_id)
+        if which == "lifecycle_snapshot":
+            return (which, "")
         if cls._host_capacity_key(msg) is not None:
             return ("host_capacity", msg.model_event.ref)
         return None
@@ -688,6 +692,8 @@ class Transport:
             if msg is grpc.aio.EOF:
                 raise ConnectionError("scheduler closed the stream")
             which = msg.WhichOneof("msg")
+            if which is None:
+                raise FatalTransportError("scheduler sent an unknown mandatory command")
             if which == "hello_ack":
                 await self._handlers.on_hello_ack(msg.hello_ack)
                 continue
