@@ -84,6 +84,7 @@ from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 from .runtime_config import ConfigStore, extract_job_config
+from .stage_timing import stage_ms_for_metrics
 
 if typing.TYPE_CHECKING:
     from . import fleet_cells
@@ -7640,6 +7641,7 @@ class Executor:
             # POST for private refs) before any source/model acquisition or
             # tenant handler work; manifest drift and caller local_path
             # values fail closed.
+            input_fetch_t0 = time.monotonic()
             await _to_thread_complete(
                 materialize_input_assets,
                 payload,
@@ -7650,6 +7652,8 @@ class Executor:
                 capability_token=run.capability_token or "",
                 cancel_check=lambda: ctx.cancelled,
             )
+            # th#1111: pre-handler stage (outside runtime_ms).
+            ctx._stages.record_pre("input_fetch", time.monotonic() - input_fetch_t0)
             ctx.raise_if_cancelled("canceled")
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
@@ -7727,6 +7731,7 @@ class Executor:
         started = time.monotonic()
         try:
             if needs_gpu:
+                permit_t0 = time.monotonic()
                 await self._intent_await(
                     job.intent_id,
                     self._gpu_semaphore.acquire(),
@@ -7735,6 +7740,9 @@ class Executor:
                     stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
                     reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
                 )
+                # th#1111: the permit wait was in NO metric — it precedes the
+                # handler window, so runtime_ms never saw it.
+                ctx._stages.record_pre("gpu_permit_wait", time.monotonic() - permit_t0)
                 self._loop = asyncio.get_running_loop()
                 lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
                 ctx._gpu_slot_lease = lease
@@ -8156,6 +8164,9 @@ class Executor:
             coro = asyncio.to_thread(self._call_sync, bound, call_kwargs, gpu_index)
 
         job.exec_task = asyncio.ensure_future(coro)
+        # th#1111: the handler window stage_ms reconciles against (the same
+        # interval runtime_ms measures).
+        ctx._stages.handler_open()
         try:
             return await asyncio.wait_for(asyncio.shield(job.exec_task), timeout_s)
         except asyncio.TimeoutError:
@@ -8167,6 +8178,8 @@ class Executor:
         except asyncio.CancelledError:
             # CancelJob path: the exec task was cancelled underneath us.
             raise CanceledError("canceled")
+        finally:
+            ctx._stages.handler_close()
 
     @staticmethod
     def _call_sync(bound: Callable[..., Any], call_kwargs: Dict[str, Any], gpu_index: int) -> Any:
@@ -8372,6 +8385,13 @@ class Executor:
         if job.finished:
             return
         job.finished = True
+        # th#1111: stamp the per-stage breakdown on EVERY terminal path (ok,
+        # deadline, cancel, error) — a slow request's stages are exactly the
+        # ones worth seeing.
+        metrics = kw.get("metrics")
+        if isinstance(metrics, pb.JobMetrics) and job.ctx is not None:
+            metrics.stage_ms.update(stage_ms_for_metrics(
+                getattr(job.ctx, "_stages", None), metrics.runtime_ms))
         terminal_status = (
             pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
             if job.superseded

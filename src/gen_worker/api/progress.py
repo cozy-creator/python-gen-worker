@@ -66,6 +66,7 @@ def diffusers_step_callback(
     if not (0.0 <= start <= end <= 1.0):
         raise ValueError(f"window must satisfy 0.0 <= start <= end <= 1.0, got {window!r}")
     span = end - start
+    stage_name = str(stage or "denoise").strip() or "denoise"
     last_emit: Optional[float] = None
 
     def _on_step_end(
@@ -77,6 +78,13 @@ def diffusers_step_callback(
         nonlocal last_emit
         ctx.raise_if_cancelled()
         step = int(step_index) + 1  # fires after the step ends -> 1-based count
+        # th#1111: every step end is a timing mark, un-throttled (the emit
+        # below is throttled; the measurement must not be). This is what gives
+        # denoise total + per-step timing on all 14 endpoints wired to this
+        # callback with no endpoint change.
+        timer = getattr(ctx, "_stages", None)
+        if timer is not None:
+            timer.mark_step(stage_name, step)
         now = time.monotonic()
         is_last = total > 0 and step >= total
         if last_emit is None or is_last or (now - last_emit) >= min_interval_s:

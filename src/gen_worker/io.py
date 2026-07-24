@@ -21,6 +21,7 @@ from typing import IO, TYPE_CHECKING, Any, Optional
 
 from .api.errors import ValidationError
 from .api.types import Asset
+from .stage_timing import stage_of as _stage
 
 if TYPE_CHECKING:
     import numpy as np
@@ -151,13 +152,14 @@ def write_image(
 
     with finalize_permit():
         _release_gpu_slot_for_finalize(ctx)
-        buf = _io.BytesIO()
-        save_kwargs: dict[str, Any] = {"format": format.upper()}
-        if format.lower() in ("webp", "jpeg", "jpg"):
-            save_kwargs["quality"] = quality
-        save_kwargs.update(encode_kwargs)
-        image.save(buf, **save_kwargs)
-        payload = buf.getvalue()
+        with _stage(ctx, "image_encode"):
+            buf = _io.BytesIO()
+            save_kwargs: dict[str, Any] = {"format": format.upper()}
+            if format.lower() in ("webp", "jpeg", "jpg"):
+                save_kwargs["quality"] = quality
+            save_kwargs.update(encode_kwargs)
+            image.save(buf, **save_kwargs)
+            payload = buf.getvalue()
     out = ctx.save_bytes(ref, payload)
     if as_type is not None and type(out) is not as_type:
         import msgspec
@@ -264,7 +266,7 @@ def write_video(
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as handle:
         tmp_path = handle.name
     try:
-        with StreamingVideoEncoder(
+        with _stage(ctx, "video_encode"), StreamingVideoEncoder(
             tmp_path, fps=fps, audio_sample_rate=sample_rate or None
         ) as encoder:
             if streaming:
@@ -314,6 +316,7 @@ def _release_gpu_slot_for_finalize(ctx: Any) -> None:
     release = getattr(ctx, "_release_gpu_slot_for_finalize", None)
     if callable(release):
         release()
+
 
 
 __all__ = [
