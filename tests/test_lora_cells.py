@@ -234,3 +234,45 @@ def test_enable_compiled_skips_lane_on_component_slot_without_target() -> None:
                   targets=("unet",), lora_bucket=64)
     armed = provision.enable_compiled(vae, cfg, cache_dir=None, artifact=None)
     assert armed is False
+
+
+def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gw#631 (r3 live find, the all_declared_functions_disabled chain): a
+    DELIVERED family lora<bucket> cell arriving at a bare component slot
+    (sdxl's standalone vae — no cfg.target resolves) must be an ordinary
+    lane miss that stays eager. Before the effective-bucket fix the self-key
+    check claimed the cell as this runtime's own (cfg bucket, '' lane) and
+    raised CellSelectionBugError (`weight_lane 'lora64' != pipeline ''`),
+    which cascaded into the gw#608 seeded-cell refusal and retired the pod."""
+
+    # Pin the runtime axes so the self-key computes on a CPU host (the live
+    # failure needs cell_key.compute to succeed — sku/sm come from the GPU).
+    rt = {
+        "sku": "rtx-4090", "sm": "sm_89", "torch": "2.13.0+cu130",
+        "triton": "3.7.1", "cuda": "13.0", "cuda_driver": "13020",
+        "image_digest": "",
+    }
+    monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(rt))
+
+    class _Vae(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.decoder = torch.nn.Linear(8, 8)
+
+    src = tmp_path / "cellsrc"
+    (src / "inductor" / "ab").mkdir(parents=True)
+    (src / "inductor" / "ab" / "graph.py").write_text("code")
+    meta = compile_cache.artifact_metadata(
+        family="loracells-test", shapes=[(64, 64)], targets=["unet"],
+        weight_lane="lora64", lora_bucket=64,
+    )
+    artifact = compile_cache.pack(src, tmp_path / "cell.tar.gz", meta)
+
+    vae = _Vae()
+    cfg = Compile(shapes=((64, 64),), family="loracells-test",
+                  targets=("unet",), lora_bucket=64)
+    armed = provision.enable_compiled(
+        vae, cfg, cache_dir=tmp_path / "cache", artifact=artifact)
+    assert armed is False
