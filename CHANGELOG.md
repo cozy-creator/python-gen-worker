@@ -39,6 +39,12 @@
   exactly that), the dynamo probe alone would credit a cell never proven
   anywhere. The disproof cleanup no longer fires the global
   `torch._dynamo.reset()` while a healthy sibling pipeline is still armed.
+- **pgw#639: SIGUSR2 dumps every thread's stack.** The worker's asyncio loop
+  owns the heartbeat while model work runs on threads, so a wedged worker
+  looks perfectly healthy from the hub. `kill -USR2 <pid>` now prints all
+  thread stacks to stderr (`faulthandler`, allocation-free, always armed) —
+  the pod-side forensic surface that was missing during the 2026-07-24
+  incident. Getting a shell into the pod to send it is still open.
 
 ## 0.56.0 (2026-07-24)
 
