@@ -2,6 +2,55 @@
 
 ## 0.58.0 (2026-07-24)
 
+- **pgw#648: VRAM is accounted PER DEVICE-GROUP, never summed across cards.**
+  `models/residency.py::_default_free_vram_bytes` used to sum free VRAM over
+  every CUDA device, so a 3x24GB pod reported 72GB free and would admit a 30GB
+  model that fits on no single card. `DeviceGroup(devices=(...))` now owns the
+  probe and one `Residency` accounts for exactly one group's pool. A group that
+  SPANS devices (a future tensor-parallel mesh) sums its own members only —
+  that is one placement unit by definition. No endpoint-visible change.
+- **pgw#641 Stage 2: admission LEASES replace the whole-job pin.**
+  `Residency.admit(sizes) -> Lease` is taken before a job starts and held for
+  its whole lifetime. From admission on, no eviction/demotion/`release_to_disk`
+  path may victim a leased ref — INCLUDING refs whose entries do not exist yet,
+  which is the structural gap the old `executing()` pin no-op'd on (a freshly
+  created entry was demotable between its `track_vram` and the execution-time
+  pin, gw#409). Bytes for not-yet-loaded refs are RESERVED, so two concurrent
+  admissions can no longer book the same free VRAM and OOM each other mid-load;
+  two leases on one ref claim the MAX, not the sum (one future load serves
+  both), and a claim is consumed the moment `track_vram` books real bytes.
+  `make_room(for_refs=)` excludes the caller's own reservation — it IS the
+  demand being satisfied. `Residency.fits(sizes)` is a new read-only "could
+  this worker serve this now?" query. Admission never refuses here: the
+  adaptive-fit ladder still owns genuine overcommit.
+- **pgw#647: handlers on one live instance are SINGLE-FLIGHT by default.**
+  One live instance == one binding set == one materialized graph with MUTABLE
+  buffers (the resident LoRA branch, adapter enable state), so two concurrent
+  requests on it corrupt each other. One-job-per-GPU masked this;
+  `BoundedSemaphore(gpu_count)` on a multi-GPU pod does not. A per-instance run
+  gate now serializes adapter attach + handler + detach; jobs on DIFFERENT
+  instances (different checkpoint picks) still run concurrently, so this costs
+  nothing under multi-residency. **New endpoint surface:**
+  `@endpoint(reentrant=True)` is the explicit opt-out for classes whose
+  handlers mutate no instance state; it is CLASS-ONLY (a loose function holds
+  no instance state to serialize) and raises if declared on a function.
+  Endpoints that hand-rolled their own handler lock can delete it.
+- **pgw#652: admission reserves ACTIVATION VRAM, learned from measured peaks.**
+  Weights are not the whole cost of admitting a request — a concurrent 1024^2
+  diffusion request also holds GBs of latents and attention workspace, so
+  interleaving would OOM the moment it started working. Leases now carry an
+  activation claim that SUMS across concurrent leases (each request allocates
+  its own) where weight claims MAX per ref. It is LEARNED, never declared: the
+  executor already measured `peak_vram_bytes` and threw the useful part away,
+  so `record_activation` now takes peak minus what was already allocated when
+  the handler took the GPU and keeps a decaying high-water — up instantly in
+  full (under-reserving is what OOMs), bleeding 12.5% per subsequent request so
+  one 4096^2 outlier does not permanently tax residency depth. Keyed by
+  FUNCTION, not by checkpoint pick, so a never-seen checkpoint inherits a real
+  measurement instead of reserving nothing on its first request. An unmeasured
+  function claims 0, so this is inert on CPU workers and at first boot. No
+  endpoint-visible change and no knob — residency depth vs concurrency headroom
+  is one runtime decision.
 - **th#1129: WebP is THE image-encoding default, on one shared encode core.**
   Paul's ruling: "the default image-encoding should be webp, always, with png
   or jpg as optional alternatives." Both encode surfaces had independently
