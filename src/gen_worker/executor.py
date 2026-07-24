@@ -696,6 +696,15 @@ class ModelStore:
         # pipeline is still in RAM/VRAM. Keep the disk identity separately
         # until record teardown makes it the highest residency tier.
         self._disk_identities: Dict[str, _ResidencyIdentity] = {}
+        # pgw#628 (th#1070 residency v2): every applied HelloAck opens a new
+        # republish epoch. The reconcile pass re-announces verified cached
+        # identities the hub re-asked about even when unchanged — observations
+        # are content-addressed and idempotent hub-side, and a force-resent
+        # plan is exactly the hub saying "tell me again" (redrive/overdue
+        # resends could otherwise never heal a lost success observation).
+        # Job-path ensure_local calls within the same epoch stay deduped.
+        self._residency_republish_epoch = 0
+        self._identity_publish_epochs: Dict[str, int] = {}
         self._identity_lock = threading.RLock()
         # Cold-ref waiters (th#763): ensure_local blocks here until the
         # hub's re-minted DOWNLOAD banks a snapshot for the ref.
@@ -781,6 +790,7 @@ class ModelStore:
             with self._identity_lock:
                 self._resident_identities.pop(ref, None)
                 self._disk_identities.pop(ref, None)
+                self._identity_publish_epochs.pop(ref, None)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -979,6 +989,7 @@ class ModelStore:
             for ref, snapshot in stored.items()
         }
         with self._identity_lock:
+            self._residency_republish_epoch += 1
             self._desired_snapshot_identities = desired
             # Generations belong only to the current desired identity. Leave
             # actual resident identity untouched: those bytes may still be in
@@ -1044,8 +1055,15 @@ class ModelStore:
     async def _confirm_cached_identity(
         self, ref: str, identity: _ResidencyIdentity,
     ) -> None:
-        """Publish exact identity when verified cached bytes satisfy a newer
-        desired generation without requiring a redundant download."""
+        """Publish exact identity when verified cached bytes satisfy the
+        desired state without requiring a redundant download.
+
+        pgw#628 (th#1070 residency v2): the emission is content-addressed and
+        idempotent hub-side, so it is re-sent once per applied-HelloAck epoch
+        even when the identity is unchanged — a re-received plan (redrive,
+        overdue resend, reconnect) is the hub asking for a resync, and a
+        worker that never re-announces can strand a lost success observation
+        forever. Job-path calls within the same epoch remain deduped."""
         tier = self.residency.tier(ref)
         digest, _ = identity
         if not digest:
@@ -1060,7 +1078,12 @@ class ModelStore:
         # serving the new snapshot.
         if tier in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM) and current[0] != digest:
             return
-        if not self._set_resident_identity(ref, identity):
+        changed = self._set_resident_identity(ref, identity)
+        with self._identity_lock:
+            epoch = self._residency_republish_epoch
+            republish = self._identity_publish_epochs.get(ref) != epoch
+            self._identity_publish_epochs[ref] = epoch
+        if not changed and not republish:
             return
         state = {
             residency_mod.Tier.DISK: pb.MODEL_STATE_ON_DISK,
