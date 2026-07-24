@@ -24,6 +24,13 @@ _SCRIPT = textwrap.dedent(
     supervise(Path(sys.argv[2]))
     # only the child gets here
     mode = sys.argv[1]
+    if mode == "term":
+        # drain semantics: the parent must forward SIGTERM to the child
+        got = []
+        signal.signal(signal.SIGTERM, lambda *_: got.append(1))
+        print("READY", flush=True)
+        signal.pause()
+        os._exit(0 if got else 3)
     if mode == "segv":
         os.kill(os.getpid(), signal.SIGSEGV)
     elif mode == "kill":
@@ -98,6 +105,29 @@ def test_previous_container_death_is_reported_on_next_boot(tmp_path):
     assert "previous_container_death" in detail
     assert "4242" in detail
     assert not record.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX only")
+def test_sigterm_is_forwarded_to_the_worker(tmp_path):
+    """Drain must still work: PID 1 is the supervisor, the worker is the child."""
+    import signal as _signal
+
+    script = tmp_path / "boot.py"
+    script.write_text(_SCRIPT)
+    sink = tmp_path / "postmortem-term.txt"
+    env = dict(os.environ)
+    env["GEN_WORKER_POSTMORTEM_FILE"] = str(sink)
+    env.pop("GEN_WORKER_SUPERVISED", None)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    proc = subprocess.Popen(
+        [sys.executable, str(script), "term", str(tmp_path / "rec.json")],
+        env=env, stdout=subprocess.PIPE, text=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "READY"
+    proc.send_signal(_signal.SIGTERM)
+    assert proc.wait(timeout=60) == 0
+    assert not sink.exists()
 
 
 def test_container_limits_are_readable():
