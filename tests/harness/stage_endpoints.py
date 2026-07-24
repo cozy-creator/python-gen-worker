@@ -47,7 +47,12 @@ class Staged:
             on_step(None, i, None, {})
 
         time.sleep(DECODE_S)  # un-bracketed on purpose
-        image = Image.new("RGB", (16, 16), (10, 20, 30))
+        # th#1129 made webp the default with a faster shared encode core, and a 16x16
+        # webp encodes in under the 1ms stage_ms resolution -> image_encode rounded to 0
+        # and th#1111's `stages["image_encode"] > 0` failed on fast CI runners. Use a
+        # size whose encode is reliably measurable; noise, not gradients, so it does not
+        # compress to nothing.
+        image = Image.effect_noise((512, 512), 64).convert("RGB")
         asset = gw_io.write_image(
             ctx, f"outputs/{ctx.request_id}/image.webp", image,
             format="webp", as_type=ImageAsset,
