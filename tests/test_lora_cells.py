@@ -239,7 +239,7 @@ def test_enable_compiled_skips_lane_on_component_slot_without_target() -> None:
 def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """gw#631 (r3 live find, the all_declared_functions_disabled chain): a
+    """gw#632 (r3 live find, the all_declared_functions_disabled chain): a
     DELIVERED family lora<bucket> cell arriving at a bare component slot
     (sdxl's standalone vae — no cfg.target resolves) must be an ordinary
     lane miss that stays eager. Before the effective-bucket fix the self-key

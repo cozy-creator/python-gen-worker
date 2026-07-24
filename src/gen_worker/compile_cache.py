@@ -1980,7 +1980,7 @@ def enable(
                         pipeline_weight_lane as _pwl,
                     )
 
-                    # gw#631: the EFFECTIVE bucket — a slot object with no
+                    # gw#632: the EFFECTIVE bucket — a slot object with no
                     # resolvable compile target (sdxl's bare vae) never rides
                     # the branch lane (provision downgrades apply_lora_lane
                     # the same way, 0.52.1), so its self-key must not claim
