@@ -12,6 +12,7 @@ import logging
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -45,56 +46,81 @@ def run_process(
     - Returns the process exit code on natural exit (callers decide whether
       nonzero is fatal).
     """
-    # th#1087: an explicit env mapping still carries the config-snapshot
-    # path so the child can read the worker's current runtime config
-    # (env=None inherits it from os.environ, exported by ConfigStore).
-    child_env = dict(env) if env is not None else None
-    if child_env is not None:
-        from .runtime_config import SNAPSHOT_PATH_ENV
+    from .runtime_config import SNAPSHOT_PATH_ENV
 
+    invocation_snapshot_path = _write_invocation_snapshot(ctx)
+    child_env = dict(env) if env is not None else None
+    if invocation_snapshot_path:
+        child_env = dict(os.environ) if child_env is None else child_env
+        child_env[SNAPSHOT_PATH_ENV] = invocation_snapshot_path
+    elif child_env is not None:
         child_env.setdefault(
             SNAPSHOT_PATH_ENV, os.environ.get(SNAPSHOT_PATH_ENV, "")
         )
-    proc = subprocess.Popen(
-        list(cmd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        cwd=str(Path(cwd)) if cwd is not None else None,
-        env=child_env,
-        text=True,
-        bufsize=1,
-        start_new_session=True,  # own process group → group-wide signals
-    )
-
-    def _tail() -> None:
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.rstrip("\n")
-            if on_line is None:
-                continue
-            try:
-                on_line(line)
-            except Exception:
-                logger.exception("run_process on_line callback failed")
-        proc.stdout.close()
-
-    reader = threading.Thread(target=_tail, name="subproc-tail", daemon=True)
-    reader.start()
-
     try:
-        while True:
-            code = proc.poll()
-            if code is not None:
-                reader.join(timeout=5.0)
-                return int(code)
-            if ctx is not None and getattr(ctx, "cancelled", False):
+        proc = subprocess.Popen(
+            list(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(Path(cwd)) if cwd is not None else None,
+            env=child_env,
+            text=True,
+            bufsize=1,
+            start_new_session=True,  # own process group → group-wide signals
+        )
+
+        def _tail() -> None:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\n")
+                if on_line is None:
+                    continue
+                try:
+                    on_line(line)
+                except Exception:
+                    logger.exception("run_process on_line callback failed")
+            proc.stdout.close()
+
+        reader = threading.Thread(target=_tail, name="subproc-tail", daemon=True)
+        reader.start()
+
+        try:
+            while True:
+                code = proc.poll()
+                if code is not None:
+                    reader.join(timeout=5.0)
+                    return int(code)
+                if ctx is not None and getattr(ctx, "cancelled", False):
+                    _terminate_group(proc, term_grace_s=term_grace_s)
+                    reader.join(timeout=5.0)
+                    raise CanceledError("subprocess cancelled")
+                time.sleep(_POLL_INTERVAL_S)
+        finally:
+            if proc.poll() is None:  # unexpected exit path (exception in caller)
                 _terminate_group(proc, term_grace_s=term_grace_s)
-                reader.join(timeout=5.0)
-                raise CanceledError("subprocess cancelled")
-            time.sleep(_POLL_INTERVAL_S)
     finally:
-        if proc.poll() is None:  # unexpected exit path (exception in caller)
-            _terminate_group(proc, term_grace_s=term_grace_s)
+        if invocation_snapshot_path:
+            try:
+                os.unlink(invocation_snapshot_path)
+            except FileNotFoundError:
+                pass
+
+
+def _write_invocation_snapshot(ctx: Any) -> str:
+    raw = getattr(ctx, "_config_snapshot", None) if ctx is not None else None
+    if not isinstance(raw, bytes):
+        return ""
+    fd, path = tempfile.mkstemp(prefix=".runtime_config-invoke-", suffix=".msgpack")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def _terminate_group(proc: "subprocess.Popen[str]", *, term_grace_s: float) -> None:

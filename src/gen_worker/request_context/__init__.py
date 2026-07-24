@@ -174,6 +174,7 @@ class RequestContext:
         self._boot_warmup = bool(boot_warmup)
         self._lane = ""  # th#1050: executing lane, set by the executor
         self._config: Dict[str, Any] = {}  # th#1087: effective config params
+        self._config_snapshot: Optional[bytes] = None
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
@@ -237,8 +238,14 @@ class RequestContext:
         worker's observed config generation. Read-only; a returned copy."""
         return dict(self._config)
 
-    def _set_config(self, values: Optional[Mapping[str, Any]]) -> None:
+    def _set_config(
+        self,
+        values: Optional[Mapping[str, Any]],
+        *,
+        snapshot: Optional[bytes] = None,
+    ) -> None:
         self._config = dict(values or {})
+        self._config_snapshot = bytes(snapshot) if snapshot is not None else None
 
     @property
     def models(self) -> Dict[str, str]:

@@ -20,6 +20,7 @@ from pathlib import Path
 import msgspec
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.request_context import RequestContext
 from gen_worker.runtime_config import (
     SNAPSHOT_PATH_ENV,
     ConfigStore,
@@ -74,6 +75,34 @@ def test_gen_bump_rewrites_snapshot_and_subprocess_sees_it(
     )
     assert code == 0, lines
     assert lines == ["4 75"]
+
+    # A job already stamped at an older generation gets an immutable
+    # per-invocation subprocess snapshot. A newer global push cannot change
+    # the bytes that run_process(ctx=...) exposes to that child.
+    ctx = RequestContext("old-gen")
+    old_values = {"default_steps": 40}
+    ctx._set_config(
+        old_values,
+        snapshot=store.invocation_snapshot(
+            "config-echo", old_values, 4,
+        ),
+    )
+    assert store.stamp_function("config-echo", {"default_steps": 100}, 5)
+    lines = []
+    code = run_process(
+        [
+            sys.executable, "-c",
+            "from gen_worker.runtime_config import read_snapshot; "
+            "s = read_snapshot(); "
+            "print(s.config_generation, s.parameters['config-echo']['default_steps'])",
+        ],
+        ctx=ctx,
+        env={},
+        on_line=lines.append,
+    )
+    assert code == 0, lines
+    assert lines == ["4 40"]
+    assert read_snapshot(str(snap_path)).config_generation == 5
 
 
 def _run_config_echo(

@@ -6836,7 +6836,21 @@ class Executor:
             job.lane = self._served_lane(spec, instructed=run.lane)
             ctx._set_lane(job.lane)
             # th#1087: effective declared-config values for this dispatch.
-            ctx._set_config(self._effective_config(spec, run))
+            effective_config = self._effective_config(spec, run)
+            invocation_snapshot = None
+            if spec.config:
+                config_generation = int(
+                    run.config_generation or self.runtime_config.generation
+                )
+                invocation_snapshot = self.runtime_config.invocation_snapshot(
+                    spec.name,
+                    effective_config,
+                    config_generation,
+                )
+            ctx._set_config(
+                effective_config,
+                snapshot=invocation_snapshot,
+            )
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
             ctx.raise_if_cancelled("canceled")

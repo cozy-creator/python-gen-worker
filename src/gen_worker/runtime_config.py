@@ -141,6 +141,26 @@ class ConfigStore:
             )
             return True
 
+    def invocation_snapshot(
+        self,
+        function_name: str,
+        values: Mapping[str, Any],
+        generation: int,
+    ) -> bytes:
+        """Encode the config stamped on one invocation.
+
+        ``run_process(ctx=...)`` gives this immutable snapshot to its child,
+        so an older in-flight job cannot accidentally read a newer global
+        generation that arrived before the child started.
+        """
+        with self._lock:
+            snap = ConfigSnapshot(
+                config_generation=int(generation),
+                release_id=self._snap.release_id,
+                parameters={str(function_name): dict(values)},
+            )
+        return msgspec.msgpack.encode(snap)
+
     def _write_snapshot_locked(self) -> None:
         """Atomic write: tmp file in the same dir + os.replace, so a
         subprocess mid-read never sees a torn file."""

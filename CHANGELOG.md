@@ -14,9 +14,12 @@
   (`GEN_WORKER_CONFIG_SNAPSHOT_PATH`, default
   `/app/.tensorhub/runtime_config.msgpack`); per-invoke subprocesses read it
   via `read_snapshot()` (`run_process` forwards the path into explicit
-  child envs). Bindings keep riding the existing HelloAck desired-residency
-  reconcile (gw#614/623, pod-churn-free); env-class changes stay boot-only
-  (the hub drain-rolls). Wire adapter follows the A+C tracker contract —
+  child envs). `run_process(ctx=...)` receives an immutable invocation
+  snapshot, so an older dispatched job cannot read a newer generation that
+  arrived before its child started. Bindings keep riding the existing
+  HelloAck desired-residency reconcile (gw#614/623, pod-churn-free);
+  env-class changes stay boot-only (the hub drain-rolls). Wire adapter
+  follows the A+C tracker contract —
   DesiredResidency `release_id`/`config_generation` observed on HelloAck,
   RunJob `config_generation`+`config_params` (msgpack) stamped per dispatch,
   and StateDelta `observed_config_generation` echo.
