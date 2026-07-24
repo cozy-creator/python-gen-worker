@@ -110,6 +110,22 @@ def report_worker_fatal(
         return False
 
 
+def report_worker_detail(settings: Optional[Settings], detail: str) -> bool:
+    """Dial the hub with an already-formatted fatal detail (gw#640 post-mortem).
+
+    Same carrier and same durable `pod_events` row as `report_worker_fatal`;
+    used by the supervisor parent, which has a `waitpid` verdict rather than a
+    Python exception to report.
+    """
+    if settings is None or not (settings.orchestrator_public_addr or "").strip():
+        return False
+    try:
+        return asyncio.run(_report_async(settings, _build_report(settings, _clip(detail))))
+    except Exception:
+        logger.warning("worker-postmortem report failed entirely", exc_info=True)
+        return False
+
+
 def fatal_identity(settings: Settings) -> str:
     worker_id, release_id = _identity_from_settings(settings)
     return f"worker={worker_id or '?'} release={release_id or '?'}"

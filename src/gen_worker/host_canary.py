@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -144,7 +143,13 @@ def measure_host_canary() -> HostCanaryReport:
     """Run every axis once; failures zero their axis instead of raising."""
     t0 = time.perf_counter()
     memcpy = single = multi = 0.0
-    vcpus = os.cpu_count() or 0
+    # gw#640: os.cpu_count() reports the HOST's cores — 32 on a pod that owns
+    # 4 — and shipping that next to a cgroup-derived ram_total_gb produced a
+    # "32 vCPUs / 14.9 GB" report nobody could interpret. Report what this
+    # container may actually use, and benchmark with that many threads.
+    from .postmortem import effective_cpu_count
+
+    vcpus = effective_cpu_count()
     try:
         memcpy = _measure_memcpy_gbps()
     except Exception:

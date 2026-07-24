@@ -32,6 +32,15 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # compile-worker subprocess. See compile_cache._disable_aot_autograd_cache.
 os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
 
+# gw#640: fork the supervisor BEFORE the heavy imports below. The parent stays
+# a bare interpreter (so the OOM killer picks the fat child, not the reporter)
+# and outlives the worker to report WTERMSIG / cgroup oom_kill over the wire.
+# In the child this returns immediately; the parent never returns from it.
+if __name__ == "__main__":
+    from .supervisor import supervise  # noqa: E402
+
+    supervise()
+
 import json
 import logging
 import sys
