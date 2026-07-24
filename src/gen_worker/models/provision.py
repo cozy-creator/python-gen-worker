@@ -200,6 +200,12 @@ def enable_compiled(
     from .. import compile_cache, trt_engine
 
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    if bucket and not compile_cache.has_compile_target(pipe, cfg):
+        # gw#627 live find: this arming runs for EVERY worker-loaded setup
+        # slot — a bare component slot (sdxl's AutoencoderKL vae) resolves
+        # none of cfg.targets and must stay branchless-eager, not raise.
+        # The loud no-denoiser error remains for real compile targets.
+        bucket = 0
     if bucket:
         compile_cache.apply_lora_lane(pipe, bucket)
     if artifact is not None and not bucket:
