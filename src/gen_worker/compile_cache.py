@@ -1980,10 +1980,21 @@ def enable(
                         pipeline_weight_lane as _pwl,
                     )
 
+                    # gw#632: the EFFECTIVE bucket — a slot object with no
+                    # resolvable compile target (sdxl's bare vae) never rides
+                    # the branch lane (provision downgrades apply_lora_lane
+                    # the same way, 0.52.1), so its self-key must not claim
+                    # the family's lora<bucket> cell and then explode on
+                    # lane drift (live: `weight_lane 'lora64' != pipeline ''`
+                    # -> CellSelectionBugError -> gw#608 seeded-cell refusal
+                    # -> all_declared_functions_disabled pod retire).
+                    eff_bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+                    if eff_bucket and not has_compile_target(pipeline, cfg):
+                        eff_bucket = 0
                     want = cell_key.compute(
                         str(getattr(cfg, "family", "") or ""),
                         _pwl(pipeline),
-                        int(getattr(cfg, "lora_bucket", 0) or 0),
+                        eff_bucket,
                         regional=bool(getattr(cfg, "regional", False)),
                     )
                     if not cell_key.mismatch(meta, want):
