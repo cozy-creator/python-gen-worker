@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.52.1 (2026-07-24)
+
+- **gw#627 live fix: `enable_compiled` skips the branch lane on slot
+  objects with no compile target.** The arming path runs for every
+  worker-loaded setup slot; a bare component slot (sdxl's standalone
+  AutoencoderKL vae) resolves none of `cfg.targets`, and `apply_lora_lane`'s
+  no-denoiser error broke the whole model load (release-broken streak on
+  the first gw#627 sdxl deploy). The loud misconfig error remains for real
+  compile targets.
+
 ## 0.52.0 (2026-07-24)
 
 - **pgw#628: residency reporting v2 — content-addressed idempotent
