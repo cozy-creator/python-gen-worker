@@ -259,7 +259,6 @@ class Lifecycle:
             c = get_host_canary()
             canary = pb.HostCanary(
                 memcpy_gbps=c.memcpy_gbps,
-                h2d_gbps=c.h2d_gbps,
                 d2h_gbps=c.d2h_gbps,
                 pinned_alloc_ok=c.pinned_alloc_ok,
                 cpu_single_mbps=c.cpu_single_mbps,

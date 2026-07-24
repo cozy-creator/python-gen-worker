@@ -155,8 +155,10 @@ message HardwareUnsuitable {
 // depends on (ie#484: 4-10x decode/encode spread at identical GPU step-ms).
 // Measured once per process in a bounded ~1.5 s before the first Hello.
 message HostCanary {
+  reserved 2;
+  reserved "h2d_gbps";
+
   double memcpy_gbps     = 1; // host-RAM copy bandwidth, 256 MiB buffer
-  double h2d_gbps        = 2; // pinned host->device PCIe bandwidth
   double d2h_gbps        = 3; // pinned device->host PCIe bandwidth
   bool   pinned_alloc_ok = 4; // cudaHostAlloc of the staging buffer worked
   double cpu_single_mbps = 5; // sha256 throughput, one thread

@@ -231,9 +231,8 @@ class HardwareUnsuitable(_message.Message):
     def __init__(self, worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., reason_class: _Optional[str] = ..., detail: _Optional[str] = ..., driver_version: _Optional[str] = ..., gpu_name: _Optional[str] = ..., torch_version: _Optional[str] = ..., torch_cuda_version: _Optional[str] = ..., gen_worker_version: _Optional[str] = ..., image_digest: _Optional[str] = ..., instance_id: _Optional[str] = ..., reported_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class HostCanary(_message.Message):
-    __slots__ = ("memcpy_gbps", "h2d_gbps", "d2h_gbps", "pinned_alloc_ok", "cpu_single_mbps", "cpu_multi_mbps", "vcpus", "ram_total_gb", "duration_ms")
+    __slots__ = ("memcpy_gbps", "d2h_gbps", "pinned_alloc_ok", "cpu_single_mbps", "cpu_multi_mbps", "vcpus", "ram_total_gb", "duration_ms")
     MEMCPY_GBPS_FIELD_NUMBER: _ClassVar[int]
-    H2D_GBPS_FIELD_NUMBER: _ClassVar[int]
     D2H_GBPS_FIELD_NUMBER: _ClassVar[int]
     PINNED_ALLOC_OK_FIELD_NUMBER: _ClassVar[int]
     CPU_SINGLE_MBPS_FIELD_NUMBER: _ClassVar[int]
@@ -242,7 +241,6 @@ class HostCanary(_message.Message):
     RAM_TOTAL_GB_FIELD_NUMBER: _ClassVar[int]
     DURATION_MS_FIELD_NUMBER: _ClassVar[int]
     memcpy_gbps: float
-    h2d_gbps: float
     d2h_gbps: float
     pinned_alloc_ok: bool
     cpu_single_mbps: float
@@ -250,7 +248,7 @@ class HostCanary(_message.Message):
     vcpus: int
     ram_total_gb: float
     duration_ms: int
-    def __init__(self, memcpy_gbps: _Optional[float] = ..., h2d_gbps: _Optional[float] = ..., d2h_gbps: _Optional[float] = ..., pinned_alloc_ok: _Optional[bool] = ..., cpu_single_mbps: _Optional[float] = ..., cpu_multi_mbps: _Optional[float] = ..., vcpus: _Optional[int] = ..., ram_total_gb: _Optional[float] = ..., duration_ms: _Optional[int] = ...) -> None: ...
+    def __init__(self, memcpy_gbps: _Optional[float] = ..., d2h_gbps: _Optional[float] = ..., pinned_alloc_ok: _Optional[bool] = ..., cpu_single_mbps: _Optional[float] = ..., cpu_multi_mbps: _Optional[float] = ..., vcpus: _Optional[int] = ..., ram_total_gb: _Optional[float] = ..., duration_ms: _Optional[int] = ...) -> None: ...
 
 class ModelResidency(_message.Message):
     __slots__ = ("ref", "tier", "vram_bytes", "snapshot_digest", "residency_generation")
