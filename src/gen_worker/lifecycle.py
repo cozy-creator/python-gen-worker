@@ -21,10 +21,6 @@ from .transport import PROTOCOL_VERSION, Transport
 
 logger = logging.getLogger(__name__)
 
-# th#1087 echo fields, present once the A+C lane's proto lands; guarded so
-# the worker runs against either proto vintage.
-_DELTA_HAS_CONFIG_GEN = "observed_config_generation" in pb.StateDelta.DESCRIPTOR.fields_by_name
-
 _VRAM_QUANTUM_FRACTION = 0.05  # quantize free-VRAM deltas to 5% of total
 
 # gw#591 boot-setup watcher: poll cadence for hub-delivered snapshots of
@@ -190,29 +186,15 @@ class Lifecycle:
         self._reconcile_active: Optional[tuple] = None
         self._residency_restart: Optional[asyncio.Event] = None
         self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
-        # th#1087: first config generation seen this boot — the hub's env-
-        # class staleness input (envs are boot-injected; the worker never
-        # mutates them, it just keeps echoing what it booted with).
-        self._boot_config_generation = 0
-
     # ---- snapshots -----------------------------------------------------------
 
     def _state_delta(self) -> pb.StateDelta:
         free = free_vram_bytes()
         total = int(self.hardware.get("gpu_total_mem") or 0)
         quantum = max(1, int(total * _VRAM_QUANTUM_FRACTION)) if total else 1
-        # th#1087/th#1085 worker half: echo the applied config generation
-        # (and the boot-time one for env-class staleness) once the proto
-        # carries the fields.
-        config_echo: Dict[str, int] = {}
-        if _DELTA_HAS_CONFIG_GEN:
-            config_echo["observed_config_generation"] = (
-                self.executor.runtime_config.generation
-            )
-            if "boot_config_generation" in pb.StateDelta.DESCRIPTOR.fields_by_name:
-                config_echo["boot_config_generation"] = self._boot_config_generation
         return pb.StateDelta(
-            **config_echo,
+            # th#1087/th#1085: echo DesiredResidency.config_generation.
+            observed_config_generation=self.executor.runtime_config.generation,
             phase=self.phase,
             available_functions=self.executor.available_functions(),
             loading_functions=self.executor.loading_functions(),
@@ -339,18 +321,16 @@ class Lifecycle:
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
-        # th#1087 class-1 parameters: update memory + rewrite the local
-        # snapshot file (per-invoke subprocesses read it). Bindings (class 2)
-        # ride the desired-residency reconcile below; envs (class 3) are
-        # boot-only — the worker just keeps echoing its boot generation.
+        # th#1087: the desired state advertises (release_id, config_gen).
+        # Observe it (memory + snapshot file rewrite); parameter VALUES ride
+        # RunJob stamps (class 1), bindings ride the desired-residency
+        # reconcile below (class 2), envs are boot-only (class 3 — the hub
+        # drain-rolls; the worker never mutates its own env).
         push = extract_config_push(ack)
         if push is not None:
-            if self._boot_config_generation == 0:
-                self._boot_config_generation = push.config_generation
-            self.executor.runtime_config.apply(
-                generation=push.config_generation,
-                parameters=push.parameters,
-                release_id=push.release_id or self.release_id,
+            gen, release_id = push
+            self.executor.runtime_config.observe(
+                gen, release_id=release_id or self.release_id,
             )
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).

@@ -14,7 +14,7 @@ import logging
 import os
 import tempfile
 import threading
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import msgspec
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Known path contract: the worker exports this env var so every subprocess
 # it spawns can locate the snapshot without plumbing.
 SNAPSHOT_PATH_ENV = "GEN_WORKER_CONFIG_SNAPSHOT_PATH"
-DEFAULT_SNAPSHOT_PATH = "/app/.tensorhub/runtime_config.json"
+DEFAULT_SNAPSHOT_PATH = "/app/.tensorhub/runtime_config.msgpack"
 
 
 class ConfigSnapshot(msgspec.Struct, frozen=True, kw_only=True):
@@ -32,11 +32,11 @@ class ConfigSnapshot(msgspec.Struct, frozen=True, kw_only=True):
     config_generation: int = 0
     release_id: str = ""
     # function name -> parameter name -> value
-    parameters: Dict[str, Dict[str, Any]] = {}
+    parameters: Dict[str, Dict[str, Any]] = msgspec.field(default_factory=dict)
 
 
 def _decode_snapshot(raw: bytes) -> ConfigSnapshot:
-    return msgspec.json.decode(raw, type=ConfigSnapshot)
+    return msgspec.msgpack.decode(raw, type=ConfigSnapshot)
 
 
 def read_snapshot(path: Optional[str] = None) -> ConfigSnapshot:
@@ -78,16 +78,12 @@ class ConfigStore:
         with self._lock:
             return dict(self._snap.parameters.get(function_name, {}))
 
-    def apply(
-        self,
-        *,
-        generation: int,
-        parameters: Optional[Mapping[str, Mapping[str, Any]]] = None,
-        release_id: str = "",
-    ) -> bool:
-        """Apply a hub config push. Stale/duplicate generations are ignored.
-        Returns True when state advanced (memory updated + snapshot file
-        atomically rewritten)."""
+    def observe(self, generation: int, *, release_id: str = "") -> bool:
+        """A hub desired-state push advertised ``generation`` (th#1085
+        interface: DesiredResidency.config_generation). Advances the observed
+        gen monotonically, keeping known parameter values; stale/duplicate
+        generations are ignored. Returns True when state advanced (memory
+        updated + snapshot file atomically rewritten)."""
         gen = int(generation)
         with self._lock:
             if gen <= self._snap.config_generation:
@@ -100,12 +96,49 @@ class ConfigStore:
             self._snap = ConfigSnapshot(
                 config_generation=gen,
                 release_id=release_id or self._snap.release_id,
-                parameters={
-                    fn: dict(vals) for fn, vals in (parameters or {}).items()
-                },
+                parameters=dict(self._snap.parameters),
             )
             self._write_snapshot_locked()
-            logger.info("config generation %d applied; snapshot at %s", gen, self._path)
+            logger.info(
+                "config generation %d observed; snapshot at %s", gen, self._path
+            )
+            return True
+
+    def stamp_function(
+        self,
+        function_name: str,
+        values: Mapping[str, Any],
+        generation: int,
+    ) -> bool:
+        """RunJob-stamped effective parameter values for one function (the
+        class-1 read-at-dispatch carrier). Values at a generation older than
+        the observed one are ignored; otherwise the function's values are
+        full-replaced and the snapshot rewritten, so per-invoke subprocesses
+        read the latest values as of this invoke."""
+        gen = int(generation)
+        with self._lock:
+            if gen < self._snap.config_generation:
+                return False
+            vals = dict(values)
+            if (
+                gen == self._snap.config_generation
+                and self._snap.parameters.get(function_name) == vals
+            ):
+                return False
+            parameters = dict(self._snap.parameters)
+            parameters[function_name] = vals
+            self._snap = ConfigSnapshot(
+                config_generation=max(gen, self._snap.config_generation),
+                release_id=self._snap.release_id,
+                parameters=parameters,
+            )
+            self._write_snapshot_locked()
+            logger.info(
+                "config generation %d applied for %s; snapshot at %s",
+                self._snap.config_generation,
+                function_name,
+                self._path,
+            )
             return True
 
     def _write_snapshot_locked(self) -> None:
@@ -117,7 +150,7 @@ class ConfigStore:
             fd, tmp = tempfile.mkstemp(dir=d, prefix=".runtime_config-")
             try:
                 with os.fdopen(fd, "wb") as f:
-                    f.write(msgspec.json.encode(self._snap))
+                    f.write(msgspec.msgpack.encode(self._snap))
                 os.replace(tmp, self._path)
             except BaseException:
                 try:
@@ -132,45 +165,35 @@ class ConfigStore:
             )
 
 
-def _pb_json_field(msg: Any, name: str) -> Optional[Dict[str, Any]]:
-    raw = getattr(msg, name, None)
-    if not raw:
-        return None
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
-    try:
-        out = msgspec.json.decode(raw)
-    except Exception:
-        logger.warning("undecodable %s payload: %r", name, raw[:200])
-        return None
-    return out if isinstance(out, dict) else None
-
-
-def extract_config_push(ack: Any) -> Optional[ConfigSnapshot]:
-    """(release_id, config_generation, parameters) from a HelloAck, when the
-    proto carries them (th#1087 A+C lane owns the field definitions; absent
-    fields -> None, worker behaves as before). Expected shape:
-    ``config_generation`` uint64 + ``config_params_json`` {fn: {name: value}}."""
-    gen = int(getattr(ack, "config_generation", 0) or 0)
+def extract_config_push(ack: Any) -> Optional[Tuple[int, str]]:
+    """(config_generation, release_id) from a HelloAck's DesiredResidency,
+    using the A+C wire contract (``release_id = 5;
+    config_generation = 6``)."""
+    desired = ack.desired_residency
+    gen = int(desired.config_generation or 0)
     if gen <= 0:
         return None
-    params = _pb_json_field(ack, "config_params_json") or {}
-    return ConfigSnapshot(
-        config_generation=gen,
-        release_id=str(getattr(ack, "release_id", "") or ""),
-        parameters={
-            str(fn): dict(vals)
-            for fn, vals in params.items()
-            if isinstance(vals, dict)
-        },
-    )
+    return gen, str(desired.release_id or "")
 
 
-def extract_job_config(run: Any) -> Optional[Dict[str, Any]]:
-    """Per-job effective parameter values stamped on the RunJob (class-1
-    read-at-dispatch), when the proto carries them. A dispatched job runs
-    with the values it was stamped with — a gen bump never rewrites it."""
-    return _pb_json_field(run, "config_params_json")
+def extract_job_config(run: Any) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """(config_generation, values) stamped on the RunJob (class-1
+    read-at-dispatch; ``config_generation = 16; bytes config_params = 17``,
+    a msgpack param-name -> value map for the invoked function). A
+    dispatched job runs with the values it was stamped with — a gen bump
+    never rewrites it. (0, None) when unstamped."""
+    gen = int(run.config_generation or 0)
+    raw = run.config_params or b""
+    if not raw:
+        return gen, None
+    try:
+        out = msgspec.msgpack.decode(raw)
+    except Exception:
+        logger.warning("undecodable RunJob.config_params: %r", raw[:200])
+        return gen, None
+    if not isinstance(out, dict):
+        return gen, None
+    return gen, {str(k): v for k, v in out.items()}
 
 
 __all__ = [

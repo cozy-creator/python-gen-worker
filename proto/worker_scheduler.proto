@@ -213,6 +213,13 @@ message DesiredResidency {
   repeated string disk_refs = 2;
   repeated DesiredInstance hot = 3;
   map<string, Snapshot> snapshots = 4;
+  // th#1087/th#1085: hub-authoritative desired state is the PAIR
+  // (release_id, config_generation). config_generation is the release's
+  // mutable-config counter — distinct from `generation`, the per-worker
+  // transport sequence number above. The worker echoes the config gen it
+  // loaded via StateDelta.observed_config_generation.
+  string release_id = 5;
+  uint64 config_generation = 6;
 }
 
 // One complete runnable endpoint instance. `models` is the same complete
@@ -269,6 +276,10 @@ message StateDelta {
   // against these measured numbers only; release-declared disk sizes are
   // pod-creation priors, never a planning budget.
   DiskUsageReport disk_usage = 9;
+  // th#1087/th#1085: the config generation this worker last loaded
+  // (DesiredResidency.config_generation echo) — config staleness is
+  // per-worker visible state, not inference. Additive: old workers send 0.
+  uint64 observed_config_generation = 12;
 }
 
 // th#962/pgw#610: storage tiers a worker measures. CONTAINER is the pod-local
@@ -376,7 +387,7 @@ message RunJob {
   string function_name = 3;
   bytes  input_payload = 4; // canonical MessagePack input; stored Asset refs remain opaque
   int64  timeout_ms = 5;    // execution deadline; 0 = no explicit timeout
-  string tenant     = 6;    // invoking owner (org/user slug)
+  string tenant  = 6;    // invoking owner (org/user slug)
   string invoker_id = 7;    // surfaced read-only as ctx.invoker_id
   string capability_token = 8; // per-job worker capability token for tensorhub HTTP calls
   OutputMode output_mode = 9;  // client's inline-vs-url preference for media outputs
@@ -401,6 +412,14 @@ message RunJob {
   // Ordered, credential-free stored inputs authorized at submit. The worker
   // resolves fresh transport URLs for the exact request+attempt capability.
   repeated InputAsset input_assets = 15;
+  // th#1087: the config generation this job was dispatched at. In-flight
+  // jobs finish on their dispatched generation; a gen bump never rewrites
+  // a running job.
+  uint64 config_generation = 16;
+  // th#1087 class 1: effective declared-parameter values for THIS function,
+  // msgpack map name -> value. Surfaced read-only as ctx.config; workers
+  // never cache them.
+  bytes config_params = 17;
 }
 
 message InputAsset {
@@ -427,7 +446,7 @@ enum OutputMode {
 
 // Resolved hardware for this invocation: accelerator gates the worker's GPU
 // semaphore; gpu_index binds the CUDA context. pgw#526 cut gpu_count/vram_gb
-// (and the ctx.compute tenant surface they fed): documented and plumbed
+// (and the ctx.compute org surface they fed): documented and plumbed
 // through every dispatch, read by zero endpoints. Reserved so the numbers
 // can't come back with different semantics.
 message ResolvedCompute {
@@ -456,8 +475,8 @@ message ModelBinding {
   // th#980 hierarchical slots: per-component repo substitutions on the base
   // composition, component name -> canonical tensorhub ref (normal form,
   // same grammar as `ref`). The worker loads the base composition then
-  // substitutes each named component from its materialized snapshot
-  // (pgw#617). Snapshots for these refs ride RunJob.snapshots /
+  // substitutes each named component from its materialized snapshot (pgw
+  // companion issue). Snapshots for these refs ride RunJob.snapshots /
   // DesiredResidency exactly like base refs. Additive: old workers ignore.
   map<string, string> components = 5;
 }
@@ -550,7 +569,7 @@ message JobMetrics {
   double output_media_duration_s = 6;
   // Typed billing usage (pgw#512) — the ONLY settlement source for
   // per_million_tokens/per_output pricing. Settlement must read these, never
-  // scavenge the (possibly blob-ref'd, tenant-controlled) result payload.
+  // scavenge the (possibly blob-ref'd, org-controlled) result payload.
   int64 input_tokens = 7;
   int64 input_cached_tokens = 8;
   int64 output_tokens = 9;

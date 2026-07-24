@@ -3368,9 +3368,17 @@ class Executor:
             if name in declared:
                 values[name] = v
         if run is not None:
-            for name, v in (extract_job_config(run) or {}).items():
-                if name in declared:
-                    values[name] = v
+            gen, stamped = extract_job_config(run)
+            if stamped is not None:
+                stamped = {
+                    name: value
+                    for name, value in stamped.items()
+                    if name in declared
+                }
+                # Advance the worker store + snapshot file to this dispatch's
+                # stamped values, so subprocesses read the latest on invoke.
+                self.runtime_config.stamp_function(spec.name, stamped, gen)
+            values.update(stamped or {})
         return values
 
     def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:

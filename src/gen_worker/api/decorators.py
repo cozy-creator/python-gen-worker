@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import re
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, overload
 
 import msgspec
@@ -275,6 +276,7 @@ class ConfigParam(msgspec.Struct, frozen=True):
     choices: tuple = ()
     ge: Optional[float] = None
     le: Optional[float] = None
+    regex: str = ""
     description: str = ""
 
     def __post_init__(self) -> None:
@@ -307,6 +309,22 @@ class ConfigParam(msgspec.Struct, frozen=True):
             raise ValueError(f"ConfigParam {name!r}: ge/le apply to int/float only")
         if self.ge is not None and self.le is not None and self.ge > self.le:
             raise ValueError(f"ConfigParam {name!r}: ge {self.ge} > le {self.le}")
+        regex = str(self.regex or "")
+        if regex and self.type is not str:
+            raise ValueError(f"ConfigParam {name!r}: regex applies to str only")
+        if regex:
+            try:
+                re.compile(regex)
+            except re.error as exc:
+                raise ValueError(
+                    f"ConfigParam {name!r}: invalid regex {regex!r}: {exc}"
+                ) from exc
+            if re.search(regex, self.default) is None:
+                raise ValueError(
+                    f"ConfigParam {name!r}: default {self.default!r} does not "
+                    f"match regex {regex!r}"
+                )
+        force(self, "regex", regex)
         force(self, "description", str(self.description or "").strip())
 
     def _check_value(self, label: str, value: Any) -> None:
@@ -342,6 +360,8 @@ class ConfigParam(msgspec.Struct, frozen=True):
             out["ge"] = self.ge
         if self.le is not None:
             out["le"] = self.le
+        if self.regex:
+            out["regex"] = self.regex
         if self.description:
             out["description"] = self.description
         return out
@@ -383,7 +403,12 @@ def _validate_env_decl(owner: str, env: Any) -> Tuple[str, ...]:
     out: list[str] = []
     for name in env:
         n = str(name or "").strip()
-        if not n or not n.replace("_", "a").isalnum() or n[0].isdigit():
+        if (
+            not n
+            or len(n) > 64
+            or not ("A" <= n[0] <= "Z")
+            or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in n)
+        ):
             raise ValueError(
                 f"@endpoint {owner}: env= name {name!r} is not a valid "
                 "environment variable name"

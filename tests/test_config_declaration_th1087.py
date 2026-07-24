@@ -69,6 +69,8 @@ def test_decoration_validation_errors() -> None:
         ConfigParam("sched", str, default="x", choices=["a", "b"])
     with pytest.raises(ValueError, match="ge/le apply to int/float"):
         ConfigParam("sched", str, default="a", ge=1)
+    with pytest.raises(ValueError, match="does not match regex"):
+        ConfigParam("slug", str, default="BAD", regex="[a-z]+")
     with pytest.raises(ValueError, match="< ge"):
         ConfigParam("steps", int, 0, ge=1, le=150)
     with pytest.raises(TypeError, match="one of"):
@@ -89,6 +91,8 @@ def test_decoration_validation_errors() -> None:
         _decl(config=[ConfigParam("steps", int, 1), ConfigParam("steps", int, 2)])
     with pytest.raises(ValueError, match="not a valid"):
         _decl(env=["BAD NAME"])
+    with pytest.raises(ValueError, match="not a valid"):
+        _decl(env=["lowercase"])
     with pytest.raises(ValueError, match="repeats"):
         _decl(env=["A_TOKEN", "A_TOKEN"])
     with pytest.raises(TypeError, match="env= must be a list/tuple"):
