@@ -564,6 +564,33 @@ def _shared_lanes_need_fp8(
     return fp8_needed + margin_bytes <= free_vram_bytes
 
 
+def _estimate_setup_need(
+    per_ref: typing.Sequence[Tuple[int, int]],
+    vram_gb: float,
+) -> int:
+    """Pre-load VRAM headroom estimate for one setup's refs (pgw#636).
+
+    ``per_ref`` carries ``(vram_hint, snapshot_bytes)`` per ref: a prior
+    MEASURED footprint wins; else the wire snapshot's byte total (an honest
+    first-load footprint for stored-precision lanes — make_room's margin
+    covers slack). Only when a ref has NEITHER fact does the declared
+    ``vram_gb`` floor the total: the declaration is a placement MINIMUM
+    ("a card with at least this much"), never a per-load reservation —
+    reserving it wholesale for every never-seen checkpoint pick evicted the
+    resident pipeline on 24 GB cards and pinned workers to one pipeline
+    (the 2026-07-24 9.8/24 GB incident)."""
+    needed = 0
+    unknown = False
+    for hint, snapshot_bytes in per_ref:
+        size = hint if hint > 0 else max(0, int(snapshot_bytes))
+        if size <= 0:
+            unknown = True
+        needed += size
+    if unknown and vram_gb > 0:
+        needed = max(needed, int(vram_gb * _GiB))
+    return needed
+
+
 def _is_corrupt_load_error(exc: BaseException) -> bool:
     """Errors a truncated/corrupt snapshot produces at weights-load time
     (gw#408). Broad on purpose: the digest re-verify gate downstream
@@ -3964,16 +3991,25 @@ class Executor:
         await self.ensure_setup(effective, snapshots)
 
     def _job_pin_refs(self, spec: EndpointSpec, slots: List[str]) -> List[str]:
-        """Wire refs a job pins for its whole lifetime: every routed slot
-        EXCEPT lane refs (gw#551 — the LaneGate pins those around the actual
-        pipeline call, so the idle sibling stays LRU-demotable)."""
+        """Refs a job pins for its whole lifetime: every routed slot EXCEPT
+        lane refs (gw#551 — the LaneGate pins those around the actual
+        pipeline call, so the idle sibling stays LRU-demotable), PLUS the
+        record's shared-component entries (pgw#636: holders alone no longer
+        block demotion, so an executing job must pin the TE/VAE entries its
+        pipeline aliases)."""
         rec = self._classes.get(spec.instance_key) if spec.cls is not None else None
         lane_refs = rec.lane_refs if rec is not None else set()
-        return [
-            r for s in slots
-            for r in _binding_wire_refs(spec.models[s])
-            if r not in lane_refs
-        ]
+        shared_ids = (
+            [k.cache_id() for k in rec.shared_keys] if rec is not None else []
+        )
+        return list(dict.fromkeys(
+            [
+                r for s in slots
+                for r in _binding_wire_refs(spec.models[s])
+                if r not in lane_refs
+            ]
+            + shared_ids
+        ))
 
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
         """Instance-group record for ``spec``, created on first sight for
@@ -4924,6 +4960,8 @@ class Executor:
                             proven_mint_objs.add(id(pipe))
                             if callable(warmup):
                                 function_proofs[id(pipe)] = {spec.name}
+                            compile_cache.record_cell_proven(
+                                str(finalized.ref))
                             inj.active_compile_artifacts[id(pipe)] = (
                                 _CompileArtifactSelection(
                                     path=Path(finalized.artifact),
@@ -4933,12 +4971,45 @@ class Executor:
                                     self_mint=True))
                         else:
                             disproven.append(candidate)
-                    elif pipe_hits <= 0:
-                        disproven.append(candidate)
-                    else:
+                    elif pipe_hits > 0:
                         proven += 1
                         if callable(warmup):
                             function_proofs[id(pipe)] = {spec.name}
+                        proved_sel = inj.active_compile_artifacts.get(id(pipe))
+                        if proved_sel is not None:
+                            compile_cache.record_cell_proven(proved_sel.ref)
+                    elif (
+                        pipe_misses <= 0
+                        and (inmem_sel := inj.active_compile_artifacts.get(
+                            id(pipe))) is not None
+                        and compile_cache.cell_proven_in_process(inmem_sel.ref)
+                        and compile_cache.has_inmemory_compiled_code(pipe)
+                    ):
+                        # pgw#637: calls>0 with ZERO counter movement against
+                        # a cell this process ALREADY proved, AND dynamo
+                        # confirming live compiled code for this object's
+                        # targets, is torch 2.13's in-memory dynamo code
+                        # cache serving a sibling checkpoint's compiled code
+                        # — a legitimate third serving surface (cell keys are
+                        # checkpoint-free by design), not silent eager.
+                        # Disproving it bricked the compiled lane on every
+                        # 2nd same-family pick. Both conditions are load-
+                        # bearing: the registry alone would let a SIBLING
+                        # object's hit certify this object's silence, which
+                        # gw#603/gw#611 forbid; the dynamo probe alone would
+                        # credit a cell never proven anywhere.
+                        proven += 1
+                        if callable(warmup):
+                            function_proofs[id(pipe)] = {spec.name}
+                        logger.info(
+                            "compile-cache: %s served warmup from dynamo's "
+                            "in-memory code cache (cell %s already proven "
+                            "in-process; calls=%d) — counted as serving "
+                            "evidence (pgw#637)",
+                            spec.name, inmem_sel.ref, calls,
+                        )
+                    else:
+                        disproven.append(candidate)
                 # gw#612: everything after the per-object proof — unproven
                 # handling, sibling resolution, the publish decision, and
                 # the bookkeeping down to readiness — reports an honest
@@ -5308,6 +5379,14 @@ class Executor:
             r for s in setup_slots
             if (r := wire_ref(spec.models[s])) not in lane_refs
         ]
+        # pgw#636: shared-component entries (TE/VAE) the record's pipelines
+        # alias are independently demotable now — swap any that went warm
+        # back in before this job executes, alongside the setup refs.
+        if rec is not None and rec.shared_keys:
+            refs.extend(
+                cid for k in rec.shared_keys
+                if (cid := k.cache_id()) not in refs
+            )
         cuda_host = torch is not None and torch.cuda.is_available()
         if any(res.tier(r) is residency_mod.Tier.RAM for r in refs):
             async with self._load_lock:
@@ -5735,18 +5814,26 @@ class Executor:
 
     async def _make_room_for(self, spec: EndpointSpec, setup_slots: List[str]) -> None:
         """Evict idle LRU pipelines before loading instead of degrading the
-        new load down the offload ladder (#371). Estimate: per-ref vram_hint
-        from a prior load, else the endpoint's declared vram_gb."""
+        new load down the offload ladder (#371).
+
+        Estimate per ref (pgw#636): a prior measured vram_hint, else the
+        snapshot's actual byte total (the wire manifest sizes — an honest
+        first-load footprint for stored-precision lanes; make_room's margin
+        covers slack), else — only when NO byte facts exist at all — the
+        endpoint's declared ``vram_gb``. The declaration is a PLACEMENT
+        MINIMUM ("give me a card with at least this much"), never a per-load
+        reservation: reserving it wholesale on every never-seen checkpoint
+        pick evicted the resident pipeline on 24 GB cards and pinned the
+        fleet to one-pipeline-per-worker (the live 9.8/24 GB incident)."""
         res = self.store.residency
         refs = [wire_ref(spec.models[s]) for s in setup_slots]
-        hints = [res.vram_hint(r) for r in refs]
-        needed = sum(hints)
-        # A partially-known set is still an unknown load. Live SDXL exposed
-        # the old sum-only bug: the fixed VAE had a small prior hint while a
-        # never-seen checkpoint had none, so admission reserved only the VAE
-        # and loaded a ~10GiB pipeline into an occupied 24GiB card.
-        if any(h <= 0 for h in hints) and spec.resources.vram_gb:
-            needed = max(needed, int(float(spec.resources.vram_gb) * _GiB))
+        needed = _estimate_setup_need(
+            [
+                (res.vram_hint(r), sum(self.store.component_sizes(r).values()))
+                for r in refs
+            ],
+            float(spec.resources.vram_gb or 0),
+        )
         if needed <= 0:
             return
         # CPU-only workers do not have a VRAM tier to admit against.
@@ -5943,17 +6030,27 @@ class Executor:
     def _component_share_plan(
         self, spec: EndpointSpec, paths: Dict[str, str], hints: Dict[str, Any]
     ) -> Optional[Dict[str, Dict[str, Any]]]:
-        """Content-keyed shared-component plan for a multi-lane record
-        (gw#479): ``{slot: {component: LoadedComponentKey}}`` restricted to
-        components whose CONTENT key appears under 2+ pipeline slots. None
-        when the record has <2 pipeline slots, digests are unavailable, or
-        nothing is byte-identical — loading then stays monolithic."""
+        """Content-keyed shared-component plan (gw#479, extended pgw#636):
+        ``{slot: {component: LoadedComponentKey}}``. A component participates
+        when its CONTENT key appears under 2+ pipeline slots of THIS record
+        (the multi-lane z-image/qwen shape), when its slot DECLARES it
+        (``Slot.share_components`` — the cross-pick opt-in: the component
+        becomes an independent residency entry so later picks with equal
+        bytes alias it and unequal bytes stay honestly exclusive), or when
+        an entry for the key is ALREADY resident in the shared cache (a
+        sibling pick's record seeded it). None when nothing qualifies —
+        loading then stays monolithic."""
         pipe_slots = [
             s for s in paths
             if isinstance(hints.get(s), type)
             and callable(getattr(hints[s], "from_pretrained", None))
         ]
-        if len(pipe_slots) < 2:
+        declared: Dict[str, frozenset] = {
+            s: frozenset(spec.slots[s].share_components)
+            for s in pipe_slots
+            if s in spec.slots and spec.slots[s].share_components
+        }
+        if len(pipe_slots) < 2 and not declared:
             return None
         keys: Dict[str, Dict[str, Any]] = {}
         for slot in pipe_slots:
@@ -5973,8 +6070,14 @@ class Executor:
         for slot_keys in keys.values():
             for k in slot_keys.values():
                 counts[k] = counts.get(k, 0) + 1
+        res = self.store.residency
         plan = {
-            slot: {c: k for c, k in slot_keys.items() if counts[k] >= 2}
+            slot: {
+                c: k for c, k in slot_keys.items()
+                if counts[k] >= 2
+                or c in declared.get(slot, frozenset())
+                or res.shared_obj(k) is not None
+            }
             for slot, slot_keys in keys.items()
         }
         if not any(plan.values()):
@@ -7215,11 +7318,13 @@ class Executor:
         rec.stale = False
         if rec.shared_keys:
             # Drop this record's holds on content-keyed shared components
-            # (gw#479); entries no other record references get evicted.
+            # (gw#479). pgw#636: entries no other record references are NOT
+            # drained eagerly — a hot GPU keeps them resident as ordinary LRU
+            # candidates so the next pick that matches their bytes aliases
+            # them for free; real pressure reclaims them through make_room.
             for key in rec.shared_keys:
                 self.store.residency.release_shared(key)
             rec.shared_keys.clear()
-            self.store.residency.drain_shared()
         self._on_state_change()
         released_refs = list(dict.fromkeys(released_refs))
         await self._observe_host_ram_progress(released_refs, collect_host=True)

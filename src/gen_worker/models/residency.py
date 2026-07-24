@@ -98,7 +98,13 @@ class _Entry:
     vram_bytes: int = 0
     vram_hint: int = 0           # last measured footprint (survives demotion)
     pinned: bool = False
-    refcount: int = 0            # live executions / shared holders
+    refcount: int = 0            # live executions (pin-while-executing)
+    # Records referencing a shared component (pgw#636). Holders do NOT block
+    # VRAM->RAM demotion (an idle pick's component may swap out; the owner
+    # promotes it back before executing) but DO block evict/release_to_disk:
+    # the registry must never drop its handle on a module that live
+    # pipelines still alias.
+    holders: int = 0
     last_used: float = field(default_factory=time.monotonic)
     # Swap telemetry (gw#479): tier-transition counts + last durations.
     promote_count: int = 0
@@ -544,7 +550,7 @@ class Residency:
             e = self._entries.get(ref)
             if e is None:
                 return False
-            if e.refcount > 0:
+            if e.refcount > 0 or e.holders > 0:
                 return False
             was_loaded = e.tier in (Tier.VRAM, Tier.RAM)
             e.obj = None
@@ -568,7 +574,7 @@ class Residency:
             e = self._entries.get(ref)
             if e is None:
                 return False
-            if e.refcount > 0 and not force:
+            if (e.refcount > 0 or e.holders > 0) and not force:
                 return False
             was_loaded = e.tier in (Tier.VRAM, Tier.RAM)
             del self._entries[ref]
@@ -607,13 +613,18 @@ class Residency:
     # ---- pressure -------------------------------------------------------------
 
     def lru_vram_victims(self) -> List[str]:
-        """Evictable VRAM refs, LRU first (pinned/executing excluded)."""
+        """Evictable VRAM refs, LRU first (pinned/executing excluded).
+
+        Genuinely shared components (2+ holders — e.g. a TE/VAE aliased by
+        several resident picks, pgw#636) sort LAST: swapping one out costs
+        every sibling a re-promote, so exclusive entries (per-pick UNets,
+        single-holder components) always go first."""
         with self._lock:
             candidates = [
                 e for e in self._entries.values()
                 if e.tier is Tier.VRAM and not e.pinned and e.refcount <= 0
             ]
-            candidates.sort(key=lambda e: e.last_used)
+            candidates.sort(key=lambda e: (1 if e.holders >= 2 else 0, e.last_used))
             return [e.ref for e in candidates]
 
     def make_room(self, needed_bytes: int) -> bool:
@@ -638,7 +649,7 @@ class Residency:
             candidates = [
                 e for e in self._entries.values()
                 if e.tier is Tier.RAM and e.obj is not None
-                and not e.pinned and e.refcount <= 0
+                and not e.pinned and e.refcount <= 0 and e.holders <= 0
             ]
             candidates.sort(key=lambda e: e.last_used)
             return [e.ref for e in candidates]
@@ -655,13 +666,16 @@ class Residency:
     ) -> Any:
         """Load-once-or-reuse a shared immutable component set. The entry is
         registered ONCE (VRAM counted once) under ``key.cache_id()`` and held
-        (refcount) so eviction never reclaims it while any pipeline uses it."""
+        (``holders``) so evict/release can never drop the registry's handle
+        while any pipeline aliases the module. Holders do NOT block VRAM->RAM
+        demotion (pgw#636): an idle pick's component may swap out under real
+        pressure; owners re-promote before executing (pin + promote path)."""
         ref = key.cache_id()
         with self._lock:
             e = self._entries.get(ref)
             if e is not None and e.obj is not None:
                 self._shared_hits += 1
-                e.refcount += 1
+                e.holders += 1
                 e.last_used = time.monotonic()
                 return e.obj
             # MISS: load under the lock so a concurrent acquire of the same key
@@ -676,8 +690,9 @@ class Residency:
                 tier=Tier.VRAM if measured > 0 else Tier.RAM,
                 obj=obj,
                 vram_bytes=measured,
+                vram_hint=measured,
                 pinned=pin,
-                refcount=1,
+                holders=1,
             )
             self._entries[ref] = e
             state, vb = (IN_VRAM, measured) if e.tier is Tier.VRAM else (IN_RAM, 0)
@@ -685,20 +700,22 @@ class Residency:
         return obj
 
     def release_shared(self, key: "LoadedComponentKey") -> int:
-        """Drop one shared reference; returns the new count. The last release
-        makes the entry an LRU candidate — it is not freed eagerly."""
+        """Drop one shared hold; returns the new holder count. The last
+        release makes the entry an ordinary LRU candidate — it is NOT freed
+        eagerly (pgw#636: a hot GPU keeps components resident for the next
+        pick; real pressure reclaims them through make_room)."""
         with self._lock:
             e = self._entries.get(key.cache_id())
             if e is None:
                 return 0
-            if e.refcount > 0:
-                e.refcount -= 1
-            return e.refcount
+            if e.holders > 0:
+                e.holders -= 1
+            return e.holders
 
     def shared_refcount(self, key: "LoadedComponentKey") -> int:
         with self._lock:
             e = self._entries.get(key.cache_id())
-            return e.refcount if e else 0
+            return e.holders if e else 0
 
     def shared_obj(self, key: "LoadedComponentKey") -> Any:
         return self.obj(key.cache_id())
@@ -710,7 +727,8 @@ class Residency:
                 "misses": self._shared_misses,
                 "entries": [
                     {"ref": e.ref, "tier": e.tier.value, "refcount": e.refcount,
-                     "vram_bytes": e.vram_bytes, "pinned": e.pinned}
+                     "holders": e.holders, "vram_bytes": e.vram_bytes,
+                     "pinned": e.pinned}
                     for e in self._entries.values() if e.ref.startswith("shared::")
                 ],
             }
@@ -731,11 +749,12 @@ class Residency:
             }
 
     def drain_shared(self, *, force: bool = False) -> int:
-        """Evict shared entries with refcount 0 (or everything when ``force``)."""
+        """Evict shared entries with no holders (or everything when ``force``)."""
         with self._lock:
             victims = [
                 r for r, e in self._entries.items()
-                if r.startswith("shared::") and (force or e.refcount <= 0)
+                if r.startswith("shared::")
+                and (force or (e.holders <= 0 and e.refcount <= 0))
             ]
         freed = 0
         for r in victims:

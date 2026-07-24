@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.57.0 (2026-07-24)
+
+- **pgw#636: hot-GPU mandate — pack VRAM with checkpoints.**
+  `Resources.vram_gb` is now purely a placement minimum, never a per-load
+  reservation: `_make_room_for` estimates a never-seen pick from its wire
+  snapshot's real byte total (prior measured `vram_hint` still wins) and
+  falls back to the declaration only when NO byte facts exist. A 24 GB card
+  therefore packs several ~5 GB checkpoint picks hot instead of evicting the
+  resident pipeline on every hop. New `Slot(share_components=(...))` opts a
+  pipeline slot into CROSS-PICK content-keyed component sharing (gw#479
+  machinery generalized): declared components become independent residency
+  entries — equal bytes alias across picks, unequal bytes stay exclusive —
+  and the per-pick denoiser lane LRU-swaps on its own. Residency shared
+  entries move from refcount-holds to `holders` semantics: referenced
+  components are demotable while idle (owners re-promote before executing —
+  jobs pin + promote their record's shared entries), never evictable while
+  referenced, and 2+-holder shared entries sort LAST in LRU victim order;
+  record vacate no longer drains unreferenced shared entries eagerly.
+- **pgw#638 (absorbed): serve-while-downloading.** Hub-staged DISK
+  materializations no longer wait for tenant idle and are no longer
+  cancelled by incoming jobs — background downloads make full-rate progress
+  while resident models serve (live incident: staged 4.7 GB downloads sat at
+  0%% for 4+ minutes on busy workers, so the hub kept buying pods for models
+  the fleet almost had). Hot warms keep the tenant-idle gate and run_job
+  preemption; a busy worker re-verifies desired disk state once tenant work
+  drains, and the park wakes on a fresh desired set.
+- **pgw#637: dynamo's in-memory code cache is a legitimate serving
+  surface.** Cell keys are checkpoint-free, so the 2nd checkpoint of an
+  already-proven family serves its warmup from dynamo's in-memory compiled
+  code with zero FX/AOT counter movement — the finalize proof now credits
+  that signature (calls>0, hits=0, misses=0) when the exact cell was already
+  proven in this process AND dynamo confirms live compiled code for that
+  object's compile targets, instead of deterministically bricking the
+  compiled lane (`compile_cell_failed`) on every multi-checkpoint session.
+  Both conditions are load-bearing: the registry alone would let a sibling
+  object's cache hit certify this object's silence (gw#603/gw#611 forbid
+  exactly that), the dynamo probe alone would credit a cell never proven
+  anywhere. The disproof cleanup no longer fires the global
+  `torch._dynamo.reset()` while a healthy sibling pipeline is still armed.
+
 ## 0.56.0 (2026-07-24)
 
 - **th#1085 Slice 5: exact mutable-config convergence.** Protocol-v5 desired
