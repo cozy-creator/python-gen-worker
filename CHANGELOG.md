@@ -7,7 +7,9 @@
   `target_dtype`, `flavor`, or `attributes`, which the repo-commit route
   never persisted. Step, epoch, and checkpoint kind remain on their live
   provenance/event paths. The private stream's write-only uploader metadata
-  and unused elapsed-time property are removed.
+  and unused elapsed-time property are removed. The zero-consumer
+  `Dataset.as_hf_dataset` and `Dataset.is_eval_set` conveniences are removed;
+  callers use `iter_examples`/`as_dataloader` and `Dataset.kind`.
 
 ## 0.54.0 (2026-07-24)
 
