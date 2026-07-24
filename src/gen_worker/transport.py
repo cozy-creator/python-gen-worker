@@ -48,6 +48,28 @@ class FatalTransportError(Exception):
     """Unrecoverable protocol mismatch or persistent registration rejection."""
 
 
+class HandlerError(Exception):
+    """A MESSAGE HANDLER raised — this is not a transport failure (gw#640).
+
+    `_recv_loop` awaits the handlers inline, so a raise while handling (say) a
+    RunJob used to propagate into `run()`'s catch-all and be logged as
+    "connection to <addr> failed" — a handler bug wearing a dropped socket's
+    clothes. The worker then reconnected forever while the hub, whose only
+    death signal is a closed stream, reported `young worker death` and
+    `workers kept dying mid-job`. Ten live th#1085 runs and two prior
+    instrument releases (0.56.1 fatals, 0.56.2 post-mortem supervisor) found
+    nothing because the process never died and nothing ever escaped to them.
+
+    Carries which message was being handled so the report names it.
+    """
+
+    def __init__(self, kind: str, cause: BaseException) -> None:
+        super().__init__(f"handler for {kind or 'unknown'} raised: "
+                         f"{type(cause).__name__}: {cause}")
+        self.kind = kind or "unknown"
+        self.cause = cause
+
+
 def normalize_grpc_addr(addr: str, default_tls: Optional[bool] = None) -> Tuple[str, bool]:
     """Normalize a scheduler address into (host:port, use_tls).
 
@@ -445,6 +467,8 @@ class Transport:
         self._consecutive_auth_failures = 0
         self._first_auth_failure_at: Optional[float] = None
         self._connected_at: Optional[float] = None  # set on each HelloAck
+        # gw#640: (message kind, exception class) already dialed to the hub.
+        self._reported_handler_failures: set = set()
         # Latest hub-pushed worker JWT (TokenRefresh, contract §1 rotation).
         # Used by the live connection's successor dials: reconnects always
         # present the newest credential; the boot-time settings token is only
@@ -514,6 +538,38 @@ class Transport:
             return None
         return [("authorization", f"Bearer {token}")]
 
+    def _report_handler_failure(self, err: HandlerError) -> None:
+        """Log a handler failure as ITSELF and dial it to the hub (gw#640).
+
+        Reuses the `worker_fatal` carrier, so this lands as a durable
+        `pod_events` row on every hub pin already deployed — no proto change,
+        no hub redeploy. Deduped per (message kind, exception class): the
+        reconnect loop would otherwise re-dial the same fault every cycle.
+        The reconnect itself is unchanged — this release unmasks the fault, it
+        does not change liveness policy.
+        """
+        logger.error(
+            "HANDLER FAILURE while handling %s (this is NOT a connection "
+            "failure; the process is alive and will reconnect): %s: %s",
+            err.kind, type(err.cause).__name__, err.cause,
+            exc_info=err.cause,
+        )
+        key = (err.kind, type(err.cause).__name__)
+        if key in self._reported_handler_failures:
+            return
+        self._reported_handler_failures.add(key)
+        try:
+            from .worker_fatal import report_worker_fatal
+
+            delivered = report_worker_fatal(
+                self._settings, f"message_handler:{err.kind}", err.cause, exit_code=0,
+            )
+            logger.info(
+                "handler-failure report for %s delivered=%s", err.kind, delivered,
+            )
+        except Exception:
+            logger.warning("handler-failure report raised unexpectedly", exc_info=True)
+
     async def run(self) -> None:
         """Reconnect until stopped; fatal protocol/auth failures still exit."""
         attempt = 0
@@ -568,6 +624,9 @@ class Transport:
                     logger.warning("stream error %s: %s", code, details)
             except FatalTransportError:
                 raise
+            except HandlerError as e:
+                # gw#640: NEVER let this look like a dropped socket again.
+                self._report_handler_failure(e)
             except Exception as e:
                 logger.warning("connection to %s failed: %s: %s", target, type(e).__name__, e)
             finally:
@@ -695,7 +754,12 @@ class Transport:
             if which is None:
                 raise FatalTransportError("scheduler sent an unknown mandatory command")
             if which == "hello_ack":
-                await self._handlers.on_hello_ack(msg.hello_ack)
+                try:
+                    await self._handlers.on_hello_ack(msg.hello_ack)
+                except (FatalTransportError, asyncio.CancelledError):
+                    raise
+                except Exception as e:
+                    raise HandlerError(which, e) from e
                 continue
             if which == "token_refresh":
                 # Kubelet-style rotation (contract §1): swap the stored
@@ -711,4 +775,9 @@ class Transport:
                         msg.token_refresh.expires_at_unix,
                     )
                 continue
-            await self._handlers.on_message(msg)
+            try:
+                await self._handlers.on_message(msg)
+            except (FatalTransportError, asyncio.CancelledError):
+                raise
+            except Exception as e:
+                raise HandlerError(which, e) from e
