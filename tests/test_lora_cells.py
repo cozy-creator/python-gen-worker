@@ -215,3 +215,22 @@ def test_discovery_carries_lora_bucket() -> None:
         family="f", weight_lane="w8a8-lora64", lora_bucket=64)
     assert meta["weight_lane"] == "w8a8-lora64"
     assert meta["lora_bucket"] == 64
+
+
+def test_enable_compiled_skips_lane_on_component_slot_without_target() -> None:
+    """gw#627 live find: enable_compiled runs for EVERY worker-loaded setup
+    slot — a bare component slot (sdxl's standalone AutoencoderKL vae)
+    resolves none of cfg.targets and must stay branchless-eager instead of
+    raising apply_lora_lane's no-denoiser error (which broke the whole
+    model load, release-broken streak)."""
+
+    class _Vae(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.decoder = torch.nn.Linear(8, 8)
+
+    vae = _Vae()
+    cfg = Compile(shapes=((64, 64),), family="loracells-test",
+                  targets=("unet",), lora_bucket=64)
+    armed = provision.enable_compiled(vae, cfg, cache_dir=None, artifact=None)
+    assert armed is False
