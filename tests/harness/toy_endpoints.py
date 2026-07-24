@@ -44,13 +44,6 @@ SLOT_PEER_RAN = threading.Event()
 FINALIZE_PROBE_STARTED = threading.Event()
 FINALIZE_PEER_RAN = threading.Event()
 
-# pgw#636 serve-while-downloading probe: `hold` blocks until the test
-# releases it, keeping the worker provably non-idle while staged background
-# downloads must still make progress.
-HOLD_STARTED = threading.Event()
-HOLD_RELEASE = threading.Event()
-
-
 @endpoint
 class Basics:
     def echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
@@ -78,12 +71,6 @@ class Basics:
     def sleepy(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         time.sleep(0.5)
         return EchoOut(response="done")
-
-    def hold(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
-        """Blocks until the test sets HOLD_RELEASE (pgw#636)."""
-        HOLD_STARTED.set()
-        ok = HOLD_RELEASE.wait(timeout=30.0)
-        return EchoOut(response="released" if ok else "hold-timeout")
 
     def slot_probe(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         SLOT_PROBE_STARTED.set()

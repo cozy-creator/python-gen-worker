@@ -16,10 +16,12 @@ Layers under test, all real logic (fakes only at the torch module boundary):
 3. The packing juggle: a 24 GB budget holds several ~5 GB picks hot; only
    real pressure demotes the LRU one (planner logic real; modules faked).
 4. ``Slot.share_components`` declaration surface.
-5. Serve-while-downloading over the real worker + hub-double: a staged
-   background download completes WHILE a tenant job holds the worker busy
-   (the old tenant-idle gate + run_job preemption starved staged downloads
-   at 0%% for minutes).
+5. THE JUGGLE, end to end over the real worker + hub-double: four checkpoints
+   through ONE ``selected_by=`` slot all stay hot (zero re-setups on the
+   second round).
+
+Serve-while-downloading (pgw#638) is deliberately absent — see that issue:
+the naive fix breaks the P2 mutable-tag identity fence and was reverted.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness import toy_endpoints
 from harness.blob_host import BlobHost
-from harness.hub_double import hub_double, is_model_event, is_ready, is_result_for
+from harness.hub_double import hub_double, is_ready, is_result_for
 from harness.toy_endpoints import EchoIn, EchoOut
 
 _GiB = 1024 ** 3
@@ -227,65 +229,6 @@ def test_slot_share_components_declaration() -> None:
     with pytest.raises(ValueError, match="duplicate"):
         Slot(_Pipe, share_components=("vae", "vae"))
     assert Slot(_Pipe).share_components == ()
-
-
-# ---------------------------------------------------------------------------
-# 5. Serve-while-downloading (real worker + hub-double + real blob host).
-# ---------------------------------------------------------------------------
-
-_STAGED_REF = "harness/pgw636-staged-checkpoint"
-
-
-def test_staged_download_completes_while_tenant_job_runs(tmp_path) -> None:
-    """A runnable tenant job must never starve a staged background
-    download (and vice versa): with `hold` provably in flight, a HelloAck
-    disk staging still reaches ON_DISK before the job finishes. Under the
-    pre-pgw#636 behavior (tenant-idle gate + run_job preemption of the
-    reconcile loop) the ON_DISK wait times out — revert-red verified."""
-    blobs = BlobHost(tmp_path)
-    toy_endpoints.HOLD_STARTED.clear()
-    toy_endpoints.HOLD_RELEASE.clear()
-    try:
-        snapshot = blobs.one_file_snapshot("snap-636", "blob", b"pgw636-weights")
-        with hub_double() as (scheduler, _harness):
-            conn = scheduler.wait_connection(0)
-            conn.wait_for(is_ready)
-
-            # Occupy the worker with a job that will NOT finish on its own.
-            conn.send(run_job=pb.RunJob(
-                request_id="r-hold", attempt=1, function_name="hold",
-                input_payload=msgspec.msgpack.encode(EchoIn(text="x"))))
-            assert toy_endpoints.HOLD_STARTED.wait(timeout=15.0)
-
-            # Stage a background disk download mid-job.
-            conn.send(hello_ack=pb.HelloAck(
-                protocol_version=pb.PROTOCOL_VERSION_CURRENT,
-                desired_residency=pb.DesiredResidency(
-                    generation=1,
-                    disk_refs=[_STAGED_REF],
-                    snapshots={_STAGED_REF: snapshot},
-                ),
-            ))
-            on_disk = conn.wait_for(
-                is_model_event(_STAGED_REF, pb.MODEL_STATE_ON_DISK),
-                timeout=15.0,
-            ).model_event
-            assert on_disk.snapshot_digest == "snap-636"
-            # The job is still in flight — the download did not wait for idle.
-            assert not any(
-                m.WhichOneof("msg") == "job_result"
-                and m.job_result.request_id == "r-hold"
-                for m in conn.received
-            )
-
-            toy_endpoints.HOLD_RELEASE.set()
-            res = conn.wait_for(is_result_for("r-hold")).job_result
-            assert res.status == pb.JOB_STATUS_OK
-            out = msgspec.msgpack.decode(res.inline, type=EchoOut)
-            assert out.response == "released"
-    finally:
-        toy_endpoints.HOLD_RELEASE.set()
-        blobs.shutdown()
 
 
 # ---------------------------------------------------------------------------

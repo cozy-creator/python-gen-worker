@@ -32,14 +32,22 @@
   jobs pin + promote their record's shared entries), never evictable while
   referenced, and 2+-holder shared entries sort LAST in LRU victim order;
   record vacate no longer drains unreferenced shared entries eagerly.
-- **pgw#638 (absorbed): serve-while-downloading.** Hub-staged DISK
-  materializations no longer wait for tenant idle and are no longer
-  cancelled by incoming jobs — background downloads make full-rate progress
-  while resident models serve (live incident: staged 4.7 GB downloads sat at
-  0%% for 4+ minutes on busy workers, so the hub kept buying pods for models
-  the fleet almost had). Hot warms keep the tenant-idle gate and run_job
-  preemption; a busy worker re-verifies desired disk state once tenant work
-  drains, and the park wakes on a fresh desired set.
+- **pgw#638 serve-while-downloading: attempted, REVERTED, no behavior change
+  in this release.** Letting hub-staged DISK materializations run concurrently
+  with tenant jobs (dropping their tenant-idle gate and the run_job
+  cancellation) is the obvious fix for the measured starvation — staged 4.7 GB
+  downloads sat at 0%% for 4+ minutes on busy workers while the same blobs
+  landed in 5-15s on idle ones — and it is WRONG. The reconcile pass's first
+  act for a ref is to fence a stale resident identity, and a tenant job may
+  legitimately be re-materializing OLDER bytes for that ref at the same time;
+  unserialized, the fence loses the race and the worker keeps reporting the
+  stale identity until the next HelloAck (the th#1066 hub/worker drift class).
+  Measured non-convergence over 10s, caught by
+  `test_mutable_tag_move_fences_events_by_digest_and_generation`. Re-verifying
+  after the job does not fix it either, because `handle_run_job` returns before
+  the job's load completes. The correct fix is to make transfers first-class
+  tasks with their own lifecycle instead of steps inside a serialized
+  reconcile pass (pgw#641 Stage 4).
 - **pgw#637: dynamo's in-memory code cache is a legitimate serving
   surface.** Cell keys are checkpoint-free, so the 2nd checkpoint of an
   already-proven family serves its warmup from dynamo's in-memory compiled

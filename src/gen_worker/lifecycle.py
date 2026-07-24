@@ -557,32 +557,8 @@ class Lifecycle:
                 if desired is None or self.draining:
                     return
                 await self._reconcile_pass(desired, restart)
-                if self.draining:
+                if self.draining or not restart.is_set():
                     return
-                if restart.is_set():
-                    continue
-                # pgw#636: disk staging no longer serializes behind tenant
-                # work, so a concurrent priority job may have re-materialized
-                # OLDER bytes for a desired ref after this pass verified it
-                # (the P2 tag-move shape). A busy worker therefore re-verifies
-                # once tenant work drains; an idle worker is converged. The
-                # park must ALSO wake on a fresh desired set (restart): with
-                # run_job no longer cancelling the loop unconditionally, a
-                # HelloAck landing here would otherwise wait behind an
-                # arbitrarily long tenant job.
-                if self.executor._idle.is_set():
-                    return
-                idle_waiter = asyncio.create_task(self.executor.wait_idle())
-                restart_waiter = asyncio.create_task(restart.wait())
-                try:
-                    await asyncio.wait(
-                        {idle_waiter, restart_waiter},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                finally:
-                    for waiter in (idle_waiter, restart_waiter):
-                        if not waiter.done():
-                            waiter.cancel()
         except asyncio.CancelledError:
             return
         except UnreportedIntentWait:
@@ -608,14 +584,30 @@ class Lifecycle:
                 pb.DESIRED_INTENT_KIND_MATERIALIZE,
                 ref=ref,
             )
-            # pgw#636: disk staging is network+disk I/O and holds no GPU
-            # lock — it proceeds WHILE tenant jobs run (serve resident
-            # models now, download absent models in the background). Only
-            # the hot phase below still yields to tenant work: on a busy
-            # worker the old tenant-idle gate + run_job preemption starved
-            # staged downloads at 0% for minutes (2026-07-24 incident) and
-            # the hub kept buying pods for models the fleet was one quiet
-            # minute away from having.
+            # pgw#638 (REVERTED, evidence in the tracker): removing this
+            # tenant-idle gate is the obvious fix for the measured staging
+            # starvation (4.7 GB staged downloads stuck at 0% for minutes on
+            # busy workers) and it is WRONG. The pass's first act is to fence
+            # a stale resident identity for this ref, and a tenant job may
+            # legitimately be re-materializing OLDER bytes concurrently; with
+            # the gate gone the fence races the job's load and the worker
+            # reports the stale identity until the next HelloAck (th#1066
+            # drift). Proven by
+            # tests/test_p2_residency_reconcile.py::
+            # test_mutable_tag_move_fences_events_by_digest_and_generation,
+            # which does not converge within 10s without this gate — and is
+            # NOT fixable by re-verifying after the job, because handle_run_job
+            # returns before the job's load completes. The real fix is
+            # pgw#641 Stage 4: transfers become their own tasks with their own
+            # lifecycle, so staging never sits inside this serialized pass.
+            await self.intent_registry.reported_await(
+                intent_id,
+                self.executor.wait_idle(),
+                operation=f"reconcile idle for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE,
+                reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+            )
             if self.draining:
                 return
             self._reconcile_active = ("disk", ref, self._work_context((ref,), desired))
@@ -737,29 +729,18 @@ class Lifecycle:
                     safe_message="worker rejected mandatory desired state",
                 )
                 return
-            # A tenant request preempts an unrelated background WARM (GPU
-            # load/setup) — re-running desired state after idle is cheap:
-            # ready instances short-circuit through the existing dedupe
-            # paths. Background DISK staging is never preempted (pgw#636):
-            # downloads hold no GPU resources, and cancelling them on every
-            # job starved staged models at 0% forever on busy workers.
-            active = self._reconcile_active
-            if active is not None and active[0] == "hot":
-                self._cancel_residency_reconcile()
-                try:
-                    await self.executor.handle_run_job(msg.run_job)
-                finally:
-                    self._resume_residency_reconcile()
-            else:
+            # A tenant request preempts unrelated background transfer/setup.
+            # Re-running desired state after idle is cheap: local refs and
+            # ready instances short-circuit through the existing dedupe paths.
+            # pgw#638 note: this cancel is LOAD-BEARING for the mutable-tag
+            # identity fence — see the reverted-gate comment in
+            # _reconcile_pass. Making downloads survive preemption needs
+            # transfers to be first-class tasks (pgw#641 Stage 4).
+            self._cancel_residency_reconcile()
+            try:
                 await self.executor.handle_run_job(msg.run_job)
-                # A completed reconcile must re-run after tenant work: a
-                # priority job may have re-materialized OLDER bytes for a
-                # desired ref (P2 tag-move shape) — the level-triggered
-                # pass re-converges cheaply through the dedupe paths. A
-                # still-running pass is left alone.
-                task = getattr(self, "_residency_task", None)
-                if task is None or task.done():
-                    self._resume_residency_reconcile()
+            finally:
+                self._resume_residency_reconcile()
         elif which == "cancel_job":
             self.executor.handle_cancel(msg.cancel_job)
         elif which == "model_op":
