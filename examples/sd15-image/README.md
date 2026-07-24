@@ -1,7 +1,7 @@
 # sd15-image
 
 Real GPU inference: Stable Diffusion 1.5 text-to-image. Send
-`{"prompt": "a lighthouse at dusk"}`, get back a PNG.
+`{"prompt": "a lighthouse at dusk"}`, get back a WebP.
 
 ## What it demonstrates
 
@@ -10,8 +10,9 @@ Real GPU inference: Stable Diffusion 1.5 text-to-image. Send
   patterns) downloaded through `ensure_local` and injected into
   `setup()` as a constructed `StableDiffusionPipeline` (dtype and
   device placement are worker policy, not endpoint code).
-- Image outputs through `gen_worker.io.write_image` — PNGs exceed the
-  inline threshold, so they ride the stored blob_ref path.
+- Image outputs through `gen_worker.io.write_image` — WebP is the
+  framework default; rendered images exceed the inline threshold, so they
+  ride the stored blob_ref path.
 - GPU jobs serialize on the worker's GPU semaphore; no CUDA OOM under
   concurrent submits.
 

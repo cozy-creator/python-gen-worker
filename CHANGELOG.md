@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.58.0 (2026-07-24)
+
+- **th#1129: WebP is THE image-encoding default, on one shared encode core.**
+  Paul's ruling: "the default image-encoding should be webp, always, with png
+  or jpg as optional alternatives." Both encode surfaces had independently
+  reimplemented the encode — and had already drifted to different default
+  qualities (`io.write_image` q90 vs `ctx.save_image` q95). They now route
+  through one core, `io.encode_image(image, *, format, quality, lossless,
+  method, **encode_kwargs) -> (bytes, extension)`, so the defaults cannot
+  drift apart again: `webp` / q95 everywhere (`DEFAULT_IMAGE_FORMAT`,
+  `DEFAULT_IMAGE_QUALITY`).
+  Two real gaps closed on the `write_image` side: `format="jpg"` used to
+  reach PIL as `"JPG"` and raise (PIL's name is `JPEG`), and a transparent
+  image encoded to JPEG raised instead of converting — both paths now
+  normalize `jpg`/`jpeg` and convert `RGBA`/`LA`/`P` to `RGB` first. An
+  unrecognized format raises `ValidationError` naming the supported set
+  instead of surfacing a PIL traceback (`ctx.save_image` previously raised a
+  bare `ValueError`). `write_image` also appends the format's extension when
+  the given ref has none — a webp payload stored as `image` defeats
+  downstream mime inference.
+  `ctx.save_image` gained `**encode_kwargs` passthrough (e.g. `method=6`).
+  Prefer `ctx.save_image`: it is what the whole endpoint fleet calls and it
+  returns a typed `ImageAsset`. `io.write_image` survives only for its
+  terminal decode->finalize handoff (th#1107), which `ctx.save_image`
+  deliberately does not perform — endpoints call that one mid-pipeline and in
+  N-image loops, where a terminal GPU-slot release would be wrong.
+
 ## 0.57.0 (2026-07-24)
 
 - **gw#640/th#1077: a worker fatal now reaches the HUB, not just pod stdout.**

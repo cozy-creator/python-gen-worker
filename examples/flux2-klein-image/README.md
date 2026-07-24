@@ -1,7 +1,7 @@
 # flux2-klein-image
 
 Real GPU inference: FLUX.2-klein-4B (turbo, 4-8 step distilled) text-to-image.
-Send `{"prompt": "a lighthouse at dusk"}`, get back a PNG.
+Send `{"prompt": "a lighthouse at dusk"}`, get back a WebP.
 
 ## What it demonstrates
 
@@ -15,7 +15,8 @@ Send `{"prompt": "a lighthouse at dusk"}`, get back a PNG.
   `setup()` fully constructed — dtype and device placement are worker
   policy, not endpoint code.
 - Image output through `gen_worker.io.write_image(..., as_type=ImageAsset)` —
-  PNGs exceed the inline threshold and ride the stored blob_ref path.
+  WebP by default; rendered images exceed the inline threshold and ride the
+  stored blob_ref path.
 
 A minimal single-function (`generate_turbo`) sibling of
 `inference-endpoints/flux.2-klein-4b`.
