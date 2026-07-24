@@ -292,27 +292,6 @@ def materialize_pickle_to_safetensors(pickle_path: Path, work_dir: Path) -> Path
     return out
 
 
-def materialize_safetensors_input(input_path: Path, work_dir: Path) -> Path:
-    """Coerce a weight file into a path the streaming readers can open.
-
-    ``.safetensors`` and ``.safetensors.index.json`` pass through (index is
-    validated); pickle is converted via ``materialize_pickle_to_safetensors``.
-    """
-    path = Path(input_path)
-    lower = path.name.lower()
-    if lower.endswith(".safetensors"):
-        return path
-    if any(lower.endswith(ext) for ext in _PICKLE_EXTS):
-        return materialize_pickle_to_safetensors(path, work_dir)
-    if not lower.endswith(".safetensors.index.json"):
-        raise ValueError("requires_safetensors_or_index_input")
-    shards = list_shard_files_from_index(path)
-    for shard in shards:
-        if not shard.exists():
-            raise ConversionImplementationError(f"sharded_index_missing_shard:{shard.name}")
-    return path
-
-
 def _resolve_input_shards(input_path: Path) -> list[Path]:
     if input_path.name.lower().endswith(".safetensors.index.json"):
         return list_shard_files_from_index(input_path)
@@ -1684,7 +1663,6 @@ __all__ = [
     "IncrementalSafetensorsWriter",
     "torch_dtype_to_st",
     "materialize_pickle_to_safetensors",
-    "materialize_safetensors_input",
     "iter_component_tensors",
     "iter_source_tensors",
     "streaming_dtype_cast",

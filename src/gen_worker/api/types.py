@@ -227,18 +227,6 @@ class SourceRepo(msgspec.Struct):
     attributes: dict = msgspec.field(default_factory=dict)
 
 
-class DestinationRepo(msgspec.Struct):
-    """Reserved-name destination descriptor for conversion/training job payloads.
-
-    gen-orchestrator inspects ``payload.destination`` by name before dispatch.
-    The library applies ``tags`` against the newly-produced checkpoint after the
-    tenant function returns success (atomic per-tag move; empty list = no-op).
-    """
-
-    ref: str
-    tags: list = msgspec.field(default_factory=list)
-
-
 class DatasetRef(msgspec.Struct):
     """Reserved-name dataset descriptor for transform-kind job payloads.
 

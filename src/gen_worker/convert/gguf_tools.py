@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 _SUPPORTED_ARCH_ALIASES: dict[str, str] = {
     "llama": "llama", "mistral": "llama", "gemma": "gemma",
@@ -24,21 +23,6 @@ _HF_SIDECAR_FILES = (
     "config.json", "generation_config.json", "preprocessor_config.json",
     "chat_template.jinja",
 )
-
-
-def read_gguf_metadata(path: Path) -> dict[str, Any]:
-    """Header metadata of a GGUF file via the ``gguf`` package."""
-    from gguf import GGUFReader
-
-    reader = GGUFReader(str(path), "r")
-    out: dict[str, Any] = {"tensor_count": len(reader.tensors)}
-    for key, field in reader.fields.items():
-        try:
-            contents = field.contents()
-        except Exception:
-            continue
-        out[str(key)] = contents
-    return out
 
 
 def normalize_gguf_encoding(value: str | None) -> str:
@@ -148,7 +132,6 @@ __all__ = [
     "detect_supported_architecture",
     "normalize_gguf_encoding",
     "prepare_hf_source_tree_for_gguf",
-    "read_gguf_metadata",
     "resolve_gguf_convert_script",
     "run_hf_to_gguf_conversion",
 ]

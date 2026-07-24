@@ -24,7 +24,7 @@ import gc
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Dict, Iterable, List, Optional, TypeVar
 
 import msgspec
 
@@ -1148,50 +1148,6 @@ def _escalate_pipeline_mode(
     return True
 
 
-def with_oom_retry(
-    fn: Callable[..., T],
-    *args: Any,
-    pipelines: Optional[List[Any]] = None,
-    max_retries: int = 2,
-    escalation: tuple[str, ...] = _DEFAULT_ESCALATION,
-    logger: Optional[logging.Logger] = None,
-    **kwargs: Any,
-) -> T:
-    """Call ``fn``; on ``torch.cuda.OutOfMemoryError`` flush, escalate offload
-    one ladder step on each pipeline, retry (up to ``max_retries`` extra)."""
-    log = logger or _LOG
-    try:
-        import torch
-
-        OOMType = torch.cuda.OutOfMemoryError
-    except Exception:
-        return fn(*args, **kwargs)
-
-    last_exc: Optional[BaseException] = None
-    attempts = max_retries + 1
-    for attempt in range(attempts):
-        try:
-            return fn(*args, **kwargs)
-        except OOMType as exc:
-            last_exc = exc
-            flush_memory()
-            if attempt == attempts - 1:
-                break
-            escalated_any = False
-            for pipe in (pipelines or []):
-                if _escalate_pipeline_mode(pipe, logger=log, escalation=escalation):
-                    escalated_any = True
-            if not escalated_any and not pipelines:
-                log.warning("low_vram: OOM (attempt %d/%d), retrying after flush", attempt + 1, attempts)
-                continue
-            if not escalated_any:
-                log.warning("low_vram: OOM (attempt %d/%d); all pipelines already at max offload", attempt + 1, attempts)
-                break
-            log.warning("low_vram: OOM (attempt %d/%d), retrying with escalated offload", attempt + 1, attempts)
-    assert last_exc is not None
-    raise last_exc
-
-
 def rearm_offload(pipeline: Any, mode: Mode = "model_offload") -> bool:
     """Serve-time offload fallback (gw#551): arm an offload rung on a
     pipeline that was already configured once (clears the idempotency stamp).
@@ -1260,7 +1216,6 @@ __all__ = [
     "is_cuda_oom",
     "degraded_log_line",
     "OFFLOAD_LADDER",
-    "with_oom_retry",
     "select_auto_mode",
     "device_mismatches",
     "repair_device_placement",

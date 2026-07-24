@@ -377,17 +377,15 @@ def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
     tensorhub's th#586 gate can family-police any LoRA overlay attached at
     this slot. Identity (the binding) and permission (whether a LoRA may
     attach here — the slot-policy ``loras`` axis, th#772) are separate
-    concerns; this only carries the family fact through. Shared by
-    top-level ``bindings`` blocks and ``model.choices[].binding`` rows
-    (pgw#519) so both surfaces stamp identically. No-op when the family
-    isn't known — nothing to police."""
+    concerns; this only carries the family fact through. No-op when the
+    family isn't known — nothing to police."""
     if not family:
         return
     binding_manifest["family"] = family
 
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
-    """``default_checkpoint``/curated-choice ref shape shared by the slots
+    """``default_checkpoint`` ref shape used by the slots
     block: ``{source, path, tag?, flavor?, revision?, version?, components?}``
     — a structured ModelRef (pgw#511; ``components`` added pgw#505)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
@@ -406,9 +404,7 @@ def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
 
 def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str, Any]:
     """One ``functions[].slots[]`` entry (pgw#520 / th#767): the hub-side
-    mapping/resolution contract for a Slot-declared model slot — NOT a
-    model choice list (``model.choices[]`` stays the ModelChoice-only
-    surface; a Slot endpoint never emits it)."""
+    mapping/resolution contract for a Slot-declared model slot."""
     out: Dict[str, Any] = {
         "name": name,
         "pipeline_class": f"{slot.pipeline_cls.__module__}.{slot.pipeline_cls.__qualname__}",
@@ -427,104 +423,6 @@ def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str
     if slot.default_config is not None:
         out["default_config"] = msgspec.to_builtins(slot.default_config)
     return out
-
-
-def _model_choice_in(ann: Any) -> Tuple[Optional[type], bool]:
-    """Inspect a payload field annotation for a curated ``ModelChoice`` set.
-
-    Returns ``(choice_enum, accepts_byom)``: the ``ModelChoice`` subclass the
-    field is typed with (or ``None``), and whether the field ALSO accepts an
-    arbitrary client-supplied :class:`ModelRef` (``ModelChoice | ModelRef`` =
-    BYOM-open). ``Optional[...]`` (a ``None`` union member) does not imply
-    BYOM."""
-    from gen_worker.api.binding import ModelRef
-    from gen_worker.api.model import is_model_choice
-
-    origin = typing.get_origin(ann)
-    if origin in (typing.Union, py_types.UnionType):
-        args = typing.get_args(ann)
-    else:
-        args = (ann,)
-    choice: Optional[type] = None
-    byom = False
-    for arg in args:
-        if is_model_choice(arg):
-            if choice is not None and choice is not arg:
-                raise ValueError(
-                    "a payload field may reference only one ModelChoice set"
-                )
-            choice = arg
-        elif arg is ModelRef:
-            byom = True
-    return choice, byom
-
-
-def _collect_model_placement_key(
-    payload_type: type, models: Dict[str, Any], compile_family: str = "", name: str = ""
-) -> Optional[Dict[str, Any]]:
-    """The handler's checkpoint placement key (pgw#509), or ``None``.
-
-    Scans the payload's top-level fields for one typed with a ``ModelChoice``
-    subclass and emits the curated set — each choice's structured
-    :class:`ModelRef` binding, typed per-model defaults, and optional
-    ``hot``/``price`` hints — plus whether the field accepts BYOM and which
-    ``models=`` slot the pick swaps into. This is the SDK->tensorhub contract
-    (th#761): the scheduler warm-pools per ``choices[].binding`` ref; the
-    catalog/UI renders ``choices[].defaults``.
-
-    ``compile_family`` mirrors the endpoint's ``Compile(family=...)`` onto
-    each choice binding via :func:`_stamp_family` — identically to how
-    top-level ``bindings`` blocks are stamped (pgw#519), unconditionally
-    when known (pgw#523)."""
-    try:
-        hints = typing.get_type_hints(payload_type)
-    except Exception:
-        hints = getattr(payload_type, "__annotations__", {}) or {}
-
-    field_name: Optional[str] = None
-    choice_enum: Optional[type] = None
-    byom = False
-    for name in getattr(payload_type, "__struct_fields__", ()) or ():
-        if name not in hints:
-            continue
-        found, field_byom = _model_choice_in(hints[name])
-        if found is None:
-            continue
-        if choice_enum is not None:
-            raise ValueError(
-                f"{payload_type.__name__}: multiple ModelChoice fields "
-                f"({field_name!r}, {name!r}); a handler has one placement key"
-            )
-        field_name, choice_enum, byom = name, found, field_byom
-
-    if choice_enum is None or field_name is None:
-        return None
-
-    # The pick swaps the primary (first-declared) model slot.
-    slot = next(iter(models), "")
-    choices: List[Dict[str, Any]] = []
-    for row in choice_enum.rows():  # type: ignore[attr-defined]
-        binding_manifest = _binding_to_manifest(row.ref, slot)
-        _stamp_family(binding_manifest, compile_family)
-        entry: Dict[str, Any] = {
-            "id": row.id,
-            "binding": binding_manifest,
-            "defaults": msgspec.to_builtins(row.defaults),
-        }
-        if row.hot:
-            entry["hot"] = True
-        if row.price is not None:
-            entry["price"] = row.price
-        choices.append(entry)
-    if not choices:
-        raise ValueError(
-            f"{payload_type.__name__}.{field_name}: ModelChoice "
-            f"{choice_enum.__name__} declares no models"
-        )
-    block: Dict[str, Any] = {"field": field_name, "byom": byom, "choices": choices}
-    if slot:
-        block["slot"] = slot
-    return block
 
 
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
@@ -685,8 +583,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # Every binding carries the endpoint's architecture family, when
         # known, so the hub's th#586 gate can family-police any LoRA
         # overlay attached at that slot (pgw#523: unconditional-when-known,
-        # not allow_lora-triggered). pgw#519: the same stamp applies to
-        # model.choices[].binding rows, not just top-level bindings. pgw#520:
+        # not allow_lora-triggered). pgw#520:
         # a Slot-declared binding with no Compile(family=...) may still carry
         # a family via its own default_config preset's registration — that's what
         # es.slot_family reconciles (Compile(family=) wins when both exist).
@@ -702,9 +599,6 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
 
         input_schema, input_sha = _schema_and_hash(es.payload_type)
         moderation = _collect_payload_moderation_metadata(es.payload_type)
-        model_key = _collect_model_placement_key(
-            es.payload_type, es.models, compile_family, es.name
-        )
         output_type = es.output_type
         if output_type is None:
             raise ValueError(
@@ -775,8 +669,6 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # constants per physics cell; the source string is the contract.
         if es.runtime_formula is not None:
             fn["runtime_formula"] = es.runtime_formula.source
-        if model_key is not None:
-            fn["model"] = model_key
         if slots_block:
             fn["slots"] = slots_block
         if incremental and es.delta_type is not None:

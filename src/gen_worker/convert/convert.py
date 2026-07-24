@@ -149,32 +149,6 @@ _CALIBRATED_DTYPES: dict[str, DeferredConversionRequirement] = {
 }
 
 
-def is_calibration_required(target_dtype: str) -> bool:
-    """True if the target dtype needs a calibration dataset.
-
-    These dtypes require a calibration corpus and (often) GPU; the clone
-    path refuses them and returns structured follow-up requirements.
-    """
-    return _normalize(target_dtype) in _CALIBRATED_DTYPES
-
-
-def is_inline_supported(target_dtype: str, *, target_file_type: str = "safetensors") -> bool:
-    """True if ``target_dtype`` can be produced inline given the desired file type."""
-    dtype = _normalize(target_dtype)
-    ftype = _normalize(target_file_type) or "safetensors"
-    if dtype in _CALIBRATED_DTYPES:
-        return False
-    if ftype == "gguf":
-        return dtype in _INLINE_GGUF_ENCODINGS
-    if dtype in _INLINE_CAST_DTYPES:
-        return True
-    if dtype in _INLINE_FP8_STORAGE_DTYPES:
-        return True
-    if dtype in _INLINE_BNB_SCHEMES:
-        return True
-    return False
-
-
 def deferred_conversion_requirement(target_dtype: str) -> DeferredConversionRequirement | None:
     """Return structured follow-up requirements for dtypes refused inline."""
     return _CALIBRATED_DTYPES.get(_normalize(target_dtype))
@@ -785,7 +759,5 @@ __all__ = [
     "InlineConversionResult",
     "DeferredConversionRequirement",
     "deferred_conversion_requirement",
-    "is_calibration_required",
-    "is_inline_supported",
     "run_inline_conversion",
 ]

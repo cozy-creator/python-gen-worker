@@ -94,14 +94,6 @@ def branch_lane(model: Any) -> str:
     return ""
 
 
-def quantized_modules(model: Any) -> Dict[str, Any]:
-    """name -> Fp8ScaledLinear for every quantized Linear in the denoiser."""
-    from .w8a8 import fp8_scaled_linear_class
-
-    cls = fp8_scaled_linear_class()
-    return {n: m for n, m in model.named_modules() if isinstance(m, cls)}
-
-
 def branch_modules(model: Any) -> Dict[str, Any]:
     """name -> branch-capable module for the denoiser: Fp8ScaledLinear,
     plain nn.Linear, or plain nn.Conv2d (gw#627 — the curated sdxl distill
@@ -735,7 +727,6 @@ __all__ = [
     "lora_lane",
     "map_adapter",
     "normalize_adapter_state_dict",
-    "quantized_modules",
     "rank_bucket",
     "split_state_dict",
     "stamp_lane",

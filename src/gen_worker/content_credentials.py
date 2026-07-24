@@ -360,13 +360,6 @@ def _sign_stream(
         raise C2paSigningError(f"C2PA signing failed for {mime}: {e}") from e
 
 
-def _reset_for_tests() -> None:
-    global _configured, _config
-    with _lock:
-        _configured = False
-        _config = None
-
-
 __all__ = [
     "C2paSigningError",
     "configure",

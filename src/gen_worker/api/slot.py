@@ -34,7 +34,7 @@ bare ref's slot NAME.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, Mapping, Optional, Sequence, TypeVar
+from typing import Any, Dict, Generic, Optional, Sequence, TypeVar
 
 import msgspec
 
@@ -332,40 +332,7 @@ def resolve_slot(
     )
 
 
-def resolve_slots(
-    slots: Mapping[str, "Slot[Any]"],
-    *,
-    refs: Mapping[str, Optional[ModelRef]],
-    families: Mapping[str, str] = {},
-    raw_metadata: Mapping[str, str] = {},
-    lora_metadata: Mapping[str, Sequence[str]] = {},
-    regimes: Mapping[str, str] = {},
-    allowed_regimes: Optional[Sequence[str]] = None,
-) -> Dict[str, "ResolvedSlot[Any]" | Exception]:
-    """Resolve every declared slot, collecting per-slot failures instead of
-    raising — callers (RequestContext) surface each failure lazily, only
-    when the handler actually reads that slot ("clear error at request
-    time", not a blanket dispatch-time failure for slots the handler never
-    touches). ``allowed_regimes`` (th#1017), when given, applies to every
-    slot: one invoked function has one declared ``regimes=`` set."""
-    out: Dict[str, "ResolvedSlot[Any]" | Exception] = {}
-    for name, slot in slots.items():
-        try:
-            out[name] = resolve_slot(
-                name, slot,
-                ref=refs.get(name),
-                family=families.get(name, ""),
-                raw_metadata_json=raw_metadata.get(name, ""),
-                lora_metadata_json=lora_metadata.get(name, ()),
-                inference_regime=regimes.get(name, "standard"),
-                allowed_regimes=allowed_regimes,
-            )
-        except ValueError as exc:
-            out[name] = exc
-    return out
-
-
 __all__ = [
     "DEFAULT_REGIMES", "REGIMES", "RegimeMismatchError", "ResolvedSlot",
-    "Slot", "resolve_slot", "resolve_slots",
+    "Slot", "resolve_slot",
 ]

@@ -154,10 +154,6 @@ class LaneSpec(msgspec.Struct, frozen=True, kw_only=True):
         return not self.family and self.lane is None
 
 
-def spec_id(spec: LaneSpec) -> str:
-    return lane_id(spec.lane) if spec.lane is not None else spec.family
-
-
 def parse_lane_spec(s: str) -> LaneSpec:
     """Dual-form: "" = auto, a family, or a full descriptor id."""
     raw = str(s or "").strip().lower()
@@ -244,6 +240,5 @@ __all__ = [
     "lane_of_binding",
     "parse_lane",
     "parse_lane_spec",
-    "spec_id",
     "valid_lane",
 ]

@@ -172,11 +172,3 @@ def test_hello_ack_lane_field_flows_into_resolutions() -> None:
         {r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions})
     assert ex._model_resolutions[BASE] == (W8A8, "", "fp8-w8a8-dynamic+compiled")
     assert wire_ref(ex.specs["generate"].models["pipeline"]) == W8A8
-
-
-def test_run_job_lane_field_round_trips_metrics() -> None:
-    # Wire shape: RunJob.lane and JobMetrics.lane exist and carry strings.
-    run = pb.RunJob(request_id="r1", function_name="generate", lane="bf16")
-    assert run.lane == "bf16"
-    m = pb.JobMetrics(runtime_ms=1, lane="fp8-w8a8-dynamic+compiled")
-    assert m.lane == "fp8-w8a8-dynamic+compiled"

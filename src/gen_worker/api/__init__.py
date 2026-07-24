@@ -2,7 +2,6 @@
 
 from .binding import Binding, Civitai, HF, Hub, ModelRef, ModelScope
 from .decorators import ConfigParam, Resources, endpoint
-from .model import Model, ModelChoice, ModelDefaults
 from .slot import ResolvedSlot, Slot, resolve_slot
 from .errors import (
     AuthError,
@@ -44,9 +43,6 @@ __all__ = [
     "Civitai",
     "HF",
     "Hub",
-    "Model",
-    "ModelChoice",
-    "ModelDefaults",
     "ModelRef",
     "ModelScope",
     "ResolvedSlot",

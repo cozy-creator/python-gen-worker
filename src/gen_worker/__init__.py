@@ -17,7 +17,6 @@ from . import io
 from .api.binding import Civitai, HF, Hub, ModelRef, ModelScope
 from .api.decorators import Compile, ConfigParam, NoWarmup, Resources, endpoint, variant_of
 from .api.formula import RuntimeFormula
-from .api.model import Model, ModelChoice, ModelDefaults
 from .api.slot import ResolvedSlot, Slot
 from .families import FamilyDefaults
 from .models.provision import arm_compile
@@ -77,9 +76,6 @@ __all__ = [
     "ModelRef",
     "ModelScope",
     # Curated model-selection (payload `model=` placement key).
-    "Model",
-    "ModelChoice",
-    "ModelDefaults",
     # Hub-resolved model slots (pgw#520) + the per-family defaults vocabulary.
     "Slot",
     "ResolvedSlot",
