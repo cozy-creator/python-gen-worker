@@ -15,9 +15,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import activity as activity_mod
 from .config import Settings
 from .executor import Executor
-from .lifecycle_shadow import LifecycleShadow
+from .intent_registry import IntentRegistry, UnreportedIntentWait
 from .pb import worker_scheduler_pb2 as pb
-from .runtime_config import extract_config_push
+from .runtime_config import ConfigSnapshotWriteError, extract_config_push
 from .transport import FatalTransportError, PROTOCOL_VERSION, Transport
 
 logger = logging.getLogger(__name__)
@@ -163,9 +163,10 @@ class Lifecycle:
             or f"py-worker-{os.getpid()}"
         )
         self.release_id = str(claims.get("release_id") or "").strip()
-        self.lifecycle_shadow = LifecycleShadow(
+        self.intent_registry = IntentRegistry(
             self.release_id,
             executor.specs.keys(),
+            on_change=self.state_changed,
         )
         self.phase = pb.WORKER_PHASE_BOOTING
         self.hardware = probe_hardware()
@@ -192,6 +193,10 @@ class Lifecycle:
         self._reconcile_active: Optional[tuple] = None
         self._residency_restart: Optional[asyncio.Event] = None
         self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
+        self.executor.runtime_config.set_projection_callbacks(
+            on_parameter_snapshot=self._config_snapshot_applied,
+            on_snapshot_failure=self._config_snapshot_failed,
+        )
     # ---- snapshots -----------------------------------------------------------
 
     def _state_delta(self) -> pb.StateDelta:
@@ -307,7 +312,7 @@ class Lifecycle:
         in_flight = {k for k in self.executor.in_flight_keys()}
         if self.transport is not None:
             in_flight.update(self.transport.queue.pending_result_keys)
-        self.lifecycle_shadow.refresh_projection(
+        self.intent_registry.refresh_projection(
             self.executor,
             self._desired_residency,
             self._model_resolutions,
@@ -326,13 +331,13 @@ class Lifecycle:
             # th#965 layer 2: promise the beat cadence; the hub reaps after
             # 6 consecutive misses (~60s). Hello counts as the first beat.
             heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
-            worker_session_id=self.lifecycle_shadow.worker_session_id,
-            lifecycle_snapshot=self.lifecycle_shadow.snapshot(),
+            worker_session_id=self.intent_registry.worker_session_id,
+            lifecycle_snapshot=self.intent_registry.snapshot(),
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
         if ack.HasField("desired_state_command"):
-            receipt = self.lifecycle_shadow.apply_command(
+            receipt = self.intent_registry.apply_command(
                 ack.desired_state_command,
                 current_config_generation=self.executor.runtime_config.generation,
             )
@@ -344,7 +349,7 @@ class Lifecycle:
                 # A rejected v5 command never silently falls through to the
                 # colocated legacy DesiredResidency. Mandatory rejection also
                 # withdraws aggregate readiness until the pod is replaced.
-                if self.lifecycle_shadow.protocol_rejected:
+                if self.intent_registry.protocol_rejected:
                     self.phase = pb.WORKER_PHASE_ERROR
                 await self._send_lifecycle_snapshot(hello_ack=True, force=True)
                 self._last_delta = None
@@ -360,9 +365,27 @@ class Lifecycle:
         push = extract_config_push(ack)
         if push is not None:
             gen, release_id = push
-            self.executor.runtime_config.observe(
-                gen, release_id=release_id or self.release_id,
+            self.intent_registry.receive_config_generation(gen)
+            config_intent = self.intent_registry.ensure_intent(
+                pb.DESIRED_INTENT_KIND_CONFIG_APPLY
             )
+            if config_intent:
+                self.intent_registry.transition(
+                    config_intent,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_CONFIG_MATERIALIZING,
+                )
+            try:
+                self.executor.runtime_config.observe(
+                    gen, release_id=release_id or self.release_id,
+                )
+            except ConfigSnapshotWriteError as exc:
+                self.intent_registry.config_snapshot_failed(str(exc))
+                self.phase = pb.WORKER_PHASE_ERROR
+                await self._send_lifecycle_snapshot(hello_ack=True, force=True)
+                self._last_delta = None
+                await self.maybe_send_state_delta(hello_ack=True)
+                return
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).
         resolutions = {
@@ -518,6 +541,10 @@ class Lifecycle:
                     return
         except asyncio.CancelledError:
             return
+        except UnreportedIntentWait:
+            self.phase = pb.WORKER_PHASE_ERROR
+            self._last_delta = None
+            await self.maybe_send_state_delta(force=True)
         finally:
             self._reconcile_active = None
 
@@ -531,19 +558,66 @@ class Lifecycle:
                 continue
             if restart.is_set():
                 return
-            await self.executor.wait_idle()
+            intent_id = self.intent_registry.ensure_intent(
+                pb.DESIRED_INTENT_KIND_MATERIALIZE,
+                ref=ref,
+            )
+            await self.intent_registry.reported_await(
+                intent_id,
+                self.executor.wait_idle(),
+                operation=f"reconcile idle for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE,
+                reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+            )
             if self.draining:
                 return
             self._reconcile_active = (
                 "disk", ref, self._work_context((ref,), desired))
+            failure_stage = pb.LIFECYCLE_INTENT_STAGE_VERIFYING
             try:
-                await self.executor.revalidate_snapshot_identity(
-                    ref, snapshots.get(ref)
+                snapshot = snapshots.get(ref)
+                await self.intent_registry.reported_await(
+                    intent_id,
+                    self.executor.revalidate_snapshot_identity(ref, snapshot),
+                    operation=f"snapshot validation for {ref}",
+                    status=pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_VERIFYING,
                 )
-                await self.executor.store.ensure_local(ref, snapshots.get(ref))
-            except asyncio.CancelledError:
+                failure_stage = pb.LIFECYCLE_INTENT_STAGE_FETCHING
+                await self.intent_registry.reported_await(
+                    intent_id,
+                    self.executor.store.ensure_local(ref, snapshot),
+                    operation=f"snapshot materialization for {ref}",
+                    status=pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_FETCHING,
+                )
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                        pb.LIFECYCLE_INTENT_STAGE_ON_DISK,
+                        actual_digest=(
+                            snapshot.digest.encode()
+                            if snapshot is not None and snapshot.digest
+                            else b""
+                        ),
+                    )
+            except (asyncio.CancelledError, UnreportedIntentWait):
                 raise
             except Exception as exc:
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                        failure_stage,
+                        error_code=(
+                            pb.LIFECYCLE_ERROR_CODE_SNAPSHOT_IDENTITY_MISSING
+                            if snapshots.get(ref) is None
+                            else pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED
+                        ),
+                        detail=str(exc)[:512],
+                    )
                 logger.warning("desired disk residency failed for %s: %s", ref, exc)
             finally:
                 self._reconcile_active = None
@@ -551,7 +625,18 @@ class Lifecycle:
         for instance in desired.hot:
             if restart.is_set():
                 return
-            await self.executor.wait_idle()
+            intent_id = self.intent_registry.ensure_intent(
+                pb.DESIRED_INTENT_KIND_FUNCTION_READY,
+                function_name=instance.function_name,
+            )
+            await self.intent_registry.reported_await(
+                intent_id,
+                self.executor.wait_idle(),
+                operation=f"reconcile idle for {instance.function_name}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE,
+                reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+            )
             if self.draining:
                 return
             self._reconcile_active = (
@@ -560,10 +645,29 @@ class Lifecycle:
                 self._work_context(_instance_refs(instance), desired),
             )
             try:
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                        pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                    )
                 await self.executor.ensure_desired_instance(instance, snapshots)
-            except asyncio.CancelledError:
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                        pb.LIFECYCLE_INTENT_STAGE_READY,
+                    )
+            except (asyncio.CancelledError, UnreportedIntentWait):
                 raise
             except Exception as exc:
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                        pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                        detail=str(exc)[:512],
+                    )
                 logger.warning(
                     "desired hot residency failed for %s: %s",
                     instance.function_name, exc,
@@ -574,7 +678,7 @@ class Lifecycle:
     async def on_message(self, msg: pb.SchedulerMessage) -> None:
         which = msg.WhichOneof("msg")
         if which == "run_job":
-            if self.lifecycle_shadow.protocol_rejected:
+            if self.intent_registry.protocol_rejected:
                 await self.executor._send_result(
                     msg.run_job.request_id,
                     msg.run_job.attempt,
@@ -629,6 +733,14 @@ class Lifecycle:
             return
         loop.create_task(self.maybe_send_state_delta())
 
+    def _config_snapshot_applied(self, generation: int) -> None:
+        self.intent_registry.config_snapshot_applied(generation)
+
+    def _config_snapshot_failed(self, detail: str) -> None:
+        self.intent_registry.config_snapshot_failed(detail)
+        self.phase = pb.WORKER_PHASE_ERROR
+        self.state_changed()
+
     async def _send_state_message(
         self, message: pb.WorkerMessage, *, hello_ack: bool = False,
     ) -> None:
@@ -645,7 +757,7 @@ class Lifecycle:
     ) -> None:
         if self.transport is None or not self.transport.connected:
             return
-        self.lifecycle_shadow.refresh_projection(
+        self.intent_registry.refresh_projection(
             self.executor,
             self._desired_residency,
             self._model_resolutions,
@@ -675,7 +787,7 @@ class Lifecycle:
         hello_ack: bool = False,
         force: bool = False,
     ) -> None:
-        snapshot = self.lifecycle_shadow.snapshot()
+        snapshot = self.intent_registry.snapshot()
         raw = snapshot.SerializeToString(deterministic=True)
         if force or raw != self._last_lifecycle_snapshot:
             self._last_lifecycle_snapshot = raw
@@ -909,7 +1021,7 @@ class Lifecycle:
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
         self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
-        self.lifecycle_shadow.set_drain(
+        self.intent_registry.set_drain(
             pb.DRAIN_LIFECYCLE_STATUS_DRAINING,
             deadline_at_unix_ms=(
                 int(time.time() * 1000) + deadline_ms
@@ -921,28 +1033,74 @@ class Lifecycle:
         deadline_at = self._drain_deadline_at
         loop = asyncio.get_running_loop()
         await self.maybe_send_state_delta()
-
-        wait_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
-        finished = await self.executor.wait_idle(timeout=wait_timeout)
-        if not finished:
-            logger.warning("drain deadline expired; aborting remaining jobs as RETRYABLE")
-            await self.executor.abort_all(safe_message="worker draining")
-
-        self.lifecycle_shadow.set_drain(
-            pb.DRAIN_LIFECYCLE_STATUS_FINALIZING,
+        drain_intent = self.intent_registry.intent_id(
+            pb.DESIRED_INTENT_KIND_DRAIN
         )
-        await self.maybe_send_state_delta()
-        await self.executor.shutdown_instances()
-        if self.transport is not None:
-            self.lifecycle_shadow.set_drain(
-                pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
+        try:
+            wait_timeout = (
+                None
+                if deadline_at is None
+                else max(0.0, deadline_at - loop.time())
+            )
+            finished = await self.intent_registry.reported_await(
+                drain_intent,
+                self.executor.wait_idle(timeout=wait_timeout),
+                operation="drain tenant-idle wait",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_DRAINING,
+                reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+            )
+            if not finished:
+                logger.warning(
+                    "drain deadline expired; aborting remaining jobs as RETRYABLE"
+                )
+                await self.intent_registry.guard_await(
+                    drain_intent,
+                    self.executor.abort_all(safe_message="worker draining"),
+                    operation="drain job abort",
+                )
+
+            self.intent_registry.set_drain(
+                pb.DRAIN_LIFECYCLE_STATUS_FINALIZING,
             )
             await self.maybe_send_state_delta()
-            flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
-            await self.transport.close_after_flush(timeout=flush_timeout)
-        self.lifecycle_shadow.set_drain(
-            pb.DRAIN_LIFECYCLE_STATUS_DRAINED,
-        )
+            await self.intent_registry.guard_await(
+                drain_intent,
+                self.executor.shutdown_instances(),
+                operation="drain instance shutdown",
+            )
+            if self.transport is not None:
+                self.intent_registry.set_drain(
+                    pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
+                )
+                await self.maybe_send_state_delta()
+                flush_timeout = (
+                    None
+                    if deadline_at is None
+                    else max(0.0, deadline_at - loop.time())
+                )
+                await self.intent_registry.guard_await(
+                    drain_intent,
+                    self.transport.close_after_flush(timeout=flush_timeout),
+                    operation="drain transport flush",
+                )
+            self.intent_registry.set_drain(
+                pb.DRAIN_LIFECYCLE_STATUS_DRAINED,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.intent_registry.set_drain(
+                pb.DRAIN_LIFECYCLE_STATUS_FAILED,
+                detail=str(exc)[:512],
+                error_code=pb.LIFECYCLE_ERROR_CODE_DRAIN_FAILED,
+            )
+            self.phase = pb.WORKER_PHASE_ERROR
+            try:
+                await self.maybe_send_state_delta()
+            except Exception:
+                logger.exception("failed to report drain failure")
+            raise
         self.drained.set()
         # getattr: stubbed Lifecycles skip __init__ (same convention as
         # _cancel_residency_reconcile, pgw#610).

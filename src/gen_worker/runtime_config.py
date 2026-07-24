@@ -14,9 +14,11 @@ import logging
 import os
 import tempfile
 import threading
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 import msgspec
+
+from .api.errors import RetryableError
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,10 @@ class ConfigSnapshot(msgspec.Struct, frozen=True, kw_only=True):
     release_id: str = ""
     # function name -> parameter name -> value
     parameters: Dict[str, Dict[str, Any]] = msgspec.field(default_factory=dict)
+
+
+class ConfigSnapshotWriteError(RetryableError):
+    """The durable worker-local config snapshot could not be replaced."""
 
 
 def _decode_snapshot(raw: bytes) -> ConfigSnapshot:
@@ -65,6 +71,9 @@ class ConfigStore:
         os.environ[SNAPSHOT_PATH_ENV] = self._path
         self._lock = threading.Lock()
         self._snap = ConfigSnapshot()
+        self._parameter_snapshot_generation = 0
+        self._on_parameter_snapshot: Callable[[int], None] = lambda _gen: None
+        self._on_snapshot_failure: Callable[[str], None] = lambda _detail: None
 
     @property
     def path(self) -> str:
@@ -74,9 +83,22 @@ class ConfigStore:
     def generation(self) -> int:
         return self._snap.config_generation
 
+    @property
+    def parameter_snapshot_generation(self) -> int:
+        return self._parameter_snapshot_generation
+
     def parameters_for(self, function_name: str) -> Dict[str, Any]:
         with self._lock:
             return dict(self._snap.parameters.get(function_name, {}))
+
+    def set_projection_callbacks(
+        self,
+        *,
+        on_parameter_snapshot: Callable[[int], None],
+        on_snapshot_failure: Callable[[str], None],
+    ) -> None:
+        self._on_parameter_snapshot = on_parameter_snapshot
+        self._on_snapshot_failure = on_snapshot_failure
 
     def observe(self, generation: int, *, release_id: str = "") -> bool:
         """A hub desired-state push advertised ``generation`` (th#1085
@@ -93,12 +115,13 @@ class ConfigStore:
                         gen, self._snap.config_generation,
                     )
                 return False
-            self._snap = ConfigSnapshot(
+            next_snapshot = ConfigSnapshot(
                 config_generation=gen,
                 release_id=release_id or self._snap.release_id,
                 parameters=dict(self._snap.parameters),
             )
-            self._write_snapshot_locked()
+            self._write_snapshot_locked(next_snapshot)
+            self._snap = next_snapshot
             logger.info(
                 "config generation %d observed; snapshot at %s", gen, self._path
             )
@@ -124,15 +147,30 @@ class ConfigStore:
                 gen == self._snap.config_generation
                 and self._snap.parameters.get(function_name) == vals
             ):
+                self._parameter_snapshot_generation = max(
+                    self._parameter_snapshot_generation,
+                    gen,
+                )
+                self._on_parameter_snapshot(gen)
                 return False
             parameters = dict(self._snap.parameters)
             parameters[function_name] = vals
-            self._snap = ConfigSnapshot(
+            next_snapshot = ConfigSnapshot(
                 config_generation=max(gen, self._snap.config_generation),
                 release_id=self._snap.release_id,
                 parameters=parameters,
             )
-            self._write_snapshot_locked()
+            try:
+                self._write_snapshot_locked(next_snapshot)
+            except ConfigSnapshotWriteError as exc:
+                self._on_snapshot_failure(str(exc))
+                raise
+            self._snap = next_snapshot
+            self._parameter_snapshot_generation = max(
+                self._parameter_snapshot_generation,
+                gen,
+            )
+            self._on_parameter_snapshot(gen)
             logger.info(
                 "config generation %d applied for %s; snapshot at %s",
                 self._snap.config_generation,
@@ -161,7 +199,7 @@ class ConfigStore:
             )
         return msgspec.msgpack.encode(snap)
 
-    def _write_snapshot_locked(self) -> None:
+    def _write_snapshot_locked(self, snapshot: ConfigSnapshot) -> None:
         """Atomic write: tmp file in the same dir + os.replace, so a
         subprocess mid-read never sees a torn file."""
         try:
@@ -170,7 +208,7 @@ class ConfigStore:
             fd, tmp = tempfile.mkstemp(dir=d, prefix=".runtime_config-")
             try:
                 with os.fdopen(fd, "wb") as f:
-                    f.write(msgspec.msgpack.encode(self._snap))
+                    f.write(msgspec.msgpack.encode(snapshot))
                 os.replace(tmp, self._path)
             except BaseException:
                 try:
@@ -178,11 +216,13 @@ class ConfigStore:
                 except OSError:
                     pass
                 raise
-        except Exception:
-            # Memory state stands; subprocesses see the previous snapshot.
+        except Exception as exc:
             logger.error(
                 "config snapshot write failed at %s", self._path, exc_info=True
             )
+            raise ConfigSnapshotWriteError(
+                f"config snapshot write failed at {self._path}"
+            ) from exc
 
 
 def extract_config_push(ack: Any) -> Optional[Tuple[int, str]]:
@@ -218,6 +258,7 @@ def extract_job_config(run: Any) -> Tuple[int, Optional[Dict[str, Any]]]:
 
 __all__ = [
     "ConfigSnapshot",
+    "ConfigSnapshotWriteError",
     "ConfigStore",
     "DEFAULT_SNAPSHOT_PATH",
     "SNAPSHOT_PATH_ENV",

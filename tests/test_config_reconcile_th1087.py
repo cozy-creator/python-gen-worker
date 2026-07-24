@@ -14,15 +14,18 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import msgspec
+import pytest
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.request_context import RequestContext
 from gen_worker.runtime_config import (
     SNAPSHOT_PATH_ENV,
+    ConfigSnapshotWriteError,
     ConfigStore,
     read_snapshot,
 )
@@ -103,6 +106,27 @@ def test_gen_bump_rewrites_snapshot_and_subprocess_sees_it(
     assert code == 0, lines
     assert lines == ["4 40"]
     assert read_snapshot(str(snap_path)).config_generation == 5
+
+
+def test_failed_snapshot_write_does_not_advance_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    snap_path = tmp_path / "runtime_config.msgpack"
+    store = ConfigStore(str(snap_path))
+    assert store.observe(1, release_id="rel-1")
+    before = snap_path.read_bytes()
+
+    def fail_replace(_source: str, _target: str) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(ConfigSnapshotWriteError):
+        store.observe(2, release_id="rel-1")
+
+    assert store.generation == 1
+    assert snap_path.read_bytes() == before
+    assert read_snapshot(str(snap_path)).config_generation == 1
 
 
 def _run_config_echo(
