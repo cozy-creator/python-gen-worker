@@ -68,18 +68,6 @@ def classify_probe_failure(reason: str) -> str:
     return "cuda_error"
 
 
-def manifest_needs_cuda(manifest: Optional[dict[str, Any]]) -> bool:
-    """True iff any function in the discovery manifest declares
-    ``resources.gpu`` — the only build-time-known signal of whether this
-    worker is a GPU (accelerator=cuda) vs CPU (accelerator=none) deployment."""
-    if not manifest:
-        return False
-    for fn in manifest.get("functions", []) or []:
-        if bool((fn.get("resources") or {}).get("gpu")):
-            return True
-    return False
-
-
 def should_probe_cuda(
     manifest: Optional[dict[str, Any]], *, cuda_build: Optional[bool] = None
 ) -> bool:

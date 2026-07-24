@@ -318,7 +318,7 @@ class ArmingScope:
             self._token = _ARMING_CTX.set(self._value)
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *_exc_info: Any) -> None:
         if self._token is not None:
             _ARMING_CTX.reset(self._token)
             self._token = None

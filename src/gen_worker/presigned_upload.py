@@ -9,8 +9,8 @@ Upload flow (one file):
   4. Older non-model platform uploads may still return presigned multipart
      URLs; those are uploaded part-by-part and completed with part ETags.
 
-Used by worker callers via ctx.save_file / ctx.save_checkpoint /
-ctx.open_output_stream. Tensorhub also exposes the same upload protocol to
+Used by worker callers via ctx.save_file / ctx.save_checkpoint. Tensorhub also
+exposes the same upload protocol to
 other authenticated clients; the caller authenticates with either a worker
 capability token or a user JWT. The orchestrator is NOT in the upload path:
 clients talk directly to tensorhub, and bytes go straight to R2/S3.

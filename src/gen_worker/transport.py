@@ -464,13 +464,6 @@ class Transport:
         """Newest worker credential: hub-rotated token, else the boot token."""
         return (self._worker_jwt or self._settings.worker_jwt or "").strip()
 
-    async def wait_connected(self, timeout: Optional[float] = None) -> bool:
-        try:
-            await asyncio.wait_for(self._connected.wait(), timeout)
-            return True
-        except asyncio.TimeoutError:
-            return False
-
     # ---- drain / shutdown --------------------------------------------------
 
     async def close_after_flush(self, timeout: Optional[float] = None) -> bool:

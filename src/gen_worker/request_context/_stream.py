@@ -389,9 +389,6 @@ class _RequestOutputStream:
             mode="merge",
             message=f"checkpoint {self._ref}",
             provenance=provenance,
-            # Producer-only state (pgw#526): checkpoint streams only open on
-            # producer contexts, which carry _repo_spec on _PublisherMixin.
-            repo_spec=dict(getattr(ctx, "_repo_spec", None) or {}),
             part_progress=_part_progress,
         )
         self._uploader_meta = {"revision_id": result.revision_id, "checkpoint_id": result.checkpoint_id}
