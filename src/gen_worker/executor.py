@@ -10,6 +10,7 @@ asyncio loop; sync tenant code runs in threads via asyncio.to_thread.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import gc
 import itertools
 import logging
@@ -21,7 +22,7 @@ import threading
 import time
 import typing
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
@@ -56,6 +57,7 @@ from .capability import (
     InsufficientHostRamError,
 )
 from .input_assets import cleanup_input_assets, manifest_from_run_job, materialize_input_assets
+from .intent_registry import IntentRegistry
 from .models import cozy_snapshot
 from .models import disk_gc
 from .models import disk_telemetry
@@ -636,6 +638,7 @@ class ModelStore:
         fill_source_dir: Optional[Path] = None,
     ) -> None:
         self._emit = emit
+        self._intent_registry: Optional[IntentRegistry] = None
         self._hf_home = hf_home or None
         self._hf_token = hf_token or None
         self._cache_dir = cache_dir or tensorhub_cas_dir()
@@ -672,6 +675,10 @@ class ModelStore:
             on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
         )
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._materialize_active: Dict[str, str] = {}
+        self._materialize_intent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "materialize_intent", default=""
+        )
         self._bindings: Dict[str, Any] = {}
         self.keep: list[str] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -764,6 +771,56 @@ class ModelStore:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
             pass
+
+    def bind_intent_registry(self, registry: IntentRegistry) -> None:
+        self._intent_registry = registry
+
+    def _materialize_intent(self, ref: str) -> str:
+        registry = self._intent_registry
+        if registry is None:
+            return ""
+        return registry.ensure_local_intent(
+            "materialize",
+            ref,
+            detail=f"materialize {ref}",
+        )
+
+    @contextmanager
+    def materialize_intent(
+        self,
+        intent_id: str,
+    ) -> typing.Iterator[None]:
+        token = self._materialize_intent_context.set(intent_id)
+        try:
+            yield
+        finally:
+            self._materialize_intent_context.reset(token)
+
+    async def _materialize_await(
+        self,
+        intent_id: str,
+        awaitable: Awaitable[Any],
+        *,
+        operation: str,
+        status: "pb.LifecycleIntentStatus",
+        stage: "pb.LifecycleIntentStage",
+        reason: "pb.LifecycleWaitReason" = pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED,
+        next_retry_at_unix_ms: int = 0,
+        blocker_intent_id: str = "",
+    ) -> Any:
+        registry = self._intent_registry
+        if registry is None:
+            return await awaitable
+        return await registry.reported_await(
+            intent_id,
+            awaitable,
+            operation=operation,
+            status=status,
+            stage=stage,
+            reason=reason,
+            next_retry_at_unix_ms=next_retry_at_unix_ms,
+            blocker_intent_id=blocker_intent_id,
+        )
 
     def _on_residency_event(
         self, ref: str, state: str, vram_bytes: int, duration_ms: int = 0
@@ -1262,12 +1319,24 @@ class ModelStore:
         self._index.remove(ref)
 
     async def _ensure_disk_headroom(
-        self, ref: str, needed_bytes: int, identity: _ResidencyIdentity = ("", 0),
+        self,
+        ref: str,
+        needed_bytes: int,
+        identity: _ResidencyIdentity = ("", 0),
+        *,
+        intent_id: str = "",
     ) -> None:
         target = int(needed_bytes) + _DISK_GC_MARGIN_BYTES
         if self._disk_free() >= target:
             return
-        await asyncio.to_thread(self.gc_disk, target, exclude=(ref,))
+        await self._materialize_await(
+            intent_id or self._materialize_intent(ref),
+            asyncio.to_thread(self.gc_disk, target, exclude=(ref,)),
+            operation=f"disk headroom for {ref}",
+            status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM,
+            reason=pb.LIFECYCLE_WAIT_REASON_DISK_HEADROOM,
+        )
         free = self._disk_free()
         if free < target:
             await self._event(
@@ -1291,7 +1360,12 @@ class ModelStore:
         startup prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
 
-    async def _await_hub_snapshot(self, ref: str) -> pb.Snapshot:
+    async def _await_hub_snapshot(
+        self,
+        ref: str,
+        *,
+        intent_id: str = "",
+    ) -> pb.Snapshot:
         """Cold tensorhub ref with no orchestrator-resolved snapshot: emit
         ``missing_snapshot`` (the hub refreshes desired state with fresh URLs
         on seeing it — connect_worker handleModelFailure) and block
@@ -1312,8 +1386,16 @@ class ModelStore:
         )
         logger.info("no snapshot for %s; waiting up to %.0fs for the hub re-mint",
                     ref, _MISSING_SNAPSHOT_WAIT_S)
+        intent_id = intent_id or self._materialize_intent(ref)
         try:
-            await asyncio.wait_for(waiter.wait(), _MISSING_SNAPSHOT_WAIT_S)
+            await self._materialize_await(
+                intent_id,
+                asyncio.wait_for(waiter.wait(), _MISSING_SNAPSHOT_WAIT_S),
+                operation=f"snapshot resolution for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT,
+                reason=pb.LIFECYCLE_WAIT_REASON_SNAPSHOT,
+            )
         except asyncio.TimeoutError:
             raise MissingSnapshotError(
                 f"tensorhub ref {ref!r} needs an orchestrator-resolved "
@@ -1337,8 +1419,13 @@ class ModelStore:
         binding: Any = None,
     ) -> Path:
         """Public path-only materialization API used by ordinary callers."""
-        return (await self._materialize_local(
-            ref, snapshot, binding=binding)).path
+        return (
+            await self._materialize_local(
+                ref,
+                snapshot,
+                binding=binding,
+            )
+        ).path
 
     async def _materialize_local(
         self,
@@ -1346,6 +1433,7 @@ class ModelStore:
         snapshot: Optional[pb.Snapshot] = None,
         *,
         binding: Any = None,
+        intent_id: str = "",
     ) -> _MaterializedLocal:
         """Materialize `ref` on disk. Transient failures retry with backoff;
         terminal (4xx-class) failures raise immediately. Emits ModelEvents.
@@ -1359,11 +1447,58 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
+        registry = self._intent_registry
+        scoped_intent_id = self._materialize_intent_context.get()
+        command_owned = bool(intent_id or scoped_intent_id)
+        intent_id = intent_id or scoped_intent_id
+        blocker_intent_id = self._materialize_active.get(ref, "")
+        if registry is None:
+            intent_id = ""
+        elif blocker_intent_id and not intent_id:
+            task = asyncio.current_task()
+            intent_id = registry.ensure_local_intent(
+                "materialize-waiter",
+                f"{ref}\0{id(task)}",
+                detail=f"waiting to materialize {ref}",
+            )
+        elif not intent_id:
+            intent_id = self._materialize_intent(ref)
+        if registry is not None and not blocker_intent_id:
+            self._materialize_active[ref] = intent_id
+        failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_REF_LOCK
+        acquired = False
 
         def complete(path: Path) -> _MaterializedLocal:
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                    pb.LIFECYCLE_INTENT_STAGE_ON_DISK,
+                    actual_digest=operation_identity[0].encode(),
+                )
             return _MaterializedLocal(path=path, identity=operation_identity)
 
-        async with self._lock(ref):
+        lock = self._lock(ref)
+        try:
+            await self._materialize_await(
+                intent_id,
+                lock.acquire(),
+                operation=f"materialization ref lock for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_REF_LOCK,
+                reason=pb.LIFECYCLE_WAIT_REASON_REF_LOCK,
+                blocker_intent_id=blocker_intent_id,
+            )
+            acquired = True
+            if registry is not None:
+                self._materialize_active[ref] = intent_id
+            failure_stage = pb.LIFECYCLE_INTENT_STAGE_VERIFYING
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_VERIFYING,
+                )
             cached = self.residency.local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
             # materialization of the SAME ref at a DIFFERENT digest is stale
@@ -1412,15 +1547,21 @@ class ModelStore:
                     # be the sacrificial cache warmer). No DOWNLOADING
                     # event, no retry burn; a hub that never answers raises
                     # the typed error (mapped RETRYABLE, never FATAL).
-                    snapshot = await self._await_hub_snapshot(ref)
+                    failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT
+                    snapshot = await self._await_hub_snapshot(
+                        ref,
+                        intent_id=intent_id,
+                    )
                     operation_identity = self._snapshot_identity(ref, snapshot)
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
+                failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM
                 await self._ensure_disk_headroom(
                     ref,
                     sum(int(f.size_bytes) for f in snapshot.files),
                     operation_identity,
+                    intent_id=intent_id,
                 )
             last_progress = 0.0
             # th#850 managed-tier ruling (gw#599): opened before _progress so
@@ -1464,6 +1605,18 @@ class ModelStore:
                 ref, pb.MODEL_STATE_DOWNLOADING, identity=operation_identity,
                 bytes_total=known_total,
             )
+            failure_stage = pb.LIFECYCLE_INTENT_STAGE_FETCHING
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_FETCHING,
+                    progress=pb.LifecycleProgress(
+                        done=0,
+                        total=float(known_total),
+                        unit="bytes",
+                    ),
+                )
             try:
                 delay = 1.0
                 for attempt in range(1, _DOWNLOAD_RETRIES + 1):
@@ -1536,13 +1689,69 @@ class ModelStore:
                                 identity=operation_identity, error=vocab,
                             )
                             raise
-                        logger.warning("download of %s failed (attempt %d): %s; retrying in %.1fs",
-                                       ref, attempt, exc, delay)
-                        await asyncio.sleep(delay)
+                        logger.warning(
+                            "download of %s failed (attempt %d): %s; retrying in %.1fs",
+                            ref,
+                            attempt,
+                            exc,
+                            delay,
+                        )
+                        await self._materialize_await(
+                            intent_id,
+                            asyncio.sleep(delay),
+                            operation=f"download retry backoff for {ref}",
+                            status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_NETWORK_RETRY,
+                            reason=pb.LIFECYCLE_WAIT_REASON_NETWORK_RETRY,
+                            next_retry_at_unix_ms=(time.time_ns() // 1_000_000 + int(delay * 1000)),
+                        )
+                        if registry is not None:
+                            registry.transition(
+                                intent_id,
+                                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                                pb.LIFECYCLE_INTENT_STAGE_FETCHING,
+                            )
                         delay *= 4
                 raise RuntimeError("unreachable")
             finally:
                 dl_counter.finish()
+        except asyncio.CancelledError:
+            if registry is not None:
+                if command_owned:
+                    registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                        pb.LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE,
+                        reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+                        detail="materialization preempted by tenant work",
+                    )
+                else:
+                    registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_CANCELED,
+                        failure_stage,
+                        detail="materialization canceled",
+                    )
+            raise
+        except BaseException as exc:
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                    failure_stage,
+                    error_code=(
+                        pb.LIFECYCLE_ERROR_CODE_SNAPSHOT_IDENTITY_MISSING
+                        if isinstance(exc, MissingSnapshotError)
+                        else pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED
+                    ),
+                    detail=_sanitize(str(exc))[:512],
+                )
+            raise
+        finally:
+            if self._materialize_active.get(ref) == intent_id:
+                self._materialize_active.pop(ref, None)
+            if acquired:
+                lock.release()
 
     def activate_load_identity(
         self, ref: str, identity: _ResidencyIdentity,
@@ -1887,6 +2096,7 @@ class _Job:
     request_id: str
     attempt: int
     spec: Optional[EndpointSpec]
+    intent_id: str = ""
     ctx: Optional[RequestContext] = None
     task: Optional[asyncio.Task] = None
     exec_task: Optional[asyncio.Task] = None
@@ -1970,6 +2180,7 @@ class Executor:
         self._send = send
         self._settings = settings
         self.store = store or ModelStore(send)
+        self.intent_registry: Optional[IntentRegistry] = None
         for s in specs:
             for b in s.models.values():
                 self.store.register_binding(wire_ref(b), b)
@@ -1987,6 +2198,7 @@ class Executor:
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
+        self._setup_active: Dict[Any, str] = {}
         # gw#624: set by a rolled-back setup; the next attempt gc-purges the
         # cancelled load's cycle-held modules before allocating.
         self._pending_alloc_purge = False
@@ -1995,6 +2207,7 @@ class Executor:
         # not only its GPU warmup, so two commands can never cross wraps or
         # let an older rollback mutate a newer adoption.
         self._compile_cache_adoption_lock = asyncio.Lock()
+        self._compile_cache_adoption_active = ""
         # pgw#548: worker-local capacity blocks retain the exact numeric
         # requirement that failed. They are cleared only by a later measured
         # observation after owner/pin release; no timer or prose retry path.
@@ -2081,6 +2294,182 @@ class Executor:
         # ref -> (resolved_ref, cast, lane). Per-request lane instructions
         # expand family forms through these picks.
         self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
+
+    def bind_intent_registry(self, registry: IntentRegistry) -> None:
+        self.intent_registry = registry
+        self.store.bind_intent_registry(registry)
+
+    def _setup_intent(self, spec: EndpointSpec) -> str:
+        registry = self.intent_registry
+        if registry is None:
+            return ""
+        return registry.intent_id(
+            pb.DESIRED_INTENT_KIND_FUNCTION_READY,
+            function_name=spec.name,
+        ) or registry.ensure_local_intent(
+            "setup",
+            repr(spec.instance_key),
+            function_name=spec.name,
+            detail=f"prepare function {spec.name}",
+        )
+
+    def _adoption_intent(self, op: pb.ModelOp) -> str:
+        registry = self.intent_registry
+        if registry is None:
+            return ""
+        return registry.intent_id(
+            pb.DESIRED_INTENT_KIND_COMPILE_ADOPT,
+            ref=op.ref,
+        ) or registry.ensure_local_intent(
+            "compile-adopt",
+            op.operation_id or op.ref,
+            detail=f"adopt compile artifact {op.ref}",
+        )
+
+    def _job_intent(self, run: pb.RunJob) -> str:
+        registry = self.intent_registry
+        if registry is None:
+            return ""
+        return registry.ensure_local_intent(
+            "job",
+            f"{run.request_id}\0{run.attempt}",
+            function_name=run.function_name,
+            detail=f"run request {run.request_id} attempt {run.attempt}",
+        )
+
+    def _intent_transition(
+        self,
+        intent_id: str,
+        status: "pb.LifecycleIntentStatus",
+        stage: "pb.LifecycleIntentStage",
+        **kw: Any,
+    ) -> None:
+        if self.intent_registry is not None and intent_id:
+            self.intent_registry.transition(intent_id, status, stage, **kw)
+
+    async def _intent_await(
+        self,
+        intent_id: str,
+        awaitable: Awaitable[Any],
+        *,
+        operation: str,
+        status: "pb.LifecycleIntentStatus",
+        stage: "pb.LifecycleIntentStage",
+        reason: "pb.LifecycleWaitReason" = pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED,
+        blocker_intent_id: str = "",
+        detail: str = "",
+    ) -> Any:
+        if self.intent_registry is None:
+            return await awaitable
+        return await self.intent_registry.reported_await(
+            intent_id,
+            awaitable,
+            operation=operation,
+            status=status,
+            stage=stage,
+            reason=reason,
+            blocker_intent_id=blocker_intent_id,
+            detail=detail,
+        )
+
+    @asynccontextmanager
+    async def _intent_lock(
+        self,
+        intent_id: str,
+        lock: asyncio.Lock,
+        *,
+        operation: str,
+        stage: "pb.LifecycleIntentStage",
+        reason: "pb.LifecycleWaitReason",
+        resume_stage: "pb.LifecycleIntentStage",
+        blocker_intent_id: str = "",
+    ) -> typing.AsyncIterator[None]:
+        acquired = False
+        try:
+            await self._intent_await(
+                intent_id,
+                lock.acquire(),
+                operation=operation,
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=stage,
+                reason=reason,
+                blocker_intent_id=blocker_intent_id,
+            )
+            acquired = True
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                resume_stage,
+            )
+            yield
+        except asyncio.CancelledError:
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_CANCELED,
+                stage,
+                detail=f"canceled while waiting: {operation}",
+            )
+            raise
+        finally:
+            if acquired:
+                lock.release()
+
+    @asynccontextmanager
+    async def _setup_singleflight(
+        self,
+        spec: EndpointSpec,
+        rec: "_ClassRecord",
+    ) -> typing.AsyncIterator[str]:
+        key = spec.instance_key
+        blocker_intent_id = self._setup_active.get(key, "")
+        registry = self.intent_registry
+        if registry is None:
+            intent_id = ""
+        elif blocker_intent_id:
+            task = asyncio.current_task()
+            intent_id = registry.ensure_local_intent(
+                "setup-waiter",
+                f"{repr(key)}\0{id(task)}",
+                function_name=spec.name,
+                detail=f"waiting to prepare function {spec.name}",
+            )
+        else:
+            intent_id = self._setup_intent(spec)
+            self._setup_active[key] = intent_id
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
+        try:
+            async with self._intent_lock(
+                intent_id,
+                rec.lock,
+                operation=f"setup single-flight for {spec.name}",
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                reason=pb.LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER,
+                resume_stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                blocker_intent_id=blocker_intent_id,
+            ):
+                if intent_id:
+                    self._setup_active[key] = intent_id
+                yield intent_id
+        except BaseException as exc:
+            if registry is not None and registry.is_active(intent_id):
+                registry.transition(
+                    intent_id,
+                    (
+                        pb.LIFECYCLE_INTENT_STATUS_CANCELED
+                        if isinstance(exc, asyncio.CancelledError)
+                        else pb.LIFECYCLE_INTENT_STATUS_FAILED
+                    ),
+                    pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                    detail=_sanitize(str(exc))[:512],
+                )
+            raise
+        finally:
+            if self._setup_active.get(key) == intent_id:
+                self._setup_active.pop(key, None)
 
     # ---- precision resolutions (th#697) -----------------------------------
 
@@ -3558,7 +3947,12 @@ class Executor:
         return rec
 
     @asynccontextmanager
-    async def _exclusive_gpu(self) -> typing.AsyncIterator[None]:
+    async def _exclusive_gpu(
+        self,
+        intent_id: str = "",
+        *,
+        resume_stage: "pb.LifecycleIntentStage" = pb.LIFECYCLE_INTENT_STAGE_WARMING,
+    ) -> typing.AsyncIterator[None]:
         """Hold every worker GPU permit for setup/adoption proof warmups.
 
         Inductor exposes process-global cache counters. Acquiring only one
@@ -3569,9 +3963,33 @@ class Executor:
         acquired = 0
         try:
             for _ in range(self._gpu_slots):
-                await self._gpu_semaphore.acquire()
+                await self._intent_await(
+                    intent_id,
+                    self._gpu_semaphore.acquire(),
+                    operation="exclusive GPU permit",
+                    status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
+                    reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
+                )
                 acquired += 1
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                resume_stage,
+            )
             yield
+        except asyncio.CancelledError:
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_CANCELED,
+                (
+                    resume_stage
+                    if acquired == self._gpu_slots
+                    else pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT
+                ),
+                detail="exclusive GPU wait canceled",
+            )
+            raise
         finally:
             for _ in range(acquired):
                 self._gpu_semaphore.release()
@@ -3592,7 +4010,7 @@ class Executor:
         except RuntimeError:
             pass
         rec = self._class_record(spec)
-        async with rec.lock:
+        async with self._setup_singleflight(spec, rec) as intent_id:
             if rec.ready and not rec.stale:
                 setup_refs = [
                     r for slot in self._setup_slots(spec)
@@ -3629,7 +4047,14 @@ class Executor:
                         # reporting the state-driven failure; it must not keep
                         # serving under superseded scheduler evidence.
                         rec.stale = True
-                        async with self._load_lock:
+                        async with self._intent_lock(
+                            intent_id,
+                            self._load_lock,
+                            operation=f"vacate stale setup for {spec.name}",
+                            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                            reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+                            resume_stage=pb.LIFECYCLE_INTENT_STAGE_LOADING_HOST,
+                        ):
                             await self._vacate_record(rec)
                         self._mark_compile_setup_unavailable(
                             rec, spec, str(exc))
@@ -3705,10 +4130,22 @@ class Executor:
                 # gw#494: the instance was loaded for a superseded pick —
                 # vacate (releasing its OLD-ref bookings) and set up fresh
                 # with the current bindings.
-                async with self._load_lock:
+                async with self._intent_lock(
+                    intent_id,
+                    self._load_lock,
+                    operation=f"vacate stale setup for {spec.name}",
+                    stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                    reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+                    resume_stage=pb.LIFECYCLE_INTENT_STAGE_LOADING_HOST,
+                ):
                     await self._vacate_record(rec)
             if rec.ready:
                 await self._promote_setup_refs(spec, promote_slots, rec=rec)
+                self._intent_transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                    pb.LIFECYCLE_INTENT_STAGE_READY,
+                )
                 return rec.instance
             if self._record_has_setup_ownership(rec):
                 # A prior process-local cancellation/failure may have reached
@@ -3730,7 +4167,12 @@ class Executor:
             )
             try:
                 with activity_mod.watchdog(act):
-                    instance = await self._setup_locked(spec, rec, snapshots)
+                    instance = await self._setup_locked(
+                        spec,
+                        rec,
+                        snapshots,
+                        intent_id=intent_id,
+                    )
             except BaseException as exc:
                 act.failed(exc)
                 # Setup is a transaction: endpoint construction, tenant
@@ -3742,8 +4184,21 @@ class Executor:
                 try:
                     await self._rollback_failed_setup(rec)
                 except BaseException:
-                    logger.exception(
-                        "failed to roll back incomplete setup for %s", spec.name)
+                    logger.exception("failed to roll back incomplete setup for %s", spec.name)
+                self._intent_transition(
+                    intent_id,
+                    (
+                        pb.LIFECYCLE_INTENT_STATUS_CANCELED
+                        if isinstance(exc, asyncio.CancelledError)
+                        else pb.LIFECYCLE_INTENT_STATUS_FAILED
+                    ),
+                    (
+                        pb.LIFECYCLE_INTENT_STAGE_COMPILING
+                        if spec.compile is not None
+                        else pb.LIFECYCLE_INTENT_STAGE_WARMING
+                    ),
+                    detail=_sanitize(str(exc))[:512],
+                )
                 if not isinstance(exc, Exception):
                     raise
                 # Honest failure (th#581): a function whose model download /
@@ -3766,6 +4221,11 @@ class Executor:
             rec.instance = instance
             rec.ready = True
             act.completed()
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+            )
             self._clear_recovered_compile_failures(rec)
             self._on_state_change()
             return instance
@@ -4107,6 +4567,8 @@ class Executor:
     async def _setup_locked(
         self, spec: EndpointSpec, rec: _ClassRecord,
         snapshots: Optional[Dict[str, pb.Snapshot]],
+        *,
+        intent_id: str = "",
     ) -> Any:
         assert spec.cls is not None  # guarded by ensure_setup
         setup_slots = self._setup_slots(spec)
@@ -4123,6 +4585,11 @@ class Executor:
         # path, plus per-override-ref snapshot digests (identity facts).
         component_paths: Dict[str, Dict[str, str]] = {}
         override_digests: Dict[str, str] = {}
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_LOADING_HOST,
+        )
         for slot in setup_slots:
             binding = spec.models[slot]
             ref = slot_refs[slot]
@@ -4149,7 +4616,14 @@ class Executor:
         compile_artifact = compile_selection.path if compile_selection else None
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
-        async with self._load_lock:
+        async with self._intent_lock(
+            intent_id,
+            self._load_lock,
+            operation=f"model load for {spec.name}",
+            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+            reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+            resume_stage=pb.LIFECYCLE_INTENT_STAGE_LOADING_DEVICE,
+        ):
             # gw#624: a prior cancelled attempt's cycle-held modules must be
             # collected BEFORE this attempt allocates, or retries stack
             # partial loads until OOM.
@@ -4314,14 +4788,29 @@ class Executor:
                 return evidence.count, evidence.functions_by_object
 
             activity_mod.current_phase(
-                activity_mod.PHASE_INDUCTOR_COMPILE if inj.pending_self_mints
-                else activity_mod.PHASE_WARMUP_FORWARD)
+                activity_mod.PHASE_INDUCTOR_COMPILE
+                if inj.pending_self_mints
+                else activity_mod.PHASE_WARMUP_FORWARD
+            )
+            warmup_stage = (
+                pb.LIFECYCLE_INTENT_STAGE_COMPILING
+                if inj.pending_self_mints
+                else pb.LIFECYCLE_INTENT_STAGE_WARMING
+            )
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                warmup_stage,
+            )
             compile_seconds_before = (
                 compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
             if inj.active_compile_artifacts:
                 # Cache-hit counters are process-global. Hold every GPU permit
                 # so each exact guard window can belong to only this warmup.
-                async with self._exclusive_gpu():
+                async with self._exclusive_gpu(
+                    intent_id,
+                    resume_stage=warmup_stage,
+                ):
                     warmed, function_proofs = await run_warmup()
             else:
                 warmed, function_proofs = await run_warmup()
@@ -6005,8 +6494,39 @@ class Executor:
         """Handle the sole v3 ModelOp: hot adoption of a compile cache."""
         if op.op != pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE:
             return
-        async with self._compile_cache_adoption_lock:
-            await self._handle_compile_cache_adoption(op)
+        blocker_intent_id = self._compile_cache_adoption_active
+        if self.intent_registry is not None and blocker_intent_id:
+            intent_id = self.intent_registry.ensure_local_intent(
+                "compile-adopt-waiter",
+                op.operation_id or f"{op.ref}\0{id(asyncio.current_task())}",
+                detail=f"waiting to adopt compile artifact {op.ref}",
+            )
+        else:
+            intent_id = self._adoption_intent(op)
+            self._compile_cache_adoption_active = intent_id
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
+        try:
+            async with self._intent_lock(
+                intent_id,
+                self._compile_cache_adoption_lock,
+                operation=f"compile adoption single-flight for {op.ref}",
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                reason=pb.LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER,
+                resume_stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                blocker_intent_id=blocker_intent_id,
+            ):
+                self._compile_cache_adoption_active = intent_id
+                await self._handle_compile_cache_adoption(
+                    op,
+                    intent_id=intent_id,
+                )
+        finally:
+            if self._compile_cache_adoption_active == intent_id:
+                self._compile_cache_adoption_active = ""
 
     def _adoption_event(
         self,
@@ -6028,7 +6548,12 @@ class Executor:
             **kw,
         )
 
-    async def _handle_compile_cache_adoption(self, op: pb.ModelOp) -> None:
+    async def _handle_compile_cache_adoption(
+        self,
+        op: pb.ModelOp,
+        *,
+        intent_id: str = "",
+    ) -> None:
         self.store.bind_loop()
         ref = op.ref
         snap = op.snapshot if op.HasField("snapshot") else None
@@ -6046,6 +6571,12 @@ class Executor:
                     error="adopt_failed:missing_operation_id",
                 )
             ))
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="missing operation_id",
+            )
             return
         if not snapshot_digest.strip():
             # Adoption is one-shot evidence for one immutable artifact.  A
@@ -6061,6 +6592,12 @@ class Executor:
                     error="adopt_failed:missing_snapshot_digest",
                 )
             ))
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="missing snapshot digest",
+            )
             return
         if not target_incarnation_id.strip():
             await self._send(pb.WorkerMessage(
@@ -6073,12 +6610,29 @@ class Executor:
                     error="adopt_failed:missing_target_incarnation_id",
                 )
             ))
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="missing target incarnation id",
+            )
             return
         try:
             await self._adopt_compile_cache(
-                ref, snap, snapshot_digest, operation_id, target_incarnation_id,
+                ref,
+                snap,
+                snapshot_digest,
+                operation_id,
+                target_incarnation_id,
+                intent_id=intent_id,
             )
         except Exception as exc:
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+                detail=_sanitize(str(exc))[:512],
+            )
             logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
             await self._send(pb.WorkerMessage(
                 model_event=self._adoption_event(
@@ -6101,6 +6655,8 @@ class Executor:
         snapshot_digest: str,
         operation_id: str,
         target_incarnation_id: str,
+        *,
+        intent_id: str = "",
     ) -> None:
         """Hot adoption (th#567): download+verify a compiled artifact and
         re-wrap the already-resident modules in place — weights untouched, no
@@ -6145,16 +6701,24 @@ class Executor:
                 "model_in_use", "target_not_ready", "target_replaced", "download",
             ):
                 error = f"{error}: {detail[:300]}"
-            await self._send(pb.WorkerMessage(
-                model_event=self._adoption_event(
-                    ref,
-                    pb.MODEL_STATE_FAILED,
-                    snapshot_digest,
-                    operation_id,
-                    target_incarnation_id,
-                    error=error,
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+                detail=_sanitize(error)[:512],
+            )
+            await self._send(
+                pb.WorkerMessage(
+                    model_event=self._adoption_event(
+                        ref,
+                        pb.MODEL_STATE_FAILED,
+                        snapshot_digest,
+                        operation_id,
+                        target_incarnation_id,
+                        error=error,
+                    )
                 )
-            ))
+            )
 
         family = compile_cache.family_from_ref(ref)
         is_trt = trt_engine.is_engine_ref(ref)
@@ -6188,14 +6752,24 @@ class Executor:
             # the latest causal operation identity for a later guard failure.
             with expected_target.state_lock:
                 expected_target.active_adoption_operation_id = operation_id
-            await self._send(pb.WorkerMessage(model_event=self._adoption_event(
-                ref,
-                pb.MODEL_STATE_ADOPTED,
-                snapshot_digest,
-                operation_id,
-                target_incarnation_id,
-                duration_ms=0,
-            )))
+            await self._send(
+                pb.WorkerMessage(
+                    model_event=self._adoption_event(
+                        ref,
+                        pb.MODEL_STATE_ADOPTED,
+                        snapshot_digest,
+                        operation_id,
+                        target_incarnation_id,
+                        duration_ms=0,
+                    )
+                )
+            )
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+                actual_digest=snapshot_digest.encode(),
+            )
             return
         if previous_ref:
             # Replacing any already-active wrapper is not transactional:
@@ -6208,10 +6782,23 @@ class Executor:
             # The hub schedules adoption idle-only; defensive — never touch
             # a module while any job is in flight.
             return await fail("model_in_use")
+        materialize_intent = self.store._materialize_intent(ref)
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_WAITING,
+            pb.LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT,
+            reason=pb.LIFECYCLE_WAIT_REASON_SNAPSHOT,
+            blocker_intent_id=materialize_intent,
+        )
         try:
             local = await self.store.ensure_local(ref, snap)
         except Exception as exc:
             return await fail("download", str(exc))
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
         artifact = compile_cache.find_artifact(local)
         if artifact is None:
             return await fail("artifact_missing")
@@ -6241,7 +6828,14 @@ class Executor:
         # Artifact work may take long enough for model juggling to replace the
         # object. Serialize the final check + mutation with setup/vacate, and
         # address only the exact incarnation observed before the download.
-        async with self._load_lock:
+        async with self._intent_lock(
+            intent_id,
+            self._load_lock,
+            operation=f"compile adoption load lock for {ref}",
+            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+            reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+            resume_stage=pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+        ):
             current = self._compile_target(target_incarnation_id)
             if (
                 current is None
@@ -6255,7 +6849,10 @@ class Executor:
             # A job landing mid-adoption queues behind every GPU permit;
             # process-global Inductor counters cannot tolerate another slot
             # compiling inside this exact target's proof window.
-            async with self._exclusive_gpu():
+            async with self._exclusive_gpu(
+                intent_id,
+                resume_stage=pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+            ):
                 current = self._compile_target(target_incarnation_id)
                 if (
                     current is None
@@ -6450,6 +7047,12 @@ class Executor:
                 warmup_s=warmup_s,
             )
         ))
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+            pb.LIFECYCLE_INTENT_STAGE_READY,
+            actual_digest=snapshot_digest.encode(),
+        )
 
     def _record_refs(self, rec: _ClassRecord) -> List[str]:
         """The wire refs a record's instance holds: the load-time booking
@@ -6595,28 +7198,67 @@ class Executor:
         for (rid, att), job in list(self.jobs.items()):
             if rid == run.request_id and att != run.attempt and not job.finished:
                 job.superseded = True
+                self._intent_transition(
+                    job.intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED,
+                    pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+                    detail=f"superseded by attempt {run.attempt}",
+                )
                 job.cancel_requested = True
                 if job.ctx is not None:
                     job.ctx._cancel()
                 if job.exec_task is not None:
                     job.exec_task.cancel()
 
+        intent_id = self._job_intent(run)
         if self.draining:
-            await self._send_result(run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE,
-                                    safe_message="worker draining")
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="worker draining",
+            )
+            await self._send_result(
+                run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE, safe_message="worker draining"
+            )
             return
         spec = self.specs.get(run.function_name)
         if spec is None:
-            await self._send_result(run.request_id, run.attempt, pb.JOB_STATUS_INVALID,
-                                    safe_message=f"unknown function {run.function_name!r}")
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail=f"unknown function {run.function_name!r}",
+            )
+            await self._send_result(
+                run.request_id,
+                run.attempt,
+                pb.JOB_STATUS_INVALID,
+                safe_message=f"unknown function {run.function_name!r}",
+            )
             return
         if run.function_name in self.unavailable:
             reason, detail, _ = self.unavailable[run.function_name]
-            await self._send_result(run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE,
-                                    safe_message=f"function unavailable: {reason}")
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail=f"function unavailable: {reason}",
+            )
+            await self._send_result(
+                run.request_id,
+                run.attempt,
+                pb.JOB_STATUS_RETRYABLE,
+                safe_message=f"function unavailable: {reason}",
+            )
             return
 
-        job = _Job(request_id=run.request_id, attempt=run.attempt, spec=spec)
+        job = _Job(
+            request_id=run.request_id,
+            attempt=run.attempt,
+            spec=spec,
+            intent_id=intent_id,
+        )
         self.jobs[key] = job
         self._idle.clear()
         logger.info("job admitted %s attempt=%d", run.request_id, run.attempt)
@@ -6659,6 +7301,11 @@ class Executor:
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
+        self._intent_transition(
+            job.intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
         try:
             payload: Any = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
@@ -6829,7 +7476,24 @@ class Executor:
                 )
             if producer:
                 await self._materialize_datasets(ctx, payload)
+            setup_intent = ""
+            if spec.cls is not None:
+                setup_intent = self._setup_intent(spec)
+                self._intent_transition(
+                    job.intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                    pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                    reason=pb.LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER,
+                    blocker_intent_id=setup_intent,
+                    detail=f"waiting for function {spec.name}",
+                )
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
+            if setup_intent:
+                self._intent_transition(
+                    job.intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                )
             # th#913/gw#596: the concrete lane actually serving this job.
             # th#1050: ctx.lane exposes the same post-degrade truth to the
             # handler (declared-lane endpoints branch on it).
@@ -6879,7 +7543,14 @@ class Executor:
         started = time.monotonic()
         try:
             if needs_gpu:
-                await self._gpu_semaphore.acquire()
+                await self._intent_await(
+                    job.intent_id,
+                    self._gpu_semaphore.acquire(),
+                    operation=f"GPU permit for request {run.request_id}",
+                    status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
+                    reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
+                )
                 self._loop = asyncio.get_running_loop()
                 lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
                 ctx._gpu_slot_lease = lease
@@ -6902,6 +7573,12 @@ class Executor:
             # run yet. The repeated check catches a replacement between
             # scheduler assignment/intake and this GPU turn.
             self._validate_required_compile(spec, run)
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+                detail="executing",
+            )
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Lane refs
@@ -6976,7 +7653,13 @@ class Executor:
                         spec.name, run.request_id,
                         int((released_at - started) * 1000),
                         int((handler_done - started) * 1000),
-                        int((handler_done - released_at) * 1000))
+                        int((handler_done - released_at) * 1000),
+                    )
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+            )
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the
@@ -7489,6 +8172,26 @@ class Executor:
         if job.finished:
             return
         job.finished = True
+        terminal_status = (
+            pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
+            if job.superseded
+            else (
+                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED
+                if status == pb.JOB_STATUS_OK
+                else (
+                    pb.LIFECYCLE_INTENT_STATUS_CANCELED
+                    if status == pb.JOB_STATUS_CANCELED
+                    else pb.LIFECYCLE_INTENT_STATUS_FAILED
+                )
+            )
+        )
+        if not job.superseded:
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+                detail=str(kw.get("safe_message", ""))[:512],
+            )
         if job.renew_task is not None:
             job.renew_task.cancel()
             job.renew_task = None
@@ -7496,6 +8199,16 @@ class Executor:
         logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:
             await self._send_result(job.request_id, job.attempt, status, **kw)
+        self._intent_transition(
+            job.intent_id,
+            terminal_status,
+            (
+                pb.LIFECYCLE_INTENT_STAGE_READY
+                if terminal_status == pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED
+                else pb.LIFECYCLE_INTENT_STAGE_FINALIZING
+            ),
+            detail=str(kw.get("safe_message", ""))[:512],
+        )
         # Keep finished records so a RunJob retransmission doesn't re-execute;
         # prune oldest finished entries beyond a small window.
         finished = [k for k, j in self.jobs.items() if j.finished]

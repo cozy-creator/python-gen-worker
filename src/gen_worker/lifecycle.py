@@ -168,6 +168,7 @@ class Lifecycle:
             executor.specs.keys(),
             on_change=self.state_changed,
         )
+        self.executor.bind_intent_registry(self.intent_registry)
         self.phase = pb.WORKER_PHASE_BOOTING
         self.hardware = probe_hardware()
         self.draining = False
@@ -585,13 +586,14 @@ class Lifecycle:
                     stage=pb.LIFECYCLE_INTENT_STAGE_VERIFYING,
                 )
                 failure_stage = pb.LIFECYCLE_INTENT_STAGE_FETCHING
-                await self.intent_registry.reported_await(
-                    intent_id,
-                    self.executor.store.ensure_local(ref, snapshot),
-                    operation=f"snapshot materialization for {ref}",
-                    status=pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                    stage=pb.LIFECYCLE_INTENT_STAGE_FETCHING,
-                )
+                with self.executor.store.materialize_intent(intent_id):
+                    await self.intent_registry.reported_await(
+                        intent_id,
+                        self.executor.store.ensure_local(ref, snapshot),
+                        operation=f"snapshot materialization for {ref}",
+                        status=pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                        stage=pb.LIFECYCLE_INTENT_STAGE_FETCHING,
+                    )
                 if intent_id:
                     self.intent_registry.transition(
                         intent_id,
@@ -842,6 +844,8 @@ class Lifecycle:
             )
 
     async def set_phase(self, phase: "pb.WorkerPhase") -> None:
+        if self.intent_registry.protocol_rejected and phase != pb.WORKER_PHASE_ERROR:
+            return
         if phase == self.phase:
             return
         self.phase = phase

@@ -473,6 +473,13 @@ class IntentRegistry:
                 return intent_id
         return ""
 
+    def is_active(self, intent_id: str) -> bool:
+        state = self._intents.get(intent_id)
+        return (
+            state is not None
+            and int(state.status) in _ACTIVE_INTENT_STATES
+        )
+
     def ensure_intent(
         self,
         kind: "pb.DesiredIntentKind",
@@ -524,6 +531,51 @@ class IntentRegistry:
         self._trim_intents()
         return intent_id
 
+    def ensure_local_intent(
+        self,
+        scope: str,
+        identity: str,
+        *,
+        function_name: str = "",
+        detail: str = "",
+    ) -> str:
+        """Create a bounded worker-local compatibility obligation.
+
+        These intents cover legacy operations that protocol v5 cannot yet own
+        directly, such as a RunJob (the wire lacks a job intent kind/owner
+        field). Their IDs are deterministic for one operation identity, but
+        they never impersonate a hub-authored DesiredIntent.
+        """
+        raw = f"{scope}\0{identity}\0{function_name}".encode()
+        base_intent_id = f"compat-{scope}-{hashlib.sha256(raw).hexdigest()[:24]}"
+        intent_id = base_intent_id
+        existing = self._intents.get(intent_id)
+        if existing is not None and int(existing.status) in _ACTIVE_INTENT_STATES:
+            return intent_id
+        if existing is not None:
+            suffix = self._state_seq
+            intent_id = f"{base_intent_id}-{suffix}"
+            while intent_id in self._intents:
+                suffix += 1
+                intent_id = f"{base_intent_id}-{suffix}"
+        now = _now_ms()
+        state = pb.IntentState(
+            worker_session_id=self.worker_session_id,
+            goal_id=f"compat-{scope}-{self.worker_session_id}",
+            intent_id=intent_id,
+            release_id=self.release_id,
+            config_generation=self._target_config_generation,
+            status=pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
+            stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+            since_unix_ms=now,
+            updated_at_unix_ms=now,
+            detail=detail,
+        )
+        state.state_seq = self._touch()
+        self._intents[intent_id] = state
+        self._trim_intents()
+        return intent_id
+
     def transition(
         self,
         intent_id: str,
@@ -531,6 +583,7 @@ class IntentRegistry:
         stage: "pb.LifecycleIntentStage",
         *,
         reason: "pb.LifecycleWaitReason" = pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED,
+        next_retry_at_unix_ms: int = 0,
         deadline_at_unix_ms: int = 0,
         blocker_intent_id: str = "",
         blocker_request: Optional["pb.RequestAttempt"] = None,
@@ -566,6 +619,7 @@ class IntentRegistry:
         state.stage = stage
         state.reason = reason
         state.updated_at_unix_ms = now
+        state.next_retry_at_unix_ms = next_retry_at_unix_ms
         if deadline_at_unix_ms:
             state.deadline_at_unix_ms = deadline_at_unix_ms
         state.blocker_intent_id = blocker_intent_id
@@ -668,7 +722,9 @@ class IntentRegistry:
         status: "pb.LifecycleIntentStatus",
         stage: "pb.LifecycleIntentStage",
         reason: "pb.LifecycleWaitReason" = pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED,
+        next_retry_at_unix_ms: int = 0,
         deadline_at_unix_ms: int = 0,
+        blocker_intent_id: str = "",
         detail: str = "",
     ) -> _T:
         if intent_id:
@@ -678,7 +734,9 @@ class IntentRegistry:
                     status,
                     stage,
                     reason=reason,
+                    next_retry_at_unix_ms=next_retry_at_unix_ms,
                     deadline_at_unix_ms=deadline_at_unix_ms,
+                    blocker_intent_id=blocker_intent_id,
                     detail=detail,
                 )
             except BaseException:
