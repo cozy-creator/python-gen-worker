@@ -59,10 +59,12 @@ def _command_digest(command: "pb.DesiredStateCommand") -> bytes:
     return hashlib.sha256(semantic.SerializeToString(deterministic=True)).digest()
 
 
-def _binding_digest(instance: Optional["pb.DesiredInstance"]) -> bytes:
-    if instance is None:
-        return b""
-    return hashlib.sha256(instance.SerializeToString(deterministic=True)).digest()
+def _binding_digest(
+    function_name: str,
+    instance: Optional["pb.DesiredInstance"],
+) -> bytes:
+    exact = instance or pb.DesiredInstance(function_name=function_name)
+    return hashlib.sha256(exact.SerializeToString(deterministic=True)).digest()
 
 
 def _intent_identity_digest(intent: "pb.DesiredIntent") -> bytes:
@@ -86,6 +88,7 @@ class IntentRegistry:
         release_id: str,
         function_names: Iterable[str],
         *,
+        boot_config_generation: int = 0,
         on_change: Optional[Callable[[], None]] = None,
         unreported_wait_timeout_s: float = _UNREPORTED_WAIT_TIMEOUT_S,
     ) -> None:
@@ -102,6 +105,7 @@ class IntentRegistry:
         self._last_receipt: Optional[pb.GoalReceipt] = None
         self._command_receipts: "OrderedDict[tuple[int, bytes], pb.GoalReceipt]" = OrderedDict()
         self._target_config_generation = 0
+        self._boot_config_generation = max(0, int(boot_config_generation))
         self._intents: "OrderedDict[str, pb.IntentState]" = OrderedDict()
         self._intent_digests: dict[str, bytes] = {}
         self._desired_intents: dict[str, pb.DesiredIntent] = {}
@@ -273,6 +277,14 @@ class IntentRegistry:
                     "config_digest is required when config_generation is set",
                 )
             )
+        if int(command.config_generation) > 0 and not bytes(command.parameter_snapshot):
+            command_errors.append(
+                (
+                    "",
+                    pb.LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD,
+                    "parameter_snapshot is required when config_generation is set",
+                )
+            )
 
         seen: set[str] = set()
         for intent in command.intents:
@@ -422,8 +434,13 @@ class IntentRegistry:
         self._trim_intents()
         self._last_command_seq = int(command.command_seq)
         self._last_command_digest = digest
-        self._target_config_generation = int(command.config_generation)
-        self._refresh_config_application(received=True)
+        changed_classes = (
+            command.changed_config_classes if command.HasField("changed_config_classes") else None
+        )
+        self.receive_config_generation(
+            int(command.config_generation),
+            changed_classes=changed_classes,
+        )
         receipt = pb.GoalReceipt(
             worker_session_id=self.worker_session_id,
             command_seq=command.command_seq,
@@ -475,10 +492,7 @@ class IntentRegistry:
 
     def is_active(self, intent_id: str) -> bool:
         state = self._intents.get(intent_id)
-        return (
-            state is not None
-            and int(state.status) in _ACTIVE_INTENT_STATES
-        )
+        return state is not None and int(state.status) in _ACTIVE_INTENT_STATES
 
     def ensure_intent(
         self,
@@ -752,13 +766,20 @@ class IntentRegistry:
             next_application = pb.ConfigApplication()
         else:
             current = self._config_application
-            received_generation = max(
-                int(current.received_generation),
-                target if received else 0,
+            received_generation = min(
+                target,
+                max(
+                    int(current.received_generation),
+                    target if received else 0,
+                ),
             )
-            parameter_generation = int(current.parameter_snapshot_generation)
-            binding_generation = int(current.binding_ready_generation)
-            boot_generation = int(current.boot_generation)
+            parameter_generation = min(target, int(current.parameter_snapshot_generation))
+            binding_generation = min(target, int(current.binding_ready_generation))
+            boot_generation = min(target, int(current.boot_generation))
+            pending_parameters = parameter_generation < target
+            pending_bindings = binding_generation < target
+            pending_boot = boot_generation < target
+            failed = int(current.state) == pb.CONFIG_APPLICATION_STATE_FAILED
             next_application = pb.ConfigApplication(
                 release_id=self.release_id,
                 target_generation=target,
@@ -768,23 +789,94 @@ class IntentRegistry:
                 boot_generation=boot_generation,
                 state=(
                     pb.CONFIG_APPLICATION_STATE_FAILED
-                    if int(current.state) == pb.CONFIG_APPLICATION_STATE_FAILED
-                    else pb.CONFIG_APPLICATION_STATE_APPLYING
+                    if failed
+                    else (
+                        pb.CONFIG_APPLICATION_STATE_BOOT_STALE
+                        if pending_boot
+                        else (
+                            pb.CONFIG_APPLICATION_STATE_APPLYING
+                            if pending_parameters or pending_bindings
+                            else pb.CONFIG_APPLICATION_STATE_CONVERGED
+                        )
+                    )
                 ),
                 pending_classes=pb.ConfigClassMask(
-                    parameters=parameter_generation < target,
-                    # Slice 2a cannot prove binding or boot convergence. Keep
-                    # those classes conservative until their owning slices.
-                    bindings=binding_generation < target,
-                    boot=boot_generation < target,
+                    parameters=pending_parameters,
+                    bindings=pending_bindings,
+                    boot=pending_boot,
                 ),
-                error_code=current.error_code,
+                error_code=(current.error_code if failed else pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED),
             )
         if next_application.SerializeToString(
             deterministic=True
         ) != self._config_application.SerializeToString(deterministic=True):
             self._config_application = next_application
             self._touch()
+
+    def _advance_config_target(
+        self,
+        generation: int,
+        changed_classes: Optional["pb.ConfigClassMask"],
+    ) -> None:
+        gen = int(generation)
+        old_target = self._target_config_generation
+        if gen <= old_target:
+            self._refresh_config_application(received=(gen == old_target))
+            return
+
+        initial = old_target <= 0
+        current = _clone(self._config_application)
+        self._target_config_generation = gen
+        current.release_id = self.release_id
+        current.target_generation = gen
+        current.received_generation = gen
+        if initial:
+            # Only the pod-launch stamp proves which boot-only environment
+            # this process received. The first command proves receipt, not
+            # boot convergence.
+            current.boot_generation = min(gen, self._boot_config_generation)
+        elif changed_classes is not None:
+            if not changed_classes.parameters:
+                current.parameter_snapshot_generation = gen
+            if not changed_classes.bindings:
+                current.binding_ready_generation = gen
+            if not changed_classes.boot:
+                current.boot_generation = gen
+        current.state = pb.CONFIG_APPLICATION_STATE_APPLYING
+        current.error_code = pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED
+        self._config_application = current
+        self._refresh_config_application(received=True)
+
+    def _project_config_intent(self) -> None:
+        intent_id = self.intent_id(pb.DESIRED_INTENT_KIND_CONFIG_APPLY)
+        if not intent_id:
+            return
+        application = self._config_application
+        if int(application.state) == pb.CONFIG_APPLICATION_STATE_BOOT_STALE:
+            self.transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                pb.LIFECYCLE_INTENT_STAGE_WAIT_REPLACEMENT,
+                reason=pb.LIFECYCLE_WAIT_REASON_REPLACEMENT,
+            )
+        elif int(application.state) == pb.CONFIG_APPLICATION_STATE_CONVERGED:
+            self.transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+            )
+        elif application.pending_classes.parameters:
+            self.transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_CONFIG_MATERIALIZING,
+            )
+        else:
+            self.transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_CONFIG_BINDINGS_APPLYING,
+            )
 
     def config_snapshot_applied(self, generation: int) -> None:
         """Record only a generation whose atomic snapshot write succeeded."""
@@ -798,23 +890,27 @@ class IntentRegistry:
         )
         next_application.error_code = pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED
         next_application.state = pb.CONFIG_APPLICATION_STATE_APPLYING
-        next_application.pending_classes.parameters = (
-            int(next_application.parameter_snapshot_generation) < target
-        )
-        next_application.pending_classes.bindings = True
-        next_application.pending_classes.boot = True
         if next_application.SerializeToString(
             deterministic=True
         ) != self._config_application.SerializeToString(deterministic=True):
             self._config_application = next_application
             self._touch()
-        intent_id = self.intent_id(pb.DESIRED_INTENT_KIND_CONFIG_APPLY)
-        if intent_id:
-            self.transition(
-                intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                pb.LIFECYCLE_INTENT_STAGE_CONFIG_BINDINGS_APPLYING,
-            )
+        self._refresh_config_application()
+        self._project_config_intent()
+
+    def bindings_applied(self, generation: int) -> None:
+        """Record exact desired bindings only after reconcile succeeds."""
+        target = self._target_config_generation
+        if target <= 0 or int(self._config_application.state) == pb.CONFIG_APPLICATION_STATE_FAILED:
+            return
+        next_application = _clone(self._config_application)
+        next_application.binding_ready_generation = min(
+            target,
+            max(int(next_application.binding_ready_generation), int(generation)),
+        )
+        self._config_application = next_application
+        self._refresh_config_application()
+        self._project_config_intent()
 
     def config_snapshot_failed(self, detail: str) -> None:
         """Withdraw config readiness without advancing an applied generation."""
@@ -839,12 +935,17 @@ class IntentRegistry:
             )
         self.protocol_rejected = True
 
-    def receive_config_generation(self, generation: int) -> None:
+    def receive_config_generation(
+        self,
+        generation: int,
+        *,
+        changed_classes: Optional["pb.ConfigClassMask"] = None,
+    ) -> None:
         """Record receipt separately from any applied config class."""
         gen = int(generation)
-        if gen > self._target_config_generation:
-            self._target_config_generation = gen
-        self._refresh_config_application(received=True)
+        if gen <= 0:
+            return
+        self._advance_config_target(gen, changed_classes)
 
     def refresh_projection(
         self,
@@ -873,6 +974,10 @@ class IntentRegistry:
                 for target in executor.compile_targets()
                 for name in target.function_names
             }
+            config_state = int(self._config_application.state)
+            target_generation = int(
+                self._config_application.target_generation or executor.runtime_config.generation
+            )
             capabilities = []
             for name in sorted(self.function_names):
                 instance = hot.get(name)
@@ -886,7 +991,15 @@ class IntentRegistry:
                         if resolutions.get(ref, ("", "", ""))[2]
                     }
                 )
-                if name in available:
+                if config_state == pb.CONFIG_APPLICATION_STATE_FAILED:
+                    state = pb.FUNCTION_CAPABILITY_STATE_FAILED
+                elif config_state == pb.CONFIG_APPLICATION_STATE_BOOT_STALE:
+                    state = pb.FUNCTION_CAPABILITY_STATE_BOOT_STALE
+                elif (
+                    target_generation > 0 and config_state != pb.CONFIG_APPLICATION_STATE_CONVERGED
+                ):
+                    state = pb.FUNCTION_CAPABILITY_STATE_APPLYING
+                elif name in available:
                     state = pb.FUNCTION_CAPABILITY_STATE_READY
                 elif name in executor.unavailable:
                     state = pb.FUNCTION_CAPABILITY_STATE_FAILED
@@ -896,8 +1009,8 @@ class IntentRegistry:
                     pb.FunctionCapability(
                         function_name=name,
                         release_id=self.release_id,
-                        config_generation=int(executor.runtime_config.generation),
-                        binding_digest=_binding_digest(instance),
+                        config_generation=target_generation,
+                        binding_digest=_binding_digest(name, instance),
                         lane=",".join(lanes),
                         models=[
                             pb.ModelIdentity(

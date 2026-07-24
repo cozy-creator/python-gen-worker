@@ -55,6 +55,10 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # config-generation push; per-invoke subprocesses read it). Empty =
     # runtime_config.DEFAULT_SNAPSHOT_PATH.
     config_snapshot_path: str = ""  # GEN_WORKER_CONFIG_SNAPSHOT_PATH
+    # Config generation whose boot-only environment was injected when this
+    # pod was created. A missing stamp is deliberately stale, not inferred
+    # from the first desired-state command.
+    boot_config_generation: int = 0  # WORKER_CONFIG_GENERATION
 
     # Immutable image provenance stamped by Tensorhub from the release image
     # variant it selected for this pod.

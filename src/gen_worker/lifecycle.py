@@ -52,8 +52,13 @@ _DISK_REPORT_TTL_S = 30.0
 def probe_hardware() -> Dict[str, Any]:
     """Static hardware facts + gate inputs. torch is optional."""
     info: Dict[str, Any] = {
-        "gpu_count": 0, "gpu_total_mem": 0, "gpu_free_mem": 0,
-        "gpu_name": "", "gpu_sm": "", "torch_version": "", "installed_libs": [],
+        "gpu_count": 0,
+        "gpu_total_mem": 0,
+        "gpu_free_mem": 0,
+        "gpu_name": "",
+        "gpu_sm": "",
+        "torch_version": "",
+        "installed_libs": [],
     }
     try:
         import torch
@@ -86,10 +91,7 @@ def free_vram_bytes() -> int:
         import torch
 
         if torch.cuda.is_available():
-            return sum(
-                int(torch.cuda.mem_get_info(i)[0])
-                for i in range(torch.cuda.device_count())
-            )
+            return sum(int(torch.cuda.mem_get_info(i)[0]) for i in range(torch.cuda.device_count()))
     except Exception:
         pass
     return 0
@@ -108,31 +110,25 @@ def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
         return ()
     return (
         snap.digest,
-        tuple(sorted(
-            (f.path, f.size_bytes, f.blake3) for f in snap.files
-        )),
+        tuple(sorted((f.path, f.size_bytes, f.blake3) for f in snap.files)),
     )
 
 
 def _semantic_model_key(
-    ack: "pb.HelloAck", desired: "pb.DesiredResidency",
+    ack: "pb.HelloAck",
+    desired: "pb.DesiredResidency",
 ) -> tuple:
     """gw#614: order-independent identity of the MODEL content of an ack —
     resolutions, disk refs, snapshot content, hot instances. Generation,
     presigned URL bytes, and other non-model fields are excluded so benign
     plan rewrites compare equal."""
     return (
-        tuple(sorted(
-            (r.ref, r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
-        )),
+        tuple(sorted((r.ref, r.resolved_ref, r.cast, r.lane) for r in ack.resolutions)),
         tuple(sorted(ref for ref in desired.disk_refs if ref)),
-        tuple(sorted(
-            (ref, _snapshot_content_key(snap))
-            for ref, snap in desired.snapshots.items()
-        )),
-        tuple(sorted(
-            inst.SerializeToString(deterministic=True) for inst in desired.hot
-        )),
+        tuple(
+            sorted((ref, _snapshot_content_key(snap)) for ref, snap in desired.snapshots.items())
+        ),
+        tuple(sorted(inst.SerializeToString(deterministic=True) for inst in desired.hot)),
     )
 
 
@@ -159,13 +155,15 @@ class Lifecycle:
 
             claims = _decode_unverified_jwt_claims(settings.worker_jwt.strip())
         self.worker_id = (
-            settings.worker_id or str(claims.get("sub") or "").strip()
-            or f"py-worker-{os.getpid()}"
+            settings.worker_id or str(claims.get("sub") or "").strip() or f"py-worker-{os.getpid()}"
         )
         self.release_id = str(claims.get("release_id") or "").strip()
         self.intent_registry = IntentRegistry(
             self.release_id,
             executor.specs.keys(),
+            boot_config_generation=int(
+                getattr(settings, "boot_config_generation", 0) or 0
+            ),
             on_change=self.state_changed,
         )
         self.executor.bind_intent_registry(self.intent_registry)
@@ -198,6 +196,7 @@ class Lifecycle:
             on_parameter_snapshot=self._config_snapshot_applied,
             on_snapshot_failure=self._config_snapshot_failed,
         )
+
     # ---- snapshots -----------------------------------------------------------
 
     def _state_delta(self) -> pb.StateDelta:
@@ -244,8 +243,7 @@ class Lifecycle:
         now = time.monotonic()
         if self._disk_report_at and now - self._disk_report_at < _DISK_REPORT_TTL_S:
             return
-        if (self._disk_report_refresh_task is not None
-                and not self._disk_report_refresh_task.done()):
+        if self._disk_report_refresh_task is not None and not self._disk_report_refresh_task.done():
             return  # a refresh is already in flight
         self._disk_report_at = now
 
@@ -254,11 +252,10 @@ class Lifecycle:
                 await self.executor.store.refresh_disk_usage_report()
             except Exception:
                 logger.warning(
-                    "disk-usage measurement failed; keeping the last "
-                    "cached report", exc_info=True)
+                    "disk-usage measurement failed; keeping the last cached report", exc_info=True
+                )
 
-        self._disk_report_refresh_task = asyncio.create_task(
-            _run(), name="disk-usage-refresh")
+        self._disk_report_refresh_task = asyncio.create_task(_run(), name="disk-usage-refresh")
 
     def build_resources(self) -> pb.WorkerResources:
         hw = self.hardware
@@ -326,8 +323,7 @@ class Lifecycle:
             state=self._state_delta(),
             models=self.executor.store.residency_snapshot(),
             in_flight=[
-                pb.InFlightJob(request_id=rid, attempt=att)
-                for rid, att in sorted(in_flight)
+                pb.InFlightJob(request_id=rid, attempt=att) for rid, att in sorted(in_flight)
             ],
             # th#965 layer 2: promise the beat cadence; the hub reaps after
             # 6 consecutive misses (~60s). Hello counts as the first beat.
@@ -337,9 +333,11 @@ class Lifecycle:
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
+        desired_command: Optional[pb.DesiredStateCommand] = None
         if ack.HasField("desired_state_command"):
+            desired_command = ack.desired_state_command
             receipt = self.intent_registry.apply_command(
-                ack.desired_state_command,
+                desired_command,
                 current_config_generation=self.executor.runtime_config.generation,
             )
             await self._send_state_message(
@@ -367,9 +365,7 @@ class Lifecycle:
         if push is not None:
             gen, release_id = push
             self.intent_registry.receive_config_generation(gen)
-            config_intent = self.intent_registry.ensure_intent(
-                pb.DESIRED_INTENT_KIND_CONFIG_APPLY
-            )
+            config_intent = self.intent_registry.ensure_intent(pb.DESIRED_INTENT_KIND_CONFIG_APPLY)
             if config_intent:
                 self.intent_registry.transition(
                     config_intent,
@@ -377,9 +373,25 @@ class Lifecycle:
                     pb.LIFECYCLE_INTENT_STAGE_CONFIG_MATERIALIZING,
                 )
             try:
-                self.executor.runtime_config.observe(
-                    gen, release_id=release_id or self.release_id,
-                )
+                if (
+                    desired_command is not None
+                    and int(desired_command.config_generation) == gen
+                    and bytes(desired_command.parameter_snapshot)
+                ):
+                    self.executor.runtime_config.apply_parameter_snapshot(
+                        bytes(desired_command.parameter_snapshot),
+                        gen,
+                        release_id=(
+                            str(desired_command.release_id or "").strip()
+                            or release_id
+                            or self.release_id
+                        ),
+                    )
+                else:
+                    self.executor.runtime_config.observe(
+                        gen,
+                        release_id=release_id or self.release_id,
+                    )
             except ConfigSnapshotWriteError as exc:
                 self.intent_registry.config_snapshot_failed(str(exc))
                 self.phase = pb.WORKER_PHASE_ERROR
@@ -389,9 +401,7 @@ class Lifecycle:
                 return
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).
-        resolutions = {
-            r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
-        }
+        resolutions = {r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions}
         self.executor.apply_model_resolutions(resolutions)
         # gw#623: the reconcile's active-work context compares against the
         # resolutions actually applied to the executor.
@@ -402,16 +412,17 @@ class Lifecycle:
         if generation < self._observed_residency_generation:
             logger.info(
                 "ignoring stale desired residency generation %d (observed %d)",
-                generation, self._observed_residency_generation,
+                generation,
+                self._observed_residency_generation,
             )
         else:
             self._observed_residency_generation = generation
             self.executor.store.keep = list(dict.fromkeys(ref for ref in desired.disk_refs if ref))
             self.executor.store.replace_desired_snapshots(
-                dict(desired.snapshots), generation=generation,
+                dict(desired.snapshots),
+                generation=generation,
             )
-            self._replace_residency_reconcile(
-                desired, model_key=_semantic_model_key(ack, desired))
+            self._replace_residency_reconcile(desired, model_key=_semantic_model_key(ack, desired))
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello. Capacity evidence has causal priority over retained results;
         # other finite baseline messages follow it in the same prepend lane.
@@ -434,7 +445,10 @@ class Lifecycle:
         await self.maybe_send_state_delta(hello_ack=True)
 
     def _replace_residency_reconcile(
-        self, desired: "pb.DesiredResidency", *, model_key: Any = None,
+        self,
+        desired: "pb.DesiredResidency",
+        *,
+        model_key: Any = None,
     ) -> None:
         # gw#614 (th#961 defense in depth): an ack whose semantic model set
         # is unchanged must not kill an in-flight reconcile — a running
@@ -447,6 +461,9 @@ class Lifecycle:
             and getattr(self, "_residency_model_key", None) == model_key
         ):
             self._desired_residency = desired
+            wanted = {instance.function_name for instance in desired.hot if instance.function_name}
+            if wanted.issubset(set(self.executor.available_functions())):
+                self.intent_registry.bindings_applied(int(desired.config_generation))
             return
         self._residency_model_key = model_key
         self._desired_residency = desired
@@ -472,7 +489,9 @@ class Lifecycle:
         event.set()
 
     def _work_context(
-        self, refs: Any, desired: "pb.DesiredResidency",
+        self,
+        refs: Any,
+        desired: "pb.DesiredResidency",
     ) -> tuple:
         """Identity facts an in-flight load depends on, per involved ref:
         snapshot content (URL-free) + the applied precision resolution."""
@@ -487,7 +506,8 @@ class Lifecycle:
         )
 
     def _active_work_still_desired(
-        self, desired: "pb.DesiredResidency",
+        self,
+        desired: "pb.DesiredResidency",
     ) -> bool:
         """Whether the reconcile loop's CURRENT work item survives ``desired``
         unchanged — the gw#623 cancel test: only cancel an in-flight load
@@ -503,8 +523,7 @@ class Lifecycle:
             return ctx == self._work_context((ident,), desired)
         for instance in desired.hot:
             if instance.SerializeToString(deterministic=True) == ident:
-                return ctx == self._work_context(
-                    _instance_refs(instance), desired)
+                return ctx == self._work_context(_instance_refs(instance), desired)
         return False
 
     def _cancel_residency_reconcile(self) -> None:
@@ -550,7 +569,9 @@ class Lifecycle:
             self._reconcile_active = None
 
     async def _reconcile_pass(
-        self, desired: "pb.DesiredResidency", restart: asyncio.Event,
+        self,
+        desired: "pb.DesiredResidency",
+        restart: asyncio.Event,
     ) -> None:
         """One convergence pass over ``desired`` in declared order."""
         snapshots = dict(desired.snapshots)
@@ -573,8 +594,7 @@ class Lifecycle:
             )
             if self.draining:
                 return
-            self._reconcile_active = (
-                "disk", ref, self._work_context((ref,), desired))
+            self._reconcile_active = ("disk", ref, self._work_context((ref,), desired))
             failure_stage = pb.LIFECYCLE_INTENT_STAGE_VERIFYING
             try:
                 snapshot = snapshots.get(ref)
@@ -624,6 +644,7 @@ class Lifecycle:
             finally:
                 self._reconcile_active = None
 
+        bindings_converged = True
         for instance in desired.hot:
             if restart.is_set():
                 return
@@ -663,6 +684,7 @@ class Lifecycle:
             except (asyncio.CancelledError, UnreportedIntentWait):
                 raise
             except Exception as exc:
+                bindings_converged = False
                 if intent_id:
                     self.intent_registry.transition(
                         intent_id,
@@ -672,10 +694,13 @@ class Lifecycle:
                     )
                 logger.warning(
                     "desired hot residency failed for %s: %s",
-                    instance.function_name, exc,
+                    instance.function_name,
+                    exc,
                 )
             finally:
                 self._reconcile_active = None
+        if bindings_converged and not restart.is_set() and self._desired_residency is desired:
+            self.intent_registry.bindings_applied(int(desired.config_generation))
 
     async def on_message(self, msg: pb.SchedulerMessage) -> None:
         which = msg.WhichOneof("msg")
@@ -744,7 +769,10 @@ class Lifecycle:
         self.state_changed()
 
     async def _send_state_message(
-        self, message: pb.WorkerMessage, *, hello_ack: bool = False,
+        self,
+        message: pb.WorkerMessage,
+        *,
+        hello_ack: bool = False,
     ) -> None:
         if self.transport is None:
             return
@@ -755,7 +783,10 @@ class Lifecycle:
         await self.transport.send(message)
 
     async def maybe_send_state_delta(
-        self, *, hello_ack: bool = False, force: bool = False,
+        self,
+        *,
+        hello_ack: bool = False,
+        force: bool = False,
     ) -> None:
         if self.transport is None or not self.transport.connected:
             return
@@ -772,7 +803,8 @@ class Lifecycle:
         if force or raw != self._last_delta:
             self._last_delta = raw
             await self._send_state_message(
-                pb.WorkerMessage(state_delta=delta), hello_ack=hello_ack,
+                pb.WorkerMessage(state_delta=delta),
+                hello_ack=hello_ack,
             )
         await self._send_lifecycle_snapshot(
             hello_ack=hello_ack,
@@ -809,9 +841,14 @@ class Lifecycle:
                 continue
             self._emitted_unavailable.add(name)
             await self._send_state_message(
-                pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
-                    function_name=name, reason=reason, detail=detail, axes=axes,
-                )),
+                pb.WorkerMessage(
+                    fn_unavailable=pb.FnUnavailable(
+                        function_name=name,
+                        reason=reason,
+                        detail=detail,
+                        axes=axes,
+                    )
+                ),
                 hello_ack=hello_ack,
             )
 
@@ -832,14 +869,16 @@ class Lifecycle:
                 continue
             self._emitted_degraded[name] = ran
             await self._send_state_message(
-                pb.WorkerMessage(fn_degraded=pb.FnDegraded(
-                    function_name=name,
-                    wanted=plan.wanted,
-                    ran=ran,
-                    reason=plan.warning,
-                    est_latency_multiplier=float(plan.est_latency_multiplier),
-                    recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
-                )),
+                pb.WorkerMessage(
+                    fn_degraded=pb.FnDegraded(
+                        function_name=name,
+                        wanted=plan.wanted,
+                        ran=ran,
+                        reason=plan.warning,
+                        est_latency_multiplier=float(plan.est_latency_multiplier),
+                        recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
+                    )
+                ),
                 hello_ack=hello_ack,
             )
 
@@ -861,8 +900,7 @@ class Lifecycle:
         # anywhere in setup is still covered — the task shares this event
         # loop, so it beats iff the loop is servicing tasks.
         if self._heartbeat_task is None:
-            self._heartbeat_task = asyncio.create_task(
-                self._heartbeat_loop(), name="heartbeat")
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
         # Disk truth first: after a restart the CAS dir is full while Residency
         # starts empty — rescan so Hello.models (and disk GC) see reality.
         self.executor.store.rescan_disk()
@@ -916,11 +954,14 @@ class Lifecycle:
                 # bootstrap fallback only.
                 dynamic.append(spec.name)
                 continue
-            missing = sorted({
-                wire_ref(b) for b in spec.models.values()
-                if b.source == "tensorhub"
-                and self.executor.store.local_path(wire_ref(b)) is None
-            })
+            missing = sorted(
+                {
+                    wire_ref(b)
+                    for b in spec.models.values()
+                    if b.source == "tensorhub"
+                    and self.executor.store.local_path(wire_ref(b)) is None
+                }
+            )
             if missing:
                 # Waits for DesiredResidency / RunJob snapshots (§7). This wait
                 # is unbounded and hub-driven: a release without resolved
@@ -937,13 +978,16 @@ class Lifecycle:
             logger.info(
                 "hub-resolved functions (dynamic slots / compile cells) set up "
                 "on delivery, not at boot (pgw#532, gw#584): %s",
-                ", ".join(sorted(dynamic)))
+                ", ".join(sorted(dynamic)),
+            )
         if awaiting_hub:
             logger.warning(
                 "functions waiting on hub-supplied snapshots (DesiredResidency, "
                 "contract §7) and NOT yet servable: %s — if these never arrive, "
                 "check that the release has resolved desired bindings for these refs",
-                "; ".join(f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())),
+                "; ".join(
+                    f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())
+                ),
             )
             # gw#591: the hub's desired-disk plan delivers those snapshots
             # seconds later, but nothing re-ran setup — the function sat in
@@ -951,8 +995,8 @@ class Lifecycle:
             # advertised functions (each side waiting on the other; found
             # live, ie#519). Finish boot setup the moment the refs land.
             self._boot_setup_watch = asyncio.create_task(
-                self._setup_awaiting_functions(awaiting_hub),
-                name="boot-setup-watch")
+                self._setup_awaiting_functions(awaiting_hub), name="boot-setup-watch"
+            )
 
         await self.set_phase(pb.WORKER_PHASE_READY)
 
@@ -968,17 +1012,14 @@ class Lifecycle:
             # open, plus the typed self-diagnosis on a stalled registry.
             activity_mod.on_beat()
 
-    async def _setup_awaiting_functions(
-        self, awaiting: Dict[str, List[str]]
-    ) -> None:
+    async def _setup_awaiting_functions(self, awaiting: Dict[str, List[str]]) -> None:
         """Complete boot setup for functions whose tensorhub snapshots arrive
         via hub delivery after the startup scan (gw#591), then push a
         StateDelta so ``available_functions`` advertises them."""
         pending = {fn: list(refs) for fn, refs in awaiting.items()}
         while pending and not self.draining:
             for fn in sorted(pending):
-                left = [r for r in pending[fn]
-                        if self.executor.store.local_path(r) is None]
+                left = [r for r in pending[fn] if self.executor.store.local_path(r) is None]
                 if left:
                     pending[fn] = left
                     continue
@@ -989,8 +1030,8 @@ class Lifecycle:
                 try:
                     await self.executor.ensure_setup(spec)
                     logger.info(
-                        "boot setup of %s completed after hub snapshot "
-                        "delivery (gw#591)", fn)
+                        "boot setup of %s completed after hub snapshot delivery (gw#591)", fn
+                    )
                 except Exception as exc:
                     logger.error("startup setup of %s failed: %s", fn, exc)
                 await self.maybe_send_state_delta()
@@ -1027,25 +1068,16 @@ class Lifecycle:
         self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
         self.intent_registry.set_drain(
             pb.DRAIN_LIFECYCLE_STATUS_DRAINING,
-            deadline_at_unix_ms=(
-                int(time.time() * 1000) + deadline_ms
-                if deadline_ms > 0 else 0
-            ),
+            deadline_at_unix_ms=(int(time.time() * 1000) + deadline_ms if deadline_ms > 0 else 0),
         )
 
     async def _finish_drain(self) -> None:
         deadline_at = self._drain_deadline_at
         loop = asyncio.get_running_loop()
         await self.maybe_send_state_delta()
-        drain_intent = self.intent_registry.intent_id(
-            pb.DESIRED_INTENT_KIND_DRAIN
-        )
+        drain_intent = self.intent_registry.intent_id(pb.DESIRED_INTENT_KIND_DRAIN)
         try:
-            wait_timeout = (
-                None
-                if deadline_at is None
-                else max(0.0, deadline_at - loop.time())
-            )
+            wait_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
             finished = await self.intent_registry.reported_await(
                 drain_intent,
                 self.executor.wait_idle(timeout=wait_timeout),
@@ -1055,9 +1087,7 @@ class Lifecycle:
                 reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
             )
             if not finished:
-                logger.warning(
-                    "drain deadline expired; aborting remaining jobs as RETRYABLE"
-                )
+                logger.warning("drain deadline expired; aborting remaining jobs as RETRYABLE")
                 await self.intent_registry.guard_await(
                     drain_intent,
                     self.executor.abort_all(safe_message="worker draining"),
@@ -1078,11 +1108,7 @@ class Lifecycle:
                     pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
                 )
                 await self.maybe_send_state_delta()
-                flush_timeout = (
-                    None
-                    if deadline_at is None
-                    else max(0.0, deadline_at - loop.time())
-                )
+                flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
                 await self.intent_registry.guard_await(
                     drain_intent,
                     self.transport.close_after_flush(timeout=flush_timeout),

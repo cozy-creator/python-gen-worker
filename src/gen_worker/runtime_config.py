@@ -63,9 +63,7 @@ class ConfigStore:
     """Current config + the snapshot-file writer. One per worker process."""
 
     def __init__(self, path: str = "") -> None:
-        self._path = (
-            path or os.environ.get(SNAPSHOT_PATH_ENV) or DEFAULT_SNAPSHOT_PATH
-        )
+        self._path = path or os.environ.get(SNAPSHOT_PATH_ENV) or DEFAULT_SNAPSHOT_PATH
         # Export the known path so every child process (subproc.run_process
         # or arbitrary Popen in endpoint code) inherits it.
         os.environ[SNAPSHOT_PATH_ENV] = self._path
@@ -112,7 +110,8 @@ class ConfigStore:
                 if gen < self._snap.config_generation:
                     logger.info(
                         "ignoring stale config generation %d (observed %d)",
-                        gen, self._snap.config_generation,
+                        gen,
+                        self._snap.config_generation,
                     )
                 return False
             next_snapshot = ConfigSnapshot(
@@ -122,10 +121,52 @@ class ConfigStore:
             )
             self._write_snapshot_locked(next_snapshot)
             self._snap = next_snapshot
-            logger.info(
-                "config generation %d observed; snapshot at %s", gen, self._path
-            )
+            logger.info("config generation %d observed; snapshot at %s", gen, self._path)
             return True
+
+    def apply_parameter_snapshot(
+        self,
+        raw: bytes,
+        generation: int,
+        *,
+        release_id: str,
+    ) -> bool:
+        """Atomically apply the hub's full declared-parameter snapshot."""
+        gen = int(generation)
+        release = str(release_id or "").strip()
+        try:
+            decoded = msgspec.msgpack.decode(raw)
+            if not isinstance(decoded, dict):
+                raise TypeError("parameter snapshot must be a map")
+            parameters: Dict[str, Dict[str, Any]] = {}
+            for function_name, values in decoded.items():
+                if not isinstance(function_name, str) or not isinstance(values, dict):
+                    raise TypeError("parameter snapshot entries must be maps")
+                parameters[function_name] = {str(name): value for name, value in values.items()}
+        except Exception as exc:
+            raise ConfigSnapshotWriteError("invalid config parameter snapshot") from exc
+
+        with self._lock:
+            current_release = self._snap.release_id
+            if current_release and release != current_release:
+                raise ConfigSnapshotWriteError("config parameter snapshot release_id mismatch")
+            if gen < self._snap.config_generation:
+                return False
+            next_snapshot = ConfigSnapshot(
+                config_generation=gen,
+                release_id=release,
+                parameters=parameters,
+            )
+            changed = next_snapshot != self._snap
+            if changed:
+                self._write_snapshot_locked(next_snapshot)
+                self._snap = next_snapshot
+            self._parameter_snapshot_generation = max(
+                self._parameter_snapshot_generation,
+                gen,
+            )
+            self._on_parameter_snapshot(gen)
+            return changed
 
     def stamp_function(
         self,
@@ -217,12 +258,8 @@ class ConfigStore:
                     pass
                 raise
         except Exception as exc:
-            logger.error(
-                "config snapshot write failed at %s", self._path, exc_info=True
-            )
-            raise ConfigSnapshotWriteError(
-                f"config snapshot write failed at {self._path}"
-            ) from exc
+            logger.error("config snapshot write failed at %s", self._path, exc_info=True)
+            raise ConfigSnapshotWriteError(f"config snapshot write failed at {self._path}") from exc
 
 
 def extract_config_push(ack: Any) -> Optional[Tuple[int, str]]:

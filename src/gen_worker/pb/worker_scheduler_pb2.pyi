@@ -534,7 +534,7 @@ class DesiredResidency(_message.Message):
     def __init__(self, generation: _Optional[int] = ..., disk_refs: _Optional[_Iterable[str]] = ..., hot: _Optional[_Iterable[_Union[DesiredInstance, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ...) -> None: ...
 
 class DesiredStateCommand(_message.Message):
-    __slots__ = ("worker_session_id", "command_seq", "goal_id", "release_id", "config_generation", "config_digest", "issued_at_unix_ms", "accept_by_unix_ms", "first_action_by_unix_ms", "intents", "mandatory")
+    __slots__ = ("worker_session_id", "command_seq", "goal_id", "release_id", "config_generation", "config_digest", "issued_at_unix_ms", "accept_by_unix_ms", "first_action_by_unix_ms", "intents", "mandatory", "changed_config_classes", "parameter_snapshot")
     WORKER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     COMMAND_SEQ_FIELD_NUMBER: _ClassVar[int]
     GOAL_ID_FIELD_NUMBER: _ClassVar[int]
@@ -546,6 +546,8 @@ class DesiredStateCommand(_message.Message):
     FIRST_ACTION_BY_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     INTENTS_FIELD_NUMBER: _ClassVar[int]
     MANDATORY_FIELD_NUMBER: _ClassVar[int]
+    CHANGED_CONFIG_CLASSES_FIELD_NUMBER: _ClassVar[int]
+    PARAMETER_SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
     worker_session_id: str
     command_seq: int
     goal_id: str
@@ -557,7 +559,9 @@ class DesiredStateCommand(_message.Message):
     first_action_by_unix_ms: int
     intents: _containers.RepeatedCompositeFieldContainer[DesiredIntent]
     mandatory: bool
-    def __init__(self, worker_session_id: _Optional[str] = ..., command_seq: _Optional[int] = ..., goal_id: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., config_digest: _Optional[bytes] = ..., issued_at_unix_ms: _Optional[int] = ..., accept_by_unix_ms: _Optional[int] = ..., first_action_by_unix_ms: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[DesiredIntent, _Mapping]]] = ..., mandatory: _Optional[bool] = ...) -> None: ...
+    changed_config_classes: ConfigClassMask
+    parameter_snapshot: bytes
+    def __init__(self, worker_session_id: _Optional[str] = ..., command_seq: _Optional[int] = ..., goal_id: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., config_digest: _Optional[bytes] = ..., issued_at_unix_ms: _Optional[int] = ..., accept_by_unix_ms: _Optional[int] = ..., first_action_by_unix_ms: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[DesiredIntent, _Mapping]]] = ..., mandatory: _Optional[bool] = ..., changed_config_classes: _Optional[_Union[ConfigClassMask, _Mapping]] = ..., parameter_snapshot: _Optional[bytes] = ...) -> None: ...
 
 class DesiredIntent(_message.Message):
     __slots__ = ("intent_id", "kind", "cause", "function_name", "ref", "snapshot_digest", "desired_tier", "binding_digest", "parent_intent_id", "waiting_requests", "priority", "mandatory")

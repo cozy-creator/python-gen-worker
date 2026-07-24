@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.56.0 (2026-07-24)
+
+- **th#1085 Slice 5: exact mutable-config convergence.** Protocol-v5 desired
+  state now carries a full MessagePack parameter snapshot and the config
+  classes changed at one target generation. The worker separately proves
+  receipt, atomic parameter persistence, binding convergence, and boot
+  generation; boot-only changes report `BOOT_STALE`, and exact function
+  capabilities remain non-ready until the release/config/binding tuple
+  converges. Boot generation now comes only from Tensorhub's pod-launch
+  `WORKER_CONFIG_GENERATION` stamp; the first desired-state receipt can no
+  longer falsely certify an older environment.
+
 ## 0.55.0 (2026-07-24)
 
 - **gw#496: make checkpoint metadata honest.** `save_checkpoint` and

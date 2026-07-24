@@ -257,6 +257,12 @@ message DesiredStateCommand {
   int64 first_action_by_unix_ms = 9;
   repeated DesiredIntent intents = 10;
   bool mandatory = 11;
+  // Classes changed since this worker's preceding target. Boot convergence
+  // always comes from the pod-launch generation stamp, including first target.
+  ConfigClassMask changed_config_classes = 12;
+  // Full function -> declared parameter -> value snapshot, encoded as
+  // msgpack. Receipt and durable application remain separate worker states.
+  bytes parameter_snapshot = 13;
 }
 
 message DesiredIntent {

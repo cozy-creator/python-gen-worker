@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import msgspec
 import pytest
@@ -207,3 +208,144 @@ def test_legacy_adoption_and_job_have_bounded_local_intents() -> None:
         assert not job_state.HasField("blocker_request")
 
     asyncio.run(run())
+
+
+def test_config_classes_converge_separately_and_boot_change_stays_stale() -> None:
+    registry = IntentRegistry("release-1", ["echo"], boot_config_generation=1)
+
+    def apply(
+        seq: int,
+        generation: int,
+        changed: pb.ConfigClassMask | None = None,
+    ) -> None:
+        command = pb.DesiredStateCommand(
+            worker_session_id=registry.worker_session_id,
+            command_seq=seq,
+            goal_id=f"goal-{seq}",
+            release_id="release-1",
+            config_generation=generation,
+            config_digest=f"digest-{generation}".encode(),
+            parameter_snapshot=msgspec.msgpack.encode({}),
+            first_action_by_unix_ms=9_000_000_000_000,
+            intents=[
+                pb.DesiredIntent(
+                    intent_id=f"config-{generation}",
+                    kind=pb.DESIRED_INTENT_KIND_CONFIG_APPLY,
+                    cause=pb.DESIRED_INTENT_CAUSE_CONFIG_CHANGE,
+                    mandatory=True,
+                )
+            ],
+            mandatory=True,
+        )
+        if changed is not None:
+            command.changed_config_classes.CopyFrom(changed)
+        receipt = registry.apply_command(command)
+        assert receipt.status == pb.GOAL_RECEIPT_STATUS_ACCEPTED
+
+    apply(1, 1)
+    registry.config_snapshot_applied(1)
+    registry.bindings_applied(1)
+    first = registry.snapshot().config_application
+    assert first.state == pb.CONFIG_APPLICATION_STATE_CONVERGED
+    assert (
+        first.received_generation,
+        first.parameter_snapshot_generation,
+        first.binding_ready_generation,
+        first.boot_generation,
+    ) == (1, 1, 1, 1)
+    runtime_config = SimpleNamespace(
+        generation=1,
+        parameter_snapshot_generation=1,
+    )
+    executor = SimpleNamespace(
+        runtime_config=runtime_config,
+        store=SimpleNamespace(residency_snapshot=lambda: []),
+        available_functions=lambda: ["echo"],
+        compile_targets=lambda: [],
+        unavailable={},
+    )
+    desired = pb.DesiredResidency(
+        hot=[pb.DesiredInstance(function_name="echo")],
+    )
+    registry.refresh_projection(executor, desired, {})
+    capability = registry.snapshot().capabilities[0]
+    assert capability.function_name == "echo"
+    assert capability.release_id == "release-1"
+    assert capability.config_generation == 1
+    assert capability.binding_digest
+    assert capability.state == pb.FUNCTION_CAPABILITY_STATE_READY
+
+    apply(2, 2, pb.ConfigClassMask(parameters=True))
+    applying = registry.snapshot().config_application
+    assert applying.state == pb.CONFIG_APPLICATION_STATE_APPLYING
+    assert applying.pending_classes.parameters
+    assert not applying.pending_classes.bindings
+    assert not applying.pending_classes.boot
+    registry.config_snapshot_applied(2)
+    assert registry.snapshot().config_application.state == pb.CONFIG_APPLICATION_STATE_CONVERGED
+
+    apply(3, 3, pb.ConfigClassMask(boot=True))
+    registry.config_snapshot_applied(3)
+    stale = registry.snapshot()
+    assert stale.config_application.state == pb.CONFIG_APPLICATION_STATE_BOOT_STALE
+    assert stale.config_application.boot_generation == 2
+    assert stale.config_application.pending_classes.boot
+    config_state = _state(registry, "config-3")
+    assert config_state.status == pb.LIFECYCLE_INTENT_STATUS_WAITING
+    assert config_state.stage == pb.LIFECYCLE_INTENT_STAGE_WAIT_REPLACEMENT
+    assert config_state.reason == pb.LIFECYCLE_WAIT_REASON_REPLACEMENT
+    assert config_state.deadline_at_unix_ms == 9_000_000_000_000
+    runtime_config.generation = 3
+    runtime_config.parameter_snapshot_generation = 3
+    registry.refresh_projection(executor, desired, {})
+    assert registry.snapshot().capabilities[0].state == pb.FUNCTION_CAPABILITY_STATE_BOOT_STALE
+
+
+def test_first_command_cannot_infer_an_unstamped_boot_generation() -> None:
+    registry = IntentRegistry("release-1", ["echo"])
+    receipt = registry.apply_command(
+        pb.DesiredStateCommand(
+            worker_session_id=registry.worker_session_id,
+            command_seq=1,
+            goal_id="goal-1",
+            release_id="release-1",
+            config_generation=4,
+            config_digest=b"digest-4",
+            parameter_snapshot=msgspec.msgpack.encode({}),
+            first_action_by_unix_ms=9_000_000_000_000,
+            intents=[
+                pb.DesiredIntent(
+                    intent_id="config-4",
+                    kind=pb.DESIRED_INTENT_KIND_CONFIG_APPLY,
+                    cause=pb.DESIRED_INTENT_CAUSE_COLD_BOOT,
+                    mandatory=True,
+                )
+            ],
+            mandatory=True,
+        )
+    )
+    assert receipt.status == pb.GOAL_RECEIPT_STATUS_ACCEPTED
+    registry.config_snapshot_applied(4)
+    registry.bindings_applied(4)
+    application = registry.snapshot().config_application
+    assert application.boot_generation == 0
+    assert application.state == pb.CONFIG_APPLICATION_STATE_BOOT_STALE
+
+
+def test_config_command_without_parameter_snapshot_is_rejected() -> None:
+    registry = IntentRegistry("release-1", ["echo"])
+    receipt = registry.apply_command(
+        pb.DesiredStateCommand(
+            worker_session_id=registry.worker_session_id,
+            command_seq=1,
+            goal_id="goal-1",
+            release_id="release-1",
+            config_generation=1,
+            config_digest=b"digest-1",
+            mandatory=True,
+        )
+    )
+    assert receipt.status == pb.GOAL_RECEIPT_STATUS_REJECTED
+    assert receipt.error_code == pb.LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD
+    assert "parameter_snapshot" in receipt.detail
+    assert registry.protocol_rejected

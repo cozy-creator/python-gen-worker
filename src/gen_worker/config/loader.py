@@ -38,6 +38,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "GEN_WORKER_CONFIG_SNAPSHOT_PATH": "config_snapshot_path",
+    "WORKER_CONFIG_GENERATION": "boot_config_generation",
     "WORKER_IMAGE_DIGEST": "worker_image_digest",
     "TENSORHUB_URL": "tensorhub_url",
     "TENSORHUB_TOKEN": "tensorhub_token",
