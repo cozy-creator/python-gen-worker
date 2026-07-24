@@ -81,7 +81,14 @@ def _wait_for(child_pid: int) -> int:
             return status
 
 
-def _emit(detail: str) -> None:
+def _emit(detail: str, *, dial: bool = True) -> None:
+    """Record a post-mortem. ``dial`` reaches the hub (bounded ~7s).
+
+    Only the deaths Python could not report itself are worth the dial: a
+    signal, or a previous container that vanished whole. An ordinary non-zero
+    exit already had 0.56.1's in-process `worker_fatal`, so re-dialing it would
+    only duplicate the row and add its budget to every failing boot's exit.
+    """
     logger.error("worker.postmortem\n%s", detail)
     sink = os.environ.get(_SINK_ENV, "").strip()
     if sink:
@@ -89,6 +96,8 @@ def _emit(detail: str) -> None:
             Path(sink).write_text(detail)
         except OSError:
             logger.warning("post-mortem sink write failed", exc_info=True)
+    if not dial:
+        return
     try:
         from .config import get_settings
         from .worker_fatal import report_worker_detail
@@ -153,7 +162,8 @@ def supervise(record_path: Path = postmortem.BOOT_RECORD_PATH) -> None:
                 oom_kill_delta=max(0, oom_after - oom_before),
                 lifetime_s=time.time() - started,
                 extra={"child_pid": child_pid},
-            )
+            ),
+            dial=bool(verdict.get("signaled")),
         )
         postmortem.clear_boot_record(record_path)
     sys.stdout.flush()

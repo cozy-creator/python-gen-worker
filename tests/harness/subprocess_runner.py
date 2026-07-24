@@ -53,6 +53,10 @@ def run_entrypoint(
         "ORCHESTRATOR_PUBLIC_ADDR": "192.0.2.1:1",
         "TENSORHUB_CACHE_DIR": str(tmp_path / "cache"),
         "ENDPOINT_LOCK_PATH": str(manifest_path),
+        # gw#640: the supervisor's boot record must not be shared between runs
+        # (its default is a fixed container-local path), or one boot reports
+        # the previous one's death and pays the report budget for it.
+        "GEN_WORKER_BOOT_RECORD": str(tmp_path / "boot-record.json"),
     }
     env.update(env_overrides or {})
 
