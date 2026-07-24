@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.54.0 (2026-07-24)
+
+- **th#1087 stages B+D: declared mutable config + worker reconcile.**
+  `@endpoint(config=[ConfigParam(name, type, default, choices/ge/le)])`
+  declares deployer-settable knobs; `@endpoint(env=[...])` declares the env
+  names the code reads (D2). Both emit into the discovery manifest
+  (`config_params` / `env`) so the hub 422s config writes outside the
+  declared surface. Handlers read effective values via `ctx.config`
+  (declared defaults <- worker config store <- RunJob-stamped values).
+  New `gen_worker.runtime_config`: on a config-generation push the worker
+  updates memory AND atomically rewrites a local snapshot file
+  (`GEN_WORKER_CONFIG_SNAPSHOT_PATH`, default
+  `/app/.tensorhub/runtime_config.json`); per-invoke subprocesses read it
+  via `read_snapshot()` (`run_process` forwards the path into explicit
+  child envs). Bindings keep riding the existing HelloAck desired-residency
+  reconcile (gw#614/623, pod-churn-free); env-class changes stay boot-only —
+  the worker echoes its boot generation and the hub drain-rolls. The wire
+  adapter (HelloAck `config_generation`/`config_params_json`, StateDelta
+  `observed_config_generation`/`boot_config_generation`) is descriptor-
+  gated: it activates when the A+C lane's proto lands, no worker change
+  needed.
+
 ## 0.52.0 (2026-07-24)
 
 - **pgw#628: residency reporting v2 — content-addressed idempotent

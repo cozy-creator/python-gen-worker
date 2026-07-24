@@ -174,6 +174,7 @@ class RequestContext:
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
         self._lane = ""  # th#1050: executing lane, set by the executor
+        self._config: Dict[str, Any] = {}  # th#1087: effective config params
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
@@ -228,6 +229,17 @@ class RequestContext:
 
     def _set_lane(self, lane: str) -> None:
         self._lane = str(lane or "").strip()
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        """Effective values for this endpoint's declared config parameters
+        (th#1087, ``@endpoint(config=[ConfigParam(...)])``) at dispatch time:
+        declared defaults overlaid with the deployer-set values at the
+        worker's observed config generation. Read-only; a returned copy."""
+        return dict(self._config)
+
+    def _set_config(self, values: Optional[Mapping[str, Any]]) -> None:
+        self._config = dict(values or {})
 
     @property
     def models(self) -> Dict[str, str]:

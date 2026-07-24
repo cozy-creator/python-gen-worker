@@ -80,6 +80,7 @@ from .models.lanes import LaneUnavailableError
 from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
+from .runtime_config import ConfigStore, extract_job_config
 
 if typing.TYPE_CHECKING:
     from . import fleet_cells
@@ -2023,6 +2024,10 @@ class Executor:
         # (Executor is constructed before Lifecycle exists).
         self._on_state_change: Callable[[], None] = lambda: None
         self.file_base_url: str = ""
+        # th#1087: worker-local mutable config (declared-parameter values +
+        # snapshot file for subprocesses). Worker wiring replaces it with the
+        # settings-pathed store; the default keeps embedded/CLI runs working.
+        self.runtime_config = ConfigStore()
         # Current worker JWT for hub HTTP calls (capability renewal). Worker
         # wiring points this at the transport's rotated credential.
         self.worker_jwt_provider: Callable[[], str] = (
@@ -3348,6 +3353,26 @@ class Executor:
              if wire_ref(spec.models[s]) != wire_ref(b)})
         return derived
 
+    def _effective_config(
+        self, spec: EndpointSpec, run: Optional["pb.RunJob"] = None,
+    ) -> Dict[str, Any]:
+        """th#1087 effective declared-parameter values for one dispatch:
+        declared defaults <- worker's current config store <- RunJob-stamped
+        values (read-at-dispatch class; a stamped job keeps its values even
+        if a gen bump lands mid-flight)."""
+        if not spec.config:
+            return {}
+        values = {p.name: p.default for p in spec.config}
+        declared = set(values)
+        for name, v in self.runtime_config.parameters_for(spec.name).items():
+            if name in declared:
+                values[name] = v
+        if run is not None:
+            for name, v in (extract_job_config(run) or {}).items():
+                if name in declared:
+                    values[name] = v
+        return values
+
     def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
         """th#1050: the instructed lane's body when the endpoint DECLARES it
         (handles=) — the author's code, not binding surgery, serves it."""
@@ -3882,6 +3907,7 @@ class Executor:
                     boot_warmup=True,
                 )
                 ctx._set_lane(self._served_lane(wj.spec))
+                ctx._set_config(self._effective_config(wj.spec))
                 try:
                     await self._invoke_warmup(wj.spec, instance, ctx, payload, handler_kwargs)
                 except Exception as exc:
@@ -6801,6 +6827,8 @@ class Executor:
             # handler (declared-lane endpoints branch on it).
             job.lane = self._served_lane(spec, instructed=run.lane)
             ctx._set_lane(job.lane)
+            # th#1087: effective declared-config values for this dispatch.
+            ctx._set_config(self._effective_config(spec, run))
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
             ctx.raise_if_cancelled("canceled")

@@ -45,12 +45,22 @@ def run_process(
     - Returns the process exit code on natural exit (callers decide whether
       nonzero is fatal).
     """
+    # th#1087: an explicit env mapping still carries the config-snapshot
+    # path so the child can read the worker's current runtime config
+    # (env=None inherits it from os.environ, exported by ConfigStore).
+    child_env = dict(env) if env is not None else None
+    if child_env is not None:
+        from .runtime_config import SNAPSHOT_PATH_ENV
+
+        child_env.setdefault(
+            SNAPSHOT_PATH_ENV, os.environ.get(SNAPSHOT_PATH_ENV, "")
+        )
     proc = subprocess.Popen(
         list(cmd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         cwd=str(Path(cwd)) if cwd is not None else None,
-        env=dict(env) if env is not None else None,
+        env=child_env,
         text=True,
         bufsize=1,
         start_new_session=True,  # own process group → group-wide signals

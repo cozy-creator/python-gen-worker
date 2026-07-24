@@ -1,7 +1,7 @@
 """Public SDK surface: the @endpoint decorator, bindings, types, and errors."""
 
 from .binding import Binding, Civitai, HF, Hub, ModelRef, ModelScope
-from .decorators import Resources, endpoint
+from .decorators import ConfigParam, Resources, endpoint
 from .model import Model, ModelChoice, ModelDefaults
 from .slot import ResolvedSlot, Slot, resolve_slot
 from .errors import (

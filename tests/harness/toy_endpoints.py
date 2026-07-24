@@ -16,7 +16,7 @@ from typing import AsyncIterator
 
 import msgspec
 
-from gen_worker import Hub, RequestContext, Slot, ValidationError, endpoint
+from gen_worker import ConfigParam, Hub, RequestContext, Slot, ValidationError, endpoint
 from gen_worker.api.streaming import StreamResult, TokenUsage
 from gen_worker.families.base import FamilyDefaults, family
 
@@ -285,6 +285,20 @@ class ComposedEndpoint:
 # ---------------------------------------------------------------------------
 # th#1050: opt-in declared lane — the endpoint's code BRANCHES on ctx.lane.
 # ---------------------------------------------------------------------------
+
+
+# th#1087: declared config parameters + envs; the handler reads ctx.config.
+@endpoint(
+    config=[
+        ConfigParam("scheduler", str, default="ddim", choices=["ddim", "euler_a"]),
+        ConfigParam("default_steps", int, default=30, ge=1, le=150),
+    ],
+    env=["TOY_API_BASE"],
+)
+class ConfigKnobsEndpoint:
+    def config_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        cfg = ctx.config
+        return EchoOut(response=f"{cfg['scheduler']}:{cfg['default_steps']}")
 
 
 @endpoint(handles=["fp8-w8a8-dynamic"])
