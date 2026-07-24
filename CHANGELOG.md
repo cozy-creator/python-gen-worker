@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.52.2 (2026-07-24)
+
+- **gw#627 live fix 2: normalization rejects legacy attn-processor
+  converter output.** diffusers' non-diffusers converter turns kohya-flat
+  sdxl attention keys into legacy `…attn1.processor.to_q_lora.down.weight`
+  names that match no real module, failing the whole curated adapter typed.
+  `normalize_adapter_state_dict` now falls back to the raw keys (which
+  resolve directly against module paths) whenever the converted dict
+  carries `.processor.` names.
+
 ## 0.52.1 (2026-07-24)
 
 - **gw#627 live fix: `enable_compiled` skips the branch lane on slot
