@@ -703,6 +703,17 @@ def normalize_adapter_state_dict(
             return sd
         converted, raw_alphas = converted
         alphas = dict(raw_alphas or {})
+    if any(".processor." in k for k in converted):
+        # gw#627 live find: diffusers' non-diffusers converter emits LEGACY
+        # attn-processor names for kohya sdxl attention keys
+        # (…attn1.processor.to_q_lora.down.weight) — they match no real
+        # module, so the whole adapter would fail typed. The raw kohya-flat
+        # keys resolve directly against module paths in map_adapter.
+        logger.info(
+            "lora_state_dict normalization for %s emitted legacy "
+            "attn-processor names; using raw keys", ref,
+        )
+        return sd
     out = dict(converted)
     for k, v in alphas.items():
         key = k if k.endswith(".alpha") else f"{k}.alpha"

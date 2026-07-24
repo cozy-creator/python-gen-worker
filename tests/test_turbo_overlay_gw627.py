@@ -86,9 +86,10 @@ class _PeftRecorder:
 
 
 class _Pipe:
-    """Minimal pipeline holding the real unet (the branch machinery and the
-    normalize/split path key off ``pipe.unet`` and the class, nothing
-    else)."""
+    """Minimal pipeline holding the real unet — plus the REAL diffusers SDXL
+    ``lora_state_dict`` converter, so normalization runs the exact live path
+    (which emits legacy attn-processor names for kohya-flat sdxl adapters —
+    the gw#627 second live find; normalize must fall back to raw keys)."""
 
     def __init__(self, unet: Any) -> None:
         self.unet = unet
@@ -96,6 +97,15 @@ class _Pipe:
         self.set_adapters = _PeftRecorder()
         self.unload_lora_weights = _PeftRecorder()
         self.disable_lora = _PeftRecorder()
+
+
+def _install_real_converter() -> None:
+    from diffusers import StableDiffusionXLPipeline
+
+    _Pipe.lora_state_dict = StableDiffusionXLPipeline.lora_state_dict
+
+
+_install_real_converter()
 
 
 # Live key grammar: kohya-flat diffusers naming, exactly what
