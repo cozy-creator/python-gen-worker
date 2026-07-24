@@ -639,6 +639,28 @@ class ModelStore:
         # otherwise resolve from env (production/tensorhub; unset -> None,
         # the cozy-local/no-volume degenerate case).
         self._fill_source_dir = fill_source_dir or tensorhub_fill_source_dir()
+        # th#1063 visibility guard: a datacenter pod without a warm fill
+        # source silently pulls everything from R2 with write-through off —
+        # that state must be visible in the boot log, never inferred.
+        if self._fill_source_dir is None and os.environ.get("RUNPOD_POD_ID") and (
+            os.environ.get("RUNPOD_PROVIDER", "") != "local"
+        ):
+            configured = os.environ.get("TENSORHUB_FILL_SOURCE_DIR", "").strip()
+            if configured:
+                logger.warning(
+                    "fill_source_disabled reason=not_a_mount configured=%s: "
+                    "TENSORHUB_FILL_SOURCE_DIR is set but not a mounted volume; "
+                    "all fills go to R2, write-through disabled (th#1063)",
+                    configured,
+                )
+            else:
+                logger.warning(
+                    "fill_source_disabled reason=unset: datacenter pod booted with no "
+                    "TENSORHUB_FILL_SOURCE_DIR (no endpoint volume attached); "
+                    "all fills go to R2, write-through disabled (th#1063)"
+                )
+        elif self._fill_source_dir is not None:
+            logger.info("fill_source_enabled dir=%s (volume-warm CAS fill tier)", self._fill_source_dir)
         self.residency = Residency(
             on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
         )
