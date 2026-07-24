@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 _SIGNAL_DRAIN_DEADLINE_MS = 30_000
 
 
+class UnexpectedWorkerExit(RuntimeError):
+    """The run loop ended without a hub Drain or a shutdown signal (gw#640)."""
+
+
 class _LoopStallWatchdog:
     """Forensics for gw#407: a host in RAM reclaim-thrash stalls the whole
     process — the event loop AND the gRPC C threads that answer h2 keepalive
@@ -138,12 +142,25 @@ class Worker:
         await self.transport.send(msg)
 
     def run(self) -> int:
-        return asyncio.run(self.arun())
+        """Always returns an exit code. gw#640: a fatal end to the run loop is
+        reported to the HUB here (sync context, own loop) before returning —
+        pod stdout is unreadable on RunPod, so this is the only channel that
+        survives the process."""
+        try:
+            return asyncio.run(self.arun())
+        except (FatalTransportError, UnexpectedWorkerExit) as exc:
+            from .worker_fatal import report_worker_fatal
+
+            logger.error("worker exiting on a fatal: %s", exc, exc_info=True)
+            report_worker_fatal(self.settings, "run_loop", exc, exit_code=1)
+            return 1
 
     _loop: Optional[asyncio.AbstractEventLoop] = None
+    _stop_requested: bool = False
 
     def stop(self) -> None:
         """Thread-safe stop (tests / embedding); production exits via Drain."""
+        self._stop_requested = True
         loop = self._loop
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(self.transport.stop)
@@ -165,8 +182,10 @@ class Worker:
         try:
             await transport_task
         except FatalTransportError as exc:
+            # gw#640: surfaced to the entrypoint so the cause reaches the hub
+            # instead of only this pod's stdout.
             logger.error("worker exiting: %s", exc)
-            return 1
+            raise
         finally:
             watchdog.stop()
             startup.cancel()
@@ -174,4 +193,13 @@ class Worker:
         if self.lifecycle.drained.is_set():
             logger.info("worker drained; exiting 0")
             return 0
-        return 0
+        if self._stop_requested:
+            return 0
+        # gw#640: the reconnect loop is supposed to run until a hub Drain or a
+        # signal. Falling out of it any other way ended the process with a
+        # clean exit 0 and NOTHING on the wire — the hub saw only a stream
+        # close and a young-worker death. An unexplained exit is a fatal.
+        raise UnexpectedWorkerExit(
+            "transport loop ended without a Drain command or shutdown signal "
+            f"(connected={self.transport.connected} draining={self.lifecycle.draining})"
+        )
