@@ -66,7 +66,7 @@ class SD15HubImage:
             generator=generator,
         ).images[0]
 
-        asset = gw_io.write_image(ctx, "image", image, format="png")
+        asset = gw_io.write_image(ctx, "image", image)
         return SD15Output(image=asset, width=image.width, height=image.height, seed=p.seed)
 
 

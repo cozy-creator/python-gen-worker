@@ -1,5 +1,133 @@
 # Changelog
 
+## 0.58.0 (2026-07-24)
+
+- **pgw#648: VRAM is accounted PER DEVICE-GROUP, never summed across cards.**
+  `models/residency.py::_default_free_vram_bytes` used to sum free VRAM over
+  every CUDA device, so a 3x24GB pod reported 72GB free and would admit a 30GB
+  model that fits on no single card. `DeviceGroup(devices=(...))` now owns the
+  probe and one `Residency` accounts for exactly one group's pool. A group that
+  SPANS devices (a future tensor-parallel mesh) sums its own members only —
+  that is one placement unit by definition. No endpoint-visible change.
+- **pgw#641 Stage 2: admission LEASES replace the whole-job pin.**
+  `Residency.admit(sizes) -> Lease` is taken before a job starts and held for
+  its whole lifetime. From admission on, no eviction/demotion/`release_to_disk`
+  path may victim a leased ref — INCLUDING refs whose entries do not exist yet,
+  which is the structural gap the old `executing()` pin no-op'd on (a freshly
+  created entry was demotable between its `track_vram` and the execution-time
+  pin, gw#409). Bytes for not-yet-loaded refs are RESERVED, so two concurrent
+  admissions can no longer book the same free VRAM and OOM each other mid-load;
+  two leases on one ref claim the MAX, not the sum (one future load serves
+  both), and a claim is consumed the moment `track_vram` books real bytes.
+  `make_room(for_refs=)` excludes the caller's own reservation — it IS the
+  demand being satisfied. `Residency.fits(sizes)` is a new read-only "could
+  this worker serve this now?" query. Admission never refuses here: the
+  adaptive-fit ladder still owns genuine overcommit.
+- **pgw#647: handlers on one live instance are SINGLE-FLIGHT by default.**
+  One live instance == one binding set == one materialized graph with MUTABLE
+  buffers (the resident LoRA branch, adapter enable state), so two concurrent
+  requests on it corrupt each other. One-job-per-GPU masked this;
+  `BoundedSemaphore(gpu_count)` on a multi-GPU pod does not. A per-instance run
+  gate now serializes adapter attach + handler + detach; jobs on DIFFERENT
+  instances (different checkpoint picks) still run concurrently, so this costs
+  nothing under multi-residency. **New endpoint surface:**
+  `@endpoint(reentrant=True)` is the explicit opt-out for classes whose
+  handlers mutate no instance state; it is CLASS-ONLY (a loose function holds
+  no instance state to serialize) and raises if declared on a function.
+  Endpoints that hand-rolled their own handler lock can delete it.
+- **pgw#652: admission reserves ACTIVATION VRAM, learned from measured peaks.**
+  Weights are not the whole cost of admitting a request — a concurrent 1024^2
+  diffusion request also holds GBs of latents and attention workspace, so
+  interleaving would OOM the moment it started working. Leases now carry an
+  activation claim that SUMS across concurrent leases (each request allocates
+  its own) where weight claims MAX per ref. It is LEARNED, never declared: the
+  executor already measured `peak_vram_bytes` and threw the useful part away,
+  so `record_activation` now takes peak minus what was already allocated when
+  the handler took the GPU and keeps a decaying high-water — up instantly in
+  full (under-reserving is what OOMs), bleeding 12.5% per subsequent request so
+  one 4096^2 outlier does not permanently tax residency depth. Keyed by
+  FUNCTION, not by checkpoint pick, so a never-seen checkpoint inherits a real
+  measurement instead of reserving nothing on its first request. An unmeasured
+  function claims 0, so this is inert on CPU workers and at first boot. No
+  endpoint-visible change and no knob — residency depth vs concurrency headroom
+  is one runtime decision.
+- **th#1129: WebP is THE image-encoding default, on one shared encode core.**
+  Paul's ruling: "the default image-encoding should be webp, always, with png
+  or jpg as optional alternatives." Both encode surfaces had independently
+  reimplemented the encode — and had already drifted to different default
+  qualities (`io.write_image` q90 vs `ctx.save_image` q95). They now route
+  through one core, `io.encode_image(image, *, format, quality, lossless,
+  method, **encode_kwargs) -> (bytes, extension)`, so the defaults cannot
+  drift apart again: `webp` / q95 everywhere (`DEFAULT_IMAGE_FORMAT`,
+  `DEFAULT_IMAGE_QUALITY`).
+  Two real gaps closed on the `write_image` side: `format="jpg"` used to
+  reach PIL as `"JPG"` and raise (PIL's name is `JPEG`), and a transparent
+  image encoded to JPEG raised instead of converting — both paths now
+  normalize `jpg`/`jpeg` and convert `RGBA`/`LA`/`P` to `RGB` first. An
+  unrecognized format raises `ValidationError` naming the supported set
+  instead of surfacing a PIL traceback (`ctx.save_image` previously raised a
+  bare `ValueError`). `write_image` also appends the format's extension when
+  the given ref has none — a webp payload stored as `image` defeats
+  downstream mime inference.
+  `ctx.save_image` gained `**encode_kwargs` passthrough (e.g. `method=6`).
+  Prefer `ctx.save_image`: it is what the whole endpoint fleet calls and it
+  returns a typed `ImageAsset`. `io.write_image` survives only for its
+  terminal decode->finalize handoff (th#1107), which `ctx.save_image`
+  deliberately does not perform — endpoints call that one mid-pipeline and in
+  N-image loops, where a terminal GPU-slot release would be wrong.
+
+- **pgw#636: hot-GPU mandate — pack VRAM with checkpoints.**
+  `Resources.vram_gb` is now purely a placement minimum, never a per-load
+  reservation: `_make_room_for` estimates a never-seen pick from its wire
+  snapshot's real byte total (prior measured `vram_hint` still wins) and
+  falls back to the declaration only when NO byte facts exist. A 24 GB card
+  therefore packs several ~5 GB checkpoint picks hot instead of evicting the
+  resident pipeline on every hop. New `Slot(share_components=(...))` opts a
+  pipeline slot into CROSS-PICK content-keyed component sharing (gw#479
+  machinery generalized): declared components become independent residency
+  entries — equal bytes alias across picks, unequal bytes stay exclusive —
+  and the per-pick denoiser lane LRU-swaps on its own. Residency shared
+  entries move from refcount-holds to `holders` semantics: referenced
+  components are demotable while idle (owners re-promote before executing —
+  jobs pin + promote their record's shared entries), never evictable while
+  referenced, and 2+-holder shared entries sort LAST in LRU victim order;
+  record vacate no longer drains unreferenced shared entries eagerly.
+- **pgw#638 serve-while-downloading: attempted, REVERTED, no behavior change
+  in this release.** Letting hub-staged DISK materializations run concurrently
+  with tenant jobs (dropping their tenant-idle gate and the run_job
+  cancellation) is the obvious fix for the measured starvation — staged 4.7 GB
+  downloads sat at 0%% for 4+ minutes on busy workers while the same blobs
+  landed in 5-15s on idle ones — and it is WRONG. The reconcile pass's first
+  act for a ref is to fence a stale resident identity, and a tenant job may
+  legitimately be re-materializing OLDER bytes for that ref at the same time;
+  unserialized, the fence loses the race and the worker keeps reporting the
+  stale identity until the next HelloAck (the th#1066 hub/worker drift class).
+  Measured non-convergence over 10s, caught by
+  `test_mutable_tag_move_fences_events_by_digest_and_generation`. Re-verifying
+  after the job does not fix it either, because `handle_run_job` returns before
+  the job's load completes. The correct fix is to make transfers first-class
+  tasks with their own lifecycle instead of steps inside a serialized
+  reconcile pass (pgw#641 Stage 4).
+- **pgw#637: dynamo's in-memory code cache is a legitimate serving
+  surface.** Cell keys are checkpoint-free, so the 2nd checkpoint of an
+  already-proven family serves its warmup from dynamo's in-memory compiled
+  code with zero FX/AOT counter movement — the finalize proof now credits
+  that signature (calls>0, hits=0, misses=0) when the exact cell was already
+  proven in this process AND dynamo confirms live compiled code for that
+  object's compile targets, instead of deterministically bricking the
+  compiled lane (`compile_cell_failed`) on every multi-checkpoint session.
+  Both conditions are load-bearing: the registry alone would let a sibling
+  object's cache hit certify this object's silence (gw#603/gw#611 forbid
+  exactly that), the dynamo probe alone would credit a cell never proven
+  anywhere. The disproof cleanup no longer fires the global
+  `torch._dynamo.reset()` while a healthy sibling pipeline is still armed.
+- **pgw#639: SIGUSR2 dumps every thread's stack.** The worker's asyncio loop
+  owns the heartbeat while model work runs on threads, so a wedged worker
+  looks perfectly healthy from the hub. `kill -USR2 <pid>` now prints all
+  thread stacks to stderr (`faulthandler`, allocation-free, always armed) —
+  the pod-side forensic surface that was missing during the 2026-07-24
+  incident. Getting a shell into the pod to send it is still open.
+
 ## 0.56.3 (2026-07-24)
 
 - **gw#640: a message-handler exception is no longer indistinguishable from a

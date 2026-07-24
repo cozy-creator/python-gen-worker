@@ -56,6 +56,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -79,6 +80,97 @@ _JUNK_SUFFIXES = (".lock", ".tmp", ".pid")
 # seed_artifact -> capture_env composable without another configuration layer.
 _SEED_ARM_LOCK = threading.RLock()
 _LOCK_TYPE = type(threading.Lock())
+
+# ---------------------------------------------------------------------------
+# pgw#637: dynamo's in-memory code cache is a THIRD serving surface.
+#
+# Cell keys carry no checkpoint digest, so arming a SECOND checkpoint of an
+# already-proven family creates a new pipeline whose target forward shares
+# the class ``__code__`` dynamo already compiled — on torch 2.13 (inlined
+# nn-modules) the cached entry's guards match the new instance and the
+# warmup call runs COMPILED with zero FX/AOT counter movement
+# (calls>0, hits=0, misses=0). That signature against a cell this process
+# already proved is service, not silence: disproving it bricked the
+# compiled lane fleet-wide on every multi-checkpoint session (2026-07-24
+# incident, 6/6 workers). The registry below records every cell proven in
+# this process (a real FX/AOT hit, or a finalized self-mint); crediting the
+# in-memory surface additionally requires DIRECT evidence from dynamo that
+# compiled code for this object's targets is live
+# (:func:`has_inmemory_compiled_code`) — the registry alone would let one
+# object's hit certify another's silence, which gw#603/gw#611 forbid.
+_PROVEN_CELLS_LOCK = threading.Lock()
+_PROVEN_CELLS: set[str] = set()
+# Live armed pipelines (weakly held): the disproof path must never
+# ``torch._dynamo.reset()`` globally while a HEALTHY sibling's compiled
+# code is live — the global reset killed the first checkpoint's proven
+# lane whenever a second checkpoint's proof failed.
+_ARMED_PIPELINES: Optional["weakref.WeakSet[Any]"] = None
+
+
+def record_cell_proven(ref: str) -> None:
+    """Mark one cell identity as served-and-proven in this process."""
+    ref = str(ref or "").strip()
+    if not ref:
+        return
+    with _PROVEN_CELLS_LOCK:
+        _PROVEN_CELLS.add(ref)
+
+
+def cell_proven_in_process(ref: str) -> bool:
+    with _PROVEN_CELLS_LOCK:
+        return str(ref or "").strip() in _PROVEN_CELLS
+
+
+def _armed_pipelines() -> "weakref.WeakSet[Any]":
+    global _ARMED_PIPELINES
+    if _ARMED_PIPELINES is None:
+        _ARMED_PIPELINES = weakref.WeakSet()
+    return _ARMED_PIPELINES
+
+
+def has_inmemory_compiled_code(pipeline: Any) -> bool:
+    """True when dynamo holds live compiled code for this pipeline's compile
+    targets (pgw#637).
+
+    This is the DIRECT evidence that separates "the warmup ran compiled off
+    dynamo's in-memory code cache" from "the wrapper ran eager and nothing
+    was ever compiled". Dynamo keys its code cache on the target's
+    ``__code__`` object, which every instance of the pipeline class shares —
+    exactly why a 2nd checkpoint of an already-minted family serves compiled
+    with zero FX/AOT counter movement. Regional compiles (ie#381) live on
+    per-block forwards rather than the wrapped target, so those fall back to
+    dynamo's total live-entry count.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if not marker:
+        return False
+    try:
+        from torch._dynamo import eval_frame
+    except Exception:
+        return False
+    def _has_entries(fn: Any) -> bool:
+        code = getattr(getattr(fn, "__func__", fn), "__code__", None)
+        if code is None:
+            return False
+        try:
+            return bool(eval_frame._debug_get_cache_entry_list(code))
+        except Exception:
+            return False
+
+    for _owner, _attr, fn in marker.get("originals") or ():
+        if _has_entries(fn):
+            return True
+    for mod in marker.get("regional_mods") or ():
+        # ie#381 regional compile puts the graphs on the repeated BLOCK
+        # forwards, not on the wrapped target — probe the block classes.
+        try:
+            children = list(mod.modules())
+        except Exception:
+            continue
+        for child in children:
+            if _has_entries(getattr(type(child), "forward", None)):
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1795,6 +1887,11 @@ def apply(
         "regional_mods": regional_mods,
         "failure_signal": failure_signal,
     })
+    try:
+        _armed_pipelines().add(pipeline)
+    except TypeError:
+        logger.debug("compile-cache: pipeline not weakref-able; sibling-aware "
+                     "dynamo reset scoping unavailable for it (pgw#637)")
     logger.info(
         "compile-cache: torch.compile armed for %s (cache=%s regional=%s)",
         applied, cache_ready, regional)
@@ -1867,6 +1964,25 @@ def unwrap(pipeline: Any) -> bool:
         delattr(pipeline, _MARKER_ATTR)
     except AttributeError:
         setattr(pipeline, _MARKER_ATTR, None)
+    try:
+        _armed_pipelines().discard(pipeline)
+    except TypeError:
+        pass
+    # pgw#637: torch._dynamo.reset() is PROCESS-GLOBAL — it drops every
+    # armed pipeline's in-memory compiled code, not just this one's. With a
+    # healthy sibling still armed (multi-checkpoint packing), a failing 2nd
+    # arm's cleanup must never kill the 1st checkpoint's proven lane; the
+    # global reset only runs when this was the last armed pipeline.
+    siblings = 0
+    try:
+        siblings = len(_armed_pipelines())
+    except Exception:
+        siblings = 0
+    if siblings > 0:
+        logger.info(
+            "compile-cache: skipping global dynamo reset on unwrap "
+            "(%d sibling armed pipeline(s) live, pgw#637)", siblings)
+        return True
     try:
         import torch._dynamo
 

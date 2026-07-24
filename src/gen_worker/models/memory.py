@@ -6,8 +6,11 @@ total capacity), plus size/measurement probes used by residency accounting.
 Ladder (auto mode, least-aggressive first):
 
   off           : no optimizations (pipeline on CUDA as-is)
-  vae_only      : VAE slicing + tiling (+ attention slicing when available)
-  model_offload : vae_only + ``enable_model_cpu_offload()``  (~10% slower)
+  vae_only      : VAE slicing only (th#1107: the pipeline FITS here — tiling
+                  and attention slicing are VRAM tools and are reserved for
+                  the rungs below, where the model genuinely does not fit)
+  model_offload : VAE slicing + tiling + attention slicing +
+                  ``enable_model_cpu_offload()``                (~10% slower)
   group_offload : leaf-level group offload with CUDA streams   (~25% slower)
   sequential    : ``enable_sequential_cpu_offload()``          (~50%+ slower)
 
@@ -21,7 +24,7 @@ import gc
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Dict, Iterable, List, Optional, TypeVar
 
 import msgspec
 
@@ -669,13 +672,28 @@ def _move_pipeline_to_cpu(pipeline: Any) -> None:
         _LOG.debug("low_vram: move-to-cpu failed: %s", exc)
 
 
-def _apply_vae_and_attention(pipeline: Any, applied: Dict[str, bool]) -> None:
+def _apply_vae_and_attention(
+    pipeline: Any, applied: Dict[str, bool], *, memory_bound: bool = True
+) -> None:
+    """VAE/attention memory savers.
+
+    th#1107: tiling and attention slicing are VRAM tools that cost real
+    latency (tiled decode re-runs the VAE per tile and blends 25% overlaps;
+    attention slicing replaces the fused SDPA/flash path with a chunked
+    loop). ``vae_only`` is selected when the pipeline FITS and only headroom
+    is tight, so applying them there taxes every request on a card that never
+    needed them. ``memory_bound=False`` (the vae_only rung) keeps only VAE
+    slicing, which is a no-op at batch 1.
+    """
     if not _call_if_present(pipeline, "enable_vae_slicing"):
         vae = getattr(pipeline, "vae", None)
         if vae is not None and _call_if_present(vae, "enable_slicing"):
             applied["vae_slicing"] = True
     else:
         applied["vae_slicing"] = True
+
+    if not memory_bound:
+        return
 
     if not _call_if_present(pipeline, "enable_vae_tiling"):
         vae = getattr(pipeline, "vae", None)
@@ -884,6 +902,20 @@ def place_pipeline(
     effective = select_auto_mode(pipeline=pipeline) if mode == "auto" else mode
     if mode == "auto":
         effective = _gguf_resident_override(pipeline, effective, log)
+    # th#1107: strict_vram was only enforced on the reactive OOM-demotion path
+    # below, so an auto SELECTION straight into an offload rung walked past the
+    # author's opt-out with no OOM and no error — the th#1043 shape
+    # ("shared-component lanes require resident placement") reached serving as
+    # a silent 5-10x tax. Refuse here too, with the same typed message.
+    if strict_vram and effective in _CPU_OFFLOAD_MODES:
+        raise RuntimeError(
+            f"placement selected {effective!r} for "
+            f"{ref or type(pipeline).__name__!r} "
+            f"({estimate_pipeline_size_gb(pipeline):.1f} GB, "
+            f"{get_available_vram_gb():.1f} GB free): this binding requires "
+            "full VRAM residency (strict_vram=True); run on a card with more "
+            "free VRAM"
+        )
     requested = effective
     demotions = 0
     while True:
@@ -989,7 +1021,9 @@ def apply_low_vram_config(
         setattr(pipeline, _COZY_MODE_ATTR, "off")
         return applied
 
-    _apply_vae_and_attention(pipeline, applied)
+    _apply_vae_and_attention(
+        pipeline, applied, memory_bound=effective_mode != "vae_only"
+    )
 
     if effective_mode == "vae_only":
         setattr(pipeline, _COZY_MODE_ATTR, "vae_only")
@@ -1114,50 +1148,6 @@ def _escalate_pipeline_mode(
     return True
 
 
-def with_oom_retry(
-    fn: Callable[..., T],
-    *args: Any,
-    pipelines: Optional[List[Any]] = None,
-    max_retries: int = 2,
-    escalation: tuple[str, ...] = _DEFAULT_ESCALATION,
-    logger: Optional[logging.Logger] = None,
-    **kwargs: Any,
-) -> T:
-    """Call ``fn``; on ``torch.cuda.OutOfMemoryError`` flush, escalate offload
-    one ladder step on each pipeline, retry (up to ``max_retries`` extra)."""
-    log = logger or _LOG
-    try:
-        import torch
-
-        OOMType = torch.cuda.OutOfMemoryError
-    except Exception:
-        return fn(*args, **kwargs)
-
-    last_exc: Optional[BaseException] = None
-    attempts = max_retries + 1
-    for attempt in range(attempts):
-        try:
-            return fn(*args, **kwargs)
-        except OOMType as exc:
-            last_exc = exc
-            flush_memory()
-            if attempt == attempts - 1:
-                break
-            escalated_any = False
-            for pipe in (pipelines or []):
-                if _escalate_pipeline_mode(pipe, logger=log, escalation=escalation):
-                    escalated_any = True
-            if not escalated_any and not pipelines:
-                log.warning("low_vram: OOM (attempt %d/%d), retrying after flush", attempt + 1, attempts)
-                continue
-            if not escalated_any:
-                log.warning("low_vram: OOM (attempt %d/%d); all pipelines already at max offload", attempt + 1, attempts)
-                break
-            log.warning("low_vram: OOM (attempt %d/%d), retrying with escalated offload", attempt + 1, attempts)
-    assert last_exc is not None
-    raise last_exc
-
-
 def rearm_offload(pipeline: Any, mode: Mode = "model_offload") -> bool:
     """Serve-time offload fallback (gw#551): arm an offload rung on a
     pipeline that was already configured once (clears the idempotency stamp).
@@ -1226,7 +1216,6 @@ __all__ = [
     "is_cuda_oom",
     "degraded_log_line",
     "OFFLOAD_LADDER",
-    "with_oom_retry",
     "select_auto_mode",
     "device_mismatches",
     "repair_device_placement",

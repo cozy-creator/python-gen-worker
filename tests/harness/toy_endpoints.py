@@ -44,7 +44,6 @@ SLOT_PEER_RAN = threading.Event()
 FINALIZE_PROBE_STARTED = threading.Event()
 FINALIZE_PEER_RAN = threading.Event()
 
-
 @endpoint
 class Basics:
     def echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
@@ -275,6 +274,46 @@ class ComposedEndpoint:
             f"base={p.base_weights}|vae={p.vae.content}"
             f"|injected={p.vae_injected}|setups={len(COMPOSED_SETUPS)}"
         ))
+
+
+# ---------------------------------------------------------------------------
+# pgw#636: the multi-checkpoint juggle — ONE dynamic ``selected_by=`` slot
+# serving N different checkpoints, the sdxl catalog shape.
+# ---------------------------------------------------------------------------
+
+
+class ToyCheckpointPipeline:
+    """Minimal pipeline whose identity is the checkpoint bytes it loaded."""
+
+    def __init__(self, weights: str) -> None:
+        self.weights = weights
+
+    @classmethod
+    def from_pretrained(cls, path: str, **_kw: object) -> "ToyCheckpointPipeline":
+        return cls((Path(path) / "transformer" / "weights.txt").read_text())
+
+    def to(self, device: str) -> "ToyCheckpointPipeline":
+        return self
+
+
+JUGGLE_DECLARED = Hub("harness/juggle-base", tag="prod")
+JUGGLE_SETUPS: list = []  # one entry per setup() run, in order
+
+
+@endpoint(models={
+    "pipeline": Slot(
+        ToyCheckpointPipeline, selected_by="model",
+        default_checkpoint=JUGGLE_DECLARED, default_config=_ToyDefaults(),
+    ),
+})
+class JuggleEndpoint:
+    def setup(self, pipeline: ToyCheckpointPipeline) -> None:
+        JUGGLE_SETUPS.append(pipeline.weights)
+        self.pipe = pipeline
+
+    def juggle_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        return EchoOut(
+            response=f"{self.pipe.weights}|setups={len(JUGGLE_SETUPS)}")
 
 
 # ---------------------------------------------------------------------------

@@ -219,8 +219,34 @@ def _preflight_cache_dirs() -> Dict[str, str]:
     }
 
 
+def _install_stack_dump_handler() -> None:
+    """pgw#639: SIGUSR2 dumps every thread's stack to stderr.
+
+    A wedged worker heartbeats fine (the asyncio loop owns the beat; model
+    work runs on threads), so "connected" proves nothing about progress and
+    hub-side logs cannot see which thread is stuck. This is the pod-side
+    forensic surface: `kill -USR2 <pid>` from any exec channel prints the
+    full picture into the pod log. Registration is free and always on —
+    the signal is never sent unless a human asks for it. SIGUSR2 is unused
+    by CPython and by torch; faulthandler writes without allocating, so it
+    works even when the process is wedged on memory.
+    """
+    import faulthandler
+    import signal
+
+    try:
+        faulthandler.register(signal.SIGUSR2, all_threads=True, chain=True)
+    except (AttributeError, ValueError, OSError) as exc:  # non-POSIX / no tty
+        logger.debug("stack-dump handler unavailable: %s", exc)
+    else:
+        logger.info(
+            "pgw#639: SIGUSR2 dumps all thread stacks to stderr (pid=%d)",
+            os.getpid())
+
+
 def _run_main() -> int:
     _log_startup_phase("boot", status="starting")
+    _install_stack_dump_handler()
     try:
         settings = get_settings()
     except Exception as e:

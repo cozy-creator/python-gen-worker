@@ -72,6 +72,9 @@ class EndpointSpec:
     # th#826: the function makes endpoint-to-endpoint child calls; emitted
     # into the discovery manifest so the hub mints the invoke_child grant.
     child_calls: bool = False
+    # pgw#647: handlers on one live instance run single-flight unless the
+    # class explicitly declared itself re-entrant (mutates no instance state).
+    reentrant: bool = False
     # th#1004 @variant_of: this function is the variant_kind variant of the
     # sibling function variant_of (both slugs). Empty = not a variant.
     variant_of: str = ""
@@ -322,6 +325,7 @@ def _spec_for_handler(
         runtime=decl.runtime,
         compile=decl.compile,
         child_calls=decl.child_calls,
+        reentrant=decl.reentrant,
         variant_of=variant_of_slug,
         variant_kind=variant_kind,
         regimes=decl.regimes.get(attr_name, DEFAULT_REGIMES),

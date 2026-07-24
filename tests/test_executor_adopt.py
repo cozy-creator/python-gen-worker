@@ -2112,6 +2112,104 @@ def test_compile_hit_on_other_object_cannot_certify_primary_object(
     assert cc.cache_hit_count(pipes["other"]) == 1
 
 
+def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
+    tmp_path, monkeypatch,
+):
+    """pgw#637: cell keys are checkpoint-free, so the 2nd checkpoint of an
+    already-proven family serves its warmup off dynamo's in-memory compiled
+    code — calls>0 with ZERO FX/AOT counter movement. That signature used to
+    disprove the cell (`CompiledLaneUnavailableError` -> FnUnavailable
+    `compile_cell_failed`) on every multi-checkpoint session. It now proves,
+    but ONLY with dynamo confirming live compiled code for this object's
+    targets: the sibling-hit guard above must keep failing closed."""
+    import gen_worker.executor as executor_mod
+    import torch
+    from torch._dynamo import eval_frame
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "family-checkpoints"
+    model_dir.mkdir()
+    with cc._PROVEN_CELLS_LOCK:
+        cc._PROVEN_CELLS.clear()
+
+    def _make_spec(model: str):
+        @endpoint(
+            models={"pipeline": Hub(model)},
+            resources=Resources(vram_gb=12),
+            compile=Compile(shapes=((768, 768),), family=FAMILY),
+            warmup={"generate": {"prompt": "warmup"}},
+        )
+        class _CheckpointEndpoint:
+            def setup(self, pipeline: _LoadablePipe) -> None:
+                self.pipeline = pipeline
+
+            def generate(self, ctx, payload: _In) -> _Out:
+                self.pipeline.transformer.forward(payload.prompt)
+                return _Out(y="ok")
+
+        (spec,) = extract_specs(_CheckpointEndpoint)
+        return spec
+
+    async def _send(_msg):
+        return None
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
+    # Torch boundary only: dynamo genuinely holds an entry for the class
+    # `__code__` both checkpoints share (the pgw#637 mechanism). torch.compile
+    # is faked here, so the real cache stays empty — say so explicitly.
+    monkeypatch.setattr(
+        eval_frame, "_debug_get_cache_entry_list", lambda _code: [object()])
+
+    def _run(model: str, hits, pipe):
+        spec = _make_spec(model)
+        counters = iter(hits)
+        monkeypatch.setattr(cc, "inductor_counters", lambda: {
+            "fxgraph_cache_hit": next(counters), "fxgraph_cache_miss": 1,
+        })
+        monkeypatch.setattr(
+            provision, "load_slot",
+            lambda *a, **kw: provision.SlotLoad(obj=pipe, is_pipeline=True))
+        ex = Executor([spec], _send)
+        ex.store._cache_dir = tmp_path / "cas"
+        asyncio.run(ex.ensure_setup(spec, {
+            wire_ref(spec.models["pipeline"]): pb.Snapshot(digest=MODEL_DIGEST),
+            CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+        }))
+        return ex
+
+    # Checkpoint 1 mints/hits normally and registers the cell as proven here.
+    first_pipe = _Pipe()
+    first = _run("acme/checkpoint-one", (10, 11), first_pipe)
+    (first_target,) = first.compile_targets()
+    assert first_target.active_compile_ref == CACHE_REF
+    assert cc.cell_proven_in_process(CACHE_REF) is True
+
+    # Checkpoint 2: same cell, new pipeline object, ZERO counter movement.
+    second_pipe = _Pipe()
+    second = _run("acme/checkpoint-two", (10, 10), second_pipe)
+    (second_target,) = second.compile_targets()
+    assert second_target.active_compile_ref == CACHE_REF
+    assert cc.execution_count(second_pipe) == 1
+    assert cc.cache_hit_count(second_pipe) == 0
+    assert cc.cache_miss_count(second_pipe) == 0
+    # Neither lane was unwrapped: checkpoint 1 still serves compiled.
+    assert getattr(second_pipe, cc._MARKER_ATTR, None) is not None
+    assert getattr(first_pipe, cc._MARKER_ATTR, None) is not None
+
+    # Same signature WITHOUT live dynamo code is still a disproof.
+    monkeypatch.setattr(
+        eval_frame, "_debug_get_cache_entry_list", lambda _code: [])
+    third_pipe = _Pipe()
+    third = _run("acme/checkpoint-three", (10, 10), third_pipe)
+    assert third.compile_targets() == []
+    assert getattr(third_pipe, cc._MARKER_ATTR, None) is None
+
+
 def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
     tmp_path, monkeypatch,
 ):

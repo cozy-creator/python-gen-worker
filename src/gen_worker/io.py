@@ -10,7 +10,7 @@ Usage::
 
     speech, sr = gw_io.read_audio(payload.audio, target_sample_rate=16000)
     img = gw_io.read_image(payload.image)
-    out = gw_io.write_image(ctx, "out", img, format="webp", quality=90)
+    out = gw_io.write_image(ctx, "out", img)
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from typing import IO, TYPE_CHECKING, Any, Optional
 
 from .api.errors import ValidationError
 from .api.types import Asset
+from .stage_timing import stage_of as _stage
 
 if TYPE_CHECKING:
     import numpy as np
@@ -120,34 +121,108 @@ def read_audio(
     return data, sr
 
 
+# The platform image-encoding default (Paul's ruling, 2026-07-24): WebP
+# always, with PNG and JPEG as first-class alternatives. Endpoints expose the
+# choice as an `output_format` payload field; they never hardcode a format.
+DEFAULT_IMAGE_FORMAT = "webp"
+DEFAULT_IMAGE_QUALITY = 95
+
+# tenant-facing name -> (PIL format, file extension)
+IMAGE_FORMATS: dict[str, tuple[str, str]] = {
+    "webp": ("WEBP", ".webp"),
+    "png": ("PNG", ".png"),
+    "jpg": ("JPEG", ".jpg"),
+    "jpeg": ("JPEG", ".jpg"),
+}
+
+
+def encode_image(
+    image: Any,
+    *,
+    format: str = DEFAULT_IMAGE_FORMAT,
+    quality: int = DEFAULT_IMAGE_QUALITY,
+    lossless: bool = False,
+    method: int = 4,
+    **encode_kwargs: Any,
+) -> tuple[bytes, str]:
+    """THE image encode core — returns ``(payload_bytes, file_extension)``.
+
+    Both encode surfaces (:func:`write_image` and ``ctx.save_image``) route
+    here, so the default format/quality cannot drift apart again.
+
+    ``quality`` applies to WebP and JPEG. ``lossless`` and ``method`` are WebP
+    only. Extra ``encode_kwargs`` are forwarded to
+    :meth:`PIL.Image.Image.save`. Unknown formats raise
+    :class:`~gen_worker.api.errors.ValidationError` rather than surfacing a
+    PIL traceback.
+    """
+    fmt = str(format or DEFAULT_IMAGE_FORMAT).strip().lower()
+    try:
+        pil_format, ext = IMAGE_FORMATS[fmt]
+    except KeyError:
+        raise ValidationError(
+            f"unsupported image format {format!r}; expected one of "
+            f"{', '.join(sorted(IMAGE_FORMATS))}"
+        ) from None
+
+    img = image
+    # JPEG has no alpha channel and no palette; convert or PIL raises.
+    if pil_format == "JPEG" and getattr(img, "mode", "") in {"RGBA", "LA", "P"}:
+        img = img.convert("RGB")
+
+    save_kwargs: dict[str, Any] = {}
+    if pil_format in {"JPEG", "WEBP"}:
+        save_kwargs["quality"] = max(1, min(int(quality), 100))
+    if pil_format == "WEBP":
+        save_kwargs["lossless"] = bool(lossless)
+        # method=4 (default): method=6 costs ~2.6x the encode CPU for ~4%
+        # smaller files (#382 measurements).
+        save_kwargs["method"] = int(method)
+    save_kwargs.update(encode_kwargs)
+
+    buf = _io.BytesIO()
+    img.save(buf, format=pil_format, **save_kwargs)
+    return buf.getvalue(), ext
+
+
 def write_image(
     ctx: Any,
     ref: str,
     image: Any,
     *,
-    format: str = "webp",
-    quality: int = 90,
+    format: str = DEFAULT_IMAGE_FORMAT,
+    quality: int = DEFAULT_IMAGE_QUALITY,
     as_type: Optional[type] = None,
     **encode_kwargs: Any,
 ) -> Asset:
-    """Encode ``image`` to bytes and save via ``ctx.save_bytes(ref, ...)``.
+    """Encode ``image`` via :func:`encode_image` and save via ``ctx.save_bytes``.
 
-    Replaces the undocumented ``ctx.save_image()``. ``format`` and ``quality``
-    are passed to :meth:`PIL.Image.Image.save`; any extra ``encode_kwargs`` are
-    forwarded too (e.g. ``method=6`` for higher-effort WebP).
+    Prefer ``ctx.save_image`` — it is what the whole endpoint fleet calls and it
+    returns a typed :class:`~gen_worker.api.types.ImageAsset` directly. This
+    free-function form exists only for its terminal decode->finalize handoff
+    (see below), which ``ctx.save_image`` deliberately does not perform.
 
     ``as_type`` optionally re-wraps the returned ``Asset`` as a subclass such as
     :class:`~gen_worker.api.types.ImageAsset`, so endpoints whose output struct
     is typed ``ImageAsset`` don't have to round-trip through
     ``msgspec.to_builtins``.
     """
-    buf = _io.BytesIO()
-    save_kwargs: dict[str, Any] = {"format": format.upper()}
-    if format.lower() in ("webp", "jpeg", "jpg"):
-        save_kwargs["quality"] = quality
-    save_kwargs.update(encode_kwargs)
-    image.save(buf, **save_kwargs)
-    out = ctx.save_bytes(ref, buf.getvalue())
+    # th#1107: the encode+upload tail runs slotless so it overlaps the next
+    # request's denoise, the same terminal handoff write_video performs. The
+    # release is TERMINAL and once-only — safe here because this call is the
+    # handler's last GPU-relevant act, which is why it is not applied to
+    # ctx.save_image (endpoints call that mid-pipeline and in N-image loops).
+    from .video_encode import finalize_permit
+
+    with finalize_permit():
+        _release_gpu_slot_for_finalize(ctx)
+        with _stage(ctx, "image_encode"):
+            payload, ext = encode_image(
+                image, format=format, quality=quality, **encode_kwargs
+            )
+    if Path(ref).suffix == "":
+        ref = f"{ref}{ext}"
+    out = ctx.save_bytes(ref, payload)
     if as_type is not None and type(out) is not as_type:
         import msgspec
         return as_type(**msgspec.to_builtins(out))
@@ -253,7 +328,7 @@ def write_video(
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as handle:
         tmp_path = handle.name
     try:
-        with StreamingVideoEncoder(
+        with _stage(ctx, "video_encode"), StreamingVideoEncoder(
             tmp_path, fps=fps, audio_sample_rate=sample_rate or None
         ) as encoder:
             if streaming:
@@ -305,13 +380,18 @@ def _release_gpu_slot_for_finalize(ctx: Any) -> None:
         release()
 
 
+
 __all__ = [
     "read_bytes",
     "open",
     "exists",
     "read_image",
     "read_audio",
+    "encode_image",
     "write_image",
+    "DEFAULT_IMAGE_FORMAT",
+    "DEFAULT_IMAGE_QUALITY",
+    "IMAGE_FORMATS",
     "write_video",
     "probe_video",
 ]

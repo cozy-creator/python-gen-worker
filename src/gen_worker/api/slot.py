@@ -34,7 +34,7 @@ bare ref's slot NAME.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, Mapping, Optional, Sequence, TypeVar
+from typing import Any, Dict, Generic, Optional, Sequence, TypeVar
 
 import msgspec
 
@@ -80,9 +80,22 @@ class Slot(Generic[D]):
     preset, used when the resolved repo carries no inference-defaults
     metadata. It LOSES to repo metadata (th#767 precedence: payload > repo
     metadata > this default_config — a recipe of last resort).
+
+    ``share_components`` (pgw#636) names pipeline components (snapshot
+    top-level subfolders, e.g. ``("text_encoder", "text_encoder_2")``) that
+    the WORKER may factor into independent content-keyed residency entries
+    shared ACROSS checkpoint picks of this slot (gw#479 machinery): equal
+    bytes load once; per-pick exclusive weights (the denoiser) become
+    independently LRU-swappable entries so one card packs several
+    checkpoints hot. Sharing stays content-honest — components whose bytes
+    differ between picks simply never alias. Purely a worker load policy;
+    not part of the hub manifest contract.
     """
 
-    __slots__ = ("pipeline_cls", "selected_by", "default_checkpoint", "default_config")
+    __slots__ = (
+        "pipeline_cls", "selected_by", "default_checkpoint", "default_config",
+        "share_components",
+    )
 
     def __init__(
         self,
@@ -91,6 +104,7 @@ class Slot(Generic[D]):
         selected_by: str = "",
         default_checkpoint: Optional[ModelRef] = None,
         default_config: Optional[D] = None,
+        share_components: Sequence[str] = (),
     ) -> None:
         if not isinstance(pipeline_cls, type):
             raise TypeError(
@@ -107,10 +121,18 @@ class Slot(Generic[D]):
                 f"Slot(default_config=...) must be a FamilyDefaults subclass "
                 f"instance, got {type(default_config).__name__}"
             )
+        cleaned = tuple(
+            s for s in (str(c or "").strip() for c in share_components) if s
+        )
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError(
+                f"Slot(share_components=...) has duplicate names: {cleaned!r}"
+            )
         self.pipeline_cls = pipeline_cls
         self.selected_by = str(selected_by or "").strip()
         self.default_checkpoint = default_checkpoint
         self.default_config = default_config
+        self.share_components: tuple[str, ...] = cleaned
 
     @property
     def family(self) -> str:
@@ -126,7 +148,8 @@ class Slot(Generic[D]):
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
             f"default_checkpoint={self.default_checkpoint!r}, "
-            f"default_config={self.default_config!r})"
+            f"default_config={self.default_config!r}, "
+            f"share_components={self.share_components!r})"
         )
 
 
@@ -309,40 +332,7 @@ def resolve_slot(
     )
 
 
-def resolve_slots(
-    slots: Mapping[str, "Slot[Any]"],
-    *,
-    refs: Mapping[str, Optional[ModelRef]],
-    families: Mapping[str, str] = {},
-    raw_metadata: Mapping[str, str] = {},
-    lora_metadata: Mapping[str, Sequence[str]] = {},
-    regimes: Mapping[str, str] = {},
-    allowed_regimes: Optional[Sequence[str]] = None,
-) -> Dict[str, "ResolvedSlot[Any]" | Exception]:
-    """Resolve every declared slot, collecting per-slot failures instead of
-    raising — callers (RequestContext) surface each failure lazily, only
-    when the handler actually reads that slot ("clear error at request
-    time", not a blanket dispatch-time failure for slots the handler never
-    touches). ``allowed_regimes`` (th#1017), when given, applies to every
-    slot: one invoked function has one declared ``regimes=`` set."""
-    out: Dict[str, "ResolvedSlot[Any]" | Exception] = {}
-    for name, slot in slots.items():
-        try:
-            out[name] = resolve_slot(
-                name, slot,
-                ref=refs.get(name),
-                family=families.get(name, ""),
-                raw_metadata_json=raw_metadata.get(name, ""),
-                lora_metadata_json=lora_metadata.get(name, ()),
-                inference_regime=regimes.get(name, "standard"),
-                allowed_regimes=allowed_regimes,
-            )
-        except ValueError as exc:
-            out[name] = exc
-    return out
-
-
 __all__ = [
     "DEFAULT_REGIMES", "REGIMES", "RegimeMismatchError", "ResolvedSlot",
-    "Slot", "resolve_slot", "resolve_slots",
+    "Slot", "resolve_slot",
 ]

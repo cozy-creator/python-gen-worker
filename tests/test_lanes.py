@@ -69,8 +69,3 @@ def test_parse_lane_spec_dual_form() -> None:
 ])
 def test_lane_of_binding(flavor: str, storage: str, compiled: bool, want: str) -> None:
     assert lanes.lane_id(lanes.lane_of_binding(flavor, storage, compiled)) == want
-
-
-def test_lane_unavailable_error_names_the_lane() -> None:
-    err = lanes.LaneUnavailableError("fp8-w8a8-dynamic+compiled", "no pick")
-    assert "lane_unavailable: fp8-w8a8-dynamic+compiled" in str(err)

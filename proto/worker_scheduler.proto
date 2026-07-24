@@ -882,6 +882,29 @@ message JobMetrics {
   // declared formula (or a pre-formula worker) — the hub falls back to
   // evaluating terms from the raw payload + schema defaults.
   map<string, double> runtime_terms = 14;
+  // th#1111: per-stage wall-clock breakdown of this request, in ms. Empty =
+  // pre-th#1111 worker. Vocabulary (see gen_worker/stage_timing.py):
+  //   measured stages   input_fetch, text_encode, denoise, refine,
+  //                     vae_decode, image_encode, video_encode,
+  //                     credential_stamp, upload, ... (endpoint brackets add
+  //                     their own names via ctx.stage("name"))
+  //   gpu_permit_wait   time waiting for the worker's GPU permit — the one
+  //                     stage OUTSIDE runtime_ms (it precedes handler start)
+  //   total.handler     == runtime_ms; the reconciliation anchor
+  //   total.prep        handler start -> first denoise step
+  //   total.tail        last denoise step -> handler end
+  //   total.denoise     sum of the denoise-family stages
+  //   class.gpu_busy    device computing / class.small_gpu / class.gpu_idle /
+  //                     class.unattributed — the per-request hot-fraction
+  //                     numerator is class.gpu_busy over total.handler
+  //   resid.prep        prep/tail time no stage explained (for images the
+  //   resid.tail        tail residual is essentially the VAE decode)
+  //   resid.unattributed  handler time no stage explained
+  //   resid.overlap     stages summed PAST wall clock (concurrent uploads)
+  //   flag.*            0/1 booleans (flag.denoise_estimated = the denoise
+  //                     window came from step marks, not an explicit bracket)
+  // Invariant: measured stages + resid.unattributed == total.handler.
+  map<string, int64> stage_ms = 15;
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,

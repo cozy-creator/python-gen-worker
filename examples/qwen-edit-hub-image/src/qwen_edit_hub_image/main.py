@@ -64,7 +64,7 @@ class QwenImageEdit:
                 generator=ctx.generator(p.seed) if p.seed is not None else None,
             ).images[0]
 
-        asset = gw_io.write_image(ctx, "image", image, format="png", as_type=ImageAsset)
+        asset = gw_io.write_image(ctx, "image", image, as_type=ImageAsset)
         return EditOutput(image=asset, width=image.width, height=image.height)
 
 

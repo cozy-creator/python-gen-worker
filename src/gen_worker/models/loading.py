@@ -978,12 +978,6 @@ def snapshot_component_weight_bytes(model_path: Path) -> Dict[str, int]:
     return {k: v for k, v in out.items() if v > 0}
 
 
-def snapshot_weight_bytes(model_path: Path) -> int:
-    """Total tensor bytes across the snapshot's safetensors (header-declared
-    data ranges; no tensor reads). 0 when undetectable."""
-    return sum(snapshot_component_weight_bytes(model_path).values())
-
-
 def bitsandbytes_available() -> bool:
     """Importability gate for the bnb-nf4 rung (gw#469): the quant config
     constructs fine without bitsandbytes and the load then dies deep in
@@ -1430,7 +1424,6 @@ __all__ = [
     "emergency_quantization_config",
     "model_index_components",
     "snapshot_component_weight_bytes",
-    "snapshot_weight_bytes",
     "load_from_pretrained",
     "load_gguf_pipeline",
 ]

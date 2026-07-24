@@ -49,6 +49,8 @@ LogLevel = Literal["debug", "info", "warning", "error"]
 
 from ..api.errors import AuthError
 from ..api.slot import ResolvedSlot
+from ..io import DEFAULT_IMAGE_FORMAT, DEFAULT_IMAGE_QUALITY, encode_image
+from ..stage_timing import StageTimer
 from ..api.types import (
     Asset,
     AudioAsset,
@@ -200,6 +202,11 @@ class RequestContext:
         # decode->finalize handoff, so the worker's finalizing-job count (and
         # the hub's StateDelta view of it) tracks the encode/upload tail.
         self._on_finalize_release: Optional[Callable[[], None]] = None
+
+        # th#1111: per-stage timing for this request. Framework hooks
+        # (permit wait, input fetch, encode, stamp, upload, denoise steps)
+        # record into it unconditionally; endpoints refine with ctx.stage().
+        self._stages = StageTimer()
 
     @property
     def request_id(self) -> str:
@@ -594,6 +601,25 @@ class RequestContext:
             "timestamp": time.time(),
         })
 
+    @contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        """Bracket one stage of this request for :data:`JobMetrics.stage_ms`
+        (th#1111)::
+
+            with ctx.stage("text_encode"):
+                embeds = encode(prompt)
+
+        The framework already times the permit wait, input fetch, denoise
+        steps, image/video encode, credential stamp and upload; brackets add
+        what only the endpoint knows (text encode, scheduler setup, an
+        explicit VAE decode). Nested stages are charged exclusively, so the
+        map always reconciles with ``runtime_ms``. Known names are classified
+        GPU-busy / small-GPU / GPU-idle (see ``stage_timing``); unknown names
+        are reported but left unclassified rather than guessed.
+        """
+        with self._stages.stage(name):
+            yield
+
     def progress(
         self,
         progress: float,
@@ -689,14 +715,18 @@ class RequestContext:
         """
         from .. import content_credentials
 
-        return content_credentials.sign_media_bytes(data, ref=ref, **self._c2pa_manifest_kwargs())
+        with self._stages.stage("credential_stamp"):
+            return content_credentials.sign_media_bytes(
+                data, ref=ref, **self._c2pa_manifest_kwargs())
 
     def _c2pa_sign_file(self, ref: str, src: str) -> Optional[str]:
         """File variant of :meth:`_c2pa_sign_bytes` — returns a signed temp
         path (caller unlinks) or None when signing doesn't apply."""
         from .. import content_credentials
 
-        return content_credentials.sign_media_file(src, ref=ref, **self._c2pa_manifest_kwargs())
+        with self._stages.stage("credential_stamp"):
+            return content_credentials.sign_media_file(
+                src, ref=ref, **self._c2pa_manifest_kwargs())
 
     # Inline-bytes threshold: when the client requested
     # `Prefer: bytes=inline` AND the payload is at or below this many
@@ -759,45 +789,29 @@ class RequestContext:
         image: "Image.Image",
         ref: Optional[str] = None,
         *,
-        format: str = "webp",
-        quality: int = 95,
+        format: str = DEFAULT_IMAGE_FORMAT,
+        quality: int = DEFAULT_IMAGE_QUALITY,
         lossless: bool = False,
+        **encode_kwargs: Any,
     ) -> ImageAsset:
-        fmt = str(format or "webp").strip().lower()
-        if fmt in {"jpg", "jpeg"}:
-            pil_format = "JPEG"
-            ext = ".jpg"
-        elif fmt == "png":
-            pil_format = "PNG"
-            ext = ".png"
-        elif fmt == "webp":
-            pil_format = "WEBP"
-            ext = ".webp"
-        else:
-            raise ValueError("unsupported image format")
+        """Encode + save an image; returns a typed :class:`ImageAsset`.
 
+        ``format`` is ``webp`` (the platform default), ``png``, or ``jpg``.
+        ``quality`` applies to webp/jpg; ``lossless`` is webp-only. The
+        extension is derived from the format when ``ref`` has no suffix.
+        """
+        with self._stages.stage("image_encode"):
+            payload, ext = encode_image(
+                image, format=format, quality=quality, lossless=lossless,
+                **encode_kwargs,
+            )
         if ref is None or str(ref).strip() == "":
             ref = f"outputs/{self.request_id}/image{ext}"
         else:
             ref = _normalize_output_ref(str(ref))
             if Path(ref).suffix == "":
                 ref += ext
-
-        img = image
-        if pil_format == "JPEG" and getattr(img, "mode", "") in {"RGBA", "LA", "P"}:
-            img = img.convert("RGB")
-
-        buf = BytesIO()
-        save_kwargs: Dict[str, Any] = {}
-        if pil_format in {"JPEG", "WEBP"}:
-            save_kwargs["quality"] = max(1, min(int(quality), 100))
-        if pil_format == "WEBP":
-            save_kwargs["lossless"] = bool(lossless)
-            # method=4 (default): method=6 costs ~2.6x the encode CPU for ~4%
-            # smaller files (#382 measurements).
-            save_kwargs["method"] = 4
-        img.save(buf, format=pil_format, **save_kwargs)
-        return _as_asset(self.save_bytes(ref, buf.getvalue()), ImageAsset)
+        return _as_asset(self.save_bytes(ref, payload), ImageAsset)
 
     def save_audio(
         self,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 import gc
 import itertools
 import logging
@@ -22,7 +23,7 @@ import threading
 import time
 import typing
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
@@ -83,6 +84,7 @@ from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 from .runtime_config import ConfigStore, extract_job_config
+from .stage_timing import stage_ms_for_metrics
 
 if typing.TYPE_CHECKING:
     from . import fleet_cells
@@ -562,6 +564,33 @@ def _shared_lanes_need_fp8(
         return False
     fp8_needed = shared_bytes + 0.5 * exclusive_bytes
     return fp8_needed + margin_bytes <= free_vram_bytes
+
+
+def _estimate_setup_need(
+    per_ref: typing.Sequence[Tuple[int, int]],
+    vram_gb: float,
+) -> int:
+    """Pre-load VRAM headroom estimate for one setup's refs (pgw#636).
+
+    ``per_ref`` carries ``(vram_hint, snapshot_bytes)`` per ref: a prior
+    MEASURED footprint wins; else the wire snapshot's byte total (an honest
+    first-load footprint for stored-precision lanes — make_room's margin
+    covers slack). Only when a ref has NEITHER fact does the declared
+    ``vram_gb`` floor the total: the declaration is a placement MINIMUM
+    ("a card with at least this much"), never a per-load reservation —
+    reserving it wholesale for every never-seen checkpoint pick evicted the
+    resident pipeline on 24 GB cards and pinned workers to one pipeline
+    (the 2026-07-24 9.8/24 GB incident)."""
+    needed = 0
+    unknown = False
+    for hint, snapshot_bytes in per_ref:
+        size = hint if hint > 0 else max(0, int(snapshot_bytes))
+        if size <= 0:
+            unknown = True
+        needed += size
+    if unknown and vram_gb > 0:
+        needed = max(needed, int(vram_gb * _GiB))
+    return needed
 
 
 def _is_corrupt_load_error(exc: BaseException) -> bool:
@@ -1987,6 +2016,13 @@ class _ClassRecord:
     ready: bool = False
     failed: Optional[str] = None
     lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
+    # pgw#647 concurrency contract: one live instance == one binding set with
+    # mutable buffers (resident LoRA branches, adapter attach state), so
+    # handler execution on it is SINGLE-FLIGHT by default. Held across
+    # adapter activation + handler + deactivation; skipped only when the
+    # endpoint class declared ``reentrant=True``. One-job-per-GPU used to
+    # mask this; multi-GPU permits and multi-residency do not.
+    run_lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
     # Content-keyed shared components this record holds (gw#479): released
     # (refcount--) at vacate so the entries become LRU/drain candidates.
     shared_keys: List[Any] = dc_field(default_factory=list)
@@ -3964,16 +4000,57 @@ class Executor:
         await self.ensure_setup(effective, snapshots)
 
     def _job_pin_refs(self, spec: EndpointSpec, slots: List[str]) -> List[str]:
-        """Wire refs a job pins for its whole lifetime: every routed slot
-        EXCEPT lane refs (gw#551 — the LaneGate pins those around the actual
-        pipeline call, so the idle sibling stays LRU-demotable)."""
+        """Refs a job pins for its whole lifetime: every routed slot EXCEPT
+        lane refs (gw#551 — the LaneGate pins those around the actual
+        pipeline call, so the idle sibling stays LRU-demotable), PLUS the
+        record's shared-component entries (pgw#636: holders alone no longer
+        block demotion, so an executing job must pin the TE/VAE entries its
+        pipeline aliases)."""
         rec = self._classes.get(spec.instance_key) if spec.cls is not None else None
         lane_refs = rec.lane_refs if rec is not None else set()
-        return [
-            r for s in slots
-            for r in _binding_wire_refs(spec.models[s])
-            if r not in lane_refs
-        ]
+        shared_ids = (
+            [k.cache_id() for k in rec.shared_keys] if rec is not None else []
+        )
+        return list(dict.fromkeys(
+            [
+                r for s in slots
+                for r in _binding_wire_refs(spec.models[s])
+                if r not in lane_refs
+            ]
+            + shared_ids
+        ))
+
+    def _job_admission_sizes(
+        self, spec: EndpointSpec, slots: List[str], run: "pb.RunJob",
+    ) -> Dict[str, int]:
+        """ref -> expected VRAM bytes for one job's admission lease (pgw#641
+        Stage 2). Same ref set as :meth:`_job_pin_refs`; bytes follow the
+        pgw#636 ask ladder — a prior MEASURED hint wins, else the dispatch's
+        own snapshot byte total (honest for a never-seen pick), else the
+        banked snapshot's total, else 0 (lease-protected, no reservation)."""
+        res = self.store.residency
+        run_snapshots = dict(run.snapshots) if run.snapshots else {}
+
+        def _expect(ref: str) -> int:
+            hint = res.vram_hint(ref)
+            if hint > 0:
+                return hint
+            snap = run_snapshots.get(ref)
+            if snap is not None:
+                return sum(int(f.size_bytes) for f in snap.files)
+            return sum(self.store.component_sizes(ref).values())
+
+        return {ref: _expect(ref) for ref in self._job_pin_refs(spec, slots)}
+
+    @staticmethod
+    def _activation_key(spec: EndpointSpec) -> str:
+        """Key the learned activation footprint by FUNCTION, not by pick
+        (pgw#652). Transient VRAM is a property of the shape and the graph the
+        function runs — a 1024^2 SDXL denoise costs the same latents and
+        attention workspace whichever checkpoint is bound — so keying by
+        function means a never-seen checkpoint inherits a real measurement
+        instead of reserving nothing on its first request."""
+        return spec.name
 
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
         """Instance-group record for ``spec``, created on first sight for
@@ -4924,6 +5001,8 @@ class Executor:
                             proven_mint_objs.add(id(pipe))
                             if callable(warmup):
                                 function_proofs[id(pipe)] = {spec.name}
+                            compile_cache.record_cell_proven(
+                                str(finalized.ref))
                             inj.active_compile_artifacts[id(pipe)] = (
                                 _CompileArtifactSelection(
                                     path=Path(finalized.artifact),
@@ -4933,12 +5012,45 @@ class Executor:
                                     self_mint=True))
                         else:
                             disproven.append(candidate)
-                    elif pipe_hits <= 0:
-                        disproven.append(candidate)
-                    else:
+                    elif pipe_hits > 0:
                         proven += 1
                         if callable(warmup):
                             function_proofs[id(pipe)] = {spec.name}
+                        proved_sel = inj.active_compile_artifacts.get(id(pipe))
+                        if proved_sel is not None:
+                            compile_cache.record_cell_proven(proved_sel.ref)
+                    elif (
+                        pipe_misses <= 0
+                        and (inmem_sel := inj.active_compile_artifacts.get(
+                            id(pipe))) is not None
+                        and compile_cache.cell_proven_in_process(inmem_sel.ref)
+                        and compile_cache.has_inmemory_compiled_code(pipe)
+                    ):
+                        # pgw#637: calls>0 with ZERO counter movement against
+                        # a cell this process ALREADY proved, AND dynamo
+                        # confirming live compiled code for this object's
+                        # targets, is torch 2.13's in-memory dynamo code
+                        # cache serving a sibling checkpoint's compiled code
+                        # — a legitimate third serving surface (cell keys are
+                        # checkpoint-free by design), not silent eager.
+                        # Disproving it bricked the compiled lane on every
+                        # 2nd same-family pick. Both conditions are load-
+                        # bearing: the registry alone would let a SIBLING
+                        # object's hit certify this object's silence, which
+                        # gw#603/gw#611 forbid; the dynamo probe alone would
+                        # credit a cell never proven anywhere.
+                        proven += 1
+                        if callable(warmup):
+                            function_proofs[id(pipe)] = {spec.name}
+                        logger.info(
+                            "compile-cache: %s served warmup from dynamo's "
+                            "in-memory code cache (cell %s already proven "
+                            "in-process; calls=%d) — counted as serving "
+                            "evidence (pgw#637)",
+                            spec.name, inmem_sel.ref, calls,
+                        )
+                    else:
+                        disproven.append(candidate)
                 # gw#612: everything after the per-object proof — unproven
                 # handling, sibling resolution, the publish decision, and
                 # the bookkeeping down to readiness — reports an honest
@@ -5308,6 +5420,14 @@ class Executor:
             r for s in setup_slots
             if (r := wire_ref(spec.models[s])) not in lane_refs
         ]
+        # pgw#636: shared-component entries (TE/VAE) the record's pipelines
+        # alias are independently demotable now — swap any that went warm
+        # back in before this job executes, alongside the setup refs.
+        if rec is not None and rec.shared_keys:
+            refs.extend(
+                cid for k in rec.shared_keys
+                if (cid := k.cache_id()) not in refs
+            )
         cuda_host = torch is not None and torch.cuda.is_available()
         if any(res.tier(r) is residency_mod.Tier.RAM for r in refs):
             async with self._load_lock:
@@ -5735,24 +5855,35 @@ class Executor:
 
     async def _make_room_for(self, spec: EndpointSpec, setup_slots: List[str]) -> None:
         """Evict idle LRU pipelines before loading instead of degrading the
-        new load down the offload ladder (#371). Estimate: per-ref vram_hint
-        from a prior load, else the endpoint's declared vram_gb."""
+        new load down the offload ladder (#371).
+
+        Estimate per ref (pgw#636): a prior measured vram_hint, else the
+        snapshot's actual byte total (the wire manifest sizes — an honest
+        first-load footprint for stored-precision lanes; make_room's margin
+        covers slack), else — only when NO byte facts exist at all — the
+        endpoint's declared ``vram_gb``. The declaration is a PLACEMENT
+        MINIMUM ("give me a card with at least this much"), never a per-load
+        reservation: reserving it wholesale on every never-seen checkpoint
+        pick evicted the resident pipeline on 24 GB cards and pinned the
+        fleet to one-pipeline-per-worker (the live 9.8/24 GB incident)."""
         res = self.store.residency
         refs = [wire_ref(spec.models[s]) for s in setup_slots]
-        hints = [res.vram_hint(r) for r in refs]
-        needed = sum(hints)
-        # A partially-known set is still an unknown load. Live SDXL exposed
-        # the old sum-only bug: the fixed VAE had a small prior hint while a
-        # never-seen checkpoint had none, so admission reserved only the VAE
-        # and loaded a ~10GiB pipeline into an occupied 24GiB card.
-        if any(h <= 0 for h in hints) and spec.resources.vram_gb:
-            needed = max(needed, int(float(spec.resources.vram_gb) * _GiB))
+        needed = _estimate_setup_need(
+            [
+                (res.vram_hint(r), sum(self.store.component_sizes(r).values()))
+                for r in refs
+            ],
+            float(spec.resources.vram_gb or 0),
+        )
         if needed <= 0:
             return
         # CPU-only workers do not have a VRAM tier to admit against.
         if torch is None or not torch.cuda.is_available():
             return
-        if await asyncio.to_thread(res.make_room, needed):
+        # This job's own reservations are the demand being satisfied here —
+        # exclude them from the outstanding-claim accounting (pgw#641 Stage 2).
+        make_room = functools.partial(res.make_room, needed, for_refs=refs)
+        if await asyncio.to_thread(make_room):
             self._on_state_change()
             return
         # Movable demotions weren't enough: tear down idle records holding
@@ -5767,7 +5898,7 @@ class Executor:
             if self._record_in_use(rec, reclaim_ref=ref):
                 continue
             await self._vacate_record(rec)
-            if await asyncio.to_thread(res.make_room, needed):
+            if await asyncio.to_thread(make_room):
                 self._on_state_change()
                 return
         # No arbitrary refusal at the recommendation boundary: vram_gb names
@@ -5943,17 +6074,27 @@ class Executor:
     def _component_share_plan(
         self, spec: EndpointSpec, paths: Dict[str, str], hints: Dict[str, Any]
     ) -> Optional[Dict[str, Dict[str, Any]]]:
-        """Content-keyed shared-component plan for a multi-lane record
-        (gw#479): ``{slot: {component: LoadedComponentKey}}`` restricted to
-        components whose CONTENT key appears under 2+ pipeline slots. None
-        when the record has <2 pipeline slots, digests are unavailable, or
-        nothing is byte-identical — loading then stays monolithic."""
+        """Content-keyed shared-component plan (gw#479, extended pgw#636):
+        ``{slot: {component: LoadedComponentKey}}``. A component participates
+        when its CONTENT key appears under 2+ pipeline slots of THIS record
+        (the multi-lane z-image/qwen shape), when its slot DECLARES it
+        (``Slot.share_components`` — the cross-pick opt-in: the component
+        becomes an independent residency entry so later picks with equal
+        bytes alias it and unequal bytes stay honestly exclusive), or when
+        an entry for the key is ALREADY resident in the shared cache (a
+        sibling pick's record seeded it). None when nothing qualifies —
+        loading then stays monolithic."""
         pipe_slots = [
             s for s in paths
             if isinstance(hints.get(s), type)
             and callable(getattr(hints[s], "from_pretrained", None))
         ]
-        if len(pipe_slots) < 2:
+        declared: Dict[str, frozenset] = {
+            s: frozenset(spec.slots[s].share_components)
+            for s in pipe_slots
+            if s in spec.slots and spec.slots[s].share_components
+        }
+        if len(pipe_slots) < 2 and not declared:
             return None
         keys: Dict[str, Dict[str, Any]] = {}
         for slot in pipe_slots:
@@ -5973,8 +6114,14 @@ class Executor:
         for slot_keys in keys.values():
             for k in slot_keys.values():
                 counts[k] = counts.get(k, 0) + 1
+        res = self.store.residency
         plan = {
-            slot: {c: k for c, k in slot_keys.items() if counts[k] >= 2}
+            slot: {
+                c: k for c, k in slot_keys.items()
+                if counts[k] >= 2
+                or c in declared.get(slot, frozenset())
+                or res.shared_obj(k) is not None
+            }
             for slot, slot_keys in keys.items()
         }
         if not any(plan.values()):
@@ -6141,7 +6288,8 @@ class Executor:
                         excl_bytes = sum(
                             b for comp, b in sizes.items() if comp not in injected)
                         if excl_bytes > 0:
-                            await _to_thread_complete(res.make_room, excl_bytes)
+                            await _to_thread_complete(functools.partial(
+                                res.make_room, excl_bytes, for_refs=(ref,)))
                     before = self._vram_allocated()
                     try:
                         sl = await _to_thread_complete(
@@ -7215,11 +7363,13 @@ class Executor:
         rec.stale = False
         if rec.shared_keys:
             # Drop this record's holds on content-keyed shared components
-            # (gw#479); entries no other record references get evicted.
+            # (gw#479). pgw#636: entries no other record references are NOT
+            # drained eagerly — a hot GPU keeps them resident as ordinary LRU
+            # candidates so the next pick that matches their bytes aliases
+            # them for free; real pressure reclaims them through make_room.
             for key in rec.shared_keys:
                 self.store.residency.release_shared(key)
             rec.shared_keys.clear()
-            self.store.residency.drain_shared()
         self._on_state_change()
         released_refs = list(dict.fromkeys(released_refs))
         await self._observe_host_ram_progress(released_refs, collect_host=True)
@@ -7387,17 +7537,28 @@ class Executor:
             await self._finish(job, status, safe_message=msg)
             return
         routed = list(spec.models)
-        # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
-        # between ensure_setup's promote and the execution-time pin let a
-        # concurrent job's make_room demote a just-promoted pipeline. Refs
-        # without entries yet are no-ops; the inner pin still covers adapters.
-        # Lane refs are NOT job-pinned (gw#551): lane dispatch is handler-side,
-        # so pinning every declared lane would make the idle sibling
-        # un-demotable and the used lane un-promotable on an overcommitted
-        # card; the LaneGate pins exactly the lane it executes, at call time.
+        # Admission lease over this job's model refs for its WHOLE lifetime
+        # (pgw#641 Stage 2, superseding the gw#409 whole-job executing() pin):
+        # from admission on, no eviction/demotion path may victim these refs —
+        # including refs whose entries do not exist yet (the executing() pin
+        # no-op'd on those, leaving a freshly created entry demotable between
+        # its track_vram and the execution-time pin) — and bytes for
+        # not-yet-loaded refs are RESERVED so concurrent admissions cannot
+        # book the same free VRAM and OOM each other mid-load. Lane refs are
+        # NOT leased (gw#551): lane dispatch is handler-side, so leasing every
+        # declared lane would make the idle sibling un-demotable and the used
+        # lane un-promotable on an overcommitted card; the LaneGate pins
+        # exactly the lane it executes, at call time.
         try:
-            with self.store.residency.executing(
-                *self._job_pin_refs(spec, routed)
+            with self.store.residency.admit(
+                self._job_admission_sizes(spec, routed, run),
+                # pgw#652: weights are not the whole cost of admitting a
+                # request — a concurrent 1024^2 diffusion request also holds
+                # GBs of latents/attention workspace. The claim is LEARNED
+                # from this function's measured peaks (0 until measured), so
+                # no endpoint declares it.
+                activation_bytes=self.store.residency.activation_hint(
+                    self._activation_key(spec)),
             ):
                 await self._run_job_pinned(job, run, payload, routed)
         finally:
@@ -7497,6 +7658,7 @@ class Executor:
             # POST for private refs) before any source/model acquisition or
             # tenant handler work; manifest drift and caller local_path
             # values fail closed.
+            input_fetch_t0 = time.monotonic()
             await _to_thread_complete(
                 materialize_input_assets,
                 payload,
@@ -7507,6 +7669,8 @@ class Executor:
                 capability_token=run.capability_token or "",
                 cancel_check=lambda: ctx.cancelled,
             )
+            # th#1111: pre-handler stage (outside runtime_ms).
+            ctx._stages.record_pre("input_fetch", time.monotonic() - input_fetch_t0)
             ctx.raise_if_cancelled("canceled")
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
@@ -7582,8 +7746,10 @@ class Executor:
         queue_ms = int((time.monotonic() - job.admitted_at) * 1000)
         lease: Optional[_GpuSlotLease] = None
         started = time.monotonic()
+        alloc_at_start = 0
         try:
             if needs_gpu:
+                permit_t0 = time.monotonic()
                 await self._intent_await(
                     job.intent_id,
                     self._gpu_semaphore.acquire(),
@@ -7592,6 +7758,9 @@ class Executor:
                     stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
                     reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
                 )
+                # th#1111: the permit wait was in NO metric — it precedes the
+                # handler window, so runtime_ms never saw it.
+                ctx._stages.record_pre("gpu_permit_wait", time.monotonic() - permit_t0)
                 self._loop = asyncio.get_running_loop()
                 lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
                 ctx._gpu_slot_lease = lease
@@ -7610,6 +7779,11 @@ class Executor:
                         torch.cuda.reset_peak_memory_stats(gpu_index)
                     except Exception:
                         pass
+                    # pgw#652: the baseline the peak is measured AGAINST.
+                    # peak - baseline is this request's transient (activation)
+                    # footprint, as opposed to the resident weights that were
+                    # already allocated when it took the GPU.
+                    alloc_at_start = self._vram_allocated()
             # Last execution fence: no adapter mutation or tenant handler has
             # run yet. The repeated check catches a replacement between
             # scheduler assignment/intake and this GPU turn.
@@ -7628,49 +7802,73 @@ class Executor:
             # gate's promote against its own job's pins.
             exec_refs = self._job_pin_refs(spec, routed)
             adapter_refs = [a.ref for group in adapters.values() for a in group]
-            with self.store.residency.executing(*exec_refs, *adapter_refs):
-                active: List[Tuple[str, Any]] = []
-                try:
-                    for slot, prepared in adapters.items():
-                        pipe = self._adapter_target(spec, slot)
-                        ref = wire_ref(spec.models[slot])
-                        await asyncio.to_thread(
-                            self._adapters.activate, ref, pipe, prepared, run.request_id
-                        )
-                        active.append((ref, pipe))
-                    # Explicit activation (gw#399): a slot this request names
-                    # no adapters for must run bare even if a previous
-                    # request's teardown failed and left adapters enabled.
-                    for slot in spec.models:
-                        if slot in adapters:
-                            continue
-                        ref = wire_ref(spec.models[slot])
-                        if self._adapters.needs_deactivation(ref):
-                            pipe = self.store.residency.obj(ref)
-                            if pipe is not None:
-                                await asyncio.to_thread(
-                                    self._adapters.deactivate, ref, pipe, run.request_id
-                                )
-                    ctx.raise_if_cancelled("canceled")
+            # pgw#647: SINGLE-FLIGHT per live instance. Adapter attach and the
+            # handler itself mutate the instance's materialized graph (LoRA
+            # buffers, adapter enable state); two concurrent requests on one
+            # instance corrupt each other — one-job-per-GPU used to mask
+            # this; multi-GPU permits and multi-residency do not. The lock is
+            # per-_ClassRecord, so jobs on DIFFERENT instances (different
+            # picks) still run concurrently; ``reentrant=True`` classes opt
+            # out. Ordering: acquired AFTER the GPU permit and never held
+            # while acquiring one — no cycle.
+            async with AsyncExitStack() as run_gate:
+                if spec.cls is not None and not spec.reentrant:
+                    await run_gate.enter_async_context(
+                        self._classes[spec.instance_key].run_lock)
+                with self.store.residency.executing(*exec_refs, *adapter_refs):
+                    active: List[Tuple[str, Any]] = []
                     try:
-                        output = await self._execute(job, spec, instance, ctx, payload, kwargs,
-                                                     timeout_ms=timeout_ms, gpu_index=gpu_index)
-                    except BaseException as exc:
-                        # A mid-inference CUDA OOM learns a per-ref floor, but
-                        # the live object is quarantined. The hub retries only
-                        # after ensure_setup reloads it cleanly at that rung.
-                        await self._quarantine_for_oom(spec, ctx, exc)
-                        raise
-                finally:
-                    # Guaranteed-inactive on every exit (OK / cancel /
-                    # deadline / handler error); attachments stay resident.
-                    for ref, pipe in active:
-                        await asyncio.to_thread(
-                            self._adapters.deactivate, ref, pipe, run.request_id
-                        )
+                        for slot, prepared in adapters.items():
+                            pipe = self._adapter_target(spec, slot)
+                            ref = wire_ref(spec.models[slot])
+                            await asyncio.to_thread(
+                                self._adapters.activate, ref, pipe, prepared, run.request_id
+                            )
+                            active.append((ref, pipe))
+                        # Explicit activation (gw#399): a slot this request
+                        # names no adapters for must run bare even if a
+                        # previous request's teardown failed and left adapters
+                        # enabled.
+                        for slot in spec.models:
+                            if slot in adapters:
+                                continue
+                            ref = wire_ref(spec.models[slot])
+                            if self._adapters.needs_deactivation(ref):
+                                pipe = self.store.residency.obj(ref)
+                                if pipe is not None:
+                                    await asyncio.to_thread(
+                                        self._adapters.deactivate, ref, pipe, run.request_id
+                                    )
+                        ctx.raise_if_cancelled("canceled")
+                        try:
+                            output = await self._execute(
+                                job, spec, instance, ctx, payload, kwargs,
+                                timeout_ms=timeout_ms, gpu_index=gpu_index)
+                        except BaseException as exc:
+                            # A mid-inference CUDA OOM learns a per-ref floor,
+                            # but the live object is quarantined. The hub
+                            # retries only after ensure_setup reloads it
+                            # cleanly at that rung.
+                            await self._quarantine_for_oom(spec, ctx, exc)
+                            raise
+                    finally:
+                        # Guaranteed-inactive on every exit (OK / cancel /
+                        # deadline / handler error); attachments stay resident.
+                        for ref, pipe in active:
+                            await asyncio.to_thread(
+                                self._adapters.deactivate, ref, pipe, run.request_id
+                            )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output, lane=job.lane,
                                     runtime_terms=_runtime_term_values(spec, payload))
+            # pgw#652: the request just told us what a concurrent one costs.
+            # Only a completed run is evidence — a cancelled or OOM-killed job
+            # never reached its real peak.
+            if metrics.peak_vram_bytes > 0:
+                self.store.residency.record_activation(
+                    self._activation_key(spec),
+                    metrics.peak_vram_bytes - alloc_at_start,
+                )
             handler_done = time.monotonic()
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
@@ -7997,6 +8195,9 @@ class Executor:
             coro = asyncio.to_thread(self._call_sync, bound, call_kwargs, gpu_index)
 
         job.exec_task = asyncio.ensure_future(coro)
+        # th#1111: the handler window stage_ms reconciles against (the same
+        # interval runtime_ms measures).
+        ctx._stages.handler_open()
         try:
             return await asyncio.wait_for(asyncio.shield(job.exec_task), timeout_s)
         except asyncio.TimeoutError:
@@ -8008,6 +8209,8 @@ class Executor:
         except asyncio.CancelledError:
             # CancelJob path: the exec task was cancelled underneath us.
             raise CanceledError("canceled")
+        finally:
+            ctx._stages.handler_close()
 
     @staticmethod
     def _call_sync(bound: Callable[..., Any], call_kwargs: Dict[str, Any], gpu_index: int) -> Any:
@@ -8213,6 +8416,13 @@ class Executor:
         if job.finished:
             return
         job.finished = True
+        # th#1111: stamp the per-stage breakdown on EVERY terminal path (ok,
+        # deadline, cancel, error) — a slow request's stages are exactly the
+        # ones worth seeing.
+        metrics = kw.get("metrics")
+        if isinstance(metrics, pb.JobMetrics) and job.ctx is not None:
+            metrics.stage_ms.update(stage_ms_for_metrics(
+                getattr(job.ctx, "_stages", None), metrics.runtime_ms))
         terminal_status = (
             pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
             if job.superseded

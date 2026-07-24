@@ -584,6 +584,22 @@ class Lifecycle:
                 pb.DESIRED_INTENT_KIND_MATERIALIZE,
                 ref=ref,
             )
+            # pgw#638 (REVERTED, evidence in the tracker): removing this
+            # tenant-idle gate is the obvious fix for the measured staging
+            # starvation (4.7 GB staged downloads stuck at 0% for minutes on
+            # busy workers) and it is WRONG. The pass's first act is to fence
+            # a stale resident identity for this ref, and a tenant job may
+            # legitimately be re-materializing OLDER bytes concurrently; with
+            # the gate gone the fence races the job's load and the worker
+            # reports the stale identity until the next HelloAck (th#1066
+            # drift). Proven by
+            # tests/test_p2_residency_reconcile.py::
+            # test_mutable_tag_move_fences_events_by_digest_and_generation,
+            # which does not converge within 10s without this gate — and is
+            # NOT fixable by re-verifying after the job, because handle_run_job
+            # returns before the job's load completes. The real fix is
+            # pgw#641 Stage 4: transfers become their own tasks with their own
+            # lifecycle, so staging never sits inside this serialized pass.
             await self.intent_registry.reported_await(
                 intent_id,
                 self.executor.wait_idle(),
@@ -716,6 +732,10 @@ class Lifecycle:
             # A tenant request preempts unrelated background transfer/setup.
             # Re-running desired state after idle is cheap: local refs and
             # ready instances short-circuit through the existing dedupe paths.
+            # pgw#638 note: this cancel is LOAD-BEARING for the mutable-tag
+            # identity fence — see the reverted-gate comment in
+            # _reconcile_pass. Making downloads survive preemption needs
+            # transfers to be first-class tasks (pgw#641 Stage 4).
             self._cancel_residency_reconcile()
             try:
                 await self.executor.handle_run_job(msg.run_job)

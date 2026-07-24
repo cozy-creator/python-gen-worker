@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 from ..api.errors import CanceledError
 from ..api.types import Asset, Tensors
+from ..stage_timing import stage_of
 from ._helpers import _enforce_output_file_size_limit, _infer_mime_type, _infer_tensors_format, _normalize_output_ref
 
 if TYPE_CHECKING:
@@ -165,10 +166,13 @@ class _RequestOutputStream:
             if self._stream_remote:
                 finalize_t0 = time.monotonic()
                 try:
-                    if self._repo_job_scope is not None:
-                        self._result = self._finalize_checkpoint_commit()
-                    else:
-                        self._result = self._finalize_presigned_upload()
+                    # th#1111: the upload tail, promoted from the
+                    # finalize_elapsed_s log line into JobMetrics.stage_ms.
+                    with stage_of(self._ctx, "upload"):
+                        if self._repo_job_scope is not None:
+                            self._result = self._finalize_checkpoint_commit()
+                        else:
+                            self._result = self._finalize_presigned_upload()
                 except CanceledError:
                     raise
                 except Exception as exc:

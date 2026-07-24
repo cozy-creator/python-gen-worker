@@ -88,7 +88,7 @@ def _generate(pipe: Flux2KleinPipeline, ctx: RequestContext, p: KleinTurboInput)
     # WEBP q90: measured visually identical to PNG for these outputs at ~15% of
     # the bytes and ~2.7x less encode CPU (#382) — the upload, not the GPU,
     # dominated per-image latency with PNG.
-    asset = gw_io.write_image(ctx, "image", image, format="webp", as_type=ImageAsset)
+    asset = gw_io.write_image(ctx, "image", image, as_type=ImageAsset)
     return KleinTurboOutput(image=asset, width=image.width, height=image.height, seed=p.seed)
 
 
