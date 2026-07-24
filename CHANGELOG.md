@@ -76,22 +76,6 @@
   deliberately does not perform — endpoints call that one mid-pipeline and in
   N-image loops, where a terminal GPU-slot release would be wrong.
 
-## 0.57.0 (2026-07-24)
-
-- **gw#640/th#1077: a worker fatal now reaches the HUB, not just pod stdout.**
-  `entrypoint._log_worker_fatal` wrote the exception class, message and
-  traceback to stdout only; RunPod exposes no container-logs API, so every
-  cloud-only worker death was unobservable by construction (six live th#1085
-  runs burned on a crash whose traceback existed and could not be read). The
-  fatal is now also dialed to the orchestrator over a fresh Connect stream,
-  reusing the `HardwareUnsuitable` carrier with `reason_class="worker_fatal"`
-  — the hub already persists that as a durable `pod_events` row, so this
-  needs NO proto change and NO hub redeploy and works against every hub pin
-  already deployed. Additionally, the run loop ending WITHOUT a hub Drain or
-  a shutdown signal is now itself a reported fatal (`UnexpectedWorkerExit`)
-  instead of a clean, silent `exit 0` — that silent exit was exactly the
-  gw#640 signature the hub could only see as a young-worker death.
-
 - **pgw#636: hot-GPU mandate — pack VRAM with checkpoints.**
   `Resources.vram_gb` is now purely a placement minimum, never a per-load
   reservation: `_make_room_for` estimates a never-seen pick from its wire
@@ -143,6 +127,73 @@
   thread stacks to stderr (`faulthandler`, allocation-free, always armed) —
   the pod-side forensic surface that was missing during the 2026-07-24
   incident. Getting a shell into the pod to send it is still open.
+
+## 0.56.3 (2026-07-24)
+
+- **gw#640: a message-handler exception is no longer indistinguishable from a
+  dropped socket — and this is the bug the last two instrument releases were
+  hunting.** `transport._recv_loop` awaits the handlers inline, so a raise while
+  handling (say) a `RunJob` propagated into `Transport.run()`'s catch-all and was
+  logged as `connection to <addr> failed`. The worker then reconnected with
+  backoff, forever; the hub, whose only death signal is a closed stream, reported
+  `young worker death lifetime=1s` and `requeue_exhausted: workers kept dying
+  mid-job`. The process was alive the entire time — which is why 0.56.1's
+  `worker_fatal`/`UnexpectedWorkerExit` and 0.56.2's post-mortem supervisor all
+  stayed silent across ten live th#1085 cold-boot runs: nothing ever escaped to
+  them and nothing ever exited. Proof from run 10: one unchanging
+  `worker_session_id`, `state_seq` climbing 14 -> 146, and six byte-identical
+  (process-cached) boot-canary payloads.
+  `HandlerError` now wraps handler raises with the offending message kind,
+  `run()` catches it as its own class, and `_report_handler_failure` dials the
+  existing `worker_fatal` carrier with `phase=message_handler:<kind>` plus the
+  traceback — a durable `pod_events` row on every hub pin already deployed, no
+  proto change and no hub redeploy. Deduped per (message kind, exception class)
+  so the reconnect loop cannot re-dial the same fault every cycle. Reconnect
+  behaviour is deliberately unchanged: this release unmasks the fault, it does
+  not change liveness policy.
+
+## 0.56.2 (2026-07-24)
+
+- **gw#640: a post-mortem supervisor names the death that happens BELOW
+  Python.** 0.56.1 instruments every death Python can observe; th#1085 run 9
+  produced six process restarts and ZERO `worker_fatal` rows, which leaves
+  exactly one class — a signal (cgroup OOM `SIGKILL`, `SIGSEGV` in a C
+  extension, an external kill). No `except` catches that and no in-process
+  reporter can dial out after it, so the reporter is now the NEXT process.
+  `python -m gen_worker.entrypoint` forks a supervisor before its heavy
+  imports: the parent stays a bare interpreter (the OOM killer picks the fat
+  child, not the reporter), forwards signals, and on an abnormal exit reports
+  `WIFSIGNALED`/`WTERMSIG`/`WCOREDUMP` plus `memory.max` vs `memory.current`
+  vs `memory.peak`, `cpu.max`, and the `memory.events` `oom_kill` counter
+  delta through the same `worker_fatal` carrier — a durable `pod_events` row
+  on any already-deployed hub, queryable with `class='hardware_unsuitable'
+  AND reason='worker_fatal'`. A boot record on the container filesystem covers
+  the case where the whole cgroup goes (`memory.oom.group`) or the container
+  is restarted: the next boot finds the unfinished record and reports it.
+  Exit status is propagated unchanged, so container-restart semantics are
+  identical; `GEN_WORKER_SUPERVISOR=0` opts out.
+- **gw#640: the host canary reports the cores this container actually owns.**
+  It shipped `os.cpu_count()` — the HOST's count, 32 on a pod that owns 4 —
+  next to a cgroup-derived `ram_total_gb` of 14.9 GB, a "32 vCPUs / 14.9 GB"
+  report that misdirected the th#1085 investigation. `vcpus` is now
+  `min(host cores, sched_getaffinity, cpu.max quota)`, and the multi-core
+  throughput probe runs that many threads instead of oversubscribing a quota.
+
+## 0.56.1 (2026-07-24)
+
+- **gw#640/th#1077: a worker fatal now reaches the HUB, not just pod stdout.**
+  `entrypoint._log_worker_fatal` wrote the exception class, message and
+  traceback to stdout only; RunPod exposes no container-logs API, so every
+  cloud-only worker death was unobservable by construction (six live th#1085
+  runs burned on a crash whose traceback existed and could not be read). The
+  fatal is now also dialed to the orchestrator over a fresh Connect stream,
+  reusing the `HardwareUnsuitable` carrier with `reason_class="worker_fatal"`
+  — the hub already persists that as a durable `pod_events` row, so this
+  needs NO proto change and NO hub redeploy and works against every hub pin
+  already deployed. Additionally, the run loop ending WITHOUT a hub Drain or
+  a shutdown signal is now itself a reported fatal (`UnexpectedWorkerExit`)
+  instead of a clean, silent `exit 0` — that silent exit was exactly the
+  gw#640 signature the hub could only see as a young-worker death.
 
 ## 0.56.0 (2026-07-24)
 
