@@ -16,6 +16,10 @@ B. pgw#641 Stage 2 — admission leases. A job's refs are victim-protected
 C. pgw#647 — concurrency contract. Handlers on ONE live instance are
    single-flight by default (mutable graph buffers); ``reentrant=True`` is
    the explicit opt-in, classes only.
+D. pgw#652 — activation-aware admission. Concurrency costs transient VRAM
+   (latents + attention workspace), not only weights. The claim is LEARNED
+   from measured peaks and SUMS across concurrent leases; nothing is
+   declared by an endpoint.
 """
 
 from __future__ import annotations
@@ -328,3 +332,162 @@ def test_reentrant_is_a_class_only_declaration() -> None:
             return _SfOut(y="ok")
 
     assert extract_specs(Unmarked)[0].reentrant is False
+
+
+# ---------------------------------------------------------------------------
+# D. Activation-aware admission (pgw#652).
+# ---------------------------------------------------------------------------
+
+
+def test_activation_is_learned_only_from_measurement() -> None:
+    """Nothing is reserved on the strength of a declaration: an unmeasured
+    function claims 0. The hint then jumps UP instantly (under-reserving is
+    what OOMs) and decays gradually, so one outlier does not tax residency
+    depth forever."""
+    res = _budget_residency(24)
+    assert res.activation_hint("sdxl.generate") == 0
+
+    assert res.record_activation("sdxl.generate", 3 * _GiB) == 3 * _GiB
+    # A bigger observation is adopted immediately, in full.
+    assert res.record_activation("sdxl.generate", 9 * _GiB) == 9 * _GiB
+    # Smaller ones bleed the high-water down instead of dropping to it.
+    after_one = res.record_activation("sdxl.generate", 1 * _GiB)
+    assert after_one == 9 * _GiB - (9 * _GiB) // 8  # one 12.5% bleed, not a drop
+    for _ in range(60):
+        res.record_activation("sdxl.generate", 1 * _GiB)
+    assert res.activation_hint("sdxl.generate") == 1 * _GiB
+
+    # An unnamed key is not a silent global bucket.
+    assert res.record_activation("", 5 * _GiB) == 0
+    assert res.activation_hint("") == 0
+
+
+def test_activation_claims_sum_across_concurrent_leases() -> None:
+    """Weight claims MAX across leases (one future load serves both jobs);
+    activation claims SUM (each concurrent request allocates its own). The
+    live pgw#652 hazard: interleaving OOMs the moment it starts working."""
+    res = _budget_residency(24)
+    res.track_vram("weights", _FakeModule(), vram_bytes=12 * _GiB)
+    assert res.free_vram_bytes() == 12 * _GiB
+
+    # Two concurrent requests on the same resident weights: no weight claim
+    # at all (already booked), but 3 GiB of activation each.
+    l1 = res.admit({"weights": 12 * _GiB}, activation_bytes=3 * _GiB)
+    l2 = res.admit({"weights": 12 * _GiB}, activation_bytes=3 * _GiB)
+    try:
+        # 12 free - 6 claimed = 6 available (the resident weights are leased,
+        # hence not reclaimable). 4 + 2 margin fits; 5 + 2 does not.
+        assert res.fits({"other": 4 * _GiB}) is True
+        assert res.fits({"other": 5 * _GiB}) is False
+        # A THIRD request must count its own activation alongside its weights.
+        assert res.fits({"other": 4 * _GiB}, activation_bytes=1 * _GiB) is False
+    finally:
+        l1.release()
+        l2.release()
+    assert res.fits({"other": 5 * _GiB}) is True
+
+
+def test_make_room_protects_other_requests_activation_not_its_own() -> None:
+    """A load must not eat the workspace a running request is about to use —
+    but it must not double-count its OWN activation either (already allocated,
+    hence already visible in the measured free bytes)."""
+    res = _budget_residency(24)
+    res.track_vram("idle-victim", _FakeModule(), vram_bytes=6 * _GiB)
+    running = res.admit({"hot": 0}, activation_bytes=4 * _GiB)
+    loader = res.admit({"incoming": 0}, activation_bytes=4 * _GiB)
+    try:
+        # 18 GiB free; the OTHER request's 4 GiB workspace is off limits, the
+        # loader's own is not => 14 GiB usable, so 11 + 2 needs no demotion...
+        assert res.make_room(11 * _GiB, for_refs=("incoming",)) is True
+        assert res.tier("idle-victim") is Tier.VRAM
+        # ...but 13 + 2 does, and the unleased idle entry is the victim.
+        assert res.make_room(13 * _GiB, for_refs=("incoming",)) is True
+        assert res.tier("idle-victim") is Tier.RAM
+    finally:
+        running.release()
+        loader.release()
+
+
+def test_negative_activation_delta_is_not_evidence() -> None:
+    # Weights evicted mid-job can put the peak BELOW the baseline. That is a
+    # measurement artifact, not a 0-byte workspace: clamp, never learn junk.
+    res = _budget_residency(24)
+    assert res.record_activation("sdxl.generate", -5 * _GiB) == 0
+    assert res.activation_hint("sdxl.generate") == 0
+
+
+class _FakeVram:
+    """torch.cuda boundary fake: a card whose allocator reports a baseline at
+    handler start and a higher peak once the handler has run."""
+
+    def __init__(self, baseline: int, peak: int) -> None:
+        self.baseline, self.peak = baseline, peak
+
+    def is_available(self) -> bool:
+        return True
+
+    def device_count(self) -> int:
+        return 1
+
+    def current_device(self) -> int:
+        return 0
+
+    def mem_get_info(self, device: int = 0) -> Tuple[int, int]:
+        return 24 * _GiB - self.baseline, 24 * _GiB
+
+    def memory_allocated(self, device: Any = None) -> int:
+        return self.baseline
+
+    def max_memory_allocated(self, device: Any = None) -> int:
+        return self.peak
+
+    def reset_peak_memory_stats(self, device: Any = None) -> None:
+        return None
+
+
+def test_executor_learns_activation_from_the_measured_peak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The REAL dispatch path teaches the store: run a job, and the function's
+    activation hint becomes (measured peak - what was already allocated when
+    it took the GPU). No test re-implements that subtraction — the executor
+    does it and the assertion reads the store."""
+    torch = pytest.importorskip("torch")
+    fake = _FakeVram(baseline=6 * _GiB, peak=9 * _GiB)
+    for name in ("is_available", "device_count", "current_device", "mem_get_info",
+                 "memory_allocated", "max_memory_allocated", "reset_peak_memory_stats"):
+        monkeypatch.setattr(torch.cuda, name, getattr(fake, name))
+
+    @endpoint(resources=Resources(gpu=True))
+    class ActivationEp:
+        def setup(self) -> None:
+            pass
+
+        def generate(self, ctx, payload: _SfIn) -> _SfOut:
+            return _SfOut(y="ok")
+
+    specs = extract_specs(ActivationEp)
+    sent: List[pb.WorkerMessage] = []
+
+    async def _send(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    ex = Executor(specs, _send)
+    res = ex.store.residency
+    assert res.activation_hint(specs[0].name) == 0
+
+    async def run() -> None:
+        await ex.handle_run_job(pb.RunJob(
+            request_id="act-1", attempt=1, function_name=specs[0].name,
+            input_payload=msgspec.msgpack.encode(_SfIn())))
+        deadline = asyncio.get_running_loop().time() + 30.0
+        while not any(m.WhichOneof("msg") == "job_result" for m in sent):
+            if asyncio.get_running_loop().time() > deadline:
+                pytest.fail(f"job did not finish: {sent}")
+            await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    result = [m.job_result for m in sent if m.WhichOneof("msg") == "job_result"][0]
+    assert result.status == pb.JOB_STATUS_OK
+    # 9 GiB peak - 6 GiB already allocated = a 3 GiB workspace, learned.
+    assert res.activation_hint(specs[0].name) == 3 * _GiB

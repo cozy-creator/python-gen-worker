@@ -223,13 +223,24 @@ class Lease:
     additionally carry a byte RESERVATION so concurrent admissions cannot
     double-book the same free bytes; a reservation is consumed the moment
     the ref actually books VRAM, and any unconsumed remainder dies with the
-    lease."""
+    lease.
 
-    __slots__ = ("_registry", "refs", "_released")
+    A lease also carries an ACTIVATION reservation (pgw#652): the transient
+    VRAM a running request allocates on top of its weights. Unlike weight
+    reservations — which are MAXed per ref because two jobs needing the same
+    checkpoint share one future load — activation SUMS across live leases:
+    every concurrent request allocates its own latents and attention
+    workspace. It is never consumed, only released, because it is transient
+    by definition."""
 
-    def __init__(self, registry: "Residency", refs: Tuple[str, ...]) -> None:
+    __slots__ = ("_registry", "refs", "activation", "_released")
+
+    def __init__(
+        self, registry: "Residency", refs: Tuple[str, ...], activation: int = 0,
+    ) -> None:
         self._registry = registry
         self.refs = refs
+        self.activation = max(0, int(activation))
         self._released = False
 
     @property
@@ -283,6 +294,11 @@ class Residency:
         # and it is consumed by the ref's actual track_vram booking.
         self._leases: Dict[int, Lease] = {}
         self._ref_reservations: Dict[str, Dict[int, int]] = {}
+        # Learned activation footprints (pgw#652): key -> observed transient
+        # VRAM high-water. Populated ONLY by measurement (record_activation);
+        # an unmeasured key claims nothing, so nothing is reserved on the
+        # strength of a declaration. No endpoint knob feeds this.
+        self._activation: Dict[str, int] = {}
         log_ram_budget_once(floor_gb=_effective_ram_floor_gb())
 
     # ---- events -------------------------------------------------------------
@@ -723,11 +739,47 @@ class Residency:
             total += max(by_lease.values())
         return total
 
-    def admit(self, sizes: Mapping[str, int]) -> Lease:
+    def _outstanding_activation_bytes(self, exclude_lease_id: int = 0) -> int:
+        """Transient VRAM every OTHER live request will allocate. SUMMED, not
+        maxed: concurrency costs activation per request (pgw#652)."""
+        return sum(
+            lease.activation for lid, lease in self._leases.items()
+            if lid != exclude_lease_id
+        )
+
+    def record_activation(self, key: str, observed_bytes: int) -> int:
+        """Learn one request's measured transient VRAM (peak allocated minus
+        what was already allocated when the handler took the GPU).
+
+        The stored hint is a DECAYING high-water: it jumps to a larger
+        observation immediately (under-reserving is what OOMs) and bleeds off
+        ~12% per subsequent request otherwise, so one 4096^2 outlier does not
+        permanently tax residency depth for a stream of 512^2 requests. Purely
+        observational — there is no declared value to fall back to."""
+        key = str(key or "")
+        if not key:
+            return 0
+        observed = max(0, int(observed_bytes))
+        with self._lock:
+            prev = self._activation.get(key, 0)
+            hint = max(observed, prev - prev // 8)
+            self._activation[key] = hint
+            return hint
+
+    def activation_hint(self, key: str) -> int:
+        """Learned transient VRAM for ``key``; 0 until it has been measured."""
+        with self._lock:
+            return self._activation.get(str(key or ""), 0)
+
+    def admit(self, sizes: Mapping[str, int], *, activation_bytes: int = 0) -> Lease:
         """Take an admission lease over one job's refs (pgw#641 Stage 2).
 
         ``sizes`` maps ref -> expected VRAM bytes (0 = unknown; the ref is
-        still lease-protected, it just books no reservation). Admission never
+        still lease-protected, it just books no reservation).
+        ``activation_bytes`` is the LEARNED transient footprint of this
+        request (pgw#652) — 0 until measured — reserved for the lease's whole
+        life so concurrent requests cannot each assume the same headroom and
+        OOM once interleaving starts working. Admission never
         REFUSES here — the adaptive-fit ladder downstream absorbs genuine
         overcommit — but from this moment on (a) no eviction/demotion path
         may pick any named ref as a victim, and (b) concurrent admissions
@@ -735,7 +787,11 @@ class Residency:
         :meth:`make_room`), so two jobs can no longer book the same free
         bytes and OOM each other mid-load."""
         with self._lock:
-            lease = Lease(self, tuple(dict.fromkeys(str(r) for r in sizes if str(r))))
+            lease = Lease(
+                self,
+                tuple(dict.fromkeys(str(r) for r in sizes if str(r))),
+                activation=activation_bytes,
+            )
             lid = id(lease)
             self._leases[lid] = lease
             for ref in lease.refs:
@@ -767,13 +823,15 @@ class Residency:
         is no longer outstanding for ANY lease."""
         self._ref_reservations.pop(ref, None)
 
-    def fits(self, sizes: Mapping[str, int]) -> bool:
+    def fits(self, sizes: Mapping[str, int], *, activation_bytes: int = 0) -> bool:
         """Cheap honest admission query: could this ref set be served now —
-        counting measured free VRAM, minus other jobs' outstanding claims,
-        plus what LRU demotion of unprotected entries could reclaim. Read
-        only; takes nothing."""
+        counting measured free VRAM, minus other jobs' outstanding weight and
+        activation claims, plus what LRU demotion of unprotected entries could
+        reclaim. ``activation_bytes`` is this request's own transient
+        footprint, which must fit alongside its weights. Read only; takes
+        nothing."""
         with self._lock:
-            needed = 0
+            needed = max(0, int(activation_bytes))
             for ref, expect in sizes.items():
                 e = self._entries.get(str(ref))
                 if e is not None and e.tier is Tier.VRAM:
@@ -786,6 +844,7 @@ class Residency:
                 return True
             reserved = self._outstanding_reserved_bytes(
                 exclude_refs=frozenset(str(r) for r in sizes))
+            reserved += self._outstanding_activation_bytes()
             ref_leases = self._ref_leases
             reclaimable = sum(
                 e.vram_bytes for e in self._entries.values()
@@ -829,12 +888,22 @@ class Residency:
         Free bytes CLAIMED by other admissions' outstanding reservations
         (pgw#641 Stage 2) do not count as available; ``for_refs`` names the
         refs this call is making room FOR, whose own reservations are the
-        very demand being satisfied and are therefore excluded."""
+        very demand being satisfied and are therefore excluded. The same
+        exclusion identifies the CALLING lease, whose activation claim
+        (pgw#652) is likewise not subtracted — it is either already allocated
+        and thus already visible in the measured free bytes, or it is this
+        job's own future demand. Other in-flight requests' activation is
+        subtracted: their latents and attention workspace are real bytes this
+        load must not eat."""
         exclude = frozenset(str(r) for r in for_refs)
 
         def _headroom() -> int:
             with self._lock:
                 reserved = self._outstanding_reserved_bytes(exclude_refs=exclude)
+                reserved += sum(
+                    lease.activation for lease in self._leases.values()
+                    if not (exclude and exclude.intersection(lease.refs))
+                )
             return self.free_vram_bytes() - reserved
 
         target = int(needed_bytes) + _VRAM_MARGIN_BYTES

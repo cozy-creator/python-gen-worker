@@ -4042,6 +4042,16 @@ class Executor:
 
         return {ref: _expect(ref) for ref in self._job_pin_refs(spec, slots)}
 
+    @staticmethod
+    def _activation_key(spec: EndpointSpec) -> str:
+        """Key the learned activation footprint by FUNCTION, not by pick
+        (pgw#652). Transient VRAM is a property of the shape and the graph the
+        function runs — a 1024^2 SDXL denoise costs the same latents and
+        attention workspace whichever checkpoint is bound — so keying by
+        function means a never-seen checkpoint inherits a real measurement
+        instead of reserving nothing on its first request."""
+        return spec.name
+
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
         """Instance-group record for ``spec``, created on first sight for
         DERIVED (per-pick) specs. Never removed: records are tiny and the
@@ -7541,7 +7551,14 @@ class Executor:
         # exactly the lane it executes, at call time.
         try:
             with self.store.residency.admit(
-                self._job_admission_sizes(spec, routed, run)
+                self._job_admission_sizes(spec, routed, run),
+                # pgw#652: weights are not the whole cost of admitting a
+                # request — a concurrent 1024^2 diffusion request also holds
+                # GBs of latents/attention workspace. The claim is LEARNED
+                # from this function's measured peaks (0 until measured), so
+                # no endpoint declares it.
+                activation_bytes=self.store.residency.activation_hint(
+                    self._activation_key(spec)),
             ):
                 await self._run_job_pinned(job, run, payload, routed)
         finally:
@@ -7729,6 +7746,7 @@ class Executor:
         queue_ms = int((time.monotonic() - job.admitted_at) * 1000)
         lease: Optional[_GpuSlotLease] = None
         started = time.monotonic()
+        alloc_at_start = 0
         try:
             if needs_gpu:
                 permit_t0 = time.monotonic()
@@ -7761,6 +7779,11 @@ class Executor:
                         torch.cuda.reset_peak_memory_stats(gpu_index)
                     except Exception:
                         pass
+                    # pgw#652: the baseline the peak is measured AGAINST.
+                    # peak - baseline is this request's transient (activation)
+                    # footprint, as opposed to the resident weights that were
+                    # already allocated when it took the GPU.
+                    alloc_at_start = self._vram_allocated()
             # Last execution fence: no adapter mutation or tenant handler has
             # run yet. The repeated check catches a replacement between
             # scheduler assignment/intake and this GPU turn.
@@ -7838,6 +7861,14 @@ class Executor:
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output, lane=job.lane,
                                     runtime_terms=_runtime_term_values(spec, payload))
+            # pgw#652: the request just told us what a concurrent one costs.
+            # Only a completed run is evidence — a cancelled or OOM-killed job
+            # never reached its real peak.
+            if metrics.peak_vram_bytes > 0:
+                self.store.residency.record_activation(
+                    self._activation_key(spec),
+                    metrics.peak_vram_bytes - alloc_at_start,
+                )
             handler_done = time.monotonic()
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
