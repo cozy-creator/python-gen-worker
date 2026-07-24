@@ -23,7 +23,7 @@ from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
 
 
-def _hf_access_error_classes() -> tuple[type, ...]:
+def _hf_access_error_classes() -> tuple[type[Exception], ...]:
     from huggingface_hub.errors import (
         EntryNotFoundError,
         GatedRepoError,

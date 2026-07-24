@@ -47,6 +47,35 @@
   RunJob `config_generation`+`config_params` (msgpack) stamped per dispatch,
   and StateDelta `observed_config_generation` echo.
 
+## 0.53.0 (2026-07-24)
+
+- **th#1084 (pgw side): input-caused refusals raise ValidationError ->
+  INVALID.** RepoRefusal + SourceIncludeError are ValidationErrors; HF
+  repo-access errors wrap as typed input refusals at the convert ingest
+  boundary with the class name preserved; an all-input-rejection "no
+  publishable flavor" aggregate is INVALID. Bad user repos fail only their
+  request — never the release.
+
+## 0.52.2 (2026-07-24)
+
+- **gw#627 live fix 2: normalization rejects legacy attn-processor
+  converter output.** diffusers' non-diffusers converter turns kohya-flat
+  sdxl attention keys into legacy `…attn1.processor.to_q_lora.down.weight`
+  names that match no real module, failing the whole curated adapter typed.
+  `normalize_adapter_state_dict` now falls back to the raw keys (which
+  resolve directly against module paths) whenever the converted dict
+  carries `.processor.` names.
+
+## 0.52.1 (2026-07-24)
+
+- **gw#627 live fix: `enable_compiled` skips the branch lane on slot
+  objects with no compile target.** The arming path runs for every
+  worker-loaded setup slot; a bare component slot (sdxl's standalone
+  AutoencoderKL vae) resolves none of `cfg.targets`, and `apply_lora_lane`'s
+  no-denoiser error broke the whole model load (release-broken streak on
+  the first gw#627 sdxl deploy). The loud misconfig error remains for real
+  compile targets.
+
 ## 0.52.0 (2026-07-24)
 
 - **pgw#628: residency reporting v2 — content-addressed idempotent
@@ -99,6 +128,20 @@
   picks (th#697 contract), and every desired-instance failure — including
   pre-setup refusals — emits MODEL_STATE_FAILED for the instance refs so a
   stalled warm is fleet-visible.
+
+## 0.50.1 (2026-07-23)
+
+- **pgw#626 / th#1059 twin: mandatory-lane admission follows the hub-resolved
+  EXECUTION lane, not the flavor token.** The `#fp8-w8a8` flavor names the
+  STORAGE format; SDXL's mixed variant serves the w8a16 upcast lane (plain
+  graphs). `_validate_required_compile` (and every other mandatory-lane
+  derivation) refused hub dispatches for the mixed lane with
+  `required_compile_missing` — the worker half of the 2026-07-23 sdxl P0
+  (Paul's live jobs failed at 21:54Z). Mandatory-ness now derives from the
+  HelloAck resolution lane when known (w8a8/w4a4 activations stay
+  fail-closed; plain activations admit and JIT-warm like bf16); the flavor
+  token remains the fallback without lane evidence, and conflicting
+  evidence fails closed.
 
 ## 0.48.2 (2026-07-23)
 

@@ -3066,7 +3066,7 @@ class Executor:
             else _CompileObjectCandidate(item, set(all_slots))
             for item in objects
         ]
-        requested_lane = _mandatory_lane_of(
+        requested_lane = self._mandatory_lane_of_bound(
             wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
         )
         active_artifacts = active_artifacts or {}
@@ -3171,7 +3171,7 @@ class Executor:
             target_quant_lane = next(
                 (lane for lane in _MANDATORY_LANES
                  if target.pipeline_weight_lane.startswith(lane)), "")
-            candidate_requested_lane = _mandatory_lane_of(
+            candidate_requested_lane = self._mandatory_lane_of_bound(
                 ref for _slot, ref, _digest in bindings)
             mandatory_quant = bool(target_quant_lane)
             if (
@@ -3332,7 +3332,7 @@ class Executor:
                 if cfg is None or not family:
                     continue
                 bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-                want_lane = _mandatory_lane_of(
+                want_lane = self._mandatory_lane_of_bound(
                     wire_ref(binding) for binding in spec.models.values()
                 )
                 lanes = (want_lane,) if want_lane else ("", "fp8-hooks")
@@ -3362,6 +3362,47 @@ class Executor:
                 return rec, target
         return None
 
+    def _resolved_mandatory_lane(self, ref: str) -> str:
+        """th#1059 twin (hub: ``mandatoryTracedLane``): the flavor token names
+        the STORAGE format, not the execution. Mandatory-ness follows the
+        hub-resolved EXECUTION lane whenever one is known for this ref —
+        SDXL's mixed variant is ``#fp8-w8a8`` storage serving the w8a16
+        upcast lane (plain graphs, never scaled_mm), while qwen's
+        ``#fp8-w8a8`` executes real w8a8. Without lane evidence the flavor
+        token remains the fallback; conflicting evidence fails closed to the
+        mandatory reading.
+        """
+        from .models import lanes as lanespec
+
+        ref = (ref or "").strip()
+        known = False
+        mandatory = ""
+        for declared, pick in (self._model_resolutions or {}).items():
+            resolved_ref = (pick[0] or declared).strip()
+            lane_str = (pick[2] or "").strip()
+            if not lane_str or ref not in (declared.strip(), resolved_ref):
+                continue
+            try:
+                lane = lanespec.parse_lane(lane_str)
+            except ValueError:
+                continue
+            known = True
+            if lane.activation == lanespec.ACT_W8A8:
+                mandatory = "w8a8"
+            elif lane.activation == lanespec.ACT_W4A4:
+                mandatory = "w4a4"
+        if known:
+            return mandatory
+        return _ref_mandatory_lane(ref)
+
+    def _mandatory_lane_of_bound(self, refs: typing.Iterable[str]) -> str:
+        """Resolution-aware :func:`_mandatory_lane_of` (th#1059)."""
+        for ref in refs:
+            lane = self._resolved_mandatory_lane(ref)
+            if lane:
+                return lane
+        return ""
+
     def _validate_required_compile(
         self, spec: EndpointSpec, run: pb.RunJob,
     ) -> None:
@@ -3373,7 +3414,7 @@ class Executor:
         than execute on a merely same-family pipeline.
         """
         setup_slots = self._setup_slots(spec)
-        want_lane = _mandatory_lane_of(
+        want_lane = self._mandatory_lane_of_bound(
             wire_ref(spec.models[slot]) for slot in setup_slots
         )
         if not run.HasField("required_compile"):
@@ -4031,7 +4072,7 @@ class Executor:
                         rec.stale = True
                         break
             if rec.ready and not rec.stale and spec.compile is not None:
-                mandatory_lane = _mandatory_lane_of(
+                mandatory_lane = self._mandatory_lane_of_bound(
                     wire_ref(spec.models[slot])
                     for slot in self._setup_slots(spec)
                 )
@@ -5796,7 +5837,7 @@ class Executor:
         # checkpoints. Snapshot maps also contain attached cells and may carry
         # unrelated/prepositioned models, so they must not choose the lane.
         model_refs = [wire_ref(binding) for binding in spec.models.values()]
-        want_lane = _mandatory_lane_of(model_refs)
+        want_lane = self._mandatory_lane_of_bound(model_refs)
         want_bucket = int(getattr(spec.compile, "lora_bucket", 0) or 0)
         # th#883 pull-by-key: a key-flavored cell is selected only when its
         # key is one this runtime computed for itself (the same candidates
