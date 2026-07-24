@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.56.3 (2026-07-24)
+
+- **gw#640: a message-handler exception is no longer indistinguishable from a
+  dropped socket — and this is the bug the last two instrument releases were
+  hunting.** `transport._recv_loop` awaits the handlers inline, so a raise while
+  handling (say) a `RunJob` propagated into `Transport.run()`'s catch-all and was
+  logged as `connection to <addr> failed`. The worker then reconnected with
+  backoff, forever; the hub, whose only death signal is a closed stream, reported
+  `young worker death lifetime=1s` and `requeue_exhausted: workers kept dying
+  mid-job`. The process was alive the entire time — which is why 0.56.1's
+  `worker_fatal`/`UnexpectedWorkerExit` and 0.56.2's post-mortem supervisor all
+  stayed silent across ten live th#1085 cold-boot runs: nothing ever escaped to
+  them and nothing ever exited. Proof from run 10: one unchanging
+  `worker_session_id`, `state_seq` climbing 14 -> 146, and six byte-identical
+  (process-cached) boot-canary payloads.
+  `HandlerError` now wraps handler raises with the offending message kind,
+  `run()` catches it as its own class, and `_report_handler_failure` dials the
+  existing `worker_fatal` carrier with `phase=message_handler:<kind>` plus the
+  traceback — a durable `pod_events` row on every hub pin already deployed, no
+  proto change and no hub redeploy. Deduped per (message kind, exception class)
+  so the reconnect loop cannot re-dial the same fault every cycle. Reconnect
+  behaviour is deliberately unchanged: this release unmasks the fault, it does
+  not change liveness policy.
+
 ## 0.56.2 (2026-07-24)
 
 - **gw#640: a post-mortem supervisor names the death that happens BELOW
