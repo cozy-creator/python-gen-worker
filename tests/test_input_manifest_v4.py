@@ -1007,6 +1007,12 @@ def test_protocol_version_is_5() -> None:
     assert pb.PROTOCOL_VERSION_CURRENT == 5
 
 
+def test_run_job_org_field_hard_cut() -> None:
+    fields = pb.RunJob.DESCRIPTOR.fields_by_name
+    assert fields["org"].number == 6
+    assert "tenant" not in fields
+
+
 def test_run_job_input_assets_field_descriptor() -> None:
     # 15, not 14: th#913 claimed RunJob.lane=14 on chaos before the v4 landing.
     fd = pb.RunJob.DESCRIPTOR.fields_by_name["input_assets"]

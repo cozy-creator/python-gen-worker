@@ -7415,7 +7415,7 @@ class Executor:
             request_id=run.request_id,
             job_id=job_id,
             emitter=self._make_ctx_emitter(job),
-            owner=run.tenant or None,
+            owner=run.org or None,
             invoker_id=run.invoker_id or None,
             timeout_ms=timeout_ms or None,
             file_api_base_url=self.file_base_url or None,

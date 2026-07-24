@@ -673,7 +673,7 @@ message RunJob {
   string function_name = 3;
   bytes  input_payload = 4; // canonical MessagePack input; stored Asset refs remain opaque
   int64  timeout_ms = 5;    // execution deadline; 0 = no explicit timeout
-  string tenant  = 6;    // invoking owner (org/user slug)
+  string org     = 6;    // canonical UUID of the org that owns job outputs
   string invoker_id = 7;    // surfaced read-only as ctx.invoker_id
   string capability_token = 8; // per-job worker capability token for tensorhub HTTP calls
   OutputMode output_mode = 9;  // client's inline-vs-url preference for media outputs

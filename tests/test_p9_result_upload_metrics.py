@@ -78,14 +78,22 @@ def test_large_output_ships_blob_ref_with_typed_usage_intact() -> None:
     INLINE_RESULT_MAX_BYTES) via a real presigned upload round trip —
     JobMetrics' token usage is computed from the raw handler output BEFORE
     that serialization decision, so it survives regardless of wire form."""
+    org_id = "00000000-0000-0000-0000-000000000001"
     httpd, base_url = _serve()
     try:
         with hub_double(file_base_url=base_url) as (scheduler, _harness):
             conn = scheduler.wait_connection(0)
             conn.wait_for(is_ready)
-            conn.send(run_job=pb.RunJob(
-                request_id="r-large", attempt=1, function_name="large-usage",
-                input_payload=_payload(), tenant="acme", capability_token="cap-token"))
+            conn.send(
+                run_job=pb.RunJob(
+                    request_id="r-large",
+                    attempt=1,
+                    function_name="large-usage",
+                    input_payload=_payload(),
+                    org=org_id,
+                    capability_token="cap-token",
+                )
+            )
             res = conn.wait_for(is_result_for("r-large")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message
             assert res.blob_ref, "a >64KB output must ship blob_ref, not inline"
@@ -95,7 +103,7 @@ def test_large_output_ships_blob_ref_with_typed_usage_intact() -> None:
             assert res.metrics.output_tokens == 9000
             assert _DedupUploadSink.requests_seen, "the real upload sink must have been hit"
             path, body = _DedupUploadSink.requests_seen[-1]
-            assert path.startswith("/api/v1/media/acme/uploads")
+            assert path.startswith(f"/api/v1/media/{org_id}/uploads")
             assert body["size_bytes"] > 64 * 1024
     finally:
         httpd.shutdown()
