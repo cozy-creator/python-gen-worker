@@ -141,13 +141,24 @@ def write_image(
     is typed ``ImageAsset`` don't have to round-trip through
     ``msgspec.to_builtins``.
     """
-    buf = _io.BytesIO()
-    save_kwargs: dict[str, Any] = {"format": format.upper()}
-    if format.lower() in ("webp", "jpeg", "jpg"):
-        save_kwargs["quality"] = quality
-    save_kwargs.update(encode_kwargs)
-    image.save(buf, **save_kwargs)
-    out = ctx.save_bytes(ref, buf.getvalue())
+    # th#1107: the image path never signalled the decode->finalize handoff, so
+    # gw#516's overlap machinery was dead on every image endpoint (measured:
+    # finalize_wall_ms == 0 on 19 of 20 endpoints, incl. 979 sdxl samples; only
+    # write_video ever released). The frames are already host-side PIL here, so
+    # this is the same terminal handoff write_video performs: the encode +
+    # upload tail runs slotless and overlaps the next request's denoise.
+    from .video_encode import finalize_permit
+
+    with finalize_permit():
+        _release_gpu_slot_for_finalize(ctx)
+        buf = _io.BytesIO()
+        save_kwargs: dict[str, Any] = {"format": format.upper()}
+        if format.lower() in ("webp", "jpeg", "jpg"):
+            save_kwargs["quality"] = quality
+        save_kwargs.update(encode_kwargs)
+        image.save(buf, **save_kwargs)
+        payload = buf.getvalue()
+    out = ctx.save_bytes(ref, payload)
     if as_type is not None and type(out) is not as_type:
         import msgspec
         return as_type(**msgspec.to_builtins(out))
