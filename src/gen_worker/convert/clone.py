@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from gen_worker.api.errors import ValidationError
+
 from .bank import build_bank_payload, flavor_bank_key
 from .hub import CommitFile, HubClient, HubPublishError, files_from_tree
 from .ingest import (
@@ -1125,6 +1127,9 @@ def run_clone(
                 result.failed_flavors.append({
                     "spec_label": spec.label, "dtype": spec.dtype,
                     "file_type": spec.file_type, "reason": str(exc),
+                    # th#1084: spec/source combination rejections are input
+                    # verdicts, not conversion faults.
+                    "input_rejection": isinstance(exc, (ValueError, ValidationError)),
                 })
                 continue
 
@@ -1222,6 +1227,11 @@ def run_clone(
             reasons = "; ".join(
                 str(f.get("reason") or "") for f in result.failed_flavors
             ) or "no output spec produced anything"
+            # th#1084: when every failure was an input-combination rejection
+            # (e.g. dtype="source" with a non-safetensors source), the verdict
+            # is about the request, not the release — INVALID, not FATAL.
+            if result.failed_flavors and all(f.get("input_rejection") for f in result.failed_flavors):
+                raise ValidationError(f"clone produced no publishable flavor: {reasons}")
             raise RuntimeError(f"clone produced no publishable flavor: {reasons}")
 
         result.metadata["destination_repo"] = destination

@@ -85,6 +85,9 @@ class EndpointSpec:
     # th#1051: declared compute-time formula for this handler; None =
     # undeclared (scalar EWMA fall-through hub-side).
     runtime_formula: Optional["RuntimeFormula"] = None
+    # th#1087: declared config parameters (ctx.config) + declared env names.
+    config: tuple = ()
+    env: tuple = ()
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -324,6 +327,8 @@ def _spec_for_handler(
         regimes=decl.regimes.get(attr_name, DEFAULT_REGIMES),
         handles=tuple(decl.handles),
         runtime_formula=runtime_formula,
+        config=tuple(decl.config),
+        env=tuple(decl.env),
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )

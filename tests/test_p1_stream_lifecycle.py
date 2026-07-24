@@ -49,6 +49,78 @@ def test_hello_carries_protocol_and_worker_identity() -> None:
         assert conn.hello is not None
         assert conn.hello.protocol_version == pb.PROTOCOL_VERSION_CURRENT
         assert conn.hello.worker_id == "p1-worker"
+        assert conn.hello.worker_session_id
+        assert conn.hello.lifecycle_snapshot.full_replace
+        assert conn.hello.lifecycle_snapshot.worker_session_id == conn.hello.worker_session_id
+
+
+def test_unknown_mandatory_intent_rejects_without_legacy_fallback() -> None:
+    with hub_double(worker_id="p1-shadow-reject") as (scheduler, _harness):
+        conn = scheduler.wait_connection(0)
+        assert conn.hello is not None
+        session_id = conn.hello.worker_session_id
+        conn.send(
+            hello_ack=pb.HelloAck(
+                protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+                file_base_url=scheduler.file_base_url,
+                desired_residency=pb.DesiredResidency(
+                    generation=77,
+                    release_id="release-shadow",
+                ),
+                desired_state_command=pb.DesiredStateCommand(
+                    worker_session_id=session_id,
+                    command_seq=77,
+                    goal_id="goal-unknown",
+                    release_id="release-shadow",
+                    mandatory=True,
+                    intents=[
+                        pb.DesiredIntent(
+                            intent_id="intent-unknown",
+                            kind=999,
+                            cause=pb.DESIRED_INTENT_CAUSE_PREPOSITION,
+                            mandatory=True,
+                        )
+                    ],
+                ),
+            )
+        )
+        receipt = conn.wait_for(
+            lambda m: (
+                m.WhichOneof("msg") == "goal_receipt" and m.goal_receipt.goal_id == "goal-unknown"
+            )
+        ).goal_receipt
+        assert receipt.status == pb.GOAL_RECEIPT_STATUS_REJECTED
+        assert receipt.error_code == pb.LIFECYCLE_ERROR_CODE_UNSUPPORTED_INTENT
+        assert receipt.rejections[0].intent_id == "intent-unknown"
+
+        conn.wait_for(
+            lambda m: (
+                m.WhichOneof("msg") == "lifecycle_snapshot"
+                and any(
+                    item.goal_id == "goal-unknown"
+                    and item.status == pb.GOAL_RECEIPT_STATUS_REJECTED
+                    for item in m.lifecycle_snapshot.goal_receipts
+                )
+            )
+        )
+        conn.wait_for(
+            lambda m: (
+                m.WhichOneof("msg") == "state_delta"
+                and m.state_delta.phase == pb.WORKER_PHASE_ERROR
+            )
+        )
+
+        conn.send(
+            run_job=pb.RunJob(
+                request_id="r-after-protocol-reject",
+                attempt=1,
+                function_name="echo",
+                input_payload=_msgpack("marco"),
+            )
+        )
+        result = conn.wait_for(is_result_for("r-after-protocol-reject")).job_result
+        assert result.status == pb.JOB_STATUS_RETRYABLE
+        assert conn.count(is_accept_for("r-after-protocol-reject")) == 0
 
 
 @pytest.mark.parametrize(

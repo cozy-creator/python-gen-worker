@@ -19,6 +19,128 @@ class ResidencyTier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     RESIDENCY_TIER_RAM: _ClassVar[ResidencyTier]
     RESIDENCY_TIER_VRAM: _ClassVar[ResidencyTier]
 
+class DesiredIntentKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    DESIRED_INTENT_KIND_UNSPECIFIED: _ClassVar[DesiredIntentKind]
+    DESIRED_INTENT_KIND_MATERIALIZE: _ClassVar[DesiredIntentKind]
+    DESIRED_INTENT_KIND_FUNCTION_READY: _ClassVar[DesiredIntentKind]
+    DESIRED_INTENT_KIND_CONFIG_APPLY: _ClassVar[DesiredIntentKind]
+    DESIRED_INTENT_KIND_COMPILE_ADOPT: _ClassVar[DesiredIntentKind]
+    DESIRED_INTENT_KIND_DRAIN: _ClassVar[DesiredIntentKind]
+
+class DesiredIntentCause(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    DESIRED_INTENT_CAUSE_UNSPECIFIED: _ClassVar[DesiredIntentCause]
+    DESIRED_INTENT_CAUSE_COLD_BOOT: _ClassVar[DesiredIntentCause]
+    DESIRED_INTENT_CAUSE_REQUEST: _ClassVar[DesiredIntentCause]
+    DESIRED_INTENT_CAUSE_PREPOSITION: _ClassVar[DesiredIntentCause]
+    DESIRED_INTENT_CAUSE_CONFIG_CHANGE: _ClassVar[DesiredIntentCause]
+    DESIRED_INTENT_CAUSE_REPLACEMENT: _ClassVar[DesiredIntentCause]
+    DESIRED_INTENT_CAUSE_RETIRE: _ClassVar[DesiredIntentCause]
+
+class GoalReceiptStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    GOAL_RECEIPT_STATUS_UNSPECIFIED: _ClassVar[GoalReceiptStatus]
+    GOAL_RECEIPT_STATUS_ACCEPTED: _ClassVar[GoalReceiptStatus]
+    GOAL_RECEIPT_STATUS_REJECTED: _ClassVar[GoalReceiptStatus]
+
+class LifecycleIntentStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    LIFECYCLE_INTENT_STATUS_UNSPECIFIED: _ClassVar[LifecycleIntentStatus]
+    LIFECYCLE_INTENT_STATUS_ACCEPTED: _ClassVar[LifecycleIntentStatus]
+    LIFECYCLE_INTENT_STATUS_WAITING: _ClassVar[LifecycleIntentStatus]
+    LIFECYCLE_INTENT_STATUS_RUNNING: _ClassVar[LifecycleIntentStatus]
+    LIFECYCLE_INTENT_STATUS_SUCCEEDED: _ClassVar[LifecycleIntentStatus]
+    LIFECYCLE_INTENT_STATUS_FAILED: _ClassVar[LifecycleIntentStatus]
+    LIFECYCLE_INTENT_STATUS_CANCELED: _ClassVar[LifecycleIntentStatus]
+    LIFECYCLE_INTENT_STATUS_SUPERSEDED: _ClassVar[LifecycleIntentStatus]
+
+class LifecycleIntentStage(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    LIFECYCLE_INTENT_STAGE_UNSPECIFIED: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_VALIDATING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_REF_LOCK: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_HOST_RAM: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_NETWORK_RETRY: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WAIT_REPLACEMENT: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_FETCHING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_VERIFYING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_ON_DISK: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_LOADING_HOST: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_LOADING_DEVICE: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_WARMING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_COMPILING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_ADOPTING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_CONFIG_MATERIALIZING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_CONFIG_BINDINGS_APPLYING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_CONFIG_BOOT_STALE: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_READY: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_DRAINING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_FINALIZING: _ClassVar[LifecycleIntentStage]
+    LIFECYCLE_INTENT_STAGE_FLUSHING: _ClassVar[LifecycleIntentStage]
+
+class LifecycleWaitReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    LIFECYCLE_WAIT_REASON_UNSPECIFIED: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_TENANT_WORK: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_REF_LOCK: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_LOAD_LOCK: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_GPU_SLOT: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_SNAPSHOT: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_DISK_HEADROOM: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_HOST_RAM: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_NETWORK_RETRY: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_REPLACEMENT: _ClassVar[LifecycleWaitReason]
+    LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER: _ClassVar[LifecycleWaitReason]
+
+class LifecycleErrorCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    LIFECYCLE_ERROR_CODE_UNSPECIFIED: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_WORKER_SESSION_MISMATCH: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_RELEASE_MISMATCH: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_COMMAND_SEQ_REGRESSION: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_COMMAND_SEQ_CONFLICT: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_CONFIG_REGRESSION: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_UNKNOWN_FUNCTION: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_SNAPSHOT_IDENTITY_MISSING: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_UNSUPPORTED_INTENT: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_UNKNOWN_MANDATORY_COMMAND: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_PROTOCOL_UNREPORTED_WAIT: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_CONFIG_SNAPSHOT_WRITE_FAILED: _ClassVar[LifecycleErrorCode]
+    LIFECYCLE_ERROR_CODE_DRAIN_FAILED: _ClassVar[LifecycleErrorCode]
+
+class FunctionCapabilityState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    FUNCTION_CAPABILITY_STATE_UNSPECIFIED: _ClassVar[FunctionCapabilityState]
+    FUNCTION_CAPABILITY_STATE_READY: _ClassVar[FunctionCapabilityState]
+    FUNCTION_CAPABILITY_STATE_APPLYING: _ClassVar[FunctionCapabilityState]
+    FUNCTION_CAPABILITY_STATE_BOOT_STALE: _ClassVar[FunctionCapabilityState]
+    FUNCTION_CAPABILITY_STATE_FAILED: _ClassVar[FunctionCapabilityState]
+
+class ConfigApplicationState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    CONFIG_APPLICATION_STATE_UNSPECIFIED: _ClassVar[ConfigApplicationState]
+    CONFIG_APPLICATION_STATE_APPLYING: _ClassVar[ConfigApplicationState]
+    CONFIG_APPLICATION_STATE_CONVERGED: _ClassVar[ConfigApplicationState]
+    CONFIG_APPLICATION_STATE_BOOT_STALE: _ClassVar[ConfigApplicationState]
+    CONFIG_APPLICATION_STATE_FAILED: _ClassVar[ConfigApplicationState]
+
+class DrainLifecycleStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    DRAIN_LIFECYCLE_STATUS_UNSPECIFIED: _ClassVar[DrainLifecycleStatus]
+    DRAIN_LIFECYCLE_STATUS_ACCEPTED: _ClassVar[DrainLifecycleStatus]
+    DRAIN_LIFECYCLE_STATUS_DRAINING: _ClassVar[DrainLifecycleStatus]
+    DRAIN_LIFECYCLE_STATUS_FINALIZING: _ClassVar[DrainLifecycleStatus]
+    DRAIN_LIFECYCLE_STATUS_FLUSHING: _ClassVar[DrainLifecycleStatus]
+    DRAIN_LIFECYCLE_STATUS_DRAINED: _ClassVar[DrainLifecycleStatus]
+    DRAIN_LIFECYCLE_STATUS_FAILED: _ClassVar[DrainLifecycleStatus]
+
 class StorageTier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     STORAGE_TIER_UNSPECIFIED: _ClassVar[StorageTier]
@@ -80,6 +202,98 @@ RESIDENCY_TIER_UNSPECIFIED: ResidencyTier
 RESIDENCY_TIER_DISK: ResidencyTier
 RESIDENCY_TIER_RAM: ResidencyTier
 RESIDENCY_TIER_VRAM: ResidencyTier
+DESIRED_INTENT_KIND_UNSPECIFIED: DesiredIntentKind
+DESIRED_INTENT_KIND_MATERIALIZE: DesiredIntentKind
+DESIRED_INTENT_KIND_FUNCTION_READY: DesiredIntentKind
+DESIRED_INTENT_KIND_CONFIG_APPLY: DesiredIntentKind
+DESIRED_INTENT_KIND_COMPILE_ADOPT: DesiredIntentKind
+DESIRED_INTENT_KIND_DRAIN: DesiredIntentKind
+DESIRED_INTENT_CAUSE_UNSPECIFIED: DesiredIntentCause
+DESIRED_INTENT_CAUSE_COLD_BOOT: DesiredIntentCause
+DESIRED_INTENT_CAUSE_REQUEST: DesiredIntentCause
+DESIRED_INTENT_CAUSE_PREPOSITION: DesiredIntentCause
+DESIRED_INTENT_CAUSE_CONFIG_CHANGE: DesiredIntentCause
+DESIRED_INTENT_CAUSE_REPLACEMENT: DesiredIntentCause
+DESIRED_INTENT_CAUSE_RETIRE: DesiredIntentCause
+GOAL_RECEIPT_STATUS_UNSPECIFIED: GoalReceiptStatus
+GOAL_RECEIPT_STATUS_ACCEPTED: GoalReceiptStatus
+GOAL_RECEIPT_STATUS_REJECTED: GoalReceiptStatus
+LIFECYCLE_INTENT_STATUS_UNSPECIFIED: LifecycleIntentStatus
+LIFECYCLE_INTENT_STATUS_ACCEPTED: LifecycleIntentStatus
+LIFECYCLE_INTENT_STATUS_WAITING: LifecycleIntentStatus
+LIFECYCLE_INTENT_STATUS_RUNNING: LifecycleIntentStatus
+LIFECYCLE_INTENT_STATUS_SUCCEEDED: LifecycleIntentStatus
+LIFECYCLE_INTENT_STATUS_FAILED: LifecycleIntentStatus
+LIFECYCLE_INTENT_STATUS_CANCELED: LifecycleIntentStatus
+LIFECYCLE_INTENT_STATUS_SUPERSEDED: LifecycleIntentStatus
+LIFECYCLE_INTENT_STAGE_UNSPECIFIED: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_VALIDATING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_REF_LOCK: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_HOST_RAM: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_NETWORK_RETRY: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WAIT_REPLACEMENT: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_FETCHING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_VERIFYING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_ON_DISK: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_LOADING_HOST: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_LOADING_DEVICE: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_WARMING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_COMPILING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_ADOPTING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_CONFIG_MATERIALIZING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_CONFIG_BINDINGS_APPLYING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_CONFIG_BOOT_STALE: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_READY: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_DRAINING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_FINALIZING: LifecycleIntentStage
+LIFECYCLE_INTENT_STAGE_FLUSHING: LifecycleIntentStage
+LIFECYCLE_WAIT_REASON_UNSPECIFIED: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_TENANT_WORK: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_REF_LOCK: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_LOAD_LOCK: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_GPU_SLOT: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_SNAPSHOT: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_DISK_HEADROOM: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_HOST_RAM: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_NETWORK_RETRY: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_REPLACEMENT: LifecycleWaitReason
+LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER: LifecycleWaitReason
+LIFECYCLE_ERROR_CODE_UNSPECIFIED: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_WORKER_SESSION_MISMATCH: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_RELEASE_MISMATCH: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_COMMAND_SEQ_REGRESSION: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_COMMAND_SEQ_CONFLICT: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_CONFIG_REGRESSION: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_UNKNOWN_FUNCTION: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_SNAPSHOT_IDENTITY_MISSING: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_UNSUPPORTED_INTENT: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_UNKNOWN_MANDATORY_COMMAND: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_PROTOCOL_UNREPORTED_WAIT: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_CONFIG_SNAPSHOT_WRITE_FAILED: LifecycleErrorCode
+LIFECYCLE_ERROR_CODE_DRAIN_FAILED: LifecycleErrorCode
+FUNCTION_CAPABILITY_STATE_UNSPECIFIED: FunctionCapabilityState
+FUNCTION_CAPABILITY_STATE_READY: FunctionCapabilityState
+FUNCTION_CAPABILITY_STATE_APPLYING: FunctionCapabilityState
+FUNCTION_CAPABILITY_STATE_BOOT_STALE: FunctionCapabilityState
+FUNCTION_CAPABILITY_STATE_FAILED: FunctionCapabilityState
+CONFIG_APPLICATION_STATE_UNSPECIFIED: ConfigApplicationState
+CONFIG_APPLICATION_STATE_APPLYING: ConfigApplicationState
+CONFIG_APPLICATION_STATE_CONVERGED: ConfigApplicationState
+CONFIG_APPLICATION_STATE_BOOT_STALE: ConfigApplicationState
+CONFIG_APPLICATION_STATE_FAILED: ConfigApplicationState
+DRAIN_LIFECYCLE_STATUS_UNSPECIFIED: DrainLifecycleStatus
+DRAIN_LIFECYCLE_STATUS_ACCEPTED: DrainLifecycleStatus
+DRAIN_LIFECYCLE_STATUS_DRAINING: DrainLifecycleStatus
+DRAIN_LIFECYCLE_STATUS_FINALIZING: DrainLifecycleStatus
+DRAIN_LIFECYCLE_STATUS_FLUSHING: DrainLifecycleStatus
+DRAIN_LIFECYCLE_STATUS_DRAINED: DrainLifecycleStatus
+DRAIN_LIFECYCLE_STATUS_FAILED: DrainLifecycleStatus
 STORAGE_TIER_UNSPECIFIED: StorageTier
 STORAGE_TIER_CONTAINER: StorageTier
 STORAGE_TIER_VOLUME: StorageTier
@@ -117,7 +331,7 @@ ACTIVITY_STATE_COMPLETED: ActivityState
 ACTIVITY_STATE_FAILED: ActivityState
 
 class WorkerMessage(_message.Message):
-    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded", "activity_update", "hardware_unsuitable")
+    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded", "activity_update", "hardware_unsuitable", "goal_receipt", "lifecycle_snapshot")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     STATE_DELTA_FIELD_NUMBER: _ClassVar[int]
     JOB_ACCEPTED_FIELD_NUMBER: _ClassVar[int]
@@ -128,6 +342,8 @@ class WorkerMessage(_message.Message):
     FN_DEGRADED_FIELD_NUMBER: _ClassVar[int]
     ACTIVITY_UPDATE_FIELD_NUMBER: _ClassVar[int]
     HARDWARE_UNSUITABLE_FIELD_NUMBER: _ClassVar[int]
+    GOAL_RECEIPT_FIELD_NUMBER: _ClassVar[int]
+    LIFECYCLE_SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     state_delta: StateDelta
     job_accepted: JobAccepted
@@ -138,7 +354,9 @@ class WorkerMessage(_message.Message):
     fn_degraded: FnDegraded
     activity_update: ActivityUpdate
     hardware_unsuitable: HardwareUnsuitable
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ..., hardware_unsuitable: _Optional[_Union[HardwareUnsuitable, _Mapping]] = ...) -> None: ...
+    goal_receipt: GoalReceipt
+    lifecycle_snapshot: LifecycleSnapshot
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ..., hardware_unsuitable: _Optional[_Union[HardwareUnsuitable, _Mapping]] = ..., goal_receipt: _Optional[_Union[GoalReceipt, _Mapping]] = ..., lifecycle_snapshot: _Optional[_Union[LifecycleSnapshot, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
     __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh")
@@ -157,7 +375,7 @@ class SchedulerMessage(_message.Message):
     def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., token_refresh: _Optional[_Union[TokenRefresh, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("protocol_version", "worker_id", "release_id", "resources", "state", "models", "in_flight", "heartbeat_interval_ms")
+    __slots__ = ("protocol_version", "worker_id", "release_id", "resources", "state", "models", "in_flight", "heartbeat_interval_ms", "worker_session_id", "lifecycle_snapshot")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
@@ -166,6 +384,8 @@ class Hello(_message.Message):
     MODELS_FIELD_NUMBER: _ClassVar[int]
     IN_FLIGHT_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_INTERVAL_MS_FIELD_NUMBER: _ClassVar[int]
+    WORKER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    LIFECYCLE_SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
     protocol_version: ProtocolVersion
     worker_id: str
     release_id: str
@@ -174,7 +394,9 @@ class Hello(_message.Message):
     models: _containers.RepeatedCompositeFieldContainer[ModelResidency]
     in_flight: _containers.RepeatedCompositeFieldContainer[InFlightJob]
     heartbeat_interval_ms: int
-    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., state: _Optional[_Union[StateDelta, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelResidency, _Mapping]]] = ..., in_flight: _Optional[_Iterable[_Union[InFlightJob, _Mapping]]] = ..., heartbeat_interval_ms: _Optional[int] = ...) -> None: ...
+    worker_session_id: str
+    lifecycle_snapshot: LifecycleSnapshot
+    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., state: _Optional[_Union[StateDelta, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelResidency, _Mapping]]] = ..., in_flight: _Optional[_Iterable[_Union[InFlightJob, _Mapping]]] = ..., heartbeat_interval_ms: _Optional[int] = ..., worker_session_id: _Optional[str] = ..., lifecycle_snapshot: _Optional[_Union[LifecycleSnapshot, _Mapping]] = ...) -> None: ...
 
 class WorkerResources(_message.Message):
     __slots__ = ("gpu_count", "vram_total_bytes", "gpu_name", "gpu_sm", "installed_libs", "image_digest", "git_commit", "instance_id", "host_canary", "torch_version", "gen_worker_version")
@@ -231,9 +453,8 @@ class HardwareUnsuitable(_message.Message):
     def __init__(self, worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., reason_class: _Optional[str] = ..., detail: _Optional[str] = ..., driver_version: _Optional[str] = ..., gpu_name: _Optional[str] = ..., torch_version: _Optional[str] = ..., torch_cuda_version: _Optional[str] = ..., gen_worker_version: _Optional[str] = ..., image_digest: _Optional[str] = ..., instance_id: _Optional[str] = ..., reported_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class HostCanary(_message.Message):
-    __slots__ = ("memcpy_gbps", "h2d_gbps", "d2h_gbps", "pinned_alloc_ok", "cpu_single_mbps", "cpu_multi_mbps", "vcpus", "ram_total_gb", "duration_ms")
+    __slots__ = ("memcpy_gbps", "d2h_gbps", "pinned_alloc_ok", "cpu_single_mbps", "cpu_multi_mbps", "vcpus", "ram_total_gb", "duration_ms")
     MEMCPY_GBPS_FIELD_NUMBER: _ClassVar[int]
-    H2D_GBPS_FIELD_NUMBER: _ClassVar[int]
     D2H_GBPS_FIELD_NUMBER: _ClassVar[int]
     PINNED_ALLOC_OK_FIELD_NUMBER: _ClassVar[int]
     CPU_SINGLE_MBPS_FIELD_NUMBER: _ClassVar[int]
@@ -242,7 +463,6 @@ class HostCanary(_message.Message):
     RAM_TOTAL_GB_FIELD_NUMBER: _ClassVar[int]
     DURATION_MS_FIELD_NUMBER: _ClassVar[int]
     memcpy_gbps: float
-    h2d_gbps: float
     d2h_gbps: float
     pinned_alloc_ok: bool
     cpu_single_mbps: float
@@ -250,7 +470,7 @@ class HostCanary(_message.Message):
     vcpus: int
     ram_total_gb: float
     duration_ms: int
-    def __init__(self, memcpy_gbps: _Optional[float] = ..., h2d_gbps: _Optional[float] = ..., d2h_gbps: _Optional[float] = ..., pinned_alloc_ok: _Optional[bool] = ..., cpu_single_mbps: _Optional[float] = ..., cpu_multi_mbps: _Optional[float] = ..., vcpus: _Optional[int] = ..., ram_total_gb: _Optional[float] = ..., duration_ms: _Optional[int] = ...) -> None: ...
+    def __init__(self, memcpy_gbps: _Optional[float] = ..., d2h_gbps: _Optional[float] = ..., pinned_alloc_ok: _Optional[bool] = ..., cpu_single_mbps: _Optional[float] = ..., cpu_multi_mbps: _Optional[float] = ..., vcpus: _Optional[int] = ..., ram_total_gb: _Optional[float] = ..., duration_ms: _Optional[int] = ...) -> None: ...
 
 class ModelResidency(_message.Message):
     __slots__ = ("ref", "tier", "vram_bytes", "snapshot_digest", "residency_generation")
@@ -275,21 +495,23 @@ class InFlightJob(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class HelloAck(_message.Message):
-    __slots__ = ("protocol_version", "file_base_url", "keep", "resolutions", "desired_residency")
+    __slots__ = ("protocol_version", "file_base_url", "keep", "resolutions", "desired_residency", "desired_state_command")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     FILE_BASE_URL_FIELD_NUMBER: _ClassVar[int]
     KEEP_FIELD_NUMBER: _ClassVar[int]
     RESOLUTIONS_FIELD_NUMBER: _ClassVar[int]
     DESIRED_RESIDENCY_FIELD_NUMBER: _ClassVar[int]
+    DESIRED_STATE_COMMAND_FIELD_NUMBER: _ClassVar[int]
     protocol_version: ProtocolVersion
     file_base_url: str
     keep: _containers.RepeatedScalarFieldContainer[str]
     resolutions: _containers.RepeatedCompositeFieldContainer[ModelResolution]
     desired_residency: DesiredResidency
-    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., keep: _Optional[_Iterable[str]] = ..., resolutions: _Optional[_Iterable[_Union[ModelResolution, _Mapping]]] = ..., desired_residency: _Optional[_Union[DesiredResidency, _Mapping]] = ...) -> None: ...
+    desired_state_command: DesiredStateCommand
+    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., keep: _Optional[_Iterable[str]] = ..., resolutions: _Optional[_Iterable[_Union[ModelResolution, _Mapping]]] = ..., desired_residency: _Optional[_Union[DesiredResidency, _Mapping]] = ..., desired_state_command: _Optional[_Union[DesiredStateCommand, _Mapping]] = ...) -> None: ...
 
 class DesiredResidency(_message.Message):
-    __slots__ = ("generation", "disk_refs", "hot", "snapshots")
+    __slots__ = ("generation", "disk_refs", "hot", "snapshots", "release_id", "config_generation")
     class SnapshotsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -301,11 +523,275 @@ class DesiredResidency(_message.Message):
     DISK_REFS_FIELD_NUMBER: _ClassVar[int]
     HOT_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOTS_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
     generation: int
     disk_refs: _containers.RepeatedScalarFieldContainer[str]
     hot: _containers.RepeatedCompositeFieldContainer[DesiredInstance]
     snapshots: _containers.MessageMap[str, Snapshot]
-    def __init__(self, generation: _Optional[int] = ..., disk_refs: _Optional[_Iterable[str]] = ..., hot: _Optional[_Iterable[_Union[DesiredInstance, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ...) -> None: ...
+    release_id: str
+    config_generation: int
+    def __init__(self, generation: _Optional[int] = ..., disk_refs: _Optional[_Iterable[str]] = ..., hot: _Optional[_Iterable[_Union[DesiredInstance, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ...) -> None: ...
+
+class DesiredStateCommand(_message.Message):
+    __slots__ = ("worker_session_id", "command_seq", "goal_id", "release_id", "config_generation", "config_digest", "issued_at_unix_ms", "accept_by_unix_ms", "first_action_by_unix_ms", "intents", "mandatory", "changed_config_classes", "parameter_snapshot")
+    WORKER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    COMMAND_SEQ_FIELD_NUMBER: _ClassVar[int]
+    GOAL_ID_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    ISSUED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    ACCEPT_BY_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    FIRST_ACTION_BY_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    INTENTS_FIELD_NUMBER: _ClassVar[int]
+    MANDATORY_FIELD_NUMBER: _ClassVar[int]
+    CHANGED_CONFIG_CLASSES_FIELD_NUMBER: _ClassVar[int]
+    PARAMETER_SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
+    worker_session_id: str
+    command_seq: int
+    goal_id: str
+    release_id: str
+    config_generation: int
+    config_digest: bytes
+    issued_at_unix_ms: int
+    accept_by_unix_ms: int
+    first_action_by_unix_ms: int
+    intents: _containers.RepeatedCompositeFieldContainer[DesiredIntent]
+    mandatory: bool
+    changed_config_classes: ConfigClassMask
+    parameter_snapshot: bytes
+    def __init__(self, worker_session_id: _Optional[str] = ..., command_seq: _Optional[int] = ..., goal_id: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., config_digest: _Optional[bytes] = ..., issued_at_unix_ms: _Optional[int] = ..., accept_by_unix_ms: _Optional[int] = ..., first_action_by_unix_ms: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[DesiredIntent, _Mapping]]] = ..., mandatory: _Optional[bool] = ..., changed_config_classes: _Optional[_Union[ConfigClassMask, _Mapping]] = ..., parameter_snapshot: _Optional[bytes] = ...) -> None: ...
+
+class DesiredIntent(_message.Message):
+    __slots__ = ("intent_id", "kind", "cause", "function_name", "ref", "snapshot_digest", "desired_tier", "binding_digest", "parent_intent_id", "waiting_requests", "priority", "mandatory")
+    INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    CAUSE_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    DESIRED_TIER_FIELD_NUMBER: _ClassVar[int]
+    BINDING_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    PARENT_INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    WAITING_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    PRIORITY_FIELD_NUMBER: _ClassVar[int]
+    MANDATORY_FIELD_NUMBER: _ClassVar[int]
+    intent_id: str
+    kind: DesiredIntentKind
+    cause: DesiredIntentCause
+    function_name: str
+    ref: str
+    snapshot_digest: bytes
+    desired_tier: ResidencyTier
+    binding_digest: bytes
+    parent_intent_id: str
+    waiting_requests: _containers.RepeatedCompositeFieldContainer[RequestAttempt]
+    priority: int
+    mandatory: bool
+    def __init__(self, intent_id: _Optional[str] = ..., kind: _Optional[_Union[DesiredIntentKind, str]] = ..., cause: _Optional[_Union[DesiredIntentCause, str]] = ..., function_name: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[bytes] = ..., desired_tier: _Optional[_Union[ResidencyTier, str]] = ..., binding_digest: _Optional[bytes] = ..., parent_intent_id: _Optional[str] = ..., waiting_requests: _Optional[_Iterable[_Union[RequestAttempt, _Mapping]]] = ..., priority: _Optional[int] = ..., mandatory: _Optional[bool] = ...) -> None: ...
+
+class RequestAttempt(_message.Message):
+    __slots__ = ("request_id", "attempt")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    ATTEMPT_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    attempt: int
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
+
+class GoalReceipt(_message.Message):
+    __slots__ = ("worker_session_id", "command_seq", "goal_id", "release_id", "status", "error_code", "rejections", "detail", "received_at_unix_ms", "command_digest")
+    WORKER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    COMMAND_SEQ_FIELD_NUMBER: _ClassVar[int]
+    GOAL_ID_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_CODE_FIELD_NUMBER: _ClassVar[int]
+    REJECTIONS_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    RECEIVED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    COMMAND_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    worker_session_id: str
+    command_seq: int
+    goal_id: str
+    release_id: str
+    status: GoalReceiptStatus
+    error_code: LifecycleErrorCode
+    rejections: _containers.RepeatedCompositeFieldContainer[IntentRejection]
+    detail: str
+    received_at_unix_ms: int
+    command_digest: bytes
+    def __init__(self, worker_session_id: _Optional[str] = ..., command_seq: _Optional[int] = ..., goal_id: _Optional[str] = ..., release_id: _Optional[str] = ..., status: _Optional[_Union[GoalReceiptStatus, str]] = ..., error_code: _Optional[_Union[LifecycleErrorCode, str]] = ..., rejections: _Optional[_Iterable[_Union[IntentRejection, _Mapping]]] = ..., detail: _Optional[str] = ..., received_at_unix_ms: _Optional[int] = ..., command_digest: _Optional[bytes] = ...) -> None: ...
+
+class IntentRejection(_message.Message):
+    __slots__ = ("intent_id", "error_code", "detail")
+    INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    ERROR_CODE_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    intent_id: str
+    error_code: LifecycleErrorCode
+    detail: str
+    def __init__(self, intent_id: _Optional[str] = ..., error_code: _Optional[_Union[LifecycleErrorCode, str]] = ..., detail: _Optional[str] = ...) -> None: ...
+
+class LifecycleProgress(_message.Message):
+    __slots__ = ("done", "total", "unit", "rate_per_s")
+    DONE_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_FIELD_NUMBER: _ClassVar[int]
+    UNIT_FIELD_NUMBER: _ClassVar[int]
+    RATE_PER_S_FIELD_NUMBER: _ClassVar[int]
+    done: float
+    total: float
+    unit: str
+    rate_per_s: float
+    def __init__(self, done: _Optional[float] = ..., total: _Optional[float] = ..., unit: _Optional[str] = ..., rate_per_s: _Optional[float] = ...) -> None: ...
+
+class IntentState(_message.Message):
+    __slots__ = ("worker_session_id", "state_seq", "goal_id", "intent_id", "release_id", "config_generation", "status", "stage", "reason", "since_unix_ms", "updated_at_unix_ms", "next_retry_at_unix_ms", "deadline_at_unix_ms", "blocker_intent_id", "blocker_request", "progress", "error_code", "detail", "actual_digest")
+    WORKER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    STATE_SEQ_FIELD_NUMBER: _ClassVar[int]
+    GOAL_ID_FIELD_NUMBER: _ClassVar[int]
+    INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    STAGE_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    SINCE_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    NEXT_RETRY_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    DEADLINE_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    BLOCKER_INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    BLOCKER_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    PROGRESS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_CODE_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    ACTUAL_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    worker_session_id: str
+    state_seq: int
+    goal_id: str
+    intent_id: str
+    release_id: str
+    config_generation: int
+    status: LifecycleIntentStatus
+    stage: LifecycleIntentStage
+    reason: LifecycleWaitReason
+    since_unix_ms: int
+    updated_at_unix_ms: int
+    next_retry_at_unix_ms: int
+    deadline_at_unix_ms: int
+    blocker_intent_id: str
+    blocker_request: RequestAttempt
+    progress: LifecycleProgress
+    error_code: LifecycleErrorCode
+    detail: str
+    actual_digest: bytes
+    def __init__(self, worker_session_id: _Optional[str] = ..., state_seq: _Optional[int] = ..., goal_id: _Optional[str] = ..., intent_id: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., status: _Optional[_Union[LifecycleIntentStatus, str]] = ..., stage: _Optional[_Union[LifecycleIntentStage, str]] = ..., reason: _Optional[_Union[LifecycleWaitReason, str]] = ..., since_unix_ms: _Optional[int] = ..., updated_at_unix_ms: _Optional[int] = ..., next_retry_at_unix_ms: _Optional[int] = ..., deadline_at_unix_ms: _Optional[int] = ..., blocker_intent_id: _Optional[str] = ..., blocker_request: _Optional[_Union[RequestAttempt, _Mapping]] = ..., progress: _Optional[_Union[LifecycleProgress, _Mapping]] = ..., error_code: _Optional[_Union[LifecycleErrorCode, str]] = ..., detail: _Optional[str] = ..., actual_digest: _Optional[bytes] = ...) -> None: ...
+
+class ModelIdentity(_message.Message):
+    __slots__ = ("ref", "snapshot_digest", "tier", "residency_generation")
+    REF_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    TIER_FIELD_NUMBER: _ClassVar[int]
+    RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    ref: str
+    snapshot_digest: bytes
+    tier: ResidencyTier
+    residency_generation: int
+    def __init__(self, ref: _Optional[str] = ..., snapshot_digest: _Optional[bytes] = ..., tier: _Optional[_Union[ResidencyTier, str]] = ..., residency_generation: _Optional[int] = ...) -> None: ...
+
+class FunctionCapability(_message.Message):
+    __slots__ = ("function_name", "release_id", "config_generation", "binding_digest", "lane", "models", "compile_target_incarnation_id", "state")
+    FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    BINDING_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    LANE_FIELD_NUMBER: _ClassVar[int]
+    MODELS_FIELD_NUMBER: _ClassVar[int]
+    COMPILE_TARGET_INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    function_name: str
+    release_id: str
+    config_generation: int
+    binding_digest: bytes
+    lane: str
+    models: _containers.RepeatedCompositeFieldContainer[ModelIdentity]
+    compile_target_incarnation_id: str
+    state: FunctionCapabilityState
+    def __init__(self, function_name: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., binding_digest: _Optional[bytes] = ..., lane: _Optional[str] = ..., models: _Optional[_Iterable[_Union[ModelIdentity, _Mapping]]] = ..., compile_target_incarnation_id: _Optional[str] = ..., state: _Optional[_Union[FunctionCapabilityState, str]] = ...) -> None: ...
+
+class ConfigClassMask(_message.Message):
+    __slots__ = ("parameters", "bindings", "boot")
+    PARAMETERS_FIELD_NUMBER: _ClassVar[int]
+    BINDINGS_FIELD_NUMBER: _ClassVar[int]
+    BOOT_FIELD_NUMBER: _ClassVar[int]
+    parameters: bool
+    bindings: bool
+    boot: bool
+    def __init__(self, parameters: _Optional[bool] = ..., bindings: _Optional[bool] = ..., boot: _Optional[bool] = ...) -> None: ...
+
+class ConfigApplication(_message.Message):
+    __slots__ = ("release_id", "target_generation", "received_generation", "parameter_snapshot_generation", "binding_ready_generation", "boot_generation", "state", "pending_classes", "error_code")
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    TARGET_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    RECEIVED_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    PARAMETER_SNAPSHOT_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    BINDING_READY_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    BOOT_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    PENDING_CLASSES_FIELD_NUMBER: _ClassVar[int]
+    ERROR_CODE_FIELD_NUMBER: _ClassVar[int]
+    release_id: str
+    target_generation: int
+    received_generation: int
+    parameter_snapshot_generation: int
+    binding_ready_generation: int
+    boot_generation: int
+    state: ConfigApplicationState
+    pending_classes: ConfigClassMask
+    error_code: LifecycleErrorCode
+    def __init__(self, release_id: _Optional[str] = ..., target_generation: _Optional[int] = ..., received_generation: _Optional[int] = ..., parameter_snapshot_generation: _Optional[int] = ..., binding_ready_generation: _Optional[int] = ..., boot_generation: _Optional[int] = ..., state: _Optional[_Union[ConfigApplicationState, str]] = ..., pending_classes: _Optional[_Union[ConfigClassMask, _Mapping]] = ..., error_code: _Optional[_Union[LifecycleErrorCode, str]] = ...) -> None: ...
+
+class DrainProjection(_message.Message):
+    __slots__ = ("goal_id", "intent_id", "status", "since_unix_ms", "updated_at_unix_ms", "deadline_at_unix_ms", "error_code", "detail")
+    GOAL_ID_FIELD_NUMBER: _ClassVar[int]
+    INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    SINCE_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    DEADLINE_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_CODE_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    goal_id: str
+    intent_id: str
+    status: DrainLifecycleStatus
+    since_unix_ms: int
+    updated_at_unix_ms: int
+    deadline_at_unix_ms: int
+    error_code: LifecycleErrorCode
+    detail: str
+    def __init__(self, goal_id: _Optional[str] = ..., intent_id: _Optional[str] = ..., status: _Optional[_Union[DrainLifecycleStatus, str]] = ..., since_unix_ms: _Optional[int] = ..., updated_at_unix_ms: _Optional[int] = ..., deadline_at_unix_ms: _Optional[int] = ..., error_code: _Optional[_Union[LifecycleErrorCode, str]] = ..., detail: _Optional[str] = ...) -> None: ...
+
+class LifecycleSnapshot(_message.Message):
+    __slots__ = ("worker_session_id", "state_seq", "intents", "capabilities", "config_application", "goal_receipts", "drain", "full_replace", "generated_at_unix_ms")
+    WORKER_SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    STATE_SEQ_FIELD_NUMBER: _ClassVar[int]
+    INTENTS_FIELD_NUMBER: _ClassVar[int]
+    CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_APPLICATION_FIELD_NUMBER: _ClassVar[int]
+    GOAL_RECEIPTS_FIELD_NUMBER: _ClassVar[int]
+    DRAIN_FIELD_NUMBER: _ClassVar[int]
+    FULL_REPLACE_FIELD_NUMBER: _ClassVar[int]
+    GENERATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    worker_session_id: str
+    state_seq: int
+    intents: _containers.RepeatedCompositeFieldContainer[IntentState]
+    capabilities: _containers.RepeatedCompositeFieldContainer[FunctionCapability]
+    config_application: ConfigApplication
+    goal_receipts: _containers.RepeatedCompositeFieldContainer[GoalReceipt]
+    drain: DrainProjection
+    full_replace: bool
+    generated_at_unix_ms: int
+    def __init__(self, worker_session_id: _Optional[str] = ..., state_seq: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[IntentState, _Mapping]]] = ..., capabilities: _Optional[_Iterable[_Union[FunctionCapability, _Mapping]]] = ..., config_application: _Optional[_Union[ConfigApplication, _Mapping]] = ..., goal_receipts: _Optional[_Iterable[_Union[GoalReceipt, _Mapping]]] = ..., drain: _Optional[_Union[DrainProjection, _Mapping]] = ..., full_replace: _Optional[bool] = ..., generated_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class DesiredInstance(_message.Message):
     __slots__ = ("function_name", "models")
@@ -328,7 +814,7 @@ class ModelResolution(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ...) -> None: ...
 
 class StateDelta(_message.Message):
-    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups", "disk_usage")
+    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups", "disk_usage", "observed_config_generation")
     PHASE_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
@@ -338,6 +824,7 @@ class StateDelta(_message.Message):
     COMPILE_TARGETS_FIELD_NUMBER: _ClassVar[int]
     CELL_LOOKUPS_FIELD_NUMBER: _ClassVar[int]
     DISK_USAGE_FIELD_NUMBER: _ClassVar[int]
+    OBSERVED_CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
     phase: WorkerPhase
     available_functions: _containers.RepeatedScalarFieldContainer[str]
     loading_functions: _containers.RepeatedScalarFieldContainer[str]
@@ -347,7 +834,8 @@ class StateDelta(_message.Message):
     compile_targets: _containers.RepeatedCompositeFieldContainer[CompileTarget]
     cell_lookups: _containers.RepeatedCompositeFieldContainer[CellLookup]
     disk_usage: DiskUsageReport
-    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ..., cell_lookups: _Optional[_Iterable[_Union[CellLookup, _Mapping]]] = ..., disk_usage: _Optional[_Union[DiskUsageReport, _Mapping]] = ...) -> None: ...
+    observed_config_generation: int
+    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ..., cell_lookups: _Optional[_Iterable[_Union[CellLookup, _Mapping]]] = ..., disk_usage: _Optional[_Union[DiskUsageReport, _Mapping]] = ..., observed_config_generation: _Optional[int] = ...) -> None: ...
 
 class StorageTierUsage(_message.Message):
     __slots__ = ("tier", "mount_path", "total_bytes", "free_bytes", "used_bytes", "reclaimable_bytes")
@@ -425,7 +913,7 @@ class CompileTargetBinding(_message.Message):
     def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ...) -> None: ...
 
 class RunJob(_message.Message):
-    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "tenant", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots", "required_compile", "lane", "input_assets")
+    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "org", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots", "required_compile", "lane", "input_assets", "config_generation", "config_params")
     class SnapshotsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -438,7 +926,7 @@ class RunJob(_message.Message):
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     INPUT_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
-    TENANT_FIELD_NUMBER: _ClassVar[int]
+    ORG_FIELD_NUMBER: _ClassVar[int]
     INVOKER_ID_FIELD_NUMBER: _ClassVar[int]
     CAPABILITY_TOKEN_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_MODE_FIELD_NUMBER: _ClassVar[int]
@@ -448,12 +936,14 @@ class RunJob(_message.Message):
     REQUIRED_COMPILE_FIELD_NUMBER: _ClassVar[int]
     LANE_FIELD_NUMBER: _ClassVar[int]
     INPUT_ASSETS_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_PARAMS_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     attempt: int
     function_name: str
     input_payload: bytes
     timeout_ms: int
-    tenant: str
+    org: str
     invoker_id: str
     capability_token: str
     output_mode: OutputMode
@@ -463,7 +953,9 @@ class RunJob(_message.Message):
     required_compile: RequiredCompileExecution
     lane: str
     input_assets: _containers.RepeatedCompositeFieldContainer[InputAsset]
-    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., tenant: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ..., lane: _Optional[str] = ..., input_assets: _Optional[_Iterable[_Union[InputAsset, _Mapping]]] = ...) -> None: ...
+    config_generation: int
+    config_params: bytes
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., org: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ..., lane: _Optional[str] = ..., input_assets: _Optional[_Iterable[_Union[InputAsset, _Mapping]]] = ..., config_generation: _Optional[int] = ..., config_params: _Optional[bytes] = ...) -> None: ...
 
 class InputAsset(_message.Message):
     __slots__ = ("asset_id", "source_ref", "blake3", "size_bytes", "kind", "mime_type")

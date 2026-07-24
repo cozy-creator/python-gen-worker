@@ -1,12 +1,17 @@
-"""gw#614(B): on_hello_ack model-set-diff cancel — th#961 defense in depth.
+"""gw#614(B)/gw#623: on_hello_ack model-set-diff handling.
 
 The th#961 livelock cancelled the in-flight self_mint_compile at phase=load
 4,602 times because EVERY ack replaced (cancelled + restarted) the
-residency-reconcile task. The hub no longer rewrites plans benignly mid-mint
-(tensorhub cb85c690), but the worker defends itself too: an ack whose
-semantic model set (resolutions + disk_refs + snapshots + hot) is unchanged
-must keep the running reconcile; a genuinely changed set cancels as before.
-"""
+residency-reconcile task. gw#614 kept the reconcile when the semantic set is
+unchanged; gw#623 tightens the cancel test to the ACTIVE work item: an ack
+may only cancel an in-flight load when the model that load is FOR left the
+set (or changed snapshot identity / resolution). Any other churn — presigned
+URL rotation (the hub re-signs snapshot URLs on every ~15s config rebuild),
+sibling refs added or removed, plan rewrites — lets the load finish and
+re-converges afterwards (level-triggered loop). The live signature this
+kills: `worker activity {warmup,self_mint_compile} failed at phase load:
+CancelledError` on nearly every first boot, requeue cycles exhausting 60-min
+request deadlines."""
 
 from __future__ import annotations
 
@@ -52,13 +57,21 @@ def _lifecycle(tmp_path: Path) -> Lifecycle:
     return lc
 
 
-def _ack(generation: int, refs: list[str], *, resolved: str = "") -> pb.HelloAck:
+def _ack(
+    generation: int, refs: list[str], *, resolved: str = "", url: str = "",
+) -> pb.HelloAck:
     ack = pb.HelloAck(
         protocol_version=pb.PROTOCOL_VERSION_CURRENT,
         desired_residency=pb.DesiredResidency(
             generation=generation,
             disk_refs=refs,
-            snapshots={r: pb.Snapshot(digest=_DIGEST) for r in refs},
+            snapshots={
+                r: pb.Snapshot(digest=_DIGEST, files=[pb.SnapshotFile(
+                    path="weights.safetensors", size_bytes=8,
+                    blake3="b" * 64, url=url or "https://cas/stable",
+                )])
+                for r in refs
+            },
         ),
     )
     if resolved:
@@ -74,8 +87,10 @@ def test_identical_model_set_keeps_the_running_reconcile(tmp_path) -> None:
     started = asyncio.Event()
     release = asyncio.Event()
     cancelled: list[str] = []
+    ensured: list[str] = []
 
     async def _blocking_ensure(ref, snapshot=None, *, binding=None):
+        ensured.append(ref)
         started.set()
         try:
             await release.wait()
@@ -107,12 +122,101 @@ def test_identical_model_set_keeps_the_running_reconcile(tmp_path) -> None:
         # Non-model deltas still applied: the observed generation advanced.
         assert lc._observed_residency_generation == 3
 
-        # A genuinely changed model set cancels as before.
+        # gw#623: a sibling ref joining the set is NOT a reason to discard
+        # the in-flight load of _REF_A — the loop converges to the new set
+        # (including _REF_B) after the active item completes.
         await lc.on_hello_ack(_ack(4, [_REF_A, _REF_B]))
         await asyncio.sleep(0)
-        assert lc._residency_task is not first_task
-        assert cancelled == [_REF_A], "the changed set must cancel the old task"
+        assert lc._residency_task is first_task, (
+            "adding a sibling ref must not cancel the active load")
+        assert cancelled == []
         release.set()
+        await asyncio.wait_for(first_task, timeout=5)
+        assert _REF_B in ensured, (
+            "after the active load finishes the loop must converge to the "
+            "updated set (level-triggered re-pass)")
+
+    asyncio.run(run())
+
+
+def test_url_rotation_is_not_a_model_change(tmp_path) -> None:
+    """gw#623 root cause: the hub re-presigns snapshot file URLs on every
+    release-config rebuild (~15s TTL) and deliberately EXCLUDES them from
+    its own HelloAck semantic hash. Hashing them worker-side cancelled the
+    in-flight warmup load on every URL refresh that rode a resent ack
+    (live: CancelledError at phase=load every ~14s during ack storms,
+    every ~10min otherwise)."""
+    lc = _lifecycle(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled: list[str] = []
+
+    async def _blocking_ensure(ref, snapshot=None, *, binding=None):
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.append(ref)
+            raise
+        return tmp_path
+
+    async def _no_revalidate(ref, snapshot=None):
+        return None
+
+    lc.executor.store.ensure_local = _blocking_ensure  # type: ignore[method-assign]
+    lc.executor.revalidate_snapshot_identity = _no_revalidate  # type: ignore[method-assign]
+
+    async def run() -> None:
+        await lc.on_hello_ack(_ack(1, [_REF_A], url="https://cas/sig-1"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        first_task = lc._residency_task
+        assert first_task is not None and not first_task.done()
+
+        await lc.on_hello_ack(_ack(3, [_REF_A], url="https://cas/sig-2"))
+        await asyncio.sleep(0)
+        assert lc._residency_task is first_task, (
+            "a presigned-URL rotation is not a model change and must not "
+            "touch the running reconcile")
+        assert cancelled == []
+        release.set()
+        await asyncio.wait_for(first_task, timeout=5)
+
+    asyncio.run(run())
+
+
+def test_active_ref_leaving_the_set_cancels(tmp_path) -> None:
+    """The one case that MUST still cancel: the model the in-flight load is
+    FOR left the desired set."""
+    lc = _lifecycle(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled: list[str] = []
+
+    async def _blocking_ensure(ref, snapshot=None, *, binding=None):
+        if ref == _REF_A:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.append(ref)
+                raise
+        return tmp_path
+
+    async def _no_revalidate(ref, snapshot=None):
+        return None
+
+    lc.executor.store.ensure_local = _blocking_ensure  # type: ignore[method-assign]
+    lc.executor.revalidate_snapshot_identity = _no_revalidate  # type: ignore[method-assign]
+
+    async def run() -> None:
+        await lc.on_hello_ack(_ack(1, [_REF_A]))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        first_task = lc._residency_task
+
+        await lc.on_hello_ack(_ack(2, [_REF_B]))
+        await asyncio.sleep(0)
+        assert lc._residency_task is not first_task
+        assert cancelled == [_REF_A]
         task = lc._residency_task
         assert task is not None
         await asyncio.wait_for(task, timeout=5)
@@ -121,12 +225,15 @@ def test_identical_model_set_keeps_the_running_reconcile(tmp_path) -> None:
 
 
 def test_changed_resolutions_count_as_a_model_set_change(tmp_path) -> None:
-    """A precision-ladder repick (same disk refs, different resolution map)
-    IS a semantic model change: the reconcile must restart on it."""
+    """A precision-ladder repick for the ACTIVELY-LOADING ref IS a semantic
+    model change: the in-flight load is for the wrong flavor and must be
+    cancelled and restarted."""
     lc = _lifecycle(tmp_path)
+    started = asyncio.Event()
     release = asyncio.Event()
 
     async def _blocking_ensure(ref, snapshot=None, *, binding=None):
+        started.set()
         await release.wait()
         return tmp_path
 
@@ -138,8 +245,8 @@ def test_changed_resolutions_count_as_a_model_set_change(tmp_path) -> None:
 
     async def run() -> None:
         await lc.on_hello_ack(_ack(1, [_REF_A], resolved=f"{_REF_A}#fp8-w8a8"))
+        await asyncio.wait_for(started.wait(), timeout=5)
         first_task = lc._residency_task
-        await asyncio.sleep(0)
 
         await lc.on_hello_ack(_ack(2, [_REF_A], resolved=f"{_REF_A}#nvfp4"))
         assert lc._residency_task is not first_task, (

@@ -51,6 +51,15 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Runtime introspection (set by the RunPod runtime; not configuration).
     runpod_pod_id: str = ""
 
+    # th#1087: local mutable-config snapshot file (atomic-rewritten on each
+    # config-generation push; per-invoke subprocesses read it). Empty =
+    # runtime_config.DEFAULT_SNAPSHOT_PATH.
+    config_snapshot_path: str = ""  # GEN_WORKER_CONFIG_SNAPSHOT_PATH
+    # Config generation whose boot-only environment was injected when this
+    # pod was created. A missing stamp is deliberately stale, not inferred
+    # from the first desired-state command.
+    boot_config_generation: int = 0  # WORKER_CONFIG_GENERATION
+
     # Immutable image provenance stamped by Tensorhub from the release image
     # variant it selected for this pod.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST

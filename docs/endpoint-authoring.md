@@ -296,7 +296,7 @@ Resources(gpu=True, vram_gb=24, compute_capability=8.0, libraries=("nunchaku",))
 subclass the handler receives: `ConversionContext` adds `save_checkpoint` /
 `mktemp` / `source` / `destination`; `DatasetContext` adds
 `publish_dataset_revision` / `resolve_dataset`; `TrainingContext` adds the
-repo-metadata RPCs.
+typed training-metric emitter.
 
 Producer endpoints publish **explicitly**: write files locally, call
 `gen_worker.convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per
@@ -403,7 +403,7 @@ At most 15 members:
 | `models` | resolved model refs by slot |
 | `device` | the torch device to run on |
 | `generator(seed)` | seeded `torch.Generator` on `device` |
-| `deadline`, `time_remaining()` | absolute deadline / seconds left |
+| `deadline` | absolute deadline |
 | `cancelled`, `raise_if_cancelled()` | THE cancellation spelling |
 | `progress(fraction, stage=)` | USER-facing status event (the job card) |
 | `log(msg, level=, **fields)` | PLATFORM/OPERATOR diagnostic, never user-facing (pgw#508) |

@@ -10,6 +10,7 @@ asyncio loop; sync tenant code runs in threads via asyncio.to_thread.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import gc
 import itertools
 import logging
@@ -21,7 +22,7 @@ import threading
 import time
 import typing
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
@@ -56,6 +57,7 @@ from .capability import (
     InsufficientHostRamError,
 )
 from .input_assets import cleanup_input_assets, manifest_from_run_job, materialize_input_assets
+from .intent_registry import IntentRegistry
 from .models import cozy_snapshot
 from .models import disk_gc
 from .models import disk_telemetry
@@ -80,6 +82,7 @@ from .models.lanes import LaneUnavailableError
 from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
+from .runtime_config import ConfigStore, extract_job_config
 
 if typing.TYPE_CHECKING:
     from . import fleet_cells
@@ -120,6 +123,12 @@ async def _to_thread_complete(func: Callable[..., Any], /, *args: Any, **kwargs:
             await work
         except BaseException:
             pass
+        # gw#624: the joined thread's result (possibly a fully-loaded
+        # multi-GB pipeline) lives on the Task. This frame rides the
+        # propagating CancelledError's traceback through rollback — keeping
+        # ``work`` referenced here would pin the whole discarded load in
+        # memory across the retry.
+        del work
         raise
 
 
@@ -629,6 +638,7 @@ class ModelStore:
         fill_source_dir: Optional[Path] = None,
     ) -> None:
         self._emit = emit
+        self._intent_registry: Optional[IntentRegistry] = None
         self._hf_home = hf_home or None
         self._hf_token = hf_token or None
         self._cache_dir = cache_dir or tensorhub_cas_dir()
@@ -665,6 +675,10 @@ class ModelStore:
             on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
         )
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._materialize_active: Dict[str, str] = {}
+        self._materialize_intent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "materialize_intent", default=""
+        )
         self._bindings: Dict[str, Any] = {}
         self.keep: list[str] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -757,6 +771,56 @@ class ModelStore:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
             pass
+
+    def bind_intent_registry(self, registry: IntentRegistry) -> None:
+        self._intent_registry = registry
+
+    def _materialize_intent(self, ref: str) -> str:
+        registry = self._intent_registry
+        if registry is None:
+            return ""
+        return registry.ensure_local_intent(
+            "materialize",
+            ref,
+            detail=f"materialize {ref}",
+        )
+
+    @contextmanager
+    def materialize_intent(
+        self,
+        intent_id: str,
+    ) -> typing.Iterator[None]:
+        token = self._materialize_intent_context.set(intent_id)
+        try:
+            yield
+        finally:
+            self._materialize_intent_context.reset(token)
+
+    async def _materialize_await(
+        self,
+        intent_id: str,
+        awaitable: Awaitable[Any],
+        *,
+        operation: str,
+        status: "pb.LifecycleIntentStatus",
+        stage: "pb.LifecycleIntentStage",
+        reason: "pb.LifecycleWaitReason" = pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED,
+        next_retry_at_unix_ms: int = 0,
+        blocker_intent_id: str = "",
+    ) -> Any:
+        registry = self._intent_registry
+        if registry is None:
+            return await awaitable
+        return await registry.reported_await(
+            intent_id,
+            awaitable,
+            operation=operation,
+            status=status,
+            stage=stage,
+            reason=reason,
+            next_retry_at_unix_ms=next_retry_at_unix_ms,
+            blocker_intent_id=blocker_intent_id,
+        )
 
     def _on_residency_event(
         self, ref: str, state: str, vram_bytes: int, duration_ms: int = 0
@@ -1255,12 +1319,24 @@ class ModelStore:
         self._index.remove(ref)
 
     async def _ensure_disk_headroom(
-        self, ref: str, needed_bytes: int, identity: _ResidencyIdentity = ("", 0),
+        self,
+        ref: str,
+        needed_bytes: int,
+        identity: _ResidencyIdentity = ("", 0),
+        *,
+        intent_id: str = "",
     ) -> None:
         target = int(needed_bytes) + _DISK_GC_MARGIN_BYTES
         if self._disk_free() >= target:
             return
-        await asyncio.to_thread(self.gc_disk, target, exclude=(ref,))
+        await self._materialize_await(
+            intent_id or self._materialize_intent(ref),
+            asyncio.to_thread(self.gc_disk, target, exclude=(ref,)),
+            operation=f"disk headroom for {ref}",
+            status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM,
+            reason=pb.LIFECYCLE_WAIT_REASON_DISK_HEADROOM,
+        )
         free = self._disk_free()
         if free < target:
             await self._event(
@@ -1284,7 +1360,12 @@ class ModelStore:
         startup prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
 
-    async def _await_hub_snapshot(self, ref: str) -> pb.Snapshot:
+    async def _await_hub_snapshot(
+        self,
+        ref: str,
+        *,
+        intent_id: str = "",
+    ) -> pb.Snapshot:
         """Cold tensorhub ref with no orchestrator-resolved snapshot: emit
         ``missing_snapshot`` (the hub refreshes desired state with fresh URLs
         on seeing it — connect_worker handleModelFailure) and block
@@ -1305,8 +1386,16 @@ class ModelStore:
         )
         logger.info("no snapshot for %s; waiting up to %.0fs for the hub re-mint",
                     ref, _MISSING_SNAPSHOT_WAIT_S)
+        intent_id = intent_id or self._materialize_intent(ref)
         try:
-            await asyncio.wait_for(waiter.wait(), _MISSING_SNAPSHOT_WAIT_S)
+            await self._materialize_await(
+                intent_id,
+                asyncio.wait_for(waiter.wait(), _MISSING_SNAPSHOT_WAIT_S),
+                operation=f"snapshot resolution for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT,
+                reason=pb.LIFECYCLE_WAIT_REASON_SNAPSHOT,
+            )
         except asyncio.TimeoutError:
             raise MissingSnapshotError(
                 f"tensorhub ref {ref!r} needs an orchestrator-resolved "
@@ -1330,8 +1419,13 @@ class ModelStore:
         binding: Any = None,
     ) -> Path:
         """Public path-only materialization API used by ordinary callers."""
-        return (await self._materialize_local(
-            ref, snapshot, binding=binding)).path
+        return (
+            await self._materialize_local(
+                ref,
+                snapshot,
+                binding=binding,
+            )
+        ).path
 
     async def _materialize_local(
         self,
@@ -1339,6 +1433,7 @@ class ModelStore:
         snapshot: Optional[pb.Snapshot] = None,
         *,
         binding: Any = None,
+        intent_id: str = "",
     ) -> _MaterializedLocal:
         """Materialize `ref` on disk. Transient failures retry with backoff;
         terminal (4xx-class) failures raise immediately. Emits ModelEvents.
@@ -1352,11 +1447,58 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
+        registry = self._intent_registry
+        scoped_intent_id = self._materialize_intent_context.get()
+        command_owned = bool(intent_id or scoped_intent_id)
+        intent_id = intent_id or scoped_intent_id
+        blocker_intent_id = self._materialize_active.get(ref, "")
+        if registry is None:
+            intent_id = ""
+        elif blocker_intent_id and not intent_id:
+            task = asyncio.current_task()
+            intent_id = registry.ensure_local_intent(
+                "materialize-waiter",
+                f"{ref}\0{id(task)}",
+                detail=f"waiting to materialize {ref}",
+            )
+        elif not intent_id:
+            intent_id = self._materialize_intent(ref)
+        if registry is not None and not blocker_intent_id:
+            self._materialize_active[ref] = intent_id
+        failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_REF_LOCK
+        acquired = False
 
         def complete(path: Path) -> _MaterializedLocal:
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                    pb.LIFECYCLE_INTENT_STAGE_ON_DISK,
+                    actual_digest=operation_identity[0].encode(),
+                )
             return _MaterializedLocal(path=path, identity=operation_identity)
 
-        async with self._lock(ref):
+        lock = self._lock(ref)
+        try:
+            await self._materialize_await(
+                intent_id,
+                lock.acquire(),
+                operation=f"materialization ref lock for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_REF_LOCK,
+                reason=pb.LIFECYCLE_WAIT_REASON_REF_LOCK,
+                blocker_intent_id=blocker_intent_id,
+            )
+            acquired = True
+            if registry is not None:
+                self._materialize_active[ref] = intent_id
+            failure_stage = pb.LIFECYCLE_INTENT_STAGE_VERIFYING
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_VERIFYING,
+                )
             cached = self.residency.local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
             # materialization of the SAME ref at a DIFFERENT digest is stale
@@ -1405,15 +1547,21 @@ class ModelStore:
                     # be the sacrificial cache warmer). No DOWNLOADING
                     # event, no retry burn; a hub that never answers raises
                     # the typed error (mapped RETRYABLE, never FATAL).
-                    snapshot = await self._await_hub_snapshot(ref)
+                    failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT
+                    snapshot = await self._await_hub_snapshot(
+                        ref,
+                        intent_id=intent_id,
+                    )
                     operation_identity = self._snapshot_identity(ref, snapshot)
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
+                failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM
                 await self._ensure_disk_headroom(
                     ref,
                     sum(int(f.size_bytes) for f in snapshot.files),
                     operation_identity,
+                    intent_id=intent_id,
                 )
             last_progress = 0.0
             # th#850 managed-tier ruling (gw#599): opened before _progress so
@@ -1457,6 +1605,18 @@ class ModelStore:
                 ref, pb.MODEL_STATE_DOWNLOADING, identity=operation_identity,
                 bytes_total=known_total,
             )
+            failure_stage = pb.LIFECYCLE_INTENT_STAGE_FETCHING
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_FETCHING,
+                    progress=pb.LifecycleProgress(
+                        done=0,
+                        total=float(known_total),
+                        unit="bytes",
+                    ),
+                )
             try:
                 delay = 1.0
                 for attempt in range(1, _DOWNLOAD_RETRIES + 1):
@@ -1529,13 +1689,69 @@ class ModelStore:
                                 identity=operation_identity, error=vocab,
                             )
                             raise
-                        logger.warning("download of %s failed (attempt %d): %s; retrying in %.1fs",
-                                       ref, attempt, exc, delay)
-                        await asyncio.sleep(delay)
+                        logger.warning(
+                            "download of %s failed (attempt %d): %s; retrying in %.1fs",
+                            ref,
+                            attempt,
+                            exc,
+                            delay,
+                        )
+                        await self._materialize_await(
+                            intent_id,
+                            asyncio.sleep(delay),
+                            operation=f"download retry backoff for {ref}",
+                            status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_NETWORK_RETRY,
+                            reason=pb.LIFECYCLE_WAIT_REASON_NETWORK_RETRY,
+                            next_retry_at_unix_ms=(time.time_ns() // 1_000_000 + int(delay * 1000)),
+                        )
+                        if registry is not None:
+                            registry.transition(
+                                intent_id,
+                                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                                pb.LIFECYCLE_INTENT_STAGE_FETCHING,
+                            )
                         delay *= 4
                 raise RuntimeError("unreachable")
             finally:
                 dl_counter.finish()
+        except asyncio.CancelledError:
+            if registry is not None:
+                if command_owned:
+                    registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                        pb.LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE,
+                        reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+                        detail="materialization preempted by tenant work",
+                    )
+                else:
+                    registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_CANCELED,
+                        failure_stage,
+                        detail="materialization canceled",
+                    )
+            raise
+        except BaseException as exc:
+            if registry is not None:
+                registry.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                    failure_stage,
+                    error_code=(
+                        pb.LIFECYCLE_ERROR_CODE_SNAPSHOT_IDENTITY_MISSING
+                        if isinstance(exc, MissingSnapshotError)
+                        else pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED
+                    ),
+                    detail=_sanitize(str(exc))[:512],
+                )
+            raise
+        finally:
+            if self._materialize_active.get(ref) == intent_id:
+                self._materialize_active.pop(ref, None)
+            if acquired:
+                lock.release()
 
     def activate_load_identity(
         self, ref: str, identity: _ResidencyIdentity,
@@ -1880,6 +2096,7 @@ class _Job:
     request_id: str
     attempt: int
     spec: Optional[EndpointSpec]
+    intent_id: str = ""
     ctx: Optional[RequestContext] = None
     task: Optional[asyncio.Task] = None
     exec_task: Optional[asyncio.Task] = None
@@ -1963,6 +2180,7 @@ class Executor:
         self._send = send
         self._settings = settings
         self.store = store or ModelStore(send)
+        self.intent_registry: Optional[IntentRegistry] = None
         for s in specs:
             for b in s.models.values():
                 self.store.register_binding(wire_ref(b), b)
@@ -1980,11 +2198,16 @@ class Executor:
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
+        self._setup_active: Dict[Any, str] = {}
+        # gw#624: set by a rolled-back setup; the next attempt gc-purges the
+        # cancelled load's cycle-held modules before allocating.
+        self._pending_alloc_purge = False
         # Compile-cache adoption mutates already-resident modules in place.
         # Serialize the whole operation (download through terminal evidence),
         # not only its GPU warmup, so two commands can never cross wraps or
         # let an older rollback mutate a newer adoption.
         self._compile_cache_adoption_lock = asyncio.Lock()
+        self._compile_cache_adoption_active = ""
         # pgw#548: worker-local capacity blocks retain the exact numeric
         # requirement that failed. They are cleared only by a later measured
         # observation after owner/pin release; no timer or prose retry path.
@@ -2014,6 +2237,10 @@ class Executor:
         # (Executor is constructed before Lifecycle exists).
         self._on_state_change: Callable[[], None] = lambda: None
         self.file_base_url: str = ""
+        # th#1087: worker-local mutable config (declared-parameter values +
+        # snapshot file for subprocesses). Worker wiring replaces it with the
+        # settings-pathed store; the default keeps embedded/CLI runs working.
+        self.runtime_config = ConfigStore()
         # Current worker JWT for hub HTTP calls (capability renewal). Worker
         # wiring points this at the transport's rotated credential.
         self.worker_jwt_provider: Callable[[], str] = (
@@ -2067,6 +2294,182 @@ class Executor:
         # ref -> (resolved_ref, cast, lane). Per-request lane instructions
         # expand family forms through these picks.
         self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
+
+    def bind_intent_registry(self, registry: IntentRegistry) -> None:
+        self.intent_registry = registry
+        self.store.bind_intent_registry(registry)
+
+    def _setup_intent(self, spec: EndpointSpec) -> str:
+        registry = self.intent_registry
+        if registry is None:
+            return ""
+        return registry.intent_id(
+            pb.DESIRED_INTENT_KIND_FUNCTION_READY,
+            function_name=spec.name,
+        ) or registry.ensure_local_intent(
+            "setup",
+            repr(spec.instance_key),
+            function_name=spec.name,
+            detail=f"prepare function {spec.name}",
+        )
+
+    def _adoption_intent(self, op: pb.ModelOp) -> str:
+        registry = self.intent_registry
+        if registry is None:
+            return ""
+        return registry.intent_id(
+            pb.DESIRED_INTENT_KIND_COMPILE_ADOPT,
+            ref=op.ref,
+        ) or registry.ensure_local_intent(
+            "compile-adopt",
+            op.operation_id or op.ref,
+            detail=f"adopt compile artifact {op.ref}",
+        )
+
+    def _job_intent(self, run: pb.RunJob) -> str:
+        registry = self.intent_registry
+        if registry is None:
+            return ""
+        return registry.ensure_local_intent(
+            "job",
+            f"{run.request_id}\0{run.attempt}",
+            function_name=run.function_name,
+            detail=f"run request {run.request_id} attempt {run.attempt}",
+        )
+
+    def _intent_transition(
+        self,
+        intent_id: str,
+        status: "pb.LifecycleIntentStatus",
+        stage: "pb.LifecycleIntentStage",
+        **kw: Any,
+    ) -> None:
+        if self.intent_registry is not None and intent_id:
+            self.intent_registry.transition(intent_id, status, stage, **kw)
+
+    async def _intent_await(
+        self,
+        intent_id: str,
+        awaitable: Awaitable[Any],
+        *,
+        operation: str,
+        status: "pb.LifecycleIntentStatus",
+        stage: "pb.LifecycleIntentStage",
+        reason: "pb.LifecycleWaitReason" = pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED,
+        blocker_intent_id: str = "",
+        detail: str = "",
+    ) -> Any:
+        if self.intent_registry is None:
+            return await awaitable
+        return await self.intent_registry.reported_await(
+            intent_id,
+            awaitable,
+            operation=operation,
+            status=status,
+            stage=stage,
+            reason=reason,
+            blocker_intent_id=blocker_intent_id,
+            detail=detail,
+        )
+
+    @asynccontextmanager
+    async def _intent_lock(
+        self,
+        intent_id: str,
+        lock: asyncio.Lock,
+        *,
+        operation: str,
+        stage: "pb.LifecycleIntentStage",
+        reason: "pb.LifecycleWaitReason",
+        resume_stage: "pb.LifecycleIntentStage",
+        blocker_intent_id: str = "",
+    ) -> typing.AsyncIterator[None]:
+        acquired = False
+        try:
+            await self._intent_await(
+                intent_id,
+                lock.acquire(),
+                operation=operation,
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=stage,
+                reason=reason,
+                blocker_intent_id=blocker_intent_id,
+            )
+            acquired = True
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                resume_stage,
+            )
+            yield
+        except asyncio.CancelledError:
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_CANCELED,
+                stage,
+                detail=f"canceled while waiting: {operation}",
+            )
+            raise
+        finally:
+            if acquired:
+                lock.release()
+
+    @asynccontextmanager
+    async def _setup_singleflight(
+        self,
+        spec: EndpointSpec,
+        rec: "_ClassRecord",
+    ) -> typing.AsyncIterator[str]:
+        key = spec.instance_key
+        blocker_intent_id = self._setup_active.get(key, "")
+        registry = self.intent_registry
+        if registry is None:
+            intent_id = ""
+        elif blocker_intent_id:
+            task = asyncio.current_task()
+            intent_id = registry.ensure_local_intent(
+                "setup-waiter",
+                f"{repr(key)}\0{id(task)}",
+                function_name=spec.name,
+                detail=f"waiting to prepare function {spec.name}",
+            )
+        else:
+            intent_id = self._setup_intent(spec)
+            self._setup_active[key] = intent_id
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
+        try:
+            async with self._intent_lock(
+                intent_id,
+                rec.lock,
+                operation=f"setup single-flight for {spec.name}",
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                reason=pb.LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER,
+                resume_stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                blocker_intent_id=blocker_intent_id,
+            ):
+                if intent_id:
+                    self._setup_active[key] = intent_id
+                yield intent_id
+        except BaseException as exc:
+            if registry is not None and registry.is_active(intent_id):
+                registry.transition(
+                    intent_id,
+                    (
+                        pb.LIFECYCLE_INTENT_STATUS_CANCELED
+                        if isinstance(exc, asyncio.CancelledError)
+                        else pb.LIFECYCLE_INTENT_STATUS_FAILED
+                    ),
+                    pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                    detail=_sanitize(str(exc))[:512],
+                )
+            raise
+        finally:
+            if self._setup_active.get(key) == intent_id:
+                self._setup_active.pop(key, None)
 
     # ---- precision resolutions (th#697) -----------------------------------
 
@@ -3380,6 +3783,34 @@ class Executor:
              if wire_ref(spec.models[s]) != wire_ref(b)})
         return derived
 
+    def _effective_config(
+        self, spec: EndpointSpec, run: Optional["pb.RunJob"] = None,
+    ) -> Dict[str, Any]:
+        """th#1087 effective declared-parameter values for one dispatch:
+        declared defaults <- worker's current config store <- RunJob-stamped
+        values (read-at-dispatch class; a stamped job keeps its values even
+        if a gen bump lands mid-flight)."""
+        if not spec.config:
+            return {}
+        values = {p.name: p.default for p in spec.config}
+        declared = set(values)
+        for name, v in self.runtime_config.parameters_for(spec.name).items():
+            if name in declared:
+                values[name] = v
+        if run is not None:
+            gen, stamped = extract_job_config(run)
+            if stamped is not None:
+                stamped = {
+                    name: value
+                    for name, value in stamped.items()
+                    if name in declared
+                }
+                # Advance the worker store + snapshot file to this dispatch's
+                # stamped values, so subprocesses read the latest on invoke.
+                self.runtime_config.stamp_function(spec.name, stamped, gen)
+            values.update(stamped or {})
+        return values
+
     def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
         """th#1050: the instructed lane's body when the endpoint DECLARES it
         (handles=) — the author's code, not binding surgery, serves it."""
@@ -3557,7 +3988,12 @@ class Executor:
         return rec
 
     @asynccontextmanager
-    async def _exclusive_gpu(self) -> typing.AsyncIterator[None]:
+    async def _exclusive_gpu(
+        self,
+        intent_id: str = "",
+        *,
+        resume_stage: "pb.LifecycleIntentStage" = pb.LIFECYCLE_INTENT_STAGE_WARMING,
+    ) -> typing.AsyncIterator[None]:
         """Hold every worker GPU permit for setup/adoption proof warmups.
 
         Inductor exposes process-global cache counters. Acquiring only one
@@ -3568,9 +4004,33 @@ class Executor:
         acquired = 0
         try:
             for _ in range(self._gpu_slots):
-                await self._gpu_semaphore.acquire()
+                await self._intent_await(
+                    intent_id,
+                    self._gpu_semaphore.acquire(),
+                    operation="exclusive GPU permit",
+                    status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
+                    reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
+                )
                 acquired += 1
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                resume_stage,
+            )
             yield
+        except asyncio.CancelledError:
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_CANCELED,
+                (
+                    resume_stage
+                    if acquired == self._gpu_slots
+                    else pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT
+                ),
+                detail="exclusive GPU wait canceled",
+            )
+            raise
         finally:
             for _ in range(acquired):
                 self._gpu_semaphore.release()
@@ -3591,7 +4051,7 @@ class Executor:
         except RuntimeError:
             pass
         rec = self._class_record(spec)
-        async with rec.lock:
+        async with self._setup_singleflight(spec, rec) as intent_id:
             if rec.ready and not rec.stale:
                 setup_refs = [
                     r for slot in self._setup_slots(spec)
@@ -3628,7 +4088,14 @@ class Executor:
                         # reporting the state-driven failure; it must not keep
                         # serving under superseded scheduler evidence.
                         rec.stale = True
-                        async with self._load_lock:
+                        async with self._intent_lock(
+                            intent_id,
+                            self._load_lock,
+                            operation=f"vacate stale setup for {spec.name}",
+                            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                            reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+                            resume_stage=pb.LIFECYCLE_INTENT_STAGE_LOADING_HOST,
+                        ):
                             await self._vacate_record(rec)
                         self._mark_compile_setup_unavailable(
                             rec, spec, str(exc))
@@ -3704,10 +4171,22 @@ class Executor:
                 # gw#494: the instance was loaded for a superseded pick —
                 # vacate (releasing its OLD-ref bookings) and set up fresh
                 # with the current bindings.
-                async with self._load_lock:
+                async with self._intent_lock(
+                    intent_id,
+                    self._load_lock,
+                    operation=f"vacate stale setup for {spec.name}",
+                    stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                    reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+                    resume_stage=pb.LIFECYCLE_INTENT_STAGE_LOADING_HOST,
+                ):
                     await self._vacate_record(rec)
             if rec.ready:
                 await self._promote_setup_refs(spec, promote_slots, rec=rec)
+                self._intent_transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                    pb.LIFECYCLE_INTENT_STAGE_READY,
+                )
                 return rec.instance
             if self._record_has_setup_ownership(rec):
                 # A prior process-local cancellation/failure may have reached
@@ -3729,7 +4208,12 @@ class Executor:
             )
             try:
                 with activity_mod.watchdog(act):
-                    instance = await self._setup_locked(spec, rec, snapshots)
+                    instance = await self._setup_locked(
+                        spec,
+                        rec,
+                        snapshots,
+                        intent_id=intent_id,
+                    )
             except BaseException as exc:
                 act.failed(exc)
                 # Setup is a transaction: endpoint construction, tenant
@@ -3741,8 +4225,21 @@ class Executor:
                 try:
                     await self._rollback_failed_setup(rec)
                 except BaseException:
-                    logger.exception(
-                        "failed to roll back incomplete setup for %s", spec.name)
+                    logger.exception("failed to roll back incomplete setup for %s", spec.name)
+                self._intent_transition(
+                    intent_id,
+                    (
+                        pb.LIFECYCLE_INTENT_STATUS_CANCELED
+                        if isinstance(exc, asyncio.CancelledError)
+                        else pb.LIFECYCLE_INTENT_STATUS_FAILED
+                    ),
+                    (
+                        pb.LIFECYCLE_INTENT_STAGE_COMPILING
+                        if spec.compile is not None
+                        else pb.LIFECYCLE_INTENT_STAGE_WARMING
+                    ),
+                    detail=_sanitize(str(exc))[:512],
+                )
                 if not isinstance(exc, Exception):
                     raise
                 # Honest failure (th#581): a function whose model download /
@@ -3765,6 +4262,11 @@ class Executor:
             rec.instance = instance
             rec.ready = True
             act.completed()
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+            )
             self._clear_recovered_compile_failures(rec)
             self._on_state_change()
             return instance
@@ -3914,6 +4416,7 @@ class Executor:
                     boot_warmup=True,
                 )
                 ctx._set_lane(self._served_lane(wj.spec))
+                ctx._set_config(self._effective_config(wj.spec))
                 try:
                     await self._invoke_warmup(wj.spec, instance, ctx, payload, handler_kwargs)
                 except Exception as exc:
@@ -4055,10 +4558,25 @@ class Executor:
         staging buffers in PyTorch's pinned-host cache, so return those unused
         blocks after the owners have gone.
         """
+        # gw#624: even with no record ownership (cancellation landed inside
+        # _injection_kwargs before the load finished), the aborted attempt's
+        # partially built modules are almost always in reference cycles and
+        # can be pinned by the propagating exception's traceback until it
+        # dies — schedule a purge so the NEXT attempt provably starts from
+        # baseline instead of stacking a fresh multi-GB load on top
+        # (observed live: 5 cancelled retries climbed one worker to 83.86GB
+        # VRAM / 97% container RAM on an 80GB card).
+        self._pending_alloc_purge = True
         if not self._record_has_setup_ownership(rec):
             return
         async with self._load_lock:
             released = await self._vacate_record(rec)
+        await asyncio.to_thread(gc.collect)
+        if torch is not None and torch.cuda.is_available():
+            try:
+                await asyncio.to_thread(torch.cuda.empty_cache)
+            except Exception:
+                pass
         released_pinned = await asyncio.to_thread(
             release_unused_pinned_host_cache)
         logger.info(
@@ -4067,9 +4585,31 @@ class Executor:
             released_pinned,
         )
 
+    async def _purge_cancelled_setup_allocations(self) -> None:
+        """gw#624: run once at the start of a setup attempt that follows a
+        rolled-back one. By now the previous attempt's exception has died,
+        so a full gc pass actually frees its cycle-held modules; only then
+        can empty_cache return their VRAM to the allocator."""
+        if not getattr(self, "_pending_alloc_purge", False):
+            return
+        self._pending_alloc_purge = False
+        freed_before = time.monotonic()
+        await asyncio.to_thread(gc.collect)
+        if torch is not None and torch.cuda.is_available():
+            try:
+                await asyncio.to_thread(torch.cuda.empty_cache)
+            except Exception:
+                pass
+        logger.info(
+            "purged prior cancelled-setup allocations in %.1fs",
+            time.monotonic() - freed_before,
+        )
+
     async def _setup_locked(
         self, spec: EndpointSpec, rec: _ClassRecord,
         snapshots: Optional[Dict[str, pb.Snapshot]],
+        *,
+        intent_id: str = "",
     ) -> Any:
         assert spec.cls is not None  # guarded by ensure_setup
         setup_slots = self._setup_slots(spec)
@@ -4086,6 +4626,11 @@ class Executor:
         # path, plus per-override-ref snapshot digests (identity facts).
         component_paths: Dict[str, Dict[str, str]] = {}
         override_digests: Dict[str, str] = {}
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_LOADING_HOST,
+        )
         for slot in setup_slots:
             binding = spec.models[slot]
             ref = slot_refs[slot]
@@ -4112,7 +4657,18 @@ class Executor:
         compile_artifact = compile_selection.path if compile_selection else None
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
-        async with self._load_lock:
+        async with self._intent_lock(
+            intent_id,
+            self._load_lock,
+            operation=f"model load for {spec.name}",
+            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+            reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+            resume_stage=pb.LIFECYCLE_INTENT_STAGE_LOADING_DEVICE,
+        ):
+            # gw#624: a prior cancelled attempt's cycle-held modules must be
+            # collected BEFORE this attempt allocates, or retries stack
+            # partial loads until OOM.
+            await self._purge_cancelled_setup_allocations()
             await self._make_room_for(spec, setup_slots)
             # VRAM make-room may demote the old pipeline into host RAM. Admit
             # the incoming load only AFTER that transition so the probe sees
@@ -4273,14 +4829,29 @@ class Executor:
                 return evidence.count, evidence.functions_by_object
 
             activity_mod.current_phase(
-                activity_mod.PHASE_INDUCTOR_COMPILE if inj.pending_self_mints
-                else activity_mod.PHASE_WARMUP_FORWARD)
+                activity_mod.PHASE_INDUCTOR_COMPILE
+                if inj.pending_self_mints
+                else activity_mod.PHASE_WARMUP_FORWARD
+            )
+            warmup_stage = (
+                pb.LIFECYCLE_INTENT_STAGE_COMPILING
+                if inj.pending_self_mints
+                else pb.LIFECYCLE_INTENT_STAGE_WARMING
+            )
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                warmup_stage,
+            )
             compile_seconds_before = (
                 compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
             if inj.active_compile_artifacts:
                 # Cache-hit counters are process-global. Hold every GPU permit
                 # so each exact guard window can belong to only this warmup.
-                async with self._exclusive_gpu():
+                async with self._exclusive_gpu(
+                    intent_id,
+                    resume_stage=warmup_stage,
+                ):
                     warmed, function_proofs = await run_warmup()
             else:
                 warmed, function_proofs = await run_warmup()
@@ -5492,222 +6063,241 @@ class Executor:
             for pname, ann in hints.items():
                 if ann is ServerHandle:
                     kwargs[pname] = server
-        for slot, path in paths.items():
-            ann = hints.get(slot)
-            overrides = dict((component_paths or {}).get(slot) or {})
-            if overrides and not (
-                isinstance(ann, type)
-                and callable(getattr(ann, "from_pretrained", None))
-            ):
-                # pgw#617: substitution requires a worker-loaded pipeline
-                # slot; a self-loading str/Path slot never sees components.
-                raise ComponentSubstitutionError(
-                    spec.name, slot, sorted(overrides)[0],
-                    detail="slot is not worker-loaded (no pipeline-class "
-                           "annotation); components cannot substitute")
-            if ann is None or ann is str:
-                kwargs[slot] = path
-            elif ann is Path:
-                kwargs[slot] = Path(path)
-            elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
-                binding = spec.models.get(slot)
-                # Worker-owned placement/offload policy: one decider for the
-                # whole worker; endpoints never write device/offload code.
-                # Plan-time offload verdicts and the learned degraded floor
-                # pick the starting rung so a doomed fully-resident attempt
-                # is never paid (gw#463 / ie#369); a CUDA OOM inside is a
-                # ladder transition, not a failure.
-                ref = wire_ref(binding) if binding is not None else ""
-                mode = self._placement_mode(spec, ref)
-                slot_share = dict((share_plan or {}).get(slot) or {})
-                if slot_share and mode != "auto":
-                    # Offload hooks on a shared module would poison sibling
-                    # lanes; a planned-offload record loads monolithically.
-                    logger.warning(
-                        "content-keyed sharing disabled for %s slot %s: "
-                        "placement mode %s", spec.name, slot, mode)
-                    slot_share = {}
-                res = self.store.residency
-                injected: Dict[str, Any] = {}
-                if overrides:
-                    # pgw#617 load-then-substitute: each override component
-                    # loads from its OWN materialized tree and rides the
-                    # same from_pretrained components= injection as gw#479
-                    # shared modules. Unknown names refuse typed at setup.
-                    valid = self._model_index_components(path)
-                    unknown = sorted(set(overrides) - valid)
-                    if unknown:
-                        raise ComponentSubstitutionError(
-                            spec.name, slot, unknown[0],
-                            detail=f"base composition {ref!r} declares "
-                                   f"components {sorted(valid)}")
-                    for comp in overrides:
-                        # An overridden component never rides the shared
-                        # cache: its bytes differ from the base's.
-                        slot_share.pop(comp, None)
-                    from .models.loading import load_component_override
-
-                    for comp, comp_path in sorted(overrides.items()):
-                        injected[comp] = await _to_thread_complete(
-                            load_component_override, path, comp, comp_path,
-                            dtype=str(getattr(binding, "dtype", "") or ""))
-                if slot_share:
-                    valid = self._model_index_components(path)
-                    for comp, key in list(slot_share.items()):
-                        if comp not in valid:
-                            del slot_share[comp]
-                            continue
-                        if res.shared_obj(key) is not None:
-                            injected[comp] = res.acquire_shared(
-                                key, _shared_loader_must_hit)
-                            result.shared_keys.append(key)
-                    # Exclusive-weights headroom BEFORE the load: demote idle
-                    # LRU lanes now so placement never has to walk the
-                    # offload ladder mid-lane (dual-resident when the budget
-                    # admits, swap-mode otherwise — existing make_room path).
-                    sizes = self.store.component_sizes(ref)
-                    excl_bytes = sum(
-                        b for comp, b in sizes.items() if comp not in injected)
-                    if excl_bytes > 0:
-                        await _to_thread_complete(res.make_room, excl_bytes)
-                before = self._vram_allocated()
-                try:
-                    sl = await _to_thread_complete(
-                        provision.load_slot, ann, path, binding=binding,
-                        slot=slot, ref=ref, mode=mode, components=injected,
-                        declared_vram_gb=float(
-                            getattr(spec.resources, "vram_gb", 0) or 0),
-                        force_storage_dtype=(
-                            "fp8" if slot in force_fp8_slots else ""),
-                    )
-                except Exception as exc:
-                    # Corruption-shaped load failure (gw#408): digest-verify
-                    # the snapshot; quarantine + re-materialize + retry ONCE
-                    # when corruption is confirmed, re-raise otherwise.
-                    fresh: Optional[Path] = None
-                    if binding is not None and _is_corrupt_load_error(exc):
-                        fresh = await self.store.refetch_corrupt(
-                            ref, (snapshots or {}).get(ref), binding=binding
-                        )
-                    if fresh is None:
-                        raise
-                    logger.warning(
-                        "weights load for slot %r failed on a corrupt snapshot "
-                        "(%s: %s); retrying once after re-materialization",
-                        slot, type(exc).__name__, exc,
-                    )
-                    path = str(fresh)
-                    paths[slot] = path
-                    sl = await _to_thread_complete(
-                        provision.load_slot, ann, path, binding=binding,
-                        slot=slot, ref=ref, mode=mode, components=injected,
-                        declared_vram_gb=float(
-                            getattr(spec.resources, "vram_gb", 0) or 0),
-                        force_storage_dtype=(
-                            "fp8" if slot in force_fp8_slots else ""),
-                    )
-                pipe = sl.obj
-                # Reconcile the load outcomes into ServePlan/FnDegraded via
-                # the state-delta path — the shared core decides WHAT
-                # degraded (details non-empty), the executor reports it.
-                if sl.pre_drop_detail:
-                    self._record_cast_drop(
-                        spec, ref=ref, wanted=sl.pre_drop_wanted,
-                        ran=sl.ran, detail=sl.pre_drop_detail)
-                if sl.rung_detail:
-                    self._record_adaptive_rung(
-                        spec, ref=ref, rung=sl.rung, detail=sl.rung_detail)
-                elif sl.cast_fail_detail:
-                    self._record_cast_drop(
-                        spec, ref=ref, wanted=sl.cast_fail_wanted,
-                        ran=sl.ran, detail=sl.cast_fail_detail)
-                placed = sl.placed
-                if placed.get("oom_demotions"):
-                    self._record_demotion(
-                        spec, ref=ref, phase="load",
-                        from_rung=str(placed.get("requested_mode") or mode),
-                        to_rung=str(placed.get("mode") or ""),
-                        needed_gb=estimate_pipeline_size_gb(pipe),
-                        detail="CUDA OOM at load; pipeline placed offloaded",
-                    )
-                if slot_share and str(placed.get("mode") or "") not in (
-                    "", "off", "vae_only", "cpu",
+        try:
+            for slot, path in paths.items():
+                ann = hints.get(slot)
+                overrides = dict((component_paths or {}).get(slot) or {})
+                if overrides and not (
+                    isinstance(ann, type)
+                    and callable(getattr(ann, "from_pretrained", None))
                 ):
-                    raise RetryableError(
-                        f"lane {slot!r} of {spec.name} placed "
-                        f"{placed.get('mode')!r}: shared-component lanes "
-                        "require resident placement; retrying")
-                if spec.compile is not None:
-                    # Opt-in acceleration against a pre-built per-SKU artifact:
-                    # a TRT engine (#390, refit with this pipeline's weights)
-                    # or an inductor cache (#384). No verified artifact =>
-                    # stays eager. ``compile_artifact`` is hub-attached (#569).
-                    from . import compile_cache
+                    # pgw#617: substitution requires a worker-loaded pipeline
+                    # slot; a self-loading str/Path slot never sees components.
+                    raise ComponentSubstitutionError(
+                        spec.name, slot, sorted(overrides)[0],
+                        detail="slot is not worker-loaded (no pipeline-class "
+                               "annotation); components cannot substitute")
+                if ann is None or ann is str:
+                    kwargs[slot] = path
+                elif ann is Path:
+                    kwargs[slot] = Path(path)
+                elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
+                    binding = spec.models.get(slot)
+                    # Worker-owned placement/offload policy: one decider for the
+                    # whole worker; endpoints never write device/offload code.
+                    # Plan-time offload verdicts and the learned degraded floor
+                    # pick the starting rung so a doomed fully-resident attempt
+                    # is never paid (gw#463 / ie#369); a CUDA OOM inside is a
+                    # ladder transition, not a failure.
+                    ref = wire_ref(binding) if binding is not None else ""
+                    mode = self._placement_mode(spec, ref)
+                    slot_share = dict((share_plan or {}).get(slot) or {})
+                    if slot_share and mode != "auto":
+                        # Offload hooks on a shared module would poison sibling
+                        # lanes; a planned-offload record loads monolithically.
+                        logger.warning(
+                            "content-keyed sharing disabled for %s slot %s: "
+                            "placement mode %s", spec.name, slot, mode)
+                        slot_share = {}
+                    res = self.store.residency
+                    injected: Dict[str, Any] = {}
+                    if overrides:
+                        # pgw#617 load-then-substitute: each override component
+                        # loads from its OWN materialized tree and rides the
+                        # same from_pretrained components= injection as gw#479
+                        # shared modules. Unknown names refuse typed at setup.
+                        valid = self._model_index_components(path)
+                        unknown = sorted(set(overrides) - valid)
+                        if unknown:
+                            raise ComponentSubstitutionError(
+                                spec.name, slot, unknown[0],
+                                detail=f"base composition {ref!r} declares "
+                                       f"components {sorted(valid)}")
+                        for comp in overrides:
+                            # An overridden component never rides the shared
+                            # cache: its bytes differ from the base's.
+                            slot_share.pop(comp, None)
+                        from .models.loading import load_component_override
 
+                        for comp, comp_path in sorted(overrides.items()):
+                            injected[comp] = await _to_thread_complete(
+                                load_component_override, path, comp, comp_path,
+                                dtype=str(getattr(binding, "dtype", "") or ""))
+                    if slot_share:
+                        valid = self._model_index_components(path)
+                        for comp, key in list(slot_share.items()):
+                            if comp not in valid:
+                                del slot_share[comp]
+                                continue
+                            if res.shared_obj(key) is not None:
+                                injected[comp] = res.acquire_shared(
+                                    key, _shared_loader_must_hit)
+                                result.shared_keys.append(key)
+                        # Exclusive-weights headroom BEFORE the load: demote idle
+                        # LRU lanes now so placement never has to walk the
+                        # offload ladder mid-lane (dual-resident when the budget
+                        # admits, swap-mode otherwise — existing make_room path).
+                        sizes = self.store.component_sizes(ref)
+                        excl_bytes = sum(
+                            b for comp, b in sizes.items() if comp not in injected)
+                        if excl_bytes > 0:
+                            await _to_thread_complete(res.make_room, excl_bytes)
+                    before = self._vram_allocated()
                     try:
-                        outcome = await _to_thread_complete(
-                            self._enable_compiled,
-                            pipe, spec.compile, compile_artifact,
+                        sl = await _to_thread_complete(
+                            provision.load_slot, ann, path, binding=binding,
+                            slot=slot, ref=ref, mode=mode, components=injected,
+                            declared_vram_gb=float(
+                                getattr(spec.resources, "vram_gb", 0) or 0),
+                            force_storage_dtype=(
+                                "fp8" if slot in force_fp8_slots else ""),
+                            strict_vram=bool(
+                                getattr(spec.resources, "strict_vram", False)),
                         )
-                    except compile_cache.CompiledLaneUnavailableError as exc:
-                        # Mandatory (w8a8/w4a4) lane: self-mint also hit a
-                        # genuine impossibility (no CUDA/toolchain/target).
-                        # When this refusal was chained from a caught
-                        # cell_selection_bug (th#1031), report it — the
-                        # lane refusal must not silently swallow the
-                        # loud invariant event.
-                        bug = exc.__cause__
-                        if isinstance(bug, compile_cache.CellSelectionBugError):
+                    except Exception as exc:
+                        # Corruption-shaped load failure (gw#408): digest-verify
+                        # the snapshot; quarantine + re-materialize + retry ONCE
+                        # when corruption is confirmed, re-raise otherwise.
+                        fresh: Optional[Path] = None
+                        if binding is not None and _is_corrupt_load_error(exc):
+                            fresh = await self.store.refetch_corrupt(
+                                ref, (snapshots or {}).get(ref), binding=binding
+                            )
+                        if fresh is None:
+                            raise
+                        logger.warning(
+                            "weights load for slot %r failed on a corrupt snapshot "
+                            "(%s: %s); retrying once after re-materialization",
+                            slot, type(exc).__name__, exc,
+                        )
+                        path = str(fresh)
+                        paths[slot] = path
+                        sl = await _to_thread_complete(
+                            provision.load_slot, ann, path, binding=binding,
+                            slot=slot, ref=ref, mode=mode, components=injected,
+                            declared_vram_gb=float(
+                                getattr(spec.resources, "vram_gb", 0) or 0),
+                            force_storage_dtype=(
+                                "fp8" if slot in force_fp8_slots else ""),
+                            strict_vram=bool(
+                                getattr(spec.resources, "strict_vram", False)),
+                        )
+                    pipe = sl.obj
+                    # Reconcile the load outcomes into ServePlan/FnDegraded via
+                    # the state-delta path — the shared core decides WHAT
+                    # degraded (details non-empty), the executor reports it.
+                    if sl.pre_drop_detail:
+                        self._record_cast_drop(
+                            spec, ref=ref, wanted=sl.pre_drop_wanted,
+                            ran=sl.ran, detail=sl.pre_drop_detail)
+                    if sl.rung_detail:
+                        self._record_adaptive_rung(
+                            spec, ref=ref, rung=sl.rung, detail=sl.rung_detail)
+                    elif sl.cast_fail_detail:
+                        self._record_cast_drop(
+                            spec, ref=ref, wanted=sl.cast_fail_wanted,
+                            ran=sl.ran, detail=sl.cast_fail_detail)
+                    placed = sl.placed
+                    if placed.get("oom_demotions"):
+                        self._record_demotion(
+                            spec, ref=ref, phase="load",
+                            from_rung=str(placed.get("requested_mode") or mode),
+                            to_rung=str(placed.get("mode") or ""),
+                            needed_gb=estimate_pipeline_size_gb(pipe),
+                            detail="CUDA OOM at load; pipeline placed offloaded",
+                        )
+                    if slot_share and str(placed.get("mode") or "") not in (
+                        "", "off", "vae_only", "cpu",
+                    ):
+                        raise RetryableError(
+                            f"lane {slot!r} of {spec.name} placed "
+                            f"{placed.get('mode')!r}: shared-component lanes "
+                            "require resident placement; retrying")
+                    if spec.compile is not None:
+                        # Opt-in acceleration against a pre-built per-SKU artifact:
+                        # a TRT engine (#390, refit with this pipeline's weights)
+                        # or an inductor cache (#384). No verified artifact =>
+                        # stays eager. ``compile_artifact`` is hub-attached (#569).
+                        from . import compile_cache
+
+                        try:
+                            outcome = await _to_thread_complete(
+                                self._enable_compiled,
+                                pipe, spec.compile, compile_artifact,
+                            )
+                        except compile_cache.CompiledLaneUnavailableError as exc:
+                            # Mandatory (w8a8/w4a4) lane: self-mint also hit a
+                            # genuine impossibility (no CUDA/toolchain/target).
+                            # When this refusal was chained from a caught
+                            # cell_selection_bug (th#1031), report it — the
+                            # lane refusal must not silently swallow the
+                            # loud invariant event.
+                            bug = exc.__cause__
+                            if isinstance(bug, compile_cache.CellSelectionBugError):
+                                await self._report_cell_selection_bug(
+                                    spec, compile_selection, bug)
+                            raise
+                        armed = outcome.armed
+                        pipe_mint = outcome.self_mint
+                        if outcome.selection_bug is not None:
+                            # th#1031: no longer fatal — this SAME call
+                            # already fell through to self-mint (or, for a
+                            # plain lane, eager); still reported loudly so
+                            # the th#883 invariant stays wire-visible.
                             await self._report_cell_selection_bug(
-                                spec, compile_selection, bug)
-                        raise
-                    armed = outcome.armed
-                    pipe_mint = outcome.self_mint
-                    if outcome.selection_bug is not None:
-                        # th#1031: no longer fatal — this SAME call
-                        # already fell through to self-mint (or, for a
-                        # plain lane, eager); still reported loudly so
-                        # the th#883 invariant stays wire-visible.
-                        await self._report_cell_selection_bug(
-                            spec, compile_selection, outcome.selection_bug)
+                                spec, compile_selection, outcome.selection_bug)
 
-                    if compile_cache.has_compile_target(pipe, spec.compile):
-                        result.add_compile_object(pipe, (slot,))
-                        selection = _selection_for(compile_selection, pipe_mint)
-                        if armed and selection is not None:
-                            result.active_compile_artifacts[id(pipe)] = selection
-                            from . import trt_engine
+                        if compile_cache.has_compile_target(pipe, spec.compile):
+                            result.add_compile_object(pipe, (slot,))
+                            selection = _selection_for(compile_selection, pipe_mint)
+                            if armed and selection is not None:
+                                result.active_compile_artifacts[id(pipe)] = selection
+                                from . import trt_engine
 
-                            if trt_engine.is_engine_ref(selection.ref):
-                                result.trt_execution_before[id(pipe)] = (
-                                    trt_engine.execution_count(pipe))
-                            # gw#587 CORRECT FIX: a PendingSelfMint is not
-                            # proven or packed yet — the warmup proof
-                            # finalizes it (pack + publish) only after
-                            # confirming a real compiled call, never before.
-                            if hasattr(pipe_mint, "capture_dir"):
-                                result.pending_self_mints[id(pipe)] = pipe_mint
-                delta = max(0, self._vram_allocated() - before)
-                if slot_share:
-                    lane_obj, lane_bytes = self._register_lane(
-                        slot,
-                        ref,
-                        pipe,
-                        slot_share,
-                        injected,
-                        delta,
-                        result,
-                        (slot_identities or {}).get(slot, ("", 0)),
-                    )
-                    loaded[slot] = (lane_obj, lane_bytes)
-                    result.lane_slots.add(slot)
+                                if trt_engine.is_engine_ref(selection.ref):
+                                    result.trt_execution_before[id(pipe)] = (
+                                        trt_engine.execution_count(pipe))
+                                # gw#587 CORRECT FIX: a PendingSelfMint is not
+                                # proven or packed yet — the warmup proof
+                                # finalizes it (pack + publish) only after
+                                # confirming a real compiled call, never before.
+                                if hasattr(pipe_mint, "capture_dir"):
+                                    result.pending_self_mints[id(pipe)] = pipe_mint
+                    delta = max(0, self._vram_allocated() - before)
+                    if slot_share:
+                        lane_obj, lane_bytes = self._register_lane(
+                            slot,
+                            ref,
+                            pipe,
+                            slot_share,
+                            injected,
+                            delta,
+                            result,
+                            (slot_identities or {}).get(slot, ("", 0)),
+                        )
+                        loaded[slot] = (lane_obj, lane_bytes)
+                        result.lane_slots.add(slot)
+                    else:
+                        loaded[slot] = (pipe, delta)
+                        if self._arm_lane_gate(pipe, ref, spec=spec):
+                            result.gated_slots.add(slot)
+                    kwargs[slot] = pipe
                 else:
-                    loaded[slot] = (pipe, delta)
-                    if self._arm_lane_gate(pipe, ref, spec=spec):
-                        result.gated_slots.add(slot)
-                kwargs[slot] = pipe
-            else:
-                kwargs[slot] = path
+                    kwargs[slot] = path
+        except BaseException:
+            # gw#624: a failed/cancelled injection never reached
+            # ``rec.shared_keys.extend`` — roll back the shared-component
+            # holds acquired so far or their refcounts leak forever (the
+            # components become permanently unevictable, and each retry
+            # re-acquires on top).
+            for key in result.shared_keys:
+                try:
+                    self.store.residency.release_shared(key)
+                except Exception:
+                    logger.exception(
+                        "failed to release shared hold %r after aborted "
+                        "injection", key)
+            raise
         return result
 
     def _register_lane(
@@ -5945,8 +6535,39 @@ class Executor:
         """Handle the sole v3 ModelOp: hot adoption of a compile cache."""
         if op.op != pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE:
             return
-        async with self._compile_cache_adoption_lock:
-            await self._handle_compile_cache_adoption(op)
+        blocker_intent_id = self._compile_cache_adoption_active
+        if self.intent_registry is not None and blocker_intent_id:
+            intent_id = self.intent_registry.ensure_local_intent(
+                "compile-adopt-waiter",
+                op.operation_id or f"{op.ref}\0{id(asyncio.current_task())}",
+                detail=f"waiting to adopt compile artifact {op.ref}",
+            )
+        else:
+            intent_id = self._adoption_intent(op)
+            self._compile_cache_adoption_active = intent_id
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
+        try:
+            async with self._intent_lock(
+                intent_id,
+                self._compile_cache_adoption_lock,
+                operation=f"compile adoption single-flight for {op.ref}",
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                reason=pb.LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER,
+                resume_stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                blocker_intent_id=blocker_intent_id,
+            ):
+                self._compile_cache_adoption_active = intent_id
+                await self._handle_compile_cache_adoption(
+                    op,
+                    intent_id=intent_id,
+                )
+        finally:
+            if self._compile_cache_adoption_active == intent_id:
+                self._compile_cache_adoption_active = ""
 
     def _adoption_event(
         self,
@@ -5968,7 +6589,12 @@ class Executor:
             **kw,
         )
 
-    async def _handle_compile_cache_adoption(self, op: pb.ModelOp) -> None:
+    async def _handle_compile_cache_adoption(
+        self,
+        op: pb.ModelOp,
+        *,
+        intent_id: str = "",
+    ) -> None:
         self.store.bind_loop()
         ref = op.ref
         snap = op.snapshot if op.HasField("snapshot") else None
@@ -5986,6 +6612,12 @@ class Executor:
                     error="adopt_failed:missing_operation_id",
                 )
             ))
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="missing operation_id",
+            )
             return
         if not snapshot_digest.strip():
             # Adoption is one-shot evidence for one immutable artifact.  A
@@ -6001,6 +6633,12 @@ class Executor:
                     error="adopt_failed:missing_snapshot_digest",
                 )
             ))
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="missing snapshot digest",
+            )
             return
         if not target_incarnation_id.strip():
             await self._send(pb.WorkerMessage(
@@ -6013,12 +6651,29 @@ class Executor:
                     error="adopt_failed:missing_target_incarnation_id",
                 )
             ))
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="missing target incarnation id",
+            )
             return
         try:
             await self._adopt_compile_cache(
-                ref, snap, snapshot_digest, operation_id, target_incarnation_id,
+                ref,
+                snap,
+                snapshot_digest,
+                operation_id,
+                target_incarnation_id,
+                intent_id=intent_id,
             )
         except Exception as exc:
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+                detail=_sanitize(str(exc))[:512],
+            )
             logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
             await self._send(pb.WorkerMessage(
                 model_event=self._adoption_event(
@@ -6041,6 +6696,8 @@ class Executor:
         snapshot_digest: str,
         operation_id: str,
         target_incarnation_id: str,
+        *,
+        intent_id: str = "",
     ) -> None:
         """Hot adoption (th#567): download+verify a compiled artifact and
         re-wrap the already-resident modules in place — weights untouched, no
@@ -6085,16 +6742,24 @@ class Executor:
                 "model_in_use", "target_not_ready", "target_replaced", "download",
             ):
                 error = f"{error}: {detail[:300]}"
-            await self._send(pb.WorkerMessage(
-                model_event=self._adoption_event(
-                    ref,
-                    pb.MODEL_STATE_FAILED,
-                    snapshot_digest,
-                    operation_id,
-                    target_incarnation_id,
-                    error=error,
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+                detail=_sanitize(error)[:512],
+            )
+            await self._send(
+                pb.WorkerMessage(
+                    model_event=self._adoption_event(
+                        ref,
+                        pb.MODEL_STATE_FAILED,
+                        snapshot_digest,
+                        operation_id,
+                        target_incarnation_id,
+                        error=error,
+                    )
                 )
-            ))
+            )
 
         family = compile_cache.family_from_ref(ref)
         is_trt = trt_engine.is_engine_ref(ref)
@@ -6128,14 +6793,24 @@ class Executor:
             # the latest causal operation identity for a later guard failure.
             with expected_target.state_lock:
                 expected_target.active_adoption_operation_id = operation_id
-            await self._send(pb.WorkerMessage(model_event=self._adoption_event(
-                ref,
-                pb.MODEL_STATE_ADOPTED,
-                snapshot_digest,
-                operation_id,
-                target_incarnation_id,
-                duration_ms=0,
-            )))
+            await self._send(
+                pb.WorkerMessage(
+                    model_event=self._adoption_event(
+                        ref,
+                        pb.MODEL_STATE_ADOPTED,
+                        snapshot_digest,
+                        operation_id,
+                        target_incarnation_id,
+                        duration_ms=0,
+                    )
+                )
+            )
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+                actual_digest=snapshot_digest.encode(),
+            )
             return
         if previous_ref:
             # Replacing any already-active wrapper is not transactional:
@@ -6148,10 +6823,23 @@ class Executor:
             # The hub schedules adoption idle-only; defensive — never touch
             # a module while any job is in flight.
             return await fail("model_in_use")
+        materialize_intent = self.store._materialize_intent(ref)
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_WAITING,
+            pb.LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT,
+            reason=pb.LIFECYCLE_WAIT_REASON_SNAPSHOT,
+            blocker_intent_id=materialize_intent,
+        )
         try:
             local = await self.store.ensure_local(ref, snap)
         except Exception as exc:
             return await fail("download", str(exc))
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
         artifact = compile_cache.find_artifact(local)
         if artifact is None:
             return await fail("artifact_missing")
@@ -6181,7 +6869,14 @@ class Executor:
         # Artifact work may take long enough for model juggling to replace the
         # object. Serialize the final check + mutation with setup/vacate, and
         # address only the exact incarnation observed before the download.
-        async with self._load_lock:
+        async with self._intent_lock(
+            intent_id,
+            self._load_lock,
+            operation=f"compile adoption load lock for {ref}",
+            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+            reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
+            resume_stage=pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+        ):
             current = self._compile_target(target_incarnation_id)
             if (
                 current is None
@@ -6195,7 +6890,10 @@ class Executor:
             # A job landing mid-adoption queues behind every GPU permit;
             # process-global Inductor counters cannot tolerate another slot
             # compiling inside this exact target's proof window.
-            async with self._exclusive_gpu():
+            async with self._exclusive_gpu(
+                intent_id,
+                resume_stage=pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
+            ):
                 current = self._compile_target(target_incarnation_id)
                 if (
                     current is None
@@ -6390,6 +7088,12 @@ class Executor:
                 warmup_s=warmup_s,
             )
         ))
+        self._intent_transition(
+            intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+            pb.LIFECYCLE_INTENT_STAGE_READY,
+            actual_digest=snapshot_digest.encode(),
+        )
 
     def _record_refs(self, rec: _ClassRecord) -> List[str]:
         """The wire refs a record's instance holds: the load-time booking
@@ -6535,28 +7239,67 @@ class Executor:
         for (rid, att), job in list(self.jobs.items()):
             if rid == run.request_id and att != run.attempt and not job.finished:
                 job.superseded = True
+                self._intent_transition(
+                    job.intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED,
+                    pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+                    detail=f"superseded by attempt {run.attempt}",
+                )
                 job.cancel_requested = True
                 if job.ctx is not None:
                     job.ctx._cancel()
                 if job.exec_task is not None:
                     job.exec_task.cancel()
 
+        intent_id = self._job_intent(run)
         if self.draining:
-            await self._send_result(run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE,
-                                    safe_message="worker draining")
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="worker draining",
+            )
+            await self._send_result(
+                run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE, safe_message="worker draining"
+            )
             return
         spec = self.specs.get(run.function_name)
         if spec is None:
-            await self._send_result(run.request_id, run.attempt, pb.JOB_STATUS_INVALID,
-                                    safe_message=f"unknown function {run.function_name!r}")
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail=f"unknown function {run.function_name!r}",
+            )
+            await self._send_result(
+                run.request_id,
+                run.attempt,
+                pb.JOB_STATUS_INVALID,
+                safe_message=f"unknown function {run.function_name!r}",
+            )
             return
         if run.function_name in self.unavailable:
             reason, detail, _ = self.unavailable[run.function_name]
-            await self._send_result(run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE,
-                                    safe_message=f"function unavailable: {reason}")
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail=f"function unavailable: {reason}",
+            )
+            await self._send_result(
+                run.request_id,
+                run.attempt,
+                pb.JOB_STATUS_RETRYABLE,
+                safe_message=f"function unavailable: {reason}",
+            )
             return
 
-        job = _Job(request_id=run.request_id, attempt=run.attempt, spec=spec)
+        job = _Job(
+            request_id=run.request_id,
+            attempt=run.attempt,
+            spec=spec,
+            intent_id=intent_id,
+        )
         self.jobs[key] = job
         self._idle.clear()
         logger.info("job admitted %s attempt=%d", run.request_id, run.attempt)
@@ -6599,6 +7342,11 @@ class Executor:
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
+        self._intent_transition(
+            job.intent_id,
+            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+        )
         try:
             payload: Any = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
@@ -6708,7 +7456,7 @@ class Executor:
             request_id=run.request_id,
             job_id=job_id,
             emitter=self._make_ctx_emitter(job),
-            owner=run.tenant or None,
+            owner=run.org or None,
             invoker_id=run.invoker_id or None,
             timeout_ms=timeout_ms or None,
             file_api_base_url=self.file_base_url or None,
@@ -6769,12 +7517,45 @@ class Executor:
                 )
             if producer:
                 await self._materialize_datasets(ctx, payload)
+            setup_intent = ""
+            if spec.cls is not None:
+                setup_intent = self._setup_intent(spec)
+                self._intent_transition(
+                    job.intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                    pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
+                    reason=pb.LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER,
+                    blocker_intent_id=setup_intent,
+                    detail=f"waiting for function {spec.name}",
+                )
             instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
+            if setup_intent:
+                self._intent_transition(
+                    job.intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                )
             # th#913/gw#596: the concrete lane actually serving this job.
             # th#1050: ctx.lane exposes the same post-degrade truth to the
             # handler (declared-lane endpoints branch on it).
             job.lane = self._served_lane(spec, instructed=run.lane)
             ctx._set_lane(job.lane)
+            # th#1087: effective declared-config values for this dispatch.
+            effective_config = self._effective_config(spec, run)
+            invocation_snapshot = None
+            if spec.config:
+                config_generation = int(
+                    run.config_generation or self.runtime_config.generation
+                )
+                invocation_snapshot = self.runtime_config.invocation_snapshot(
+                    spec.name,
+                    effective_config,
+                    config_generation,
+                )
+            ctx._set_config(
+                effective_config,
+                snapshot=invocation_snapshot,
+            )
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
             ctx.raise_if_cancelled("canceled")
@@ -6803,7 +7584,14 @@ class Executor:
         started = time.monotonic()
         try:
             if needs_gpu:
-                await self._gpu_semaphore.acquire()
+                await self._intent_await(
+                    job.intent_id,
+                    self._gpu_semaphore.acquire(),
+                    operation=f"GPU permit for request {run.request_id}",
+                    status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
+                    reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
+                )
                 self._loop = asyncio.get_running_loop()
                 lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
                 ctx._gpu_slot_lease = lease
@@ -6826,6 +7614,12 @@ class Executor:
             # run yet. The repeated check catches a replacement between
             # scheduler assignment/intake and this GPU turn.
             self._validate_required_compile(spec, run)
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+                detail="executing",
+            )
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Lane refs
@@ -6900,7 +7694,13 @@ class Executor:
                         spec.name, run.request_id,
                         int((released_at - started) * 1000),
                         int((handler_done - started) * 1000),
-                        int((handler_done - released_at) * 1000))
+                        int((handler_done - released_at) * 1000),
+                    )
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+            )
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the
@@ -7413,6 +8213,26 @@ class Executor:
         if job.finished:
             return
         job.finished = True
+        terminal_status = (
+            pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
+            if job.superseded
+            else (
+                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED
+                if status == pb.JOB_STATUS_OK
+                else (
+                    pb.LIFECYCLE_INTENT_STATUS_CANCELED
+                    if status == pb.JOB_STATUS_CANCELED
+                    else pb.LIFECYCLE_INTENT_STATUS_FAILED
+                )
+            )
+        )
+        if not job.superseded:
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+                detail=str(kw.get("safe_message", ""))[:512],
+            )
         if job.renew_task is not None:
             job.renew_task.cancel()
             job.renew_task = None
@@ -7420,6 +8240,16 @@ class Executor:
         logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:
             await self._send_result(job.request_id, job.attempt, status, **kw)
+        self._intent_transition(
+            job.intent_id,
+            terminal_status,
+            (
+                pb.LIFECYCLE_INTENT_STAGE_READY
+                if terminal_status == pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED
+                else pb.LIFECYCLE_INTENT_STAGE_FINALIZING
+            ),
+            detail=str(kw.get("safe_message", ""))[:512],
+        )
         # Keep finished records so a RunJob retransmission doesn't re-execute;
         # prune oldest finished entries beyond a small window.
         finished = [k for k, j in self.jobs.items() if j.finished]

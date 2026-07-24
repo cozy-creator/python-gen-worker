@@ -30,7 +30,7 @@ option go_package = "github.com/cozy-creator/tensorhub/internal/orchestrator/grp
 // FAILED_PRECONDITION. No minor versions, no feature gates, no negotiation.
 enum ProtocolVersion {
   PROTOCOL_VERSION_UNSPECIFIED = 0;
-  PROTOCOL_VERSION_CURRENT     = 4;
+  PROTOCOL_VERSION_CURRENT     = 5;
 }
 
 service WorkerScheduler {
@@ -59,6 +59,11 @@ message WorkerMessage {
     // the worker exits immediately after this send (or after a bounded
     // retry budget if the hub is unreachable/rejects the connection).
     HardwareUnsuitable hardware_unsuitable = 10;
+    // th#1085 protocol-v5 shadow state. GoalReceipt is the typed command
+    // receipt edge; LifecycleSnapshot is the full current projection and is
+    // also replayed in Hello on every reconnect.
+    GoalReceipt        goal_receipt        = 11;
+    LifecycleSnapshot  lifecycle_snapshot  = 12;
   }
 }
 
@@ -93,6 +98,12 @@ message Hello {
   // declares the worker dead (worker_heartbeat_lost). 0 = no promise: the
   // worker is never heartbeat-reaped (pre-th#965 builds).
   uint64 heartbeat_interval_ms = 8;
+  // Stable for one worker process across transport reconnects. The hub
+  // echoes it on DesiredStateCommand and rejects cross-session shadow state.
+  string worker_session_id = 9;
+  // Full current protocol-v5 shadow projection. Legacy fields above remain
+  // authoritative until the later dispatch/remediation cutover.
+  LifecycleSnapshot lifecycle_snapshot = 10;
 }
 
 // Static per-boot facts. Sent once in Hello; never updated mid-connection.
@@ -155,8 +166,10 @@ message HardwareUnsuitable {
 // depends on (ie#484: 4-10x decode/encode spread at identical GPU step-ms).
 // Measured once per process in a bounded ~1.5 s before the first Hello.
 message HostCanary {
+  reserved 2;
+  reserved "h2d_gbps";
+
   double memcpy_gbps     = 1; // host-RAM copy bandwidth, 256 MiB buffer
-  double h2d_gbps        = 2; // pinned host->device PCIe bandwidth
   double d2h_gbps        = 3; // pinned device->host PCIe bandwidth
   bool   pinned_alloc_ok = 4; // cudaHostAlloc of the staging buffer worked
   double cpu_single_mbps = 5; // sha256 throughput, one thread
@@ -171,7 +184,7 @@ message ModelResidency {
   ResidencyTier tier = 2;      // highest tier the model currently occupies
   int64 vram_bytes = 3;        // measured footprint; set when tier = VRAM, else 0
   // Exact immutable bytes and the DesiredResidency generation that caused
-  // their materialization. Both are protocol-v4 evidence: legacy
+  // their materialization. Both are legacy residency evidence: older
   // workers leave them zero/empty, which means identity is unknown rather
   // than inferred from the mutable ref.
   string snapshot_digest = 4;
@@ -195,15 +208,19 @@ message InFlightJob {
 message HelloAck {
   ProtocolVersion protocol_version = 1; // orchestrator's version, for symmetric validation
   string file_base_url = 2;  // tensorhub base URL for capability-token HTTP calls (uploads, blob refs)
-  repeated string keep = 3;  // legacy v2 field; ignored by protocol v4 workers
+  repeated string keep = 3;  // legacy v2 field; ignored by current workers
   // th#697 precision ladder: per-model flavor resolutions for THIS worker's
   // card. The worker applies each entry to bindings whose wire ref equals
   // `ref` (a bare declared ref): download/load `resolved_ref` and apply the
   // `cast` transform at load. Full-replace with the ack. Additive: old
   // workers ignore it and load their declared bindings.
   repeated ModelResolution resolutions = 4;
-  // Full-replace desired model residency for this worker (protocol v4).
+  // Legacy full-replace desired model residency for this worker.
   DesiredResidency desired_residency = 5;
+  // th#1085 protocol-v5 causally identified shadow command. It rides beside
+  // DesiredResidency during migration; workers must reject malformed or
+  // unsupported mandatory intents instead of silently falling back.
+  DesiredStateCommand desired_state_command = 6;
 }
 
 // Declarative worker model state. Lists are ordered by orchestrator priority;
@@ -213,6 +230,288 @@ message DesiredResidency {
   repeated string disk_refs = 2;
   repeated DesiredInstance hot = 3;
   map<string, Snapshot> snapshots = 4;
+  // th#1087/th#1085: hub-authoritative desired state is the PAIR
+  // (release_id, config_generation). config_generation is the release's
+  // mutable-config counter — distinct from `generation`, the per-worker
+  // transport sequence number above. The worker echoes the config gen it
+  // loaded via StateDelta.observed_config_generation.
+  string release_id = 5;
+  uint64 config_generation = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Protocol-v5 lifecycle shadow state (th#1085)
+// ---------------------------------------------------------------------------
+
+// Hub-authored full desired target. During Slice 1 this is observational and
+// rides beside DesiredResidency; later slices make it the control authority.
+message DesiredStateCommand {
+  string worker_session_id = 1;
+  uint64 command_seq = 2;
+  string goal_id = 3;
+  string release_id = 4;
+  uint64 config_generation = 5;
+  bytes config_digest = 6;
+  int64 issued_at_unix_ms = 7;
+  int64 accept_by_unix_ms = 8;
+  int64 first_action_by_unix_ms = 9;
+  repeated DesiredIntent intents = 10;
+  bool mandatory = 11;
+  // Classes changed since this worker's preceding target. Boot convergence
+  // always comes from the pod-launch generation stamp, including first target.
+  ConfigClassMask changed_config_classes = 12;
+  // Full function -> declared parameter -> value snapshot, encoded as
+  // msgpack. Receipt and durable application remain separate worker states.
+  bytes parameter_snapshot = 13;
+}
+
+message DesiredIntent {
+  string intent_id = 1;
+  DesiredIntentKind kind = 2;
+  DesiredIntentCause cause = 3;
+  string function_name = 4;
+  string ref = 5;
+  bytes snapshot_digest = 6;
+  ResidencyTier desired_tier = 7;
+  bytes binding_digest = 8;
+  string parent_intent_id = 9;
+  repeated RequestAttempt waiting_requests = 10;
+  int32 priority = 11;
+  bool mandatory = 12;
+}
+
+message RequestAttempt {
+  string request_id = 1;
+  int64 attempt = 2;
+}
+
+enum DesiredIntentKind {
+  DESIRED_INTENT_KIND_UNSPECIFIED = 0;
+  DESIRED_INTENT_KIND_MATERIALIZE = 1;
+  DESIRED_INTENT_KIND_FUNCTION_READY = 2;
+  DESIRED_INTENT_KIND_CONFIG_APPLY = 3;
+  DESIRED_INTENT_KIND_COMPILE_ADOPT = 4;
+  DESIRED_INTENT_KIND_DRAIN = 5;
+}
+
+enum DesiredIntentCause {
+  DESIRED_INTENT_CAUSE_UNSPECIFIED = 0;
+  DESIRED_INTENT_CAUSE_COLD_BOOT = 1;
+  DESIRED_INTENT_CAUSE_REQUEST = 2;
+  DESIRED_INTENT_CAUSE_PREPOSITION = 3;
+  DESIRED_INTENT_CAUSE_CONFIG_CHANGE = 4;
+  DESIRED_INTENT_CAUSE_REPLACEMENT = 5;
+  DESIRED_INTENT_CAUSE_RETIRE = 6;
+}
+
+message GoalReceipt {
+  string worker_session_id = 1;
+  uint64 command_seq = 2;
+  string goal_id = 3;
+  string release_id = 4;
+  GoalReceiptStatus status = 5;
+  LifecycleErrorCode error_code = 6;
+  repeated IntentRejection rejections = 7;
+  string detail = 8;
+  int64 received_at_unix_ms = 9;
+  bytes command_digest = 10;
+}
+
+message IntentRejection {
+  string intent_id = 1;
+  LifecycleErrorCode error_code = 2;
+  string detail = 3;
+}
+
+enum GoalReceiptStatus {
+  GOAL_RECEIPT_STATUS_UNSPECIFIED = 0;
+  GOAL_RECEIPT_STATUS_ACCEPTED = 1;
+  GOAL_RECEIPT_STATUS_REJECTED = 2;
+}
+
+message LifecycleProgress {
+  double done = 1;
+  double total = 2;
+  string unit = 3;
+  double rate_per_s = 4;
+}
+
+message IntentState {
+  string worker_session_id = 1;
+  uint64 state_seq = 2;
+  string goal_id = 3;
+  string intent_id = 4;
+  string release_id = 5;
+  uint64 config_generation = 6;
+  LifecycleIntentStatus status = 7;
+  LifecycleIntentStage stage = 8;
+  LifecycleWaitReason reason = 9;
+  int64 since_unix_ms = 10;
+  int64 updated_at_unix_ms = 11;
+  int64 next_retry_at_unix_ms = 12;
+  int64 deadline_at_unix_ms = 13;
+  string blocker_intent_id = 14;
+  RequestAttempt blocker_request = 15;
+  LifecycleProgress progress = 16;
+  LifecycleErrorCode error_code = 17;
+  string detail = 18;
+  bytes actual_digest = 19;
+}
+
+enum LifecycleIntentStatus {
+  LIFECYCLE_INTENT_STATUS_UNSPECIFIED = 0;
+  LIFECYCLE_INTENT_STATUS_ACCEPTED = 1;
+  LIFECYCLE_INTENT_STATUS_WAITING = 2;
+  LIFECYCLE_INTENT_STATUS_RUNNING = 3;
+  LIFECYCLE_INTENT_STATUS_SUCCEEDED = 4;
+  LIFECYCLE_INTENT_STATUS_FAILED = 5;
+  LIFECYCLE_INTENT_STATUS_CANCELED = 6;
+  LIFECYCLE_INTENT_STATUS_SUPERSEDED = 7;
+}
+
+enum LifecycleIntentStage {
+  LIFECYCLE_INTENT_STAGE_UNSPECIFIED = 0;
+  LIFECYCLE_INTENT_STAGE_VALIDATING = 1;
+  LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE = 2;
+  LIFECYCLE_INTENT_STAGE_WAIT_REF_LOCK = 3;
+  LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK = 4;
+  LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT = 5;
+  LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT = 6;
+  LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM = 7;
+  LIFECYCLE_INTENT_STAGE_WAIT_HOST_RAM = 8;
+  LIFECYCLE_INTENT_STAGE_WAIT_NETWORK_RETRY = 9;
+  LIFECYCLE_INTENT_STAGE_WAIT_REPLACEMENT = 10;
+  LIFECYCLE_INTENT_STAGE_FETCHING = 11;
+  LIFECYCLE_INTENT_STAGE_VERIFYING = 12;
+  LIFECYCLE_INTENT_STAGE_ON_DISK = 13;
+  LIFECYCLE_INTENT_STAGE_LOADING_HOST = 14;
+  LIFECYCLE_INTENT_STAGE_LOADING_DEVICE = 15;
+  LIFECYCLE_INTENT_STAGE_WARMING = 16;
+  LIFECYCLE_INTENT_STAGE_COMPILING = 17;
+  LIFECYCLE_INTENT_STAGE_ADOPTING = 18;
+  LIFECYCLE_INTENT_STAGE_CONFIG_MATERIALIZING = 19;
+  LIFECYCLE_INTENT_STAGE_CONFIG_BINDINGS_APPLYING = 20;
+  LIFECYCLE_INTENT_STAGE_CONFIG_BOOT_STALE = 21;
+  LIFECYCLE_INTENT_STAGE_READY = 22;
+  LIFECYCLE_INTENT_STAGE_DRAINING = 23;
+  LIFECYCLE_INTENT_STAGE_FINALIZING = 24;
+  LIFECYCLE_INTENT_STAGE_FLUSHING = 25;
+}
+
+enum LifecycleWaitReason {
+  LIFECYCLE_WAIT_REASON_UNSPECIFIED = 0;
+  LIFECYCLE_WAIT_REASON_TENANT_WORK = 1;
+  LIFECYCLE_WAIT_REASON_REF_LOCK = 2;
+  LIFECYCLE_WAIT_REASON_LOAD_LOCK = 3;
+  LIFECYCLE_WAIT_REASON_GPU_SLOT = 4;
+  LIFECYCLE_WAIT_REASON_SNAPSHOT = 5;
+  LIFECYCLE_WAIT_REASON_DISK_HEADROOM = 6;
+  LIFECYCLE_WAIT_REASON_HOST_RAM = 7;
+  LIFECYCLE_WAIT_REASON_NETWORK_RETRY = 8;
+  LIFECYCLE_WAIT_REASON_REPLACEMENT = 9;
+  LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER = 10;
+}
+
+enum LifecycleErrorCode {
+  LIFECYCLE_ERROR_CODE_UNSPECIFIED = 0;
+  LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD = 1;
+  LIFECYCLE_ERROR_CODE_WORKER_SESSION_MISMATCH = 2;
+  LIFECYCLE_ERROR_CODE_RELEASE_MISMATCH = 3;
+  LIFECYCLE_ERROR_CODE_COMMAND_SEQ_REGRESSION = 4;
+  LIFECYCLE_ERROR_CODE_COMMAND_SEQ_CONFLICT = 5;
+  LIFECYCLE_ERROR_CODE_CONFIG_REGRESSION = 6;
+  LIFECYCLE_ERROR_CODE_UNKNOWN_FUNCTION = 7;
+  LIFECYCLE_ERROR_CODE_SNAPSHOT_IDENTITY_MISSING = 8;
+  LIFECYCLE_ERROR_CODE_UNSUPPORTED_INTENT = 9;
+  LIFECYCLE_ERROR_CODE_UNKNOWN_MANDATORY_COMMAND = 10;
+  LIFECYCLE_ERROR_CODE_PROTOCOL_UNREPORTED_WAIT = 11;
+  LIFECYCLE_ERROR_CODE_CONFIG_SNAPSHOT_WRITE_FAILED = 12;
+  LIFECYCLE_ERROR_CODE_DRAIN_FAILED = 13;
+}
+
+message ModelIdentity {
+  string ref = 1;
+  bytes snapshot_digest = 2;
+  ResidencyTier tier = 3;
+  uint64 residency_generation = 4;
+}
+
+message FunctionCapability {
+  string function_name = 1;
+  string release_id = 2;
+  uint64 config_generation = 3;
+  bytes binding_digest = 4;
+  string lane = 5;
+  repeated ModelIdentity models = 6;
+  string compile_target_incarnation_id = 7;
+  FunctionCapabilityState state = 8;
+}
+
+enum FunctionCapabilityState {
+  FUNCTION_CAPABILITY_STATE_UNSPECIFIED = 0;
+  FUNCTION_CAPABILITY_STATE_READY = 1;
+  FUNCTION_CAPABILITY_STATE_APPLYING = 2;
+  FUNCTION_CAPABILITY_STATE_BOOT_STALE = 3;
+  FUNCTION_CAPABILITY_STATE_FAILED = 4;
+}
+
+message ConfigClassMask {
+  bool parameters = 1;
+  bool bindings = 2;
+  bool boot = 3;
+}
+
+message ConfigApplication {
+  string release_id = 1;
+  uint64 target_generation = 2;
+  uint64 received_generation = 3;
+  uint64 parameter_snapshot_generation = 4;
+  uint64 binding_ready_generation = 5;
+  uint64 boot_generation = 6;
+  ConfigApplicationState state = 7;
+  ConfigClassMask pending_classes = 8;
+  LifecycleErrorCode error_code = 9;
+}
+
+enum ConfigApplicationState {
+  CONFIG_APPLICATION_STATE_UNSPECIFIED = 0;
+  CONFIG_APPLICATION_STATE_APPLYING = 1;
+  CONFIG_APPLICATION_STATE_CONVERGED = 2;
+  CONFIG_APPLICATION_STATE_BOOT_STALE = 3;
+  CONFIG_APPLICATION_STATE_FAILED = 4;
+}
+
+message DrainProjection {
+  string goal_id = 1;
+  string intent_id = 2;
+  DrainLifecycleStatus status = 3;
+  int64 since_unix_ms = 4;
+  int64 updated_at_unix_ms = 5;
+  int64 deadline_at_unix_ms = 6;
+  LifecycleErrorCode error_code = 7;
+  string detail = 8;
+}
+
+enum DrainLifecycleStatus {
+  DRAIN_LIFECYCLE_STATUS_UNSPECIFIED = 0;
+  DRAIN_LIFECYCLE_STATUS_ACCEPTED = 1;
+  DRAIN_LIFECYCLE_STATUS_DRAINING = 2;
+  DRAIN_LIFECYCLE_STATUS_FINALIZING = 3;
+  DRAIN_LIFECYCLE_STATUS_FLUSHING = 4;
+  DRAIN_LIFECYCLE_STATUS_DRAINED = 5;
+  DRAIN_LIFECYCLE_STATUS_FAILED = 6;
+}
+
+message LifecycleSnapshot {
+  string worker_session_id = 1;
+  uint64 state_seq = 2;
+  repeated IntentState intents = 3;
+  repeated FunctionCapability capabilities = 4;
+  ConfigApplication config_application = 5;
+  repeated GoalReceipt goal_receipts = 6;
+  DrainProjection drain = 7;
+  bool full_replace = 8;
+  int64 generated_at_unix_ms = 9;
 }
 
 // One complete runnable endpoint instance. `models` is the same complete
@@ -269,6 +568,10 @@ message StateDelta {
   // against these measured numbers only; release-declared disk sizes are
   // pod-creation priors, never a planning budget.
   DiskUsageReport disk_usage = 9;
+  // th#1087/th#1085: the config generation this worker last loaded
+  // (DesiredResidency.config_generation echo) — config staleness is
+  // per-worker visible state, not inference. Additive: old workers send 0.
+  uint64 observed_config_generation = 12;
 }
 
 // th#962/pgw#610: storage tiers a worker measures. CONTAINER is the pod-local
@@ -376,7 +679,7 @@ message RunJob {
   string function_name = 3;
   bytes  input_payload = 4; // canonical MessagePack input; stored Asset refs remain opaque
   int64  timeout_ms = 5;    // execution deadline; 0 = no explicit timeout
-  string tenant     = 6;    // invoking owner (org/user slug)
+  string org     = 6;    // canonical UUID of the org that owns job outputs
   string invoker_id = 7;    // surfaced read-only as ctx.invoker_id
   string capability_token = 8; // per-job worker capability token for tensorhub HTTP calls
   OutputMode output_mode = 9;  // client's inline-vs-url preference for media outputs
@@ -401,6 +704,14 @@ message RunJob {
   // Ordered, credential-free stored inputs authorized at submit. The worker
   // resolves fresh transport URLs for the exact request+attempt capability.
   repeated InputAsset input_assets = 15;
+  // th#1087: the config generation this job was dispatched at. In-flight
+  // jobs finish on their dispatched generation; a gen bump never rewrites
+  // a running job.
+  uint64 config_generation = 16;
+  // th#1087 class 1: effective declared-parameter values for THIS function,
+  // msgpack map name -> value. Surfaced read-only as ctx.config; workers
+  // never cache them.
+  bytes config_params = 17;
 }
 
 message InputAsset {
@@ -427,7 +738,7 @@ enum OutputMode {
 
 // Resolved hardware for this invocation: accelerator gates the worker's GPU
 // semaphore; gpu_index binds the CUDA context. pgw#526 cut gpu_count/vram_gb
-// (and the ctx.compute tenant surface they fed): documented and plumbed
+// (and the ctx.compute org surface they fed): documented and plumbed
 // through every dispatch, read by zero endpoints. Reserved so the numbers
 // can't come back with different semantics.
 message ResolvedCompute {
@@ -456,8 +767,8 @@ message ModelBinding {
   // th#980 hierarchical slots: per-component repo substitutions on the base
   // composition, component name -> canonical tensorhub ref (normal form,
   // same grammar as `ref`). The worker loads the base composition then
-  // substitutes each named component from its materialized snapshot
-  // (pgw#617). Snapshots for these refs ride RunJob.snapshots /
+  // substitutes each named component from its materialized snapshot (pgw
+  // companion issue). Snapshots for these refs ride RunJob.snapshots /
   // DesiredResidency exactly like base refs. Additive: old workers ignore.
   map<string, string> components = 5;
 }
@@ -550,7 +861,7 @@ message JobMetrics {
   double output_media_duration_s = 6;
   // Typed billing usage (pgw#512) — the ONLY settlement source for
   // per_million_tokens/per_output pricing. Settlement must read these, never
-  // scavenge the (possibly blob-ref'd, tenant-controlled) result payload.
+  // scavenge the (possibly blob-ref'd, org-controlled) result payload.
   int64 input_tokens = 7;
   int64 input_cached_tokens = 8;
   int64 output_tokens = 9;
@@ -665,7 +976,7 @@ message ModelEvent {
   // Immutable bytes and DesiredResidency generation for this ref transition.
   // A receiver must treat an empty digest or zero generation as identity
   // unknown. Generation fences delayed events after a tag moves or a newer
-  // desired replacement is reconciled without changing protocol version 4.
+  // desired replacement is reconciled without changing protocol version.
   string snapshot_digest = 16;
   uint64 residency_generation = 17;
   // Echoes ModelOp.operation_id on ADOPTED/adopt-FAILED and at most one later

@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.56.0 (2026-07-24)
+
+- **th#1085 Slice 5: exact mutable-config convergence.** Protocol-v5 desired
+  state now carries a full MessagePack parameter snapshot and the config
+  classes changed at one target generation. The worker separately proves
+  receipt, atomic parameter persistence, binding convergence, and boot
+  generation; boot-only changes report `BOOT_STALE`, and exact function
+  capabilities remain non-ready until the release/config/binding tuple
+  converges. Boot generation now comes only from Tensorhub's pod-launch
+  `WORKER_CONFIG_GENERATION` stamp; the first desired-state receipt can no
+  longer falsely certify an older environment.
+
+## 0.55.0 (2026-07-24)
+
+- **gw#496: make checkpoint metadata honest.** `save_checkpoint` and
+  `open_checkpoint_stream` no longer accept `produced_by_kind`,
+  `target_dtype`, `flavor`, or `attributes`, which the repo-commit route
+  never persisted. Step, epoch, and checkpoint kind remain on their live
+  provenance/event paths. The private stream's write-only uploader metadata
+  and unused elapsed-time property are removed. The zero-consumer
+  `Dataset.as_hf_dataset` and `Dataset.is_eval_set` conveniences are removed;
+  callers use `iter_examples`/`as_dataloader` and `Dataset.kind`.
+
+## 0.54.0 (2026-07-24)
+
+- **th#1087 stages B+D: declared mutable config + worker reconcile.**
+  `@endpoint(config=[ConfigParam(name, type, default, choices/ge/le/regex)])`
+  declares deployer-settable knobs; `@endpoint(env=[...])` declares the env
+  names the code reads (D2). Both emit into the discovery manifest
+  (`config_params` / `env`) so the hub 422s config writes outside the
+  declared surface. Handlers read effective values via `ctx.config`
+  (declared defaults <- worker config store <- RunJob-stamped values).
+  New `gen_worker.runtime_config`: on a config-generation push the worker
+  updates memory AND atomically rewrites a local snapshot file
+  (`GEN_WORKER_CONFIG_SNAPSHOT_PATH`, default
+  `/app/.tensorhub/runtime_config.msgpack`); per-invoke subprocesses read it
+  via `read_snapshot()` (`run_process` forwards the path into explicit
+  child envs). `run_process(ctx=...)` receives an immutable invocation
+  snapshot, so an older dispatched job cannot read a newer generation that
+  arrived before its child started. Bindings keep riding the existing
+  HelloAck desired-residency reconcile (gw#614/623, pod-churn-free);
+  env-class changes stay boot-only (the hub drain-rolls). Wire adapter
+  follows the A+C tracker contract —
+  DesiredResidency `release_id`/`config_generation` observed on HelloAck,
+  RunJob `config_generation`+`config_params` (msgpack) stamped per dispatch,
+  and StateDelta `observed_config_generation` echo.
+
+## 0.53.0 (2026-07-24)
+
+- **th#1084 (pgw side): input-caused refusals raise ValidationError ->
+  INVALID.** RepoRefusal + SourceIncludeError are ValidationErrors; HF
+  repo-access errors wrap as typed input refusals at the convert ingest
+  boundary with the class name preserved; an all-input-rejection "no
+  publishable flavor" aggregate is INVALID. Bad user repos fail only their
+  request — never the release.
+
 ## 0.52.2 (2026-07-24)
 
 - **gw#627 live fix 2: normalization rejects legacy attn-processor

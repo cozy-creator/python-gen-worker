@@ -29,15 +29,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_FIXED_FILE_UPLOAD_WORKERS = 4
-
-
-def optimal_file_concurrency(item_count: int) -> int:
-    """Return the internal upper bound for one file-level upload batch."""
-    if item_count <= 1:
-        return 1
-    return min(int(item_count), _FIXED_FILE_UPLOAD_WORKERS)
-
 
 class BudgetExceededError(RuntimeError):
     """Raised when a single file exceeds the per-file or total byte budget.

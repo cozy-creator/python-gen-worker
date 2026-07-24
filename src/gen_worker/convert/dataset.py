@@ -15,8 +15,7 @@ unified interface.
 ### 1. HF-datasets layout (``load_from_disk``-compatible)
 
 Typical for LLM calibration (wikitext / c4) and fine-tuning (image+caption /
-instruction data). Exposed via ``iter_examples`` / ``as_dataloader`` /
-``as_hf_dataset``.
+instruction data). Exposed via ``iter_examples`` / ``as_dataloader``.
 
 ### 2. Prompt corpus
 
@@ -40,12 +39,12 @@ Exposed via ``is_prompt_corpus`` / ``dataset_info`` / ``iter_prompts``.
 ```
 
 Source+variant-specific eval sets can hold side-by-side renders for A/B eval.
-Exposed via ``is_eval_set`` / ``dataset_info`` / ``iter_rows``.
+Exposed via ``dataset_info`` / ``iter_rows``.
 
 ## Detection
 
-``is_prompt_corpus`` / ``is_eval_set`` feature-detect via ``dataset_info.json``
-at the snapshot root.
+``is_prompt_corpus`` / ``Dataset.kind`` feature-detect via
+``dataset_info.json`` at the snapshot root.
 
 ## JSONL row encoding
 
@@ -64,7 +63,6 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
-    import datasets as hf_datasets
 
 _BYTES_KEY = "__bytes_b64__"
 
@@ -78,16 +76,11 @@ class Dataset:
       as_dataloader(...)             -- torch DataLoader of tokenized batches
                                         (for modelopt / GPTQ / AWQ LLM
                                          calibration)
-      as_hf_dataset(...)             -- tokenized datasets.Dataset
-                                        (for transformers.Trainer / peft /
-                                         accelerate training flows)
-
     Prompt-corpus + eval-set shapes:
 
       dataset_info()                 -- parsed dataset_info.json
       kind                           -- "prompt_corpus" | "eval_set" | ""
       is_prompt_corpus()             -- True if kind == "prompt_corpus"
-      is_eval_set()                  -- True if kind == "eval_set"
       iter_prompts()                 -- yield prompt rows from the jsonl
                                         data/ shard
       iter_rows()                    -- yield full rows with image columns
@@ -180,37 +173,6 @@ class Dataset:
         ds = TensorDataset(torch.stack(tokenized_ids), torch.stack(attention_masks))
         return DataLoader(ds, batch_size=batch_size, shuffle=False)
 
-    def as_hf_dataset(
-        self,
-        *,
-        tokenizer: Any | None = None,
-        max_seq_length: int | None = None,
-    ) -> "hf_datasets.Dataset":
-        """Return a ``datasets.Dataset`` for the declared split.
-
-        If ``tokenizer`` + ``max_seq_length`` are passed, eagerly tokenize the
-        text column and add ``input_ids`` + ``attention_mask`` columns (the
-        shape ``transformers.Trainer`` expects). If omitted, return the raw
-        dataset with no tokenization — for tenants that handle tokenization
-        themselves or use trl.SFTTrainer (which tokenizes internally).
-        """
-        import datasets as hf_datasets
-
-        ds = hf_datasets.load_from_disk(str(self._path))
-        if isinstance(ds, hf_datasets.DatasetDict):
-            ds = ds[self._split]
-        if tokenizer is None or max_seq_length is None:
-            return ds
-        text_field = _guess_text_field(ds[0])
-
-        def _tok(batch: dict) -> dict:
-            return tokenizer(
-                batch[text_field],
-                truncation=True, max_length=max_seq_length, padding="max_length",
-            )
-
-        return ds.map(_tok, batched=True, remove_columns=[text_field])
-
     # ---- prompt-corpus + eval-set ------------------------------
 
     def dataset_info(self) -> dict:
@@ -237,10 +199,6 @@ class Dataset:
         """True iff this artifact is a prompt corpus."""
         return self.kind == "prompt_corpus"
 
-    def is_eval_set(self) -> bool:
-        """True iff this artifact is an eval set."""
-        return self.kind == "eval_set"
-
     def shards(self) -> list[Path]:
         """Return the list of jsonl shard files under ``data/``.
 
@@ -262,7 +220,8 @@ class Dataset:
         the text it needs.
 
         Raises ``FileNotFoundError`` if no jsonl shards are present —
-        callers should guard with ``is_prompt_corpus() or is_eval_set()``.
+        callers should guard with ``is_prompt_corpus()`` or
+        ``kind == "eval_set"``.
         """
         shards = self.shards()
         if not shards:
