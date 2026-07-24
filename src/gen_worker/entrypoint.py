@@ -84,7 +84,19 @@ def _log_startup_phase(phase: str, *, status: str = "ok", level: int = logging.I
         logger.log(level, "worker.startup.phase phase=%s status=%s", phase, status)
 
 
-def _log_worker_fatal(phase: str, exc: BaseException, *, exit_code: int) -> None:
+def _log_worker_fatal(
+    phase: str,
+    exc: BaseException,
+    *,
+    exit_code: int,
+    settings: Optional[Any] = None,
+) -> None:
+    """Record this process's cause of death to stdout AND to the hub.
+
+    gw#640/th#1077: stdout alone is unreachable on RunPod (no container-logs
+    API), so every cloud-only crash was un-debuggable. The wire report reuses
+    the HardwareUnsuitable carrier and lands as a durable pod_events row.
+    """
     try:
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     except Exception:
@@ -102,6 +114,19 @@ def _log_worker_fatal(phase: str, exc: BaseException, *, exit_code: int) -> None
         logger.error("worker.fatal %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
     except Exception:
         logger.exception("worker.fatal: %s", exc)
+    try:
+        from .worker_fatal import report_worker_fatal
+
+        delivered = report_worker_fatal(settings, phase, exc, exit_code=exit_code)
+        _log_startup_phase(
+            "worker_fatal_report",
+            status="ok" if delivered else "error",
+            level=logging.INFO if delivered else logging.WARNING,
+            delivered=delivered,
+            phase_context=str(phase or ""),
+        )
+    except Exception:
+        logger.warning("worker-fatal wire report raised unexpectedly", exc_info=True)
 
 
 def load_manifest(path: Path = MANIFEST_PATH) -> Optional[dict]:
@@ -243,7 +268,7 @@ def _run_main() -> int:
     try:
         cache_cfg = _preflight_cache_dirs()
     except Exception as e:
-        _log_worker_fatal("cache_preflight", e, exit_code=1)
+        _log_worker_fatal("cache_preflight", e, exit_code=1, settings=settings)
         logger.error(str(e))
         return 1
 
@@ -269,6 +294,9 @@ def _run_main() -> int:
                 )
             except Exception:
                 logger.warning("hardware-unsuitable report raised unexpectedly", exc_info=True)
+            # settings=None: this path ALREADY dialed the hub with the typed
+            # HardwareUnsuitable report just above — a second wire dial would
+            # only duplicate it (and double the pre-exit budget).
             _log_worker_fatal("cuda_probe", RuntimeError(probe.reason), exit_code=1)
             return 1
         _log_startup_phase("cuda_probe_ok", status="ok")
@@ -285,7 +313,7 @@ def _run_main() -> int:
 
         _c2pa_configure(settings)
     except Exception as e:
-        _log_worker_fatal("c2pa_configure", e, exit_code=1)
+        _log_worker_fatal("c2pa_configure", e, exit_code=1, settings=settings)
         logger.error(str(e))
         return 1
 
@@ -323,11 +351,11 @@ def _run_main() -> int:
             e,
             user_modules,
         )
-        _log_worker_fatal("import", e, exit_code=1)
+        _log_worker_fatal("import", e, exit_code=1, settings=settings)
         return 1
     except Exception as e:
         logger.exception("Worker failed unexpectedly: %s", e)
-        _log_worker_fatal("runtime", e, exit_code=1)
+        _log_worker_fatal("runtime", e, exit_code=1, settings=settings)
         return 1
 
 
