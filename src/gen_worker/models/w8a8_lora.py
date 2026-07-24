@@ -1,4 +1,5 @@
-"""Runtime LoRA additive branches (gw#547 w8a8; gw#558 lane-general).
+"""Runtime LoRA additive branches (gw#547 w8a8; gw#558 lane-general;
+gw#627 Conv2d).
 
 Denoiser adapter halves ride a compute-dtype SIDE-BRANCH — ``y += B(A @ x)``
 reading the original activation and adding onto the output — never peft
@@ -32,6 +33,7 @@ both directions.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -101,9 +103,12 @@ def quantized_modules(model: Any) -> Dict[str, Any]:
 
 
 def branch_modules(model: Any) -> Dict[str, Any]:
-    """name -> branch-capable Linear (Fp8ScaledLinear or plain nn.Linear)
-    for the denoiser. Convs and other module kinds are not branch targets —
-    adapters that name them fail loud in :func:`map_adapter`."""
+    """name -> branch-capable module for the denoiser: Fp8ScaledLinear,
+    plain nn.Linear, or plain nn.Conv2d (gw#627 — the curated sdxl distill
+    adapters carry conv pairs; convs are never quantized, so their branch
+    is always the eager instance-forward wrap). Other module kinds are not
+    branch targets — adapters that name them fail loud in
+    :func:`map_adapter`."""
     import torch.nn as nn
 
     from .w8a8 import fp8_scaled_linear_class
@@ -111,7 +116,7 @@ def branch_modules(model: Any) -> Dict[str, Any]:
     fp8_cls = fp8_scaled_linear_class()
     return {
         n: m for n, m in model.named_modules()
-        if isinstance(m, fp8_cls) or type(m) is nn.Linear
+        if isinstance(m, fp8_cls) or type(m) in (nn.Linear, nn.Conv2d)
     }
 
 
@@ -255,17 +260,43 @@ def map_adapter(
             )
         rank = int(a.shape[0])
         mod = mods[path]
-        if int(a.shape[1]) != mod.in_features or int(b.shape[0]) != mod.out_features:
-            raise RefCompatibilitySurprise(
-                f"adapter shapes for {path!r} do not match the base "
-                f"({tuple(a.shape)}/{tuple(b.shape)} vs "
-                f"in={mod.in_features} out={mod.out_features})",
-                ref=ref, axis="state_dict",
-            )
+        a, b = _validated_pair(path, mod, a, b, ref=ref)
         alpha = g.get("alpha")
         alpha_scale = (float(alpha) / rank) if alpha is not None else 1.0
         out[path] = (a, b, alpha_scale)
     return out
+
+
+def _validated_pair(path: str, mod: Any, a: Any, b: Any, *, ref: str) -> Tuple[Any, Any]:
+    """Shape-check one down/up pair against its branch module; conv pairs
+    (gw#627) normalize the up half to [out, r, 1, 1]."""
+    import torch.nn as nn
+
+    def bad(detail: str) -> RefCompatibilitySurprise:
+        return RefCompatibilitySurprise(
+            f"adapter shapes for {path!r} do not match the base "
+            f"({tuple(a.shape)}/{tuple(b.shape)}): {detail}",
+            ref=ref, axis="state_dict",
+        )
+
+    rank = int(a.shape[0])
+    if isinstance(mod, nn.Conv2d):
+        if mod.groups != 1:
+            raise bad(f"grouped conv (groups={mod.groups}) is not a branch target")
+        if a.dim() != 4 or int(a.shape[1]) != mod.in_channels or (
+                tuple(int(v) for v in a.shape[2:]) != tuple(mod.kernel_size)):
+            raise bad(
+                f"want down [r, {mod.in_channels}, "
+                f"{mod.kernel_size[0]}, {mod.kernel_size[1]}]")
+        if int(b.shape[0]) != mod.out_channels or int(b.shape[1]) != rank or (
+                b.dim() not in (2, 4)) or (
+                b.dim() == 4 and tuple(int(v) for v in b.shape[2:]) != (1, 1)):
+            raise bad(f"want up [{mod.out_channels}, {rank}(, 1, 1)]")
+        return a, b.reshape(mod.out_channels, rank, 1, 1)
+    if a.dim() != 2 or b.dim() != 2 or int(a.shape[1]) != mod.in_features or (
+            int(b.shape[0]) != mod.out_features or int(b.shape[1]) != rank):
+        raise bad(f"want down [r, {mod.in_features}] / up [{mod.out_features}, r]")
+    return a, b
 
 
 # Flat staging buffers above this size stay pageable — pinned host memory is
@@ -317,11 +348,12 @@ def _is_scaled_linear(mod: Any) -> bool:
 
 
 def _install_branch_forward(mod: Any) -> None:
-    """Idempotent instance-forward wrap for a plain ``nn.Linear``:
-    ``y = orig(x) + (x @ A.T) @ B.T``. Branch tensors are read from the
-    module ``__dict__`` so layerwise-cast hooks (``.to(dtype)``) never see
-    them (gw#558 / ie#374). With no branch installed the wrap is a pure
-    pass-through — removal is bit-exact."""
+    """Idempotent instance-forward wrap for a plain ``nn.Linear``
+    (``y = orig(x) + (x @ A.T) @ B.T``) or plain ``nn.Conv2d``
+    (``y = orig(x) + conv1x1(conv(x, A), B)`` — gw#627). Branch tensors are
+    read from the module ``__dict__`` so layerwise-cast hooks
+    (``.to(dtype)``) never see them (gw#558 / ie#374). With no branch
+    installed the wrap is a pure pass-through — removal is bit-exact."""
     if getattr(mod, _WRAP_ATTR, False):
         return
     orig = mod.forward
@@ -343,6 +375,13 @@ def _install_branch_forward(mod: Any) -> None:
                     and mod.__dict__.get("lora_b") is b):
                 mod.lora_a, mod.lora_b = a2, b2
             a, b = a2, b2
+        if a.dim() == 4:
+            import torch.nn.functional as F
+
+            x2 = x if x.dtype == a.dtype else x.to(a.dtype)
+            h = F.conv2d(x2, a, stride=mod.stride, padding=mod.padding,
+                         dilation=mod.dilation)
+            return y + F.conv2d(h, b).to(y.dtype)
         x2 = x.reshape(-1, x.shape[-1])
         if x2.dtype != a.dtype:
             x2 = x2.to(a.dtype)
@@ -355,14 +394,17 @@ def _install_branch_forward(mod: Any) -> None:
 
 
 def alloc_branch_buffers(mod: Any, bucket: int) -> None:
-    """Zeroed A/B branch tensors on one branch-capable Linear.
+    """Zeroed A/B branch tensors on one branch-capable module.
 
     Fp8ScaledLinear registers non-persistent buffers (they move with the
     module and its forward reads them natively; the w8a8 denoiser carries
-    no cast hooks). Plain ``nn.Linear`` gets a forward wrap + plain
-    ``__dict__`` attrs instead — registered buffers would be round-tripped
-    bf16->fp8->bf16 by the layerwise-cast hooks on the fp8-storage lane."""
+    no cast hooks). Plain ``nn.Linear``/``nn.Conv2d`` get a forward wrap +
+    plain ``__dict__`` attrs instead — registered buffers would be
+    round-tripped bf16->fp8->bf16 by the layerwise-cast hooks on the
+    fp8-storage lane. Conv branches (gw#627): A [bucket, in, kh, kw] runs
+    the base conv's stride/padding, B [out, bucket, 1, 1] projects up."""
     import torch
+    import torch.nn as nn
 
     dev = mod.weight.device
     # Branch tensors compute in the module's COMPUTE dtype — never its
@@ -377,6 +419,15 @@ def alloc_branch_buffers(mod: Any, bucket: int) -> None:
     for name in ("lora_a", "lora_b"):
         mod._buffers.pop(name, None)
         mod.__dict__.pop(name, None)
+    if isinstance(mod, nn.Conv2d):
+        a = torch.zeros(bucket, mod.in_channels, *mod.kernel_size,
+                        dtype=dtype, device=dev)
+        b = torch.zeros(mod.out_channels, bucket, 1, 1,
+                        dtype=dtype, device=dev)
+        _install_branch_forward(mod)
+        mod.lora_a = a
+        mod.lora_b = b
+        return
     a = torch.zeros(bucket, mod.in_features, dtype=dtype, device=dev)
     b = torch.zeros(mod.out_features, bucket, dtype=dtype, device=dev)
     if _is_scaled_linear(mod):
@@ -554,8 +605,8 @@ def apply_branch_adapters(
                     hit_any = True
                 (dt_a, off_a, shp_a), (dt_b, off_b, shp_b), alpha_scale = idx
                 r = shp_a[0]
-                n_a = shp_a[0] * shp_a[1]
-                n_b = shp_b[0] * shp_b[1]
+                n_a = math.prod(shp_a)
+                n_b = math.prod(shp_b)
                 mod.lora_a[r0:r0 + r].copy_(
                     df[dt_a][off_a:off_a + n_a].view(shp_a))
                 mod.lora_b[:, r0:r0 + r].copy_(

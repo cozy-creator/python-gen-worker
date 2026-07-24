@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.51.0 (2026-07-24)
+
+- **gw#627: Conv2d additive-branch support in the runtime LoRA overlay.**
+  The curated sdxl distill adapters (Lightning/DMD2) carry 49 conv LoRA
+  pairs each; the gw#547/558 branch was Linear-only, so on the w8a8 lane
+  (`_Fp8ScaledLinear`, no peft fallback) the only route for them was raw
+  peft injection — which rejects the quantized module class fatally (8/8
+  live sdxl generate-turbo failures on L4, th#1037 addendum). Plain
+  ``nn.Conv2d`` modules in the denoiser are now branch-capable: canonical
+  zeroed conv branches ride the same rank bucket (A [bucket, in, kh, kw]
+  at the base conv's stride/padding, B [out, bucket, 1, 1]), swap is the
+  same staged buffer copy, and the eager instance-forward wrap adds
+  ``conv1x1(conv(x, A), B)``. Convs are never quantized, so every lane
+  takes the wrap path; graph stability and cell lane naming
+  (``w8a8-lora<bucket>``) are unchanged.
+
+## 0.50.3 (2026-07-24)
+
+- **th#1063: loud boot log when a datacenter pod has no CAS fill source.**
+
 ## 0.50.2 (2026-07-23)
 
 - **th#1055: desired-hot warm works on slot-only endpoints; failures are
