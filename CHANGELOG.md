@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.55.0 (2026-07-24)
+
+- **gw#496: make checkpoint metadata honest.** `save_checkpoint` and
+  `open_checkpoint_stream` no longer accept `produced_by_kind`,
+  `target_dtype`, `flavor`, or `attributes`, which the repo-commit route
+  never persisted. Step, epoch, and checkpoint kind remain on their live
+  provenance/event paths. The private stream's write-only uploader metadata
+  and unused elapsed-time property are removed.
+
 ## 0.54.0 (2026-07-24)
 
 - **th#1087 stages B+D: declared mutable config + worker reconcile.**

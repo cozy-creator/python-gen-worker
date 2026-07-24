@@ -47,14 +47,8 @@ class _RequestOutputStream:
         format: Optional[str] = None,
         create: bool = False,
         expected_size_bytes: Optional[int] = None,
-        # Lineage metadata (checkpoint uploads only).
-        produced_by_kind: Optional[str] = None,
         step_number: Optional[int] = None,
         epoch_number: Optional[int] = None,
-        output_kind: Optional[str] = None,
-        target_dtype: Optional[str] = None,
-        flavor: Optional[str] = None,
-        attributes: Optional[dict] = None,
     ) -> None:
 
         self._ctx = ctx
@@ -63,18 +57,8 @@ class _RequestOutputStream:
         self._format = str(format or "").strip() or None
         self._create = bool(create)
         self._expected_size_bytes = int(expected_size_bytes or 0)
-        # Lineage/attributes are retained for local fallback compatibility.
-        # Repo-CAS `/complete` is deliberately parts-only; checkpoint-level
-        # metadata rides the commit payload (gen_worker.convert.publish_flavors).
-        self._lineage_produced_by_kind = (str(produced_by_kind or "").strip() or None)
         self._lineage_step_number = step_number if isinstance(step_number, int) else None
         self._lineage_epoch_number = epoch_number if isinstance(epoch_number, int) else None
-        self._lineage_output_kind = (str(output_kind or "").strip() or None)
-        self._lineage_target_dtype = (str(target_dtype or "").strip() or None)
-        self._lineage_flavor = (str(flavor or "").strip() or None)
-        # Free-form attributes from the dispatch wrapper (quantization
-        # library + scheme + group_size + calibration dataset id, etc).
-        self._lineage_attributes = dict(attributes) if isinstance(attributes, dict) and attributes else None
         if self._expected_size_bytes < 0:
             self._expected_size_bytes = 0
         if self._expected_size_bytes > 0:
@@ -98,7 +82,6 @@ class _RequestOutputStream:
         self._last_progress_mono = self._started_mono
         self._last_progress_uploaded = 0
         self._session_id: Optional[str] = None
-        self._uploader_meta: Dict[str, Any] = {}
         # Split routing by artifact kind (gw#453): checkpoint streams publish
         # via the /commits API when the job carries a destination_repo scope
         # (job-bound create_checkpoint grant, multi-GB per-file caps);
@@ -130,10 +113,6 @@ class _RequestOutputStream:
     @property
     def stream_mode(self) -> str:
         return self._stream_mode
-
-    @property
-    def elapsed_s(self) -> float:
-        return float(max(time.monotonic() - self._started_mono, 0.0))
 
     @property
     def ref(self) -> str:
@@ -208,13 +187,8 @@ class _RequestOutputStream:
                         self._ref,
                         self._tmp_path,
                         format=self._format,
-                        produced_by_kind=self._lineage_produced_by_kind,
                         step_number=self._lineage_step_number,
                         epoch_number=self._lineage_epoch_number,
-                        output_kind=self._lineage_output_kind,
-                        target_dtype=self._lineage_target_dtype,
-                        flavor=self._lineage_flavor,
-                        attributes=self._lineage_attributes,
                     )
                 else:
                     raw = self._ctx.save_file(
@@ -391,7 +365,6 @@ class _RequestOutputStream:
             provenance=provenance,
             part_progress=_part_progress,
         )
-        self._uploader_meta = {"revision_id": result.revision_id, "checkpoint_id": result.checkpoint_id}
         with self._progress_lock:
             self._bytes_uploaded = int(file_size)
 
@@ -493,7 +466,6 @@ class _RequestOutputStream:
         except Exception:
             pass
 
-        self._uploader_meta = result.meta
         with self._progress_lock:
             self._bytes_uploaded = file_size
 

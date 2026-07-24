@@ -1102,21 +1102,11 @@ class _PublisherMixin:
         local_path: str | os.PathLike[str],
         format: Optional[str] = None,
         *,
-        produced_by_kind: Optional[str] = None,
         step_number: Optional[int] = None,
         epoch_number: Optional[int] = None,
         output_kind: Optional[str] = None,
-        target_dtype: Optional[str] = None,
-        flavor: Optional[str] = None,
-        attributes: Optional[dict] = None,
     ) -> Tensors:
-        """Save checkpoint/model-weight bytes and return a first-class tensor artifact.
-
-        ``attributes`` is a free-form provenance map (e.g. quantization
-        library + scheme + group_size + calibration dataset id). Conversion
-        dispatchers attach it to the final ``checkpoint_flavors[]`` publish
-        payload; per-file repo-CAS ``/complete`` remains parts-only.
-        """
+        """Save checkpoint/model-weight bytes and return a tensor artifact."""
         src = str(os.fspath(local_path) if local_path else "").strip()
         if not src:
             raise ValueError("local_path is required")
@@ -1137,13 +1127,9 @@ class _PublisherMixin:
             format=format,
             feed=_feed,
             fallback=lambda r: self.save_file(r, src),
-            produced_by_kind=produced_by_kind,
             step_number=step_number,
             epoch_number=epoch_number,
             output_kind=output_kind,
-            target_dtype=target_dtype,
-            flavor=flavor,
-            attributes=attributes,
         )
 
     def _publish_checkpoint(
@@ -1154,13 +1140,9 @@ class _PublisherMixin:
         format: Optional[str],
         feed: Callable[[_RequestOutputStream], object],
         fallback: Callable[[str], Asset],
-        produced_by_kind: Optional[str],
         step_number: Optional[int],
         epoch_number: Optional[int],
         output_kind: Optional[str],
-        target_dtype: Optional[str],
-        flavor: Optional[str],
-        attributes: Optional[dict],
     ) -> Tensors:
         """Shared checkpoint-publish core.
 
@@ -1190,13 +1172,8 @@ class _PublisherMixin:
                     ref,
                     format=fmt,
                     expected_size_bytes=size,
-                    produced_by_kind=produced_by_kind,
                     step_number=step_number,
                     epoch_number=epoch_number,
-                    output_kind=output_kind,
-                    target_dtype=target_dtype,
-                    flavor=flavor,
-                    attributes=attributes,
                 )
                 feed(stream)
                 out = stream.finalize()
@@ -1223,13 +1200,8 @@ class _PublisherMixin:
         *,
         format: Optional[str] = None,
         expected_size_bytes: Optional[int] = None,
-        produced_by_kind: Optional[str] = None,
         step_number: Optional[int] = None,
         epoch_number: Optional[int] = None,
-        output_kind: Optional[str] = None,
-        target_dtype: Optional[str] = None,
-        flavor: Optional[str] = None,
-        attributes: Optional[dict] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
@@ -1242,13 +1214,8 @@ class _PublisherMixin:
             kind="checkpoint",
             format=format,
             expected_size_bytes=expected_size_bytes,
-            produced_by_kind=produced_by_kind,
             step_number=step_number,
             epoch_number=epoch_number,
-            output_kind=output_kind,
-            target_dtype=target_dtype,
-            flavor=flavor,
-            attributes=attributes,
         )
 
     def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
