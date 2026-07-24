@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.56.2 (2026-07-24)
+
+- **gw#640: a post-mortem supervisor names the death that happens BELOW
+  Python.** 0.56.1 instruments every death Python can observe; th#1085 run 9
+  produced six process restarts and ZERO `worker_fatal` rows, which leaves
+  exactly one class — a signal (cgroup OOM `SIGKILL`, `SIGSEGV` in a C
+  extension, an external kill). No `except` catches that and no in-process
+  reporter can dial out after it, so the reporter is now the NEXT process.
+  `python -m gen_worker.entrypoint` forks a supervisor before its heavy
+  imports: the parent stays a bare interpreter (the OOM killer picks the fat
+  child, not the reporter), forwards signals, and on an abnormal exit reports
+  `WIFSIGNALED`/`WTERMSIG`/`WCOREDUMP` plus `memory.max` vs `memory.current`
+  vs `memory.peak`, `cpu.max`, and the `memory.events` `oom_kill` counter
+  delta through the same `worker_fatal` carrier — a durable `pod_events` row
+  on any already-deployed hub, queryable with `class='hardware_unsuitable'
+  AND reason='worker_fatal'`. A boot record on the container filesystem covers
+  the case where the whole cgroup goes (`memory.oom.group`) or the container
+  is restarted: the next boot finds the unfinished record and reports it.
+  Exit status is propagated unchanged, so container-restart semantics are
+  identical; `GEN_WORKER_SUPERVISOR=0` opts out.
+- **gw#640: the host canary reports the cores this container actually owns.**
+  It shipped `os.cpu_count()` — the HOST's count, 32 on a pod that owns 4 —
+  next to a cgroup-derived `ram_total_gb` of 14.9 GB, a "32 vCPUs / 14.9 GB"
+  report that misdirected the th#1085 investigation. `vcpus` is now
+  `min(host cores, sched_getaffinity, cpu.max quota)`, and the multi-core
+  throughput probe runs that many threads instead of oversubscribing a quota.
+
 ## 0.56.1 (2026-07-24)
 
 - **gw#640/th#1077: a worker fatal now reaches the HUB, not just pod stdout.**
