@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.56.1 (2026-07-24)
+
+- **gw#640/th#1077: a worker fatal now reaches the HUB, not just pod stdout.**
+  `entrypoint._log_worker_fatal` wrote the exception class, message and
+  traceback to stdout only; RunPod exposes no container-logs API, so every
+  cloud-only worker death was unobservable by construction (six live th#1085
+  runs burned on a crash whose traceback existed and could not be read). The
+  fatal is now also dialed to the orchestrator over a fresh Connect stream,
+  reusing the `HardwareUnsuitable` carrier with `reason_class="worker_fatal"`
+  — the hub already persists that as a durable `pod_events` row, so this
+  needs NO proto change and NO hub redeploy and works against every hub pin
+  already deployed. Additionally, the run loop ending WITHOUT a hub Drain or
+  a shutdown signal is now itself a reported fatal (`UnexpectedWorkerExit`)
+  instead of a clean, silent `exit 0` — that silent exit was exactly the
+  gw#640 signature the hub could only see as a young-worker death.
+
 ## 0.56.0 (2026-07-24)
 
 - **th#1085 Slice 5: exact mutable-config convergence.** Protocol-v5 desired
