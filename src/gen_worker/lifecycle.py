@@ -10,13 +10,15 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
 from .config import Settings
 from .executor import Executor
+from .intent_registry import IntentRegistry, UnreportedIntentWait
 from .pb import worker_scheduler_pb2 as pb
-from .transport import PROTOCOL_VERSION, Transport
+from .runtime_config import ConfigSnapshotWriteError, extract_config_push
+from .transport import FatalTransportError, PROTOCOL_VERSION, Transport
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +52,13 @@ _DISK_REPORT_TTL_S = 30.0
 def probe_hardware() -> Dict[str, Any]:
     """Static hardware facts + gate inputs. torch is optional."""
     info: Dict[str, Any] = {
-        "gpu_count": 0, "gpu_total_mem": 0, "gpu_free_mem": 0,
-        "gpu_name": "", "gpu_sm": "", "torch_version": "", "installed_libs": [],
+        "gpu_count": 0,
+        "gpu_total_mem": 0,
+        "gpu_free_mem": 0,
+        "gpu_name": "",
+        "gpu_sm": "",
+        "torch_version": "",
+        "installed_libs": [],
     }
     try:
         import torch
@@ -84,34 +91,53 @@ def free_vram_bytes() -> int:
         import torch
 
         if torch.cuda.is_available():
-            return sum(
-                int(torch.cuda.mem_get_info(i)[0])
-                for i in range(torch.cuda.device_count())
-            )
+            return sum(int(torch.cuda.mem_get_info(i)[0]) for i in range(torch.cuda.device_count()))
     except Exception:
         pass
     return 0
 
 
+def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
+    """Snapshot CONTENT identity: digest + per-file (path, size, blake3).
+
+    Presigned URL bytes are deliberately excluded — the hub refreshes
+    expiring snapshot URLs on every release-config rebuild (~15s TTL) and
+    its own HelloAck semantic hash excludes them for exactly this reason
+    (tensorhub desiredResidencySemanticHash). Hashing URLs made every
+    URL rotation look like a model change and cancelled in-flight warmup
+    loads at ~15s / ~10min cadence (gw#623)."""
+    if snap is None:
+        return ()
+    return (
+        snap.digest,
+        tuple(sorted((f.path, f.size_bytes, f.blake3) for f in snap.files)),
+    )
+
+
 def _semantic_model_key(
-    ack: "pb.HelloAck", desired: "pb.DesiredResidency",
+    ack: "pb.HelloAck",
+    desired: "pb.DesiredResidency",
 ) -> tuple:
     """gw#614: order-independent identity of the MODEL content of an ack —
-    resolutions, disk refs, snapshots, hot instances. Generation and other
-    non-model fields are excluded so benign plan rewrites compare equal."""
+    resolutions, disk refs, snapshot content, hot instances. Generation,
+    presigned URL bytes, and other non-model fields are excluded so benign
+    plan rewrites compare equal."""
     return (
-        tuple(sorted(
-            (r.ref, r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
-        )),
+        tuple(sorted((r.ref, r.resolved_ref, r.cast, r.lane) for r in ack.resolutions)),
         tuple(sorted(ref for ref in desired.disk_refs if ref)),
-        tuple(sorted(
-            (ref, snap.SerializeToString(deterministic=True))
-            for ref, snap in desired.snapshots.items()
-        )),
-        tuple(sorted(
-            inst.SerializeToString(deterministic=True) for inst in desired.hot
-        )),
+        tuple(
+            sorted((ref, _snapshot_content_key(snap)) for ref, snap in desired.snapshots.items())
+        ),
+        tuple(sorted(inst.SerializeToString(deterministic=True) for inst in desired.hot)),
     )
+
+
+def _instance_refs(instance: "pb.DesiredInstance") -> list:
+    refs = []
+    for model in instance.models:
+        refs.append(model.ref)
+        refs.extend(lora.ref for lora in model.loras)
+    return refs
 
 
 class Lifecycle:
@@ -129,15 +155,24 @@ class Lifecycle:
 
             claims = _decode_unverified_jwt_claims(settings.worker_jwt.strip())
         self.worker_id = (
-            settings.worker_id or str(claims.get("sub") or "").strip()
-            or f"py-worker-{os.getpid()}"
+            settings.worker_id or str(claims.get("sub") or "").strip() or f"py-worker-{os.getpid()}"
         )
         self.release_id = str(claims.get("release_id") or "").strip()
+        self.intent_registry = IntentRegistry(
+            self.release_id,
+            executor.specs.keys(),
+            boot_config_generation=int(
+                getattr(settings, "boot_config_generation", 0) or 0
+            ),
+            on_change=self.state_changed,
+        )
+        self.executor.bind_intent_registry(self.intent_registry)
         self.phase = pb.WORKER_PHASE_BOOTING
         self.hardware = probe_hardware()
         self.draining = False
         self.drained = asyncio.Event()  # set when drain completed -> exit 0
         self._last_delta: Optional[bytes] = None
+        self._last_lifecycle_snapshot: Optional[bytes] = None
         self._emitted_unavailable: set[str] = set()
         # fn name -> the "ran" rung last reported. Keyed on the rung (not
         # mere membership) so a runtime ladder demotion (gw#463) re-emits.
@@ -151,6 +186,16 @@ class Lifecycle:
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
         self._observed_residency_generation = 0
+        # gw#623: the reconcile loop's currently-loading work item
+        # ((kind, identity, context)) + the level-trigger that re-runs a
+        # convergence pass instead of cancelling an in-flight load.
+        self._reconcile_active: Optional[tuple] = None
+        self._residency_restart: Optional[asyncio.Event] = None
+        self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
+        self.executor.runtime_config.set_projection_callbacks(
+            on_parameter_snapshot=self._config_snapshot_applied,
+            on_snapshot_failure=self._config_snapshot_failed,
+        )
 
     # ---- snapshots -----------------------------------------------------------
 
@@ -159,6 +204,8 @@ class Lifecycle:
         total = int(self.hardware.get("gpu_total_mem") or 0)
         quantum = max(1, int(total * _VRAM_QUANTUM_FRACTION)) if total else 1
         return pb.StateDelta(
+            # th#1087/th#1085: echo DesiredResidency.config_generation.
+            observed_config_generation=self.executor.runtime_config.generation,
             phase=self.phase,
             available_functions=self.executor.available_functions(),
             loading_functions=self.executor.loading_functions(),
@@ -196,8 +243,7 @@ class Lifecycle:
         now = time.monotonic()
         if self._disk_report_at and now - self._disk_report_at < _DISK_REPORT_TTL_S:
             return
-        if (self._disk_report_refresh_task is not None
-                and not self._disk_report_refresh_task.done()):
+        if self._disk_report_refresh_task is not None and not self._disk_report_refresh_task.done():
             return  # a refresh is already in flight
         self._disk_report_at = now
 
@@ -206,11 +252,10 @@ class Lifecycle:
                 await self.executor.store.refresh_disk_usage_report()
             except Exception:
                 logger.warning(
-                    "disk-usage measurement failed; keeping the last "
-                    "cached report", exc_info=True)
+                    "disk-usage measurement failed; keeping the last cached report", exc_info=True
+                )
 
-        self._disk_report_refresh_task = asyncio.create_task(
-            _run(), name="disk-usage-refresh")
+        self._disk_report_refresh_task = asyncio.create_task(_run(), name="disk-usage-refresh")
 
     def build_resources(self) -> pb.WorkerResources:
         hw = self.hardware
@@ -223,7 +268,6 @@ class Lifecycle:
             c = get_host_canary()
             canary = pb.HostCanary(
                 memcpy_gbps=c.memcpy_gbps,
-                h2d_gbps=c.h2d_gbps,
                 d2h_gbps=c.d2h_gbps,
                 pinned_alloc_ok=c.pinned_alloc_ok,
                 cpu_single_mbps=c.cpu_single_mbps,
@@ -266,6 +310,11 @@ class Lifecycle:
         in_flight = {k for k in self.executor.in_flight_keys()}
         if self.transport is not None:
             in_flight.update(self.transport.queue.pending_result_keys)
+        self.intent_registry.refresh_projection(
+            self.executor,
+            self._desired_residency,
+            self._model_resolutions,
+        )
         return pb.Hello(
             protocol_version=PROTOCOL_VERSION,
             worker_id=self.worker_id,
@@ -274,38 +323,106 @@ class Lifecycle:
             state=self._state_delta(),
             models=self.executor.store.residency_snapshot(),
             in_flight=[
-                pb.InFlightJob(request_id=rid, attempt=att)
-                for rid, att in sorted(in_flight)
+                pb.InFlightJob(request_id=rid, attempt=att) for rid, att in sorted(in_flight)
             ],
             # th#965 layer 2: promise the beat cadence; the hub reaps after
             # 6 consecutive misses (~60s). Hello counts as the first beat.
             heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
+            worker_session_id=self.intent_registry.worker_session_id,
+            lifecycle_snapshot=self.intent_registry.snapshot(),
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
+        desired_command: Optional[pb.DesiredStateCommand] = None
+        if ack.HasField("desired_state_command"):
+            desired_command = ack.desired_state_command
+            receipt = self.intent_registry.apply_command(
+                desired_command,
+                current_config_generation=self.executor.runtime_config.generation,
+            )
+            await self._send_state_message(
+                pb.WorkerMessage(goal_receipt=receipt),
+                hello_ack=True,
+            )
+            if receipt.status == pb.GOAL_RECEIPT_STATUS_REJECTED:
+                # A rejected v5 command never silently falls through to the
+                # colocated legacy DesiredResidency. Mandatory rejection also
+                # withdraws aggregate readiness until the pod is replaced.
+                if self.intent_registry.protocol_rejected:
+                    self.phase = pb.WORKER_PHASE_ERROR
+                await self._send_lifecycle_snapshot(hello_ack=True, force=True)
+                self._last_delta = None
+                await self.maybe_send_state_delta(hello_ack=True)
+                return
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
+        # th#1087: the desired state advertises (release_id, config_gen).
+        # Observe it (memory + snapshot file rewrite); parameter VALUES ride
+        # RunJob stamps (class 1), bindings ride the desired-residency
+        # reconcile below (class 2), envs are boot-only (class 3 — the hub
+        # drain-rolls; the worker never mutates its own env).
+        push = extract_config_push(ack)
+        if push is not None:
+            gen, release_id = push
+            self.intent_registry.receive_config_generation(gen)
+            config_intent = self.intent_registry.ensure_intent(pb.DESIRED_INTENT_KIND_CONFIG_APPLY)
+            if config_intent:
+                self.intent_registry.transition(
+                    config_intent,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_CONFIG_MATERIALIZING,
+                )
+            try:
+                if (
+                    desired_command is not None
+                    and int(desired_command.config_generation) == gen
+                    and bytes(desired_command.parameter_snapshot)
+                ):
+                    self.executor.runtime_config.apply_parameter_snapshot(
+                        bytes(desired_command.parameter_snapshot),
+                        gen,
+                        release_id=(
+                            str(desired_command.release_id or "").strip()
+                            or release_id
+                            or self.release_id
+                        ),
+                    )
+                else:
+                    self.executor.runtime_config.observe(
+                        gen,
+                        release_id=release_id or self.release_id,
+                    )
+            except ConfigSnapshotWriteError as exc:
+                self.intent_registry.config_snapshot_failed(str(exc))
+                self.phase = pb.WORKER_PHASE_ERROR
+                await self._send_lifecycle_snapshot(hello_ack=True, force=True)
+                self._last_delta = None
+                await self.maybe_send_state_delta(hello_ack=True)
+                return
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).
-        self.executor.apply_model_resolutions({
-            r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions
-        })
+        resolutions = {r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions}
+        self.executor.apply_model_resolutions(resolutions)
+        # gw#623: the reconcile's active-work context compares against the
+        # resolutions actually applied to the executor.
+        self._model_resolutions = resolutions
         desired = pb.DesiredResidency()
         desired.CopyFrom(ack.desired_residency)
         generation = int(desired.generation)
         if generation < self._observed_residency_generation:
             logger.info(
                 "ignoring stale desired residency generation %d (observed %d)",
-                generation, self._observed_residency_generation,
+                generation,
+                self._observed_residency_generation,
             )
         else:
             self._observed_residency_generation = generation
             self.executor.store.keep = list(dict.fromkeys(ref for ref in desired.disk_refs if ref))
             self.executor.store.replace_desired_snapshots(
-                dict(desired.snapshots), generation=generation,
+                dict(desired.snapshots),
+                generation=generation,
             )
-            self._replace_residency_reconcile(
-                desired, model_key=_semantic_model_key(ack, desired))
+            self._replace_residency_reconcile(desired, model_key=_semantic_model_key(ack, desired))
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello. Capacity evidence has causal priority over retained results;
         # other finite baseline messages follow it in the same prepend lane.
@@ -328,24 +445,86 @@ class Lifecycle:
         await self.maybe_send_state_delta(hello_ack=True)
 
     def _replace_residency_reconcile(
-        self, desired: "pb.DesiredResidency", *, model_key: Any = None,
+        self,
+        desired: "pb.DesiredResidency",
+        *,
+        model_key: Any = None,
     ) -> None:
         # gw#614 (th#961 defense in depth): an ack whose semantic model set
         # is unchanged must not kill an in-flight reconcile — a running
-        # self_mint_compile needs its full window. Non-model deltas were
-        # already applied by the caller; changed sets cancel as before.
+        # self_mint_compile needs its full window.
         task = getattr(self, "_residency_task", None)
+        running = task is not None and not task.done()
         if (
             model_key is not None
-            and task is not None and not task.done()
+            and running
             and getattr(self, "_residency_model_key", None) == model_key
         ):
             self._desired_residency = desired
+            wanted = {instance.function_name for instance in desired.hot if instance.function_name}
+            if wanted.issubset(set(self.executor.available_functions())):
+                self.intent_registry.bindings_applied(int(desired.config_generation))
             return
         self._residency_model_key = model_key
-        self._cancel_residency_reconcile()
         self._desired_residency = desired
+        if running and self._active_work_still_desired(desired):
+            # gw#623: the set changed, but the model this reconcile is
+            # loading RIGHT NOW is still wanted with the same identity and
+            # resolution. Cancelling would discard minutes of load over a
+            # benign update (sibling ref added/removed, plan rewrite);
+            # signal the level-triggered loop to re-converge against the
+            # new set once the current item completes.
+            self._signal_residency_restart()
+            if not task.done():  # type: ignore[union-attr]
+                return
+            # The loop finished before observing the signal; fall through
+            # and start a fresh reconcile against the new desired state.
+        self._cancel_residency_reconcile()
         self._resume_residency_reconcile()
+
+    def _signal_residency_restart(self) -> None:
+        event = getattr(self, "_residency_restart", None)
+        if event is None:
+            event = self._residency_restart = asyncio.Event()
+        event.set()
+
+    def _work_context(
+        self,
+        refs: Any,
+        desired: "pb.DesiredResidency",
+    ) -> tuple:
+        """Identity facts an in-flight load depends on, per involved ref:
+        snapshot content (URL-free) + the applied precision resolution."""
+        resolutions = getattr(self, "_model_resolutions", {})
+        return tuple(
+            (
+                ref,
+                _snapshot_content_key(desired.snapshots.get(ref)),
+                resolutions.get(ref),
+            )
+            for ref in sorted({r for r in refs if r})
+        )
+
+    def _active_work_still_desired(
+        self,
+        desired: "pb.DesiredResidency",
+    ) -> bool:
+        """Whether the reconcile loop's CURRENT work item survives ``desired``
+        unchanged — the gw#623 cancel test: only cancel an in-flight load
+        when the model it is FOR left the set (or changed identity or
+        resolution), never on unrelated set churn."""
+        active = getattr(self, "_reconcile_active", None)
+        if active is None:
+            return True  # between items: the restart signal re-converges
+        kind, ident, ctx = active
+        if kind == "disk":
+            if ident not in set(desired.disk_refs):
+                return False
+            return ctx == self._work_context((ident,), desired)
+        for instance in desired.hot:
+            if instance.SerializeToString(deterministic=True) == ident:
+                return ctx == self._work_context(_instance_refs(instance), desired)
+        return False
 
     def _cancel_residency_reconcile(self) -> None:
         task = getattr(self, "_residency_task", None)
@@ -358,49 +537,182 @@ class Lifecycle:
         if desired is None or self.draining:
             return
         self._residency_task = asyncio.create_task(
-            self._reconcile_residency(desired),
+            self._reconcile_residency(),
             name=f"residency-{int(desired.generation)}",
         )
 
-    async def _reconcile_residency(self, desired: "pb.DesiredResidency") -> None:
-        """Converge in declared order while tenant work has first claim."""
-        snapshots = dict(desired.snapshots)
+    async def _reconcile_residency(self) -> None:
+        """Converge to the LATEST desired state while tenant work has first
+        claim. Level-triggered (gw#623): each pass reads the freshest set; a
+        benign mid-load update re-runs the pass instead of cancelling the
+        in-flight item (already-satisfied refs/instances short-circuit
+        through the ordinary dedupe paths, so a re-pass is cheap)."""
+        restart = getattr(self, "_residency_restart", None)
+        if restart is None:
+            restart = self._residency_restart = asyncio.Event()
         try:
-            for ref in desired.disk_refs:
-                if not ref:
-                    continue
-                await self.executor.wait_idle()
-                if self.draining:
+            while True:
+                restart.clear()
+                desired = self._desired_residency
+                if desired is None or self.draining:
                     return
-                try:
-                    await self.executor.revalidate_snapshot_identity(
-                        ref, snapshots.get(ref)
-                    )
-                    await self.executor.store.ensure_local(ref, snapshots.get(ref))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning("desired disk residency failed for %s: %s", ref, exc)
-
-            for instance in desired.hot:
-                await self.executor.wait_idle()
-                if self.draining:
+                await self._reconcile_pass(desired, restart)
+                if self.draining or not restart.is_set():
                     return
-                try:
-                    await self.executor.ensure_desired_instance(instance, snapshots)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "desired hot residency failed for %s: %s",
-                        instance.function_name, exc,
-                    )
         except asyncio.CancelledError:
             return
+        except UnreportedIntentWait:
+            self.phase = pb.WORKER_PHASE_ERROR
+            self._last_delta = None
+            await self.maybe_send_state_delta(force=True)
+        finally:
+            self._reconcile_active = None
+
+    async def _reconcile_pass(
+        self,
+        desired: "pb.DesiredResidency",
+        restart: asyncio.Event,
+    ) -> None:
+        """One convergence pass over ``desired`` in declared order."""
+        snapshots = dict(desired.snapshots)
+        for ref in desired.disk_refs:
+            if not ref:
+                continue
+            if restart.is_set():
+                return
+            intent_id = self.intent_registry.ensure_intent(
+                pb.DESIRED_INTENT_KIND_MATERIALIZE,
+                ref=ref,
+            )
+            await self.intent_registry.reported_await(
+                intent_id,
+                self.executor.wait_idle(),
+                operation=f"reconcile idle for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE,
+                reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+            )
+            if self.draining:
+                return
+            self._reconcile_active = ("disk", ref, self._work_context((ref,), desired))
+            failure_stage = pb.LIFECYCLE_INTENT_STAGE_VERIFYING
+            try:
+                snapshot = snapshots.get(ref)
+                await self.intent_registry.reported_await(
+                    intent_id,
+                    self.executor.revalidate_snapshot_identity(ref, snapshot),
+                    operation=f"snapshot validation for {ref}",
+                    status=pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_VERIFYING,
+                )
+                failure_stage = pb.LIFECYCLE_INTENT_STAGE_FETCHING
+                with self.executor.store.materialize_intent(intent_id):
+                    await self.intent_registry.reported_await(
+                        intent_id,
+                        self.executor.store.ensure_local(ref, snapshot),
+                        operation=f"snapshot materialization for {ref}",
+                        status=pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                        stage=pb.LIFECYCLE_INTENT_STAGE_FETCHING,
+                    )
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                        pb.LIFECYCLE_INTENT_STAGE_ON_DISK,
+                        actual_digest=(
+                            snapshot.digest.encode()
+                            if snapshot is not None and snapshot.digest
+                            else b""
+                        ),
+                    )
+            except (asyncio.CancelledError, UnreportedIntentWait):
+                raise
+            except Exception as exc:
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                        failure_stage,
+                        error_code=(
+                            pb.LIFECYCLE_ERROR_CODE_SNAPSHOT_IDENTITY_MISSING
+                            if snapshots.get(ref) is None
+                            else pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED
+                        ),
+                        detail=str(exc)[:512],
+                    )
+                logger.warning("desired disk residency failed for %s: %s", ref, exc)
+            finally:
+                self._reconcile_active = None
+
+        bindings_converged = True
+        for instance in desired.hot:
+            if restart.is_set():
+                return
+            intent_id = self.intent_registry.ensure_intent(
+                pb.DESIRED_INTENT_KIND_FUNCTION_READY,
+                function_name=instance.function_name,
+            )
+            await self.intent_registry.reported_await(
+                intent_id,
+                self.executor.wait_idle(),
+                operation=f"reconcile idle for {instance.function_name}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_TENANT_IDLE,
+                reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+            )
+            if self.draining:
+                return
+            self._reconcile_active = (
+                "hot",
+                instance.SerializeToString(deterministic=True),
+                self._work_context(_instance_refs(instance), desired),
+            )
+            try:
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                        pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                    )
+                await self.executor.ensure_desired_instance(instance, snapshots)
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+                        pb.LIFECYCLE_INTENT_STAGE_READY,
+                    )
+            except (asyncio.CancelledError, UnreportedIntentWait):
+                raise
+            except Exception as exc:
+                bindings_converged = False
+                if intent_id:
+                    self.intent_registry.transition(
+                        intent_id,
+                        pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                        pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                        detail=str(exc)[:512],
+                    )
+                logger.warning(
+                    "desired hot residency failed for %s: %s",
+                    instance.function_name,
+                    exc,
+                )
+            finally:
+                self._reconcile_active = None
+        if bindings_converged and not restart.is_set() and self._desired_residency is desired:
+            self.intent_registry.bindings_applied(int(desired.config_generation))
 
     async def on_message(self, msg: pb.SchedulerMessage) -> None:
         which = msg.WhichOneof("msg")
         if which == "run_job":
+            if self.intent_registry.protocol_rejected:
+                await self.executor._send_result(
+                    msg.run_job.request_id,
+                    msg.run_job.attempt,
+                    pb.JOB_STATUS_RETRYABLE,
+                    safe_message="worker rejected mandatory desired state",
+                )
+                return
             # A tenant request preempts unrelated background transfer/setup.
             # Re-running desired state after idle is cheap: local refs and
             # ready instances short-circuit through the existing dedupe paths.
@@ -416,6 +728,10 @@ class Lifecycle:
             asyncio.create_task(self._adopt_compile_cache_then_delta(msg.model_op))
         elif which == "drain":
             self.start_drain(int(msg.drain.deadline_ms or 0))
+        elif which is None:
+            raise FatalTransportError("scheduler sent an unknown mandatory command")
+        else:
+            raise FatalTransportError(f"scheduler sent unsupported command {which!r}")
 
     async def _adopt_compile_cache_then_delta(self, op: pb.ModelOp) -> None:
         try:
@@ -425,6 +741,7 @@ class Lifecycle:
 
     async def on_disconnect(self) -> None:
         self._last_delta = None
+        self._last_lifecycle_snapshot = None
         self._emitted_unavailable.clear()
         self._emitted_degraded.clear()
 
@@ -443,8 +760,19 @@ class Lifecycle:
             return
         loop.create_task(self.maybe_send_state_delta())
 
+    def _config_snapshot_applied(self, generation: int) -> None:
+        self.intent_registry.config_snapshot_applied(generation)
+
+    def _config_snapshot_failed(self, detail: str) -> None:
+        self.intent_registry.config_snapshot_failed(detail)
+        self.phase = pb.WORKER_PHASE_ERROR
+        self.state_changed()
+
     async def _send_state_message(
-        self, message: pb.WorkerMessage, *, hello_ack: bool = False,
+        self,
+        message: pb.WorkerMessage,
+        *,
+        hello_ack: bool = False,
     ) -> None:
         if self.transport is None:
             return
@@ -455,10 +783,18 @@ class Lifecycle:
         await self.transport.send(message)
 
     async def maybe_send_state_delta(
-        self, *, hello_ack: bool = False, force: bool = False,
+        self,
+        *,
+        hello_ack: bool = False,
+        force: bool = False,
     ) -> None:
         if self.transport is None or not self.transport.connected:
             return
+        self.intent_registry.refresh_projection(
+            self.executor,
+            self._desired_residency,
+            self._model_resolutions,
+        )
         self._kick_disk_usage_refresh_if_stale()
         delta = self._state_delta()
         raw = delta.SerializeToString(deterministic=True)
@@ -467,12 +803,32 @@ class Lifecycle:
         if force or raw != self._last_delta:
             self._last_delta = raw
             await self._send_state_message(
-                pb.WorkerMessage(state_delta=delta), hello_ack=hello_ack,
+                pb.WorkerMessage(state_delta=delta),
+                hello_ack=hello_ack,
             )
+        await self._send_lifecycle_snapshot(
+            hello_ack=hello_ack,
+            force=force,
+        )
         # Deduped internally; must run even on an unchanged delta — a runtime
         # ladder demotion (gw#463) changes the ServePlan, not the delta bytes.
         await self._emit_unavailable(hello_ack=hello_ack)
         await self._emit_degraded(hello_ack=hello_ack)
+
+    async def _send_lifecycle_snapshot(
+        self,
+        *,
+        hello_ack: bool = False,
+        force: bool = False,
+    ) -> None:
+        snapshot = self.intent_registry.snapshot()
+        raw = snapshot.SerializeToString(deterministic=True)
+        if force or raw != self._last_lifecycle_snapshot:
+            self._last_lifecycle_snapshot = raw
+            await self._send_state_message(
+                pb.WorkerMessage(lifecycle_snapshot=snapshot),
+                hello_ack=hello_ack,
+            )
 
     async def _emit_unavailable(self, *, hello_ack: bool = False) -> None:
         if self.transport is None:
@@ -485,9 +841,14 @@ class Lifecycle:
                 continue
             self._emitted_unavailable.add(name)
             await self._send_state_message(
-                pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
-                    function_name=name, reason=reason, detail=detail, axes=axes,
-                )),
+                pb.WorkerMessage(
+                    fn_unavailable=pb.FnUnavailable(
+                        function_name=name,
+                        reason=reason,
+                        detail=detail,
+                        axes=axes,
+                    )
+                ),
                 hello_ack=hello_ack,
             )
 
@@ -508,18 +869,22 @@ class Lifecycle:
                 continue
             self._emitted_degraded[name] = ran
             await self._send_state_message(
-                pb.WorkerMessage(fn_degraded=pb.FnDegraded(
-                    function_name=name,
-                    wanted=plan.wanted,
-                    ran=ran,
-                    reason=plan.warning,
-                    est_latency_multiplier=float(plan.est_latency_multiplier),
-                    recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
-                )),
+                pb.WorkerMessage(
+                    fn_degraded=pb.FnDegraded(
+                        function_name=name,
+                        wanted=plan.wanted,
+                        ran=ran,
+                        reason=plan.warning,
+                        est_latency_multiplier=float(plan.est_latency_multiplier),
+                        recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
+                    )
+                ),
                 hello_ack=hello_ack,
             )
 
     async def set_phase(self, phase: "pb.WorkerPhase") -> None:
+        if self.intent_registry.protocol_rejected and phase != pb.WORKER_PHASE_ERROR:
+            return
         if phase == self.phase:
             return
         self.phase = phase
@@ -535,8 +900,7 @@ class Lifecycle:
         # anywhere in setup is still covered — the task shares this event
         # loop, so it beats iff the loop is servicing tasks.
         if self._heartbeat_task is None:
-            self._heartbeat_task = asyncio.create_task(
-                self._heartbeat_loop(), name="heartbeat")
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
         # Disk truth first: after a restart the CAS dir is full while Residency
         # starts empty — rescan so Hello.models (and disk GC) see reality.
         self.executor.store.rescan_disk()
@@ -590,11 +954,14 @@ class Lifecycle:
                 # bootstrap fallback only.
                 dynamic.append(spec.name)
                 continue
-            missing = sorted({
-                wire_ref(b) for b in spec.models.values()
-                if b.source == "tensorhub"
-                and self.executor.store.local_path(wire_ref(b)) is None
-            })
+            missing = sorted(
+                {
+                    wire_ref(b)
+                    for b in spec.models.values()
+                    if b.source == "tensorhub"
+                    and self.executor.store.local_path(wire_ref(b)) is None
+                }
+            )
             if missing:
                 # Waits for DesiredResidency / RunJob snapshots (§7). This wait
                 # is unbounded and hub-driven: a release without resolved
@@ -611,13 +978,16 @@ class Lifecycle:
             logger.info(
                 "hub-resolved functions (dynamic slots / compile cells) set up "
                 "on delivery, not at boot (pgw#532, gw#584): %s",
-                ", ".join(sorted(dynamic)))
+                ", ".join(sorted(dynamic)),
+            )
         if awaiting_hub:
             logger.warning(
                 "functions waiting on hub-supplied snapshots (DesiredResidency, "
                 "contract §7) and NOT yet servable: %s — if these never arrive, "
                 "check that the release has resolved desired bindings for these refs",
-                "; ".join(f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())),
+                "; ".join(
+                    f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())
+                ),
             )
             # gw#591: the hub's desired-disk plan delivers those snapshots
             # seconds later, but nothing re-ran setup — the function sat in
@@ -625,8 +995,8 @@ class Lifecycle:
             # advertised functions (each side waiting on the other; found
             # live, ie#519). Finish boot setup the moment the refs land.
             self._boot_setup_watch = asyncio.create_task(
-                self._setup_awaiting_functions(awaiting_hub),
-                name="boot-setup-watch")
+                self._setup_awaiting_functions(awaiting_hub), name="boot-setup-watch"
+            )
 
         await self.set_phase(pb.WORKER_PHASE_READY)
 
@@ -642,17 +1012,14 @@ class Lifecycle:
             # open, plus the typed self-diagnosis on a stalled registry.
             activity_mod.on_beat()
 
-    async def _setup_awaiting_functions(
-        self, awaiting: Dict[str, List[str]]
-    ) -> None:
+    async def _setup_awaiting_functions(self, awaiting: Dict[str, List[str]]) -> None:
         """Complete boot setup for functions whose tensorhub snapshots arrive
         via hub delivery after the startup scan (gw#591), then push a
         StateDelta so ``available_functions`` advertises them."""
         pending = {fn: list(refs) for fn, refs in awaiting.items()}
         while pending and not self.draining:
             for fn in sorted(pending):
-                left = [r for r in pending[fn]
-                        if self.executor.store.local_path(r) is None]
+                left = [r for r in pending[fn] if self.executor.store.local_path(r) is None]
                 if left:
                     pending[fn] = left
                     continue
@@ -663,8 +1030,8 @@ class Lifecycle:
                 try:
                     await self.executor.ensure_setup(spec)
                     logger.info(
-                        "boot setup of %s completed after hub snapshot "
-                        "delivery (gw#591)", fn)
+                        "boot setup of %s completed after hub snapshot delivery (gw#591)", fn
+                    )
                 except Exception as exc:
                     logger.error("startup setup of %s failed: %s", fn, exc)
                 await self.maybe_send_state_delta()
@@ -699,21 +1066,71 @@ class Lifecycle:
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
         self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
+        self.intent_registry.set_drain(
+            pb.DRAIN_LIFECYCLE_STATUS_DRAINING,
+            deadline_at_unix_ms=(int(time.time() * 1000) + deadline_ms if deadline_ms > 0 else 0),
+        )
+
     async def _finish_drain(self) -> None:
         deadline_at = self._drain_deadline_at
         loop = asyncio.get_running_loop()
         await self.maybe_send_state_delta()
+        drain_intent = self.intent_registry.intent_id(pb.DESIRED_INTENT_KIND_DRAIN)
+        try:
+            wait_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
+            finished = await self.intent_registry.reported_await(
+                drain_intent,
+                self.executor.wait_idle(timeout=wait_timeout),
+                operation="drain tenant-idle wait",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_DRAINING,
+                reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
+            )
+            if not finished:
+                logger.warning("drain deadline expired; aborting remaining jobs as RETRYABLE")
+                await self.intent_registry.guard_await(
+                    drain_intent,
+                    self.executor.abort_all(safe_message="worker draining"),
+                    operation="drain job abort",
+                )
 
-        wait_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
-        finished = await self.executor.wait_idle(timeout=wait_timeout)
-        if not finished:
-            logger.warning("drain deadline expired; aborting remaining jobs as RETRYABLE")
-            await self.executor.abort_all(safe_message="worker draining")
-
-        await self.executor.shutdown_instances()
-        if self.transport is not None:
-            flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
-            await self.transport.close_after_flush(timeout=flush_timeout)
+            self.intent_registry.set_drain(
+                pb.DRAIN_LIFECYCLE_STATUS_FINALIZING,
+            )
+            await self.maybe_send_state_delta()
+            await self.intent_registry.guard_await(
+                drain_intent,
+                self.executor.shutdown_instances(),
+                operation="drain instance shutdown",
+            )
+            if self.transport is not None:
+                self.intent_registry.set_drain(
+                    pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
+                )
+                await self.maybe_send_state_delta()
+                flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
+                await self.intent_registry.guard_await(
+                    drain_intent,
+                    self.transport.close_after_flush(timeout=flush_timeout),
+                    operation="drain transport flush",
+                )
+            self.intent_registry.set_drain(
+                pb.DRAIN_LIFECYCLE_STATUS_DRAINED,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.intent_registry.set_drain(
+                pb.DRAIN_LIFECYCLE_STATUS_FAILED,
+                detail=str(exc)[:512],
+                error_code=pb.LIFECYCLE_ERROR_CODE_DRAIN_FAILED,
+            )
+            self.phase = pb.WORKER_PHASE_ERROR
+            try:
+                await self.maybe_send_state_delta()
+            except Exception:
+                logger.exception("failed to report drain failure")
+            raise
         self.drained.set()
         # getattr: stubbed Lifecycles skip __init__ (same convention as
         # _cancel_residency_reconcile, pgw#610).

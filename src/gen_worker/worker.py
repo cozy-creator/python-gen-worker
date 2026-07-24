@@ -114,6 +114,12 @@ class Worker:
         self.executor = Executor(
             specs, self._send, settings=settings, store=store, gpu_slots=gpu_slots
         )
+        if (settings.config_snapshot_path or "").strip():
+            from .runtime_config import ConfigStore
+
+            self.executor.runtime_config = ConfigStore(
+                settings.config_snapshot_path.strip()
+            )
         self.lifecycle = Lifecycle(settings, self.executor)
         self.executor._on_state_change = self.lifecycle.state_changed
         self.transport = Transport(

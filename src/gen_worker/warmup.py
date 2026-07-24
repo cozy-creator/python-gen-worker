@@ -41,7 +41,7 @@ from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, T
 
 import msgspec
 
-from .api.decorators import ATTR, EndpointDecl, NoWarmup
+from .api.decorators import EndpointDecl, NoWarmup
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 
 if typing.TYPE_CHECKING:  # pragma: no cover
@@ -408,20 +408,6 @@ def _raise_unwarmable(owner: str, skips: Sequence[Tuple[str, str]]) -> None:
         f"inference endpoints but no handler is warmable ({detail}). Declare "
         "warmup={method: payload} with a self-contained payload, define a "
         "warmup() method, or opt out with warmup=NoWarmup(\"reason\")."
-    )
-
-
-def plan_for_class(cls: type) -> Tuple[List[WarmupJob], List[WarmupSkip]]:
-    """Plan from a decorated class (endpoint CPU-stub tests use this)."""
-    from .registry import extract_specs
-
-    decl: Optional[EndpointDecl] = getattr(cls, ATTR, None)
-    if decl is None:
-        raise TypeError(f"{cls.__name__} is not an @endpoint class")
-    return plan(
-        extract_specs(cls),
-        decl_warmup=decl.warmup,
-        has_warmup_method=callable(getattr(cls, "warmup", None)),
     )
 
 

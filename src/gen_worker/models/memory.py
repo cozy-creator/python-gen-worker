@@ -846,6 +846,7 @@ def place_pipeline(
     logger: Optional[logging.Logger] = None,
     mode: Mode = "auto",
     ref: str = "",
+    strict_vram: bool = False,
 ) -> Dict[str, Any]:
     """Worker-owned placement + offload policy for a freshly-loaded pipeline.
 
@@ -861,6 +862,16 @@ def place_pipeline(
     (gw#463): flush, demote one offload rung, retry — down to sequential.
     The result dict carries ``oom_demotions``/``requested_mode`` when that
     happened so the caller can record + report the degradation.
+
+    ``strict_vram`` (th#1043) is the author's own opt-out of the
+    CPU-touching rungs (``Resources(strict_vram=True)``, serve_fit.py):
+    plan-time already refuses a function whose predicted footprint needs
+    offload, but that prediction can be wrong (an inaccurate plan-time
+    estimate, a deploy-time binding that changed after the author sized
+    ``vram_gb``). Without this flag a reactive CUDA OOM here would silently
+    walk into ``model_offload``/``group_offload`` anyway — exactly the
+    CPU-resident weights the author declared this binding cannot tolerate.
+    Refuse immediately instead of demoting into a rung the caller forbade.
     """
     log = logger or _LOG
     try:
@@ -890,6 +901,15 @@ def place_pipeline(
             nxt = next_offload_rung(effective)
             if nxt is None:
                 raise
+            if strict_vram and nxt in _CPU_OFFLOAD_MODES:
+                raise RuntimeError(
+                    f"CUDA OOM placing {ref or type(pipeline).__name__!r} at "
+                    f"{effective!r} ({estimate_pipeline_size_gb(pipeline):.1f} GB, "
+                    f"{get_available_vram_gb():.1f} GB free): only CPU/disk "
+                    f"offload ({nxt!r}) would fit here, but this binding "
+                    "requires full VRAM residency (strict_vram=True); run on a "
+                    "card with more free VRAM"
+                ) from exc
             # ``pipeline.to('cuda')`` may have moved only a prefix of the
             # component graph before the allocator raised. Offload hooks must
             # start from a coherent CPU object; attaching them to that partial

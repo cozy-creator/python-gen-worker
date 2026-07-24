@@ -764,6 +764,13 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
+        # th#1087: declared config parameters + env names — the hub persists
+        # these as the release's declared surface and 422s config writes
+        # outside it.
+        if es.config:
+            fn["config_params"] = [p.to_manifest() for p in es.config]
+        if es.env:
+            fn["env"] = list(es.env)
         # th#1051: declared compute-time formula — the hub learns the
         # constants per physics cell; the source string is the contract.
         if es.runtime_formula is not None:

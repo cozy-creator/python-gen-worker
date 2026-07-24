@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import ast
 import math
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import msgspec
 

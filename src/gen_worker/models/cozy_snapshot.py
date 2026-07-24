@@ -93,7 +93,7 @@ class NetworkBytesScope:
         self._token = _NETWORK_BYTES_SINK.set(self._sink)
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *_exc_info: Any) -> None:
         if self._token is not None:
             _NETWORK_BYTES_SINK.reset(self._token)
             self._token = None

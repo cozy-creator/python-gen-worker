@@ -14,11 +14,32 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, NoReturn, Optional, Sequence
+
+from gen_worker.api.errors import ValidationError
 
 from ..net import hf, install_hf_http_timeouts
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
+
+
+def _hf_access_error_classes() -> tuple[type[Exception], ...]:
+    from huggingface_hub.errors import (
+        EntryNotFoundError,
+        GatedRepoError,
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+    )
+
+    return (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError)
+
+
+def _raise_input_refusal(exc: BaseException) -> NoReturn:
+    """th#1084: user-caused repo-access failures are typed INVALID (the class
+    name is preserved for the hub's refusal taxonomy), never FATAL."""
+    first = str(exc).splitlines()[0] if str(exc) else ""
+    msg = f"{type(exc).__name__}: {first}" if first else type(exc).__name__
+    raise ValidationError(msg) from exc
 
 logger = logging.getLogger(__name__)
 
@@ -279,9 +300,12 @@ def plan_huggingface(
     resolve on its own. Every glob must match >=1 file (fail loud on a typo).
     """
     install_hf_http_timeouts()
-    repo_id, sha = resolve_hf_identity(source_ref, revision=revision, hf_token=hf_token)
-    rev = sha or (str(revision).strip() if revision else None)
-    paths, sizes, side, content_ids = _hf_classification_inputs(repo_id, rev, hf_token)
+    try:
+        repo_id, sha = resolve_hf_identity(source_ref, revision=revision, hf_token=hf_token)
+        rev = sha or (str(revision).strip() if revision else None)
+        paths, sizes, side, content_ids = _hf_classification_inputs(repo_id, rev, hf_token)
+    except _hf_access_error_classes() as exc:
+        _raise_input_refusal(exc)
     if source_include:
         paths = apply_source_include(paths, source_include)
         sizes = {p: v for p, v in sizes.items() if p in paths}
@@ -371,7 +395,9 @@ def _snapshot_download_with_retries(
             )
             return
         except (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
-                EntryNotFoundError, ValueError, TypeError):
+                EntryNotFoundError) as exc:
+            _raise_input_refusal(exc)  # permanent + user-caused (th#1084)
+        except (ValueError, TypeError):
             raise  # permanent — retrying cannot help
         except Exception as exc:
             # Transport errors: httpx exceptions, HfHubHTTPError (5xx/429),

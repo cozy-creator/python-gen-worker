@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import inspect
 import math
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar, Union, overload
+import re
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, overload
 
 import msgspec
 
@@ -254,6 +255,170 @@ def _validate_handles(owner: str, handles: Any) -> Tuple[str, ...]:
     return tuple(out)
 
 
+_CONFIG_TYPES: Dict[type, str] = {str: "string", int: "int", float: "float", bool: "bool"}
+
+
+class ConfigParam(msgspec.Struct, frozen=True):
+    """th#1087 declared config parameter: code declares the knob (name, type,
+    default, constraints); the deployer sets values through the hub config
+    API (write-time 422 on unknown/invalid); handlers read the effective
+    value via ``ctx.config[name]``::
+
+        @endpoint(config=[
+            ConfigParam("scheduler", str, default="ddim", choices=["ddim", "euler_a"]),
+            ConfigParam("default_steps", int, default=30, ge=1, le=150),
+        ])
+    """
+
+    name: str
+    type: type
+    default: Any
+    choices: tuple = ()
+    ge: Optional[float] = None
+    le: Optional[float] = None
+    regex: str = ""
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        force = msgspec.structs.force_setattr
+        name = str(self.name or "").strip()
+        if not name or not name.isidentifier():
+            raise ValueError(f"ConfigParam name {self.name!r} must be an identifier")
+        force(self, "name", name)
+        if self.type not in _CONFIG_TYPES:
+            raise TypeError(
+                f"ConfigParam {name!r}: type must be one of "
+                f"{sorted(t.__name__ for t in _CONFIG_TYPES)}, got {self.type!r}"
+            )
+        self._check_value("default", self.default)
+        if self.type is float and isinstance(self.default, int) and not isinstance(self.default, bool):
+            force(self, "default", float(self.default))
+        choices = tuple(self.choices)
+        for c in choices:
+            self._check_value("choices entry", c)
+        if choices:
+            if len(set(choices)) != len(choices):
+                raise ValueError(f"ConfigParam {name!r}: choices must be unique")
+            if self.default not in choices:
+                raise ValueError(
+                    f"ConfigParam {name!r}: default {self.default!r} not in "
+                    f"choices {list(choices)}"
+                )
+        force(self, "choices", choices)
+        if (self.ge is not None or self.le is not None) and self.type not in (int, float):
+            raise ValueError(f"ConfigParam {name!r}: ge/le apply to int/float only")
+        if self.ge is not None and self.le is not None and self.ge > self.le:
+            raise ValueError(f"ConfigParam {name!r}: ge {self.ge} > le {self.le}")
+        regex = str(self.regex or "")
+        if regex and self.type is not str:
+            raise ValueError(f"ConfigParam {name!r}: regex applies to str only")
+        if regex:
+            try:
+                re.compile(regex)
+            except re.error as exc:
+                raise ValueError(
+                    f"ConfigParam {name!r}: invalid regex {regex!r}: {exc}"
+                ) from exc
+            if re.search(regex, self.default) is None:
+                raise ValueError(
+                    f"ConfigParam {name!r}: default {self.default!r} does not "
+                    f"match regex {regex!r}"
+                )
+        force(self, "regex", regex)
+        force(self, "description", str(self.description or "").strip())
+
+    def _check_value(self, label: str, value: Any) -> None:
+        ok = isinstance(value, self.type) and not (
+            self.type is not bool and isinstance(value, bool)
+        )
+        if self.type is float and isinstance(value, int) and not isinstance(value, bool):
+            ok = True
+        if not ok:
+            raise TypeError(
+                f"ConfigParam {self.name!r}: {label} {value!r} is not "
+                f"{self.type.__name__}"
+            )
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if self.ge is not None and value < self.ge:
+                raise ValueError(
+                    f"ConfigParam {self.name!r}: {label} {value!r} < ge {self.ge}"
+                )
+            if self.le is not None and value > self.le:
+                raise ValueError(
+                    f"ConfigParam {self.name!r}: {label} {value!r} > le {self.le}"
+                )
+
+    def to_manifest(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "name": self.name,
+            "type": _CONFIG_TYPES[self.type],
+            "default": self.default,
+        }
+        if self.choices:
+            out["choices"] = list(self.choices)
+        if self.ge is not None:
+            out["ge"] = self.ge
+        if self.le is not None:
+            out["le"] = self.le
+        if self.regex:
+            out["regex"] = self.regex
+        if self.description:
+            out["description"] = self.description
+        return out
+
+
+def _validate_config_decl(owner: str, config: Any) -> Tuple[ConfigParam, ...]:
+    if config is None:
+        return ()
+    if isinstance(config, ConfigParam) or not isinstance(config, (list, tuple)):
+        raise TypeError(
+            f"@endpoint {owner}: config= must be a list/tuple of ConfigParam, "
+            f"got {type(config).__name__}"
+        )
+    out: list[ConfigParam] = []
+    seen: set[str] = set()
+    for p in config:
+        if not isinstance(p, ConfigParam):
+            raise TypeError(
+                f"@endpoint {owner}: config= entries must be ConfigParam, "
+                f"got {type(p).__name__}"
+            )
+        if p.name in seen:
+            raise ValueError(f"@endpoint {owner}: config= repeats {p.name!r}")
+        seen.add(p.name)
+        out.append(p)
+    return tuple(out)
+
+
+def _validate_env_decl(owner: str, env: Any) -> Tuple[str, ...]:
+    """th#1087 D2: code declares the env names it reads; the hub validates
+    config-layer env writes against this declaration (undeclared-write 422)."""
+    if env is None:
+        return ()
+    if isinstance(env, str) or not isinstance(env, (list, tuple)):
+        raise TypeError(
+            f"@endpoint {owner}: env= must be a list/tuple of env-var name "
+            f"strings, got {type(env).__name__}"
+        )
+    out: list[str] = []
+    for name in env:
+        n = str(name or "").strip()
+        if (
+            not n
+            or len(n) > 64
+            or not ("A" <= n[0] <= "Z")
+            or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in n)
+        ):
+            raise ValueError(
+                f"@endpoint {owner}: env= name {name!r} is not a valid "
+                "environment variable name"
+            )
+        if n in out:
+            raise ValueError(f"@endpoint {owner}: env= repeats {name!r}")
+        out.append(n)
+    return tuple(out)
+
+
 class Compile(msgspec.Struct, frozen=True):
     """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
 
@@ -374,6 +539,10 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # Declared via the runtime= kwarg overload; payload-field validation
     # happens at registry walk time when payload types are resolved.
     runtime_formula: Mapping[str, RuntimeFormula] = msgspec.field(default_factory=dict)
+    # th#1087: declared config parameters (ctx.config) + declared env names
+    # (D2) — the mutable-config surface the hub validates writes against.
+    config: Tuple[ConfigParam, ...] = ()
+    env: Tuple[str, ...] = ()
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -680,6 +849,8 @@ def _decorate_class(
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
+    config: Optional[Any] = None,
+    env: Optional[Any] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -704,6 +875,8 @@ def _decorate_class(
         runtime_formula=_expand_formula_map(
             cls.__name__, runtime_formula or {}, [attr for attr, _ in handlers]
         ),
+        config=_validate_config_decl(cls.__name__, config),
+        env=_validate_env_decl(cls.__name__, env),
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -731,6 +904,8 @@ def _decorate_function(
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
+    config: Optional[Any] = None,
+    env: Optional[Any] = None,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
@@ -770,6 +945,8 @@ def _decorate_function(
         regimes={"": _validate_function_regimes(fn.__name__, regimes)},
         handles=_validate_handles(fn.__name__, handles),
         runtime_formula={"": formulas["*"]} if "*" in formulas else {},
+        config=_validate_config_decl(fn.__name__, config),
+        env=_validate_env_decl(fn.__name__, env),
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -793,6 +970,8 @@ def endpoint(
     warmup: Optional[WarmupDecl] = ...,
     regimes: Optional[RegimesDecl] = ...,
     handles: Optional[Any] = ...,
+    config: Optional[Sequence[ConfigParam]] = ...,
+    env: Optional[Sequence[str]] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -810,6 +989,8 @@ def endpoint(
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
+    config: Optional[Sequence[ConfigParam]] = None,
+    env: Optional[Sequence[str]] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -845,7 +1026,7 @@ def endpoint(
                 slots=dict(slot_map), runtime=engine_runtime,
                 runtime_formula=runtime_formulas, compile=compile,
                 child_calls=child_calls, warmup=warmup, regimes=regimes,
-                handles=handles,
+                handles=handles, config=config, env=env,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
@@ -853,7 +1034,7 @@ def endpoint(
                 slots=dict(slot_map), runtime=engine_runtime,
                 runtime_formula=runtime_formulas, name=name, compile=compile,
                 child_calls=child_calls, warmup=warmup, regimes=regimes,
-                handles=handles,
+                handles=handles, config=config, env=env,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
@@ -865,6 +1046,7 @@ def endpoint(
 
 
 __all__ = [
-    "Compile", "EndpointDecl", "NoWarmup", "RegimesDecl", "Resources",
-    "SlotLike", "VariantDecl", "WarmupDecl", "endpoint", "variant_of",
+    "Compile", "ConfigParam", "EndpointDecl", "NoWarmup", "RegimesDecl",
+    "Resources", "SlotLike", "VariantDecl", "WarmupDecl", "endpoint",
+    "variant_of",
 ]

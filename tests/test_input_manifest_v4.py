@@ -3,8 +3,8 @@
 Hermetic: the resolver is a fake injected transport; downloads hit a local
 loopback HTTP server only. Covers deterministic traversal, manifest fencing,
 the single strict resolver POST, response strict-decoding, byte verification,
-attempt-scoped cleanup/result fencing, discovery build rejection, and the v4
-proto descriptors.
+attempt-scoped cleanup/result fencing, discovery build rejection, and the
+current proto descriptors.
 """
 
 from __future__ import annotations
@@ -1003,8 +1003,14 @@ def test_discovery_rejects_non_string_key_asset_maps() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_protocol_version_is_4() -> None:
-    assert pb.PROTOCOL_VERSION_CURRENT == 4
+def test_protocol_version_is_5() -> None:
+    assert pb.PROTOCOL_VERSION_CURRENT == 5
+
+
+def test_run_job_org_field_hard_cut() -> None:
+    fields = pb.RunJob.DESCRIPTOR.fields_by_name
+    assert fields["org"].number == 6
+    assert "tenant" not in fields
 
 
 def test_run_job_input_assets_field_descriptor() -> None:

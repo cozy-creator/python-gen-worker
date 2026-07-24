@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import msgspec
 import os
@@ -174,6 +173,8 @@ class RequestContext:
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
         self._lane = ""  # th#1050: executing lane, set by the executor
+        self._config: Dict[str, Any] = {}  # th#1087: effective config params
+        self._config_snapshot: Optional[bytes] = None
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
@@ -228,6 +229,23 @@ class RequestContext:
 
     def _set_lane(self, lane: str) -> None:
         self._lane = str(lane or "").strip()
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        """Effective values for this endpoint's declared config parameters
+        (th#1087, ``@endpoint(config=[ConfigParam(...)])``) at dispatch time:
+        declared defaults overlaid with the deployer-set values at the
+        worker's observed config generation. Read-only; a returned copy."""
+        return dict(self._config)
+
+    def _set_config(
+        self,
+        values: Optional[Mapping[str, Any]],
+        *,
+        snapshot: Optional[bytes] = None,
+    ) -> None:
+        self._config = dict(values or {})
+        self._config_snapshot = bytes(snapshot) if snapshot is not None else None
 
     @property
     def models(self) -> Dict[str, str]:
@@ -416,12 +434,6 @@ class RequestContext:
     # #321: preferred_batch_size() / prefetch_depth() removed alongside
     # RuntimeBatchingConfigCommand — they only ever read state set by the
     # orchestrator's runtime override, and that producer never landed.
-
-    def time_remaining(self) -> Optional[float]:
-        """Seconds until the deadline; None when unbounded."""
-        if self._deadline is None:
-            return None
-        return max(0.0, self._deadline - time.time())
 
     @property
     def cancelled(self) -> bool:
@@ -967,26 +979,26 @@ class RequestContext:
 # RequestContext is the per-inference base. Conversion, dataset-producing,
 # and trainer endpoints get richer subclasses that carry the
 # producer-contract RPCs (publish_dataset_revision, resolve_dataset,
-# read/write_repo_metadata, materialize_blob).
+# materialize_blob).
 #
 # ConversionContext / DatasetContext / TrainingContext share `_PublisherMixin`
-# for the producer-contract HTTP helpers (repo metadata read/write, blob
-# fetch + materialization by digest). Checkpoint publishing is NOT here:
+# for the producer-contract HTTP helpers (blob fetch + materialization by
+# digest). Checkpoint publishing is NOT here:
 # producer endpoints call gen_worker.convert.publish_flavors (the /commits path).
 # ---------------------------------------------------------------------------
 
 
 class _PublisherMixin:
     """Producer-contract helpers shared by ConversionContext, DatasetContext
-    and TrainingContext: repo metadata read/write, blob fetch by digest, and
-    ``materialize_blob``. Always combined with ``RequestContext`` via multiple
+    and TrainingContext: blob fetch by digest and ``materialize_blob``.
+    Always combined with ``RequestContext`` via multiple
     inheritance (so ``self`` has ``_file_api_base_url`` / ``_owner`` /
     ``_get_worker_capability_token``).
 
     Producer-only STATE lives here too (pgw#526): the reserved
     ``source``/``destination``/``text_encoder`` payload structs, the hf
-    token, and the repo spec for checkpoint commits initialize in this
-    ``__init__`` — a plain inference ``RequestContext`` never carries them.
+    token, and their materialized paths initialize in this ``__init__`` — a
+    plain inference ``RequestContext`` never carries them.
 
     Not a public surface: tenants should never import this directly.
     """
@@ -1011,12 +1023,6 @@ class _PublisherMixin:
         self._text_encoder_info = dict(text_encoder_info or {})
         self._text_encoder_path: Optional[str] = None
         self._hf_token = (hf_token or "").strip()
-        # Repo fields declared by the ingest pipeline before the first
-        # checkpoint commit. Sent in the /commits body so tensorhub can
-        # auto-create the destination repo; empty values are omitted and
-        # tensorhub keeps/inherits existing repo values.
-        self._repo_spec: Dict[str, str] = {}
-
     if TYPE_CHECKING:
         # The host contract (gw#497): everything this mixin borrows from
         # RequestContext, declared so mypy checks the mixin against the
@@ -1090,67 +1096,17 @@ class _PublisherMixin:
         """Library-internal: called after text_encoder materialization."""
         self._text_encoder_path = str(path) if path else None
 
-    def set_repo_spec(
-        self,
-        *,
-        kind: str = "",
-        library_name: str = "",
-        model_family: str = "",
-        class_name: str = "",
-        adapter_for_family: str = "",
-    ) -> None:
-        """Set destination repo fields for checkpoint commits from this ctx.
-
-        Must be called before the first save_checkpoint call for the
-        destination repo (the fields ride each /commits body so tensorhub
-        can auto-create the repo with the right spec).
-        """
-        spec = {
-            "kind": kind,
-            "library_name": library_name,
-            "model_family": model_family,
-            "class_name": class_name,
-            "adapter_for_family": adapter_for_family,
-        }
-        self._repo_spec = {
-            k: str(v or "").strip()
-            for k, v in spec.items()
-            if str(v or "").strip()
-        }
-
-    def open_output_stream(
-        self,
-        ref: str,
-        *,
-        create: bool = False,
-        expected_size_bytes: Optional[int] = None,
-    ) -> _RequestOutputStream:
-        """Open a chunk-writable output stream that finalizes to an Asset."""
-        return self._open_output_stream(
-            ref, create=create, expected_size_bytes=expected_size_bytes
-        )
-
     def save_checkpoint(
         self,
         ref: str,
         local_path: str | os.PathLike[str],
         format: Optional[str] = None,
         *,
-        produced_by_kind: Optional[str] = None,
         step_number: Optional[int] = None,
         epoch_number: Optional[int] = None,
         output_kind: Optional[str] = None,
-        target_dtype: Optional[str] = None,
-        flavor: Optional[str] = None,
-        attributes: Optional[dict] = None,
     ) -> Tensors:
-        """Save checkpoint/model-weight bytes and return a first-class tensor artifact.
-
-        ``attributes`` is a free-form provenance map (e.g. quantization
-        library + scheme + group_size + calibration dataset id). Conversion
-        dispatchers attach it to the final ``checkpoint_flavors[]`` publish
-        payload; per-file repo-CAS ``/complete`` remains parts-only.
-        """
+        """Save checkpoint/model-weight bytes and return a tensor artifact."""
         src = str(os.fspath(local_path) if local_path else "").strip()
         if not src:
             raise ValueError("local_path is required")
@@ -1171,46 +1127,9 @@ class _PublisherMixin:
             format=format,
             feed=_feed,
             fallback=lambda r: self.save_file(r, src),
-            produced_by_kind=produced_by_kind,
             step_number=step_number,
             epoch_number=epoch_number,
             output_kind=output_kind,
-            target_dtype=target_dtype,
-            flavor=flavor,
-            attributes=attributes,
-        )
-
-    def save_checkpoint_bytes(
-        self,
-        ref: str,
-        data: bytes,
-        format: Optional[str] = None,
-        *,
-        produced_by_kind: Optional[str] = None,
-        step_number: Optional[int] = None,
-        epoch_number: Optional[int] = None,
-        output_kind: Optional[str] = None,
-        target_dtype: Optional[str] = None,
-        flavor: Optional[str] = None,
-        attributes: Optional[dict] = None,
-    ) -> Tensors:
-        """Save in-memory checkpoint/model-weight bytes."""
-        if not isinstance(data, (bytes, bytearray)):
-            raise TypeError("save_checkpoint_bytes expects bytes")
-        payload = bytes(data)
-        return self._publish_checkpoint(
-            ref,
-            size=len(payload),
-            format=format,
-            feed=lambda stream: stream.write(payload),
-            fallback=lambda r: self.save_bytes(r, payload),
-            produced_by_kind=produced_by_kind,
-            step_number=step_number,
-            epoch_number=epoch_number,
-            output_kind=output_kind,
-            target_dtype=target_dtype,
-            flavor=flavor,
-            attributes=attributes,
         )
 
     def _publish_checkpoint(
@@ -1221,15 +1140,11 @@ class _PublisherMixin:
         format: Optional[str],
         feed: Callable[[_RequestOutputStream], object],
         fallback: Callable[[str], Asset],
-        produced_by_kind: Optional[str],
         step_number: Optional[int],
         epoch_number: Optional[int],
         output_kind: Optional[str],
-        target_dtype: Optional[str],
-        flavor: Optional[str],
-        attributes: Optional[dict],
     ) -> Tensors:
-        """Shared save_checkpoint / save_checkpoint_bytes core.
+        """Shared checkpoint-publish core.
 
         Job-scoped writes publish through the /commits stream (gw#471) so
         the returned Tensors carries a blake3 digest + blob_digest and each
@@ -1257,13 +1172,8 @@ class _PublisherMixin:
                     ref,
                     format=fmt,
                     expected_size_bytes=size,
-                    produced_by_kind=produced_by_kind,
                     step_number=step_number,
                     epoch_number=epoch_number,
-                    output_kind=output_kind,
-                    target_dtype=target_dtype,
-                    flavor=flavor,
-                    attributes=attributes,
                 )
                 feed(stream)
                 out = stream.finalize()
@@ -1290,13 +1200,8 @@ class _PublisherMixin:
         *,
         format: Optional[str] = None,
         expected_size_bytes: Optional[int] = None,
-        produced_by_kind: Optional[str] = None,
         step_number: Optional[int] = None,
         epoch_number: Optional[int] = None,
-        output_kind: Optional[str] = None,
-        target_dtype: Optional[str] = None,
-        flavor: Optional[str] = None,
-        attributes: Optional[dict] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
@@ -1309,13 +1214,8 @@ class _PublisherMixin:
             kind="checkpoint",
             format=format,
             expected_size_bytes=expected_size_bytes,
-            produced_by_kind=produced_by_kind,
             step_number=step_number,
             epoch_number=epoch_number,
-            output_kind=output_kind,
-            target_dtype=target_dtype,
-            flavor=flavor,
-            attributes=attributes,
         )
 
     def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
@@ -1345,76 +1245,6 @@ class _PublisherMixin:
                 for chunk in resp.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
-
-    def read_repo_metadata(self, *, destination_repo: str) -> dict[str, Any]:
-        """Read repo-level metadata from Tensorhub public HTTP API."""
-        import requests
-        owner, repo = _parse_owner_repo(destination_repo)
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or "").strip()
-        if not base or not token:
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "exists": False, "metadata": {}}
-
-        url = f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/metadata"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Cozy-Owner": owner,
-        }
-        resp = requests.get(url, headers=headers, timeout=30)
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"repo metadata read unauthorized ({code}): check worker_capability_token validity")
-        if code == 404:
-            return {"ok": True, "exists": False, "metadata": {}}
-        if code < 200 or code >= 300:
-            raise RuntimeError(f"repo metadata read failed ({code}): {resp.text[:256]}")
-
-        try:
-            parsed = resp.json()
-        except Exception:
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
-        metadata = parsed.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
-        exists = bool(parsed.get("exists", True))
-        return {"ok": True, "exists": exists, "metadata": metadata}
-
-    def write_repo_metadata(self, *, destination_repo: str, metadata: dict[str, Any]) -> dict[str, Any]:
-        """Write repo-level metadata via Tensorhub public HTTP API."""
-        import requests
-        owner, repo = _parse_owner_repo(destination_repo)
-        if not isinstance(metadata, dict):
-            raise ValueError("metadata must be an object")
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or "").strip()
-        if not base or not token:
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "name": repo}
-
-        url = f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/metadata"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-Cozy-Owner": owner,
-        }
-        resp = requests.put(url, headers=headers, data=json.dumps({"metadata": metadata}), timeout=30)
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"repo metadata write unauthorized ({code}): check worker_capability_token validity")
-        if code < 200 or code >= 300:
-            raise RuntimeError(f"repo metadata write failed ({code}): {resp.text[:256]}")
-
-        try:
-            parsed = resp.json()
-        except Exception:
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
-        returned = parsed.get("metadata")
-        if not isinstance(returned, dict):
-            returned = metadata
-        return {"ok": True, "owner": owner, "name": repo, "metadata": returned}
 
 
     def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
@@ -1536,9 +1366,8 @@ class ConversionContext(_PublisherMixin, RequestContext):
     """RequestContext for ``@conversion(sub_kind="format-conversion")``
     and similar conversion endpoints.
 
-    Carries the producer-contract RPCs needed to publish new repo revisions
-    and read/write repo metadata, plus the conversion-helper surface
-    (``mktemp``, ``checkpoint_dir``, ``copy_unconverted_components``,
+    Carries the producer-contract RPCs needed to publish new repo revisions,
+    plus the conversion-helper surface (``mktemp``, ``checkpoint_dir``,
     ``cancelled``). The ETL itself (ingest / cast / quant / clone / writers)
     lives in the ``gen_worker.convert`` module — this class only carries what the
     worker API needs.
@@ -1578,32 +1407,6 @@ class ConversionContext(_PublisherMixin, RequestContext):
                 )
             )
         return Path(tempfile.mkdtemp(dir=str(self._mktemp_root)))
-
-    def copy_unconverted_components(
-        self,
-        source: Any,
-        out_dir: "str | os.PathLike[str]",
-        *,
-        skip: Any = (),
-    ) -> None:
-        """Copy components from ``source`` -> ``out_dir`` that the tenant didn't produce.
-
-        For tenants that use ``source.as_hf_model() + model.save_pretrained()``
-        and want source-layout passthrough for non-touched components. The
-        ``skip`` iterable names components the tenant HAS produced (and thus
-        should not be overwritten).
-        """
-        skip_set = set(skip)
-        out_dir = Path(os.fspath(out_dir))
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for comp_name, comp in source.components.items():
-            if comp_name in skip_set:
-                continue
-            dst = out_dir / comp_name
-            if dst.exists():
-                continue
-            shutil.copytree(str(comp.path), str(dst))
-
 
 class DatasetContext(_PublisherMixin, RequestContext):
     """RequestContext for dataset-producing endpoints (``@dataset``).
@@ -1693,7 +1496,7 @@ class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
 class TrainingContext(_PublisherMixin, RequestContext):
     """RequestContext for ``@endpoint(kind="training")`` endpoints.
 
-    From ``_PublisherMixin``: repo-metadata RPCs, ``save_checkpoint``,
+    From ``_PublisherMixin``: ``save_checkpoint``,
     ``resolve_dataset`` / ``dataset_paths`` (the executor materializes
     ``payload.datasets`` before the handler runs) and ``checkpoint_dir``
     (job-scoped scratch, NOT durable — see its docstring).

@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
+from gen_worker.api.errors import ValidationError
+
 _PICKLE_EXTS = {".bin", ".pt", ".pth", ".ckpt", ".pickle", ".pkl"}
 _JUNK_EXTS = {
     ".onnx", ".onnx_data", ".pb", ".h5", ".tflite", ".engine", ".plan",
@@ -66,11 +68,15 @@ _DIFFUSERS_COMPONENT_WEIGHT_RE = re.compile(
 )
 
 
-class RepoRefusal(RuntimeError):
+class RepoRefusal(ValidationError):
     """The repo can't be ingested. ``reason`` is a stable machine token:
 
     pickle_only | onnx_only | tf_only | flax_only | coreml_only |
     tensorrt_only | unknown_shape | too_large
+
+    A ValidationError (th#1084): a deterministic verdict about the USER'S
+    source repo — the executor maps it INVALID, so it fails only the request
+    and never feeds release-health blame.
     """
 
     def __init__(self, reason: str, *, files_seen: Sequence[str] = (), detail: str = "") -> None:
@@ -82,7 +88,7 @@ class RepoRefusal(RuntimeError):
         super().__init__(msg)
 
 
-class SourceIncludeError(ValueError):
+class SourceIncludeError(ValidationError):
     """gw#593 item 2: one or more ``source_include`` globs matched no file in
     the source repo's listing. Every glob is a REQUIRED selector (the caller
     is explicitly pinning a file that must exist) — a typo or stale pattern
