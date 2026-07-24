@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.52.0 (2026-07-24)
+
+- **pgw#628: residency reporting v2 — content-addressed idempotent
+  observations (worker half of th#1070).** Every applied HelloAck opens a
+  republish epoch: the reconcile pass re-announces verified cached
+  identities (ON_DISK/IN_RAM/IN_VRAM with exact ref+digest) once per epoch
+  even when unchanged — a re-received plan (hub redrive, overdue resend,
+  reconnect) is the hub asking for a resync, and success observations are
+  now safe to emit late, twice, or across plan revisions (the v2 hub
+  accepts them by digest, generations survive only for cancel/evict/
+  failure attribution). Job-path cache hits within one epoch stay deduped
+  (no event spam). gw#614's no-cancel-on-same-set reconcile behavior is
+  unchanged — under the v2 hub it is simply correct instead of a trap.
+  Version floor note: endpoint images need no forced rebuild — v2 hubs
+  accept 0.44–0.51 success reports fine; images pick up >=0.52.0 on their
+  next routine rebuild for the lost-observation resync hardening.
+
 ## 0.51.0 (2026-07-24)
 
 - **gw#627: Conv2d additive-branch support in the runtime LoRA overlay.**
