@@ -383,3 +383,50 @@ def test_downloading_progress_reports_populated_bytes_done_and_total(
         "expected at least one mid-flight DOWNLOADING event with a "
         f"PARTIAL bytes_done; got {[e.bytes_done for e in later]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# th#1063 visibility guard: no fill source on a datacenter pod must be LOUD
+# ---------------------------------------------------------------------------
+
+def test_datacenter_pod_without_fill_source_logs(tmp_path: Path, monkeypatch, caplog) -> None:
+    async def _emit(msg: pb.WorkerMessage) -> None:
+        del msg
+
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-guard-test")
+    monkeypatch.delenv("RUNPOD_PROVIDER", raising=False)
+    monkeypatch.delenv("TENSORHUB_FILL_SOURCE_DIR", raising=False)
+    with caplog.at_level("WARNING", logger="gen_worker.executor"):
+        ModelStore(_emit, cache_dir=tmp_path / "local")
+    assert any("fill_source_disabled reason=unset" in r.message for r in caplog.records)
+
+
+def test_datacenter_pod_with_unmounted_fill_source_logs(tmp_path: Path, monkeypatch, caplog) -> None:
+    from gen_worker.config.loader import get_settings
+
+    async def _emit(msg: pb.WorkerMessage) -> None:
+        del msg
+
+    plain_dir = tmp_path / "not-a-mount"
+    plain_dir.mkdir()
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-guard-test")
+    monkeypatch.delenv("RUNPOD_PROVIDER", raising=False)
+    monkeypatch.setenv("TENSORHUB_FILL_SOURCE_DIR", str(plain_dir))
+    get_settings.cache_clear()
+    try:
+        with caplog.at_level("WARNING", logger="gen_worker.executor"):
+            ModelStore(_emit, cache_dir=tmp_path / "local")
+    finally:
+        get_settings.cache_clear()
+    assert any("fill_source_disabled reason=not_a_mount" in r.message for r in caplog.records)
+
+
+def test_local_pod_without_fill_source_stays_quiet(tmp_path: Path, monkeypatch, caplog) -> None:
+    async def _emit(msg: pb.WorkerMessage) -> None:
+        del msg
+
+    monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
+    monkeypatch.delenv("TENSORHUB_FILL_SOURCE_DIR", raising=False)
+    with caplog.at_level("WARNING", logger="gen_worker.executor"):
+        ModelStore(_emit, cache_dir=tmp_path / "local")
+    assert not [r for r in caplog.records if "fill_source_disabled" in r.message]
