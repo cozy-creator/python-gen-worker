@@ -29,6 +29,7 @@ identity, so the compile cell DERIVES facts like "this cell must not claim
 from __future__ import annotations
 
 import inspect
+from pathlib import PurePath
 from typing import Any, Dict, List, Optional
 
 # Part-name prefixes that are configuration, not weights. Everything else a
@@ -121,9 +122,10 @@ def validate_no_sibling_parts(
        tree (the old ``"vae": Slot(AutoencoderKL)`` hand-wiring) — the part
        is already addressable as ``<root>.<name>``; the override is catalog
        data (th#1116), not endpoint code.
-    2. A sibling ``str``/``Path`` slot next to a derived-tree pipeline slot
-       (the old ``"turbo_lora": Slot(str)`` workaround) — modifiers on
-       components are adapters riding the binding, never sibling slots.
+    2. A sibling ``str``/``Path``/``PurePath`` slot next to a derived-tree
+       pipeline slot (the old ``"turbo_lora": Slot(str)`` workaround) —
+       modifiers on components are adapters riding the binding, never
+       sibling slots.
     """
     trees: Dict[str, Dict[str, str]] = {}
     for name, slot in slots.items():
@@ -150,7 +152,12 @@ def validate_no_sibling_parts(
         if name in trees:
             continue
         cls = getattr(slot, "pipeline_cls", None)
-        if isinstance(cls, type) and (cls is str or issubclass(cls, (str, bytes))):
+        # pgw#654 gap #8: Path counts — the docstring always promised it;
+        # the old test only caught str/bytes, silently re-permitting the
+        # deleted Slot(Path) modifier shape on Tier-A endpoints.
+        if isinstance(cls, type) and (
+            cls is str or issubclass(cls, (str, bytes, PurePath))
+        ):
             raise ValueError(
                 f"{owner}: slot {name!r} is a self-loading str slot declared "
                 f"as a SIBLING of derived-tree pipeline slot(s) "

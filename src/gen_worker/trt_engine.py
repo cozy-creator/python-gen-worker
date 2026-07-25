@@ -760,8 +760,8 @@ def build(
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Build a weight-stripped TRT engine for one family on THIS GPU SKU.
 
-    ``batch`` is the CFG regime (ie#345): CFG variants run batch-2 graphs,
-    distilled variants batch-1 — one regime per artifact, never both.
+    ``batch`` is the CFG graph class (ie#345): CFG variants run batch-2
+    graphs, distilled variants batch-1 — one class per artifact, never both.
     ``shapes`` should derive from the family's payload preset enum; every
     shape becomes one static optimization profile in the ONE engine.
     """

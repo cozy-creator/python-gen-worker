@@ -646,6 +646,7 @@ def _load_injected_model(
             dynamic=tuple(compile_cfg.dynamic),
             lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0),
             guidance_scales=(),
+            text_lens=(),
         )
     if compile_cfg is not None and device.strip().lower() != "cpu":
         from ..local_cells import enable_compiled as enable_compiled_local
@@ -700,7 +701,12 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
             errors[name] = str(exc)
     set_slots = getattr(ctx, "_set_resolved_slots", None)
     if callable(set_slots):
-        set_slots(resolved, errors)
+        root = ""
+        for name, slot in selected.slots.items():
+            if getattr(slot, "root", False):
+                root = name
+                break
+        set_slots(resolved, errors, root_slot=root)
 
 
 def _local_executing_lane(
