@@ -349,7 +349,10 @@ class Lifecycle:
                 # colocated legacy DesiredResidency. Mandatory rejection also
                 # withdraws aggregate readiness until the pod is replaced.
                 if self.intent_registry.protocol_rejected:
-                    self.phase = pb.WORKER_PHASE_ERROR
+                    self._enter_error_phase(
+                        "mandatory desired-state command rejected: "
+                        + str(receipt.detail or "")[:512]
+                    )
                 await self._send_lifecycle_snapshot(hello_ack=True, force=True)
                 self._last_delta = None
                 await self.maybe_send_state_delta(hello_ack=True)
@@ -394,7 +397,7 @@ class Lifecycle:
                     )
             except ConfigSnapshotWriteError as exc:
                 self.intent_registry.config_snapshot_failed(str(exc))
-                self.phase = pb.WORKER_PHASE_ERROR
+                self._enter_error_phase("config snapshot write failed", exc)
                 await self._send_lifecycle_snapshot(hello_ack=True, force=True)
                 self._last_delta = None
                 await self.maybe_send_state_delta(hello_ack=True)
@@ -561,8 +564,8 @@ class Lifecycle:
                     return
         except asyncio.CancelledError:
             return
-        except UnreportedIntentWait:
-            self.phase = pb.WORKER_PHASE_ERROR
+        except UnreportedIntentWait as exc:
+            self._enter_error_phase("residency reconcile", exc)
             self._last_delta = None
             await self.maybe_send_state_delta(force=True)
         finally:
@@ -785,8 +788,42 @@ class Lifecycle:
 
     def _config_snapshot_failed(self, detail: str) -> None:
         self.intent_registry.config_snapshot_failed(detail)
-        self.phase = pb.WORKER_PHASE_ERROR
+        self._enter_error_phase(f"config snapshot failed: {detail}")
         self.state_changed()
+
+    def _enter_error_phase(
+        self, reason: str, exc: Optional[BaseException] = None,
+    ) -> None:
+        """pgw#654 observability: every WORKER_PHASE_ERROR names its cause on
+        a durable channel. The hub persists only the bare phase flip
+        ("worker phase reported error" -> release breaker), and a worker's
+        lifecycle snapshot can be dropped by hub shadow validation — the
+        combination made the 0.58.0 fleet-wide breakage undiagnosable
+        (ie#544: signature="" detail="worker phase reported error"). Dial
+        the gw#640 worker-fatal carrier once per process, best-effort; the
+        hub stores it as a queryable pod_events row."""
+        from .worker_fatal import build_fatal_detail, report_worker_error_async
+
+        if exc is not None:
+            detail = build_fatal_detail(f"phase_error: {reason}", exc, exit_code=0)
+        else:
+            detail = f"phase=phase_error: {reason}"
+        logger.error("entering WORKER_PHASE_ERROR: %s", detail)
+        self.phase = pb.WORKER_PHASE_ERROR
+        # getattr: stubbed Lifecycles skip __init__ (same convention as
+        # _cancel_residency_reconcile, pgw#610).
+        if getattr(self, "_error_phase_reported", False):
+            return
+        self._error_phase_reported = True
+        settings = getattr(self, "_settings", None)
+
+        async def _dial() -> None:
+            await report_worker_error_async(settings, detail)
+
+        try:
+            asyncio.get_running_loop().create_task(_dial(), name="phase-error-report")
+        except RuntimeError:
+            pass
 
     async def _send_state_message(
         self,
@@ -1145,7 +1182,7 @@ class Lifecycle:
                 detail=str(exc)[:512],
                 error_code=pb.LIFECYCLE_ERROR_CODE_DRAIN_FAILED,
             )
-            self.phase = pb.WORKER_PHASE_ERROR
+            self._enter_error_phase("drain failed", exc)
             try:
                 await self.maybe_send_state_delta()
             except Exception:

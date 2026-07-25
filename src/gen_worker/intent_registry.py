@@ -390,6 +390,14 @@ class IntentRegistry:
         now = _now_ms()
         incoming_ids = {str(intent.intent_id) for intent in command.intents}
         for intent_id, state in self._intents.items():
+            # pgw#654: a command is a full replacement of COMMAND-OWNED work
+            # only. Worker-local compat obligations (job/setup/materialize
+            # carriers, never present in any hub command) must survive a
+            # generation bump — superseding them terminalized a LIVE job's
+            # intent mid-flight, so its next legal transition raised.
+            # Command-born intents are exactly the ids in _intent_digests.
+            if intent_id not in self._intent_digests:
+                continue
             if intent_id not in incoming_ids and int(state.status) in _ACTIVE_INTENT_STATES:
                 state.status = pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
                 state.updated_at_unix_ms = now
@@ -506,12 +514,22 @@ class IntentRegistry:
     ) -> str:
         """Find command-owned work or create a compatibility intent.
 
-        A current v5 command is a full replacement. Missing work under that
-        command is not fabricated: ``guard_await`` will fail it closed if the
-        corresponding await exceeds the reporting grace period.
+        pgw#654: this used to return "" whenever a v5 command was registered
+        but the matching intent was terminal (or absent) — "missing work is
+        not fabricated; guard_await fails it closed". That armed the 2.0s
+        unreported-wait bomb on every RECONCILE RE-PASS after convergence:
+        the pass's first await (``wait_idle``) blocks for the whole duration
+        of any in-flight tenant job, so the first real request on a freshly
+        converged pod drove the worker to WORKER_PHASE_ERROR two seconds in
+        (the hub then counted a "model load failure" on a healthy worker and
+        broke the release — the 0.58.0/0.60.0 fleet-wide false
+        ``model_load_failure_streak``). Re-verifying converged command work
+        is legitimate; it just needs a REPORTABLE carrier — so mint the same
+        worker-local compat intent the no-command path uses. guard_await's
+        fail-closed remains for waits that genuinely carry no intent id.
         """
         intent_id = self.intent_id(kind, function_name=function_name, ref=ref)
-        if intent_id or self._last_command_seq:
+        if intent_id:
             return intent_id
         identity = f"{int(kind)}\0{function_name}\0{ref}".encode()
         base_intent_id = f"compat-{hashlib.sha256(identity).hexdigest()[:24]}"

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.58.2 (2026-07-25) — pgw#654: the false fleet-wide "model load failure" (0.58-line hotfix)
+
+Backport of the 0.60.1 fix for the ie#544 fleet breakage: after the shadow
+command's materialize intents reached SUCCEEDED, the post-RunJob residency
+re-pass got "" from ensure_intent, reported_await("") armed guard_await's
+2.0s unreported-wait fail-closed while wait_idle() blocked on the in-flight
+job, and the worker reported WORKER_PHASE_ERROR 2s after first dispatch —
+the hub counted a startup failure on a healthy worker and broke the
+release. ensure_intent now mints a compat carrier for re-verified command
+work; apply_command supersedes command-born intents only; every
+WORKER_PHASE_ERROR dials its cause via the gw#640 worker-fatal carrier
+(durable pod_events row). See 0.60.1 for the full write-up.
+
 ## 0.58.1 (2026-07-25)
 
 - **gw#640 (secondary half): a WAITING lifecycle intent always carries a
