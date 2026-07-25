@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker.api.binding import Binding
-from gen_worker.api.slot import DEFAULT_REGIMES, Slot
+from gen_worker.api.slot import Slot
 from gen_worker.api.types import (
     Asset,
     AudioAsset,
@@ -680,10 +680,12 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         if es.variant_of:
             fn["variant_of"] = es.variant_of
             fn["variant"] = es.variant_kind
-        # th#1017: declared inference regimes — omitted when it's just the
-        # default (absent = ["standard"]).
-        if tuple(es.regimes) != DEFAULT_REGIMES:
-            fn["regimes"] = list(es.regimes)
+        # pgw#654: per-function objective contract (@worker_function) —
+        # objectives omitted = unrestricted; distilled omitted = either.
+        if es.objectives is not None:
+            fn["objectives"] = list(es.objectives)
+        if es.distilled is not None:
+            fn["distilled"] = bool(es.distilled)
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
@@ -715,8 +717,17 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             # SDK v2 shape contract: the declared text axis and dynamic
             # ranges ride to the hub's cell producer, and the contract
             # digest is the ck2 cell-key axis (pgw#647).
-            if es.compile.text_len is not None:
-                fn["compile"]["text_len"] = int(es.compile.text_len)
+            if ccell.text_len is not None:
+                # THIS function's effective pin (a @worker_function
+                # text_len= override wins over the class Compile's).
+                fn["compile"]["text_len"] = int(ccell.text_len)
+            if ccell.contract_text_lens():
+                # pgw#654 gap #6: the CLASS's per-lane pin union — what the
+                # shared cell contract digests (dual-pin classes describe
+                # both lanes).
+                fn["compile"]["text_lens"] = [
+                    int(v) for v in ccell.contract_text_lens()
+                ]
             if es.compile.dynamic:
                 fn["compile"]["dynamic"] = [
                     {"dim": d.dim, "min": d.min, "max": d.max}

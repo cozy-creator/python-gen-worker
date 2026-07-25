@@ -24,9 +24,10 @@ from .api.decorators import (
     Resources,
     endpoint,
     variant_of,
+    worker_function,
 )
 from .api.formula import RuntimeFormula
-from .api.slot import ResolvedSlot, Slot
+from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot
 from .families import GenerationDefaults
 from .models.provision import arm_compile
 from .text_pin import TextLengthExceededError, pad_text_sequence
@@ -73,9 +74,10 @@ from .subproc import run_process
 
 
 __all__ = [
-    # The decorator + bindings.
+    # The decorators + bindings.
     "endpoint",
     "variant_of",
+    "worker_function",
     "Resources",
     "Compile",
     "CompileAxis",
@@ -98,6 +100,9 @@ __all__ = [
     "Slot",
     "ResolvedSlot",
     "GenerationDefaults",
+    # pgw#654 objective vocabulary (checkpoint training-objective facts).
+    "OBJECTIVES",
+    "ObjectiveMismatchError",
     # Context types.
     "RequestContext",
     "ConversionContext",

@@ -17,9 +17,12 @@ import msgspec
 
 from .api.binding import Binding, ModelRef
 from .api.compile_axis import extract_payload_axes
-from .api.decorators import ATTR, VARIANT_ATTR, Compile, EndpointDecl, Resources, VariantDecl
+from .api.decorators import (
+    ATTR, VARIANT_ATTR, WF_ATTR, Compile, EndpointDecl, Resources,
+    VariantDecl, WorkerFunctionDecl,
+)
 from .api.formula import RuntimeFormula
-from .api.slot import DEFAULT_REGIMES, Slot
+from .api.slot import Slot
 from .api.tree import derive_components, validate_no_sibling_parts
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
@@ -51,20 +54,34 @@ class CompileCell:
     targets: tuple
     family: str
     regional: bool
+    # This FUNCTION's effective text pin (per-lane, gap #6: a
+    # @worker_function(text_len=) override wins over the class Compile's).
     text_len: Optional[int]
     dynamic: tuple
     lora_bucket: int
+    # CLASS-scoped unions (pgw#654 / pgw#647 gap #1): every sibling
+    # function on one class shares one cell family, so the contract facts
+    # digest the UNION across the class's functions — never one function's
+    # own view (per-function digests split the cell: turbo fails closed on
+    # w8a8 lanes). Union is per CLASS only; sibling @endpoint classes keep
+    # their own contracts (two checkpoints = two instances = two cells).
     guidance_scales: tuple
+    text_lens: tuple = ()
+
+    def contract_text_lens(self) -> tuple:
+        if self.text_lens:
+            return tuple(sorted({int(v) for v in self.text_lens}))
+        return (int(self.text_len),) if self.text_len is not None else ()
 
     def contract_facts(self) -> Dict[str, Any]:
         """Canonical declared-shape-contract facts — the ck2 ``contract``
         axis digests exactly this (pgw#647: a worker on a newer contract
         must never consume an older cell)."""
         return {
-            "v": 2,
+            "v": 3,
             "shapes": sorted([int(v) for v in row] for row in self.shapes),
             "targets": [str(t) for t in self.targets],
-            "text_len": self.text_len,
+            "text_lens": [int(v) for v in self.contract_text_lens()],
             "dynamic": [
                 {"dim": d.dim, "min": d.min, "max": d.max} for d in self.dynamic
             ],
@@ -138,9 +155,21 @@ class EndpointSpec:
     # sibling function variant_of (both slugs). Empty = not a variant.
     variant_of: str = ""
     variant_kind: str = ""
-    # th#1017: this handler's declared inference regimes (from @endpoint's
-    # regimes=); ("standard",) when undeclared.
-    regimes: tuple = DEFAULT_REGIMES
+    # pgw#654: this handler's declared objective contract (from
+    # @worker_function). None = unrestricted / serves either.
+    objectives: Optional[tuple] = None
+    distilled: Optional[bool] = None
+    # pgw#654 gap #6: this handler's effective text pin
+    # (@worker_function(text_len=) else the class Compile.text_len).
+    text_len: Optional[int] = None
+    # pgw#654 derived warm plan: per-function non-axis warm overrides
+    # (validated at walk time; require a recorded warm_reason).
+    warm_overrides: Dict[str, Any] = field(default_factory=dict)
+    warm_reason: str = ""
+    # pgw#654 CLASS-scoped unions (set by extract_specs over the class's
+    # sibling specs; a function-shaped endpoint unions with itself).
+    guidance_union: tuple = ()
+    text_lens: tuple = ()
     # th#1050: declared lane bodies this endpoint's code branches on
     # (ctx.lane). Empty = platform-managed only.
     handles: tuple = ()
@@ -166,15 +195,21 @@ class EndpointSpec:
             return None
         from .api.compile_axis import warm_guidance_values
 
+        effective_text_len = self.text_len if self.text_len is not None else cfg.text_len
         return CompileCell(
             shapes=tuple(cfg.shapes),
             targets=tuple(cfg.targets),
             family=str(cfg.family or ""),
             regional=bool(cfg.regional),
-            text_len=cfg.text_len,
+            text_len=effective_text_len,
             dynamic=tuple(cfg.dynamic),
             lora_bucket=int(self.lora_bucket or 0),
-            guidance_scales=warm_guidance_values(self.payload_axes),
+            guidance_scales=(
+                self.guidance_union
+                if self.guidance_union
+                else warm_guidance_values(self.payload_axes)
+            ),
+            text_lens=self.text_lens,
         )
 
     @property
@@ -428,10 +463,43 @@ def _spec_for_handler(
             raise ValueError(f"{owner}: @variant_of cannot target itself")
 
     # th#1051: resolve + validate this handler's declared compute-time
-    # formula now that the payload type is known.
+    # formula now that the payload type is known. pgw#654 gap #4: fields
+    # may resolve against the derived defaults schema (catalog recipe),
+    # not only numeric wire defaults.
     runtime_formula = decl.runtime_formula.get(attr_name)
     if runtime_formula is not None:
-        runtime_formula.validate_for_payload(payload_type, owner)
+        runtime_formula.validate_for_payload(
+            payload_type, owner, defaults_type=defaults_type)
+
+    # pgw#654: per-function facts declared at the definition site.
+    wf: Optional[WorkerFunctionDecl] = getattr(method, WF_ATTR, None)
+    warm_overrides: Dict[str, Any] = {}
+    if wf is not None and wf.warm:
+        try:
+            payload_fields = {f.name for f in msgspec.structs.fields(payload_type)}
+        except Exception:
+            payload_fields = set()
+        axis_fields = {a.field for a in payload_axes}
+        for wf_field in wf.warm:
+            if wf_field not in payload_fields:
+                raise ValueError(
+                    f"{owner}: @worker_function warm= names {wf_field!r}, "
+                    f"which is not a field of {payload_type.__name__!r}"
+                )
+            if wf_field in axis_fields:
+                raise ValueError(
+                    f"{owner}: @worker_function warm= overrides AXIS field "
+                    f"{wf_field!r} — axis classes already carry their warm= "
+                    "representatives; per-function warm overrides are for "
+                    "non-axis fields that change tracing only"
+                )
+        warm_overrides = dict(wf.warm)
+    wf_text_len = wf.text_len if wf is not None else None
+    if wf_text_len is not None and decl.compile is None:
+        raise ValueError(
+            f"{owner}: @worker_function(text_len=...) requires the class to "
+            "declare compile= (the pin is a compile shape-contract fact)"
+        )
 
     return EndpointSpec(
         name=slug,
@@ -463,7 +531,12 @@ def _spec_for_handler(
         reentrant=decl.reentrant,
         variant_of=variant_of_slug,
         variant_kind=variant_kind,
-        regimes=decl.regimes.get(attr_name, DEFAULT_REGIMES),
+        objectives=(tuple(wf.objectives) if wf is not None and wf.objectives is not None else None),
+        distilled=(wf.distilled if wf is not None else None),
+        text_len=(wf_text_len if wf_text_len is not None
+                  else (decl.compile.text_len if decl.compile is not None else None)),
+        warm_overrides=warm_overrides,
+        warm_reason=(wf.warm_reason if wf is not None else ""),
         handles=tuple(decl.handles),
         runtime_formula=runtime_formula,
         config=tuple(decl.config),
@@ -481,7 +554,7 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
     walked = walked_module or (getattr(obj, "__module__", "") or "")
 
     if decl.is_function:
-        return [_spec_for_handler(
+        return _apply_class_unions([_spec_for_handler(
             fn_name=decl.name or obj.__name__,
             method=obj,
             decl=decl,
@@ -491,7 +564,7 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
             slots=dict(decl.slots),
             resources=decl.resources,
             walked_module=walked,
-        )]
+        )])
 
     cls = obj
     handlers: list[tuple[str, Callable[..., Any]]] = list(
@@ -506,11 +579,47 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
             slots=dict(decl.slots),
             resources=decl.resources, walked_module=walked,
         ))
+    out = _apply_class_unions(out)
     # gw#470: boot warmup is default-on for GPU inference classes — fail at
     # walk time (discovery/CI/boot), never at first request.
     from .warmup import validate_class_warmup
 
     validate_class_warmup(cls, decl, out)
+    return out
+
+
+def _apply_class_unions(specs: List[EndpointSpec]) -> List[EndpointSpec]:
+    """pgw#654 / pgw#647 gap #1: sibling functions of ONE class share one
+    cell family, so the class's compile-contract warm facts are the UNION
+    across its functions — the guidance warm set (a distilled sibling with
+    no guidance field contributes nothing yet consumes the same cell) and
+    the per-lane text pins (gap #6: qwen t2i 512 / edit 1024 digest as one
+    dual-pin contract). Scope is exactly one class — sibling @endpoint
+    CLASSES keep divergent contracts by design (ernie's base/turbo are two
+    checkpoints, two instances, two cells). Compile-less classes pass
+    through untouched."""
+    import dataclasses
+
+    from .api.compile_axis import warm_guidance_values
+
+    compiled = [s for s in specs if s.compile is not None]
+    if not compiled:
+        return specs
+    guidance_union = tuple(sorted({
+        float(v)
+        for s in compiled
+        for v in warm_guidance_values(s.payload_axes)
+    }))
+    text_lens = tuple(sorted({
+        int(s.text_len) for s in compiled if s.text_len is not None
+    }))
+    out: List[EndpointSpec] = []
+    for s in specs:
+        if s.compile is None:
+            out.append(s)
+        else:
+            out.append(dataclasses.replace(
+                s, guidance_union=guidance_union, text_lens=text_lens))
     return out
 
 

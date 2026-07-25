@@ -387,12 +387,17 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if lora_bucket_override is not None:
         bucket = int(lora_bucket_override)
+    text_lens = tuple(getattr(cfg, "text_lens", ()) or ())
+    if not text_lens and getattr(cfg, "text_len", None) is not None:
+        text_lens = (int(cfg.text_len),)
     return {
-        "v": 2,
+        "v": 3,
         "shapes": sorted(
             [int(v) for v in row] for row in getattr(cfg, "shapes", ())),
         "targets": [str(t) for t in getattr(cfg, "targets", ())],
-        "text_len": getattr(cfg, "text_len", None),
+        # pgw#654 gap #6: the CLASS's per-lane text-pin UNION — sibling
+        # functions with different pins share one cell contract.
+        "text_lens": sorted({int(v) for v in text_lens}),
         "dynamic": [
             {"dim": d.dim, "min": d.min, "max": d.max}
             for d in getattr(cfg, "dynamic", ())
@@ -1504,8 +1509,11 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
     graph_signature, weight_contract = execution_contract(pipeline, cfg)
     from .models.memory import low_vram_mode
 
+    text_lens = tuple(getattr(cfg, "text_lens", ()) or ())
+    if not text_lens and getattr(cfg, "text_len", None) is not None:
+        text_lens = (int(cfg.text_len),)
     payload = {
-        "version": 2,
+        "version": 3,
         "family": str(getattr(cfg, "family", "") or ""),
         "shapes": sorted(
             [int(v) for v in row] for row in getattr(cfg, "shapes", ())
@@ -1514,7 +1522,9 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
         "guidance_scales": [
             float(v) for v in getattr(cfg, "guidance_scales", ())
         ],
-        "text_len": getattr(cfg, "text_len", None),
+        # pgw#654 gap #6: sibling lanes with different text pins share one
+        # cell — the digest carries the class UNION, never one lane's pin.
+        "text_lens": sorted({int(v) for v in text_lens}),
         "dynamic": [
             {"dim": d.dim, "min": d.min, "max": d.max}
             for d in getattr(cfg, "dynamic", ())
@@ -2302,6 +2312,18 @@ def resolve_pipeline_class(name: str) -> Any:
     return cls
 
 
+def _warm_text_lens(cfg: Any) -> tuple:
+    """The text pins a warm loop must trace (pgw#654 gap #6): the class
+    UNION when present (dual-lane classes trace one graph per pin), else
+    the single declared pin, else (None,) — one unpinned pass."""
+    pins = tuple(getattr(cfg, "text_lens", ()) or ())
+    if not pins:
+        tl = getattr(cfg, "text_len", None)
+        pins = (int(tl),) if tl is not None else ()
+    pins = tuple(sorted({int(v) for v in pins if int(v) > 0}))
+    return pins if pins else (None,)
+
+
 def _warm_call(
     pipe: Any,
     shape: Tuple[int, ...],
@@ -2393,6 +2415,7 @@ def build(
     targets: Iterable[str] = ("transformer", "vae.decode"),
     guidance_scales: Iterable[float] = (),
     text_len: Optional[int] = None,
+    text_lens: Iterable[int] = (),
     dynamic: Iterable[Any] = (),
     family: str = "",
     source_ref: str = "",
@@ -2473,6 +2496,7 @@ def build(
         dynamic=tuple(dynamic),
         lora_bucket=int(lora_bucket or 0),
         guidance_scales=tuple(float(v) for v in guidance_scales),
+        text_lens=tuple(int(v) for v in text_lens),
     )
     load_cls: Any = DiffusionPipeline
     if str(pipeline_class or "").strip():
@@ -2520,11 +2544,12 @@ def build(
     for shape in cfg.shapes:
         torch.cuda.synchronize()
         t = time.monotonic()
-        _warm_call(
-            pipe, shape, steps=int(steps), prompt=prompt, decode=decode,
-            guidance_scales=cfg.guidance_scales,
-            text_len=cfg.text_len,
-        )
+        for pin in _warm_text_lens(cfg):
+            _warm_call(
+                pipe, shape, steps=int(steps), prompt=prompt, decode=decode,
+                guidance_scales=cfg.guidance_scales,
+                text_len=pin,
+            )
         torch.cuda.synchronize()
         key = "x".join(str(v) for v in shape)
         timings[key] = round(time.monotonic() - t, 2)
@@ -2603,13 +2628,14 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -
     for shape in cfg.shapes:
         torch.cuda.synchronize()
         t0 = time.monotonic()
-        _warm_call(
-            pipe, shape, steps=steps,
-            prompt="cache warm-up: a lighthouse on a cliff at dawn, detailed",
-            decode=decode,
-            guidance_scales=getattr(cfg, "guidance_scales", ()),
-            text_len=getattr(cfg, "text_len", None),
-        )
+        for pin in _warm_text_lens(cfg):
+            _warm_call(
+                pipe, shape, steps=steps,
+                prompt="cache warm-up: a lighthouse on a cliff at dawn, detailed",
+                decode=decode,
+                guidance_scales=getattr(cfg, "guidance_scales", ()),
+                text_len=pin,
+            )
         torch.cuda.synchronize()
         shape_key = "x".join(str(v) for v in shape)
         _say(f"  compiled {shape_key} in {time.monotonic() - t0:.0f}s")

@@ -84,9 +84,14 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     civitai_api_key: str = ""
 
     # C2PA Content Credentials signing (th#714, EU AI Act Art. 50).
-    # Signing is ON iff cert_path is set: every generated media asset gets a
-    # signed provenance manifest at save time (content_credentials.py).
-    # cert_path = PEM chain (leaf first), key_path = PKCS#8 PEM private key.
+    # Signing is ON iff cert material is set (inline PEM or path): every
+    # generated media asset gets a signed provenance manifest at save time
+    # (content_credentials.py). Inline *_PEM vars carry the PEM content
+    # itself — the hub injects them into pod env at launch (RunPod pods
+    # have no file mounts) — and take precedence over the *_PATH pair.
+    # Chain = leaf first, key = PKCS#8 PEM.
+    c2pa_cert_pem: str = ""   # GEN_WORKER_C2PA_CERT_PEM (inline PEM chain)
+    c2pa_key_pem: str = ""    # GEN_WORKER_C2PA_KEY_PEM (inline PKCS#8 PEM)
     c2pa_cert_path: str = ""  # GEN_WORKER_C2PA_CERT_PATH
     c2pa_key_path: str = ""   # GEN_WORKER_C2PA_KEY_PATH
     c2pa_alg: str = "es256"   # GEN_WORKER_C2PA_ALG (COSE alg matching the cert key)

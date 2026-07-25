@@ -9,11 +9,16 @@ every generated media asset as it passes through ``RequestContext.save_bytes``
 upload.
 
 Config (Settings / env):
-- ``GEN_WORKER_C2PA_CERT_PATH`` — PEM signing-cert chain (leaf first, then
-  intermediates/root). Signing is ON iff this is set.
-- ``GEN_WORKER_C2PA_KEY_PATH``  — PKCS#8 PEM private key for the leaf.
+- ``GEN_WORKER_C2PA_CERT_PEM`` — inline PEM signing-cert chain (leaf first,
+  then intermediates/root). The hub injects this into pod env at launch
+  (RunPod pods have no file mounts). Takes precedence over ``_CERT_PATH``.
+- ``GEN_WORKER_C2PA_KEY_PEM``  — inline PKCS#8 PEM private key for the leaf.
+- ``GEN_WORKER_C2PA_CERT_PATH`` / ``GEN_WORKER_C2PA_KEY_PATH`` — file-path
+  variants for mounted material (dev / non-RunPod deploys).
 - ``GEN_WORKER_C2PA_ALG``      — COSE alg (default ``es256``).
 - ``GEN_WORKER_C2PA_TA_URL``   — optional RFC3161 timestamp authority URL.
+
+Signing is ON iff cert material is set (either variant).
 
 Policy: default-ON when the cert is configured; configured-but-broken fails
 worker startup (never silently ship unlabeled media believing signing is on);
@@ -137,27 +142,38 @@ def configure(settings: Any) -> None:
     cert is configured (signing disabled).
     """
     global _configured, _config
+    inline_cert = str(getattr(settings, "c2pa_cert_pem", "") or "").strip()
+    inline_key = str(getattr(settings, "c2pa_key_pem", "") or "").strip()
     cert_path = str(getattr(settings, "c2pa_cert_path", "") or "").strip()
     key_path = str(getattr(settings, "c2pa_key_path", "") or "").strip()
     with _lock:
-        if not cert_path:
+        if not inline_cert and not cert_path:
             _config = None
             _configured = True
             logger.warning(
-                "C2PA content-credential signing DISABLED — GEN_WORKER_C2PA_CERT_PATH is not set. "
-                "Generated media will NOT carry Content Credentials "
-                "(EU AI Act Art. 50 machine-readable AI-marking, th#714)."
+                "C2PA content-credential signing DISABLED — neither GEN_WORKER_C2PA_CERT_PEM "
+                "nor GEN_WORKER_C2PA_CERT_PATH is set. Generated media will NOT carry Content "
+                "Credentials (EU AI Act Art. 50 machine-readable AI-marking, th#714)."
             )
             return
-        if not key_path:
-            raise C2paSigningError(
-                "GEN_WORKER_C2PA_CERT_PATH is set but GEN_WORKER_C2PA_KEY_PATH is not"
-            )
-        try:
-            cert_pem = open(cert_path, "rb").read()
-            key_pem = open(key_path, "rb").read()
-        except OSError as e:
-            raise C2paSigningError(f"cannot read C2PA signing material: {e}") from e
+        if inline_cert:
+            # Inline PEM (hub-injected pod env) wins over mounted paths.
+            if not inline_key:
+                raise C2paSigningError(
+                    "GEN_WORKER_C2PA_CERT_PEM is set but GEN_WORKER_C2PA_KEY_PEM is not"
+                )
+            cert_pem = inline_cert.encode()
+            key_pem = inline_key.encode()
+        else:
+            if not key_path:
+                raise C2paSigningError(
+                    "GEN_WORKER_C2PA_CERT_PATH is set but GEN_WORKER_C2PA_KEY_PATH is not"
+                )
+            try:
+                cert_pem = open(cert_path, "rb").read()
+                key_pem = open(key_path, "rb").read()
+            except OSError as e:
+                raise C2paSigningError(f"cannot read C2PA signing material: {e}") from e
         cfg = _SignerConfig(
             cert_pem=cert_pem,
             key_pem=key_pem,
@@ -171,7 +187,9 @@ def configure(settings: Any) -> None:
         _config = cfg
         _configured = True
         logger.info(
-            "C2PA content-credential signing ENABLED (alg=%s, cert=%s)", cfg.alg, cert_path
+            "C2PA content-credential signing ENABLED (alg=%s, cert=%s)",
+            cfg.alg,
+            "<inline env PEM>" if inline_cert else cert_path,
         )
 
 

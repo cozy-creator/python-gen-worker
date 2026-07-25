@@ -1,4 +1,4 @@
-"""pgw#654: the 0.58.0/0.60.0 fleet-wide false "model load failure".
+"""pgw#658 (filed as pgw#654 in v0.58.2/v0.60.1 release notes — id race): the 0.58.0/0.60.0 fleet-wide false "model load failure".
 
 Live shape (ie#544, hub a838b34a): a pod converges its v5 shadow command
 (materialize SUCCEEDED, model on_disk), the first real jobs arrive, the

@@ -1072,7 +1072,7 @@ def test_endpoint_compile_reaches_spec():
     assert cell.text_len == 0
     # Warm guidance derives from the payload CompileAxis classes, in class
     # declaration order (Compile(guidance_scales=...) is deleted in v2).
-    assert cell.guidance_scales == (5.0, 0.0)
+    assert cell.guidance_scales == (0.0, 5.0)  # class union, sorted (pgw#654)
 
     with pytest.raises(TypeError, match="compile="):
         @endpoint(compile="yes")  # type: ignore[arg-type]

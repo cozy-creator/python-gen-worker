@@ -843,20 +843,26 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
         _link_or_copy(f, out_dir / rel)
 
 
-# th#1017: scheduler config overrides per checkpoint-declared inference
-# regime. v_prediction needs zero-terminal-SNR v-prediction sampling;
+# pgw#654: scheduler config overrides per checkpoint objective/distilled
+# fact. v_prediction needs zero-terminal-SNR v-prediction sampling;
 # distilled needs trailing timestep spacing (few-step, near-zero CFG).
-_REGIME_SCHEDULER_OVERRIDES: dict[str, dict[str, Any]] = {
+_OBJECTIVE_SCHEDULER_OVERRIDES: dict[str, dict[str, Any]] = {
     "v_prediction": {"prediction_type": "v_prediction", "rescale_betas_zero_snr": True},
-    "distilled": {"timestep_spacing": "trailing"},
 }
+_DISTILLED_SCHEDULER_OVERRIDES: dict[str, Any] = {"timestep_spacing": "trailing"}
 
 
-def apply_regime_scheduler_config(out_dir: Path, inference_regime: str) -> None:
-    """Stamp ``inference_regime``'s scheduler overrides into a produced
-    diffusers snapshot's ``scheduler/config.json``. No-op for "standard" or
-    a tree with no scheduler component (e.g. singlefile output)."""
-    overrides = _REGIME_SCHEDULER_OVERRIDES.get(inference_regime)
+def apply_objective_scheduler_config(
+    out_dir: Path, objective: str, distilled: bool = False,
+) -> None:
+    """Stamp the checkpoint's objective/distilled scheduler overrides into a
+    produced diffusers snapshot's ``scheduler/config.json``. No-op for an
+    epsilon/unstamped non-distilled checkpoint or a tree with no scheduler
+    component (e.g. singlefile output)."""
+    overrides: dict[str, Any] = dict(
+        _OBJECTIVE_SCHEDULER_OVERRIDES.get(str(objective or ""), {}))
+    if distilled:
+        overrides.update(_DISTILLED_SCHEDULER_OVERRIDES)
     if not overrides:
         return
     cfg_path = Path(out_dir) / "scheduler" / "config.json"

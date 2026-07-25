@@ -1,4 +1,4 @@
-"""pgw#654 fixture: a Slot endpoint whose setup outlasts the intent
+"""pgw#658 (filed as pgw#654 in v0.58.2/v0.60.1 release notes — id race) fixture: a Slot endpoint whose setup outlasts the intent
 registry's 2.0s unreported-wait grace — the shape of every real model
 endpoint (multi-minute pipeline load), which no toy fixture had."""
 

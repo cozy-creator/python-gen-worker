@@ -44,18 +44,29 @@ from ..families.base import KIND_LORA, GenerationDefaults, family_for
 
 D = TypeVar("D", bound=GenerationDefaults)
 
-# th#1017 inference regimes: a checkpoint-level fact about what inference
-# configuration the WEIGHTS demand. "distilled" routes (CFG-off contract
-# only); "v_prediction" configures (scheduler prediction_type) — both are
-# hub-classified at ingest; the SDK only consumes.
-REGIMES = ("standard", "v_prediction", "distilled")
-DEFAULT_REGIMES = ("standard",)
+# pgw#654 objective split (retires th#1017's 3-value regime enum): two
+# ORTHOGONAL checkpoint-level facts, both hub-classified at ingest; the SDK
+# only consumes.
+#
+# ``objective`` — what the network predicts (the training objective).
+# Drives scheduler math at VIEW construction: prediction_type (+ zero-SNR
+# rescale) for v_prediction; a flow-match scheduler class for flow. ""
+# means the hub did not stamp one (hub-less runs, unclassified rows) — the
+# view then applies nothing and the declaration backstop does not fire.
+#
+# ``distilled`` — a post-training property, orthogonal to the objective
+# (z-image-turbo is distilled FLOW; a distilled v-pred fine-tune keeps its
+# v-pred fact). Drives the recipe (few steps, CFG off), the graph choice
+# (cfg_off/batch-1 class) and adapter policy (never stack a distillation
+# LoRA onto already-distilled weights).
+OBJECTIVES = ("epsilon", "v_prediction", "flow")
 
 
-class RegimeMismatchError(ValueError):
-    """A resolved checkpoint's inference_regime is outside the invoked
-    function's declared ``regimes=`` (th#1017). Hub routing enforces this
-    upstream; reaching here means version skew or a hub bug."""
+class ObjectiveMismatchError(ValueError):
+    """A resolved checkpoint's stamped objective/distilled facts are outside
+    the invoked function's declared ``@worker_function(objectives=...,
+    distilled=...)`` contract. Hub routing enforces this upstream; reaching
+    here means version skew or a hub bug."""
 
 
 class Slot(Generic[D]):
@@ -80,9 +91,16 @@ class Slot(Generic[D]):
     ONLY resolution source in hub-less mode (``cozy run``, hermetic tests) —
     a live hub mapping always wins when present. ``None`` means this slot
     has no code-side bootstrap ref: it only resolves against a hub mapping.
+
+    ``root=True`` (pgw#654, gap #7) marks THE root slot of a multi-slot
+    class: the slot ``ctx.defaults`` / ``ctx.for_request`` resolve when no
+    explicit ``slot=`` is passed. A single-slot class needs no marker, and
+    a slot literally named ``"pipeline"`` is the implicit root; any OTHER
+    multi-slot shape must mark exactly one root — ambiguity is a
+    decoration-time error, never a silent fallback.
     """
 
-    __slots__ = ("pipeline_cls", "selected_by", "default_checkpoint")
+    __slots__ = ("pipeline_cls", "selected_by", "default_checkpoint", "root")
 
     def __init__(
         self,
@@ -90,6 +108,7 @@ class Slot(Generic[D]):
         *,
         selected_by: str = "",
         default_checkpoint: Optional[ModelRef] = None,
+        root: bool = False,
     ) -> None:
         if not isinstance(pipeline_cls, type):
             raise TypeError(
@@ -104,11 +123,12 @@ class Slot(Generic[D]):
         self.pipeline_cls = pipeline_cls
         self.selected_by = str(selected_by or "").strip()
         self.default_checkpoint = default_checkpoint
+        self.root = bool(root)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
-            f"default_checkpoint={self.default_checkpoint!r})"
+            f"default_checkpoint={self.default_checkpoint!r}, root={self.root!r})"
         )
 
 
@@ -121,25 +141,29 @@ class ResolvedSlot(Generic[D]):
     Explicit PAYLOAD values still win over ``.defaults`` — that precedence
     is handler logic; this object only carries the resolved catalog recipe.
 
-    ``regime`` (th#1017) is the resolved checkpoint's inference regime —
-    ``"standard"`` unless the hub classified the weights otherwise
-    (``"v_prediction"`` | ``"distilled"``). ``ctx.for_request`` applies it
-    to the per-request scheduler view automatically; handlers may also
-    branch on it (e.g. a dual-mode turbo lane skips its distillation LoRA
-    for an already-distilled checkpoint).
+    ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
+    hub-stamped facts. ``objective`` is ``""`` when the hub did not stamp
+    one. ``ctx.for_request`` applies the objective to the per-request
+    scheduler view automatically; handlers may also branch on ``distilled``
+    (e.g. a dual-mode turbo lane skips its distillation LoRA for
+    already-distilled weights).
     """
 
-    __slots__ = ("ref", "defaults", "regime")
+    __slots__ = ("ref", "defaults", "objective", "distilled")
 
-    def __init__(self, ref: ModelRef, defaults: D, regime: str = "standard") -> None:
+    def __init__(
+        self, ref: ModelRef, defaults: D, objective: str = "",
+        distilled: bool = False,
+    ) -> None:
         self.ref = ref
         self.defaults = defaults
-        self.regime = regime
+        self.objective = objective
+        self.distilled = distilled
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"ResolvedSlot(ref={self.ref!r}, defaults={self.defaults!r}, "
-            f"regime={self.regime!r})"
+            f"objective={self.objective!r}, distilled={self.distilled!r})"
         )
 
 
@@ -197,20 +221,33 @@ def _finish_resolved(
     ref: ModelRef,
     defaults: Any,
     *,
-    inference_regime: str,
-    allowed_regimes: Optional[Sequence[str]],
+    objective: str,
+    distilled: bool,
+    allowed_objectives: Optional[Sequence[str]],
+    allowed_distilled: Optional[bool],
 ) -> "ResolvedSlot[Any]":
     """Build the ``ResolvedSlot`` and, when the caller knows the invoked
-    function's declared regimes, enforce the th#1017 backstop: the hub
-    enforces checkpoint-regime/function-regime compatibility at deploy and
-    request time upstream — reaching a mismatch here means version skew or
-    a hub bug, never a normal-path outcome."""
-    resolved = ResolvedSlot(ref=ref, defaults=defaults, regime=inference_regime)
-    if allowed_regimes is not None and resolved.regime not in allowed_regimes:
-        raise RegimeMismatchError(
-            f"slot {name!r}: resolved checkpoint regime {resolved.regime!r} is "
-            f"not in the invoked function's declared regimes {tuple(allowed_regimes)!r}"
-        )
+    function's declared objective/distilled contract, enforce the backstop:
+    the hub gates checkpoint<->function compatibility at deploy and request
+    time upstream — reaching a mismatch here means version skew or a hub
+    bug, never a normal-path outcome. The backstop only fires on STAMPED
+    facts (``objective`` non-empty); an unclassified checkpoint passes."""
+    resolved = ResolvedSlot(
+        ref=ref, defaults=defaults, objective=objective, distilled=distilled,
+    )
+    if resolved.objective:
+        if allowed_objectives is not None and resolved.objective not in allowed_objectives:
+            raise ObjectiveMismatchError(
+                f"slot {name!r}: resolved checkpoint objective "
+                f"{resolved.objective!r} is not in the invoked function's "
+                f"declared objectives {tuple(allowed_objectives)!r}"
+            )
+        if allowed_distilled is not None and resolved.distilled != allowed_distilled:
+            raise ObjectiveMismatchError(
+                f"slot {name!r}: resolved checkpoint distilled="
+                f"{resolved.distilled!r} but the invoked function declares "
+                f"distilled={allowed_distilled!r}"
+            )
     return resolved
 
 
@@ -223,8 +260,10 @@ def resolve_slot(
     family: str = "",
     raw_metadata_json: str = "",
     lora_metadata_json: Sequence[str] = (),
-    inference_regime: str = "standard",
-    allowed_regimes: Optional[Sequence[str]] = None,
+    objective: str = "",
+    distilled: bool = False,
+    allowed_objectives: Optional[Sequence[str]] = None,
+    allowed_distilled: Optional[bool] = None,
 ) -> "ResolvedSlot[Any]":
     """SDK v2 resolution chain: decode the catalog-resolved recipe
     (``raw_metadata_json``) against the handler's DERIVED config schema
@@ -243,10 +282,11 @@ def resolve_slot(
     ``lora_metadata_json`` (pgw#516, in lora-ride order) applies LAST, field
     by field — see :func:`_apply_lora_overrides`.
 
-    ``inference_regime`` (th#1017) is the resolved checkpoint's hub-
-    classified regime ("standard" on hubs/paths that don't send one).
-    ``allowed_regimes``, when given, is the invoked function's declared
-    ``regimes=`` — see :func:`_finish_resolved`.
+    ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
+    hub-stamped facts ("" / False on hubs/paths that don't send them).
+    ``allowed_objectives``/``allowed_distilled``, when given, are the
+    invoked function's declared ``@worker_function`` contract — see
+    :func:`_finish_resolved`.
     """
     if ref is None:
         raise ValueError(
@@ -276,23 +316,29 @@ def resolve_slot(
         defaults = _apply_lora_overrides(name, defaults, fam, lora_metadata_json)
         return _finish_resolved(
             name, ref, defaults,
-            inference_regime=inference_regime, allowed_regimes=allowed_regimes,
+            objective=objective, distilled=distilled,
+            allowed_objectives=allowed_objectives,
+            allowed_distilled=allowed_distilled,
         )
     if defaults_cls is not None:
         neutral = _apply_lora_overrides(name, defaults_cls(), fam, lora_metadata_json)
         return _finish_resolved(
             name, ref, neutral,
-            inference_regime=inference_regime, allowed_regimes=allowed_regimes,
+            objective=objective, distilled=distilled,
+            allowed_objectives=allowed_objectives,
+            allowed_distilled=allowed_distilled,
         )
     # No schema declared and no metadata: the ref itself still resolves
     # (handlers that never read .defaults — self-loading runtimes).
     return _finish_resolved(
         name, ref, None,
-        inference_regime=inference_regime, allowed_regimes=allowed_regimes,
+        objective=objective, distilled=distilled,
+        allowed_objectives=allowed_objectives,
+        allowed_distilled=allowed_distilled,
     )
 
 
 __all__ = [
-    "DEFAULT_REGIMES", "REGIMES", "RegimeMismatchError", "ResolvedSlot",
+    "OBJECTIVES", "ObjectiveMismatchError", "ResolvedSlot",
     "Slot", "resolve_slot",
 ]

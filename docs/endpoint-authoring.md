@@ -258,9 +258,36 @@ per registered family. Code owns this SCHEMA; the catalog owns the VALUES.
 returns a container copy sharing every module by reference (zero weight
 VRAM; the compiled graph stays bound to the module objects) with its OWN
 scheduler cloned from config — the SDK owns the sampler-name table
-(`gen_worker.view.SAMPLERS`) and applies the resolved checkpoint's regime
-(v_prediction) automatically. Never assign `self.pipeline.scheduler` per
-request: schedulers are stateful, shared, and part of the instance.
+(`gen_worker.view.SAMPLERS`; recipes select among its names, endpoints
+never define private sampler maps) and applies the resolved checkpoint's
+OBJECTIVE (pgw#654: `epsilon` / `v_prediction` — prediction_type plus
+zero-terminal-SNR for v-pred; `flow` — flow-match scheduler classes only)
+automatically. Never assign `self.pipeline.scheduler` per request:
+schedulers are stateful, shared, and part of the instance.
+
+Per-function contract facts live ON the function (pgw#654):
+
+```python
+@worker_function(objectives=("epsilon", "v_prediction"), distilled=False)
+def generate(self, ctx, payload: TextToImageInput) -> ImageOutput: ...
+```
+
+`objectives` = which checkpoint training objectives the handler's code
+path serves (omit = unrestricted); `distilled` = True (only distilled) /
+False (only non-distilled) / omit (either). The boot WARM PLAN is DERIVED
+— defaulted fields keep their schema defaults, `CompileAxis` fields
+cross-product their classes' `warm=` representatives, required fields
+synthesize neutral values — so there is no `warmup=` payload dict to
+write or to drift. Cheapen non-graph work on `ctx.boot_warmup`
+(`steps = 1 if ctx.boot_warmup else steps`). A per-function
+`@worker_function(warm={...}, warm_reason=...)` override exists only for
+a non-axis field that genuinely changes tracing. When the serve path
+modifies a requested value (clamps, substitutions), record it with
+`ctx.adjusted(field, requested, applied, reason)` / `ctx.clamp(...)` —
+the rows ride the result envelope to the caller.
+
+Imports live at module top by convention — no function-body imports
+unless breaking a genuine cycle or deferring an optional extra.
 
 **Testing:** `gen_worker.testing` builds a `RequestContext` with stubbed
 `ctx.slots` for handler unit tests, no hand-rolled fake context needed:

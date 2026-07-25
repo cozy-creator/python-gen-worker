@@ -15,8 +15,7 @@ Three levers live here, all behind the stable ``write_video`` surface:
   numpy view (no intermediate copy); the encoder wraps it with PyAV's
   ``from_numpy_buffer`` when available (see ``video_encode``).
 
-Frame buffers are transient media staging, NOT model placement — the
-GEN_WORKER_FORBID_CPU_OFFLOAD veto (weights) does not apply here.
+Frame buffers are transient media staging, NOT model placement.
 """
 
 from __future__ import annotations

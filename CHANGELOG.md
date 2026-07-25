@@ -1,5 +1,108 @@
 # Changelog
 
+## 0.61.0 (2026-07-25) — pgw#654: the objective/distilled vocabulary train (v2.1)
+
+**HARD CUT on the v2 vocabulary — the wave-1 endpoints (sdxl, z-image,
+qwen-image, ernie, anima) relock to `gen-worker==0.61.0` in the same
+train; wave 2 (ie#546) builds on this release.** No aliases, no shims:
+old declarations fail loudly at import/decoration time. What every
+endpoint author must change:
+
+- **The 3-value inference "regime" enum is SPLIT into two orthogonal
+  checkpoint facts, and the word "regime" is retired.**
+  `objective: "epsilon" | "v_prediction" | "flow"` is what the network
+  predicts — it drives scheduler math at VIEW construction
+  (prediction_type + zero-terminal-SNR rescale for v-pred, folded in so
+  no endpoint can forget it; flow-match scheduler classes required for
+  flow — a diffusion sampler on a flow checkpoint raises).
+  `distilled: bool` is a post-training property — it drives the recipe
+  (few steps, CFG off), the graph choice (cfg_off/batch-1 class) and
+  adapter policy (never stack a distillation LoRA on already-distilled
+  weights). `ResolvedSlot.regime` -> `.objective` + `.distilled`;
+  `resolve_slot(inference_regime=, allowed_regimes=)` ->
+  `(objective=, distilled=, allowed_objectives=, allowed_distilled=)`;
+  `RegimeMismatchError` -> `ObjectiveMismatchError`; `REGIMES` ->
+  `OBJECTIVES`; `for_request(regime=)` -> `for_request(objective=)`.
+  The wire adds `ModelBinding.objective`/`.distilled` (hub-stamped; ""
+  = unstamped, and the declaration backstop only fires on stamped facts).
+  Conversion payloads rename `inference_regime` -> `objective` +
+  `distilled` (`apply_regime_scheduler_config` ->
+  `apply_objective_scheduler_config`).
+- **Per-function declarations replace the class-level name-keyed dicts.**
+  `@endpoint(regimes={...})` and `@endpoint(warmup={...})` payload dicts
+  are decoration-time errors. Declare per handler, at the definition
+  site: `@worker_function(objectives=("epsilon", "v_prediction"),
+  distilled=False)` — omit `objectives` for unrestricted handlers, omit
+  `distilled` for either. Works identically on class methods and bare
+  `@endpoint` functions. The manifest emits `objectives`/`distilled` per
+  function (both omitted = unrestricted).
+- **The boot warm plan is DERIVED — delete your `warmup=` payloads.**
+  Defaulted fields keep their schema defaults (post-th#1116 = the
+  neutral recipe), `CompileAxis` fields cross-product their classes'
+  `warm=` representatives (that product IS the graph set, so "fully
+  warmed?" is computable), required no-default fields synthesize neutral
+  values (short string for prompts, tiny generated image/audio for
+  media). One run per (function, graph class) — every alias proves its
+  own code path causally; re-executions of an already-traced graph are
+  cache hits, never second traces. Cheapen non-graph work on
+  `ctx.boot_warmup` (`steps = 1 if ctx.boot_warmup else steps`).
+  `@worker_function(warm={...}, warm_reason=...)` survives ONLY for a
+  non-axis field that genuinely changes tracing (mandatory recorded
+  reason; axis fields are rejected). `warmup=NoWarmup(reason)` and a
+  custom `warmup()` method remain; the custom-warmup proof now
+  attributes to every contract-compatible sibling (the
+  `warmup={...: None}` per-alias opt-out died with the dict — an
+  incompatible sibling is a separate `@endpoint` class).
+- **The class cell contract is the UNION across sibling functions
+  (pgw#647 gap #1 — the sdxl/z-image/qwen strict-xfails flip green).**
+  `CompileCell.guidance_scales` derives as the union of the class's
+  payload-axis warm sets, so a distilled sibling with no guidance field
+  shares the family cell instead of failing closed on w8a8 lanes (or
+  silently serving eager on w8a16). Union is per CLASS — sibling
+  `@endpoint` classes keep their own contracts. The ck2/execution
+  contract digests changed (v3): existing cells re-mint on first build.
+- **Per-lane text pins (gap #6).** `@worker_function(text_len=)`
+  overrides the class `Compile.text_len` for that handler's lane; the
+  contract digests the sorted UNION of the class's pins (`text_lens`),
+  so a dual-lane class (qwen: 512 t2i / 1024 edit) describes both and
+  the forge warms every pin. Delete module-constant pin workarounds.
+- **Multi-slot classes declare their root (gap #7).** Two or more model
+  slots with no slot named `pipeline` is now a decoration-time error
+  unless exactly one is marked `Slot(root=True)`. `ctx.defaults` /
+  `ctx.for_request` resolve the root; non-root lanes pass
+  `ctx.for_request(pipe, slot="edit")` / read
+  `ctx.slots["edit"].defaults`. The old silent standard-regime fallback
+  on ambiguity is GONE — ambiguity raises.
+- **`RuntimeFormula` evaluates on RESOLVED EFFECTIVE values (gap #4).**
+  A referenced field may be `Optional[...] = None` when the handler's
+  derived defaults schema carries the same-named field: validation
+  accepts it and the worker evaluates payload-over-`ctx.defaults`.
+  Endpoints that dropped their steps terms (z-image, ernie, anima)
+  can restore them.
+- **Non-diffusers `lora_bucket=` roots must declare `lora_state_dict`
+  (gap #9)** — decoration-time error otherwise (adapters previously
+  failed closed at first live attach). `Path`-typed modifier slots are
+  now rejected like `str` ones (gap #8).
+- **`ctx.adjusted(field, requested, applied, reason)` / `ctx.clamp(...)`
+  — caller-visible adjustment warnings.** Whenever the serve path
+  modifies a requested value (guidance clamped by `max_guidance`,
+  neutral defaults substituted for an unconfigured checkpoint, ...),
+  record it; rows ride `JobResult.adjustments` and the hub persists them
+  on the request record + events stream. Adjustments WARN-AND-SERVE;
+  catalog-LOCKED recipe fields refuse typed upstream instead.
+- **`gen_worker.view.SAMPLERS` is the ONE sampler definition (absorbs
+  gap #2).** Added `euler_trailing` (Lightning recipe); the `dpmpp_2m*`
+  entries now carry `solver_order=2` + `final_sigmas_type="zero"` as
+  part of the sampler's definition. Endpoint-private sampler maps are
+  deleted in the wave-1 relock.
+- **`ModelRef.label`** — the one `model_used`/logging label (wire form
+  per source registry); endpoints delete their `_ref_label` copies.
+- **Runtime owns generic tuning.** The executor sets TF32 once at
+  bootstrap and disables per-request progress bars at materialization —
+  endpoints delete their `_tune_pipeline` copies.
+- **Convention: imports at module top.** No function-body imports unless
+  breaking a genuine cycle or deferring an optional extra.
+
 ## 0.60.1 (2026-07-25) — pgw#654: the false fleet-wide "model load failure"
 
 **Fixes the 0.56.0–0.60.0 defect that broke every real model release on the

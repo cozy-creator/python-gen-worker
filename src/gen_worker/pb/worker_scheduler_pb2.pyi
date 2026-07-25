@@ -994,7 +994,7 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref", "loras", "inference_defaults", "components")
+    __slots__ = ("slot", "ref", "loras", "inference_defaults", "components", "objective", "distilled")
     class ComponentsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -1007,12 +1007,16 @@ class ModelBinding(_message.Message):
     LORAS_FIELD_NUMBER: _ClassVar[int]
     INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
     COMPONENTS_FIELD_NUMBER: _ClassVar[int]
+    OBJECTIVE_FIELD_NUMBER: _ClassVar[int]
+    DISTILLED_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
     loras: _containers.RepeatedCompositeFieldContainer[LoraOverlay]
     inference_defaults: str
     components: _containers.ScalarMap[str, str]
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., components: _Optional[_Mapping[str, str]] = ...) -> None: ...
+    objective: str
+    distilled: bool
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., components: _Optional[_Mapping[str, str]] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
     __slots__ = ("ref", "weight", "inference_defaults")
@@ -1053,7 +1057,7 @@ class JobAccepted(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class JobResult(_message.Message):
-    __slots__ = ("request_id", "attempt", "status", "inline", "blob_ref", "safe_message", "metrics")
+    __slots__ = ("request_id", "attempt", "status", "inline", "blob_ref", "safe_message", "metrics", "adjustments")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     ATTEMPT_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
@@ -1061,6 +1065,7 @@ class JobResult(_message.Message):
     BLOB_REF_FIELD_NUMBER: _ClassVar[int]
     SAFE_MESSAGE_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
+    ADJUSTMENTS_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     attempt: int
     status: JobStatus
@@ -1068,7 +1073,20 @@ class JobResult(_message.Message):
     blob_ref: str
     safe_message: str
     metrics: JobMetrics
-    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ...) -> None: ...
+    adjustments: _containers.RepeatedCompositeFieldContainer[Adjustment]
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ..., adjustments: _Optional[_Iterable[_Union[Adjustment, _Mapping]]] = ...) -> None: ...
+
+class Adjustment(_message.Message):
+    __slots__ = ("field", "requested", "applied", "reason")
+    FIELD_FIELD_NUMBER: _ClassVar[int]
+    REQUESTED_FIELD_NUMBER: _ClassVar[int]
+    APPLIED_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    field: str
+    requested: str
+    applied: str
+    reason: str
+    def __init__(self, field: _Optional[str] = ..., requested: _Optional[str] = ..., applied: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
     __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms", "stage_ms")
