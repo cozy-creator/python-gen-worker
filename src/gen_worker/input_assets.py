@@ -33,6 +33,7 @@ import msgspec
 from .api.errors import CanceledError, RetryableError, ValidationError
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 from .request_context._helpers import _infer_mime_type, _url_is_blocked
+from .url_fetch import open_guarded_stream
 
 logger = logging.getLogger(__name__)
 
@@ -488,7 +489,13 @@ def _download(
                 f"input_asset_too_large: {occurrences[0].path} exceeds its byte cap"
             )
         cap = entry.size_bytes
-    req = urllib.request.Request(unit.url, headers={"User-Agent": "gen-worker"})
+    # pgw#663: redirects go through the guarded opener, which re-applies the
+    # SSRF policy to EVERY hop. `urlopen` follows them silently, so the
+    # pre-flight `_validate_transport_url` only ever covered hop 0 — a caller
+    # transport that 302s at the metadata service was reachable. Private
+    # (resolver-minted, blake3-attested) units keep their internal-object-host
+    # exemption, which is the whole reason that env var exists.
+    resolver_minted = entry is not None
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=f"input-{index}-", suffix=".part", dir=dest_dir)
     except OSError:
@@ -501,7 +508,17 @@ def _download(
     hasher = blake3_mod.blake3() if entry is not None else None
     try:
         try:
-            with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT_S) as response:
+            with open_guarded_stream(
+                unit.url,
+                timeout_s=_DOWNLOAD_TIMEOUT_S,
+                extra_allowed_hosts=(
+                    tuple(_internal_object_hosts()) if resolver_minted else ()
+                ),
+                # This module's own reference to the destination policy, so
+                # the pre-flight check and the per-hop check are provably the
+                # same function.
+                is_blocked=_url_is_blocked,
+            ) as response:
                 raw_length = str(response.headers.get("Content-Length") or "").strip()
                 expected_length = int(raw_length) if raw_length.isdigit() else 0
                 if expected_length > cap:
