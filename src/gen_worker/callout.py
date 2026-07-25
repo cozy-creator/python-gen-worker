@@ -122,7 +122,7 @@ class CalloutClient:
         tier: Optional[str] = None,
     ) -> str:
         """Submit one child request; returns its request id."""
-        import requests
+        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
 
         endpoint = (endpoint or "").strip().strip("/")
         if "/" not in endpoint:

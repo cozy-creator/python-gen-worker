@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, Optional
 
 from .api.errors import ValidationError
+import io as _io
+from fractions import Fraction
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,6 @@ def _probe_nvenc() -> bool:
     (H.264 min is 145x49) — a 64x64 probe fails "Frame Dimension less than
     the minimum supported value" on GENUINELY capable cards (measured live
     on an L4, gw#476)."""
-    import io as _io
 
     try:
         import av
@@ -378,7 +379,6 @@ class StreamingVideoEncoder:
 # ---- audio mux (moved verbatim from gen_worker.io, gw#387) ------------------
 
 def _prepare_audio_stream(container: Any, sample_rate: int, av: Any) -> Any:
-    from fractions import Fraction
 
     stream = container.add_stream("aac", rate=sample_rate)
     cc = stream.codec_context

@@ -31,6 +31,7 @@ from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot
 from .families import GenerationDefaults
 from .models.provision import arm_compile
 from .text_pin import TextLengthExceededError, pad_text_sequence
+from .url_fetch import FetchedUrl, fetch_bytes, fetch_image
 from .view import for_request
 from .api.errors import (
     CanceledError,
@@ -88,6 +89,9 @@ __all__ = [
     "arm_compile",
     # SDK v2 per-request views + text pinning.
     "for_request",
+    "FetchedUrl",
+    "fetch_bytes",
+    "fetch_image",
     "pad_text_sequence",
     "TextLengthExceededError",
     "HF",

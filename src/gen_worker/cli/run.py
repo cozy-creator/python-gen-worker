@@ -29,6 +29,15 @@ import msgspec
 from ..api.errors import CanceledError
 from ..models import provision
 from .local_context import build_local_context
+from ..discovery.project import load_project_config
+from gen_worker.registry import collect_from_namespace
+from .args import ArgError, build_payload
+from ..api.slot import resolve_slot
+from ..models import lanes as lanespec
+from ..api.binding import rebind_pick
+from .serve import DEFAULT_SOCKET_PATH
+from . import invoke as invoke_mod
+from .local_context import _stderr_emitter
 
 
 # Exit codes — tracked here for one-line reference. Mirrors progress.json #12.
@@ -151,7 +160,6 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
 
 def _load_project_main(config_path: Optional[str]) -> Tuple[Path, str]:
     """Return ``(project_root, main_module)`` from pyproject [tool.gen_worker]."""
-    from ..discovery.project import load_project_config
 
     try:
         cfg = load_project_config(config_path)
@@ -221,7 +229,6 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
     """Collect every routable function on every @endpoint object in a module
     namespace. Delegates signature inspection to ``gen_worker.registry`` — the
     one walker shared with the worker runtime and build-time discovery."""
-    from gen_worker.registry import collect_from_namespace
 
     return [
         _SelectedFunction(
@@ -341,7 +348,6 @@ def _apply_field_tokens(
     """
     if not fields:
         return raw_bytes
-    from .args import ArgError, build_payload
 
     try:
         base = json.loads(raw_bytes.decode("utf-8") or "{}")
@@ -683,7 +689,6 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
     ever arrives, so every Slot resolves to the NEUTRAL schema defaults of
     the handler's derived config schema (``RequestContext[D]``) — exactly
     the hub's own neutral stamp, so hub-less and production agree."""
-    from ..api.slot import resolve_slot
 
     spec = getattr(selected, "spec", None)
     defaults_cls = getattr(spec, "defaults_type", None)
@@ -715,7 +720,6 @@ def _local_executing_lane(
     """th#1050 ctx.lane for local runs: a --lane the endpoint DECLARES wins
     (author kernels execute it); otherwise the most-quantized binding's lane
     (the local twin of Executor._served_lane, eager execution)."""
-    from ..models import lanes as lanespec
 
     if lane_str and handles:
         try:
@@ -744,8 +748,6 @@ def _apply_lane_to_bindings(bindings: Dict[str, Any], lane_str: str) -> Dict[str
     lane (per-layer fp8 storage); an explicit fp8-w8a8 descriptor folds the
     #fp8-w8a8 flavor (fails loudly if unpublished at resolve time); 4bit
     lanes need an exact ref#flavor and are refused here."""
-    from ..api.binding import rebind_pick
-    from ..models import lanes as lanespec
 
     try:
         req = lanespec.parse_lane_spec(lane_str)
@@ -866,7 +868,6 @@ def _handle_run(args: argparse.Namespace) -> int:
 def _warm_serve_socket() -> Optional[Path]:
     """Return the default serve socket path if a warm ``gen-worker serve``
     is listening, else None. Used by the explicit ``--attach`` flag."""
-    from .serve import DEFAULT_SOCKET_PATH
 
     sock = Path(DEFAULT_SOCKET_PATH).resolve()
     try:
@@ -885,7 +886,6 @@ def _run_via_warm_serve(
     class/method, but serve addresses by FUNCTION NAME — so we still import the
     module to resolve the selected function's wire name (cheap; no model load).
     """
-    from . import invoke as invoke_mod
 
     _root, mod = load_endpoint_module(
         config_path=args.config_path, module=args.module,
@@ -1009,8 +1009,6 @@ def _run_inner(args: argparse.Namespace) -> int:
         raw_bytes = _inject_default_source(
             raw_bytes, selected.payload_type, source_path,
         )
-
-    from .local_context import _stderr_emitter
 
     # 4. Build the local context for this kind.
     ctx = build_local_context(

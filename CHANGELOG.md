@@ -1,5 +1,151 @@
 # Changelog
 
+## 0.63.0 (2026-07-25) — debt sweep: a worker never advertises a model it does not have
+
+Four fleet-debt issues from Paul's audit (pgw#655 / #656 / #657) plus the SDK half of
+ie#554 (pgw#663). One new public API; three behaviour changes worth reading before
+upgrading.
+
+### pgw#663 — one guarded URL fetch for endpoint code (NEW PUBLIC API; ie#554)
+
+`gen_worker.fetch_bytes` / `fetch_image` (and `url_fetch.open_guarded_stream`
+for streaming callers) replace the hand-rolled `urlopen(url).read()` that
+endpoints accepting caller URLs were each writing for themselves:
+
+- scheme, destination (private/loopback/link-local/metadata addresses refused)
+  and an optional host allowlist — caller-level plus a deployment-wide outer
+  bound in `GEN_WORKER_URL_FETCH_ALLOWED_HOSTS`;
+- **redirects are followed manually, with the policy re-applied to every hop.**
+  `urlopen` follows them silently, so a pre-flight check on the caller's URL
+  said nothing about where the bytes came from — a public URL 302-ing to the
+  cloud metadata service was the one-line bypass. `input_assets` had the same
+  hole on its caller-transport path and now goes through the same opener
+  (resolver-minted units keep their internal-object-host exemption);
+- a streamed byte cap that does not depend on the server declaring a size;
+- MIME matched against the SNIFFED type.
+
+Refusals are `ValidationError` (caller-caused), transport failures
+`RetryableError`. Documented limit: per-hop validation does not close DNS
+rebinding — see the module docstring.
+
+### pgw#655 — READY-without-the-model, and a download bound that was off (P0)
+
+- **Boot prefetch failure now GATES the function.** A failed startup prefetch of
+  an hf/civitai-source ref used to log "failed terminally" and walk on to READY.
+  Function-shaped (`cls=None`) and non-inference functions are advertised
+  unconditionally, so the hub then dispatched paid GPU jobs that each
+  re-discovered the missing model as a per-request load failure. Those functions
+  now go `FnUnavailable(reason="model_unavailable", axes={"ref": …})` instead.
+  Per function, never the process: a sibling whose model landed keeps serving.
+  Hub-resolved slot refs are unaffected — they arrive by delivery, not prefetch.
+- **The HF download bound is a progress-RATE floor, not a wall clock.**
+  `_HF_DOWNLOAD_MAX_SECONDS` was `0.0` (off) for its entire life, and the stall
+  watchdog reset its window on ANY byte — so a trickle pinned
+  `DOWNLOADING_MODELS` forever. A transfer must now put
+  `_HF_DOWNLOAD_MIN_WINDOW_BYTES` (8 MiB) on disk within the 180s window or it
+  raises `DownloadStalledError`. That is ~46 KiB/s: three orders of magnitude
+  under any real pod link, and still 60+ hours for a 10GB checkpoint. The dead
+  wall-clock knob is deleted, not defaulted.
+
+### pgw#656 — dataset ingest never creates a duplicate it could have found
+
+`publish_dataset_revision`'s existing-dataset lookup had three ways to come back
+empty, and empty means CREATE:
+
+- a swallowed JSON-parse error **and** a non-2xx response that simply fell
+  through — both now raise (`AuthError` on 401/403, `RuntimeError` otherwise);
+- one unpaginated page (tensorhub defaults `limit` to 50) — now walks
+  `next_cursor` at the API's 200 cap, with a no-movement/page-ceiling guard;
+- `?tenant=`, which the hub's `listDatasets` never reads — now `?org=`.
+
+The `__cozy_kind__` / `__cozy_dataset_info__` / `__cozy_snapshot_manifest__`
+features_json squat needs hub columns first: tracked as th#1162.
+
+### pgw#657 — fail-loud hardening
+
+- `install_hf_http_timeouts()` now **proves** the huggingface_hub timeout floor
+  on the client hf will actually build, and raises `HfHttpFloorError` at boot if
+  it cannot. The patch reaches into hf's private backend (already reshaped once,
+  requests -> httpx); a silent revert puts the fleet back on infinite HTTP
+  timeouts (gw#456) with nothing to say so.
+- The gw#640 boot record picks a **durable** carrier
+  (`GEN_WORKER_BOOT_RECORD` > the model-cache volume > `/tmp`), detects a
+  tmpfs/ramfs carrier, records `carrier_volatile` in the record itself, and warns
+  loudly — a record on RAM is freed by the very OOM it exists to report.
+- `Source.iter_hf_components()` on a diffusers-singlefile source is now a typed
+  `ValidationError` naming the supported layouts, replacing a
+  `NotImplementedError` that the docstring promised worked.
+- Compile-evidence probes say why they failed: a silent
+  `has_inmemory_compiled_code` false negative kills a healthy compiled lane, and
+  a silently-degraded `runtime_key()` computes a different cell key than every
+  healthy pod (a guaranteed miss + re-mint).
+- Three inline `gc.collect` + `empty_cache` copies in the executor fold into
+  `models.memory.aflush_memory` (`reset_peak=False` — pgw#652's activation
+  learning reads `max_memory_allocated`).
+
+## 0.62.1 (2026-07-25) — gw#661: a retrying worker no longer reports itself failed
+
+A setup/warmup loss whose contract is "will be re-attempted" now reports
+`ACTIVITY_STATE_RUNNING` with a `retrying (attempt N/5)` detail instead of the
+`ACTIVITY_STATE_FAILED` terminal. Exhausting the budget reports FAILED and
+disables the function (`reason=retry_exhausted`), so the hub still gets the
+terminal truth.
+
+- **Premise correction.** gw#661 was filed as "`RetryableError` is mapped onto
+  startup `phase=error`". It is not: `WORKER_PHASE_ERROR` has exactly five
+  sources (mandatory-command rejection, config-snapshot write failure,
+  `UnreportedIntentWait` out of residency reconcile, config-snapshot failure,
+  drain failure) and none of them is the self-mint compile path. The signal the
+  incident actually quoted (`activity failed kind=self_mint_compile
+  phase=warmup_forward error=RetryableError: ... retrying`) is the
+  **ActivityUpdate** carrier, and that is the one that was lying.
+- **Why it condemned pods anyway.** The hub's th#1160 progress-aware verdict
+  reads `lastWorkerProgressLocked`, which *excludes* activities in state
+  `failed`. Declaring a will-retry attempt FAILED therefore erased exactly the
+  progress evidence that keeps a working pod alive — the worker was deleting its
+  own defense. Measured 2026-07-25: 4 condemnations, 4 self-mint compiles that
+  then COMPLETED, one finishing 53s after its pod was condemned.
+- `CompiledLaneUnavailableError` subclasses `RetryableError` but the worker does
+  give up on it (it disables every handler needing the unproven lane), so it
+  stays on the FAILED rung. Job-path `RetryableError` -> `JOB_STATUS_RETRYABLE`
+  is unchanged; `ConfigSnapshotWriteError` -> `WORKER_PHASE_ERROR` is unchanged
+  (nothing re-attempts a failed snapshot write worker-side).
+- No proto change: `WorkerPhase` and `ActivityState` are untouched, so this
+  needs no hub lockstep. A distinct `retrying` wire rung remains available as
+  follow-up if the hub ever wants to distinguish it from ordinary running.
+- The hub-side defenses (th#1157 debounce, th#1160 progress-aware verdict) stay.
+  They are correct independent of this fix — defense in depth.
+
+## 0.62.0 (2026-07-25) — th#1130: the image encode+upload tail overlaps the next request
+
+**No endpoint changes required.** `ctx.save_image` now DEFERS its encode +
+C2PA stamp + upload to the finalize tail: the executor releases the GPU permit
+at handler return (as it always did), then drains the deferred outputs, so the
+webp encode (~250ms for a 1024^2 frame, ~1.1s for 1328^2 at q95) and the upload
+run while the next request is already denoising. Previously they ran inside the
+handler, holding the permit — `finalize_wall_ms` was 0 on every image endpoint.
+
+- Why deferral and not a terminal marker: th#1107's
+  `_release_gpu_slot_for_finalize` is terminal and once-only, so it could not be
+  copied onto `save_image` — endpoints save mid-pipeline and in N-image loops,
+  and the first of N saves would have freed the permit with GPU work still to
+  come. The terminality signal already existed: the handler's RETURN. `save_image`
+  releases nothing; the executor's existing post-handler release is the seam.
+- Safety, by construction: pixels are SNAPSHOTTED at save (`image.copy()`, ~2ms
+  against a ~250ms encode) so mutate-after-save cannot change the upload;
+  reading a bytes field (`size_bytes`, `sha256`, `inline_bytes`, ...) inside the
+  handler forces the encode inline (correct, just not overlapped, and logged);
+  the drain runs before the OK result is built, so a failing encode fails the
+  request instead of shipping a hollow asset. Format validation and the ref's
+  extension stay EAGER (a bad `format=` still raises at the call).
+- Not armed for streaming handlers (they serialize items mid-handler), CLI runs
+  or endpoint unit tests — those stay exactly as they were.
+- th#1111: the stage window now covers the tail, so `image_encode`/
+  `credential_stamp`/`upload` land in `total.tail` and the map still closes
+  exactly against `runtime_ms`. `FINALIZE_OVERLAP` gained `handoff=handler|
+  executor`; `runtime_ms` is unchanged in meaning (the same work, reordered).
+- New: `gen_worker.io.image_format(format) -> (PIL format, extension)`.
+
 ## 0.61.0 (2026-07-25) — pgw#654: the objective/distilled vocabulary train (v2.1)
 
 **HARD CUT on the v2 vocabulary — the wave-1 endpoints (sdxl, z-image,

@@ -531,6 +531,37 @@ def flush_memory() -> None:
         pass
 
 
+async def aflush_memory(*, collect: bool = True, reset_peak: bool = False) -> None:
+    """Async twin of :func:`flush_memory` for the executor's teardown paths
+    (pgw#657 — three hand-rolled copies of this lived inline).
+
+    Both steps are blocking C calls (a full gc pass over a torn-down pipeline
+    is seconds), so each rides ``asyncio.to_thread`` — that, not the body, is
+    why this could not simply call ``flush_memory``.
+
+    ``reset_peak`` defaults FALSE and the executor never sets it: pgw#652's
+    activation learning reads ``max_memory_allocated`` per request, so a
+    teardown that quietly reset the peak would zero the measurement the
+    admission ladder is built on.
+    """
+    import asyncio
+
+    if collect:
+        await asyncio.to_thread(gc.collect)
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 — torch-free installs (cozy-local CLI)
+        return
+    if not torch.cuda.is_available():
+        return
+    try:
+        await asyncio.to_thread(torch.cuda.empty_cache)
+        if reset_peak:
+            await asyncio.to_thread(torch.cuda.reset_peak_memory_stats)
+    except Exception:
+        _LOG.debug("aflush_memory: CUDA cache flush failed", exc_info=True)
+
+
 def release_unused_pinned_host_cache() -> int:
     """Return unused PyTorch pinned-host blocks to the OS, best effort.
 
@@ -1227,6 +1258,7 @@ __all__ = [
     "effective_vram_requirement_gb",
     "get_available_ram_gb",
     "get_total_ram_gb",
+    "aflush_memory",
     "flush_memory",
     "release_unused_pinned_host_cache",
 ]

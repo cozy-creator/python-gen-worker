@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
+from .writer import iter_component_tensors
 
 if TYPE_CHECKING:
     import torch
@@ -57,7 +58,6 @@ class Component:
         local to the component (e.g. ``conv_in.weight``), NOT prefixed with
         the component name.
         """
-        from .writer import iter_component_tensors
 
         yield from iter_component_tensors(self._path)
 

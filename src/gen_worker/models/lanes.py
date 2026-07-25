@@ -173,6 +173,7 @@ def is_w8a8_flavor(token: str) -> bool:
 def lane_of_binding(flavor: str, storage_dtype: str, compiled: bool) -> Lane:
     """The concrete lane a (flavor, cast/storage_dtype) binding executes as —
     the twin of tensorhub's ``LaneOfResolution``."""
+    # cycle: ladder imports lanes at module top
     from .ladder import (
         CLASS_FP8,
         CLASS_NVFP4_W4A4,

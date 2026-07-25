@@ -248,7 +248,6 @@ def _download_one_file_sync(
 
 def fsync_file(path: Path) -> None:
     """Force a file's data to stable storage (read-only fd works on Linux)."""
-    import os
 
     try:
         fd = os.open(path, os.O_RDONLY)
@@ -264,7 +263,6 @@ def fsync_file(path: Path) -> None:
 
 def fsync_dir(path: Path) -> None:
     """Persist a directory entry (the rename itself) to stable storage."""
-    import os
 
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))

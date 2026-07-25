@@ -37,6 +37,7 @@ from ..request_context import (
     RequestContext,
     TrainingContext,
 )
+from ..models.cache_paths import tensorhub_cas_dir
 
 
 _LOCAL_OUTPUT_DIR_NAME = ".gen-worker-run"
@@ -148,7 +149,6 @@ class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
         # Local stub: look in the tensorhub CAS for a matching snapshot. If
         # nothing's there we can't materialize — surface a typed error so
         # the tenant adjusts (run without --offline first, or seed the CAS).
-        from ..models.cache_paths import tensorhub_cas_dir
         d = (digest or "").strip()
         if not d:
             raise ValueError("materialize_blob: empty digest")
@@ -171,7 +171,6 @@ class LocalDatasetContext(LocalRequestContextMixin, DatasetContext):
 
     def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
         # Same fallback as ConversionContext.
-        from ..models.cache_paths import tensorhub_cas_dir
         d = (digest or "").strip()
         if not d:
             raise ValueError("materialize_blob: empty digest")

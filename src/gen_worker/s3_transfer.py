@@ -11,6 +11,7 @@ from typing import Any, Mapping, Optional
 
 from .api.errors import ArtifactTransferError
 from .presigned_upload import blake3_hash_file
+from .models.cozy_cas import fsync_dir, fsync_file
 
 _MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
 _MULTIPART_MAX_WORKERS = 10
@@ -174,7 +175,6 @@ def download_file_with_grant(
         )
     # Durable atomic finalize (gw#408): see cozy_cas — data must hit stable
     # storage before the rename, or a pod hard-kill persists a truncated blob.
-    from .models.cozy_cas import fsync_dir, fsync_file
 
     fsync_file(tmp)
     os.replace(tmp, dest)

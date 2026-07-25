@@ -23,21 +23,77 @@ vs ``memory.peak``, and the ``memory.events`` ``oom_kill`` counter delta — so
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+logger = logging.getLogger(__name__)
+
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
 _PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+_PROC_MOUNTS = Path("/proc/mounts")
 _GIB = 1024 ** 3
 
-# Default location of the boot record. Container-local and restart-persistent:
-# RunPod restarts the container in place, so this file outlives the death.
-BOOT_RECORD_PATH = Path(
-    os.environ.get("GEN_WORKER_BOOT_RECORD", "/tmp/gen-worker-boot-record.json")
-)
+# Filesystems whose contents die with the container's memory — i.e. exactly
+# the death this record exists to report (pgw#657).
+_VOLATILE_FSTYPES = {"tmpfs", "ramfs"}
+
+_BOOT_RECORD_NAME = "gen-worker-boot-record.json"
+
+
+def _fstype_for(path: Path, mounts: Path = _PROC_MOUNTS) -> str:
+    """fstype of the longest mount point that is a prefix of ``path``.
+    Empty string when /proc/mounts is unreadable (non-Linux, sandboxes)."""
+    try:
+        lines = mounts.read_text().splitlines()
+    except OSError:
+        return ""
+    target = os.path.abspath(str(path))
+    best, best_type = "", ""
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        point, fstype = parts[1].replace("\\040", " "), parts[2]
+        if (target == point or target.startswith(point.rstrip("/") + "/")) and (
+            len(point) > len(best)
+        ):
+            best, best_type = point, fstype
+    return best_type
+
+
+def boot_record_is_volatile(path: Path, mounts: Path = _PROC_MOUNTS) -> bool:
+    """Whether the record's carrier is wiped by the very death it instruments.
+
+    pgw#657: the record used to be unconditionally ``/tmp``, which on many
+    container images is tmpfs — RAM. A cgroup OOM kill (the headline case this
+    module reports) frees that RAM, so the evidence dies with the process and
+    the next boot finds nothing, indistinguishable from "no death happened".
+    """
+    probe = path if path.exists() else path.parent
+    return _fstype_for(probe, mounts) in _VOLATILE_FSTYPES
+
+
+def _default_boot_record_path() -> Path:
+    """Prefer a DURABLE carrier. ``GEN_WORKER_BOOT_RECORD`` wins; otherwise the
+    model-cache volume (a real RunPod disk) when it is not itself volatile;
+    ``/tmp`` only as the last resort, and then :func:`write_boot_record` says
+    so loudly rather than pretending the record is durable."""
+    explicit = os.environ.get("GEN_WORKER_BOOT_RECORD", "").strip()
+    if explicit:
+        return Path(explicit)
+    cache = os.environ.get("TENSORHUB_CACHE_DIR", "").strip()
+    if cache:
+        candidate = Path(cache) / _BOOT_RECORD_NAME
+        if not boot_record_is_volatile(candidate):
+            return candidate
+    return Path("/tmp") / _BOOT_RECORD_NAME
+
+
+BOOT_RECORD_PATH = _default_boot_record_path()
 
 
 def _cgroup_nodes(
@@ -296,11 +352,15 @@ def format_detail(
 
 def write_boot_record(path: Path = BOOT_RECORD_PATH, **extra: Any) -> None:
     """Stamp this boot: pid, time, and the OOM counter to diff against."""
+    volatile = boot_record_is_volatile(path)
     record = {
         "pid": os.getpid(),
         "boot_unix": time.time(),
         "oom_kill_at_boot": oom_kill_count(),
         "limits": container_limits(),
+        # Carried IN the record so a reader can tell "the pod did not die"
+        # from "the evidence was on RAM and died with it" (pgw#657).
+        "carrier_volatile": volatile,
     }
     record.update(extra)
     try:
@@ -308,6 +368,14 @@ def write_boot_record(path: Path = BOOT_RECORD_PATH, **extra: Any) -> None:
         path.write_text(json.dumps(record, default=str))
     except OSError:
         pass
+    if volatile:
+        logger.warning(
+            "POSTMORTEM CARRIER IS VOLATILE: boot record at %s lives on %s — a "
+            "cgroup OOM kill frees it, so the death this record exists to report "
+            "will look like no death at all. Point GEN_WORKER_BOOT_RECORD at a "
+            "real volume (pgw#657).",
+            path, _fstype_for(path if path.exists() else path.parent) or "an unknown fs",
+        )
 
 
 def clear_boot_record(path: Path = BOOT_RECORD_PATH) -> None:
@@ -365,6 +433,7 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
 
 __all__ = [
     "BOOT_RECORD_PATH",
+    "boot_record_is_volatile",
     "clear_boot_record",
     "container_limits",
     "cpu_quota_cores",

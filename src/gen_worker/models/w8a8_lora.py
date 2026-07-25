@@ -38,6 +38,8 @@ import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..api.errors import RefCompatibilitySurprise, ValidationError
+from .w8a8 import fp8_scaled_linear_class
+import inspect
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +104,6 @@ def branch_modules(model: Any) -> Dict[str, Any]:
     branch targets — adapters that name them fail loud in
     :func:`map_adapter`."""
     import torch.nn as nn
-
-    from .w8a8 import fp8_scaled_linear_class
 
     fp8_cls = fp8_scaled_linear_class()
     return {
@@ -334,7 +334,6 @@ _WRAP_ATTR = "_cozy_lora_wrapped"
 
 
 def _is_scaled_linear(mod: Any) -> bool:
-    from .w8a8 import fp8_scaled_linear_class
 
     return isinstance(mod, fp8_scaled_linear_class())
 
@@ -664,7 +663,6 @@ def normalize_adapter_state_dict(
     before. sdxl-class converters receive ``unet_config`` for SGM block
     remapping of kohya adapters. Returned ``network_alphas`` fold back in as
     ``<module>.alpha`` entries."""
-    import inspect
 
     fn = getattr(type(pipe), "lora_state_dict", None)
     if fn is None:

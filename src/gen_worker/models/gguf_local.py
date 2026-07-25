@@ -24,6 +24,13 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from .hub_client import WorkerResolvedRepo
 from .refs import TensorhubRef
+from .loading import FP8_STORAGE_FIT_FACTOR
+from .ladder import (placement_for_flavor, placement_from_metadata, w8a8_excluded_for_family)
+from .lanes import is_w8a8_flavor
+import asyncio
+import time
+from .cozy_snapshot import ensure_snapshot_async
+from .errors import UrlExpiredError
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +102,9 @@ def select_gguf(
     base_gb = float(resolved.size_bytes or sum(f.size_bytes for f in files)) / 1e9
     # The regular loader can keep the base resident or cast its denoiser to
     # fp8 at load. GGUF is the rung after those, never a preference over them.
-    from .loading import FP8_STORAGE_FIT_FACTOR
 
     if base_gb <= free or base_gb * FP8_STORAGE_FIT_FACTOR <= free:
         return None
-
-    from .ladder import (
-        placement_for_flavor,
-        placement_from_metadata,
-        w8a8_excluded_for_family,
-    )
-    from .lanes import is_w8a8_flavor
 
     # th#964: w8a8 rows of conv-UNet families are AUTO-ineligible — they
     # must not count as a fitting native rung that suppresses the GGUF pick.
@@ -257,11 +256,6 @@ def fetch_gguf_snapshot(
     ref. Mirrors ``_fetch_tensorhub_snapshot``'s contract (progress events,
     one re-resolve retry on presigned-URL expiry); returns the snapshot dir.
     """
-    import asyncio
-    import time
-
-    from .cozy_snapshot import ensure_snapshot_async
-    from .errors import UrlExpiredError
 
     if resolve is not None:
         resolver = resolve
