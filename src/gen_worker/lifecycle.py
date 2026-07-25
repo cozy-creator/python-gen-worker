@@ -991,7 +991,21 @@ class Lifecycle:
                 try:
                     await self.executor.store.ensure_local(ref)
                 except Exception as exc:
-                    logger.error("startup prefetch of %s failed terminally: %s", ref, exc)
+                    # pgw#655: this used to log and walk on to READY with an
+                    # unmaterialized model, so the failure resurfaced as a
+                    # per-job load failure on paid GPU. `_materialize_local`
+                    # has already retried the transient classes with backoff;
+                    # reaching here means the model is not coming, so the
+                    # functions that need it go unavailable NOW and the hub
+                    # stops routing to them.
+                    gated = self.executor.mark_ref_unmaterializable(
+                        ref, f"{type(exc).__name__}: {exc}")
+                    logger.error(
+                        "startup prefetch of %s failed terminally: %s — gating %s "
+                        "(pgw#655: a worker never advertises a function whose "
+                        "model is absent)",
+                        ref, exc, ", ".join(gated) or "no function",
+                    )
 
         await self.set_phase(pb.WORKER_PHASE_LOADING_PIPELINES)
         awaiting_hub: Dict[str, List[str]] = {}

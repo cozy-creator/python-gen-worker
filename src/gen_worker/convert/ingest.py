@@ -22,7 +22,6 @@ import struct
 
 from gen_worker.api.errors import ValidationError
 from gen_worker.models.download import (
-    _HF_DOWNLOAD_MAX_SECONDS,
     _HF_DOWNLOAD_STALL_TIMEOUT_S,
     _civitai_select_files,
     _run_with_stall_watchdog,
@@ -394,7 +393,6 @@ def _snapshot_download_with_retries(
                 progress_callback=progress,
                 total_hint=total_hint,
                 stall_timeout=_HF_DOWNLOAD_STALL_TIMEOUT_S,
-                wall_clock_max=_HF_DOWNLOAD_MAX_SECONDS,
             )
             return
         except (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,

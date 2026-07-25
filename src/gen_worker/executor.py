@@ -2051,6 +2051,32 @@ class _WarmupEvidence:
     functions_by_object: Dict[int, set[str]] = dc_field(default_factory=dict)
 
 
+# gw#661: setup failures whose contract is "will be re-attempted". These are
+# reported to the hub as a still-RUNNING activity, not the FAILED terminal —
+# the hub reads FAILED as "no progress here" (th#1160) and condemns the pod.
+_TRANSIENT_SETUP_ERRORS = (InsufficientDiskError, RetryableError, MissingSnapshotError)
+
+# Consecutive transient losses on ONE record before the condition is this
+# function's terminal truth. Each attempt already carries its own internal
+# wait (the lane gate polls VRAM headroom for 45s), so this is minutes of
+# real patience, not a tight spin.
+MAX_TRANSIENT_SETUP_ATTEMPTS = 5
+
+
+def _setup_error_will_retry(exc: BaseException) -> bool:
+    """Whether this setup loss is contractually re-attempted (gw#661).
+
+    CompiledLaneUnavailableError subclasses RetryableError but the worker
+    DOES give up on it — it disables every handler requiring the unproven
+    lane — so it is a failure, not a retry.
+    """
+    if not isinstance(exc, _TRANSIENT_SETUP_ERRORS):
+        return False
+    from .compile_cache import CompiledLaneUnavailableError
+
+    return not isinstance(exc, CompiledLaneUnavailableError)
+
+
 @dataclass
 class _ClassRecord:
     cls: type
@@ -2099,6 +2125,8 @@ class _ClassRecord:
     # IDs are minted after successful setup and cleared before vacate; they do
     # not derive from mutable refs, authored specs, or object memory addresses.
     compile_targets: Dict[str, _CompileTargetRecord] = dc_field(default_factory=dict)
+    # gw#661: consecutive will-retry setup losses; reset by any success.
+    transient_setup_failures: int = 0
 
 
 @dataclass
@@ -4335,7 +4363,23 @@ class Executor:
                         intent_id=intent_id,
                     )
             except BaseException as exc:
-                act.failed(exc)
+                # gw#661: a will-retry condition is not a failure. Only
+                # exhausting the budget is, and then the hub must see it.
+                will_retry = _setup_error_will_retry(exc)
+                exhausted = False
+                if will_retry:
+                    rec.transient_setup_failures += 1
+                    exhausted = (
+                        rec.transient_setup_failures >= MAX_TRANSIENT_SETUP_ATTEMPTS
+                    )
+                if will_retry and not exhausted:
+                    act.retrying(
+                        exc,
+                        rec.transient_setup_failures,
+                        MAX_TRANSIENT_SETUP_ATTEMPTS,
+                    )
+                else:
+                    act.failed(exc)
                 # Setup is a transaction: endpoint construction, tenant
                 # setup/warmup, residency registration, and compile-target
                 # publication either all reach READY or all ownership is
@@ -4371,7 +4415,7 @@ class Executor:
                 if isinstance(exc, CompiledLaneUnavailableError):
                     self._mark_compile_setup_unavailable(rec, spec, str(exc))
                     self._on_state_change()
-                self._mark_setup_failed(rec, exc)
+                self._mark_setup_failed(rec, exc, exhausted=exhausted)
                 raise
             if rec.failed is not None:
                 # Recovery (desired-state retry succeeded): lift the
@@ -4379,6 +4423,7 @@ class Executor:
                 rec.failed = None
                 for s in rec.specs:
                     self.unavailable.pop(s.name, None)
+            rec.transient_setup_failures = 0
             rec.instance = instance
             rec.ready = True
             act.completed()
@@ -4637,13 +4682,21 @@ class Executor:
 
             await _to_thread_complete(_consume)
 
-    def _mark_setup_failed(self, rec: _ClassRecord, exc: BaseException) -> None:
-        if isinstance(exc, (InsufficientDiskError, RetryableError, MissingSnapshotError)):
+    def _mark_setup_failed(
+        self, rec: _ClassRecord, exc: BaseException, *, exhausted: bool = False,
+    ) -> None:
+        if isinstance(exc, _TRANSIENT_SETUP_ERRORS) and not exhausted:
             # Transient pressure (disk GC frees space / warm-tier RAM drains /
             # the hub re-mints a snapshot): fail the op RETRYABLE, never
             # disable the function.
             return
-        if isinstance(exc, HardwareUnmetError):
+        if isinstance(exc, _TRANSIENT_SETUP_ERRORS):
+            # gw#661: the budget is spent. "Retryable" described the class of
+            # error, not an infinite entitlement — a condition that survives
+            # every attempt is this function's terminal truth (th#1159's
+            # genuinely-unfittable VRAM lane is the case this exists for).
+            reason, axes = "retry_exhausted", {}
+        elif isinstance(exc, HardwareUnmetError):
             reason = getattr(exc, "reason", "hardware_unmet")
             axes = {str(k): str(v) for k, v in (exc.axes() or {}).items()}
         else:
@@ -4653,6 +4706,39 @@ class Executor:
         for s in rec.specs:
             self.unavailable[s.name] = (reason, detail, axes)
         self._on_state_change()
+
+    def mark_ref_unmaterializable(self, ref: str, detail: str) -> List[str]:
+        """pgw#655: a model this worker fetches ITSELF never landed — gate
+        every function that statically binds it.
+
+        The alternative (log and continue) is what produced the live wedge:
+        the worker walked on to READY, advertised the function, and the hub
+        dispatched paid GPU jobs that each re-discovered the missing model as
+        a per-request load failure. A worker never advertises a function whose
+        model is absent. This is deliberately NOT a process kill — a sibling
+        function whose model DID land keeps serving, exactly as a hardware
+        gate leaves the rest of the endpoint alive.
+
+        Hub-resolved slots are excluded: their refs arrive by delivery
+        (pgw#532), so the worker never prefetches them and their absence at
+        boot is not a failure.
+        """
+        gated: List[str] = []
+        for name, spec in self.specs.items():
+            bound = any(
+                ref in _binding_wire_refs(binding)
+                for slot, binding in spec.models.items()
+                if slot not in spec.slots
+            )
+            if not bound:
+                continue
+            self.unavailable[name] = (
+                "model_unavailable", _sanitize(detail), {"ref": ref},
+            )
+            gated.append(name)
+        if gated:
+            self._on_state_change()
+        return sorted(gated)
 
     @staticmethod
     def _record_has_setup_ownership(rec: _ClassRecord) -> bool:
