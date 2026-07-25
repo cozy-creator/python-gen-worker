@@ -1,27 +1,45 @@
-"""Boot-time synthetic warmup planning (gw#470).
+"""Boot-time warm-plan DERIVATION (gw#470 -> pgw#654).
 
 First-call tax on a fresh worker is EAGER cost — allocator-pool growth to
 the activation peak plus cuBLAS/cuDNN heuristic selection (measured 216s vs
 63s warm on LTX/H100 pre-expandable-segments; 0-152s host lottery on B200).
-The worker therefore runs one synthetic request per GPU inference function
-after ``setup()``, BEFORE the function reports READY. Output is discarded
-(never billing/outputs/CAS); a failure is a load failure (loud).
+The worker runs synthetic requests per GPU inference function after
+``setup()``, BEFORE the function reports READY. Output is discarded (never
+billing/outputs/CAS); a failure is a load failure (loud).
 
-Author surface, smallest first (Paul ruling 2026-07-16):
+pgw#654: the warm plan is DERIVED, never developer-written — hand-written
+warmup payloads were a coverage CLAIM that drifts (add a guidance class,
+forget warmup, ship an untraced graph that compiles at request time).
+Derivation per handler:
 
-1. DEFAULT — nothing. The payload is synthesized from the handler's typed
-   msgspec schema: defaulted fields keep their defaults, required ``str``
-   fields fill ``"warmup"``, required ``ImageAsset``/``AudioAsset`` fields
-   get a tiny generated PNG/WAV, nested structs and lists synthesize
-   recursively. A function whose schema cannot synthesize (e.g. required
-   video input) is skipped with a logged reason.
-2. ``@endpoint(warmup={"method": {...}})`` — declarative per-method payload
-   overriding synthesis (e.g. to warm the largest preset when the schema
-   default is not the allocator peak). ``{"method": None}`` skips a method.
-3. A class-defined ``warmup()`` method wins outright (fully custom — the
-   LTX two-stage synthetic).
-4. ``@endpoint(warmup=NoWarmup("reason"))`` — class-level opt-out, reason
-   recorded in code. Never an env knob.
+1. Defaulted payload fields keep their defaults (post-th#1116 those are
+   neutral schema values — deterministic).
+2. ``CompileAxis`` fields take each class's ``warm=`` representative,
+   CROSS-PRODUCTED — that product IS the graph set, so "fully warmed?" is
+   computable.
+3. Required no-default fields synthesize neutral values by type: ``str``
+   fills ``"warmup"`` (content never affects the graph; ``text_len`` pins
+   the traced shape), ``ImageAsset``/``AudioAsset`` get a tiny generated
+   PNG/WAV, nested structs/lists recurse. A handler whose schema cannot
+   synthesize (e.g. required video input) is skipped with a logged reason.
+4. ``@worker_function(warm={...}, warm_reason=...)`` overrides a NON-AXIS
+   field that genuinely changes tracing (validated at walk time; needing
+   it usually means the field should be an axis).
+
+Warm RUNS are per GRAPH CLASS, not per function: the plan dedupes the
+cross-product ACROSS sibling functions of one class via the class-level
+axis union (pgw#647 gap #1's fix shape) — a distilled sibling with no
+guidance field maps to the guidance class containing 0 (no wire guidance
+== CFG off), so generate's cfg_off trace covers turbo's.
+
+Handlers SHOULD cheapen non-graph work on ``ctx.boot_warmup`` (e.g.
+``steps = 1 if ctx.boot_warmup else steps``): the allocator peak is
+shape-driven and the traced graph is step-count-independent.
+
+Remaining class-level surfaces: a class-defined ``warmup()`` method wins
+outright (fully custom — the LTX two-stage synthetic);
+``@endpoint(warmup=NoWarmup("reason"))`` is the recorded opt-out. Payload
+dicts on the decorator are a decoration-time error.
 
 A GPU inference class with NO warmable path and no opt-out fails at spec
 construction time (discovery walk / CI), not at first request.
@@ -30,6 +48,7 @@ construction time (discovery walk / CI), not at first request.
 from __future__ import annotations
 
 import enum
+import itertools
 import os
 import struct
 import types as py_types
@@ -37,10 +56,11 @@ import typing
 import wave
 import zlib
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import msgspec
 
+from .api.compile_axis import PayloadAxis
 from .api.decorators import EndpointDecl, NoWarmup
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 
@@ -246,11 +266,16 @@ def media_variants(
 
 @dataclass(frozen=True)
 class WarmupJob:
-    """One planned synthetic invocation: ``build(tmp_dir)`` -> payload."""
+    """One planned synthetic invocation: ``build(tmp_dir)`` -> payload.
+
+    ``graph_key`` is the class-scoped graph identity this run traces (the
+    dedup key across sibling functions); ``declared`` is True when a
+    ``@worker_function(warm=...)`` override applied."""
 
     spec: "EndpointSpec"
     build: _Factory
-    declared: bool  # True when the payload came from `warmup=`
+    declared: bool
+    graph_key: Tuple = ()
 
 
 @dataclass(frozen=True)
@@ -259,70 +284,73 @@ class WarmupSkip:
     reason: str
 
 
-def _declared_factory(owner: str, attr: str, payload_type: type, value: Any) -> _Factory:
-    """Validate a declared warmup payload against the handler's schema NOW
-    (decoration/walk time), returning a factory that rebuilds it fresh."""
-    if isinstance(value, payload_type):
-        builtins_value = msgspec.to_builtins(value)
-    elif isinstance(value, Mapping):
-        builtins_value = dict(value)
-    else:
-        raise TypeError(
-            f"{owner}: warmup[{attr!r}] must be a dict or "
-            f"{payload_type.__name__} instance, got {type(value).__name__}"
-        )
-    try:
-        msgspec.convert(builtins_value, type=payload_type, strict=False)
-    except msgspec.ValidationError as exc:
-        raise TypeError(
-            f"{owner}: warmup[{attr!r}] is not a valid "
-            f"{payload_type.__name__}: {exc}"
-        ) from exc
-    return lambda d: msgspec.convert(builtins_value, type=payload_type, strict=False)
+# Guidance-class axis fields (mirrors api.compile_axis.warm_guidance_values):
+# a sibling function whose payload LACKS the field cannot be asked for CFG,
+# so its graph falls in the class containing 0 — that mapping is what lets
+# generate's cfg_off trace cover turbo's (pgw#647 gap #1).
+_GUIDANCE_FIELDS = ("guidance_scale", "guidance", "cfg", "true_cfg_scale")
 
 
-def _plan_pairs(
-    owner: str,
-    pairs: Sequence[Tuple[str, type]],
-    decl_warmup: Any,
-    *,
-    known_attrs: Optional[Iterable[str]] = None,
-) -> Tuple[List[Tuple[str, _Factory, bool]], List[Tuple[str, str]]]:
-    """Core planner over (attr_name, payload_type) pairs ->
-    (jobs=[(attr, factory, declared)], skips=[(attr, reason)]).
+def _axis_combos(
+    axes: Sequence[PayloadAxis],
+) -> List[Tuple[Tuple[str, str, Any], ...]]:
+    """Cross-product of the axes' classes: each combo is a tuple of
+    ``(field, class_name, warm_value)`` rows — the derived graph set."""
+    if not axes:
+        return [()]
+    per_axis = [
+        [(a.field, n, w) for n, w in zip(a.class_names, a.warm_values)]
+        for a in axes
+    ]
+    return [tuple(combo) for combo in itertools.product(*per_axis)]
 
-    ``pairs`` is the active instance group to plan. ``known_attrs`` is the
-    class-wide handler vocabulary used only to validate ``warmup=`` keys.
-    They differ after a dynamic Slot pick splits one handler off from its
-    authored siblings into a distinct instance group.
-    """
-    if isinstance(decl_warmup, NoWarmup):
-        return [], [(a, f"NoWarmup: {decl_warmup.reason}") for a, _ in pairs]
-    declared: Mapping[str, Any] = decl_warmup if isinstance(decl_warmup, Mapping) else {}
-    pair_attrs = {a for a, _ in pairs}
-    known = set(known_attrs) if known_attrs is not None else pair_attrs
-    unknown = set(declared) - known
-    if unknown:
-        raise TypeError(
-            f"{owner}: warmup= names unknown or non-GPU handler method(s) "
-            f"{sorted(unknown)!r} (known: {sorted(known)!r})"
-        )
-    jobs: List[Tuple[str, _Factory, bool]] = []
-    skips: List[Tuple[str, str]] = []
-    for attr, payload_type in pairs:
-        if attr in declared:
-            value = declared[attr]
-            if value is None:
-                skips.append((attr, "declared skip (warmup={...: None})"))
-                continue
-            jobs.append((attr, _declared_factory(owner, attr, payload_type, value), True))
-            continue
-        factory, reason = synthesize_factory(payload_type)
-        if factory is None:
-            skips.append((attr, f"not auto-synthesizable: {reason}"))
+
+def _union_axes(specs: Sequence["EndpointSpec"]) -> List[Tuple[str, PayloadAxis]]:
+    """Ordered (field, representative axis) union across sibling specs."""
+    out: List[Tuple[str, PayloadAxis]] = []
+    seen: set = set()
+    for s in specs:
+        for a in getattr(s, "payload_axes", ()) or ():
+            if a.field not in seen:
+                seen.add(a.field)
+                out.append((a.field, a))
+    return out
+
+
+def _combo_signature(
+    spec: "EndpointSpec",
+    combo: Tuple[Tuple[str, str, Any], ...],
+    union_axes: Sequence[Tuple[str, PayloadAxis]],
+) -> Tuple:
+    own = {f: c for f, c, _ in combo}
+    sig: List[Tuple[str, Any]] = []
+    for field, axis in union_axes:
+        if field in own:
+            sig.append((field, own[field]))
+        elif field in _GUIDANCE_FIELDS:
+            cls = axis.classify(0.0)
+            sig.append((field, cls if cls is not None else "absent"))
         else:
-            jobs.append((attr, factory, False))
-    return jobs, skips
+            sig.append((field, "absent"))
+    sig.append(("__text_len__", getattr(spec, "text_len", None)))
+    return tuple(sig)
+
+
+def _job_factory(
+    base: _Factory,
+    combo: Tuple[Tuple[str, str, Any], ...],
+    overrides: Any,
+) -> _Factory:
+    changes = {f: w for f, _, w in combo}
+    changes.update(dict(overrides or {}))
+
+    def build(dir_path: str) -> Any:
+        payload = base(dir_path)
+        if not changes:
+            return payload
+        return msgspec.structs.replace(payload, **changes)
+
+    return build
 
 
 def plan(
@@ -331,42 +359,43 @@ def plan(
     decl_warmup: Any = None,
     has_warmup_method: bool = False,
 ) -> Tuple[List[WarmupJob], List[WarmupSkip]]:
-    """Warmup plan for the GPU inference handlers of ONE instance group.
-
-    Declared ``warmup=`` payloads override synthesis per method; methods the
-    mapping does not name still auto-synthesize. The declaration belongs to
-    the class, while this plan may cover only one dynamically rebound subset
-    of its handlers. Raises TypeError for declarations that name methods
-    unknown to the full class or fail schema validation.
-    """
+    """The DERIVED warm plan for the GPU inference handlers of ONE instance
+    group (pgw#654): per handler, the cross-product of its axis classes'
+    warm representatives over a synthesized base payload, deduped ACROSS
+    sibling functions per graph class (class-level axis union — one trace
+    per graph, generate's cfg_off covering turbo's). Per-function
+    ``@worker_function(warm=...)`` overrides apply to non-axis fields."""
     eligible = [
         s for s in specs
         if s.cls is not None and s.kind == "inference" and s.needs_gpu
     ]
     if has_warmup_method or not eligible:
         return [], []
-    cls0 = eligible[0].cls
-    assert cls0 is not None  # eligible filters cls None
-    owner = cls0.__name__
-    by_attr = {s.attr_name: s for s in eligible}
-    # A request-time Slot pick can split one handler away from its authored
-    # siblings by changing instance_key. Validate the class-level declaration
-    # against every authored handler, but apply it only to this active group.
-    # Otherwise a valid explicit skip for a sibling (for example SDXL Turbo)
-    # becomes an "unknown method" setup fatal when ordinary generate rebinds.
-    known_attrs = {
-        attr for attr, _method in (
-            getattr(cls0, "__gen_worker_handlers__", []) or []
-        )
-    } | set(by_attr)
-    raw_jobs, raw_skips = _plan_pairs(
-        owner,
-        [(s.attr_name, s.payload_type) for s in eligible],
-        decl_warmup,
-        known_attrs=known_attrs,
-    )
-    jobs = [WarmupJob(by_attr[a], f, d) for a, f, d in raw_jobs]
-    skips = [WarmupSkip(by_attr[a], r) for a, r in raw_skips]
+    if isinstance(decl_warmup, NoWarmup):
+        return [], [
+            WarmupSkip(s, f"NoWarmup: {decl_warmup.reason}") for s in eligible
+        ]
+    union_axes = _union_axes(eligible)
+    jobs: List[WarmupJob] = []
+    skips: List[WarmupSkip] = []
+    seen_graphs: set = set()
+    for s in eligible:
+        base, reason = synthesize_factory(s.payload_type)
+        if base is None:
+            skips.append(WarmupSkip(s, f"not auto-synthesizable: {reason}"))
+            continue
+        overrides = dict(getattr(s, "warm_overrides", {}) or {})
+        for combo in _axis_combos(tuple(getattr(s, "payload_axes", ()) or ())):
+            sig = _combo_signature(s, combo, union_axes)
+            if sig in seen_graphs:
+                continue
+            seen_graphs.add(sig)
+            jobs.append(WarmupJob(
+                spec=s,
+                build=_job_factory(base, combo, overrides),
+                declared=bool(overrides),
+                graph_key=sig,
+            ))
     return jobs, skips
 
 
@@ -393,11 +422,15 @@ def validate_at_decoration(cls: type, decl: EndpointDecl) -> None:
         if not (isinstance(pt, type) and issubclass(pt, msgspec.Struct)):
             return  # walk time raises its own, clearer error
         pairs.append((attr, pt))
-    jobs, skips = _plan_pairs(cls.__name__, pairs, decl.warmup)
-    # A present `warmup=` mapping is itself an explicit in-code decision
-    # (per-method None = declared skip) — enforcement targets only classes
-    # whose author never engaged with warmup at all.
-    if pairs and not jobs and decl.warmup is None:
+    skips: List[Tuple[str, str]] = []
+    warmable = False
+    for attr, pt in pairs:
+        factory, reason = synthesize_factory(pt)
+        if factory is None:
+            skips.append((attr, f"not auto-synthesizable: {reason}"))
+        else:
+            warmable = True
+    if pairs and not warmable:
         _raise_unwarmable(cls.__name__, skips)
 
 
@@ -405,16 +438,17 @@ def _raise_unwarmable(owner: str, skips: Sequence[Tuple[str, str]]) -> None:
     detail = "; ".join(f"{a}: {r}" for a, r in skips) or "no handlers"
     raise TypeError(
         f"@endpoint class {owner!r}: boot warmup is default-on for GPU "
-        f"inference endpoints but no handler is warmable ({detail}). Declare "
-        "warmup={method: payload} with a self-contained payload, define a "
-        "warmup() method, or opt out with warmup=NoWarmup(\"reason\")."
+        f"inference endpoints but no handler is warmable ({detail}). The "
+        "warm plan is DERIVED (pgw#654) — make at least one handler's "
+        "payload synthesizable, define a custom warmup() method, or opt "
+        "out with warmup=NoWarmup(\"reason\")."
     )
 
 
 def validate_class_warmup(cls: type, decl: EndpointDecl, specs: List["EndpointSpec"]) -> None:
     """Spec-construction-time enforcement: a GPU inference class must have a
-    warmable path — a custom ``warmup()``, at least one auto/declared
-    warmup job, or an explicit ``NoWarmup(reason)``."""
+    warmable path — a custom ``warmup()``, at least one derivable warm job,
+    or an explicit ``NoWarmup(reason)``."""
     eligible = [
         s for s in specs
         if s.cls is not None and s.kind == "inference" and s.needs_gpu
@@ -426,6 +460,6 @@ def validate_class_warmup(cls: type, decl: EndpointDecl, specs: List["EndpointSp
     if isinstance(decl.warmup, NoWarmup):
         return
     jobs, skips = plan(specs, decl_warmup=decl.warmup, has_warmup_method=False)
-    if jobs or decl.warmup is not None:
+    if jobs:
         return
     _raise_unwarmable(cls.__name__, [(s.spec.attr_name, s.reason) for s in skips])

@@ -53,16 +53,30 @@ class RuntimeFormula:
 
     # -- declaration-time validation ------------------------------------
 
-    def validate_for_payload(self, payload_type: type, owner: str) -> None:
-        """Every payload identifier must be a numeric/bool payload field WITH
-        a declared default (the defaults are the reference payload); no
-        constant may collide with a field name."""
+    def validate_for_payload(
+        self, payload_type: type, owner: str, *,
+        defaults_type: Optional[type] = None,
+    ) -> None:
+        """Every referenced identifier must be a payload field whose
+        EFFECTIVE value is numeric: either the field carries a numeric/bool
+        wire default, or (pgw#654 gap #4) the handler's derived defaults
+        schema (``ctx: RequestContext[D]``) declares a same-named field the
+        catalog recipe resolves — the v2 ``Optional[...] = None ->
+        ctx.defaults`` pattern. No constant may collide with a field name."""
         try:
             field_map = {f.name: f for f in msgspec.structs.fields(payload_type)}
         except Exception as exc:  # not a Struct — walker validates elsewhere
             raise ValueError(
                 f"{owner}: runtime= formula needs a msgspec.Struct payload ({exc})"
             ) from exc
+        defaults_fields: set = set()
+        if defaults_type is not None:
+            try:
+                defaults_fields = {
+                    f.name for f in msgspec.structs.fields(defaults_type)
+                }
+            except Exception:
+                defaults_fields = set()
         for t in self.terms:
             if t.constant in field_map:
                 raise ValueError(
@@ -78,11 +92,19 @@ class RuntimeFormula:
             default = f.default
             if default is msgspec.NODEFAULT and f.default_factory is not msgspec.NODEFAULT:
                 default = f.default_factory()
-            if default is msgspec.NODEFAULT or not isinstance(default, _NUMERIC_TYPES):
-                raise ValueError(
-                    f"{owner}: runtime formula field {name!r} needs a numeric/bool "
-                    f"default (the defaults are the reference payload)"
-                )
+            if isinstance(default, _NUMERIC_TYPES):
+                continue
+            if name in defaults_fields:
+                # Resolved-effective evaluation: the catalog recipe
+                # (ctx.defaults.<name>) is the reference value when the wire
+                # field is omitted/None.
+                continue
+            raise ValueError(
+                f"{owner}: runtime formula field {name!r} needs a numeric/bool "
+                "wire default, or a same-named field on the handler's derived "
+                "defaults schema (the resolved recipe is the reference value "
+                "— pgw#654 gap #4)"
+            )
 
     # -- worker-side evaluation ------------------------------------------
 
@@ -101,10 +123,18 @@ class RuntimeFormula:
             out[t.key] = v
         return out
 
-    def term_values_from_struct(self, payload: Any) -> Optional[Dict[str, float]]:
+    def term_values_from_struct(
+        self, payload: Any, defaults: Any = None,
+    ) -> Optional[Dict[str, float]]:
+        """Evaluate on RESOLVED EFFECTIVE values (pgw#654 gap #4): an
+        explicit payload value wins; a ``None``/missing wire field falls
+        back to the same-named field of ``defaults`` (the catalog-resolved
+        recipe object, ``ctx.defaults``)."""
         values: Dict[str, float] = {}
         for name in self.fields:
             raw = getattr(payload, name, None)
+            if raw is None and defaults is not None:
+                raw = getattr(defaults, name, None)
             if isinstance(raw, bool):
                 values[name] = 1.0 if raw else 0.0
             elif isinstance(raw, (int, float)):

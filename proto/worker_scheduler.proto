@@ -771,6 +771,14 @@ message ModelBinding {
   // companion issue). Snapshots for these refs ride RunJob.snapshots /
   // DesiredResidency exactly like base refs. Additive: old workers ignore.
   map<string, string> components = 5;
+  // pgw#654 objective split (retires th#1017's never-landed regime field):
+  // the resolved checkpoint's hub-stamped training objective
+  // ("epsilon" | "v_prediction" | "flow"; "" = unstamped) and distillation
+  // fact. The SDK applies the objective to the per-request scheduler view
+  // and enforces the per-function @worker_function declaration as a
+  // backstop; the hub gates compatibility upstream. Additive.
+  string objective = 6;
+  bool distilled = 7;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
@@ -828,6 +836,21 @@ message JobResult {
   }
   string safe_message = 6; // sanitized client-facing error text; empty when OK
   JobMetrics metrics = 7;
+  // pgw#654 caller-visible adjustment warnings: every divergence between a
+  // requested and a served value (clamp, substitution, injection) reaches
+  // the CALLER — the hub persists these on the request record and emits
+  // them on its events stream. Adjustments warn-and-serve; catalog-LOCKED
+  // recipe fields refuse typed upstream instead.
+  repeated Adjustment adjustments = 8;
+}
+
+// One caller-visible adjustment: "guidance clamped 15 -> 10 (model
+// maximum)". Values are display-oriented strings.
+message Adjustment {
+  string field     = 1;
+  string requested = 2;
+  string applied   = 3;
+  string reason    = 4;
 }
 
 enum JobStatus {

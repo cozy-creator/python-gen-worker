@@ -181,6 +181,7 @@ class RequestContext(Generic[D]):
         loras: Optional[Dict[str, Any]] = None,
         resolved_slots: Optional[Mapping[str, "ResolvedSlot[Any]"]] = None,
         slot_errors: Optional[Mapping[str, str]] = None,
+        root_slot: str = "",
         boot_warmup: bool = False,
     ) -> None:
         self._request_id = str(request_id or "").strip()
@@ -207,6 +208,12 @@ class RequestContext(Generic[D]):
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
         self._slots = _SlotTable(resolved_slots or {}, slot_errors or {})
+        self._root_slot_name = str(root_slot or "").strip()
+        # pgw#654: caller-visible adjustment warnings — structured rows the
+        # merge/clamp layer emits whenever a requested value is modified.
+        # They ride the RESULT ENVELOPE (JobResult.adjustments) + the hub's
+        # request record/events stream; pod logs alone never reach a caller.
+        self._adjustments: List[Dict[str, str]] = []
 
         # Capability-budget gate (issue #269 back-pressure). Lazy-built from
         # the worker_capability_token's max_total_bytes + max_bytes_per_file
@@ -294,7 +301,8 @@ class RequestContext(Generic[D]):
     @property
     def slots(self) -> Mapping[str, "ResolvedSlot[Any]"]:
         """One entry per ``Slot``-declared model slot:
-        ``ctx.slots["pipeline"].ref`` / ``.defaults`` / ``.regime`` — the
+        ``ctx.slots["pipeline"].ref`` / ``.defaults`` / ``.objective`` /
+        ``.distilled`` — the
         catalog-resolved recipe decoded against the handler's derived
         config schema (SDK v2; ``ctx.defaults`` is the root-slot
         shortcut). A slot that failed resolution raises on access (not at
@@ -305,16 +313,29 @@ class RequestContext(Generic[D]):
         self,
         resolved: Mapping[str, "ResolvedSlot[Any]"],
         errors: Optional[Mapping[str, str]] = None,
+        root_slot: str = "",
     ) -> None:
         """CLI-only mutator (``gen-worker run``/``serve``): the hub-less
         resolve step runs after context construction, unlike the executor
         which has every input up front."""
         self._slots = _SlotTable(resolved, errors or {})
+        if root_slot:
+            self._root_slot_name = str(root_slot).strip()
 
-    def _root_slot(self) -> "ResolvedSlot[Any]":
-        """The root slot's resolution: the slot named "pipeline" when
-        present, else the single resolved slot."""
+    def _root_slot(self, slot: str = "") -> "ResolvedSlot[Any]":
+        """The named slot's resolution, or the ROOT slot (pgw#654 gap #7):
+        the declared ``Slot(root=True)`` when present, else the slot named
+        "pipeline", else the single resolved slot. Ambiguity RAISES — a
+        multi-slot class is already a decoration-time error unless it marks
+        a root, and handlers on non-root lanes pass ``slot=`` explicitly."""
         resolved = self._slots._resolved
+        if slot:
+            return self._slots[slot]
+        if self._root_slot_name and (
+            self._root_slot_name in resolved
+            or self._root_slot_name in self._slots._errors
+        ):
+            return self._slots[self._root_slot_name]
         if "pipeline" in resolved:
             return self._slots["pipeline"]
         if len(resolved) == 1:
@@ -325,8 +346,9 @@ class RequestContext(Generic[D]):
             return self._slots[name]
         raise ValueError(
             f"ctx has {len(resolved)} resolved slots ({sorted(resolved)}); "
-            "ctx.defaults/ctx.for_request need an unambiguous root — read "
-            "ctx.slots[name] explicitly"
+            "ctx.defaults/ctx.for_request need an unambiguous root — mark "
+            "one Slot(root=True), or pass slot=/read ctx.slots[name] "
+            "explicitly"
         )
 
     @property
@@ -335,7 +357,9 @@ class RequestContext(Generic[D]):
         typed as the handler's ``RequestContext[D]`` annotation: the
         catalog-resolved recipe (th#1116) decoded against the derived
         schema, with per-lora field overrides applied (pgw#516). Payload
-        values still win over these — that precedence is handler logic."""
+        values still win over these — that precedence is handler logic.
+        Non-root lanes of a multi-slot class read
+        ``ctx.slots[name].defaults`` explicitly."""
         d = self._root_slot().defaults
         if d is None:
             raise ValueError(
@@ -344,10 +368,52 @@ class RequestContext(Generic[D]):
             )
         return d
 
+    def adjusted(
+        self, field: str, requested: Any, applied: Any, reason: str,
+    ) -> None:
+        """Record a caller-visible ADJUSTMENT (pgw#654): the serve path
+        modified a requested value (clamp, substitution, injection). Rows
+        ride the result envelope (``JobResult.adjustments``) and the hub's
+        request record + events stream, so API consumers and UIs can show
+        e.g. "guidance clamped 15 -> 10 (model maximum)".
+
+        Boundary: adjustments WARN-AND-SERVE. A catalog-LOCKED recipe field
+        is the opposite contract — override attempts get a typed refusal
+        upstream, never a warning-carrying garbage render."""
+        self._adjustments.append({
+            "field": str(field),
+            "requested": "" if requested is None else str(requested),
+            "applied": "" if applied is None else str(applied),
+            "reason": str(reason or ""),
+        })
+
+    def clamp(
+        self,
+        field: str,
+        requested: float,
+        *,
+        lo: Optional[float] = None,
+        hi: Optional[float] = None,
+        reason: str = "",
+    ) -> float:
+        """Clamp ``requested`` into [lo, hi] and, when that CHANGES the
+        value, record the adjustment (:meth:`adjusted`) — the one merge/
+        clamp helper endpoints use so caller-visible coverage cannot drift
+        per endpoint."""
+        applied = float(requested)
+        if lo is not None and applied < lo:
+            applied = float(lo)
+        if hi is not None and applied > hi:
+            applied = float(hi)
+        if applied != float(requested):
+            self.adjusted(field, requested, applied, reason or "outside the model's supported range")
+        return applied
+
     def for_request(
         self,
         pipeline: Any,
         *,
+        slot: str = "",
         sampler: str = "",
         seed: Optional[int] = None,
         generator: Optional["torch.Generator"] = None,
@@ -356,9 +422,14 @@ class RequestContext(Generic[D]):
         """A per-request VIEW of ``pipeline`` (SDK v2): same module objects
         (shared weights; the compiled graph stays bound), OWN scheduler —
         cloned from the instance scheduler's config, with the resolved
-        checkpoint's regime applied (v_prediction is a checkpoint fact the
-        SDK applies here, never payload logic) and ``sampler`` selecting
-        the scheduler class from the SDK table (``gen_worker.view.SAMPLERS``).
+        checkpoint's OBJECTIVE applied (v-prediction/flow are checkpoint
+        facts the SDK applies here, never payload logic — pgw#654) and
+        ``sampler`` selecting the scheduler class from the SDK table
+        (``gen_worker.view.SAMPLERS``).
+
+        ``slot`` names the resolving slot on a multi-slot class (gap #7);
+        omitted, the declared root resolves. Ambiguity raises — never a
+        silent objective-less fallback.
 
         Never assign ``self.pipeline.scheduler`` per request — that is an
         instance mutation two concurrent requests corrupt each other
@@ -366,16 +437,16 @@ class RequestContext(Generic[D]):
         """
         from ..view import for_request as _view_for_request
 
-        regime = "standard"
-        try:
-            regime = self._root_slot().regime
-        except (ValueError, KeyError):
-            pass
+        objective = ""
+        resolved = None
+        if self._slots._resolved or self._slots._errors:
+            resolved = self._root_slot(slot)
+            objective = resolved.objective
         gen = generator
         if gen is None and seed is not None:
             gen = self.generator(seed)
         return _view_for_request(
-            pipeline, sampler=sampler, regime=regime, generator=gen,
+            pipeline, sampler=sampler, objective=objective, generator=gen,
             scheduler_config=scheduler_config,
         )
 

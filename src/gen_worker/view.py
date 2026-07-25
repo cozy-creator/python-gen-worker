@@ -25,8 +25,8 @@ swap-don't-wrap that risks a recompile. Cloning the scheduler per request
 is a CORRECTNESS fix, not an optimization.
 
 Handlers reach this through ``ctx.for_request(self.pipeline, ...)`` (which
-also applies the resolved checkpoint's regime — v_prediction is a
-checkpoint fact the composer applies, never payload logic) or directly::
+also applies the resolved checkpoint's objective — v-prediction/flow are
+checkpoint facts the composer applies, never payload logic) or directly::
 
     view = ctx.for_request(self.pipeline, sampler=p.sampler, seed=p.seed)
     image = view(prompt=p.prompt, num_inference_steps=steps).images[0]
@@ -38,28 +38,51 @@ import copy
 from typing import Any, Dict, Optional, Tuple
 
 # Friendly sampler name -> (diffusers scheduler class name, extra config).
-# The SDK owns this table so endpoints stop shipping their own
-# `_scheduler_kind` maps; a per-request sampler is a VIEW field.
+# The SDK table DEFINES each named sampler COMPLETELY (pgw#654, absorbing
+# pgw#647 gap #2): recipes SELECT among these names; endpoint-private
+# sampler tables must not exist — two endpoints defining "euler_trailing"
+# differently would make one recipe mean different math depending on which
+# endpoint serves it. Per-setting rulings folded in:
+# - solver_order=2 on the dpm++ multistep entries: part of the sampler's
+#   DEFINITION ("2M" means second order), not a family preference.
+# - final_sigmas_type="zero" on the dpm++ multistep entries: diffusers' own
+#   guidance for stable final steps; definition, not family recipe.
+# - "euler_trailing" (Euler + timestep_spacing="trailing"): the documented
+#   SDXL-Lightning recipe, family-neutral by construction.
+# Genuinely family-specific numbers (steps, guidance) are catalog recipe
+# data (th#1116 family schemas), never rows here.
 SAMPLERS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "ddim": ("DDIMScheduler", {}),
     "ddpm": ("DDPMScheduler", {}),
     "deis": ("DEISMultistepScheduler", {}),
-    "dpmpp_2m": ("DPMSolverMultistepScheduler", {}),
-    "dpmpp_2m_karras": ("DPMSolverMultistepScheduler", {"use_karras_sigmas": True}),
+    "dpmpp_2m": ("DPMSolverMultistepScheduler",
+                 {"solver_order": 2, "final_sigmas_type": "zero"}),
+    "dpmpp_2m_karras": ("DPMSolverMultistepScheduler",
+                        {"solver_order": 2, "use_karras_sigmas": True,
+                         "final_sigmas_type": "zero"}),
     "dpmpp_2m_sde": (
-        "DPMSolverMultistepScheduler", {"algorithm_type": "sde-dpmsolver++"}),
+        "DPMSolverMultistepScheduler",
+        {"solver_order": 2, "algorithm_type": "sde-dpmsolver++",
+         "final_sigmas_type": "zero"}),
     "dpmpp_2m_sde_karras": (
         "DPMSolverMultistepScheduler",
-        {"algorithm_type": "sde-dpmsolver++", "use_karras_sigmas": True}),
+        {"solver_order": 2, "algorithm_type": "sde-dpmsolver++",
+         "use_karras_sigmas": True, "final_sigmas_type": "zero"}),
     "dpmpp_sde": ("DPMSolverSinglestepScheduler", {}),
     "euler": ("EulerDiscreteScheduler", {}),
     "euler_a": ("EulerAncestralDiscreteScheduler", {}),
+    "euler_trailing": ("EulerDiscreteScheduler", {"timestep_spacing": "trailing"}),
     "flow_euler": ("FlowMatchEulerDiscreteScheduler", {}),
     "heun": ("HeunDiscreteScheduler", {}),
     "lcm": ("LCMScheduler", {}),
     "lms": ("LMSDiscreteScheduler", {}),
     "unipc": ("UniPCMultistepScheduler", {}),
 }
+
+# Scheduler classes that integrate a FLOW-MATCHING objective. A checkpoint
+# stamped objective="flow" must never be driven by a diffusion (eps/v-pred)
+# scheduler — the sigma schedules are different math, not a preference.
+_FLOW_CLASS_PREFIX = "FlowMatch"
 
 
 class UnknownSamplerError(ValueError):
@@ -88,16 +111,25 @@ def clone_scheduler(
     pipeline: Any,
     *,
     sampler: str = "",
-    regime: str = "standard",
+    objective: str = "",
     config_overrides: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """A FRESH scheduler for one request, built from the instance
     scheduler's config — never the shared stateful instance.
 
     ``sampler`` picks a different scheduler class from the SDK table
-    (``""`` keeps the instance's class). ``regime`` applies resolved-
-    checkpoint facts: ``"v_prediction"`` sets ``prediction_type`` — a
-    checkpoint fact applied at view construction, not payload logic.
+    (``""`` keeps the instance's class). ``objective`` applies the resolved
+    checkpoint's stamped training-objective fact (pgw#654) — scheduler math
+    at view construction, never payload logic:
+
+    - ``"epsilon"`` / ``"v_prediction"``: sets ``prediction_type``; for
+      v-prediction ALSO sets ``rescale_betas_zero_snr=True`` (th#1017's
+      zero-terminal-SNR contract — folded in here so no endpoint can
+      forget it and wash out).
+    - ``"flow"``: requires a flow-match scheduler class — a diffusion
+      sampler selection raises instead of silently integrating the wrong
+      math; the sigma schedule rides the instance scheduler's config.
+    - ``""`` (unstamped): applies nothing.
     """
     base = getattr(pipeline, "scheduler", None)
     if base is None:
@@ -106,13 +138,25 @@ def clone_scheduler(
         )
     base_config = getattr(base, "config", None)
     overrides = dict(config_overrides or {})
-    if str(regime or "") == "v_prediction":
-        overrides.setdefault("prediction_type", "v_prediction")
+    obj = str(objective or "")
+    if obj in ("epsilon", "v_prediction"):
+        overrides.setdefault("prediction_type", obj)
+        if obj == "v_prediction":
+            overrides.setdefault("rescale_betas_zero_snr", True)
     if sampler:
         cls, extra = _scheduler_class(sampler)
         overrides = {**extra, **overrides}
     else:
         cls = type(base)
+    if obj == "flow":
+        cls_name = cls.__name__ if isinstance(cls, type) else str(cls)
+        if not cls_name.startswith(_FLOW_CLASS_PREFIX):
+            raise ValueError(
+                f"objective='flow' checkpoint cannot run under sampler "
+                f"{sampler or cls_name!r} ({cls_name} is not a flow-match "
+                "scheduler); flow sigma schedules are different math, not a "
+                "preference"
+            )
     if base_config is None or not hasattr(cls, "from_config"):
         # Non-diffusers scheduler shape: fall back to a deepcopy (still a
         # private per-request object; state never shared).
@@ -128,7 +172,7 @@ def for_request(
     pipeline: Any,
     *,
     sampler: str = "",
-    regime: str = "standard",
+    objective: str = "",
     generator: Any = None,
     scheduler_config: Optional[Dict[str, Any]] = None,
 ) -> Any:
@@ -164,7 +208,7 @@ def for_request(
     object.__setattr__(view, "__dict__", d)
     if getattr(pipeline, "scheduler", None) is not None:
         fresh = clone_scheduler(
-            pipeline, sampler=sampler, regime=regime,
+            pipeline, sampler=sampler, objective=objective,
             config_overrides=scheduler_config,
         )
         # Bypass DiffusionPipeline.__setattr__ (register_modules

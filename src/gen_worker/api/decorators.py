@@ -40,7 +40,7 @@ import msgspec
 
 from .binding import BINDING_TYPES, Binding
 from .formula import RuntimeFormula
-from .slot import DEFAULT_REGIMES, REGIMES, Slot
+from .slot import OBJECTIVES, Slot
 
 T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
@@ -125,84 +125,149 @@ class NoWarmup(msgspec.Struct, frozen=True):
         msgspec.structs.force_setattr(self, "reason", reason)
 
 
-WarmupDecl = Union[NoWarmup, Mapping[str, Any]]
+WarmupDecl = NoWarmup
 
 
-def _validate_warmup_decl(owner: str, warmup: Optional[WarmupDecl]) -> Optional[WarmupDecl]:
+def _validate_warmup_decl(owner: str, warmup: Optional[NoWarmup]) -> Optional[NoWarmup]:
     if warmup is None or isinstance(warmup, NoWarmup):
         return warmup
     if isinstance(warmup, Mapping):
-        for key in warmup:
-            k = str(key or "").strip()
-            if not k or not k.isidentifier():
-                raise ValueError(
-                    f"@endpoint {owner}: warmup= key {key!r} must be a handler "
-                    "method name"
-                )
-        return dict(warmup)
+        raise TypeError(
+            f"@endpoint {owner}: warmup= payload dicts are DELETED (pgw#654) "
+            "— the warm plan is DERIVED: defaulted fields keep their "
+            "defaults, CompileAxis fields cross-product their classes' "
+            "warm= representatives, required fields synthesize neutral "
+            "values. A per-function override for a non-axis field that "
+            "genuinely changes tracing rides "
+            "@worker_function(warm={...}, warm_reason=...). The only class "
+            "form left is warmup=NoWarmup(reason)."
+        )
     raise TypeError(
-        f"@endpoint {owner}: warmup= must be a "
-        "{method_name: payload} mapping or NoWarmup(reason), got "
-        f"{type(warmup).__name__}"
+        f"@endpoint {owner}: warmup= must be NoWarmup(reason) or None "
+        f"(derived warm plan, pgw#654), got {type(warmup).__name__}"
     )
 
 
-# th#1017 inference regimes: what checkpoint(s) a handler's CFG/scheduling
-# code path was written for. Class handlers declare a {method_name:
-# (regime, ...)} mapping (mirrors warmup=); the function form (one handler)
-# declares a bare tuple. A method/function absent from the declaration gets
-# DEFAULT_REGIMES ("standard",).
-RegimesDecl = Union[Tuple[str, ...], Mapping[str, Tuple[str, ...]]]
+# pgw#654: per-function facts live ON the function, not in class-level
+# name-keyed dicts (the stringly-typed indirection v2 eliminated everywhere
+# else). ``@worker_function`` is the one per-handler declaration surface.
+WF_ATTR = "__gen_worker_function__"
 
 
-def _validate_regime_tuple(owner: str, value: Any) -> Tuple[str, ...]:
-    if isinstance(value, str) or not isinstance(value, (list, tuple)):
-        raise TypeError(
-            f"@endpoint {owner}: regimes= entries must be a tuple of regime "
-            f"strings, got {type(value).__name__}"
-        )
-    regimes = tuple(str(v).strip() for v in value)
-    if not regimes:
-        raise ValueError(f"@endpoint {owner}: regimes= entry must not be empty")
-    bad = [r for r in regimes if r not in REGIMES]
-    if bad:
-        raise ValueError(
-            f"@endpoint {owner}: unknown regime(s) {bad!r} (valid: {REGIMES})"
-        )
-    return regimes
+class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
+    """``@worker_function`` marker: this handler's own contract facts.
+
+    ``objectives`` — which checkpoint training objectives the handler's
+    scheduling/CFG code path serves (subset of
+    :data:`~gen_worker.api.slot.OBJECTIVES`). ``None`` = unrestricted (the
+    handler does not branch on the objective; non-diffusion endpoints
+    simply never declare it).
+
+    ``distilled`` — tri-state: ``True`` = serves only distilled
+    checkpoints, ``False`` = only non-distilled, ``None`` = either (e.g. a
+    turbo lane overlaying a distillation LoRA on standard weights AND
+    passing through already-distilled ones).
+
+    ``text_len`` (gap #6) — this handler's pinned text-sequence length,
+    overriding the class ``Compile.text_len`` for its lane. The class cell
+    contract digests the UNION of all lanes' pins, so a dual-pin class
+    (qwen: 512 t2i / 1024 edit) describes both.
+
+    ``warm``/``warm_reason`` — per-function warm-plan override for a
+    NON-AXIS payload field that genuinely changes tracing. Needing it
+    usually signals the field should be a CompileAxis; the mandatory
+    ``warm_reason`` records why it is not.
+    """
+
+    objectives: Optional[Tuple[str, ...]] = None
+    distilled: Optional[bool] = None
+    text_len: Optional[int] = None
+    warm: Optional[Dict[str, Any]] = None
+    warm_reason: str = ""
+
+    def __post_init__(self) -> None:
+        force = msgspec.structs.force_setattr
+        if self.objectives is not None:
+            objs = tuple(str(v).strip() for v in self.objectives)
+            if not objs:
+                raise ValueError(
+                    "@worker_function objectives= must not be empty (omit it "
+                    "for an unrestricted handler)"
+                )
+            bad = [o for o in objs if o not in OBJECTIVES]
+            if bad:
+                raise ValueError(
+                    f"@worker_function: unknown objective(s) {bad!r} "
+                    f"(valid: {OBJECTIVES})"
+                )
+            if len(set(objs)) != len(objs):
+                raise ValueError(f"@worker_function objectives= repeats a value: {objs!r}")
+            force(self, "objectives", objs)
+        if self.text_len is not None:
+            tl = int(self.text_len)
+            if tl < 0:
+                raise ValueError(
+                    f"@worker_function text_len must be >= 0, got {self.text_len!r}"
+                )
+            force(self, "text_len", tl)
+        if self.warm is not None:
+            if not isinstance(self.warm, Mapping) or not self.warm:
+                raise TypeError(
+                    "@worker_function warm= must be a non-empty "
+                    "{field: value} mapping"
+                )
+            if not str(self.warm_reason or "").strip():
+                raise ValueError(
+                    "@worker_function warm= requires warm_reason= — a "
+                    "one-line justification for overriding the derived warm "
+                    "plan on a non-axis field (needing it usually means the "
+                    "field should be a CompileAxis)"
+                )
+            force(self, "warm", dict(self.warm))
+        force(self, "warm_reason", str(self.warm_reason or "").strip())
 
 
-def _validate_class_regimes(
-    owner: str, regimes: Optional[RegimesDecl], handler_names: "set[str]"
-) -> Dict[str, Tuple[str, ...]]:
-    if regimes is None:
-        return {}
-    if not isinstance(regimes, Mapping):
-        raise TypeError(
-            f"@endpoint {owner}: class regimes= must be a "
-            "{method_name: (regime, ...)} mapping, got "
-            f"{type(regimes).__name__}"
-        )
-    unknown = set(regimes) - handler_names
-    if unknown:
-        raise ValueError(
-            f"@endpoint {owner}: regimes= names unknown handler method(s) "
-            f"{sorted(unknown)} (known: {sorted(handler_names)})"
-        )
-    return {k: _validate_regime_tuple(f"{owner}.{k}", v) for k, v in regimes.items()}
+def worker_function(
+    *,
+    objectives: Optional[Sequence[str]] = None,
+    distilled: Optional[bool] = None,
+    text_len: Optional[int] = None,
+    warm: Optional[Mapping[str, Any]] = None,
+    warm_reason: str = "",
+) -> Callable[[T], T]:
+    """Per-handler contract facts (pgw#654), declared AT the definition
+    site — on class handler methods and on bare ``@endpoint`` functions::
 
+        @worker_function(objectives=("epsilon", "v_prediction"), distilled=False)
+        def generate(self, ctx, payload: In) -> Out: ...
 
-def _validate_function_regimes(
-    owner: str, regimes: Optional[RegimesDecl]
-) -> Tuple[str, ...]:
-    if regimes is None:
-        return DEFAULT_REGIMES
-    if isinstance(regimes, Mapping):
-        raise TypeError(
-            f"@endpoint function {owner!r}: regimes= must be a tuple of "
-            "regime strings (functions have one handler, no per-method mapping)"
-        )
-    return _validate_regime_tuple(owner, regimes)
+    See :class:`WorkerFunctionDecl` for field semantics. The class-level
+    ``regimes={...}`` / ``warmup={...}`` name-keyed dicts are DELETED —
+    passing them to ``@endpoint`` is a decoration-time error.
+    """
+    decl = WorkerFunctionDecl(
+        objectives=tuple(objectives) if objectives is not None else None,
+        distilled=distilled,
+        text_len=text_len,
+        warm=dict(warm) if warm is not None else None,
+        warm_reason=warm_reason,
+    )
+
+    def apply(fn: T) -> T:
+        if not inspect.isfunction(fn):
+            raise TypeError(
+                f"@worker_function decorates handler functions/methods, got "
+                f"{type(fn).__name__}"
+            )
+        if getattr(fn, WF_ATTR, None) is not None:
+            raise ValueError(
+                f"@worker_function: {fn.__name__!r} already carries a "
+                "worker_function declaration"
+            )
+        setattr(fn, WF_ATTR, decl)
+        return fn
+
+    return apply
 
 
 def _validate_handles(owner: str, handles: Any) -> Tuple[str, ...]:
@@ -608,13 +673,11 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # contract), only `<lane>-lora<bucket>` cells adopt, and adapter swaps
     # stay buffer copies — never a recompile. 0 = branchless.
     lora_bucket: int = 0
-    # gw#470 boot warmup: None = auto-synthesize from each handler's payload
-    # schema; {method: payload-or-None} = declared warmup payloads (None
-    # skips that method); NoWarmup(reason) = class-level opt-out.
-    warmup: Optional[WarmupDecl] = None
-    # th#1017: per-handler declared regimes, attr_name -> (regime, ...).
-    # Function-shaped endpoints key their single handler under "".
-    regimes: Mapping[str, Tuple[str, ...]] = msgspec.field(default_factory=dict)
+    # gw#470/pgw#654 boot warmup: None = the DERIVED warm plan (defaults +
+    # axis cross-product + synthesized required fields, union-deduped per
+    # graph class); NoWarmup(reason) = class-level opt-out. Developer
+    # payload dicts are deleted.
+    warmup: Optional[NoWarmup] = None
     # th#1050: opt-in declared lane bodies this endpoint's code branches on
     # (ctx.lane). Empty = platform-managed behavior only.
     handles: Tuple[str, ...] = ()
@@ -877,6 +940,70 @@ def _validate_class_models(
             )
 
 
+def _validate_root_slot(owner: str, slots: Dict[str, Slot]) -> None:
+    """pgw#654 gap #7: a multi-slot class must designate ONE root —
+    ambiguity is a decoration-time error, never a silent runtime fallback
+    (the old ``for_request`` swallowed the ambiguous-root ValueError and
+    silently applied no objective, which would drop a v-pred checkpoint's
+    prediction_type)."""
+    roots = [n for n, s in slots.items() if s.root]
+    if len(roots) > 1:
+        raise ValueError(
+            f"@endpoint {owner}: more than one Slot(root=True) ({sorted(roots)}) "
+            "— exactly one slot may be the root"
+        )
+    if len(slots) > 1 and not roots and "pipeline" not in slots:
+        raise ValueError(
+            f"@endpoint {owner}: {len(slots)} model slots ({sorted(slots)}) "
+            "and no unambiguous root — mark exactly one with "
+            "Slot(root=True) (it backs ctx.defaults / ctx.for_request when "
+            "no slot= is passed; handlers on other lanes pass "
+            "slot=<name> explicitly)."
+        )
+
+
+def _validate_lora_state_dict(owner: str, slots: Dict[str, Slot], lora_bucket: int) -> None:
+    """pgw#654 gap #9: a ``lora_bucket=`` endpoint whose root pipeline class
+    is NON-introspectable (non-diffusers) must declare
+    ``lora_state_dict`` — the adapter normalization path routes through
+    ``type(pipe).lora_state_dict``, and without a converter every adapter
+    attach fails closed at FIRST LIVE ATTACH (comfy-grammar keys fall to
+    the peft path, which raises on pipelines lacking ``load_lora_weights``).
+    ``str``/``Path`` self-loading slots are unverifiable here (the real
+    pipeline class is endpoint-internal) and are skipped."""
+    if not lora_bucket or not slots:
+        return
+    from .tree import is_introspectable
+
+    roots = [s for s in slots.values() if s.root]
+    root = roots[0] if roots else slots.get("pipeline") or (
+        next(iter(slots.values())) if len(slots) == 1 else None
+    )
+    if root is None:
+        return
+    cls = root.pipeline_cls
+    if not isinstance(cls, type) or cls in (str, bytes) or issubclass(cls, (str, bytes)):
+        return
+    try:
+        from pathlib import PurePath
+
+        if issubclass(cls, PurePath):
+            return
+    except TypeError:
+        pass
+    if is_introspectable(cls):
+        return
+    if not callable(getattr(cls, "lora_state_dict", None)):
+        raise ValueError(
+            f"@endpoint {owner}: lora_bucket={lora_bucket} with a "
+            f"non-introspectable root pipeline class {cls.__name__!r} that "
+            "does not define lora_state_dict. Non-diffusers pipelines MUST "
+            "declare a lora_state_dict classmethod converting adapter key "
+            "grammars to the canonical 'transformer.'/'unet.' form, or every "
+            "adapter (curated and BYO) fails closed at first attach."
+        )
+
+
 def _split_runtime_kwarg(
     owner: str, runtime: Any,
 ) -> Tuple[Optional[str], Dict[str, RuntimeFormula]]:
@@ -941,8 +1068,7 @@ def _decorate_class(
     child_calls: bool = False,
     reentrant: bool = False,
     lora_bucket: int = 0,
-    warmup: Optional[WarmupDecl] = None,
-    regimes: Optional[RegimesDecl] = None,
+    warmup: Optional[NoWarmup] = None,
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
@@ -952,6 +1078,8 @@ def _decorate_class(
         _reject_producer_generator(f"{cls.__name__}.{attr}", member, kind)
     models, slots = _resolve_single_slot(cls, models, slots, handlers)
     _validate_class_models(cls, models, slots)
+    _validate_root_slot(cls.__name__, slots)
+    _validate_lora_state_dict(cls.__name__, slots, lora_bucket)
 
     if runtime is not None and runtime not in ("vllm", "llama-server"):
         raise ValueError(
@@ -964,9 +1092,6 @@ def _decorate_class(
         runtime=runtime, compile=compile, child_calls=child_calls,
         reentrant=reentrant, lora_bucket=lora_bucket,
         warmup=_validate_warmup_decl(cls.__name__, warmup),
-        regimes=_validate_class_regimes(
-            cls.__name__, regimes, {attr for attr, _ in handlers}
-        ),
         handles=_validate_handles(cls.__name__, handles),
         runtime_formula=_expand_formula_map(
             cls.__name__, runtime_formula or {}, [attr for attr, _ in handlers]
@@ -999,8 +1124,7 @@ def _decorate_function(
     child_calls: bool = False,
     reentrant: bool = False,
     lora_bucket: int = 0,
-    warmup: Optional[WarmupDecl] = None,
-    regimes: Optional[RegimesDecl] = None,
+    warmup: Optional[NoWarmup] = None,
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
@@ -1046,7 +1170,6 @@ def _decorate_function(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=None, name=(name or fn.__name__), is_function=True,
         compile=compile, child_calls=child_calls, lora_bucket=lora_bucket,
-        regimes={"": _validate_function_regimes(fn.__name__, regimes)},
         handles=_validate_handles(fn.__name__, handles),
         runtime_formula={"": formulas["*"]} if "*" in formulas else {},
         config=_validate_config_decl(fn.__name__, config),
@@ -1073,8 +1196,7 @@ def endpoint(
     child_calls: bool = ...,
     reentrant: bool = ...,
     lora_bucket: int = ...,
-    warmup: Optional[WarmupDecl] = ...,
-    regimes: Optional[RegimesDecl] = ...,
+    warmup: Optional[NoWarmup] = ...,
     handles: Optional[Any] = ...,
     config: Optional[Sequence[ConfigParam]] = ...,
     env: Optional[Sequence[str]] = ...,
@@ -1094,8 +1216,7 @@ def endpoint(
     child_calls: bool = False,
     reentrant: bool = False,
     lora_bucket: int = 0,
-    warmup: Optional[WarmupDecl] = None,
-    regimes: Optional[RegimesDecl] = None,
+    warmup: Optional[NoWarmup] = None,
     handles: Optional[Any] = None,
     config: Optional[Sequence[ConfigParam]] = None,
     env: Optional[Sequence[str]] = None,
@@ -1156,7 +1277,7 @@ def endpoint(
                 runtime_formula=runtime_formulas, compile=compile,
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
-                regimes=regimes, handles=handles, config=config, env=env,
+                handles=handles, config=config, env=env,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
@@ -1165,7 +1286,7 @@ def endpoint(
                 runtime_formula=runtime_formulas, name=name, compile=compile,
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
-                regimes=regimes, handles=handles, config=config, env=env,
+                handles=handles, config=config, env=env,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
@@ -1178,6 +1299,6 @@ def endpoint(
 
 __all__ = [
     "Compile", "ConfigParam", "DynamicDim", "EndpointDecl", "NoWarmup",
-    "RegimesDecl", "Resources", "SlotLike", "VariantDecl", "WarmupDecl",
-    "endpoint", "variant_of",
+    "Resources", "SlotLike", "VariantDecl", "WorkerFunctionDecl",
+    "endpoint", "variant_of", "worker_function",
 ]

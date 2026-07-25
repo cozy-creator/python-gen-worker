@@ -268,7 +268,7 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dic
     no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access error
     instead of failing the whole dispatch."""
     if not spec.slots:
-        return {"resolved_slots": {}, "slot_errors": {}}
+        return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
     from .api.slot import resolve_slot
 
     run_models = list(run.models) if run is not None else []
@@ -277,15 +277,19 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dic
         b.slot: tuple(lo.inference_defaults for lo in b.loras if lo.inference_defaults)
         for b in run_models if b.loras
     }
+    # pgw#654: the resolved checkpoint's stamped objective/distilled facts
+    # ride the binding; the per-function declaration is the backstop (the
+    # hub gates checkpoint<->function compatibility at deploy/dispatch).
+    objectives = {
+        b.slot: str(getattr(b, "objective", "") or "") for b in run_models
+    }
+    distilled_facts = {
+        b.slot: bool(getattr(b, "distilled", False)) for b in run_models
+    }
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
     for name, slot in spec.slots.items():
         try:
-            # th#1017: allowed_regimes is the backstop, not primary
-            # enforcement (the hub gates checkpoint<->function regime
-            # compatibility at deploy/dispatch time) — RunJob.ModelBinding
-            # has no wire field for the resolved checkpoint's regime yet, so
-            # inference_regime stays "standard" here until that lands.
             resolved[name] = resolve_slot(
                 name, slot,
                 ref=spec.models.get(name),
@@ -293,11 +297,31 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dic
                 family=spec.slot_family.get(name, ""),
                 raw_metadata_json=raw_defaults.get(name, ""),
                 lora_metadata_json=lora_defaults.get(name, ()),
-                allowed_regimes=spec.regimes,
+                objective=objectives.get(name, ""),
+                distilled=distilled_facts.get(name, False),
+                allowed_objectives=spec.objectives,
+                allowed_distilled=spec.distilled,
             )
         except ValueError as exc:
             errors[name] = str(exc)
-    return {"resolved_slots": resolved, "slot_errors": errors}
+    return {
+        "resolved_slots": resolved,
+        "slot_errors": errors,
+        "root_slot": _spec_root_slot(spec),
+    }
+
+
+def _spec_root_slot(spec: EndpointSpec) -> str:
+    """The declared root slot name (pgw#654 gap #7): Slot(root=True), else
+    "pipeline", else the single slot; "" when nothing resolves a root."""
+    for name, slot in spec.slots.items():
+        if getattr(slot, "root", False):
+            return name
+    if "pipeline" in spec.slots:
+        return "pipeline"
+    if len(spec.slots) == 1:
+        return next(iter(spec.slots))
+    return ""
 
 
 def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
@@ -384,15 +408,24 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
 
 
-def _runtime_term_values(spec: Any, payload: Any) -> "Optional[Dict[str, float]]":
-    """th#1051: evaluate the declared runtime formula's terms on the EXECUTED
-    payload (defaults already applied by msgspec decode). None = undeclared
-    or unevaluable — the hub then evaluates from the raw payload itself."""
+def _runtime_term_values(
+    spec: Any, payload: Any, ctx: Any = None,
+) -> "Optional[Dict[str, float]]":
+    """th#1051: evaluate the declared runtime formula's terms on RESOLVED
+    EFFECTIVE values (pgw#654 gap #4): explicit payload value, else the
+    same-named field of the catalog-resolved recipe (``ctx.defaults``).
+    None = undeclared or unevaluable — the hub then falls back."""
     rf = getattr(spec, "runtime_formula", None)
     if rf is None:
         return None
+    defaults = None
+    if ctx is not None:
+        try:
+            defaults = ctx._root_slot().defaults
+        except Exception:
+            defaults = None
     try:
-        return rf.term_values_from_struct(payload)
+        return rf.term_values_from_struct(payload, defaults)
     except Exception:
         return None
 
@@ -2227,6 +2260,12 @@ class Executor:
         self._send = send
         self._settings = settings
         self.store = store or ModelStore(send)
+        # pgw#654: TF32 is PROCESS-GLOBAL state — set once at executor
+        # bootstrap, never inside per-instance endpoint setup. Largely moot
+        # on the bf16 compute path (it affects residual fp32 matmuls only).
+        if torch is not None and torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.intent_registry: Optional[IntentRegistry] = None
         for s in specs:
             for b in s.models.values():
@@ -3192,22 +3231,19 @@ class Executor:
                 # OBJECT and the graph set actually exercised, not of the
                 # initiating handler's name — the same identity reasoning as
                 # gw#587 design pt 5. A custom object-level warmup (author
-                # surface 3: "wins outright", e.g. LTX's two-stage synthetic
+                # surface: "wins outright", e.g. LTX's two-stage synthetic
                 # that warms EVERY declared graph) therefore attributes its
                 # proof to every CONTRACT-COMPATIBLE sibling alias of this
                 # exact object (same family, lora bucket, execution-contract
-                # digest, and bindings — the compatible_names gate above),
-                # EXCEPT aliases whose spec explicitly declares
-                # `warmup={...: None}`: those remain fail-closed (the
-                # SDXL-legacy-Turbo carve-out — an author's explicit "this
-                # handler must not be warmed/served on this lane" is a
-                # contract, never overridden by a sibling's proof). Runtime
-                # backstop stays: every advertised alias serves through the
-                # per-call guarded wrapper with hit/miss counters, so an
-                # attributed alias whose real requests miss is visible and
-                # degrades loudly, never silently.
-                permitted_names = (
-                    compatible_names - self._custom_warmup_optouts(spec))
+                # digest, and bindings — the compatible_names gate above).
+                # pgw#654 removed the `warmup={...: None}` per-handler
+                # opt-out with the declared-dict surface itself — the warm
+                # plan is derived, so there is no author skip to honor.
+                # Runtime backstop stays: every advertised alias serves
+                # through the per-call guarded wrapper with hit/miss
+                # counters, so an attributed alias whose real requests miss
+                # is visible and degrades loudly, never silently.
+                permitted_names = set(compatible_names)
             target.function_names = tuple(sorted(
                 compatible_names & permitted_names))
             target_quant_lane = next(
@@ -4384,29 +4420,6 @@ class Executor:
             decl_warmup=decl.warmup,
             has_warmup_method=False,
         )
-
-    def _custom_warmup_optouts(self, spec: EndpointSpec) -> set[str]:
-        """Function names whose spec explicitly declares ``warmup={...: None}``.
-
-        gw#603: the explicit-None carve-out from custom-warmup proof
-        attribution — an author's declared skip is a per-handler contract
-        ("never warm/serve this alias on this lane"), so it stays fail-closed
-        even when the object-level proof would otherwise cover it."""
-        if spec.cls is None:
-            return set()
-        from .api.decorators import ATTR as _DECL_ATTR
-
-        decl = getattr(spec.cls, _DECL_ATTR, None)
-        declared = getattr(decl, "warmup", None)
-        if not isinstance(declared, typing.Mapping):
-            return set()
-        skipped_attrs = {a for a, v in declared.items() if v is None}
-        if not skipped_attrs:
-            return set()
-        return {
-            s.name for s in self.specs.values()
-            if s.cls is spec.cls and s.attr_name in skipped_attrs
-        }
 
     def _compile_contract_names(
         self, spec: EndpointSpec, rec: _ClassRecord,
@@ -6338,6 +6351,14 @@ class Executor:
                             strict_vram=bool(spec.resources.strict_vram),
                         )
                     pipe = sl.obj
+                    # pgw#654: generic materialization tuning — per-request
+                    # progress bars are worker noise on every diffusers
+                    # pipeline; endpoints never write this line.
+                    if callable(getattr(pipe, "set_progress_bar_config", None)):
+                        try:
+                            pipe.set_progress_bar_config(disable=True)
+                        except Exception:
+                            pass
                     # Reconcile the load outcomes into ServePlan/FnDegraded via
                     # the state-delta path — the shared core decides WHAT
                     # degraded (details non-empty), the executor reports it.
@@ -7867,7 +7888,7 @@ class Executor:
                             )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output, lane=job.lane,
-                                    runtime_terms=_runtime_term_values(spec, payload))
+                                    runtime_terms=_runtime_term_values(spec, payload, ctx))
             # pgw#652: the request just told us what a concurrent one costs.
             # Only a completed run is evidence — a cancelled or OOM-killed job
             # never reached its real peak.
@@ -8408,6 +8429,7 @@ class Executor:
         blob_ref: Optional[str] = None,
         safe_message: str = "",
         metrics: Optional[pb.JobMetrics] = None,
+        adjustments: Optional[List[Dict[str, str]]] = None,
     ) -> None:
         result = pb.JobResult(request_id=request_id, attempt=attempt, status=status,
                               safe_message=safe_message)
@@ -8417,6 +8439,16 @@ class Executor:
             result.blob_ref = blob_ref
         if metrics is not None:
             result.metrics.CopyFrom(metrics)
+        # pgw#654: caller-visible adjustment warnings ride the RESULT
+        # ENVELOPE — the hub persists them on the request record and emits
+        # them on its events stream; pod logs alone never reach a caller.
+        for adj in adjustments or []:
+            result.adjustments.add(
+                field=str(adj.get("field", "")),
+                requested=str(adj.get("requested", "")),
+                applied=str(adj.get("applied", "")),
+                reason=str(adj.get("reason", "")),
+            )
         await self._send(pb.WorkerMessage(job_result=result))
 
     async def _finish(self, job: _Job, status: "pb.JobStatus", **kw: Any) -> None:
@@ -8456,7 +8488,11 @@ class Executor:
         cleanup_input_assets(job.request_id, job.attempt)
         logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:
-            await self._send_result(job.request_id, job.attempt, status, **kw)
+            adjustments = list(getattr(job.ctx, "_adjustments", ()) or ()) \
+                if job.ctx is not None else []
+            await self._send_result(
+                job.request_id, job.attempt, status,
+                adjustments=adjustments, **kw)
         self._intent_transition(
             job.intent_id,
             terminal_status,
