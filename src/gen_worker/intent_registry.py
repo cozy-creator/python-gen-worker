@@ -14,6 +14,9 @@ from .pb import worker_scheduler_pb2 as pb
 _MAX_INTENTS = 128
 _MAX_RECEIPTS = 32
 _UNREPORTED_WAIT_TIMEOUT_S = 2.0
+# gw#640: fallback deadline for a WAITING state with no blocker and no retry
+# time. Mirrors the hub's shadow first-action budget (60s).
+_WAITING_DEADLINE_FALLBACK_MS = 60_000
 _ACTIVE_INTENT_STATES = {
     pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
     pb.LIFECYCLE_INTENT_STATUS_WAITING,
@@ -641,6 +644,23 @@ class IntentRegistry:
             state.ClearField("blocker_request")
         else:
             state.blocker_request.CopyFrom(blocker_request)
+        # gw#640: a WAITING state MUST carry a blocker, a retry time, or a
+        # deadline — the hub's shadow validator requires one of the three, and
+        # compat-synthesized intents (compat-materialize-*, minted outside a
+        # DesiredStateCommand) had none, so they were rejected. Guarantee it at
+        # the single choke point instead of at each call site. (The hub no
+        # longer kills the stream over this as of the gw#640 hub fix; emitting
+        # well-formed state is still ours to get right.)
+        if int(status) == pb.LIFECYCLE_INTENT_STATUS_WAITING:
+            blocked = bool(state.blocker_intent_id) or bool(
+                state.blocker_request.request_id
+            )
+            if (
+                not blocked
+                and state.next_retry_at_unix_ms <= 0
+                and state.deadline_at_unix_ms <= 0
+            ):
+                state.deadline_at_unix_ms = now + _WAITING_DEADLINE_FALLBACK_MS
         if progress is None:
             state.ClearField("progress")
         else:
