@@ -27,6 +27,23 @@ _DEFAULT_TERM_GRACE_S = 10.0
 _POLL_INTERVAL_S = 0.2
 
 
+class ProcessStalledError(RuntimeError):
+    """The child produced no output for its stall window — presumed wedged.
+
+    Raised only by ``run_process(stall_window_s=...)``. It is the
+    progress-based replacement for a wall-clock ``timeout=``: a long job that
+    keeps talking is never killed, a silent one is killed quickly.
+    """
+
+    def __init__(self, cmd: Sequence[str], silent_for_s: float, window_s: float) -> None:
+        super().__init__(
+            f"subprocess produced no output for {silent_for_s:.0f}s "
+            f"(stall window {window_s:.0f}s): {' '.join(cmd)}"
+        )
+        self.silent_for_s = silent_for_s
+        self.window_s = window_s
+
+
 def run_process(
     cmd: Sequence[str],
     *,
@@ -35,6 +52,7 @@ def run_process(
     cwd: "str | os.PathLike[str] | None" = None,
     env: Optional[Mapping[str, str]] = None,
     term_grace_s: float = _DEFAULT_TERM_GRACE_S,
+    stall_window_s: Optional[float] = None,
 ) -> int:
     """Run ``cmd``, streaming merged stdout+stderr lines to ``on_line``.
 
@@ -44,6 +62,12 @@ def run_process(
     - ``on_line``: called from a reader thread with each output line
       (trailing newline stripped). Exceptions in the callback are logged
       and swallowed — a bad parse must not kill the trainer.
+    - ``stall_window_s``: optional PROGRESS watchdog. Every output line is an
+      advance; the group is terminated and ``ProcessStalledError`` raised only
+      once the child has been silent this long. ``None`` (default) = no
+      watchdog. There is deliberately no total-runtime bound: a wall clock
+      cannot tell a healthy 3-hour quantize from a wedge, so it is either
+      useless or it kills real work (gw#655's residency-design principle).
     - Returns the process exit code on natural exit (callers decide whether
       nonzero is fatal).
     """
@@ -69,9 +93,15 @@ def run_process(
             start_new_session=True,  # own process group → group-wide signals
         )
 
+        # Last-advance stamp for the stall watchdog. Written by the reader
+        # thread on every line, read by the supervisor loop; a float store is
+        # atomic under the GIL, so no lock is needed.
+        last_advance = [time.monotonic()]
+
         def _tail() -> None:
             assert proc.stdout is not None
             for raw in proc.stdout:
+                last_advance[0] = time.monotonic()
                 line = raw.rstrip("\n")
                 if on_line is None:
                     continue
@@ -94,6 +124,12 @@ def run_process(
                     _terminate_group(proc, term_grace_s=term_grace_s)
                     reader.join(timeout=5.0)
                     raise CanceledError("subprocess cancelled")
+                if stall_window_s is not None and stall_window_s > 0:
+                    silent_for = time.monotonic() - last_advance[0]
+                    if silent_for >= stall_window_s:
+                        _terminate_group(proc, term_grace_s=term_grace_s)
+                        reader.join(timeout=5.0)
+                        raise ProcessStalledError(cmd, silent_for, stall_window_s)
                 time.sleep(_POLL_INTERVAL_S)
         finally:
             if proc.poll() is None:  # unexpected exit path (exception in caller)
