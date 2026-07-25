@@ -394,3 +394,31 @@ def test_ctx_adjustments_is_public_and_immutable() -> None:
     assert row["requested"] == "15.0" and row["applied"] == "10.0"
     with pytest.raises(AttributeError):
         rows.append({})  # noqa: B038 — proves immutability
+
+
+# ---------------------------------------------------------------------------
+# benchmark harness: content-address plan (CPU-safe half)
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_component_digest_discriminates(tmp_path: Path) -> None:
+    """The swap benchmark's component plan: identical component subtrees
+    share a content address (no bytes move on swap); differing ones split."""
+    sys_path = __import__("sys").path
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys_path:
+        sys_path.insert(0, root)
+    from benchmarks.swap_latency import component_digest
+
+    a = tmp_path / "a" / "vae"
+    b = tmp_path / "b" / "vae"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    (a / "w.safetensors").write_bytes(b"same-bytes")
+    (b / "w.safetensors").write_bytes(b"same-bytes")
+    assert component_digest(tmp_path / "a", "vae") == component_digest(
+        tmp_path / "b", "vae")
+    (b / "w.safetensors").write_bytes(b"other-bytes")
+    assert component_digest(tmp_path / "a", "vae") != component_digest(
+        tmp_path / "b", "vae")
+    assert component_digest(tmp_path / "a", "absent") == ""
