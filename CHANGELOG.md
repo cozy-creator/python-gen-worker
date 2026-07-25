@@ -1,17 +1,5 @@
 # Changelog
 
-## 0.60.2 (2026-07-25) — ie#552: th#1036 zero-delta refusal moves into the SDK
-
-`load_adapter_state_dict` now refuses, typed (`RefCompatibilitySurprise`,
-axis=state_dict), any adapter whose low-rank product is provably zero — no
-lora down/up (A/B) pair with both halves nonzero. One implementation of the
-attach-but-invisible rule at the one seam every attach path shares (executor
-`ModelBinding.loras` overlays, BYO per-request loras, endpoint callers); the
-endpoint-side copies (sdxl, qwen-image) are deleted in the same train. The
-pair-aware check also closes the old copies' hole: a stored/injected alpha
-key is nonzero by construction and could vouch for an all-zero delta under
-the previous whole-dict `any(tensor != 0)` form.
-
 ## 0.60.1 (2026-07-25) — pgw#654: the false fleet-wide "model load failure"
 
 **Fixes the 0.56.0–0.60.0 defect that broke every real model release on the
