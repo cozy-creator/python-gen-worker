@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal
 
+from gen_worker.api.errors import ValidationError
+
 from .component import Component
 from .loaded_component import LoadedComponent
 from ._hf_load import load_component_module
@@ -333,11 +335,13 @@ class Source:
              card without OOM-walks in tenant code.
 
           2. **Layout dispatch.** The same iteration shape works for
-             diffusers-layout (multiple component subdirs), diffusers
-             singlefile (one .safetensors reconstructed via
-             ``from_single_file``), and transformers singlefile (one
-             ``AutoModelForCausalLM.from_pretrained``). The tenant doesn't
-             care which it is.
+             diffusers-layout (multiple component subdirs) and transformers
+             singlefile (one ``AutoModelForCausalLM.from_pretrained``). A
+             DIFFUSERS-singlefile source (a lone ``.safetensors`` needing
+             ``from_single_file``) is refused here, typed: use
+             ``Source.as_hf_model()`` and quantize the resulting pipeline
+             yourself. Nothing in the fleet converts that layout through this
+             API, and a half-wired branch reads as support (pgw#657).
 
           3. **Passthrough vs quant decision.** Components matching
              ``quant_only`` are loaded + quantized; the rest are yielded
@@ -505,22 +509,15 @@ def _iter_singlefile_components(
     compute_dtype: Any,
     offload_folder: Path | None,
 ) -> Iterator[LoadedComponent]:
-    """Yield a single LoadedComponent for a singlefile-layout snapshot.
+    """Yield a single LoadedComponent for a **transformers** singlefile
+    snapshot: a directory with ``config.json`` + weights at the top level
+    (e.g. a llama / qwen dump), loaded via
+    ``AutoModelForCausalLM.from_pretrained(path, quantization_config=...,
+    torch_dtype=..., device_map='auto', offload_folder=...)``.
 
-    Two flavors handled here:
-      - **transformers singlefile** — directory with ``config.json`` +
-        weights at the top level (e.g. a llama / qwen model dump). Loaded
-        via ``AutoModelForCausalLM.from_pretrained(path, quantization_config=
-        ..., torch_dtype=..., device_map='auto', offload_folder=...)``.
-      - **diffusers singlefile** — one ``.safetensors`` file reconstructible
-        via ``from_single_file``. Less common; the library defers to the
-        diffusers-layout caller (``StableDiffusionPipeline.from_single_file``)
-        and yields the resulting pipeline as a single ``LoadedComponent
-        (name='model')``.
-
-    For now the diffusers singlefile path raises NotImplementedError if
-    invoked — the calling tenant can fall back to the legacy ``as_hf_model``
-    + manual quant path. Wiring it up is a small follow-up.
+    Anything else on this branch is a DIFFUSERS singlefile (a lone
+    ``.safetensors`` needing ``from_single_file``) and is refused typed — see
+    the refusal below.
     """
     if (snapshot_path / "config.json").is_file():
         # See _iter_diffusers_components for the device_map rationale —
@@ -553,10 +550,15 @@ def _iter_singlefile_components(
         )
         return
 
-    raise NotImplementedError(
-        "iter_hf_components: diffusers-singlefile sources are not yet "
-        "supported. Use the legacy Source.as_hf_model() path and quantize "
-        "the resulting DiffusionPipeline manually for now."
+    # pgw#657: this was a NotImplementedError plus docs promising the layout
+    # worked — a dispatchable branch nobody wired, with no tracker item. It is
+    # a REFUSAL, not a gap: no fleet conversion uses this layout through this
+    # API, and the documented alternative is one call away.
+    raise ValidationError(
+        f"iter_hf_components: {snapshot_path.name} is a diffusers-singlefile "
+        "source (no top-level config.json); this API serves diffusers-layout "
+        "and transformers-singlefile only. Use Source.as_hf_model() and "
+        "quantize the resulting DiffusionPipeline directly."
     )
 
 

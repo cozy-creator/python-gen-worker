@@ -65,6 +65,7 @@ from .models import disk_telemetry
 from .models import provision
 from .models import residency as residency_mod
 from .models.memory import (
+    aflush_memory,
     deeper_offload_mode,
     degraded_log_line,
     estimate_cuda_resident_gb,
@@ -4775,12 +4776,7 @@ class Executor:
             return
         async with self._load_lock:
             released = await self._vacate_record(rec)
-        await asyncio.to_thread(gc.collect)
-        if torch is not None and torch.cuda.is_available():
-            try:
-                await asyncio.to_thread(torch.cuda.empty_cache)
-            except Exception:
-                pass
+        await aflush_memory()
         released_pinned = await asyncio.to_thread(
             release_unused_pinned_host_cache)
         logger.info(
@@ -4798,12 +4794,7 @@ class Executor:
             return
         self._pending_alloc_purge = False
         freed_before = time.monotonic()
-        await asyncio.to_thread(gc.collect)
-        if torch is not None and torch.cuda.is_available():
-            try:
-                await asyncio.to_thread(torch.cuda.empty_cache)
-            except Exception:
-                pass
+        await aflush_memory()
         logger.info(
             "purged prior cancelled-setup allocations in %.1fs",
             time.monotonic() - freed_before,
@@ -7451,11 +7442,10 @@ class Executor:
         if server is not None:
             await asyncio.to_thread(server.stop)
         server = None
-        if torch is not None and torch.cuda.is_available():
-            try:
-                await asyncio.to_thread(torch.cuda.empty_cache)
-            except Exception:
-                pass
+        # No gc pass here: the caller holds the load lock and the departing
+        # objects' owners were just dropped above, so only the allocator cache
+        # needs returning (pgw#657 fold).
+        await aflush_memory(collect=False)
         # gw#494: inspect exactly what the instance BOOKED (held_refs) —
         # re-deriving from spec.models would inspect the wrong keys after a
         # resolution rebind. A multiply-held ref stays resident until its last

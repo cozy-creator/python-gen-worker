@@ -156,10 +156,19 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
     marker = getattr(pipeline, _MARKER_ATTR, None)
     if not marker:
         return False
+    # pgw#657: every `return False` below is a NEGATIVE compile-proof verdict,
+    # and a false negative here kills a healthy compiled lane (the pgw#637 /
+    # gw#603 class). A probe that fails must therefore say WHY — silently it
+    # is indistinguishable from "nothing was ever compiled".
     try:
         from torch._dynamo import eval_frame
     except Exception:
+        logger.warning(
+            "compile-cache: torch._dynamo.eval_frame unavailable — in-memory "
+            "compile evidence reads as ABSENT (false-negative risk)",
+            exc_info=True)
         return False
+
     def _has_entries(fn: Any) -> bool:
         code = getattr(getattr(fn, "__func__", fn), "__code__", None)
         if code is None:
@@ -167,6 +176,10 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
         try:
             return bool(eval_frame._debug_get_cache_entry_list(code))
         except Exception:
+            logger.warning(
+                "compile-cache: dynamo cache-entry probe failed for %s — "
+                "counted as NOT compiled", getattr(fn, "__qualname__", fn),
+                exc_info=True)
             return False
 
     for _owner, _attr, fn in marker.get("originals") or ():
@@ -178,6 +191,10 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
         try:
             children = list(mod.modules())
         except Exception:
+            logger.warning(
+                "compile-cache: could not enumerate regional submodules of %s "
+                "— its compiled blocks read as ABSENT",
+                type(mod).__name__, exc_info=True)
             continue
         for child in children:
             if _has_entries(getattr(type(child), "forward", None)):
@@ -234,13 +251,19 @@ def runtime_key() -> Dict[str, str]:
             # rather than provider-specific nvidia-smi output.
             key["cuda_driver"] = _cuda_driver_version()
     except Exception:
-        pass
+        # pgw#657: silently leaving these EMPTY manufactures a different cell
+        # key than every healthy pod computes — i.e. a guaranteed cache miss
+        # (and a mint) whose cause is invisible. Say it.
+        logger.warning(
+            "compile-cache: torch/CUDA runtime-key probe failed — cell identity "
+            "falls back to empty sku/sm/torch fields; expect a cache MISS",
+            exc_info=True)
     try:
         import triton
 
         key["triton"] = str(triton.__version__)
     except Exception:
-        pass
+        logger.debug("compile-cache: triton version unavailable", exc_info=True)
     return key
 
 
