@@ -7975,23 +7975,21 @@ class Executor:
                         0, int((released_at - started) * 1000))
                     metrics.finalize_wall_ms = max(
                         0, int((handler_done - released_at) * 1000))
-                if overlapped and released_at is not None:
-                    # The handler released terminally at the decode->finalize
-                    # handoff (gw#476/gw#516): the whole encode/upload tail
-                    # overlapped the next request.
+                if released_at is not None and handler_done > released_at:
+                    # The encode/upload tail ran slotless, overlapping the next
+                    # request. `handoff` says who ended the GPU phase: the
+                    # HANDLER at the decode->finalize signal (gw#476/gw#516
+                    # write_video/write_image), or the EXECUTOR at handler
+                    # return with a deferred tail behind it (th#1130).
                     logger.info(
-                        "FINALIZE_OVERLAP fn=%s request=%s slot_held_ms=%d "
-                        "handler_wall_ms=%d overlap_ms=%d",
+                        "FINALIZE_OVERLAP fn=%s request=%s handoff=%s "
+                        "slot_held_ms=%d handler_wall_ms=%d overlap_ms=%d",
                         spec.name, run.request_id,
+                        "handler" if overlapped else "executor",
                         int((released_at - started) * 1000),
                         int((handler_done - started) * 1000),
                         int((handler_done - released_at) * 1000),
                     )
-            self._intent_transition(
-                job.intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
-            )
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the
@@ -8432,6 +8430,15 @@ class Executor:
     async def _serialize_output(
         self, ctx: RequestContext, run: pb.RunJob, output: Any
     ) -> Tuple[Optional[bytes], Optional[str]]:
+        # th#1130 safety net: msgpack reads struct fields straight off the C
+        # layout, so an un-drained deferred asset would serialize as nulls.
+        # _run_job_pinned always drains first; this catches any future path
+        # that does not, loudly rather than by shipping a hollow asset.
+        if ctx._deferred.pending():
+            logger.error(
+                "deferred outputs reached serialization un-drained for %s — "
+                "materializing inline", run.request_id)
+            await asyncio.to_thread(ctx._drain_deferred_outputs)
         data = msgspec.msgpack.encode(output)
         if len(data) <= INLINE_RESULT_MAX_BYTES:
             return data, None
@@ -8447,10 +8454,22 @@ class Executor:
             logger.warning("result blob upload failed for %s: %s", run.request_id, exc)
             raise RetryableError("output upload failed") from exc
 
+    @staticmethod
+    def _peak_vram_bytes(gpu_index: int) -> int:
+        """This job's CUDA peak-allocator high-water mark (reset when it took
+        the GPU). 0 without torch/CUDA."""
+        if torch is not None and torch.cuda.is_available():
+            try:
+                return int(torch.cuda.max_memory_allocated(gpu_index))
+            except Exception:
+                return 0
+        return 0
+
     def _metrics(
         self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int,
         output: Any = None, lane: str = "",
         runtime_terms: "Optional[Dict[str, float]]" = None,
+        peak_vram_bytes: "Optional[int]" = None,
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
         # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
@@ -8463,12 +8482,12 @@ class Executor:
             rss_at_end = int(psutil.Process().memory_info().rss)
         except Exception:
             pass
-        peak_vram = 0
-        if torch is not None and torch.cuda.is_available():
-            try:
-                peak_vram = int(torch.cuda.max_memory_allocated(gpu_index))
-            except Exception:
-                pass
+        # th#1130: the caller reads the peak before releasing the GPU permit
+        # (the next job resets the watermark), and passes it in.
+        peak_vram = (
+            self._peak_vram_bytes(gpu_index) if peak_vram_bytes is None
+            else int(peak_vram_bytes)
+        )
         duration_s, output_count = _scan_output_assets(output)
         usage = _output_token_usage(output)
         return pb.JobMetrics(

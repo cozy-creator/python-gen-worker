@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.62.0 (2026-07-25) — th#1130: the image encode+upload tail overlaps the next request
+
+**No endpoint changes required.** `ctx.save_image` now DEFERS its encode +
+C2PA stamp + upload to the finalize tail: the executor releases the GPU permit
+at handler return (as it always did), then drains the deferred outputs, so the
+webp encode (~250ms for a 1024^2 frame, ~1.1s for 1328^2 at q95) and the upload
+run while the next request is already denoising. Previously they ran inside the
+handler, holding the permit — `finalize_wall_ms` was 0 on every image endpoint.
+
+- Why deferral and not a terminal marker: th#1107's
+  `_release_gpu_slot_for_finalize` is terminal and once-only, so it could not be
+  copied onto `save_image` — endpoints save mid-pipeline and in N-image loops,
+  and the first of N saves would have freed the permit with GPU work still to
+  come. The terminality signal already existed: the handler's RETURN. `save_image`
+  releases nothing; the executor's existing post-handler release is the seam.
+- Safety, by construction: pixels are SNAPSHOTTED at save (`image.copy()`, ~2ms
+  against a ~250ms encode) so mutate-after-save cannot change the upload;
+  reading a bytes field (`size_bytes`, `sha256`, `inline_bytes`, ...) inside the
+  handler forces the encode inline (correct, just not overlapped, and logged);
+  the drain runs before the OK result is built, so a failing encode fails the
+  request instead of shipping a hollow asset. Format validation and the ref's
+  extension stay EAGER (a bad `format=` still raises at the call).
+- Not armed for streaming handlers (they serialize items mid-handler), CLI runs
+  or endpoint unit tests — those stay exactly as they were.
+- th#1111: the stage window now covers the tail, so `image_encode`/
+  `credential_stamp`/`upload` land in `total.tail` and the map still closes
+  exactly against `runtime_ms`. `FINALIZE_OVERLAP` gained `handoff=handler|
+  executor`; `runtime_ms` is unchanged in meaning (the same work, reordered).
+- New: `gen_worker.io.image_format(format) -> (PIL format, extension)`.
+
 ## 0.61.0 (2026-07-25) — pgw#654: the objective/distilled vocabulary train (v2.1)
 
 **HARD CUT on the v2 vocabulary — the wave-1 endpoints (sdxl, z-image,
