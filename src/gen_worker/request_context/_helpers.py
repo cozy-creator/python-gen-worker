@@ -18,6 +18,7 @@ import urllib.parse
 from typing import Any, Dict
 
 from ..api.errors import OutputTooLargeError
+import mimetypes
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,6 @@ def _infer_mime_type(ref: str, head: bytes) -> str:
         return "image/webp"
 
     # Fall back to extension.
-    import mimetypes
 
     guessed, _ = mimetypes.guess_type(ref)
     return guessed or "application/octet-stream"

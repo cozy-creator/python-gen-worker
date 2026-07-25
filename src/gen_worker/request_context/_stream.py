@@ -327,7 +327,7 @@ class _RequestOutputStream:
         One save_checkpoint == one commit == one finalized repo revision;
         the repo is auto-created server-side under the job's create_repo
         grant on first publish."""
-        from ..convert.hub import CommitFile, HubClient
+        from ..convert.hub import CommitFile, HubClient  # lazy: keeps `import gen_worker` off the convert/requests stack
 
         assert self._tmp_path is not None
         assert self._repo_job_scope is not None
@@ -392,7 +392,7 @@ class _RequestOutputStream:
         """Hash the buffered temp file, then upload to the MEDIA route via
         presigned S3 multipart. Checkpoint saves with a repo-job scope go
         through `_finalize_checkpoint_commit` instead (gw#453 routing)."""
-        from ..presigned_upload import presigned_upload_file
+        from ..presigned_upload import presigned_upload_file  # lazy: keeps `import gen_worker` requests-free
 
         assert self._tmp_path is not None
         file_size = os.path.getsize(self._tmp_path)

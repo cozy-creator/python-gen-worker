@@ -30,6 +30,8 @@ from gen_worker.discovery.heavy_deps import stub_missing_heavy_deps
 from gen_worker.discovery.names import slugify_name
 from gen_worker.discovery.project import load_project_config
 from gen_worker.discovery.walk import EndpointImportError, find_endpoints
+from gen_worker.registry import extract_specs
+from .validation import validate_endpoint_lock
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -575,7 +577,6 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
     shared with the worker runtime and the CLI. This adds only the
     manifest-specific enrichment (schemas, moderation, bindings blocks).
     """
-    from gen_worker.registry import extract_specs
 
     out: List[Dict[str, Any]] = []
     for es in extract_specs(obj, walked_module=module_name):
@@ -835,7 +836,6 @@ def main() -> None:
     # uniqueness check; non-class shapes (an entry without archetype/kind)
     # are caught by the required-field check. All errors flow out at once
     # so the build surfaces every problem rather than one-at-a-time.
-    from .validation import validate_endpoint_lock
 
     val = validate_endpoint_lock(manifest)
     for w in val.warnings:

@@ -22,6 +22,9 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import msgspec
+from msgspec import structs
+
+from ..models.refs import HuggingFaceRef, fold_ref, normalize_model_ref, parse_model_ref
 
 ModelSource = Literal["tensorhub", "huggingface", "civitai", "modelscope"]
 
@@ -245,7 +248,6 @@ def wire_ref(binding: Binding) -> str:
     ``#flavor`` suffixes; HF refs carry ``@revision``. Load-time metadata
     (dtype/subfolder/files/storage_dtype) never enters the ref.
     """
-    from ..models.refs import HuggingFaceRef, fold_ref
 
     if binding.source == "tensorhub":
         # The default tag never overrides one embedded in ``ref``.
@@ -277,9 +279,6 @@ def rebind_pick(
     struct always accepts the field (msgspec has no per-source shape), so the
     round-trip mismatch is the enforcement point.
     """
-    from msgspec import structs
-
-    from ..models.refs import fold_ref, normalize_model_ref, parse_model_ref
 
     if resolved_ref:
         parsed = parse_model_ref(resolved_ref)

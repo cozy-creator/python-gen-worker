@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .api.errors import CanceledError
+from .runtime_config import SNAPSHOT_PATH_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,6 @@ def run_process(
     - Returns the process exit code on natural exit (callers decide whether
       nonzero is fatal).
     """
-    from .runtime_config import SNAPSHOT_PATH_ENV
 
     invocation_snapshot_path = _write_invocation_snapshot(ctx)
     child_env = dict(env) if env is not None else None

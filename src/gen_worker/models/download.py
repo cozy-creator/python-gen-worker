@@ -31,6 +31,8 @@ from ..api.errors import ValidationError
 from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
+import hashlib
+from fnmatch import fnmatch
 
 if TYPE_CHECKING:
     from .hub_client import WorkerResolvedRepo
@@ -424,7 +426,6 @@ def components_present(paths: Sequence[str], components: Sequence[str]) -> bool:
 def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) -> set[str]:
     """Repo files matched by ``patterns`` — huggingface_hub semantics
     (fnmatch; a trailing ``/`` means the whole directory)."""
-    from fnmatch import fnmatch
 
     pats = [p + "*" if p.endswith("/") else p for p in patterns]
     return {f for f in repo_files if any(fnmatch(f, p) for p in pats)}
@@ -563,7 +564,7 @@ def download_hf(
     per-component flavor picking (bf16 > fp16 > untagged), just over a
     smaller candidate set.
     """
-    from ..net import hf
+    from ..net import hf  # lazy: net imports requests; keeps `import gen_worker` light
 
     try:
         hub = hf()  # gw#456: no HF socket may wait forever
@@ -716,8 +717,7 @@ def parse_civitai_version_id(raw: str) -> int:
 
 
 def _civitai_get_json(url: str, api_key: str = "") -> dict[str, Any]:
-    import requests
-    from urllib.parse import urlparse
+    import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
     headers: Dict[str, str] = {}
     if api_key and urlparse(url).hostname in _CIVITAI_AUTH_HOSTS:
@@ -843,10 +843,8 @@ def _civitai_stream_one(
     expected_sha256: str,
     on_bytes: Callable[[int], None],
 ) -> int:
-    import hashlib
 
     import requests
-    from urllib.parse import urlparse
 
     headers: Dict[str, str] = {}
     if api_key and urlparse(url).hostname in _CIVITAI_AUTH_HOSTS:
