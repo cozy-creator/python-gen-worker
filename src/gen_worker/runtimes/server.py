@@ -20,11 +20,25 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Sequence
+from ..subproc import LineTail
 from .llama import plan_for, resolve_gguf
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BOOT_TIMEOUT_S = 600.0
+# gw#666 (th#1166 finding B): a boot is bounded by SILENCE, never by a clock.
+# The old `_DEFAULT_BOOT_TIMEOUT_S = 600.0` killed the child on a flat deadline
+# whose only liveness check was `proc.poll()` — "has not exited yet", which
+# says nothing about progress — while the engine was printing weight-load
+# progress to a stdout nobody read. A 70B vLLM cold load routinely outlives
+# 600s, and endpoints had already started papering over it with
+# `boot_timeout_s=1800`, which is the same mistake with a bigger number.
+#
+# The window below is a SILENCE window over the engine's own output, not a
+# boot budget: an engine that keeps talking boots for as long as it needs, and
+# one that says nothing for 15 minutes is wedged. 900s is orders of magnitude
+# past any real silent phase (CUDA graph capture, torch.compile) and matches
+# the window gw#665 gave the llama.cpp toolchain.
+_BOOT_STALL_WINDOW_S = 900.0
 _TERM_GRACE_S = 10.0
 
 
@@ -62,7 +76,12 @@ class ServerHandle:
 
 
 class ServerBootError(RuntimeError):
-    """The engine server exited or failed health checks during boot."""
+    """The engine server exited, or went silent, during boot.
+
+    ``DegradingBoot`` degrades on this — so it must only be raised on real
+    evidence (the process died, or it produced no output for its stall
+    window), never because a stopwatch expired.
+    """
 
 
 class ServerProcess:
@@ -84,13 +103,13 @@ class ServerProcess:
         *,
         health_url: str,
         base_url: str = "",
-        boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
+        stall_window_s: float = _BOOT_STALL_WINDOW_S,
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self.command = [str(c) for c in command]
         self.health_url = health_url
         self.base_url = base_url or health_url.rsplit("/", 1)[0]
-        self.boot_timeout_s = float(boot_timeout_s)
+        self.stall_window_s = float(stall_window_s)
         self.env = env
 
     def start(self) -> ServerHandle:
@@ -98,18 +117,42 @@ class ServerProcess:
         env = dict(os.environ)
         if self.env:
             env.update(self.env)
-        proc = subprocess.Popen(self.command, env=env, start_new_session=True)
+        # Capture the engine's merged output instead of inheriting stdio: it
+        # is both the boot-progress signal AND the log line an operator needs
+        # when a boot goes wrong. The tail thread keeps draining for the whole
+        # life of the server — a child whose pipe fills blocks mid-serving.
+        proc = subprocess.Popen(
+            self.command,
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        tail = LineTail(
+            proc,
+            window_s=self.stall_window_s,
+            on_line=self._log_line,
+            name="engine-server-tail",
+        ).start()
         handle = ServerHandle(base_url=self.base_url, process=proc)
         try:
-            self._wait_healthy(proc)
+            self._wait_healthy(proc, tail)
         except BaseException:
             handle.stop()
             raise
         logger.info("engine server healthy at %s", self.base_url)
         return handle
 
-    def _wait_healthy(self, proc: subprocess.Popen) -> None:
-        deadline = time.monotonic() + self.boot_timeout_s
+    def _log_line(self, line: str) -> None:
+        logger.info("[engine] %s", line)
+
+    def _wait_healthy(self, proc: subprocess.Popen, tail: LineTail) -> None:
+        """Boot is over when the health URL answers. It has FAILED only when
+        the process died or stopped emitting output for its stall window —
+        every log line the engine prints is proof it is still loading, so a
+        slow cold load is never a failure (gw#666)."""
         delay = 0.25
         while True:
             code = proc.poll()
@@ -124,10 +167,12 @@ class ServerProcess:
                         return
             except (urllib.error.URLError, OSError, TimeoutError):
                 pass
-            if time.monotonic() >= deadline:
+            if tail.stalled():
                 raise ServerBootError(
-                    f"engine server failed health check within "
-                    f"{self.boot_timeout_s:.0f}s at {self.health_url}"
+                    f"engine server produced no output for "
+                    f"{tail.silent_for():.0f}s (stall window "
+                    f"{tail.window_s:.0f}s) and never became healthy at "
+                    f"{self.health_url}: {shlex.join(self.command)}"
                 )
             time.sleep(delay)
             delay = min(delay * 1.5, 2.0)
@@ -138,16 +183,19 @@ def vllm_server(
     *,
     port: Optional[int] = None,
     extra_args: Sequence[str] = (),
-    boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
 ) -> ServerProcess:
-    """``vllm serve <model_path>`` with an OpenAI-compatible API + /health."""
+    """``vllm serve <model_path>`` with an OpenAI-compatible API + /health.
+
+    There is no boot-duration knob: how long a cold load legitimately takes
+    is not something an endpoint can know in advance, and the boot is bounded
+    by engine silence instead (gw#666).
+    """
     p = port or free_port()
     return ServerProcess(
         ["vllm", "serve", model_path, "--host", "127.0.0.1", "--port", str(p),
          *extra_args],
         health_url=f"http://127.0.0.1:{p}/health",
         base_url=f"http://127.0.0.1:{p}",
-        boot_timeout_s=boot_timeout_s,
     )
 
 
@@ -184,7 +232,6 @@ def llama_server(
     *,
     port: Optional[int] = None,
     extra_args: Sequence[str] = (),
-    boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
     vram_budget_gb: Optional[float] = None,
     n_ctx: Optional[int] = None,
 ) -> "ServerProcess | DegradingBoot":
@@ -207,7 +254,6 @@ def llama_server(
              "--port", str(p), *fit_args, *args],
             health_url=f"http://127.0.0.1:{p}/health",
             base_url=f"http://127.0.0.1:{p}",
-            boot_timeout_s=boot_timeout_s,
         )
 
     if any(a in _NGL_FLAGS for a in args):

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..api.errors import AuthError, SnapshotBuildFailedError
+from ..stall import SilenceWindow
 import requests
 import blake3
 
@@ -25,9 +26,19 @@ _DOWNLOAD_RETRIES = 3
 _DOWNLOAD_BACKOFF_S = 1.0
 _CHUNK_BYTES = 1024 * 1024
 
-# DATASET-V2 202 contract (th#691): the hub's snapshot build budget is 20 min;
-# the worker waits it out with headroom (training pods can afford minutes).
-_MATERIALIZE_BUDGET_S = 30.0 * 60.0
+# DATASET-V2 202 contract (th#691).
+#
+# gw#666 (th#1166 finding F): the old `_MATERIALIZE_BUDGET_S = 30 min` gave up
+# on a materialization purely because a stopwatch expired. What the hub
+# actually reports is a DEFINITE state per poll — `202 building`, `503
+# snapshot_build_failed` (typed, terminal), or the manifest — and every poll
+# also re-enqueues the (unique) build job, so a lost build self-heals rather
+# than hanging. A 202 is therefore evidence the build is live and the loop
+# waits; only silence — no answer at all, or a 5xx that says nothing —
+# accumulates the window below, derived from the poll's own request timeout
+# times headroom.
+_MATERIALIZE_REQUEST_TIMEOUT_S = 120.0
+_MATERIALIZE_SILENCE_WINDOW_S = 3.0 * _MATERIALIZE_REQUEST_TIMEOUT_S
 _MATERIALIZE_WAIT_HINT_S = 30  # ?wait long-poll hint (server caps ~30s)
 _POLL_BACKOFF_START_S = 1.0
 _POLL_BACKOFF_CAP_S = 30.0
@@ -115,7 +126,7 @@ def fetch_materialize_manifest(
     token: str,
     dataset_id: str,
     *,
-    budget_s: float = _MATERIALIZE_BUDGET_S,
+    hub_silence_window_s: float = _MATERIALIZE_SILENCE_WINDOW_S,
     cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """GET /datasets/:id/materialize?format=files&include_urls=true.
@@ -127,10 +138,15 @@ def fetch_materialize_manifest(
     DATASET-V2 async contract (th#691 / gw#457): the hub may answer
     202 ``{status: building, state_version, retry_after}`` while the snapshot
     builds in the background. We long-poll (``?wait=``, ignored by pre-v2
-    hubs) and retry with backoff — honoring ``retry_after`` — until ready or
-    ``budget_s`` runs out. A typed ``snapshot_build_failed`` raises
-    ``SnapshotBuildFailedError``; transient transport/5xx errors retry within
-    the same budget (hub restart mid-build).
+    hubs) and retry with backoff, honoring ``retry_after``.
+
+    There is NO total budget (gw#666). A 202 is the hub definitively saying
+    the build is live, and each poll re-enqueues the unique build job, so the
+    loop waits as long as the hub keeps answering. A typed
+    ``snapshot_build_failed`` raises ``SnapshotBuildFailedError`` — that is
+    the terminal outcome. Only silence gives up: transport errors and 5xx
+    say nothing definite, and ``hub_silence_window_s`` bounds how long the
+    loop tolerates hearing nothing at all.
     """
 
     url = (
@@ -139,27 +155,32 @@ def fetch_materialize_manifest(
         f"&wait={_MATERIALIZE_WAIT_HINT_S}"
     )
     headers = {"Authorization": f"Bearer {token}"}
-    deadline = time.monotonic() + max(0.0, budget_s)
+    contact = SilenceWindow(hub_silence_window_s)
     backoff = _POLL_BACKOFF_START_S
 
-    def _wait_or_budget_exhausted(sleep_s: float, why: str) -> None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+    def _wait_or_hub_silent(sleep_s: float, why: str) -> None:
+        """Sleep before the next poll, unless the hub has told us nothing
+        definite for the whole silence window — the only give-up."""
+        if contact.stalled():
             raise RuntimeError(
-                f"dataset materialize budget exhausted after {budget_s:.0f}s "
-                f"for dataset_id={dataset_id} (last state: {why})"
+                f"dataset materialize: the hub said nothing definite for "
+                f"{contact.silent_for():.0f}s (window "
+                f"{contact.window_s:.0f}s) for dataset_id={dataset_id} "
+                f"(last state: {why})"
             )
-        _sleep_cancellable(min(sleep_s, _POLL_SLEEP_MAX_S, remaining), cancelled)
+        _sleep_cancellable(min(sleep_s, _POLL_SLEEP_MAX_S), cancelled)
 
     while True:
         _check_cancelled(cancelled)
         try:
-            resp = requests.get(url, headers=headers, timeout=120)
+            resp = requests.get(
+                url, headers=headers, timeout=_MATERIALIZE_REQUEST_TIMEOUT_S,
+            )
         except requests.RequestException as exc:
             logger.warning(
                 "dataset %s materialize request failed (%s); retrying", dataset_id, exc,
             )
-            _wait_or_budget_exhausted(backoff, f"transport error: {exc}")
+            _wait_or_hub_silent(backoff, f"transport error: {exc}")
             backoff = min(backoff * 2.0, _POLL_BACKOFF_CAP_S)
             continue
 
@@ -167,6 +188,8 @@ def fetch_materialize_manifest(
             raise AuthError(f"dataset materialize unauthorized ({resp.status_code})")
 
         if resp.status_code == 202:
+            # A definite answer: the build is live hub-side.
+            contact.touch()
             try:
                 data = resp.json() if resp.text else {}
             except ValueError:
@@ -179,7 +202,7 @@ def fetch_materialize_manifest(
                 "dataset %s snapshot building (state_version=%s); polling again in %.1fs",
                 dataset_id, data.get("state_version"), min(sleep_s, _POLL_SLEEP_MAX_S),
             )
-            _wait_or_budget_exhausted(sleep_s, "202 building")
+            _wait_or_hub_silent(sleep_s, "202 building")
             backoff = min(backoff * 2.0, _POLL_BACKOFF_CAP_S)
             continue
 
@@ -191,7 +214,7 @@ def fetch_materialize_manifest(
                 logger.warning(
                     "dataset %s materialize got %d; retrying", dataset_id, resp.status_code,
                 )
-                _wait_or_budget_exhausted(backoff, f"http {resp.status_code}")
+                _wait_or_hub_silent(backoff, f"http {resp.status_code}")
                 backoff = min(backoff * 2.0, _POLL_BACKOFF_CAP_S)
                 continue
             raise RuntimeError(
