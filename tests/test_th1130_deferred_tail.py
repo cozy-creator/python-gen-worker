@@ -63,7 +63,14 @@ def test_the_permit_is_released_before_the_deferred_encode_runs() -> None:
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     stages = dict(res.metrics.stage_ms)
     encode_ms = stages["image_encode"]
-    assert encode_ms >= 100, f"the 1024^2 webp encode should be visible: {stages}"
+    # The encode must be big enough that "it ran slotless" means something —
+    # but NOT a wall-clock claim about the runner's CPU. `>= 100` failed on a
+    # GitHub runner at 83ms (pgw debt-sweep lane, PR #397), which said nothing
+    # about the property under test. Measurable, and dominating the tail, is
+    # the honest form of the same requirement.
+    assert encode_ms >= 10, f"the 1024^2 webp encode should be visible: {stages}"
+    assert encode_ms >= 0.5 * stages["total.tail"], (
+        f"the deferred encode should dominate the tail: {stages}")
 
     # The whole encode fits inside the post-release window: the GPU was free
     # for every millisecond of it.

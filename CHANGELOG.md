@@ -2,8 +2,31 @@
 
 ## 0.63.0 (2026-07-25) — debt sweep: a worker never advertises a model it does not have
 
-Three fleet-debt issues from Paul's audit (pgw#655 / #656 / #657). No endpoint
-changes; three behaviour changes worth reading before upgrading.
+Four fleet-debt issues from Paul's audit (pgw#655 / #656 / #657) plus the SDK half of
+ie#554 (pgw#663). One new public API; three behaviour changes worth reading before
+upgrading.
+
+### pgw#663 — one guarded URL fetch for endpoint code (NEW PUBLIC API; ie#554)
+
+`gen_worker.fetch_bytes` / `fetch_image` (and `url_fetch.open_guarded_stream`
+for streaming callers) replace the hand-rolled `urlopen(url).read()` that
+endpoints accepting caller URLs were each writing for themselves:
+
+- scheme, destination (private/loopback/link-local/metadata addresses refused)
+  and an optional host allowlist — caller-level plus a deployment-wide outer
+  bound in `GEN_WORKER_URL_FETCH_ALLOWED_HOSTS`;
+- **redirects are followed manually, with the policy re-applied to every hop.**
+  `urlopen` follows them silently, so a pre-flight check on the caller's URL
+  said nothing about where the bytes came from — a public URL 302-ing to the
+  cloud metadata service was the one-line bypass. `input_assets` had the same
+  hole on its caller-transport path and now goes through the same opener
+  (resolver-minted units keep their internal-object-host exemption);
+- a streamed byte cap that does not depend on the server declaring a size;
+- MIME matched against the SNIFFED type.
+
+Refusals are `ValidationError` (caller-caused), transport failures
+`RetryableError`. Documented limit: per-hop validation does not close DNS
+rebinding — see the module docstring.
 
 ### pgw#655 — READY-without-the-model, and a download bound that was off (P0)
 
