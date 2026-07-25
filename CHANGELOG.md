@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.63.0 (2026-07-25) — debt sweep: a worker never advertises a model it does not have
+
+Three fleet-debt issues from Paul's audit (pgw#655 / #656 / #657). No endpoint
+changes; three behaviour changes worth reading before upgrading.
+
+### pgw#655 — READY-without-the-model, and a download bound that was off (P0)
+
+- **Boot prefetch failure now GATES the function.** A failed startup prefetch of
+  an hf/civitai-source ref used to log "failed terminally" and walk on to READY.
+  Function-shaped (`cls=None`) and non-inference functions are advertised
+  unconditionally, so the hub then dispatched paid GPU jobs that each
+  re-discovered the missing model as a per-request load failure. Those functions
+  now go `FnUnavailable(reason="model_unavailable", axes={"ref": …})` instead.
+  Per function, never the process: a sibling whose model landed keeps serving.
+  Hub-resolved slot refs are unaffected — they arrive by delivery, not prefetch.
+- **The HF download bound is a progress-RATE floor, not a wall clock.**
+  `_HF_DOWNLOAD_MAX_SECONDS` was `0.0` (off) for its entire life, and the stall
+  watchdog reset its window on ANY byte — so a trickle pinned
+  `DOWNLOADING_MODELS` forever. A transfer must now put
+  `_HF_DOWNLOAD_MIN_WINDOW_BYTES` (8 MiB) on disk within the 180s window or it
+  raises `DownloadStalledError`. That is ~46 KiB/s: three orders of magnitude
+  under any real pod link, and still 60+ hours for a 10GB checkpoint. The dead
+  wall-clock knob is deleted, not defaulted.
+
+### pgw#656 — dataset ingest never creates a duplicate it could have found
+
+`publish_dataset_revision`'s existing-dataset lookup had three ways to come back
+empty, and empty means CREATE:
+
+- a swallowed JSON-parse error **and** a non-2xx response that simply fell
+  through — both now raise (`AuthError` on 401/403, `RuntimeError` otherwise);
+- one unpaginated page (tensorhub defaults `limit` to 50) — now walks
+  `next_cursor` at the API's 200 cap, with a no-movement/page-ceiling guard;
+- `?tenant=`, which the hub's `listDatasets` never reads — now `?org=`.
+
+The `__cozy_kind__` / `__cozy_dataset_info__` / `__cozy_snapshot_manifest__`
+features_json squat needs hub columns first: tracked as th#1162.
+
+### pgw#657 — fail-loud hardening
+
+- `install_hf_http_timeouts()` now **proves** the huggingface_hub timeout floor
+  on the client hf will actually build, and raises `HfHttpFloorError` at boot if
+  it cannot. The patch reaches into hf's private backend (already reshaped once,
+  requests -> httpx); a silent revert puts the fleet back on infinite HTTP
+  timeouts (gw#456) with nothing to say so.
+- The gw#640 boot record picks a **durable** carrier
+  (`GEN_WORKER_BOOT_RECORD` > the model-cache volume > `/tmp`), detects a
+  tmpfs/ramfs carrier, records `carrier_volatile` in the record itself, and warns
+  loudly — a record on RAM is freed by the very OOM it exists to report.
+- `Source.iter_hf_components()` on a diffusers-singlefile source is now a typed
+  `ValidationError` naming the supported layouts, replacing a
+  `NotImplementedError` that the docstring promised worked.
+- Compile-evidence probes say why they failed: a silent
+  `has_inmemory_compiled_code` false negative kills a healthy compiled lane, and
+  a silently-degraded `runtime_key()` computes a different cell key than every
+  healthy pod (a guaranteed miss + re-mint).
+- Three inline `gc.collect` + `empty_cache` copies in the executor fold into
+  `models.memory.aflush_memory` (`reset_peak=False` — pgw#652's activation
+  learning reads `max_memory_allocated`).
+
 ## 0.62.1 (2026-07-25) — gw#661: a retrying worker no longer reports itself failed
 
 A setup/warmup loss whose contract is "will be re-attempted" now reports
