@@ -191,6 +191,29 @@ class Activity:
             )
         _end(self)
 
+    def retrying(self, exc: BaseException, attempt: int, max_attempts: int) -> None:
+        """gw#661: this attempt lost, but the work is contractually
+        re-attempted — so the activity is still RUNNING, not FAILED.
+
+        FAILED is the hub's terminal rung: ``lastWorkerProgressLocked``
+        (th#1160) excludes failed activities from progress evidence, so a
+        will-retry attempt that reports FAILED erases exactly the evidence
+        that keeps a working pod alive. Measured 2026-07-25: 4 condemnations,
+        4 self-mint compiles that then COMPLETED. Only exhaustion is failure.
+        """
+        if self._done:
+            _end(self)
+            return
+        self._done = True
+        self._report(
+            pb.ActivityState.ACTIVITY_STATE_RUNNING,
+            detail=(
+                f"retrying (attempt {attempt}/{max_attempts}): "
+                f"{type(exc).__name__}: {exc}"
+            )[:2000],
+        )
+        _end(self)
+
 
 def begin(kind: str, phase: str = "") -> Activity:
     global _current

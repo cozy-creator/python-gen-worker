@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.62.1 (2026-07-25) — gw#661: a retrying worker no longer reports itself failed
+
+A setup/warmup loss whose contract is "will be re-attempted" now reports
+`ACTIVITY_STATE_RUNNING` with a `retrying (attempt N/5)` detail instead of the
+`ACTIVITY_STATE_FAILED` terminal. Exhausting the budget reports FAILED and
+disables the function (`reason=retry_exhausted`), so the hub still gets the
+terminal truth.
+
+- **Premise correction.** gw#661 was filed as "`RetryableError` is mapped onto
+  startup `phase=error`". It is not: `WORKER_PHASE_ERROR` has exactly five
+  sources (mandatory-command rejection, config-snapshot write failure,
+  `UnreportedIntentWait` out of residency reconcile, config-snapshot failure,
+  drain failure) and none of them is the self-mint compile path. The signal the
+  incident actually quoted (`activity failed kind=self_mint_compile
+  phase=warmup_forward error=RetryableError: ... retrying`) is the
+  **ActivityUpdate** carrier, and that is the one that was lying.
+- **Why it condemned pods anyway.** The hub's th#1160 progress-aware verdict
+  reads `lastWorkerProgressLocked`, which *excludes* activities in state
+  `failed`. Declaring a will-retry attempt FAILED therefore erased exactly the
+  progress evidence that keeps a working pod alive — the worker was deleting its
+  own defense. Measured 2026-07-25: 4 condemnations, 4 self-mint compiles that
+  then COMPLETED, one finishing 53s after its pod was condemned.
+- `CompiledLaneUnavailableError` subclasses `RetryableError` but the worker does
+  give up on it (it disables every handler needing the unproven lane), so it
+  stays on the FAILED rung. Job-path `RetryableError` -> `JOB_STATUS_RETRYABLE`
+  is unchanged; `ConfigSnapshotWriteError` -> `WORKER_PHASE_ERROR` is unchanged
+  (nothing re-attempts a failed snapshot write worker-side).
+- No proto change: `WorkerPhase` and `ActivityState` are untouched, so this
+  needs no hub lockstep. A distinct `retrying` wire rung remains available as
+  follow-up if the hub ever wants to distinguish it from ordinary running.
+- The hub-side defenses (th#1157 debounce, th#1160 progress-aware verdict) stay.
+  They are correct independent of this fix — defense in depth.
+
 ## 0.62.0 (2026-07-25) — th#1130: the image encode+upload tail overlaps the next request
 
 **No endpoint changes required.** `ctx.save_image` now DEFERS its encode +
