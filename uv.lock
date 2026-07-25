@@ -588,6 +588,7 @@ source = { editable = "." }
 dependencies = [
     { name = "blake3" },
     { name = "boto3" },
+    { name = "c2pa-python" },
     { name = "gguf" },
     { name = "grpcio" },
     { name = "huggingface-hub" },
@@ -648,6 +649,7 @@ requires-dist = [
     { name = "bitsandbytes", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=0.45.0" },
     { name = "blake3", specifier = ">=1.0.0" },
     { name = "boto3", specifier = ">=1.41.0" },
+    { name = "c2pa-python", specifier = ">=0.36" },
     { name = "c2pa-python", marker = "extra == 'dev'", specifier = ">=0.36" },
     { name = "c2pa-python", marker = "extra == 'signing'", specifier = ">=0.36" },
     { name = "diffusers", marker = "extra == 'dev'", specifier = ">=0.39.0" },

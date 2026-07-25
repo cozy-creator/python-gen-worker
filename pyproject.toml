@@ -34,6 +34,10 @@ dependencies = [
     "gguf>=0.10.0",
     # endpoint.lock is TOML; msgspec.toml.encode needs tomli-w at bake time.
     "tomli-w>=1.0.0",
+    # C2PA Content Credentials (th#714, EU AI Act Art. 50) — core, not an
+    # extra: the compliance default-ON posture must not depend on every
+    # endpoint image remembering `[signing]`. Small manylinux wheel.
+    "c2pa-python>=0.36",
 ]
 # Pillow (image I/O) and numpy/soundfile (audio I/O) are lazy-imported by
 # gen_worker.io and live in the [images] / [audio] extras — the base wheel
