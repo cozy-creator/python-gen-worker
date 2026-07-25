@@ -51,7 +51,7 @@
   function claims 0, so this is inert on CPU workers and at first boot. No
   endpoint-visible change and no knob — residency depth vs concurrency headroom
   is one runtime decision.
-- **th#1129: WebP is THE image-encoding default, on one shared encode core.**
+- **th#1130: WebP is THE image-encoding default, on one shared encode core.**
   Paul's ruling: "the default image-encoding should be webp, always, with png
   or jpg as optional alternatives." Both encode surfaces had independently
   reimplemented the encode — and had already drifted to different default
