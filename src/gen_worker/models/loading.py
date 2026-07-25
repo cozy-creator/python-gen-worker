@@ -866,6 +866,25 @@ def model_index_entry(path: str | Path, component: str) -> Optional[tuple]:
     return None
 
 
+def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
+    """The compute dtype the COMPOSED pipeline will run at (pgw#647 gap #2):
+    the base binding's declared dtype when present, else the base tree's
+    on-disk dtype with fp8/quantized storage mapping to its bf16 compute
+    default (mirrors :func:`load_diffusers_pipeline`'s own selection).
+    ``""`` = unknown (an fp32-defaulting composition)."""
+    if dtype:
+        return dtype
+    sniffed = detect_on_disk_dtype(Path(base_path))
+    if sniffed == "fp8":
+        # fp8-stored flavors (w8a16/w8a8 alike) compute in bf16; per-layer
+        # storage precision is restored separately (apply_fp8_storage /
+        # the scaled-mm lane).
+        return "bf16"
+    if sniffed in ("bf16", "fp16"):
+        return sniffed
+    return ""
+
+
 def load_component_override(
     base_path: str | Path, component: str, override_path: str | Path,
     *, dtype: str = "",
@@ -873,9 +892,16 @@ def load_component_override(
     """Load one named pipeline component from an OVERRIDE snapshot tree
     (pgw#617 hierarchical bindings). The module class comes from the BASE
     tree's model_index.json; weights come from the override tree's
-    ``<component>/`` subtree when present, else its root. ``dtype`` (the
-    base binding's) wins; otherwise the override's on-disk dtype is
-    honored. Blocking; callers on an event loop run it off-thread."""
+    ``<component>/`` subtree when present, else its root.
+
+    dtype resolution (pgw#647 gap #2): the base binding's declared dtype
+    wins; otherwise the override inherits the BASE COMPOSITION's compute
+    dtype (:func:`composition_compute_dtype`); the override's own on-disk
+    dtype is only the last resort. Hub-resolved bindings carry no dtype, so
+    the old override-on-disk fallback loaded e.g. the fp32-stored fp16-fix
+    VAE into a bf16 pipeline and setup died on the first latent
+    (ie#546 canary, 2/2 pods). Blocking; callers on an event loop run it
+    off-thread."""
 
     entry = model_index_entry(base_path, component)
     if entry is None:
@@ -895,7 +921,10 @@ def load_component_override(
     if not src.is_dir():
         src = Path(override_path)
     kwargs: Dict[str, Any] = {}
-    wanted = dtype or detect_on_disk_dtype(src)
+    wanted = (
+        composition_compute_dtype(base_path, dtype)
+        or detect_on_disk_dtype(src)
+    )
     if wanted in ("bf16", "fp16", "bfloat16", "float16", "fp32", "float32"):
         try:
             kwargs["torch_dtype"] = get_torch_dtype(wanted)

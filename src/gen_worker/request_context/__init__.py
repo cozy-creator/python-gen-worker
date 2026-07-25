@@ -403,6 +403,13 @@ class RequestContext(Generic[D]):
             "reason": str(reason or ""),
         })
 
+    @property
+    def adjustments(self) -> Tuple[Dict[str, str], ...]:
+        """Immutable view of the adjustment ledger (:meth:`adjusted` /
+        :meth:`clamp` rows, in emission order). The PUBLIC read side —
+        endpoint tests assert against this, never ``_adjustments``."""
+        return tuple(dict(row) for row in self._adjustments)
+
     def clamp(
         self,
         field: str,
@@ -1534,7 +1541,9 @@ class _PublisherMixin:
             self._dataset_paths = d
         return d
 
-    def resolve_dataset(self, ref: str, *, budget_s: Optional[float] = None) -> str:
+    def resolve_dataset(
+        self, ref: str, *, hub_silence_window_s: Optional[float] = None,
+    ) -> str:
         """Materialize a dataset by bare dataset-id or ``owner/name`` ref;
         return the local root.
 
@@ -1549,15 +1558,17 @@ class _PublisherMixin:
         2. ``GET /api/v1/datasets/:id/materialize?format=files&include_urls=true``
            → a rows.jsonl-style entry index (raw CAS blobs by digest) with
            presigned URLs, sizes and blake3 checksums. A 202 (async snapshot
-           build, th#691) is polled until ready within ``budget_s`` (default
-           30 min, ≥ the hub's 20-min build budget); a typed
-           ``snapshot_build_failed`` raises ``SnapshotBuildFailedError``.
+           build, th#691) is polled for as long as the hub keeps answering —
+           there is no wall-clock budget (gw#666); a typed
+           ``snapshot_build_failed`` raises ``SnapshotBuildFailedError``, and
+           ``hub_silence_window_s`` bounds only how long a hub that answers
+           NOTHING is tolerated.
         3. Stream each entry to disk (bounded memory), digest-verified, with
            bounded retries. Entries lacking a presigned URL fall back to the
            repo-CAS by-digest reader.
 
         Raises ``RuntimeError`` when the dataset isn't found, the manifest is
-        empty, the poll budget runs out, or any download exhausts its retries.
+        empty, the hub goes silent, or any download exhausts its retries.
         """
         from ._datasets import (
             download_entries,
@@ -1583,8 +1594,8 @@ class _PublisherMixin:
                 raise RuntimeError("resolve_dataset: empty ref")
             cache_key = ("by-id", dataset_id)
         fetch_kwargs: Dict[str, Any] = {"cancelled": lambda: self.cancelled}
-        if budget_s is not None:
-            fetch_kwargs["budget_s"] = budget_s
+        if hub_silence_window_s is not None:
+            fetch_kwargs["hub_silence_window_s"] = hub_silence_window_s
         snapshot_id, entries = fetch_materialize_manifest(
             base, token, dataset_id, **fetch_kwargs,
         )

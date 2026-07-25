@@ -2380,6 +2380,14 @@ class Executor:
                 continue
             rec = self._classes.setdefault(s.instance_key, _ClassRecord(cls=s.cls))
             rec.specs.append(s)
+        # pgw#654 warm-tax fix: graph_keys already warm-RUN in this process,
+        # keyed by warm CONTRACT (class + per-slot lane facts + component
+        # overrides — everything that selects graphs/kernels, NEVER the
+        # checkpoint ref). A new checkpoint instance of an already-warmed
+        # contract is a cache hit: it runs one verification job, not the
+        # plan. Process-local by design — allocator pool, cuBLAS/cuDNN
+        # heuristics and dynamo's code cache die with the process.
+        self._warm_contract_runs: Dict[Any, set] = {}
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
         # Runtime compile failures are owned by the exact record/target that
@@ -4467,6 +4475,26 @@ class Executor:
             has_warmup_method=False,
         )
 
+    def _warm_contract_key(self, spec: EndpointSpec) -> Any:
+        """The identity under which warm RUNS are shared across checkpoint
+        instances (pgw#654 warm-tax fix): the class plus every per-slot fact
+        that selects graphs or kernels — precision lane (flavor /
+        storage_dtype / dtype) and component overrides — and NEVER the
+        checkpoint ref itself. Two fine-tunes of one family land on the same
+        key by construction; a lane rebind or a component substitution
+        derives a different one."""
+        rows = tuple(
+            (
+                slot,
+                getattr(b, "flavor", "") or "",
+                getattr(b, "storage_dtype", "") or "",
+                getattr(b, "dtype", "") or "",
+                tuple(getattr(b, "component_overrides", ()) or ()),
+            )
+            for slot, b in sorted(spec.models.items())
+        )
+        return (spec.cls, rows)
+
     def _compile_contract_names(
         self, spec: EndpointSpec, rec: _ClassRecord,
     ) -> set[str]:
@@ -4501,6 +4529,8 @@ class Executor:
         *,
         proof_objects: typing.Iterable[Any] = (),
         cold_proof_ids: typing.Container[int] = (),
+        allow_contract_skip: bool = False,
+        armed_cell_refs: typing.Iterable[str] = (),
     ) -> _WarmupEvidence:
         """Run the declared per-handler warmup contract pre-READY.
 
@@ -4514,13 +4544,46 @@ class Executor:
         proof (there is nothing pre-existing on disk to HIT against; the
         capture this very call populates becomes the cell). Delivered cells
         keep requiring a real cache hit.
+
+        ``allow_contract_skip`` (pgw#654 warm-tax fix, setup path only):
+        permit the contract-keyed run memory to collapse this warmup to a
+        single verification job when every planned run already executed in
+        this process for the same warm contract. Inheritance is refused
+        when a self-mint capture is pending (its cell must trace every
+        graph) or when any armed cell is not yet proven in-process (a
+        1-job run must never disprove a cell the full plan would have
+        proven). The hot-adopt path never passes it: a NEW cell on a live
+        instance requires its own full proof.
         """
         from . import compile_cache, trt_engine
+        from . import warmup as warmup_mod
 
         jobs, skips = self._warmup_plan(spec, rec)
         for skip in skips:
             logger.info("boot warmup skipped for %s: %s", skip.spec.name, skip.reason)
         objects = tuple({id(obj): obj for obj in proof_objects}.values())
+        # Tracing == some artifact is armed or minting on this setup; only
+        # then does the full class x bucket cross-product buy anything (each
+        # graph must trace into the capture / prove against the cell).
+        tracing = bool(objects)
+        memory = self._warm_contract_runs.setdefault(
+            self._warm_contract_key(spec), set())
+        armed_refs = tuple(armed_cell_refs)
+        skip_ok = (
+            allow_contract_skip
+            and not cold_proof_ids
+            and all(compile_cache.cell_proven_in_process(r) for r in armed_refs)
+        )
+        run_jobs, warm_mode = warmup_mod.select_runs(
+            jobs,
+            tracing=tracing,
+            executed=(memory if skip_ok else frozenset()),
+        )
+        if warm_mode != "full":
+            logger.info(
+                "boot warm plan for %s: mode=%s runs=%d/%d planned "
+                "(contract-keyed warm memory holds %d graph keys)",
+                spec.name, warm_mode, len(run_jobs), len(jobs), len(memory))
         evidence = _WarmupEvidence()
         start_counts = {
             id(obj): (
@@ -4600,16 +4663,20 @@ class Executor:
                 wj.spec.name, mode, time.monotonic() - t0)
             return True
 
-        for wj_index, wj in enumerate(jobs, start=1):
+        for wj_index, wj in enumerate(run_jobs, start=1):
             activity_mod.current_phase(
-                activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(jobs))
+                activity_mod.PHASE_WARMUP_FORWARD, wj_index, len(run_jobs))
             act = activity_mod.current()
             if act is not None:
                 act.counter("warmup:jobs", progress_mod.UNIT_STEPS,
-                            total=len(jobs)).set_done(wj_index)
-            mode = "declared" if wj.declared else "synthesized"
+                            total=len(run_jobs)).set_done(wj_index)
+            mode = (
+                "verify" if warm_mode == "verify"
+                else "declared" if wj.declared else "synthesized"
+            )
             if not await _one(wj, wj.build, mode, variant=False):
                 return evidence
+            memory.add(wj.graph_key)
 
         def _unexercised() -> list[Any]:
             return [
@@ -4624,18 +4691,16 @@ class Executor:
         # (gw#612) and an adopt arms it unproven. Synthesized media variants
         # of the same base payloads exercise those lanes with matching
         # compile-key derivation (only the media field differs).
-        if jobs and _unexercised():
-            from . import warmup as warmup_mod
-
+        if warm_mode == "full" and run_jobs and _unexercised():
             variant_jobs = [
                 (wj, label, build)
-                for wj in jobs
+                for wj in run_jobs
                 for label, build in warmup_mod.media_variants(
                     wj.spec.payload_type, wj.build)
             ]
-            total = len(jobs) + len(variant_jobs)
+            total = len(run_jobs) + len(variant_jobs)
             for v_index, (wj, label, build) in enumerate(
-                    variant_jobs, start=len(jobs) + 1):
+                    variant_jobs, start=len(run_jobs) + 1):
                 if not _unexercised():
                     break
                 activity_mod.current_phase(
@@ -4646,6 +4711,19 @@ class Executor:
                                 total=total).set_done(v_index)
                 if not await _one(wj, build, label, variant=True):
                     break
+        if warm_mode == "verify" and evidence.count:
+            # Contract inheritance (pgw#654 warm-tax fix): the verification
+            # run proving this object, together with every graph key already
+            # EXECUTED in this process for the same warm contract (the skip
+            # precondition), certifies the full plan on this object —
+            # handler code paths and graph classes are instance-invariant;
+            # only the weights changed. Without this, a 1-job verify would
+            # attribute a single alias and fail the mandatory-lane
+            # completeness gate that the full plan (whose runs would land on
+            # dynamo's in-memory code anyway) passes.
+            all_keys = {wj.graph_key for wj in jobs}
+            for obj_id in list(proven_keys):
+                proven_keys[obj_id] |= all_keys
         # Coverage attribution (pgw#654): name -> its full graph-class set,
         # from the plan; an alias attributes to an object only when EVERY
         # one of its classes proved there — a partially-traced alias is
@@ -5020,6 +5098,14 @@ class Executor:
                         if id(candidate.pipeline) in inj.active_compile_artifacts
                     ),
                     cold_proof_ids=frozenset(inj.pending_self_mints),
+                    # pgw#654 warm-tax fix: a checkpoint instance of an
+                    # already-warmed contract collapses to one verification
+                    # job (setup path only; hot-adopt keeps full proof).
+                    allow_contract_skip=True,
+                    armed_cell_refs=tuple(
+                        sel.ref
+                        for sel in inj.active_compile_artifacts.values()
+                    ),
                 )
                 return evidence.count, evidence.functions_by_object
 
