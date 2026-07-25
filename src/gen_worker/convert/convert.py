@@ -39,8 +39,8 @@ from .writer import streaming_fp8_storage_cast
 import json as _json
 import shutil as _shutil
 from ._hf_load import load_component_module
-import subprocess
-from .gguf_tools import (prepare_hf_source_tree_for_gguf, resolve_gguf_convert_script, run_hf_to_gguf_conversion)
+from ..subproc import ProcessStalledError, run_process
+from .gguf_tools import (GGUF_TOOLCHAIN_STALL_WINDOW_S, prepare_hf_source_tree_for_gguf, resolve_gguf_convert_script, run_hf_to_gguf_conversion)
 
 logger = logging.getLogger(__name__)
 
@@ -699,17 +699,30 @@ def _run_gguf_inline(
             encoding="f16",
         )
         llama_quantize = "llama-quantize"
-        proc = subprocess.run(
-            [llama_quantize, str(intermediate), str(final_path), dtype.upper()],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=7200.0,
-        )
-        if proc.returncode != 0:
+        cmd = [llama_quantize, str(intermediate), str(final_path), dtype.upper()]
+        # No wall clock: llama-quantize prints a line per quantized tensor, so
+        # SILENCE is the wedge signal and elapsed time is not (a large source
+        # legitimately runs for hours). The tail is kept only for the error.
+        tail: list[str] = []
+
+        def _quantize_line(line: str) -> None:
+            logger.info("llama-quantize: %s", line)
+            tail.append(line)
+            if len(tail) > 200:
+                del tail[0]
+
+        try:
+            returncode = run_process(
+                cmd,
+                on_line=_quantize_line,
+                stall_window_s=GGUF_TOOLCHAIN_STALL_WINDOW_S,
+            )
+        except ProcessStalledError as exc:
+            raise RuntimeError(f"llama-quantize stalled: {exc}") from exc
+        if returncode != 0:
             raise RuntimeError(
-                f"llama-quantize failed (rc={proc.returncode}): "
-                f"{(proc.stderr or '').strip()[-2000:]}"
+                f"llama-quantize failed (rc={returncode}): "
+                f"{chr(10).join(tail).strip()[-2000:]}"
             )
         if not final_path.exists() or final_path.stat().st_size <= 0:
             raise RuntimeError(f"llama-quantize produced no output for {dtype}")

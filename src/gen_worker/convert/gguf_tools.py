@@ -4,11 +4,26 @@ package (replaces the hand-rolled binary parser in gguf_utils.py)."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
+
+from ..subproc import ProcessStalledError, run_process
+
+logger = logging.getLogger(__name__)
+
+# The llama.cpp toolchain is chatty per TENSOR (convert_hf_to_gguf.py prints a
+# line per tensor, llama-quantize prints one per quantized block), so silence
+# is the honest wedge signal and elapsed time is not: a 200GB source legitimately
+# runs for hours on a shared conversion pod. Fifteen minutes of total silence is
+# orders of magnitude past any real inter-tensor gap.
+#
+# This replaces a flat ``timeout=7200`` that killed conversions mid-write purely
+# for taking two hours (gw#655's principle: a wall clock cannot tell a healthy
+# long job from a wedge, so it is either useless or it kills real work).
+GGUF_TOOLCHAIN_STALL_WINDOW_S = 900.0
 
 _SUPPORTED_ARCH_ALIASES: dict[str, str] = {
     "llama": "llama", "mistral": "llama", "gemma": "gemma",
@@ -117,18 +132,23 @@ def run_hf_to_gguf_conversion(
     cmd = [sys.executable, str(script_path), str(hf_model_dir),
            "--outfile", str(output_path), "--outtype", normalize_gguf_encoding(encoding)]
     try:
-        proc = subprocess.run(cmd, check=False, text=True, capture_output=True, timeout=7200.0)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("gguf_conversion_timeout") from exc
+        returncode = run_process(
+            cmd,
+            on_line=lambda line: logger.info("hf-to-gguf: %s", line),
+            stall_window_s=GGUF_TOOLCHAIN_STALL_WINDOW_S,
+        )
+    except ProcessStalledError as exc:
+        raise RuntimeError(f"gguf_conversion_stalled:{exc}") from exc
     except Exception as exc:
         raise RuntimeError("gguf_conversion_exec_failed") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(f"gguf_conversion_failed:rc={proc.returncode}")
+    if returncode != 0:
+        raise RuntimeError(f"gguf_conversion_failed:rc={returncode}")
     if not output_path.exists() or output_path.stat().st_size <= 0:
         raise RuntimeError("gguf_conversion_failed:missing_output")
 
 
 __all__ = [
+    "GGUF_TOOLCHAIN_STALL_WINDOW_S",
     "detect_supported_architecture",
     "normalize_gguf_encoding",
     "prepare_hf_source_tree_for_gguf",

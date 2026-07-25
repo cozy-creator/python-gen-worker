@@ -71,7 +71,7 @@ from .request_context import (
     TrainingContext,
     TrainingMetric,
 )
-from .subproc import run_process
+from .subproc import ProcessStalledError, run_process
 
 
 __all__ = [
@@ -116,6 +116,7 @@ __all__ = [
     # Per-step progress helper for diffusers pipelines.
     "diffusers_step_callback",
     # Delegated-trainer subprocess primitive.
+    "ProcessStalledError",
     "run_process",
     # Errors.
     "CanceledError",
