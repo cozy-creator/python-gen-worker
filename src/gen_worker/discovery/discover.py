@@ -402,9 +402,21 @@ def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
     return out
 
 
-def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str, Any]:
-    """One ``functions[].slots[]`` entry (pgw#520 / th#767): the hub-side
-    mapping/resolution contract for a Slot-declared model slot."""
+def _slot_to_manifest(
+    name: str, slot: Slot, *, family: str,
+    components: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """One ``functions[].slots[]`` entry (pgw#520 / th#767, SDK v2): the
+    hub-side mapping/resolution contract for a Slot-declared model slot.
+
+    v2 publishes the DERIVED component tree (``components``: ordered
+    ``[{name, kind}]`` rows, kind ``weights`` | ``config``) — the path
+    vocabulary the hub needs for per-path policy (``pipeline`` open /
+    ``pipeline.vae`` curated / ``pipeline.unet`` fixed, th#980/ie#524) and
+    component-level routing. Pinned at publish so diffusers drift stays
+    deterministic. ``default_config`` is gone: recipe values are catalog
+    data (th#1116); the schema derives from the handler's
+    ``RequestContext[D]`` annotation."""
     out: Dict[str, Any] = {
         "name": name,
         "pipeline_class": f"{slot.pipeline_cls.__module__}.{slot.pipeline_cls.__qualname__}",
@@ -413,15 +425,13 @@ def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str
         out["selected_by"] = slot.selected_by
     if slot.default_checkpoint is not None:
         out["default_checkpoint"] = _model_ref_to_manifest(slot.default_checkpoint)
-    # Compile(family=...) is the explicit, functionally-load-bearing
-    # declaration (compile-cache keying) — it wins over the slot's own
-    # default_config-preset registration when both are present, mirroring
-    # _stamp_family's precedence for the bindings-block stamp below.
-    family = compile_family or slot.family
     if family:
         out["family"] = family
-    if slot.default_config is not None:
-        out["default_config"] = msgspec.to_builtins(slot.default_config)
+    if components:
+        out["components"] = [
+            {"name": part, "kind": kind}
+            for part, kind in sorted(components.items())
+        ]
     return out
 
 
@@ -593,7 +603,11 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             _stamp_family(block, compile_family or slot_family)
 
         slots_block = [
-            _slot_to_manifest(name, slot, compile_family=compile_family)
+            _slot_to_manifest(
+                name, slot,
+                family=es.slot_family.get(name, "") or compile_family,
+                components=es.slot_components.get(name),
+            )
             for name, slot in es.slots.items()
         ]
 
@@ -646,6 +660,21 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # capability grant only for declaring functions. Omitted when false.
         if es.child_calls:
             fn["child_calls"] = True
+        # SDK v2 (pgw#647): payload compile axes (equivalence classes) —
+        # catalog recipes validate against the declared class names at
+        # publish time; the warm plan derives from classes x buckets.
+        if es.payload_axes:
+            fn["compile_axes"] = [a.to_manifest() for a in es.payload_axes]
+        if es.lora_bucket:
+            fn["lora_bucket"] = int(es.lora_bucket)
+        # SDK v2: the derived config schema (RequestContext[D]) — names the
+        # family vocabulary the catalog's recipe values are validated
+        # against (th#1116).
+        if es.defaults_type is not None:
+            fn["config_schema"] = es.defaults_type.__name__
+            fam = str(getattr(es.defaults_type, "__gen_worker_family__", "") or "")
+            if fam:
+                fn["config_family"] = fam
         # th#1004 @variant_of: the base<->variant pairing rides into the
         # manifest so the hub's public endpoint info can advertise it.
         if es.variant_of:
@@ -675,17 +704,30 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha
             fn["delta_output_schema"] = delta_schema
-        if es.compile is not None:
+        ccell = es.compile_cell()
+        if es.compile is not None and ccell is not None:
             # Hub keys family-cache lookups off this block (th#569).
             fn["compile"] = {
                 "family": es.compile.family,
                 "shapes": [[int(v) for v in s] for s in es.compile.shapes],
                 "targets": list(es.compile.targets),
             }
-            if es.compile.guidance_scales:
-                fn["compile"]["guidance_scales"] = list(
-                    es.compile.guidance_scales
-                )
+            # SDK v2 shape contract: the declared text axis and dynamic
+            # ranges ride to the hub's cell producer, and the contract
+            # digest is the ck2 cell-key axis (pgw#647).
+            if es.compile.text_len is not None:
+                fn["compile"]["text_len"] = int(es.compile.text_len)
+            if es.compile.dynamic:
+                fn["compile"]["dynamic"] = [
+                    {"dim": d.dim, "min": d.min, "max": d.max}
+                    for d in es.compile.dynamic
+                ]
+            if ccell.guidance_scales:
+                # Warm representatives derived from the payload's
+                # CompileAxis classes (the v2 replacement for the deleted
+                # Compile(guidance_scales=...) decorator tuple).
+                fn["compile"]["guidance_scales"] = list(ccell.guidance_scales)
+            fn["compile"]["shape_contract_digest"] = ccell.contract_digest()
             # ie#381: the primary binding's weight-storage lane (gw#389 fp8
             # layerwise casting) rides along so the hub's cell producer
             # builds from an identically-loaded pipeline — the cast hooks
@@ -699,8 +741,9 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 fn["compile"]["regional"] = True
             # gw#561: dynamic-LoRA endpoints trace the branch-bearing graph
             # family; the hub's producer must build `-lora<bucket>` cells.
-            if getattr(es.compile, "lora_bucket", 0):
-                fn["compile"]["lora_bucket"] = int(es.compile.lora_bucket)
+            # SDK v2: declared at the decorator (`@endpoint(lora_bucket=)`).
+            if es.lora_bucket:
+                fn["compile"]["lora_bucket"] = int(es.lora_bucket)
         out.append(fn)
 
     return out

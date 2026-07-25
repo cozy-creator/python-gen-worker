@@ -47,7 +47,7 @@ class Staged:
             on_step(None, i, None, {})
 
         time.sleep(DECODE_S)  # un-bracketed on purpose
-        # th#1129 made webp the default with a faster shared encode core, and a 16x16
+        # th#1130 made webp the default with a faster shared encode core, and a 16x16
         # webp encodes in under the 1ms stage_ms resolution -> image_encode rounded to 0
         # and th#1111's `stages["image_encode"] > 0` failed on fast CI runners. Use a
         # size whose encode is reliably measurable; noise, not gradients, so it does not

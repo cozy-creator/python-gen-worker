@@ -5,7 +5,7 @@ Real GPU inference: Stable Diffusion 1.5 text-to-image. Send
 
 ## What it demonstrates
 
-- `@endpoint(model=HF(...), resources=Resources(vram_gb=6))` — a
+- `@endpoint(model=HF(...), resources=Resources(gpu=True))` — a
   HuggingFace model binding (fp16 variant only, via `files=` allow
   patterns) downloaded through `ensure_local` and injected into
   `setup()` as a constructed `StableDiffusionPipeline` (dtype and

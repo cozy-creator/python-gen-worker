@@ -14,7 +14,7 @@ split:
   `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024))))`.
   At load the worker seeds a VERIFIED artifact (exact-match on family, SKU,
   torch, triton, diffusers/transformers), then arms guarded `torch.compile`
-  (dynamic=False) on `Compile.targets`. Plain optional lanes fall back to eager
+  (static by declaration: `dynamic=None` + `assume_static_by_default` + explicit marks, SDK v2) on `Compile.targets`. Plain optional lanes fall back to eager
   on a miss or mismatch. W8A8 is mandatory compiled execution: a missing,
   mismatched, or unproven cell fails retryably before GPU/handler work and
   never dequantizes or runs eager. A plain compiled call that still needs a

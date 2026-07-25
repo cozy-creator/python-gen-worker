@@ -10,9 +10,11 @@ import threading
 import msgspec
 import pytest
 
-from gen_worker import Compile, Resources, endpoint
+from typing import Annotated
+
+from gen_worker import AxisClass, Compile, CompileAxis, DynamicDim, Resources, endpoint
 from gen_worker import compile_cache as cc
-from gen_worker.registry import collect_from_namespace
+from gen_worker.registry import CompileCell, collect_from_namespace
 
 
 # ---------------------------------------------------------------------------
@@ -867,25 +869,43 @@ def test_compile_struct_validation():
     assert c.shapes == ((768, 768), (1024, 1024))
     assert c.targets == ("transformer", "vae.decode")
     assert c.family == "sd15"
-    assert c.guidance_scales == ()
+    assert c.text_len is None       # None = undeclared (walk-time lint)
+    assert c.dynamic == ()
     assert c.regional is False
     assert Compile(shapes=((960, 544, 241),), targets=("transformer",),
                    family="ltx-2.3", regional=True).regional is True
-    assert Compile(
-        shapes=((1024, 1024),), guidance_scales=[5, 0],
-    ).guidance_scales == (5.0, 0.0)
+    # SDK v2 text axis: 0 = explicitly unconditioned; >0 = pinned length.
+    assert Compile(shapes=((1024, 1024),), text_len=0).text_len == 0
+    assert Compile(shapes=((1024, 1024),), text_len=512).text_len == 512
+    seq = DynamicDim(dim="sequence", min=2, max=512)
+    c2 = Compile(shapes=((1024, 1024),), dynamic=(seq,))
+    assert c2.sequence_dynamic == seq and c2.batch_dynamic is None
     with pytest.raises(ValueError):
         Compile(shapes=())
     with pytest.raises(ValueError):
         Compile(shapes=((0, 768),))
     with pytest.raises(ValueError):
         Compile(shapes=((768, 768),), targets=())
-    with pytest.raises(ValueError, match="finite non-negative"):
-        Compile(shapes=((768, 768),), guidance_scales=(float("nan"),))
-    with pytest.raises(ValueError, match="finite non-negative"):
-        Compile(shapes=((768, 768),), guidance_scales=(-1.0,))
-    with pytest.raises(ValueError, match="duplicates"):
-        Compile(shapes=((768, 768),), guidance_scales=(5.0, 5.0))
+    with pytest.raises(ValueError):
+        Compile(shapes=((768, 768),), text_len=-1)
+    with pytest.raises(TypeError):
+        Compile(shapes=((768, 768),), dynamic=("sequence",))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="repeats"):
+        Compile(shapes=((768, 768),), dynamic=(
+            DynamicDim(dim="batch", min=2, max=4),
+            DynamicDim(dim="batch", min=2, max=8),
+        ))
+
+
+def test_dynamic_dim_validation():
+    d = DynamicDim(dim=" Batch ", min=2, max=8)
+    assert (d.dim, d.min, d.max) == ("batch", 2, 8)
+    with pytest.raises(ValueError):
+        DynamicDim(dim="channels", min=2, max=8)
+    with pytest.raises(ValueError, match=">= 2"):
+        DynamicDim(dim="batch", min=1, max=8)  # torch 0/1 specialization
+    with pytest.raises(ValueError, match="exceed"):
+        DynamicDim(dim="sequence", min=4, max=4)
 
 
 def test_compile_struct_video_shapes():
@@ -920,14 +940,17 @@ def test_artifact_metadata_video_shapes_and_storage_dtype():
 
 
 def test_guidance_regimes_are_artifact_contract_axis():
+    """SDK v2: warm guidance regimes live on the enriched CompileCell (from
+    payload CompileAxis classes), and remain an artifact contract axis."""
     torch = pytest.importorskip("torch")
 
     class _Pipe:
         def __init__(self) -> None:
             self.transformer = torch.nn.Linear(16, 16)
 
-    cfg = Compile(
-        family="sdxl", shapes=((1024, 1024),), targets=("transformer",),
+    cfg = CompileCell(
+        shapes=((1024, 1024),), targets=("transformer",), family="sdxl",
+        regional=False, text_len=0, dynamic=(), lora_bucket=0,
         guidance_scales=(5.0, 0.0),
     )
     meta = cc.artifact_metadata(
@@ -1014,18 +1037,28 @@ class Out(msgspec.Struct):
     ok: bool = True
 
 
+class GuidedIn(msgspec.Struct):
+    """SDK v2: CFG regimes are payload-field equivalence classes."""
+
+    prompt: str = ""
+    guidance_scale: Annotated[float, CompileAxis(classes=(
+        AxisClass("cfg_on", match=lambda v: v != 0, warm=5.0),
+        AxisClass("cfg_off", match=lambda v: v == 0, warm=0.0),
+    ))] = 5.0
+
+
 def test_endpoint_compile_reaches_spec():
     import types
 
     @endpoint(
-        resources=Resources(vram_gb=4),
-        compile=Compile(shapes=((768, 768),), guidance_scales=(5.0, 0.0)),
+        resources=Resources(vram_gb_hint=4),
+        compile=Compile(shapes=((768, 768),), text_len=0),
     )
     class Ep:
         def setup(self) -> None:
             pass
 
-        def gen(self, ctx, p: In) -> Out:
+        def gen(self, ctx, p: GuidedIn) -> Out:
             return Out()
 
     mod = types.SimpleNamespace(Ep=Ep)
@@ -1033,12 +1066,35 @@ def test_endpoint_compile_reaches_spec():
     assert len(specs) == 1
     assert specs[0].compile is not None
     assert specs[0].compile.shapes == ((768, 768),)
-    assert specs[0].compile.guidance_scales == (5.0, 0.0)
+    cell = specs[0].compile_cell()
+    assert cell is not None
+    assert cell.shapes == ((768, 768),)
+    assert cell.text_len == 0
+    # Warm guidance derives from the payload CompileAxis classes, in class
+    # declaration order (Compile(guidance_scales=...) is deleted in v2).
+    assert cell.guidance_scales == (5.0, 0.0)
 
     with pytest.raises(TypeError, match="compile="):
         @endpoint(compile="yes")  # type: ignore[arg-type]
         def bad(ctx, p: In) -> Out:
             return Out()
+
+    # SDK v2 lint (ie#544): an inference compile= endpoint must declare its
+    # text-sequence axis — text_len or a dynamic "sequence" dim.
+    with pytest.raises(ValueError, match="text-sequence"):
+        @endpoint(compile=Compile(shapes=((768, 768),)))
+        def unlinted(ctx, p: In) -> Out:
+            return Out()
+
+    @endpoint(compile=Compile(
+        shapes=((768, 768),),
+        dynamic=(DynamicDim(dim="sequence", min=2, max=512),),
+    ))
+    def dyn_ok(ctx, p: In) -> Out:
+        return Out()
+
+    # Constructing a bare Compile outside @endpoint never lints.
+    assert Compile(shapes=((768, 768),)).text_len is None
 
 
 def test_flavor_label_carries_weight_lane_gw534() -> None:

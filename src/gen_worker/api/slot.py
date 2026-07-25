@@ -1,47 +1,48 @@
-"""``Slot`` — a hub-resolved model slot (pgw#520 / th#767).
+"""``Slot`` — a hub-resolved model slot (SDK v2, pgw#647).
 
 The model SET is catalog, not code: tensorhub owns the mapping from a
-``models={}` slot to the checkpoint(s) it may resolve to. The endpoint code
-declares only what the HUB needs to enforce that mapping and what the
-WORKER needs when no hub is configured — everything else (the curated list,
-per-repo pricing, hot hints) moved to platform config.
+``models={}`` slot to the checkpoint(s) it may resolve to. Under SDK v2 the
+declaration shrinks to the ROOT of the component tree::
 
-    from gen_worker import HF, Slot, endpoint
+    from gen_worker import HF, RequestContext, Slot, endpoint
     from gen_worker.families import SdxlDefaults
 
     @endpoint(models={
-        "pipeline": Slot(
-            StableDiffusionXLPipeline,
-            selected_by="model",
-            default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"),
-            default_config=SdxlDefaults(steps=28, guidance=6.0),
-        ),
-        "vae": Slot(AutoencoderKL, default_checkpoint=HF("madebyollin/sdxl-vae-fp16-fix")),
+        "pipeline": Slot(StableDiffusionXLPipeline, selected_by="model"),
     })
     class Generate:
-        def setup(self, pipeline: StableDiffusionXLPipeline, vae: AutoencoderKL) -> None: ...
+        def setup(self, pipeline: StableDiffusionXLPipeline) -> None:
+            self.pipeline = pipeline
 
-        def generate(self, ctx: RequestContext, p: In) -> Out:
-            resolved = ctx.slots["pipeline"]   # ResolvedSlot[SdxlDefaults]
-            steps = p.steps if p.steps is not None else resolved.defaults.steps
+        def generate(self, ctx: RequestContext[SdxlDefaults], p: In) -> Out:
+            steps = p.steps if p.steps is not None else ctx.defaults.steps
 
-A bare :class:`~gen_worker.api.binding.ModelRef` value in ``models={}``/
-``model=`` is sugar for ``Slot(<inferred pipeline class>, default_checkpoint=ref)``
-— the ``@endpoint`` decorator performs that inference from the
-``setup()``/handler parameter annotation the same way it always resolved a
-bare ref's slot NAME.
+Component parts (``pipeline.unet`` / ``pipeline.vae`` /
+``pipeline.text_encoder`` / ``pipeline.scheduler``) are DERIVED from the
+pipeline class and addressable by path — never declared as sibling slots
+(``gen_worker.api.tree``). Component overrides (the SDXL VAE fix) are
+CATALOG DATA (th#1116), not endpoint code. Explicit multi-slot declaration
+survives only as the escape hatch for runtimes the SDK cannot introspect
+(llama/gguf, custom engines).
+
+The per-model CONFIG SCHEMA is derived from the handler's context
+annotation (``ctx: RequestContext[SdxlDefaults]``), never declared on the
+Slot: code owns the schema, the catalog owns the values (th#1116 stamps one
+resolved recipe per slot). ``Slot(default_config=...)`` and
+``Slot(share_components=...)`` are DELETED (v2 hard cut): code-side recipe
+values are gone, and component sharing is automatic by content address.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, Optional, Sequence, TypeVar
+from typing import Any, Dict, Generic, Optional, Sequence, Type, TypeVar
 
 import msgspec
 
 from .binding import ModelRef
-from ..families.base import KIND_LORA, FamilyDefaults, family_for
+from ..families.base import KIND_LORA, GenerationDefaults, family_for
 
-D = TypeVar("D", bound=FamilyDefaults)
+D = TypeVar("D", bound=GenerationDefaults)
 
 # th#1017 inference regimes: a checkpoint-level fact about what inference
 # configuration the WEIGHTS demand. "distilled" routes (CFG-off contract
@@ -61,9 +62,13 @@ class Slot(Generic[D]):
     """One ``models={}`` slot as a hub-resolved value.
 
     ``pipeline_cls`` names the slot's load-time compat — what ``setup()``/
-    handler injection constructs (the role a bare ``ModelRef``'s consuming
-    annotation played before; here it's explicit because a Slot's actual
-    resolved ref is no longer necessarily the ``default``).
+    handler injection constructs. When it is an introspectable pipeline
+    class (diffusers-style: exposes ``_get_signature_keys`` or a components
+    signature) the SDK derives the slot's COMPONENT TREE from it at
+    discovery time and publishes the tree into the release manifest; parts
+    are then addressable by path (``pipeline.vae``) for catalog policy and
+    component-level overrides. A ``str``/``Path`` class is the escape hatch
+    for self-loading runtimes — no tree is derived.
 
     ``selected_by`` names the ``str``-typed payload field that branches this
     slot at request time. Validated at registration (registry.py) against
@@ -75,27 +80,9 @@ class Slot(Generic[D]):
     ONLY resolution source in hub-less mode (``cozy run``, hermetic tests) —
     a live hub mapping always wins when present. ``None`` means this slot
     has no code-side bootstrap ref: it only resolves against a hub mapping.
-
-    ``default_config`` is this slot's code-side :class:`FamilyDefaults`
-    preset, used when the resolved repo carries no inference-defaults
-    metadata. It LOSES to repo metadata (th#767 precedence: payload > repo
-    metadata > this default_config — a recipe of last resort).
-
-    ``share_components`` (pgw#636) names pipeline components (snapshot
-    top-level subfolders, e.g. ``("text_encoder", "text_encoder_2")``) that
-    the WORKER may factor into independent content-keyed residency entries
-    shared ACROSS checkpoint picks of this slot (gw#479 machinery): equal
-    bytes load once; per-pick exclusive weights (the denoiser) become
-    independently LRU-swappable entries so one card packs several
-    checkpoints hot. Sharing stays content-honest — components whose bytes
-    differ between picks simply never alias. Purely a worker load policy;
-    not part of the hub manifest contract.
     """
 
-    __slots__ = (
-        "pipeline_cls", "selected_by", "default_checkpoint", "default_config",
-        "share_components",
-    )
+    __slots__ = ("pipeline_cls", "selected_by", "default_checkpoint")
 
     def __init__(
         self,
@@ -103,8 +90,6 @@ class Slot(Generic[D]):
         *,
         selected_by: str = "",
         default_checkpoint: Optional[ModelRef] = None,
-        default_config: Optional[D] = None,
-        share_components: Sequence[str] = (),
     ) -> None:
         if not isinstance(pipeline_cls, type):
             raise TypeError(
@@ -116,57 +101,32 @@ class Slot(Generic[D]):
                 f"Slot(default_checkpoint=...) must be a ModelRef (Hub/HF/"
                 f"Civitai/ModelScope), got {type(default_checkpoint).__name__}"
             )
-        if default_config is not None and not isinstance(default_config, FamilyDefaults):
-            raise TypeError(
-                f"Slot(default_config=...) must be a FamilyDefaults subclass "
-                f"instance, got {type(default_config).__name__}"
-            )
-        cleaned = tuple(
-            s for s in (str(c or "").strip() for c in share_components) if s
-        )
-        if len(set(cleaned)) != len(cleaned):
-            raise ValueError(
-                f"Slot(share_components=...) has duplicate names: {cleaned!r}"
-            )
         self.pipeline_cls = pipeline_cls
         self.selected_by = str(selected_by or "").strip()
         self.default_checkpoint = default_checkpoint
-        self.default_config = default_config
-        self.share_components: tuple[str, ...] = cleaned
-
-    @property
-    def family(self) -> str:
-        """Family name from ``default_config``'s registration, or ``""``
-        when this slot has no default_config (the endpoint's
-        ``Compile(family=...)`` is the other source the decorator
-        reconciles against — see ``gen_worker.api.decorators``)."""
-        if self.default_config is None:
-            return ""
-        return self.default_config.family
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
-            f"default_checkpoint={self.default_checkpoint!r}, "
-            f"default_config={self.default_config!r}, "
-            f"share_components={self.share_components!r})"
+            f"default_checkpoint={self.default_checkpoint!r})"
         )
 
 
 class ResolvedSlot(Generic[D]):
     """What ``ctx.slots[name]`` hands the handler: the resolved
-    :class:`ModelRef` plus ONE typed defaults object — repo metadata merged
-    over the endpoint's code fallback (pgw#520 resolution chain).
+    :class:`ModelRef` plus ONE typed defaults object — the catalog-resolved
+    recipe decoded against the handler's declared config schema
+    (``ctx: RequestContext[D]``).
 
     Explicit PAYLOAD values still win over ``.defaults`` — that precedence
-    is handler logic; this object only carries the merged HUB-vs-CODE
-    result.
+    is handler logic; this object only carries the resolved catalog recipe.
 
     ``regime`` (th#1017) is the resolved checkpoint's inference regime —
     ``"standard"`` unless the hub classified the weights otherwise
-    (``"v_prediction"`` | ``"distilled"``). Handlers branch on it (e.g. a
-    dual-mode turbo lane skips its distillation LoRA for an
-    already-distilled checkpoint).
+    (``"v_prediction"`` | ``"distilled"``). ``ctx.for_request`` applies it
+    to the per-request scheduler view automatically; handlers may also
+    branch on it (e.g. a dual-mode turbo lane skips its distillation LoRA
+    for an already-distilled checkpoint).
     """
 
     __slots__ = ("ref", "defaults", "regime")
@@ -189,8 +149,7 @@ def _apply_lora_overrides(
     """pgw#516 composition rule: apply each lora's non-``None`` fields onto
     ``base`` (the checkpoint's already-resolved recipe) FIELD BY FIELD, in
     ``lora_metadata_json`` order (a later lora's non-``None`` field wins over
-    an earlier one's on the same field) — NOT the whole-object precedence
-    :func:`resolve_slot` uses for repo-metadata-over-fallback above.
+    an earlier one's on the same field).
 
     Only fields ``base``'s own struct declares participate — a lora's
     LoRA-only fields (``trigger_words``, ``recommended_weight``: no
@@ -236,11 +195,11 @@ def _apply_lora_overrides(
 def _finish_resolved(
     name: str,
     ref: ModelRef,
-    defaults: D,
+    defaults: Any,
     *,
     inference_regime: str,
     allowed_regimes: Optional[Sequence[str]],
-) -> "ResolvedSlot[D]":
+) -> "ResolvedSlot[Any]":
     """Build the ``ResolvedSlot`` and, when the caller knows the invoked
     function's declared regimes, enforce the th#1017 backstop: the hub
     enforces checkpoint-regime/function-regime compatibility at deploy and
@@ -260,29 +219,29 @@ def resolve_slot(
     slot: "Slot[D]",
     *,
     ref: Optional[ModelRef],
+    defaults_cls: Optional[Type[D]] = None,
     family: str = "",
     raw_metadata_json: str = "",
     lora_metadata_json: Sequence[str] = (),
     inference_regime: str = "standard",
     allowed_regimes: Optional[Sequence[str]] = None,
-) -> "ResolvedSlot[D]":
-    """Merge repo-metadata inference defaults over ``slot.default_config``,
-    then apply per-lora FIELD-LEVEL overrides — the pgw#520/pgw#516
-    resolution chain shared by the production executor and the hub-less CLI
-    path.
+) -> "ResolvedSlot[Any]":
+    """SDK v2 resolution chain: decode the catalog-resolved recipe
+    (``raw_metadata_json``) against the handler's DERIVED config schema
+    (``defaults_cls``, from ``ctx: RequestContext[D]``), then apply per-lora
+    FIELD-LEVEL overrides — shared by the production executor and the
+    hub-less CLI path.
 
-    Precedence: repo metadata (``raw_metadata_json``, when non-empty) wins
-    over ``slot.default_config`` entirely (a repo either fully specifies its
-    family vocabulary or it doesn't — tensorhub validates the whole object
-    at metadata-PUT time, so a partial merge would silently hide invalid
-    metadata behind the code default). ``default_config`` LOSES to repo
-    metadata — it is a recipe of last resort. Missing metadata AND no
-    default_config is a clear error, not a silent empty object.
+    th#1116 moved recipe VALUES to the catalog: the hub stamps ONE resolved
+    recipe per slot, so in production the metadata branch always runs. With
+    no metadata (hub-less ``cozy run``, hermetic tests, a family the hub has
+    not stamped) the NEUTRAL SCHEMA DEFAULTS (``defaults_cls()``) apply —
+    exactly the hub's neutral stamp, so both paths agree. There is no
+    code-side recipe fallback (v2 deleted ``Slot(default_config=...)``):
+    code owns the schema only.
 
-    ``lora_metadata_json`` (pgw#516, in lora-ride order — riding
-    ``ModelBinding.loras[i].inference_defaults`` on the wire) applies LAST,
-    field by field, on top of whichever recipe precedence above picked — see
-    :func:`_apply_lora_overrides`.
+    ``lora_metadata_json`` (pgw#516, in lora-ride order) applies LAST, field
+    by field — see :func:`_apply_lora_overrides`.
 
     ``inference_regime`` (th#1017) is the resolved checkpoint's hub-
     classified regime ("standard" on hubs/paths that don't send one).
@@ -294,24 +253,24 @@ def resolve_slot(
             f"slot {name!r}: no resolved model ref for this request (no "
             "Slot(default_checkpoint=...) and no hub resolution)"
         )
-    fam = str(family or slot.family or "").strip()
-    defaults_cls = type(slot.default_config) if slot.default_config is not None else (
-        family_for(fam) if fam else None
-    )
+    fam = str(family or "").strip()
+    if defaults_cls is None and fam:
+        defaults_cls = family_for(fam)  # type: ignore[assignment]
     raw = (raw_metadata_json or "").strip()
     if raw:
         if defaults_cls is None:
             raise ValueError(
-                f"slot {name!r}: repo metadata present but no family is "
-                "resolvable (no Slot(default_config=...) and no "
-                "Compile(family=...) on the endpoint) — cannot determine "
-                "which vocabulary to decode it against"
+                f"slot {name!r}: catalog recipe metadata present but no "
+                "config schema is derivable — annotate the handler's context "
+                "parameter as RequestContext[YourDefaults] (or declare "
+                "Compile(family=...)) so the SDK knows which vocabulary to "
+                "decode it against"
             )
         try:
             defaults: Any = msgspec.json.decode(raw.encode("utf-8"), type=defaults_cls)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
             raise ValueError(
-                f"slot {name!r}: repo inference-defaults metadata failed "
+                f"slot {name!r}: catalog inference-defaults metadata failed "
                 f"{defaults_cls.__name__} validation: {exc}"
             ) from exc
         defaults = _apply_lora_overrides(name, defaults, fam, lora_metadata_json)
@@ -319,16 +278,17 @@ def resolve_slot(
             name, ref, defaults,
             inference_regime=inference_regime, allowed_regimes=allowed_regimes,
         )
-    if slot.default_config is not None:
-        merged = _apply_lora_overrides(name, slot.default_config, fam, lora_metadata_json)
+    if defaults_cls is not None:
+        neutral = _apply_lora_overrides(name, defaults_cls(), fam, lora_metadata_json)
         return _finish_resolved(
-            name, ref, merged,
+            name, ref, neutral,
             inference_regime=inference_regime, allowed_regimes=allowed_regimes,
         )
-    raise ValueError(
-        f"slot {name!r}: no repo inference-defaults metadata for the "
-        "resolved model and no Slot(default_config=...) on the endpoint — "
-        "nothing to resolve this slot's defaults from"
+    # No schema declared and no metadata: the ref itself still resolves
+    # (handlers that never read .defaults — self-loading runtimes).
+    return _finish_resolved(
+        name, ref, None,
+        inference_regime=inference_regime, allowed_regimes=allowed_regimes,
     )
 
 

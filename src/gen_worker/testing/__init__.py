@@ -27,14 +27,14 @@ from typing import Any, Dict, Mapping, Tuple, Type, TypeVar
 
 from ..api.binding import ModelRef
 from ..api.slot import ResolvedSlot
-from ..families.base import FamilyDefaults
+from ..families.base import GenerationDefaults
 from ..request_context import RequestContext
 
 C = TypeVar("C", bound=RequestContext)
 
 
 def stub_slots(
-    slots: Mapping[str, Tuple[ModelRef, FamilyDefaults]],
+    slots: Mapping[str, Tuple[ModelRef, GenerationDefaults]],
 ) -> Dict[str, "ResolvedSlot[Any]"]:
     """``{slot_name: (ref, defaults)}`` -> ``{slot_name: ResolvedSlot}`` —
     the same shape ``ctx.slots`` hands a handler in production, built
@@ -45,7 +45,7 @@ def stub_slots(
 def fake_context(
     *,
     request_id: str = "test-request",
-    slots: Mapping[str, Tuple[ModelRef, FamilyDefaults]] = {},
+    slots: Mapping[str, Tuple[ModelRef, GenerationDefaults]] = {},
     cls: Type[C] = RequestContext,  # type: ignore[assignment]
     **kwargs: Any,
 ) -> C:

@@ -371,13 +371,37 @@ def is_cache_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names an inductor compile-cache cell (optionally of
     one specific family). Cells are flavored either with the legacy human
     label (``inductor-<sku>-torch<mm>[-lane]``) or, post-th#883, with the
-    worker-computed cell key itself (``ck1-<sha256>`` — pull-by-key)."""
+    worker-computed cell key itself (``ck2-<sha256>`` — pull-by-key)."""
     from . import cell_key
 
     fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
         return False
     return flavor.startswith("inductor-") or cell_key.is_key(flavor)
+
+
+def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = None) -> Dict[str, Any]:
+    """Canonical declared-shape-contract facts for ``cfg`` (a
+    ``registry.CompileCell`` or any duck with the same fields) — the ck2
+    ``contract`` cell-key axis digests exactly this dict (pgw#647)."""
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    if lora_bucket_override is not None:
+        bucket = int(lora_bucket_override)
+    return {
+        "v": 2,
+        "shapes": sorted(
+            [int(v) for v in row] for row in getattr(cfg, "shapes", ())),
+        "targets": [str(t) for t in getattr(cfg, "targets", ())],
+        "text_len": getattr(cfg, "text_len", None),
+        "dynamic": [
+            {"dim": d.dim, "min": d.min, "max": d.max}
+            for d in getattr(cfg, "dynamic", ())
+        ],
+        "regional": bool(getattr(cfg, "regional", False)),
+        "lora_bucket": bucket,
+        "guidance": sorted(
+            float(v) for v in getattr(cfg, "guidance_scales", ())),
+    }
 
 
 def artifact_metadata(
@@ -395,6 +419,7 @@ def artifact_metadata(
     lora_bucket: int = 0,
     graph_signature: str = "",
     weight_contract: Optional[Dict[str, Any]] = None,
+    shape_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
     identical content must be byte-identical). ``source_ref``/``source_digest``
@@ -427,6 +452,7 @@ def artifact_metadata(
         "lora_bucket": int(lora_bucket or 0),
         "graph_signature": str(graph_signature or ""),
         "weight_contract": dict(weight_contract or {}),
+        "shape_contract": dict(shape_contract or {}),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
@@ -1409,6 +1435,62 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     return hashlib.sha256(encoded).hexdigest(), weight_contract
 
 
+def _apply_declared_shape_config(cfg: Any) -> None:
+    """The v2 dynamo posture: nothing becomes dynamic by accident.
+
+    ``automatic_dynamic_shapes=False`` — never promote a dim on change (a
+    novel signature is a guard miss routed by the consumer guards, never a
+    silent recompile-to-dynamic); ``assume_static_by_default=True`` —
+    unmarked dims are static. Declared dynamism arrives ONLY through
+    explicit ``mark_dynamic`` marks (``_with_declared_marks``)."""
+    try:
+        import torch._dynamo
+
+        torch._dynamo.config.automatic_dynamic_shapes = False
+        torch._dynamo.config.assume_static_by_default = True
+    except Exception:
+        logger.debug("compile-cache: could not set dynamo shape config",
+                     exc_info=True)
+
+
+def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callable[..., Any]:
+    """Wrap a compiled callable so every call marks the DECLARED dynamic
+    dims on its tensor inputs before dynamo sees them.
+
+    Mapping of logical axes to tensor dims: ``batch`` marks dim 0 of every
+    floating tensor argument; ``sequence`` marks dim 1 of rank-3 floating
+    tensors (the ``[B, seq, hidden]`` conditioning shape). A dim smaller
+    than the declared ``min`` is left unmarked — torch's 0/1 specialization
+    is not overridable (ie#543) and gets its own free specialized graph. A
+    mark torch cannot honor raises ``ConstraintViolationError`` at
+    compile/warm time — a LOUD build failure, never a silent fallback to
+    recompilation (the mint's warm calls do not guard)."""
+    import functools
+
+    import torch
+
+    def _mark(t: Any) -> None:
+        if not isinstance(t, torch.Tensor) or not t.is_floating_point():
+            return
+        for d in dynamic_dims:
+            dim = 0 if d.dim == "batch" else (1 if t.dim() >= 3 else -1)
+            if dim < 0 or t.dim() <= dim:
+                continue
+            if int(t.shape[dim]) < int(d.min):
+                continue  # 0/1 (and sub-min) sizes keep their free static graph
+            torch._dynamo.mark_dynamic(t, dim, min=int(d.min), max=int(d.max))
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        for a in args:
+            _mark(a)
+        for v in kwargs.values():
+            _mark(v)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
     """Digest every graph-compatibility axis enforced by the consumer.
 
@@ -1423,7 +1505,7 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
     from .models.memory import low_vram_mode
 
     payload = {
-        "version": 1,
+        "version": 2,
         "family": str(getattr(cfg, "family", "") or ""),
         "shapes": sorted(
             [int(v) for v in row] for row in getattr(cfg, "shapes", ())
@@ -1431,6 +1513,11 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
         "targets": [str(v) for v in getattr(cfg, "targets", ())],
         "guidance_scales": [
             float(v) for v in getattr(cfg, "guidance_scales", ())
+        ],
+        "text_len": getattr(cfg, "text_len", None),
+        "dynamic": [
+            {"dim": d.dim, "min": d.min, "max": d.max}
+            for d in getattr(cfg, "dynamic", ())
         ],
         "compile_mode": (
             "regional" if bool(getattr(cfg, "regional", False)) else "whole"
@@ -1479,6 +1566,16 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
             f"guidance_scales {cell_guidance_scales!r} != declared "
             f"{guidance_scales!r}"
         )
+    # SDK v2: the recorded shape contract must be the declared one — a
+    # worker on a newer contract must never serve an older cell (pgw#647).
+    cell_contract = meta.get("shape_contract") or {}
+    if cell_contract:
+        here_contract = declared_contract_facts(cfg)
+        if cell_contract != here_contract:
+            return (
+                "shape contract mismatch: "
+                + _first_contract_difference(cell_contract, here_contract)
+            )
     signature, weight_contract = execution_contract(pipeline, cfg)
     meta_signature = str(meta.get("graph_signature") or "")
     meta_weights = meta.get("weight_contract") or {}
@@ -1839,7 +1936,8 @@ def apply(
             # Per-block graphs (ie#381): bounded memory under fp8 layerwise
             # casting + much cheaper cold compile. Blocks are compiled in
             # place; the guard wrapper clears them on the first failure.
-            owner.compile_repeated_blocks(dynamic=False)
+            _apply_declared_shape_config(cfg)
+            owner.compile_repeated_blocks(dynamic=None)
             if guard:
                 setattr(owner, attr, _guarded_regional(
                     owner,
@@ -1867,7 +1965,16 @@ def apply(
             vae = getattr(pipeline, "vae", None)
             if vae is not None and _vae_supports_channels_last(vae):
                 vae.to(memory_format=torch.channels_last)
-        compiled = torch.compile(fn, dynamic=False)
+        # SDK v2 shape contract (ie#543 measured encoding): unmarked dims
+        # are STATIC, promotion-on-change is OFF, and explicit marks are the
+        # ONLY dynamism. `dynamic=False` + mark_dynamic is NOT expressible
+        # (torch raises ConstraintViolationError), so the global guard is
+        # the config pair + dynamic=None, never dynamic=False.
+        _apply_declared_shape_config(cfg)
+        compiled = torch.compile(fn, dynamic=None)
+        declared_dynamic = tuple(getattr(cfg, "dynamic", ()) or ())
+        if declared_dynamic:
+            compiled = _with_declared_marks(compiled, declared_dynamic)
         setattr(owner, attr, _guarded(
             fn,
             compiled,
@@ -2111,6 +2218,9 @@ def enable(
                         str(getattr(cfg, "family", "") or ""),
                         _pwl(pipeline),
                         eff_bucket,
+                        contract=cell_key.contract_digest(
+                            declared_contract_facts(
+                                cfg, lora_bucket_override=eff_bucket)),
                         regional=bool(getattr(cfg, "regional", False)),
                     )
                     if not cell_key.mismatch(meta, want):
@@ -2200,6 +2310,7 @@ def _warm_call(
     prompt: str,
     decode: bool,
     guidance_scales: Iterable[float] = (),
+    text_len: Optional[int] = None,
 ) -> None:
     """One warm-up call for ``shape``. (w, h) is the classic image call;
     (w, h, frames) is a video call (ie#381): the DiT graph keys on the token
@@ -2228,6 +2339,12 @@ def _warm_call(
         height=int(shape[1]),
         generator=torch.Generator(device="cuda").manual_seed(0),
     )
+    # SDK v2 text pin (ie#544): warm through the SAME pinned token length
+    # the serving path uses, when the pipeline exposes the knob — the
+    # traced sequence dim must match serving or every request misses.
+    if text_len and text_len > 0:
+        if "max_sequence_length" in inspect.signature(type(pipe).__call__).parameters:
+            kwargs["max_sequence_length"] = int(text_len)
     if len(shape) == 3:
         params = inspect.signature(type(pipe).__call__).parameters
         kwargs["num_frames"] = int(shape[2])
@@ -2275,6 +2392,8 @@ def build(
     shapes: Iterable[Tuple[int, ...]],
     targets: Iterable[str] = ("transformer", "vae.decode"),
     guidance_scales: Iterable[float] = (),
+    text_len: Optional[int] = None,
+    dynamic: Iterable[Any] = (),
     family: str = "",
     source_ref: str = "",
     source_digest: str = "",
@@ -2314,9 +2433,9 @@ def build(
     first call per shape is the compile cost. Raises on any compile failure
     or an empty capture; a silently-eager build must never publish.
     """
-    from .api.decorators import Compile as CompileCfg
     from .models.loading import load_from_pretrained
     from .models.memory import place_pipeline
+    from .registry import CompileCell
 
     _W8A8_MINT_NEEDS_DIGEST = (
         "W8A8 cell mint requires serving_image_digest (the endpoint "
@@ -2346,9 +2465,14 @@ def build(
     if not torch.cuda.is_available():
         raise RuntimeError("compile-cache build requires CUDA")
 
-    cfg = CompileCfg(
-        shapes=tuple(shapes), targets=tuple(targets),
-        guidance_scales=tuple(guidance_scales), regional=bool(regional),
+    cfg = CompileCell(
+        shapes=tuple(tuple(int(v) for v in row) for row in shapes),
+        targets=tuple(targets), family=str(family or ""),
+        regional=bool(regional),
+        text_len=(int(text_len) if text_len is not None else None),
+        dynamic=tuple(dynamic),
+        lora_bucket=int(lora_bucket or 0),
+        guidance_scales=tuple(float(v) for v in guidance_scales),
     )
     load_cls: Any = DiffusionPipeline
     if str(pipeline_class or "").strip():
@@ -2399,6 +2523,7 @@ def build(
         _warm_call(
             pipe, shape, steps=int(steps), prompt=prompt, decode=decode,
             guidance_scales=cfg.guidance_scales,
+            text_len=cfg.text_len,
         )
         torch.cuda.synchronize()
         key = "x".join(str(v) for v in shape)
@@ -2428,6 +2553,7 @@ def build(
         lora_bucket=int(lora_bucket or 0),
         graph_signature=graph_signature,
         weight_contract=weight_contract,
+        shape_contract=declared_contract_facts(cfg),
     )
     if serving_image_digest:
         # The producer image contains a compiler; the graph is consumed by
@@ -2482,6 +2608,7 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -
             prompt="cache warm-up: a lighthouse on a cliff at dawn, detailed",
             decode=decode,
             guidance_scales=getattr(cfg, "guidance_scales", ()),
+            text_len=getattr(cfg, "text_len", None),
         )
         torch.cuda.synchronize()
         shape_key = "x".join(str(v) for v in shape)
@@ -2541,6 +2668,7 @@ def mint_artifact(
         lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
         graph_signature=graph_signature,
         weight_contract=weight_contract,
+        shape_contract=declared_contract_facts(cfg),
     )
     tmp = target.with_suffix(".part")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2672,6 +2800,7 @@ def finish_fleet_mint(
         lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
         graph_signature=graph_signature,
         weight_contract=weight_contract,
+        shape_contract=declared_contract_facts(cfg),
     )
     tmp = target.with_suffix(".part")
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -5,7 +5,7 @@ Send `{"prompt": "a lighthouse at dusk"}`, get back a WebP.
 
 ## What it demonstrates
 
-- `@endpoint(model=HF(...), resources=Resources(vram_gb=20))` — an HF binding
+- `@endpoint(model=HF(...), resources=Resources(gpu=True))` — an HF binding
   narrowed with `files=` to skip a redundant root-level single-file
   checkpoint the source repo ships alongside its real diffusers-layout
   weights (transformer/text_encoder/vae subfolders), roughly halving the

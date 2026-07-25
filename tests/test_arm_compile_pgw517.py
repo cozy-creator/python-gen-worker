@@ -52,8 +52,8 @@ def test_compile_on_self_loading_slot_is_a_discovery_error(slot_type) -> None:
 
         @endpoint(
             model=Hub("acme/wan"),
-            resources=Resources(vram_gb=40),
-            compile=Compile(family=FAMILY, shapes=((768, 768),)),
+            resources=Resources(gpu=True),
+            compile=Compile(family=FAMILY, shapes=((768, 768),), text_len=0),
         )
         class SelfLoader:
             def setup(self, model: str) -> None:
@@ -66,8 +66,8 @@ def test_compile_on_self_loading_slot_is_a_discovery_error(slot_type) -> None:
 
         @endpoint(
             model=Hub("acme/wan"),
-            resources=Resources(vram_gb=40),
-            compile=Compile(family=FAMILY, shapes=((768, 768),)),
+            resources=Resources(gpu=True),
+            compile=Compile(family=FAMILY, shapes=((768, 768),), text_len=0),
         )
         class SelfLoader:
             def setup(self, model: Path) -> None:
@@ -91,8 +91,8 @@ def test_compile_opts_out_via_arm_compile_call_in_setup() -> None:
 
     @endpoint(
         model=Hub("acme/wan"),
-        resources=Resources(vram_gb=40),
-        compile=Compile(family=FAMILY, shapes=((768, 768),)),
+        resources=Resources(gpu=True),
+        compile=Compile(family=FAMILY, shapes=((768, 768),), text_len=0),
     )
     class SelfLoaderArmed:
         def setup(self, model: str) -> None:
@@ -117,8 +117,8 @@ def test_compile_on_class_annotated_slot_never_errors() -> None:
 
     @endpoint(
         model=Hub("acme/wan"),
-        resources=Resources(vram_gb=40),
-        compile=Compile(family=FAMILY, shapes=((768, 768),)),
+        resources=Resources(gpu=True),
+        compile=Compile(family=FAMILY, shapes=((768, 768),), text_len=0),
     )
     class WorkerLoaded:
         def setup(self, model: _Pipe) -> None:
@@ -135,7 +135,7 @@ def test_compile_with_no_models_is_not_this_issue() -> None:
     """compile= with no setup() model slots at all is out of scope for
     pgw#517 (nothing here is "self-loading" vs "worker-loaded")."""
 
-    @endpoint(resources=Resources(vram_gb=4), compile=Compile(shapes=((768, 768),)))
+    @endpoint(resources=Resources(gpu=True), compile=Compile(shapes=((768, 768),), text_len=0))
     class NoModels:
         def setup(self) -> None:
             pass
@@ -166,7 +166,7 @@ def test_arm_compile_outside_any_scope_is_a_noop() -> None:
 
 
 def test_arm_compile_inside_scope_reaches_enable_compiled(monkeypatch, tmp_path) -> None:
-    cfg = Compile(family=FAMILY, shapes=((768, 768),))
+    cfg = Compile(family=FAMILY, shapes=((768, 768),), text_len=0)
     seen: list = []
     monkeypatch.setattr(
         provision, "enable_compiled",
@@ -228,11 +228,11 @@ def test_executor_arms_self_loaded_pipeline_via_arm_compile(
         def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
             return _Out()
 
-    compile_cfg = Compile(family=FAMILY, shapes=((768, 768),))
+    compile_cfg = Compile(family=FAMILY, shapes=((768, 768),), text_len=0)
     spec = EndpointSpec(
         name="wan-generate", method=Endpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint, attr_name="run",
-        models={"model": Hub("acme/wan")}, resources=Resources(vram_gb=1.0),
+        models={"model": Hub("acme/wan")}, resources=Resources(gpu=True),
         compile=compile_cfg,
     )
     sent: list = []
@@ -247,7 +247,9 @@ def test_executor_arms_self_loaded_pipeline_via_arm_compile(
         assert len(applied) == 1
         pipeline, cfg, cache_ready = applied[0]
         assert pipeline is inst.pipe
-        assert cfg is compile_cfg
+        # SDK v2: the executor hands the compile machinery the enriched
+        # CompileCell derived from the spec, never the raw Compile.
+        assert cfg == spec.compile_cell()
         # no hub-attached artifact / no local cache seeded -> stays eager.
         assert cache_ready is False
 
@@ -279,7 +281,7 @@ def test_executor_eager_registration_arm_compile_no_raise_setup_completes(
     spec = EndpointSpec(
         name="wan-generate", method=Endpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint, attr_name="run",
-        models={"model": Hub("acme/wan")}, resources=Resources(vram_gb=1.0),
+        models={"model": Hub("acme/wan")}, resources=Resources(gpu=True),
         compile=None,  # the eager registration: no compile grid declared
     )
     sent: list = []
@@ -315,8 +317,8 @@ def test_executor_never_arms_without_an_explicit_call(tmp_path, monkeypatch) -> 
     spec = EndpointSpec(
         name="wan-generate", method=Endpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint, attr_name="run",
-        models={"model": Hub("acme/wan")}, resources=Resources(vram_gb=1.0),
-        compile=Compile(family=FAMILY, shapes=((768, 768),)),
+        models={"model": Hub("acme/wan")}, resources=Resources(gpu=True),
+        compile=Compile(family=FAMILY, shapes=((768, 768),), text_len=0),
     )
     sent: list = []
 
@@ -374,12 +376,12 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
             return _Out()
 
     monkeypatch.setattr(provision, "enable_compiled", _fake_enable)
-    compile_cfg = Compile(family=FAMILY, shapes=((768, 768),))
+    compile_cfg = Compile(family=FAMILY, shapes=((768, 768),), text_len=0)
     spec = EndpointSpec(
         name="wan-w8a8", method=Endpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint, attr_name="run",
         models={"model": Hub("acme/wan", flavor="fp8-w8a8")},
-        resources=Resources(vram_gb=1.0), compile=compile_cfg,
+        resources=Resources(gpu=True), compile=compile_cfg,
     )
     model_ref = wire_ref(spec.models["model"])
     cell_ref = (

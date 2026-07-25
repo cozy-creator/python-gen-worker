@@ -94,13 +94,17 @@ def _generate(pipe: Flux2KleinPipeline, ctx: RequestContext, p: KleinTurboInput)
 
 @endpoint(
     model=HF(REPO_ID, dtype="bf16", files=KLEIN_FILES),
-    resources=Resources(vram_gb=20),
+    resources=Resources(gpu=True),
     # Opt into torch.compile (#384). Safe by construction: the worker arms
     # Plain lanes compile only when Tensorhub attaches a verified per-(family,
     # SKU, torch, triton) artifact and otherwise remain eager. A W8A8 binding
     # is stricter: the worker fails retryably unless its exact cell is attached
     # and proven; it never serves dequantized/eager W8A8.
-    compile=Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024))),
+    # text_len pins the token axis (ie#544): the Qwen3-based text encoder's
+    # sequence dim is padded to 512 so prompt length never mints a new graph.
+    compile=Compile(
+        family="flux2-klein-4b", shapes=((768, 768), (1024, 1024)), text_len=512,
+    ),
 )
 class Flux2KleinTurbo:
     def setup(self, model: Flux2KleinPipeline) -> None:
@@ -129,7 +133,7 @@ class Flux2KleinTurbo:
     # SAME repo, fp8-E4M3 denoiser storage. No compile: this lane exists to
     # measure fp8 STORAGE quality, and eager keeps that measurement honest.
     model=HF(REPO_ID, dtype="bf16", storage_dtype="fp8", files=KLEIN_FILES),
-    resources=Resources(vram_gb=20),
+    resources=Resources(gpu=True),
 )
 class Flux2KleinTurboFP8:
     def setup(self, model: Flux2KleinPipeline) -> None:

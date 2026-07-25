@@ -1,9 +1,9 @@
 """P5 (th#960/pgw#609 design table): endpoint.lock contract — a real
 ``discover`` walk over a toy on-disk package, matching SDK declarations:
 slots, kinds, reserved-method/duplicate-slug rejection, payload Meta bounds,
-accelerator + cuda-floor fields present (producer half of th#904's 422 gate
-— pgw emits ``resources.gpu``/``resources.compute_capability``, tensorhub's
-T8 validates them). Real discovery/registry code, no mocking.
+accelerator fields present (SDK v2: ``resources.gpu`` is the binary
+incapability declaration; ``vram_gb_hint`` an optional placement hint).
+Real discovery/registry code, no mocking.
 """
 
 from __future__ import annotations
@@ -47,14 +47,13 @@ def test_slot_endpoint_emits_slots_block(tmp_pkg: Path) -> None:
                 "pipeline": Slot(
                     object, selected_by="model",
                     default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"),
-                    default_config=SdxlDefaults(steps=28, guidance=6.0),
                 ),
             },
-            resources=Resources(vram_gb=12, compute_capability=8.9),
+            resources=Resources(gpu=True, vram_gb_hint=12),
         )
         class Gen:
             def setup(self, pipeline: object) -> None: ...
-            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+            def generate(self, ctx: RequestContext[SdxlDefaults], data: In_) -> Out_:
                 return Out_(y="ok")
     """)
 
@@ -63,12 +62,24 @@ def test_slot_endpoint_emits_slots_block(tmp_pkg: Path) -> None:
     (slot,) = fn["slots"]
     assert slot["name"] == "pipeline"
     assert slot["selected_by"] == "model"
+    # SDK v2: family comes from the handler's derived config schema (the
+    # RequestContext[SdxlDefaults] annotation's @family registration).
     assert slot["family"] == "sdxl"
-    # Accelerator + cuda-floor fields (th#904 producer half): gpu implied by
-    # vram_gb/compute_capability; compute_capability IS the cuda-floor.
+    # default_config is DELETED from the slots block; ``object`` is not an
+    # introspectable pipeline class, so no component tree is derived either.
+    assert "default_config" not in slot
+    assert "components" not in slot
+    # The derived config schema rides the fn dict (th#1116: code owns the
+    # schema, the catalog owns the values).
+    assert fn["config_schema"] == "SdxlDefaults"
+    assert fn["config_family"] == "sdxl"
+    # SDK v2 resources: gpu is the binary incapability declaration;
+    # vram_gb_hint the optional placement hint (vram_gb/compute_capability
+    # are deleted).
     assert fn["resources"]["gpu"] is True
-    assert fn["resources"]["compute_capability"] == pytest.approx(8.9)
-    assert fn["resources"]["vram_gb"] == pytest.approx(12.0)
+    assert fn["resources"]["vram_gb_hint"] == pytest.approx(12.0)
+    assert "vram_gb" not in fn["resources"]
+    assert "compute_capability" not in fn["resources"]
 
 
 def test_cpu_endpoint_never_carries_gpu_or_cuda_floor(tmp_pkg: Path) -> None:

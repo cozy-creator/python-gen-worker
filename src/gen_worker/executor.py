@@ -247,6 +247,16 @@ def _undeclared_model_slots(spec: EndpointSpec, run: "pb.RunJob") -> List[str]:
     return sorted({b.slot for b in run.models if b.slot and b.slot not in spec.models})
 
 
+class _AllComponents(frozenset):
+    """SDK v2 automatic-sharing sentinel: membership test always true."""
+
+    def __contains__(self, item: object) -> bool:  # noqa: D105
+        return True
+
+
+_ALL_COMPONENTS = _AllComponents()
+
+
 def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dict[str, Any]:
     """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
     Slot-declared slot's repo-metadata ``ModelBinding.inference_defaults``
@@ -279,6 +289,7 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dic
             resolved[name] = resolve_slot(
                 name, slot,
                 ref=spec.models.get(name),
+                defaults_cls=spec.defaults_type,
                 family=spec.slot_family.get(name, ""),
                 raw_metadata_json=raw_defaults.get(name, ""),
                 lora_metadata_json=lora_defaults.get(name, ()),
@@ -472,7 +483,7 @@ def _cell_lane_matches(
     lora_bucket endpoint needs exactly a ``-lora<bucket>`` cell of its base
     lane, and a branchless endpoint must never fetch one (either mismatch is
     a guaranteed lane_drift that would shadow the right cell and serve
-    eager). Key-flavored cells (th#883 pull-by-key, ``#ck1-…``) match only
+    eager). Key-flavored cells (th#883 pull-by-key, ``#ck2-…``) match only
     when their key is one this runtime computed for itself."""
     from . import cell_key, compile_cache
 
@@ -2702,7 +2713,6 @@ class Executor:
         total_vram_gb = float(gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
         free_vram_gb = float(gpu_info.get("gpu_free_mem") or gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
         detected_sm = str(gpu_info.get("gpu_sm") or "")
-        detected_cc = (float(detected_sm) / 10.0) if detected_sm.isdigit() else None
         libs = {str(x) for x in (gpu_info.get("installed_libs") or [])}
         caps = TensorhubWorkerCapabilities(
             cuda_version=str(gpu_info.get("cuda_version") or ""),
@@ -2712,16 +2722,10 @@ class Executor:
         )
         for name, spec in self.specs.items():
             r = spec.resources
-            # Genuine hard incompatibilities keep their explicit reason codes —
-            # no lever (offload/cpu/quant) makes them run on this silicon.
-            if r.compute_capability is not None and detected_cc is not None \
-                    and detected_cc < float(r.compute_capability):
-                self.unavailable[name] = (
-                    "compute_capability_unmet",
-                    f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
-                    {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
-                self._gate_owned.add(name)
-                continue
+            # SDK v2 (pgw#647): NO compute-capability gate — precision per
+            # card class is the fit ladder's decision (sdxl runs fine in
+            # fp16 on sm75); only stored-flavor SM windows (svdq/nvfp4,
+            # via variant_fit) remain genuinely hard.
             missing = [lib for lib in (r.libraries or ()) if lib not in libs]
             if missing:
                 import importlib.util
@@ -2755,7 +2759,8 @@ class Executor:
                 self.unavailable[name] = (
                     code, plan.reason,
                     {"detected_vram_gb": f"{total_vram_gb:.0f}",
-                     "recommended_vram_gb": (f"{r.vram_gb:.0f}" if r.vram_gb else "")})
+                     "recommended_vram_gb": (
+                         f"{r.vram_gb_hint:.0f}" if r.vram_gb_hint else "")})
                 self._gate_owned.add(name)
                 continue
             if plan.degraded:
@@ -2878,7 +2883,7 @@ class Executor:
         from . import compile_cache
         from .models.loading import pipeline_weight_lane
 
-        cfg = target.spec.compile
+        cfg = target.spec.compile_cell()
         assert cfg is not None
         contract_digest = compile_cache.execution_contract_digest(
             target.pipeline, cfg)
@@ -2891,6 +2896,7 @@ class Executor:
 
             key = cell_key.compute(
                 str(getattr(cfg, "family", "") or ""), lane, bucket,
+                contract=cfg.contract_digest(),
                 regional=bool(getattr(cfg, "regional", False)))
             requested_key, requested_axes = key.digest, key.axes
         except Exception:
@@ -3087,7 +3093,7 @@ class Executor:
         """Mint one incarnation for every compile-capable object just set up."""
         from . import compile_cache
 
-        cfg = spec.compile
+        cfg = spec.compile_cell()
         rec.compile_targets = {}
         if cfg is None:
             return
@@ -3153,7 +3159,7 @@ class Executor:
             # cannot inherit this target's immutable applicability.
             compatible_names: set[str] = set()
             for alias in rec.specs:
-                alias_cfg = alias.compile
+                alias_cfg = alias.compile_cell()
                 if alias_cfg is None:
                     continue
                 if (
@@ -3317,7 +3323,7 @@ class Executor:
                 continue
             for target in rec.compile_targets.values():
                 with target.state_lock:
-                    cfg = target.spec.compile
+                    cfg = target.spec.compile_cell()
                     family = str(getattr(cfg, "family", "") or "").strip()
                     if not family:
                         continue
@@ -3357,13 +3363,13 @@ class Executor:
             ] if rec.ready else []
             for target in live:
                 family = str(getattr(
-                    target.spec.compile, "family", "") or "").strip()
+                    target.spec.compile_cell(), "family", "") or "").strip()
                 if family:
                     seen.add((family, target.requested_cell_key))
             if live:
                 continue
             for spec in rec.specs:
-                cfg = spec.compile
+                cfg = spec.compile_cell()
                 family = str(getattr(cfg, "family", "") or "").strip()
                 if cfg is None or not family:
                     continue
@@ -3376,6 +3382,7 @@ class Executor:
                     try:
                         digest = cell_key.compute(
                             family, lane, bucket,
+                            contract=cfg.contract_digest(),
                             regional=bool(getattr(cfg, "regional", False)),
                         ).digest
                     except Exception:
@@ -4485,7 +4492,7 @@ class Executor:
                     return True
                 if payload is None:
                     return True  # variant base already carries media
-                ctx = RequestContext(
+                ctx: RequestContext[Any] = RequestContext(
                     request_id=f"boot-warmup-{wj.spec.name}",
                     local_output_dir=tmp,
                     models={slot: wire_ref(b) for slot, b in wj.spec.models.items()},
@@ -4815,7 +4822,7 @@ class Executor:
                 # reaches the same cache-artifact-gated policy. No-op when
                 # spec.compile is None.
                 arming_scope = provision.ArmingScope(
-                    spec.compile, self.store._cache_dir, compile_artifact,
+                    spec.compile_cell(), self.store._cache_dir, compile_artifact,
                     enable=self._arming_enable,
                 )
                 with arming_scope:
@@ -5072,7 +5079,7 @@ class Executor:
                         pipe = candidate.pipeline
                         function_proofs[id(pipe)] = set()
                         compile_cache.unwrap(pipe)
-                        if int(getattr(spec.compile, "lora_bucket", 0) or 0):
+                        if spec.lora_bucket:
                             compile_cache.drop_lora_lane(pipe)
                         inj.active_compile_artifacts.pop(id(pipe), None)
                         self._abandon_pending_mint(inj, pipe)
@@ -5196,7 +5203,7 @@ class Executor:
                         sorted(candidate.slots))
                     function_proofs[id(pipe)] = set()
                     compile_cache.unwrap(pipe)
-                    if int(getattr(spec.compile, "lora_bucket", 0) or 0):
+                    if spec.lora_bucket:
                         compile_cache.drop_lora_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
                     self._abandon_pending_mint(inj, pipe)
@@ -5873,7 +5880,7 @@ class Executor:
                 (res.vram_hint(r), sum(self.store.component_sizes(r).values()))
                 for r in refs
             ],
-            float(spec.resources.vram_gb or 0),
+            float(spec.resources.vram_gb_hint or 0),
         )
         if needed <= 0:
             return
@@ -5960,16 +5967,17 @@ class Executor:
         one exact immutable Forge cell. Returns the selected ref/digest/path or
         ``None`` only for an ordinary eager-compatible lane.
         """
-        if spec.compile is None or not snapshots:
+        ccell = spec.compile_cell()
+        if ccell is None or not snapshots:
             return None
         from . import compile_cache, trt_engine
-        family = getattr(spec.compile, "family", "") or ""
+        family = ccell.family
         # The effective spec is already rebound to this RunJob's selected
         # checkpoints. Snapshot maps also contain attached cells and may carry
         # unrelated/prepositioned models, so they must not choose the lane.
         model_refs = [wire_ref(binding) for binding in spec.models.values()]
         want_lane = self._mandatory_lane_of_bound(model_refs)
-        want_bucket = int(getattr(spec.compile, "lora_bucket", 0) or 0)
+        want_bucket = int(ccell.lora_bucket or 0)
         # th#883 pull-by-key: a key-flavored cell is selected only when its
         # key is one this runtime computed for itself (the same candidates
         # the worker advertises in cell_lookups).
@@ -5980,7 +5988,8 @@ class Executor:
             try:
                 candidate_keys.add(cell_key.compute(
                     family, lane, want_bucket,
-                    regional=bool(getattr(spec.compile, "regional", False)),
+                    contract=ccell.contract_digest(),
+                    regional=bool(ccell.regional),
                 ).digest)
             except Exception:
                 continue
@@ -6074,25 +6083,25 @@ class Executor:
     def _component_share_plan(
         self, spec: EndpointSpec, paths: Dict[str, str], hints: Dict[str, Any]
     ) -> Optional[Dict[str, Dict[str, Any]]]:
-        """Content-keyed shared-component plan (gw#479, extended pgw#636):
-        ``{slot: {component: LoadedComponentKey}}``. A component participates
-        when its CONTENT key appears under 2+ pipeline slots of THIS record
-        (the multi-lane z-image/qwen shape), when its slot DECLARES it
-        (``Slot.share_components`` — the cross-pick opt-in: the component
-        becomes an independent residency entry so later picks with equal
-        bytes alias it and unequal bytes stay honestly exclusive), or when
-        an entry for the key is ALREADY resident in the shared cache (a
-        sibling pick's record seeded it). None when nothing qualifies —
-        loading then stays monolithic."""
+        """Content-keyed shared-component plan (gw#479 / pgw#636, SDK v2):
+        ``{slot: {component: LoadedComponentKey}}``. Sharing is AUTOMATIC by
+        content address (pgw#647 deleted the ``Slot.share_components``
+        opt-in — an endpoint can no longer forget to share): every
+        component of a hub-resolvable (Slot-declared) pipeline slot becomes
+        an independent content-keyed residency entry, so later picks with
+        equal bytes alias it and unequal bytes stay honestly exclusive. A
+        component also participates when its content key appears under 2+
+        pipeline slots of THIS record (the multi-lane z-image/qwen shape)
+        or when an entry for the key is ALREADY resident in the shared
+        cache (a sibling pick's record seeded it). None when nothing
+        qualifies — loading then stays monolithic."""
         pipe_slots = [
             s for s in paths
             if isinstance(hints.get(s), type)
             and callable(getattr(hints[s], "from_pretrained", None))
         ]
         declared: Dict[str, frozenset] = {
-            s: frozenset(spec.slots[s].share_components)
-            for s in pipe_slots
-            if s in spec.slots and spec.slots[s].share_components
+            s: _ALL_COMPONENTS for s in pipe_slots if s in spec.slots
         }
         if len(pipe_slots) < 2 and not declared:
             return None
@@ -6296,11 +6305,10 @@ class Executor:
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
                             declared_vram_gb=float(
-                                getattr(spec.resources, "vram_gb", 0) or 0),
+                                spec.resources.vram_gb_hint or 0),
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
-                            strict_vram=bool(
-                                getattr(spec.resources, "strict_vram", False)),
+                            strict_vram=bool(spec.resources.strict_vram),
                         )
                     except Exception as exc:
                         # Corruption-shaped load failure (gw#408): digest-verify
@@ -6324,11 +6332,10 @@ class Executor:
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
                             declared_vram_gb=float(
-                                getattr(spec.resources, "vram_gb", 0) or 0),
+                                spec.resources.vram_gb_hint or 0),
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
-                            strict_vram=bool(
-                                getattr(spec.resources, "strict_vram", False)),
+                            strict_vram=bool(spec.resources.strict_vram),
                         )
                     pipe = sl.obj
                     # Reconcile the load outcomes into ServePlan/FnDegraded via
@@ -6371,7 +6378,7 @@ class Executor:
                         try:
                             outcome = await _to_thread_complete(
                                 self._enable_compiled,
-                                pipe, spec.compile, compile_artifact,
+                                pipe, spec.compile_cell(), compile_artifact,
                             )
                         except compile_cache.CompiledLaneUnavailableError as exc:
                             # Mandatory (w8a8/w4a4) lane: self-mint also hit a
@@ -6568,7 +6575,7 @@ class Executor:
     ) -> Callable[[], None]:
         """Republish the grown cell after a background novel-shape warm
         (pgw#622). Runs on the Debounce thread, never the serving path."""
-        cfg = spec.compile
+        cfg = spec.compile_cell()
         family = str(getattr(cfg, "family", "") or "")
 
         def republish() -> None:
@@ -7052,7 +7059,7 @@ class Executor:
 
                 rec, target = current
                 spec = target.spec
-                cfg = spec.compile
+                cfg = spec.compile_cell()
                 assert cfg is not None
                 obj = target.pipeline
                 wrapped = False

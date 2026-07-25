@@ -26,16 +26,20 @@ def _restore_capture_env(monkeypatch):
 
 
 class _Cfg:
-    """Stand-in for api.decorators.Compile (duck-typed in local_cells)."""
+    """Stand-in for registry.CompileCell (duck-typed in local_cells)."""
 
     def __init__(
         self, family="fam", shapes=((64, 64),), targets=("transformer",),
-        regional=False, guidance_scales=(),
+        regional=False, text_len=0, dynamic=(), lora_bucket=0,
+        guidance_scales=(),
     ):
         self.family = family
         self.shapes = tuple(tuple(s) for s in shapes)
         self.targets = tuple(targets)
         self.regional = regional
+        self.text_len = text_len
+        self.dynamic = tuple(dynamic)
+        self.lora_bucket = int(lora_bucket)
         self.guidance_scales = tuple(guidance_scales)
 
 
@@ -459,10 +463,26 @@ def test_local_cells_has_no_publish_path():
 
 def test_local_cli_is_the_only_mint_caller():
     # The mint entry is the local CLI only: the production executor and
-    # lifecycle must never reference local_cells (fetch-only stays fetch-only).
+    # lifecycle must never import or call local_cells (fetch-only stays
+    # fetch-only). AST-level: imports plus any code identifier naming the
+    # module count; prose mentions in docstrings do not.
     root = Path(lc.__file__).parent
-    callers = [
-        p for p in root.rglob("*.py")
-        if p.name != "local_cells.py" and "local_cells" in p.read_text()
-    ]
+    callers = set()
+    for p in root.rglob("*.py"):
+        if p.name == "local_cells.py":
+            continue
+        tree = ast.parse(p.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any("local_cells" in a.name for a in node.names):
+                    callers.add(p)
+            elif isinstance(node, ast.ImportFrom):
+                if "local_cells" in (node.module or "") or any(
+                    a.name == "local_cells" for a in node.names
+                ):
+                    callers.add(p)
+            elif isinstance(node, ast.Name) and "local_cells" in node.id:
+                callers.add(p)
+            elif isinstance(node, ast.Attribute) and "local_cells" in node.attr:
+                callers.add(p)
     assert {p.relative_to(root).as_posix() for p in callers} == {"cli/run.py"}

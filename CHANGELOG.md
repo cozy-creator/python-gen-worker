@@ -1,5 +1,122 @@
 # Changelog
 
+## 0.60.0 (2026-07-25) — SDK v2: THE breaking cut (pgw#647)
+
+**HARD CUT, no compatibility window.** Design of record:
+`SDK-API-V2-DESIGN.md` (tracker root); the campaign that consumes it is
+ie#546 — every endpoint is rewritten against this release, and this release
+IS the API freeze. Old declarations fail loudly at import/decoration time
+(there are no shims and no deprecation aliases). What every endpoint author
+must change:
+
+- **The component tree is DERIVED from the pipeline class — sibling-as-part
+  slots are DELETED, not migrated.** Declare only the root:
+  `models={"pipeline": Slot(StableDiffusionXLPipeline, selected_by="model")}`.
+  `pipeline.unet` / `pipeline.vae` / `pipeline.text_encoder(_2)` /
+  `pipeline.scheduler` are addressable automatically; the derived tree
+  (classified weights vs config) is published into the release manifest
+  (`functions[].slots[].components`) for per-path policy
+  (fixed | curated | open) and component-level routing. A sibling slot that
+  names a component of another slot's tree (`"vae": Slot(AutoencoderKL)`)
+  or a `str` modifier slot next to a pipeline slot (z-image's
+  `turbo_lora: Slot(str)`) is now a decoration-time error. The SDXL VAE-fix
+  override becomes CATALOG DATA (th#1116), not endpoint code — and with it,
+  `setup()` loses its wiring role (`pipeline.vae = vae.to(...)` is gone).
+  Explicit multi-slot declaration survives ONLY for non-introspectable
+  runtimes (llama/gguf, custom engines).
+- **Handlers own their instance: `self.pipeline`, not per-handler model
+  args.** `setup(self, pipeline, ...)` runs once per instance and stores
+  the pipeline; handlers are exactly `(self, ctx, payload)` — extra
+  injected model params on class handlers now raise, and a class with
+  `models=` requires `setup()`. One live instance == one binding set: the
+  "which checkpoint am I?" question does not exist, the runtime routed the
+  request here because the bindings match. `ctx` keeps only request-scoped
+  facts (resolved refs/digests, typed defaults, progress/cancel, request
+  id).
+- **Per-request VIEWS replace instance mutation.** `ctx.for_request(
+  self.pipeline, sampler=p.sampler, seed=p.seed)` returns a container copy
+  sharing every module by reference (the compiled graph stays bound — the
+  view WRAPS, never swaps) with its OWN scheduler cloned from config. The
+  SDK owns the sampler table (`gen_worker.view.SAMPLERS`) and applies the
+  resolved checkpoint's regime (v_prediction) at view construction.
+  Assigning `self.pipeline.scheduler` per request (sdxl's old
+  `_ensure_scheduler`) was a live concurrency-corruption bug — diffusers
+  schedulers are stateful and shared — and must be deleted, along with
+  hand-rolled handler locks (`@endpoint` single-flight, shipped in 0.58.0,
+  owns that) and `_scheduler_kind` / `_scheduler_config` maps.
+- **`Resources` declares only what the endpoint CANNOT RUN WITHOUT.**
+  `vram_gb`, `ram_gb` and `compute_capability` are DELETED (th#683
+  profiling measures the real VRAM per lane/shape; host RAM is an
+  opportunistic tier; precision-per-card is the fit ladder's call — the
+  worker no longer refuses pods on a declared compute capability).
+  Surviving fields: `gpu`, `gpu_count`, `libraries`, `strict_vram`,
+  `vcpus`, plus `vram_gb_hint` — an optional FIRST-BUILD placement hint
+  only, never a gate or reservation. sdxl's
+  `Resources(vram_gb=12, ram_gb=48, compute_capability=8.0)` becomes
+  `Resources(gpu=True)`.
+- **Compile axes moved onto PAYLOAD FIELDS.** `Compile(guidance_scales=)`
+  is DELETED; annotate the field with its equivalence classes::
+
+      guidance_scale: Annotated[float, CompileAxis(classes=(
+          AxisClass("cfg_off", match=lambda v: v == 0, warm=0.0),
+          AxisClass("cfg_on",  match=lambda v: v != 0, warm=5.0),
+      ))] = 5.0
+      aspect_ratio: Annotated[AspectRatio, CompileAxis(classes="enum")]
+
+  Each class carries a WARM representative, so the warm plan is DERIVABLE
+  (classes x shape buckets) and catalog recipes validate against the
+  declared class names at publish time. The manifest carries the projection
+  (`compile_axes`).
+- **The shape contract is DECLARED to the compiler, never discovered.**
+  The compile encoding is now `automatic_dynamic_shapes=False` +
+  `assume_static_by_default=True` + `torch.compile(dynamic=None)` + explicit
+  marks (ie#543: `dynamic=False` + `mark_dynamic` raises
+  ConstraintViolationError and is not expressible). NEW REQUIRED AXIS —
+  every inference `compile=` endpoint must declare its text-sequence axis
+  or fail at decoration (the ie#544 lint): `Compile(text_len=<pinned token
+  length>)` (pad embeddings with `gen_worker.pad_text_sequence`, which
+  produces canonically-strided allocations — dynamo guards on strides, and
+  a pin that fixes only the size is not a pin), `text_len=0` for an
+  explicitly unconditioned model, or a declared range
+  `Compile(dynamic=(DynamicDim("sequence", min=.., max=..),))`. BATCH stays
+  a supported declarable axis (`DynamicDim("batch", min>=2, max=..)`) even
+  though no endpoint uses it today (ie#542/ie#543: ~1.0-1.2x at our
+  operating point; min>=2 because torch 0/1 specialization is not
+  overridable).
+- **`lora_bucket` moved to the decorator:** `@endpoint(lora_bucket=64,
+  compile=Compile(...))` — it shapes the resident branch and the graph
+  family whether or not compile is armed. `Compile(lora_bucket=)` is gone.
+- **Cell keys are `ck2` and carry a shape-contract digest.** The declared
+  contract (shapes, targets, text_len, dynamic dims, regional, lora bucket,
+  warm guidance classes) is digested into a new REQUIRED `contract` axis
+  and recorded in artifact metadata (`shape_contract`), so a worker on a
+  newer contract can never consume an older incompatible cell. All ck1
+  cells are naturally invalidated (this release's `gen_worker` version axis
+  changed anyway).
+- **The config type is renamed and DERIVED.** `FamilyDefaults` is now
+  `GenerationDefaults`, and the schema comes from the handler's context
+  annotation — `def generate(self, ctx: RequestContext[SdxlDefaults], p)` —
+  never from a decorator/Slot kwarg. `Slot(default_config=...)` is DELETED:
+  the catalog owns recipe VALUES (th#1116 stamps one resolved recipe per
+  slot); code owns the schema only. Read the resolved recipe as
+  `ctx.defaults` (typed as your annotation). With no catalog metadata
+  (hub-less runs) the neutral schema defaults apply — identical to the
+  hub's neutral stamp. Code-side lineage recipe constants are deleted with
+  it.
+- **Component sharing is AUTOMATIC by content address.**
+  `Slot(share_components=...)` is DELETED — every component of a
+  Slot-declared pipeline slot is a content-keyed share candidate; equal
+  bytes alias, unequal bytes stay exclusive. An endpoint can no longer
+  forget to share.
+- **Output contract, stated:** RETURN the output object (`ImageOutput`
+  etc.); the SDK owns encode + upload (gw#516 handoff). A handler that
+  hand-uploads inside its body opts out of the encode/upload tail overlap.
+  Async handlers deliberately did NOT ride this cut — `async def` is
+  already a per-handler opt-in (dual dispatch exists today), and the
+  blocking `ctx.save_*` methods will gain `async` twins in a later
+  non-breaking pass (pgw#652 Phase 1). No new sync ctx I/O was added.
+
+
 ## 0.58.1 (2026-07-25)
 
 - **gw#640 (secondary half): a WAITING lifecycle intent always carries a
@@ -68,7 +185,7 @@
   function claims 0, so this is inert on CPU workers and at first boot. No
   endpoint-visible change and no knob — residency depth vs concurrency headroom
   is one runtime decision.
-- **th#1129: WebP is THE image-encoding default, on one shared encode core.**
+- **th#1130: WebP is THE image-encoding default, on one shared encode core.**
   Paul's ruling: "the default image-encoding should be webp, always, with png
   or jpg as optional alternatives." Both encode surfaces had independently
   reimplemented the encode — and had already drifted to different default

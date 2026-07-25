@@ -41,7 +41,7 @@ class SD15Output(msgspec.Struct):
 
 @endpoint(
     model=Hub(HUB_REF, tag="prod"),
-    resources=Resources(vram_gb=6),
+    resources=Resources(gpu=True),
 )
 class SD15HubImage:
     def setup(self, model: StableDiffusionPipeline) -> None:

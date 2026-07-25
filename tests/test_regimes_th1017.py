@@ -159,10 +159,14 @@ def test_resolved_slot_carries_regime_from_resolve_slot() -> None:
     from gen_worker.api.slot import Slot, resolve_slot
     from gen_worker.families import SdxlDefaults
 
-    slot = Slot(object, default_config=SdxlDefaults())
+    slot = Slot(object)
     ref = HF("acme/gonzalomo-xl")
-    resolved = resolve_slot("pipeline", slot, ref=ref, inference_regime="distilled")
+    resolved = resolve_slot(
+        "pipeline", slot, ref=ref, defaults_cls=SdxlDefaults,
+        inference_regime="distilled",
+    )
     assert resolved.regime == "distilled"
+    assert isinstance(resolved.defaults, SdxlDefaults)
 
 
 def test_resolve_slot_defaults_regime_to_standard() -> None:
@@ -170,8 +174,10 @@ def test_resolve_slot_defaults_regime_to_standard() -> None:
     from gen_worker.api.slot import Slot, resolve_slot
     from gen_worker.families import SdxlDefaults
 
-    slot = Slot(object, default_config=SdxlDefaults())
-    resolved = resolve_slot("pipeline", slot, ref=HF("acme/plain-xl"))
+    slot = Slot(object)
+    resolved = resolve_slot(
+        "pipeline", slot, ref=HF("acme/plain-xl"), defaults_cls=SdxlDefaults,
+    )
     assert resolved.regime == "standard"
 
 
@@ -180,11 +186,11 @@ def test_regime_mismatch_raises_typed_backstop_error() -> None:
     from gen_worker.api.slot import RegimeMismatchError, Slot, resolve_slot
     from gen_worker.families import SdxlDefaults
 
-    slot = Slot(object, default_config=SdxlDefaults())
+    slot = Slot(object)
     ref = HF("acme/gonzalomo-xl")
     with pytest.raises(RegimeMismatchError, match="distilled"):
         resolve_slot(
-            "pipeline", slot, ref=ref,
+            "pipeline", slot, ref=ref, defaults_cls=SdxlDefaults,
             inference_regime="distilled", allowed_regimes=("standard",),
         )
 
@@ -194,10 +200,10 @@ def test_regime_within_allowed_set_resolves_cleanly() -> None:
     from gen_worker.api.slot import Slot, resolve_slot
     from gen_worker.families import SdxlDefaults
 
-    slot = Slot(object, default_config=SdxlDefaults())
+    slot = Slot(object)
     ref = HF("acme/gonzalomo-xl")
     resolved = resolve_slot(
-        "pipeline", slot, ref=ref,
+        "pipeline", slot, ref=ref, defaults_cls=SdxlDefaults,
         inference_regime="distilled", allowed_regimes=("standard", "distilled"),
     )
     assert resolved.regime == "distilled"

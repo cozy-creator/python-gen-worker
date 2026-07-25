@@ -11,7 +11,7 @@ A family struct is declared once per architecture and shared by every
 endpoint that serves it::
 
     @family("sdxl")
-    class SdxlDefaults(FamilyDefaults):
+    class SdxlDefaults(GenerationDefaults):
         scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
         steps: int = 28
         guidance: float = 6.0
@@ -32,7 +32,7 @@ LORA overlay's recipe OPINIONS (``kind="lora"``), a separate typed struct
 sharing the same family name::
 
     @family("sdxl", kind="lora")
-    class SdxlLoraDefaults(FamilyDefaults):
+    class SdxlLoraDefaults(GenerationDefaults):
         trigger_words: tuple[str, ...] = ()
         recommended_weight: float | None = None
         steps: int | None = None
@@ -46,7 +46,7 @@ instead of inventing a parallel family name per kind. tensorhub's schema
 registry mirrors this: ``<root>.schema.json`` (checkpoint) vs
 ``<root>.lora.schema.json`` (lora) — see ``export_json_schema``.
 
-A DECORATOR, not a ``class X(FamilyDefaults, family="sdxl")`` class kwarg:
+A DECORATOR, not a ``class X(GenerationDefaults, family="sdxl")`` class kwarg:
 msgspec's own ``StructMeta`` does not forward unrecognized class keywords to
 ``__init_subclass__`` (verified: it raises ``TypeError`` on an unknown
 kwarg), and mypy cannot type-check a metaclass computed at runtime
@@ -69,13 +69,13 @@ import msgspec
 # Keyed (family_name, kind) — "checkpoint" | "lora" (see module docstring's
 # kind-axis section). Kind is normalized/defaulted to "checkpoint" so every
 # pre-th#767b ``@family("sdxl")`` call site is unaffected.
-_REGISTRY: Dict[Tuple[str, str], Type["FamilyDefaults"]] = {}
+_REGISTRY: Dict[Tuple[str, str], Type["GenerationDefaults"]] = {}
 
 KIND_CHECKPOINT = "checkpoint"
 KIND_LORA = "lora"
 _VALID_KINDS = (KIND_CHECKPOINT, KIND_LORA)
 
-F = TypeVar("F", bound="FamilyDefaults")
+F = TypeVar("F", bound="GenerationDefaults")
 
 
 def _normalize_kind(kind: str) -> str:
@@ -85,7 +85,7 @@ def _normalize_kind(kind: str) -> str:
     return k
 
 
-class FamilyDefaults(
+class GenerationDefaults(
     msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True,
 ):
     """Base for a per-family inference-defaults/constraints vocabulary.
@@ -128,7 +128,7 @@ class FamilyDefaults(
 
 
 def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Type[F]]:
-    """Class decorator: register a :class:`FamilyDefaults` subclass under
+    """Class decorator: register a :class:`GenerationDefaults` subclass under
     ``(name, kind)`` — the key :func:`family_for` / tensorhub's repo-metadata
     validation / a :class:`~gen_worker.api.slot.Slot`'s ``Compile(family=)``
     reconciliation all look it up by.
@@ -144,9 +144,9 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
     knd = _normalize_kind(kind)
 
     def deco(cls: Type[F]) -> Type[F]:
-        if not (isinstance(cls, type) and issubclass(cls, FamilyDefaults)):
+        if not (isinstance(cls, type) and issubclass(cls, GenerationDefaults)):
             raise TypeError(
-                f"@family({fam!r}, kind={knd!r}) must decorate a FamilyDefaults "
+                f"@family({fam!r}, kind={knd!r}) must decorate a GenerationDefaults "
                 f"subclass, got {cls!r}"
             )
         key = (fam, knd)
@@ -165,13 +165,13 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
     return deco
 
 
-def family_registry(*, kind: str = KIND_CHECKPOINT) -> Dict[str, Type[FamilyDefaults]]:
+def family_registry(*, kind: str = KIND_CHECKPOINT) -> Dict[str, Type[GenerationDefaults]]:
     """Every registered family of ``kind``, name -> struct class."""
     knd = _normalize_kind(kind)
     return {fam: cls for (fam, k), cls in _REGISTRY.items() if k == knd}
 
 
-def family_for(name: str, *, kind: str = KIND_CHECKPOINT) -> Optional[Type[FamilyDefaults]]:
+def family_for(name: str, *, kind: str = KIND_CHECKPOINT) -> Optional[Type[GenerationDefaults]]:
     """The registered family class for ``(name, kind)``, or ``None``."""
     return _REGISTRY.get((str(name or "").strip(), _normalize_kind(kind))) or None
 
@@ -251,7 +251,7 @@ def export_all_schemas() -> Dict[Tuple[str, str], Dict[str, Any]]:
 __all__ = [
     "KIND_CHECKPOINT",
     "KIND_LORA",
-    "FamilyDefaults",
+    "GenerationDefaults",
     "export_all_schemas",
     "export_json_schema",
     "family",

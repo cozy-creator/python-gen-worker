@@ -63,21 +63,25 @@ from gen_worker import HF, RequestContext, Resources, endpoint
 
 @endpoint(
     model=HF("stabilityai/stable-diffusion-xl-base-1.0", dtype="bf16"),
-    resources=Resources(vram_gb=12),
+    resources=Resources(gpu=True),
 )
 class Generate:
-    def setup(self, pipe: StableDiffusionXLPipeline) -> None:
-        self.pipe = pipe
+    def setup(self, pipeline: StableDiffusionXLPipeline) -> None:
+        self.pipeline = pipeline
 
     def generate(self, ctx: RequestContext, payload: Input) -> Output:
-        image = self.pipe(payload.prompt, generator=ctx.generator(42)).images[0]
+        view = ctx.for_request(self.pipeline, seed=42)
+        image = view(payload.prompt, generator=view.generator).images[0]
         return Output(text=ctx.save_image(image).ref)
 ```
 
-`Resources(vram_gb=N)` recommends a card size — the total VRAM of the smallest
-card the function targets, not free bytes. It's an optional placement hint: the
-platform reserves ~1 GB for driver/framebuffer/CUDA-context overhead, so
-`vram_gb=24` serves on any 24 GB card.
+`Resources` declares only what the endpoint CANNOT run without (`gpu`,
+`gpu_count`, `libraries`, `strict_vram`, `vcpus`); VRAM requirements are
+MEASURED by the platform's profiling gate, not declared (`vram_gb_hint` is
+an optional first-build placement hint only). Handlers are exactly
+`(self, ctx, payload)`; per-request state (sampler, seed, scheduler) lives
+in a `ctx.for_request` view over shared weights — never assigned onto the
+instance.
 
 Bindings: `HF(id, revision=, dtype=, subfolder=, files=, storage_dtype=)`,
 `Hub(ref, tag=, flavor=, storage_dtype=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
@@ -94,13 +98,14 @@ SomeModelChoice | ModelRef` opens BYOM. Streaming = an async-generator handler.
 Engine-hosted endpoints declare `runtime="vllm"` and get a booted,
 health-checked server subprocess injected into `setup()`.
 
-`Slot(pipeline_cls, selected_by=, default_checkpoint=, default_config=)` is
-the hub-resolved alternative to `ModelChoice`: the model SET lives in
-platform config, not code. `ctx.slots["<name>"]` returns a typed
-`ResolvedSlot` — repo-metadata inference defaults (a
-`gen_worker.families.FamilyDefaults` vocabulary, tensorhub-validated)
-merged over the endpoint's code `default_config=` preset (which LOSES to
-repo metadata — a recipe of last resort).
+`Slot(pipeline_cls, selected_by=, default_checkpoint=)` is the hub-resolved
+alternative to `ModelChoice`: the model SET lives in platform config, not
+code, and the COMPONENT TREE (`pipeline.unet`, `pipeline.vae`, ...) is
+derived from the pipeline class and published to the hub — parts are never
+declared as sibling slots. The per-model config SCHEMA derives from the
+handler's context annotation (`ctx: RequestContext[SdxlDefaults]`, a
+`gen_worker.families.GenerationDefaults` vocabulary); the catalog owns the
+VALUES and `ctx.defaults` hands the resolved recipe to the handler typed.
 
 Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 
@@ -109,7 +114,9 @@ Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 - The decorator + bindings: `endpoint`, `Resources`, `Compile`, `HF`, `Hub`,
   `Civitai`, `ModelScope`, `ModelRef`
 - Model selection: `Model`, `ModelChoice`, `ModelDefaults`, `Slot`,
-  `ResolvedSlot`, `gen_worker.families.FamilyDefaults`
+  `ResolvedSlot`, `gen_worker.families.GenerationDefaults`
+- Compile contract: `Compile`, `CompileAxis`, `AxisClass`, `DynamicDim`,
+  `pad_text_sequence`; per-request views: `ctx.for_request` / `gen_worker.view`
 - Contexts: `RequestContext` (≤15 members), `ConversionContext`,
   `DatasetContext`, `TrainingContext`
 - Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`

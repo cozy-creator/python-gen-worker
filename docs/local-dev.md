@@ -374,9 +374,9 @@ uses for an orchestrator interrupt.
 
 ## When `gen-worker run` is the wrong tool
 
-- **Resource gating.** The CLI doesn't enforce VRAM / compute-capability
-  gates. If your endpoint declares `vram_gb=80` and you're on a 24GB
-  card, the CLI happily tries to load the model and fails inside torch.
+- **Resource gating.** The CLI doesn't enforce fit-ladder placement: on a
+  card too small for the model it happily tries to load and fails inside
+  torch instead of degrading through the production offload rungs.
 - **Multi-tenant scheduling.** No request queuing, no fairness, no
   micro-batching. One request, sequential dispatch.
 - **Cross-machine repro.** Captures local Python + local cache state.

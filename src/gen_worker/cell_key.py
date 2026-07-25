@@ -26,6 +26,14 @@ facts that actually change compiled-kernel identity:
                   wheel's ptxas + SM arch — the host driver deliberately
                   never enters the key, gw#577)
     gen_worker    exact gen-worker version (graph-shaping code)
+    contract      digest of the DECLARED shape contract (SDK v2, pgw#647):
+                  shapes, targets, text_len, dynamic dims, regional mode,
+                  lora bucket, warm guidance classes. A contract change
+                  (bucket added, axis made dynamic, text pin moved) makes
+                  the artifacts genuinely different, so a worker on a newer
+                  contract can never consume an older cell — pre-fix and
+                  post-fix cells were indistinguishable by key before this
+                  axis existed.
     diffusers/transformers  exact lib versions when installed
     image_digest  the SERVING image OCI digest (absent for local runtimes)
 
@@ -44,7 +52,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
-KEY_SCHEME = "ck1"
+KEY_SCHEME = "ck2"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
 # (th#597 C5: [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64
@@ -54,7 +62,7 @@ _DIGEST_HEX = 56
 # Axes that must be non-empty for a computable key: a runtime that cannot
 # state them has no cell identity (CPU-only build, failed CUDA probe).
 _REQUIRED = ("format", "kind", "family", "sku", "sm", "cuda", "torch",
-             "triton", "gen_worker")
+             "triton", "gen_worker", "contract")
 # Axes that may be legitimately absent ("" => omitted from canonical form):
 # image_digest is absent on local runtimes; libs may not be installed; lane
 # "" is the plain-resident graph family; mode "" is whole-graph compilation
@@ -129,21 +137,38 @@ def _canonical_lane(weight_lane: str, lora_bucket: int = 0) -> str:
     return token
 
 
+def contract_digest(facts: Mapping[str, Any]) -> str:
+    """Digest of the DECLARED shape-contract facts (SDK v2 axis). Both
+    sides state the same canonical dict — the worker from its EndpointSpec
+    (``compile_cache.declared_contract_facts``), the mint from its build
+    inputs, the artifact from its recorded ``shape_contract`` block — so the
+    digest can never disagree with the facts it summarizes."""
+    encoded = json.dumps(
+        dict(facts), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
 def compute(
     family: str,
     weight_lane: str = "",
     lora_bucket: int = 0,
     *,
+    contract: str,
     regional: bool = False,
     image_digest: Optional[str] = None,
 ) -> CellKey:
     """The key THIS runtime wants for ``family`` on ``weight_lane``.
 
     Probes the live process (the same probes ``compile_cache.verify`` trusts).
-    ``image_digest=None`` uses this process's ``WORKER_IMAGE_DIGEST``; pass an
-    explicit value (the SERVING image digest at mint time, or ``""`` for a
-    local runtime) to override. Raises :class:`CellKeyError` when a required
-    axis is unavailable — callers on non-CUDA runtimes simply have no key.
+    ``contract`` is the declared shape-contract digest
+    (:func:`contract_digest` over ``compile_cache.declared_contract_facts``)
+    — REQUIRED: a keyless contract would let a newer-contract worker consume
+    an older cell. ``image_digest=None`` uses this process's
+    ``WORKER_IMAGE_DIGEST``; pass an explicit value (the SERVING image
+    digest at mint time, or ``""`` for a local runtime) to override. Raises
+    :class:`CellKeyError` when a required axis is unavailable — callers on
+    non-CUDA runtimes simply have no key.
     """
     from . import compile_cache as cc
 
@@ -163,6 +188,7 @@ def compute(
         "torch": rt["torch"],
         "triton": rt["triton"],
         "gen_worker": cc.gen_worker_version(),
+        "contract": str(contract or ""),
         "diffusers": libs.get("diffusers", ""),
         "transformers": libs.get("transformers", ""),
         "image_digest": str(image_digest or ""),
@@ -182,6 +208,12 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
     libs = meta.get("libs") or {}
     mode = str(meta.get("compile_mode") or "whole")
+    contract_facts = meta.get("shape_contract")
+    if not isinstance(contract_facts, dict) or not contract_facts:
+        raise CellKeyError(
+            "artifact records no shape_contract block (pre-ck2 cell); no "
+            "ck2 identity — a newer-contract worker must not consume it"
+        )
     return from_axes({
         "format": str(meta.get("format") or ""),
         "kind": "inductor",
@@ -197,6 +229,7 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         "torch": str(meta.get("torch") or ""),
         "triton": str(meta.get("triton") or ""),
         "gen_worker": str(meta.get("gen_worker") or ""),
+        "contract": contract_digest(contract_facts),
         "diffusers": str(libs.get("diffusers") or ""),
         "transformers": str(libs.get("transformers") or ""),
         "image_digest": str(meta.get("image_digest") or ""),
@@ -246,6 +279,7 @@ __all__ = [
     "CellKey",
     "CellKeyError",
     "compute",
+    "contract_digest",
     "from_artifact_metadata",
     "from_axes",
     "is_key",

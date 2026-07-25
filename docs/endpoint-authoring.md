@@ -41,16 +41,28 @@ from gen_worker import HF, RequestContext, Resources, endpoint
 
 @endpoint(
     model=HF("black-forest-labs/FLUX.1-dev", dtype="bf16"),
-    resources=Resources(vram_gb=24),
+    resources=Resources(gpu=True),
 )
 class Generate:
     def setup(self, model: FluxPipeline) -> None:
-        self.model = model
+        self.pipeline = model
 
     def generate(self, ctx: RequestContext, p: In) -> Out:
-        img = self.model(prompt=p.text, generator=ctx.generator(42)).images[0]
+        view = ctx.for_request(self.pipeline, seed=42)
+        img = view(prompt=p.text, generator=view.generator).images[0]
         return Out(reply=ctx.save_image(img).ref)
 ```
+
+Handlers take exactly `(self, ctx, payload)` and use the instance state
+`setup()` stored — one live instance == one binding set, so "which
+checkpoint am I?" never needs asking; the runtime routed the request here
+because the bindings match. Anything request-scoped (sampler/scheduler
+state, seed/generator, latents) lives in a per-request VIEW
+(`ctx.for_request`), never assigned onto `self.pipeline` — diffusers
+schedulers are stateful and shared, so per-request instance mutation
+corrupts concurrent requests. RETURN the output object; the SDK owns
+encode + upload (hand-uploading inside the handler opts out of the
+encode/upload tail overlap).
 
 The worker downloads the model, constructs the pipeline from the `setup()`
 annotation (`FluxPipeline` → `from_pretrained`; `str`/`Path` → the local
@@ -165,14 +177,14 @@ weight-sharing forces one class. A distilled turbo that shares the base is a
 `generate_turbo` method on the same class (shares the resident base); a
 standalone distilled checkpoint is a separate class/endpoint.
 
-## `Slot`: hub-resolved model slots (pgw#520 / th#767)
+## `Slot`: hub-resolved model slots (SDK v2, pgw#647)
 
 `ModelChoice` above bakes the curated set into the endpoint image — fine
 for a first-party endpoint that ships its own recipes, but the model SET is
 CATALOG, not code (th#767): adding a checkpoint shouldn't be a software
-release. `Slot(pipeline_cls, selected_by=, default_checkpoint=,
-default_config=)` is the hub-resolved alternative — a `models={}`/`model=`
-value alongside (or instead of) a plain binding:
+release. `Slot(pipeline_cls, selected_by=, default_checkpoint=)` is the
+hub-resolved alternative, and under SDK v2 the declaration shrinks to the
+ROOT of the component tree:
 
 ```python
 from gen_worker import HF, RequestContext, Slot, endpoint
@@ -183,53 +195,56 @@ from gen_worker.families import SdxlDefaults
         StableDiffusionXLPipeline,
         selected_by="model",                                              # payload field that branches this slot
         default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"), # hub-less / seed-publish ref
-        default_config=SdxlDefaults(steps=28, guidance=6.0),               # used when the resolved repo has no metadata
     ),
-    "vae": HF("madebyollin/sdxl-vae-fp16-fix"),   # bare ModelRef: sugar for Slot(default_checkpoint=ref)
 })
 class Generate:
-    def setup(self, pipeline: StableDiffusionXLPipeline, vae) -> None: ...
+    def setup(self, pipeline: StableDiffusionXLPipeline) -> None:
+        self.pipeline = pipeline
 
-    def generate(self, ctx: RequestContext, p: TextToImage) -> ImageOutput:
-        d = ctx.slots["pipeline"].defaults   # typed SdxlDefaults — repo metadata > default_config
+    def generate(self, ctx: RequestContext[SdxlDefaults], p: TextToImage) -> ImageOutput:
+        d = ctx.defaults                     # typed SdxlDefaults — the catalog-resolved recipe
         steps = p.steps if p.steps is not None else d.steps
 ```
 
+- **The component tree is DERIVED from the pipeline class.**
+  `pipeline.unet` / `pipeline.vae` / `pipeline.text_encoder(_2)` /
+  `pipeline.scheduler` are addressable automatically (diffusers pipelines
+  self-describe), and the derived tree is published into the release
+  manifest for per-path catalog policy (`pipeline` open to a checkpoint
+  pick, `pipeline.vae` curated, `pipeline.unet` fixed) and
+  component-level routing. Declaring a part as a SIBLING slot
+  (`"vae": Slot(AutoencoderKL)`) or a `str` modifier slot next to a
+  pipeline slot (`turbo_lora: Slot(str)`) is a decoration-time error —
+  component overrides are CATALOG DATA (th#1116), adapters ride the model
+  binding. Explicit multi-slot declaration survives only for runtimes the
+  SDK cannot introspect (llama/gguf, custom engines).
+- **The config SCHEMA derives from the context annotation**
+  (`ctx: RequestContext[SdxlDefaults]`), never from a Slot kwarg
+  (`default_config=` is deleted). The catalog owns recipe VALUES: the hub
+  stamps one resolved recipe per slot and `ctx.defaults` hands it to the
+  handler typed. With no catalog metadata (hub-less `gen-worker run`,
+  tests), the neutral schema defaults (`SdxlDefaults()`) apply — identical
+  to the hub's neutral stamp.
 - `selected_by` names a payload field typed **plain `str`** (or
-  `str | ModelRef`, the wire's BYOM-open shape — see below) — validated at
-  registration against that field's presence/type, and REQUIRES
-  `default_checkpoint=...` (a request-branching slot with no code-side
-  default has nothing to seed the hub mapping with; the hub rejects it at
-  registration, the SDK fails at author time instead). The hub overlays the
-  live allowed-value enum onto the field; the SDK never bakes a curated
-  list.
+  `str | ModelRef`, the wire's BYOM-open shape) — validated at
+  registration. The hub overlays the live allowed-value enum onto the
+  field; the SDK never bakes a curated list.
 - `default_checkpoint` seeds the hub mapping at first publish and is the
-  ONLY resolution source in hub-less mode (`gen-worker run` / `cozy run`);
-  a live hub mapping always wins when present.
-- `default_config` is a typed preset from `gen_worker.families` (a
-  per-family vocabulary struct — see below) used when the resolved repo
-  publishes no inference-defaults metadata of its own. It LOSES to repo
-  metadata when both are present — a recipe of last resort.
-- No curated list, no family kwarg on the endpoint: compat derives from
-  `pipeline_cls`; family comes from `default_config`'s registration or the
-  endpoint's `Compile(family=...)`.
-
-**`selected_by` field contract**: the payload field is typed plain `str`
-for a curated-only pick, or `str | ModelRef` to also accept a
-client-supplied structured `ModelRef` (bring-your-own-model) — the hub
-resolves either shape to a concrete ref before the worker ever sees the
-request; the SDK schema never bakes the curated-value enum into either
-form.
+  ONLY resolution source in hub-less mode; a live hub mapping always wins.
+- **Component sharing is AUTOMATIC by content address** — byte-identical
+  components (the qwen text encoder, a shared VAE) load once and are
+  refcounted across checkpoint picks; there is nothing to declare
+  (`share_components=` is deleted).
 
 **Per-family defaults vocabulary** (`gen_worker.families`): a typed,
 versioned, JSON-Schema-exportable struct per architecture — the shape
-tensorhub validates repo metadata against at PUT time:
+tensorhub validates catalog recipe values against:
 
 ```python
-from gen_worker.families import FamilyDefaults, family
+from gen_worker.families import GenerationDefaults, family
 
 @family("sdxl")
-class SdxlDefaults(FamilyDefaults, frozen=True):
+class SdxlDefaults(GenerationDefaults, frozen=True):
     scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
     steps: int = 28
     guidance: float = 6.0
@@ -237,19 +252,15 @@ class SdxlDefaults(FamilyDefaults, frozen=True):
 ```
 
 `gen-worker families export-schemas <dir>` writes `<family>.schema.json`
-per registered family. `ctx.slots["<name>"]` merges repo metadata over the
-`Slot`'s `default_config` (whole-object precedence — a resolved repo either
-fully specifies its family vocabulary or it doesn't); a slot with neither
-raises on first ACCESS, not at dispatch.
+per registered family. Code owns this SCHEMA; the catalog owns the VALUES.
 
-**Positional construction:** `FamilyDefaults`'s own `schema_version` field
-is `kw_only=True` on the BASE class, but msgspec's `kw_only` only affects
-fields declared on the class where it's set — it does not propagate to a
-subclass's own fields. `SdxlDefaults(steps=28, guidance=6.0)` and
-`SdxlDefaults("euler_a", 28, 6.0)` (declaration order) both work; prefer
-keyword args in your own presets — positional order follows FIELD
-DECLARATION order, not intuition, and a stray positional value silently
-lands on the wrong field (msgspec does not type-check plain construction).
+**Per-request views**: `ctx.for_request(self.pipeline, sampler=, seed=)`
+returns a container copy sharing every module by reference (zero weight
+VRAM; the compiled graph stays bound to the module objects) with its OWN
+scheduler cloned from config — the SDK owns the sampler-name table
+(`gen_worker.view.SAMPLERS`) and applies the resolved checkpoint's regime
+(v_prediction) automatically. Never assign `self.pipeline.scheduler` per
+request: schedulers are stateful, shared, and part of the instance.
 
 **Testing:** `gen_worker.testing` builds a `RequestContext` with stubbed
 `ctx.slots` for handler unit tests, no hand-rolled fake context needed:
@@ -284,11 +295,19 @@ t2v/i2v); unified models (one transformer doing t2i + edit) bind one model.
 
 ## Resources
 
+Declare ONLY what the endpoint cannot run without:
+
 ```python
-Resources(gpu=True, vram_gb=24, compute_capability=8.0, libraries=("nunchaku",))
+Resources(gpu=True, libraries=("nunchaku",))
 ```
 
-`vram_gb=`/`compute_capability=` imply `gpu=True`.
+Fields: `gpu`, `gpu_count`, `libraries`, `strict_vram` (bindings that
+cannot tolerate CPU-resident weights), `vcpus`, and `vram_gb_hint` — an
+optional FIRST-BUILD placement hint used only before th#683 profiling
+measurements exist; never a gate, ceiling, or reservation.
+`vram_gb`/`ram_gb`/`compute_capability` were deleted in SDK v2: measured
+requirements belong to the profiler, host RAM is an opportunistic tier,
+and precision-per-card is the fit ladder's decision.
 
 ## Kinds
 
@@ -353,7 +372,7 @@ process control) into any setup parameter annotated with it:
 ```python
 from gen_worker.runtimes.server import ServerHandle
 
-@endpoint(model=HF("org/llm"), resources=Resources(vram_gb=40), runtime="vllm")
+@endpoint(model=HF("org/llm"), resources=Resources(gpu=True), runtime="vllm")
 class Chat:
     def setup(self, model: str, server: ServerHandle) -> None:
         self.base_url = server.base_url
@@ -381,7 +400,7 @@ Python binding dependency.
 from gen_worker.runtimes.llama import chat_deltas
 from gen_worker.runtimes.server import ServerHandle
 
-@endpoint(model=Hub("org/llm-gguf"), resources=Resources(vram_gb=24),
+@endpoint(model=Hub("org/llm-gguf"), resources=Resources(gpu=True),
           runtime="llama-server")
 class Chat:
     def setup(self, model: str, server: ServerHandle) -> None:
@@ -401,6 +420,8 @@ At most 15 members:
 |---|---|
 | `request_id` | unique id for this request |
 | `models` | resolved model refs by slot |
+| `defaults` | the catalog-resolved recipe, typed as `RequestContext[D]` |
+| `for_request(pipeline, sampler=, seed=)` | per-request view (own scheduler over shared weights) |
 | `device` | the torch device to run on |
 | `generator(seed)` | seeded `torch.Generator` on `device` |
 | `deadline` | absolute deadline |

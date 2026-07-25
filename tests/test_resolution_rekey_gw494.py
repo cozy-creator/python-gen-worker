@@ -159,24 +159,26 @@ def test_hf_binding_resolution_is_rejected_keeps_declared() -> None:
 def test_regate_runs_after_resolutions_and_is_idempotent() -> None:
     """apply_model_resolutions re-runs gate_functions against the rebound
     bindings; gate marks are gate-owned (cleared on re-gate), setup failures
-    survive."""
-    spec = _spec(resources=Resources(gpu=True, compute_capability=8.9))
+    survive. SDK v2 (pgw#647) deleted the compute-capability gate (the fit
+    ladder owns precision), so the regate mechanic is pinned on the
+    surviving missing-library gate."""
+    spec = _spec(resources=Resources(gpu=True, libraries=("nunchaku",)))
     ex = _executor(spec)
 
-    small = {"gpu_total_mem": 48 * 1024**3, "gpu_free_mem": 48 * 1024**3,
-             "gpu_sm": "75", "installed_libs": []}
-    big = dict(small, gpu_sm="90")
+    without_lib = {"gpu_total_mem": 48 * 1024**3, "gpu_free_mem": 48 * 1024**3,
+                   "gpu_sm": "90", "installed_libs": []}
+    with_lib = dict(without_lib, installed_libs=["nunchaku"])
 
-    ex.gate_functions(small)
-    assert ex.unavailable["generate"][0] == "compute_capability_unmet"
+    ex.gate_functions(without_lib)
+    assert ex.unavailable["generate"][0] == "missing_cuda_library"
 
-    # Re-gate with capable silicon: the gate-owned mark clears.
-    ex.gate_functions(big)
+    # Re-gate with the library present: the gate-owned mark clears.
+    ex.gate_functions(with_lib)
     assert "generate" not in ex.unavailable
 
     # A setup failure is NOT gate-owned and survives a re-gate.
     ex.unavailable["generate"] = ("setup_failed", "boom", {})
-    ex.gate_functions(big)
+    ex.gate_functions(with_lib)
     assert ex.unavailable["generate"][0] == "setup_failed"
 
     # Resolutions re-run the gates using the remembered probe.
