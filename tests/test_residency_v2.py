@@ -117,6 +117,17 @@ class _FakeModule:
         return self
 
 
+@pytest.fixture(autouse=True)
+def _plentiful_host_ram(monkeypatch: pytest.MonkeyPatch):
+    """Demote-to-RAM consults the REAL host RAM probe (residency.py's
+    get_available_ram_gb floor guard). On this shared box available RAM
+    rides sibling load, flipping demote() verdicts test-to-test — fake the
+    HOST boundary (th#1105) so the accounting under test is deterministic."""
+    from gen_worker.models import residency as residency_mod
+
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 256.0)
+
+
 def _budget_residency(gib: int) -> Residency:
     def move(obj: Any, device: str) -> None:
         to = getattr(obj, "to", None)

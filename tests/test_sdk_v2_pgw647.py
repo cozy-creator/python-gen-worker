@@ -395,10 +395,11 @@ def test_for_request_shares_modules_and_owns_scheduler():
     assert type(view) is type(pipe)
 
 
-def test_for_request_applies_v_prediction_regime():
+def test_for_request_applies_v_prediction_objective():
     pipe = _ViewPipeline()
-    view = for_request(pipe, regime="v_prediction")
+    view = for_request(pipe, objective="v_prediction")
     assert view.scheduler.config["prediction_type"] == "v_prediction"
+    assert view.scheduler.config["rescale_betas_zero_snr"] is True
     assert "prediction_type" not in pipe.scheduler.config
 
 

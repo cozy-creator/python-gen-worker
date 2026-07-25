@@ -26,11 +26,13 @@ Derivation per handler:
    field that genuinely changes tracing (validated at walk time; needing
    it usually means the field should be an axis).
 
-Warm RUNS are per GRAPH CLASS, not per function: the plan dedupes the
-cross-product ACROSS sibling functions of one class via the class-level
-axis union (pgw#647 gap #1's fix shape) — a distilled sibling with no
-guidance field maps to the guidance class containing 0 (no wire guidance
-== CFG off), so generate's cfg_off trace covers turbo's.
+The graph SET unifies per class via the class-level axis union (pgw#647
+gap #1's fix): the cell CONTRACT digests the union, and the forge traces
+each graph once. Warm RUNS at boot deliberately stay PER FUNCTION — every
+alias proves itself causally through its own handler (a sibling's run
+must never certify an alias whose code path was not exercised; pgw#637's
+whole blindness class). A deduped-away graph re-executes as a cheap cache
+hit, never a second trace.
 
 Handlers SHOULD cheapen non-graph work on ``ctx.boot_warmup`` (e.g.
 ``steps = 1 if ctx.boot_warmup else steps``): the allocator peak is
@@ -269,13 +271,17 @@ class WarmupJob:
     """One planned synthetic invocation: ``build(tmp_dir)`` -> payload.
 
     ``graph_key`` is the class-scoped graph identity this run traces (the
-    dedup key across sibling functions); ``declared`` is True when a
+    dedup key across sibling functions); ``covers`` names every sibling
+    function whose graph set contains this run's class (proof attribution
+    is by GRAPH COVERAGE: an alias is proven once ALL of its graph classes
+    proved — pgw#654/pgw#647 gap #1); ``declared`` is True when a
     ``@worker_function(warm=...)`` override applied."""
 
     spec: "EndpointSpec"
     build: _Factory
     declared: bool
     graph_key: Tuple = ()
+    covers: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -361,10 +367,10 @@ def plan(
 ) -> Tuple[List[WarmupJob], List[WarmupSkip]]:
     """The DERIVED warm plan for the GPU inference handlers of ONE instance
     group (pgw#654): per handler, the cross-product of its axis classes'
-    warm representatives over a synthesized base payload, deduped ACROSS
-    sibling functions per graph class (class-level axis union — one trace
-    per graph, generate's cfg_off covering turbo's). Per-function
-    ``@worker_function(warm=...)`` overrides apply to non-axis fields."""
+    warm representatives over a synthesized base payload — one run per
+    (function, graph class), so each alias proves its own code path.
+    Per-function ``@worker_function(warm=...)`` overrides apply to
+    non-axis fields."""
     eligible = [
         s for s in specs
         if s.cls is not None and s.kind == "inference" and s.needs_gpu
@@ -376,25 +382,26 @@ def plan(
             WarmupSkip(s, f"NoWarmup: {decl_warmup.reason}") for s in eligible
         ]
     union_axes = _union_axes(eligible)
-    jobs: List[WarmupJob] = []
     skips: List[WarmupSkip] = []
-    seen_graphs: set = set()
+    jobs: List[WarmupJob] = []
     for s in eligible:
         base, reason = synthesize_factory(s.payload_type)
         if base is None:
             skips.append(WarmupSkip(s, f"not auto-synthesizable: {reason}"))
             continue
         overrides = dict(getattr(s, "warm_overrides", {}) or {})
+        seen: set = set()
         for combo in _axis_combos(tuple(getattr(s, "payload_axes", ()) or ())):
             sig = _combo_signature(s, combo, union_axes)
-            if sig in seen_graphs:
+            if sig in seen:
                 continue
-            seen_graphs.add(sig)
+            seen.add(sig)
             jobs.append(WarmupJob(
                 spec=s,
                 build=_job_factory(base, combo, overrides),
                 declared=bool(overrides),
-                graph_key=sig,
+                graph_key=(s.name,) + sig,
+                covers=(s.name,),
             ))
     return jobs, skips
 

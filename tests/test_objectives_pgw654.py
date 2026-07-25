@@ -1,0 +1,405 @@
+"""pgw#654: the objective/distilled vocabulary split + per-function
+declarations — ``@worker_function`` surface, discovery manifest emission,
+Slot resolution's ``.objective``/``.distilled`` backstop, view-construction
+scheduler math, the class-union compile contract (pgw#647 gap #1/#6), the
+multi-slot root rule (gap #7), the lora_state_dict lint (gap #9), the
+derived warm plan, and the converter's objective scheduler stamp. Real
+discovery/registry/convert code, no mocking (test_variant_th1004 idiom).
+"""
+
+from __future__ import annotations
+
+import json
+import textwrap
+from pathlib import Path
+
+import msgspec
+import pytest
+
+
+@pytest.fixture()
+def tmp_pkg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return tmp_path
+
+
+def _write(pkg: Path, main_src: str) -> None:
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(textwrap.dedent(main_src))
+
+
+# ---------------------------------------------------------------------------
+# decorator surface + discovery manifest emission
+# ---------------------------------------------------------------------------
+
+
+def test_worker_function_objectives_round_trip_into_manifest(tmp_pkg: Path) -> None:
+    from gen_worker.discovery.discover import discover_functions
+
+    pkg = tmp_pkg / "ep_obj_method"
+    _write(pkg, """
+        import msgspec
+        from gen_worker import RequestContext, endpoint, worker_function
+
+        class In_(msgspec.Struct):
+            prompt: str = ""
+
+        class Out_(msgspec.Struct):
+            y: str
+
+        @endpoint
+        class Gen:
+            @worker_function(objectives=("epsilon", "v_prediction"), distilled=False)
+            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(y="base")
+
+            @worker_function(objectives=("epsilon",))
+            def generate_turbo(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(y="turbo")
+
+            def caption(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(y="undeclared")
+    """)
+
+    fns = {f["name"]: f for f in discover_functions(tmp_pkg, main_module="ep_obj_method.main")}
+    assert fns["generate"]["objectives"] == ["epsilon", "v_prediction"]
+    assert fns["generate"]["distilled"] is False
+    assert fns["generate-turbo"]["objectives"] == ["epsilon"]
+    # distilled=None (serves either) is omitted from the manifest.
+    assert "distilled" not in fns["generate-turbo"]
+    # Undeclared handler: unrestricted — both keys omitted.
+    assert "objectives" not in fns["caption"]
+    assert "distilled" not in fns["caption"]
+
+
+def test_worker_function_applies_to_bare_endpoint_functions(tmp_pkg: Path) -> None:
+    from gen_worker.discovery.discover import discover_functions
+
+    pkg = tmp_pkg / "ep_obj_fn"
+    _write(pkg, """
+        import msgspec
+        from gen_worker import RequestContext, endpoint, worker_function
+
+        class In_(msgspec.Struct):
+            prompt: str = ""
+
+        class Out_(msgspec.Struct):
+            y: str
+
+        @endpoint
+        @worker_function(objectives=("flow",), distilled=True)
+        def render(ctx: RequestContext, data: In_) -> Out_:
+            return Out_(y="base")
+    """)
+
+    fns = {f["name"]: f for f in discover_functions(tmp_pkg, main_module="ep_obj_fn.main")}
+    assert fns["render"]["objectives"] == ["flow"]
+    assert fns["render"]["distilled"] is True
+
+
+# Module scope: typing.get_type_hints resolves handler annotations from the
+# declaring module's globals, so spec-time structs cannot be test-local.
+from gen_worker import RequestContext, endpoint, worker_function  # noqa: E402
+
+
+class RIn(msgspec.Struct):
+    prompt: str = ""
+
+
+class ROut(msgspec.Struct):
+    y: str
+
+
+def test_unknown_objective_rejected_at_decoration() -> None:
+    with pytest.raises(ValueError, match="unknown objective"):
+        @worker_function(objectives=("standard",))
+        def render(ctx: RequestContext, data: RIn) -> ROut:  # pragma: no cover
+            return ROut(y="x")
+
+
+def test_class_regimes_dict_is_a_decoration_time_error() -> None:
+    # The v1 class-level name-keyed dict is DELETED, not aliased: the kwarg
+    # no longer exists, so passing it is a TypeError by construction.
+    with pytest.raises(TypeError, match="regimes"):
+        @endpoint(regimes={"generate": ("epsilon",)})  # type: ignore[call-arg]
+        class Gen:
+            def generate(self, ctx: RequestContext, data: RIn) -> ROut:
+                return ROut(y="x")
+
+
+def test_warmup_payload_dict_is_a_decoration_time_error() -> None:
+    with pytest.raises(TypeError, match="DELETED"):
+        @endpoint(warmup={"generate": {"prompt": "warmup"}})  # type: ignore[arg-type]
+        class Gen:
+            def generate(self, ctx: RequestContext, data: RIn) -> ROut:
+                return ROut(y="x")
+
+
+def test_warm_override_requires_reason() -> None:
+    with pytest.raises(ValueError, match="warm_reason"):
+        worker_function(warm={"frames": 8})
+
+
+def test_double_worker_function_rejected() -> None:
+    with pytest.raises(ValueError, match="already carries"):
+        @worker_function(objectives=("epsilon",))
+        @worker_function(distilled=True)
+        def render(ctx: RequestContext, data: RIn) -> ROut:  # pragma: no cover
+            return ROut(y="x")
+
+
+# ---------------------------------------------------------------------------
+# Slot resolution: .objective/.distilled + the executor-level backstop
+# ---------------------------------------------------------------------------
+
+
+def test_resolved_slot_carries_objective_facts() -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import Slot, resolve_slot
+    from gen_worker.families import SdxlDefaults
+
+    resolved = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/gonzalomo-xl"),
+        defaults_cls=SdxlDefaults, objective="flow", distilled=True,
+    )
+    assert resolved.objective == "flow"
+    assert resolved.distilled is True
+    assert isinstance(resolved.defaults, SdxlDefaults)
+
+
+def test_resolve_slot_defaults_to_unstamped() -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import Slot, resolve_slot
+    from gen_worker.families import SdxlDefaults
+
+    resolved = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/plain-xl"), defaults_cls=SdxlDefaults,
+    )
+    assert resolved.objective == ""
+    assert resolved.distilled is False
+
+
+def test_objective_mismatch_raises_typed_backstop_error() -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
+    from gen_worker.families import SdxlDefaults
+
+    with pytest.raises(ObjectiveMismatchError, match="flow"):
+        resolve_slot(
+            "pipeline", Slot(object), ref=HF("acme/z-image"),
+            defaults_cls=SdxlDefaults,
+            objective="flow", allowed_objectives=("epsilon", "v_prediction"),
+        )
+
+
+def test_distilled_mismatch_raises_typed_backstop_error() -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
+    from gen_worker.families import SdxlDefaults
+
+    with pytest.raises(ObjectiveMismatchError, match="distilled"):
+        resolve_slot(
+            "pipeline", Slot(object), ref=HF("acme/dmd2-merge"),
+            defaults_cls=SdxlDefaults,
+            objective="epsilon", distilled=True, allowed_distilled=False,
+        )
+
+
+def test_unstamped_checkpoint_passes_the_backstop() -> None:
+    # The backstop fires on STAMPED facts only: an unclassified checkpoint
+    # (objective "") must not be refused by a declared contract.
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import Slot, resolve_slot
+    from gen_worker.families import SdxlDefaults
+
+    resolved = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+        defaults_cls=SdxlDefaults,
+        allowed_objectives=("epsilon",), allowed_distilled=False,
+    )
+    assert resolved.objective == ""
+
+
+def test_stamped_facts_within_contract_resolve_cleanly() -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import Slot, resolve_slot
+    from gen_worker.families import SdxlDefaults
+
+    resolved = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/gonzalomo-xl"),
+        defaults_cls=SdxlDefaults,
+        objective="epsilon", distilled=True,
+        allowed_objectives=("epsilon",), allowed_distilled=None,
+    )
+    assert resolved.objective == "epsilon"
+    assert resolved.distilled is True
+
+
+# ---------------------------------------------------------------------------
+# hub_client: resolve_repo parses objective/distilled (mirrors model_family)
+# ---------------------------------------------------------------------------
+
+
+def _fake_resolve(monkeypatch: pytest.MonkeyPatch, body: dict) -> "object":
+    import requests
+
+    from gen_worker.models.hub_client import resolve_repo
+    from gen_worker.models.refs import TensorhubRef
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "snapshot_digest": "abc123",
+                "files": [{"path": "model.safetensors", "blake3": "b3",
+                           "url": "http://x/f", "size_bytes": 10}],
+                **body,
+            }
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp())
+    ref = TensorhubRef(owner="acme", repo="gonzalomo-xl", tag="prod", flavor="")
+    return resolve_repo(ref, base_url="https://hub.example")
+
+
+def test_resolve_repo_parses_objective_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    resolved = _fake_resolve(monkeypatch, {
+        "model_family": "z-image", "objective": "flow", "distilled": True,
+    })
+    assert resolved.objective == "flow"
+    assert resolved.distilled is True
+
+
+def test_resolve_repo_defaults_unstamped_on_older_hubs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _fake_resolve(monkeypatch, {})
+    assert resolved.objective == ""
+    assert resolved.distilled is False
+
+
+# ---------------------------------------------------------------------------
+# view: objective scheduler math at view construction
+# ---------------------------------------------------------------------------
+
+
+class _StubScheduler:
+    """Duck-typed non-diffusers scheduler (deepcopy fallback path)."""
+
+    def __init__(self) -> None:
+        self.prediction_type = "epsilon"
+
+
+class _StubPipe:
+    def __init__(self, scheduler: object) -> None:
+        self.scheduler = scheduler
+
+
+def test_clone_scheduler_v_prediction_sets_pred_type_and_zero_snr() -> None:
+    from gen_worker.view import clone_scheduler
+
+    fresh = clone_scheduler(_StubPipe(_StubScheduler()), objective="v_prediction")
+    assert fresh.prediction_type == "v_prediction"
+    assert fresh.rescale_betas_zero_snr is True
+
+
+def test_clone_scheduler_unstamped_applies_nothing() -> None:
+    from gen_worker.view import clone_scheduler
+
+    base = _StubScheduler()
+    fresh = clone_scheduler(_StubPipe(base), objective="")
+    assert fresh is not base  # always a private per-request object
+    assert fresh.prediction_type == "epsilon"
+    assert not hasattr(fresh, "rescale_betas_zero_snr")
+
+
+def test_flow_objective_refuses_a_diffusion_sampler() -> None:
+    pytest.importorskip("diffusers")
+    from gen_worker.view import clone_scheduler
+
+    with pytest.raises(ValueError, match="flow"):
+        clone_scheduler(_StubPipe(_StubScheduler()), sampler="euler_a", objective="flow")
+
+
+def test_sampler_table_defines_euler_trailing_and_dpmpp_completely() -> None:
+    # pgw#647 gap #2 absorbed: the SDK table is the ONE definition of each
+    # named sampler; endpoints delete their private maps.
+    from gen_worker.view import SAMPLERS
+
+    cls_name, extra = SAMPLERS["euler_trailing"]
+    assert cls_name == "EulerDiscreteScheduler"
+    assert extra == {"timestep_spacing": "trailing"}
+    for key in ("dpmpp_2m", "dpmpp_2m_karras", "dpmpp_2m_sde", "dpmpp_2m_sde_karras"):
+        _cls, extra = SAMPLERS[key]
+        assert extra["solver_order"] == 2
+        assert extra["final_sigmas_type"] == "zero"
+
+
+# ---------------------------------------------------------------------------
+# convert: objective-correct scheduler config in produced snapshots
+# ---------------------------------------------------------------------------
+
+
+def _diffusers_source(tmp_path: Path) -> "object":
+    from gen_worker.convert.ingest import IngestedSource
+
+    src = tmp_path / "source"
+    (src / "scheduler").mkdir(parents=True)
+    (src / "scheduler" / "config.json").write_text(json.dumps({
+        "_class_name": "EulerDiscreteScheduler", "prediction_type": "epsilon",
+    }))
+    (src / "unet").mkdir()
+    (src / "unet" / "model.safetensors").write_bytes(b"\x00" * 8)
+    (src / "model_index.json").write_text(json.dumps({"_class_name": "StableDiffusionXLPipeline"}))
+    return IngestedSource(
+        provider="huggingface", source_ref="acme/gonzalomo-xl", source_revision="sha1",
+        dir=src, layout="diffusers", model_family="sdxl", model_family_variant="",
+        attrs={"dtype": "fp16"},
+    )
+
+
+def test_distilled_fact_writes_trailing_timestep_spacing(tmp_path: Path) -> None:
+    from gen_worker.convert.clone import OutputSpec, build_flavor_tree
+
+    source = _diffusers_source(tmp_path)
+    spec = OutputSpec(dtype="fp16", file_layout="diffusers", file_type="safetensors")
+    tree, _attrs = build_flavor_tree(
+        source, spec, tmp_path / "flavor-distilled", distilled=True)
+
+    cfg = json.loads((tree / "scheduler" / "config.json").read_text())
+    assert cfg["timestep_spacing"] == "trailing"
+    assert cfg["prediction_type"] == "epsilon"  # objective untouched
+
+
+def test_v_prediction_objective_writes_zero_snr_v_pred(tmp_path: Path) -> None:
+    from gen_worker.convert.clone import OutputSpec, build_flavor_tree
+
+    source = _diffusers_source(tmp_path)
+    spec = OutputSpec(dtype="fp16", file_layout="diffusers", file_type="safetensors")
+    tree, _attrs = build_flavor_tree(
+        source, spec, tmp_path / "flavor-vpred", objective="v_prediction")
+
+    cfg = json.loads((tree / "scheduler" / "config.json").read_text())
+    assert cfg["prediction_type"] == "v_prediction"
+    assert cfg["rescale_betas_zero_snr"] is True
+
+
+def test_epsilon_unstamped_leaves_scheduler_config_untouched(tmp_path: Path) -> None:
+    from gen_worker.convert.clone import OutputSpec, build_flavor_tree
+
+    source = _diffusers_source(tmp_path)
+    spec = OutputSpec(dtype="fp16", file_layout="diffusers", file_type="safetensors")
+    tree, _attrs = build_flavor_tree(source, spec, tmp_path / "flavor-plain")
+
+    cfg = json.loads((tree / "scheduler" / "config.json").read_text())
+    assert cfg == {"_class_name": "EulerDiscreteScheduler", "prediction_type": "epsilon"}
+
+
+def test_apply_objective_scheduler_config_noop_without_scheduler_dir(tmp_path: Path) -> None:
+    from gen_worker.convert.writer import apply_objective_scheduler_config
+
+    out_dir = tmp_path / "singlefile-out"
+    out_dir.mkdir()
+    apply_objective_scheduler_config(out_dir, "epsilon", distilled=True)  # must not raise
+    assert not (out_dir / "scheduler").exists()

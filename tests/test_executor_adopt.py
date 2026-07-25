@@ -1714,14 +1714,13 @@ def test_boot_warmup_proves_each_compile_object_independently(
     assert targets["first"].model_bindings[0].ref == first_ref
 
 
-def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
+def test_sdxl_w8a8_boot_proves_both_aliases_through_their_own_runs(
     tmp_path, monkeypatch,
 ):
-    """SDXL's legacy Turbo handler rejects W8A8 and is explicitly skipped.
-
-    The ordinary generate warmup still proves the attached cell and reaches
-    READY, but its cache hit must not certify the incompatible sibling alias.
-    """
+    """pgw#654: the derived plan runs one warm forward PER ALIAS (causal
+    per-alias proof — a sibling's run never certifies an unexercised code
+    path), and the class-union contract keeps both aliases on ONE cell, so
+    turbo serves compiled on w8a8 instead of failing closed (gap #1)."""
     import gen_worker.executor as executor_mod
 
     family = "sdxl"
@@ -1735,7 +1734,6 @@ def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
         models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
-        warmup={"generate": {"prompt": "warmup"}, "generate_turbo": None},
     )
     class _SdxlEndpoint:
         def setup(self, pipeline: _LoadablePipe) -> None:
@@ -1748,7 +1746,8 @@ def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
 
         def generate_turbo(self, ctx, payload: _In) -> _Out:
             calls["generate_turbo"] += 1
-            raise AssertionError("legacy Turbo is incompatible with W8A8")
+            _record_fake_warm(self.pipeline)
+            return _Out(y="turbo")
 
     specs = extract_specs(_SdxlEndpoint)
     generate = next(spec for spec in specs if spec.name == "generate")
@@ -1778,9 +1777,9 @@ def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
         cell_ref: pb.Snapshot(digest=DIGEST_A),
     }))
 
-    assert calls == {"generate": 1, "generate_turbo": 0}
+    assert calls == {"generate": 1, "generate_turbo": 1}
     (target,) = ex.compile_targets()
-    assert list(target.function_names) == ["generate"]
+    assert list(target.function_names) == ["generate", "generate-turbo"]
     assert target.active_compile_ref == cell_ref
     assert target.active_compile_snapshot_digest == DIGEST_A
 
@@ -1801,10 +1800,6 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
         models={"pipeline": Hub("acme/flux-base", flavor="fp8-w8a8")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-        warmup={
-            "generate": {"prompt": "warmup"},
-            "edit": {"prompt": "warmup"},
-        },
     )
     class _FluxBaseEndpoint:
         def setup(self, pipeline: _LoadablePipe) -> None:
@@ -1954,10 +1949,6 @@ def test_flux_real_guard_requires_object_activation_and_each_alias_execution(
         models={"pipeline": Hub("acme/flux-base")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-        warmup={
-            "generate": {"prompt": "warmup"},
-            "edit": {"prompt": "warmup"},
-        },
     )
     class _FluxBaseEndpoint:
         def setup(self, pipeline: _LoadablePipe) -> None:
@@ -2063,7 +2054,6 @@ def test_compile_hit_on_other_object_cannot_certify_primary_object(
         },
         resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-        warmup={"generate": {"prompt": "warmup"}},
     )
     class _TwoObjectEndpoint:
         def setup(
@@ -2158,8 +2148,7 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
             models={"pipeline": Hub(model)},
             resources=Resources(gpu=True),
             compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-            warmup={"generate": {"prompt": "warmup"}},
-        )
+            )
         class _CheckpointEndpoint:
             def setup(self, pipeline: _LoadablePipe) -> None:
                 self.pipeline = pipeline
@@ -2381,17 +2370,17 @@ def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     assert ex.unavailable[spec.name][0] == "compile_cell_failed"
 
 
-def test_w8a8_custom_warmup_proof_attributes_to_siblings_except_declared_none(
+def test_w8a8_custom_warmup_proof_attributes_to_all_compatible_siblings(
     tmp_path, monkeypatch,
 ):
-    """gw#603 ruling (2026-07-20, rewrites the ac0bab9 pin — see the tracker
-    note in gw#603 for the reversal rationale + gw#595's original reasoning):
-    proof is a property of the WARMED OBJECT and the graph set actually
-    exercised, not of the initiating handler's name. A custom object-level
-    warmup's proof attributes to every contract-compatible sibling alias of
-    the exact proven object — EXCEPT aliases explicitly declared
-    ``warmup={...: None}``, which stay fail-closed (the legacy-Turbo
-    carve-out; this exclusion is the revert-turns-red for the safeguard).
+    """gw#603 ruling, amended by pgw#654: proof is a property of the WARMED
+    OBJECT and the graph set actually exercised, not of the initiating
+    handler's name. A custom object-level warmup's proof attributes to
+    EVERY contract-compatible sibling alias of the exact proven object.
+    The old ``warmup={...: None}`` per-alias opt-out died with the declared
+    warmup surface itself (the warm plan is derived), so there is no
+    author skip left to honor — an incompatible sibling is expressed as a
+    separate @endpoint class (its own contract), never a skip row.
     Live motivation: LTX serves generate+edit(+extend) from ONE class with
     ONE custom warmup that warms every declared graph — under the ac0bab9
     single-name attribution no >=0.38.8 worker could EVER boot it compiled,
@@ -2408,11 +2397,6 @@ def test_w8a8_custom_warmup_proof_attributes_to_siblings_except_declared_none(
         models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
-        warmup={
-            "generate": {"prompt": "warmup"},
-            "edit": {"prompt": "warmup"},
-            "generate_turbo": None,
-        },
     )
     class _SdxlEndpoint:
         def setup(self, pipeline: _LoadablePipe) -> None:
@@ -2428,7 +2412,7 @@ def test_w8a8_custom_warmup_proof_attributes_to_siblings_except_declared_none(
             return _Out(y="eager")
 
         def generate_turbo(self, ctx, payload: _In) -> _Out:
-            raise AssertionError("explicitly skipped Turbo must not run")
+            return _Out(y="turbo")
 
     specs = extract_specs(_SdxlEndpoint)
     by_attr = {spec.attr_name: spec for spec in specs}
@@ -2460,15 +2444,13 @@ def test_w8a8_custom_warmup_proof_attributes_to_siblings_except_declared_none(
     }))
     assert isinstance(instance, _SdxlEndpoint)
 
-    # The object proof covers both compatible siblings...
+    # The object proof covers EVERY contract-compatible sibling (pgw#654:
+    # the declared-skip carve-out died with the declared warmup surface).
     (target,) = ex.compile_targets()
     proven = set(target.function_names)
     assert by_attr["generate"].name in proven
     assert by_attr["edit"].name in proven
-    # ...but NEVER the explicitly opted-out alias (revert-turns-red for the
-    # warmup={...: None} carve-out): Turbo rejects W8A8 by author contract
-    # and must not be advertised as servable on this lane.
-    assert by_attr["generate_turbo"].name not in proven
+    assert by_attr["generate_turbo"].name in proven
     assert not ex.unavailable
 
 
@@ -2555,7 +2537,6 @@ def _merged_lane_endpoint(record_warm):
         },
         resources=Resources(gpu=True),
         compile=Compile(shapes=((1328, 1328),), family="qwen-image", text_len=0),
-        warmup={"generate": {"prompt": "warmup"}},
     )
     class _MergedEndpoint:
         def setup(self, t2i: _LoadablePipe, edit: _LoadablePipe) -> None:
@@ -3333,10 +3314,6 @@ def test_multifunction_adoption_keeps_target_identity_through_guard_failure(
         models={"pipeline": Hub("acme/flux-base")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-        warmup={
-            "generate": {"prompt": "warmup"},
-            "edit": {"prompt": "warmup"},
-        },
     )
     class _FluxBaseEndpoint:
         def setup(self, pipeline: _LoadablePipe) -> None:
@@ -3441,10 +3418,6 @@ def test_hot_adoption_rejects_an_unproven_advertised_function_alias(
         models={"pipeline": Hub("acme/flux-base")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-        warmup={
-            "generate": {"prompt": "warmup"},
-            "edit": {"prompt": "warmup"},
-        },
     )
     class _PartiallyCoveredEndpoint:
         def setup(self, pipeline: _LoadablePipe) -> None:
@@ -3738,6 +3711,8 @@ def test_manifest_carries_compile_block():
         "shapes": [[768, 768], [1024, 1024]],
         "targets": ["transformer", "vae.decode"],
         "text_len": 0,
+        # pgw#654 gap #6: the class's per-lane pin union rides too.
+        "text_lens": [0],
         "guidance_scales": [0.0, 5.0],
         "shape_contract_digest": cell.contract_digest(),
         "lora_bucket": 64,
@@ -4034,7 +4009,6 @@ def _routed_mint_boot(tmp_path, monkeypatch, *, publisher):
         },
         resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-        warmup={"run": {"prompt": "warmup"}},
     )
     class _RoutedMerged:
         edit_payloads: list = []
@@ -4156,6 +4130,8 @@ def test_routed_two_lane_mint_synthesized_media_coverage_publishes_union(
     # synthesized image — nothing else may drift, or the minted graphs
     # would not match a real edit request's compile keys.
     ((edit_payload, image_was_real),) = cls.edit_payloads
-    assert edit_payload.prompt == "warmup"
+    # pgw#654 derived plan: defaulted fields keep their SCHEMA defaults
+    # (the neutral value) — no declared "warmup" string anymore.
+    assert edit_payload.prompt == ""
     assert len(edit_payload.images) == 1
     assert image_was_real, "the synthesized input image must exist on disk"
