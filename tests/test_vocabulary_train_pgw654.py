@@ -419,3 +419,17 @@ def test_formula_evaluates_payload_over_defaults() -> None:
     vals = rf.term_values_from_struct(
         FormulaIn(prompt="x", num_inference_steps=4), defaults)
     assert vals == {"1": 1.0, "num_inference_steps": 4.0}
+
+
+# ---------------------------------------------------------------------------
+# ModelRef.label — the one model_used/logging label (endpoints delete theirs)
+# ---------------------------------------------------------------------------
+
+
+def test_model_ref_label_mirrors_registry_wire_forms() -> None:
+    from gen_worker import HF, Civitai, Hub
+
+    assert HF("acme/gonzalomo-xl").label == "acme/gonzalomo-xl"
+    assert Hub("acme/wai-illustrious", tag="prod", flavor="fp8-w8a8").label \
+        == "acme/wai-illustrious:prod#fp8-w8a8"
+    assert Civitai("civitai/123", version="456").label == "civitai/123@456"

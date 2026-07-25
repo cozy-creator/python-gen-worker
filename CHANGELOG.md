@@ -95,6 +95,8 @@ endpoint author must change:
   entries now carry `solver_order=2` + `final_sigmas_type="zero"` as
   part of the sampler's definition. Endpoint-private sampler maps are
   deleted in the wave-1 relock.
+- **`ModelRef.label`** — the one `model_used`/logging label (wire form
+  per source registry); endpoints delete their `_ref_label` copies.
 - **Runtime owns generic tuning.** The executor sets TF32 once at
   bootstrap and disables per-request progress bars at materialization —
   endpoints delete their `_tune_pipeline` copies.

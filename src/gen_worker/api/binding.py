@@ -146,6 +146,20 @@ class ModelRef(msgspec.Struct, frozen=True):
         else:
             raise ValueError(f"unknown ModelRef source {self.source!r}")
 
+    @property
+    def label(self) -> str:
+        """Human-readable label for ``model_used`` metadata / logging —
+        mirrors the wire form each source's registry keys on (pgw#654:
+        endpoints delete their per-file ``_ref_label`` copies)."""
+        label = self.path
+        if self.source == "civitai" and self.version:
+            label += f"@{self.version}"
+        elif self.tag and self.tag != "latest":
+            label += f":{self.tag}"
+        if self.flavor:
+            label += f"#{self.flavor}"
+        return label
+
 
 def Hub(
     ref: str,
