@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from .memory import effective_vram_requirement_gb
+from .loading import EMERGENCY_FIT_FACTOR, FP8_STORAGE_FIT_FACTOR
 
 
 @dataclass(frozen=True)
@@ -218,7 +220,6 @@ def variant_fit(
     # vram_gb recommends a card SIZE (total VRAM), so an idle card of exactly
     # that size counts as fitting: subtract the fixed driver/framebuffer/CUDA
     # reserve before comparing against measured free VRAM.
-    from .memory import effective_vram_requirement_gb
 
     if vram is None or effective_vram_requirement_gb(vram) <= float(free_vram_gb):
         if svdq_kind == "fp4":
@@ -230,7 +231,6 @@ def variant_fit(
         if quant_kind == "nvfp4":
             return FIT_NVFP4, "nvfp4 stored flavor (Blackwell rung)"
         return FIT_FITS, ""
-    from .loading import EMERGENCY_FIT_FACTOR, FP8_STORAGE_FIT_FACTOR
 
     # Runtime rungs are automatic on CUDA hosts (gw#420) — pure functions of
     # the declared capabilities, so verdicts don't depend on the probing host.

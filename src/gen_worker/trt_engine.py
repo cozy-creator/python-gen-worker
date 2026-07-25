@@ -51,6 +51,8 @@ from .compile_cache import (
     parse_cell_ref,
     sku_slug,
 )
+import gzip
+from .models.loading import load_from_pretrained
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +175,6 @@ def pack(content_dir: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
     content_dir = Path(content_dir)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    import gzip
 
     with open(out_path, "wb") as raw:
         with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz:
@@ -768,8 +769,6 @@ def build(
     import tensorrt as trt
     import torch
     from diffusers import DiffusionPipeline
-
-    from .models.loading import load_from_pretrained
 
     if not torch.cuda.is_available():
         raise RuntimeError("trt-engine build requires CUDA")

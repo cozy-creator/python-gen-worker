@@ -19,6 +19,9 @@ from .intent_registry import IntentRegistry, UnreportedIntentWait
 from .pb import worker_scheduler_pb2 as pb
 from .runtime_config import ConfigSnapshotWriteError, extract_config_push
 from .transport import FatalTransportError, PROTOCOL_VERSION, Transport
+from .api.binding import wire_ref
+# module import: tests monkeypatch worker_fatal.report_worker_error_async; stay late-bound.
+from . import worker_fatal
 
 logger = logging.getLogger(__name__)
 
@@ -802,10 +805,9 @@ class Lifecycle:
         (ie#544: signature="" detail="worker phase reported error"). Dial
         the gw#640 worker-fatal carrier once per process, best-effort; the
         hub stores it as a queryable pod_events row."""
-        from .worker_fatal import build_fatal_detail, report_worker_error_async
 
         if exc is not None:
-            detail = build_fatal_detail(f"phase_error: {reason}", exc, exit_code=0)
+            detail = worker_fatal.build_fatal_detail(f"phase_error: {reason}", exc, exit_code=0)
         else:
             detail = f"phase=phase_error: {reason}"
         logger.error("entering WORKER_PHASE_ERROR: %s", detail)
@@ -818,7 +820,7 @@ class Lifecycle:
         settings = getattr(self, "_settings", None)
 
         async def _dial() -> None:
-            await report_worker_error_async(settings, detail)
+            await worker_fatal.report_worker_error_async(settings, detail)
 
         try:
             asyncio.get_running_loop().create_task(_dial(), name="phase-error-report")
@@ -962,8 +964,6 @@ class Lifecycle:
         # starts empty — rescan so Hello.models (and disk GC) see reality.
         self.executor.store.rescan_disk()
         self.executor.gate_functions(self.hardware)
-
-        from .api.binding import wire_ref
 
         prefetch_refs: List[str] = []
         for spec in self.executor.specs.values():

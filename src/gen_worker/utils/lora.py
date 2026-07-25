@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, runtime_checkable
 
 from ..api.errors import RefCompatibilitySurprise, ValidationError
+from dataclasses import replace
+from ..models import w8a8_lora
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +140,6 @@ def _split_adapters(
     additive branch, the rest (text-encoder halves) keep peft. Branch
     entries are (state_dict, weight, ref) — the
     models.w8a8_lora.apply_branch_adapters contract."""
-    from dataclasses import replace
-
-    from ..models import w8a8_lora
 
     fp = _denoiser_fingerprint(pipe)
     peft: List[PreparedAdapter] = []
@@ -443,7 +442,6 @@ class AdapterResidency:
         whose adapter cannot map onto branch-capable Linears (e.g. conv-
         targeting LoCon) fall back to the whole-adapter peft path when the
         pipeline supports it — capability preserved, branch primary."""
-        from ..models import w8a8_lora
 
         all_adapters = list(adapters)
         denoiser = w8a8_lora.branch_target(pipe)

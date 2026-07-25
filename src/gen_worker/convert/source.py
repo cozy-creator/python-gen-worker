@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal
 
 from .component import Component
 from .loaded_component import LoadedComponent
+from ._hf_load import load_component_module
+from .writer import iter_source_tensors
 
 if TYPE_CHECKING:
     import torch
@@ -237,7 +239,6 @@ class Source:
         Handles pickle → safetensors conversion and sharded-safetensors via
         .index.json internally. Tenant sees a flat iteration.
         """
-        from .writer import iter_source_tensors
 
         yield from iter_source_tensors(
             self._path,
@@ -422,7 +423,6 @@ def _iter_diffusers_components(
     passthrough. A final ``_root`` LoadedComponent carries the top-level
     files (model_index.json, README, etc).
     """
-    from ._hf_load import load_component_module
 
     if not snapshot_path.is_dir():
         return

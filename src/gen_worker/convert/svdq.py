@@ -23,6 +23,7 @@ from typing import Optional
 
 from ..models.svdq import SvdqArtifact, detect_svdq_artifact
 from .writer import copy_non_weight_files
+from ..net import hf
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,6 @@ def fetch_svdq_checkpoint(
     hf_token: Optional[str] = None,
 ) -> Path:
     """Download ONE nunchaku checkpoint file from an HF repo (mirror lane)."""
-    from ..net import hf
 
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)

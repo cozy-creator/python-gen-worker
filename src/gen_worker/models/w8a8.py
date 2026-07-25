@@ -38,6 +38,7 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -790,7 +791,6 @@ def quantize_tree_w8a8(
     fp8 + per-out-channel ``weight_scale`` per the gw#534 contract. Eligible:
     ``*.weight``, 2D, bf16/fp16/fp32, both dims 16-aligned, name not matching
     ``exclude`` substrings."""
-    import shutil
 
     import torch
     from safetensors.torch import load_file, save_file

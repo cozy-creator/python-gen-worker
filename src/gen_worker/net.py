@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import threading
 from typing import Any
+import requests
 
 CONNECT_TIMEOUT_ENV = "COZY_HTTP_CONNECT_TIMEOUT_S"
 READ_TIMEOUT_ENV = "COZY_HTTP_READ_TIMEOUT_S"
@@ -87,7 +88,6 @@ def install_hf_http_timeouts() -> None:
 def _install_requests_backend() -> None:
     """huggingface_hub 0.x (requests): default a (connect, read) timeout on
     every Session request that would otherwise wait forever."""
-    import requests
     from huggingface_hub import configure_http_backend
 
     class _TimeoutSession(requests.Session):

@@ -22,6 +22,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+from ..families import export_all_schemas, schema_filename
 
 
 def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
@@ -60,8 +61,6 @@ def _handle_export_schemas(args: argparse.Namespace) -> int:
         except Exception as e:
             sys.stderr.write(f"gen-worker families export-schemas: failed to import {args.module!r}: {e}\n")
             return 2
-
-    from ..families import export_all_schemas, schema_filename
 
     schemas = export_all_schemas()
     if not schemas:

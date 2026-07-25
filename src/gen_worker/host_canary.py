@@ -20,6 +20,8 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from .postmortem import effective_cpu_count
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,6 @@ def _measure_cpu_mbps(workers: int) -> float:
     sha256 releases the GIL and stresses the ALU + memory system — a stable
     proxy for the x264/VAE-postprocess CPU work the encode tail is made of.
     """
-    from concurrent.futures import ThreadPoolExecutor
 
     block = b"\xa5" * _HASH_BLOCK
 
@@ -147,7 +148,6 @@ def measure_host_canary() -> HostCanaryReport:
     # 4 — and shipping that next to a cgroup-derived ram_total_gb produced a
     # "32 vCPUs / 14.9 GB" report nobody could interpret. Report what this
     # container may actually use, and benchmark with that many threads.
-    from .postmortem import effective_cpu_count
 
     vcpus = effective_cpu_count()
     try:

@@ -38,6 +38,8 @@ import logging
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
+import os
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -243,8 +245,6 @@ def sign_media_file(
     mime = sniff_media_mime(head, ref)
     if mime is None:
         return None
-    import os
-    import tempfile
 
     suffix = os.path.splitext(str(src_path))[1] or ".bin"
     fd, out_path = tempfile.mkstemp(suffix=suffix, prefix="c2pa-")

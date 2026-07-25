@@ -25,6 +25,11 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional
+import os
+from gen_worker.models.loading import (_fp8_block_windows, _fp8_block_windows_whole)
+from fnmatch import fnmatch
+import random
+from gen_worker.models.w8a8 import detect_w8a8_artifact
 
 if TYPE_CHECKING:
     import torch
@@ -515,7 +520,6 @@ def fp8_cast_eligible(
     *, skip_patterns: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS,
 ) -> bool:
     """True when a tensor is safe to store as fp8-E4M3 for the ``#fp8`` flavor."""
-    import re
 
     if src_st_dtype not in {"F64", "F32", "F16", "BF16"}:
         return False
@@ -535,7 +539,6 @@ _FP8_BLOCK_SCOPE_RE = r"\.\d+\."
 
 
 def _in_repeated_block(name: str) -> bool:
-    import re
 
     return re.search(_FP8_BLOCK_SCOPE_RE, name) is not None
 
@@ -810,7 +813,6 @@ def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Pat
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
-    import os
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
@@ -1000,11 +1002,6 @@ def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
     Embeddings, norms, biases, poolers stay at source precision."""
     import torch
     import transformers
-
-    from gen_worker.models.loading import (
-        _fp8_block_windows,
-        _fp8_block_windows_whole,
-    )
 
     component_dir = Path(component_dir)
     cfg = transformers.AutoConfig.from_pretrained(str(component_dir))
@@ -1204,7 +1201,6 @@ def streaming_w8a8_snapshot(
     (their quantized keys could never resolve in the denoiser at swap
     time). No component config exists; the headers alone carry
     detection."""
-    from fnmatch import fnmatch
 
     source_dir, out_dir = Path(source_dir), Path(out_dir)
     if file_layout != "diffusers":
@@ -1336,12 +1332,9 @@ def verify_w8a8_snapshot(
     producer-side quantization input view. For example, an immutable FP16
     checkpoint loaded as production BF16 is cast to BF16 before exact
     recomputation; storage and compute dtypes are both reported."""
-    import random
 
     import torch
     from safetensors import safe_open
-
-    from gen_worker.models.w8a8 import detect_w8a8_artifact
 
     aliases = {
         "storage": ("storage", None),
@@ -1484,7 +1477,6 @@ _RAW_COPY_CHUNK = 8 * 1024 * 1024
 
 
 def _read_safetensors_header(fd: int) -> tuple[dict, int]:
-    import os
 
     os.lseek(fd, 0, os.SEEK_SET)
     prefix = os.read(fd, _HEADER_LEN_PREFIX)
@@ -1515,7 +1507,6 @@ def shard_safetensors_by_offset(
     Returns (shard_paths, index_path, shard_sizes). The index is always
     written; callers skip uploading it for single-shard plans.
     """
-    import os
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

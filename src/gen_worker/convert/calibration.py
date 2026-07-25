@@ -29,6 +29,7 @@ unsupported for a requested scheme; callers own how datasets are selected.
 from __future__ import annotations
 
 from typing import Literal
+import logging
 
 CalibrationPolicy = Literal["required", "beneficial", "unsupported"]
 
@@ -84,7 +85,6 @@ def resolve_calibration_action(
     Tenants typically take the returned action + any ``WARN-``-tagged notes
     they want to surface. A raise means the caller must fix the request.
     """
-    import logging
 
     _log = logging.getLogger(__name__)
     label = f"[{scheme}]" if scheme else ""

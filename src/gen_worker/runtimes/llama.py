@@ -22,6 +22,7 @@ import msgspec
 
 from ..api.errors import FatalError
 from ..api.streaming import IncrementalTokenDelta, TokenUsage
+from ..models.memory import get_available_vram_gb
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,6 @@ def plan_fit(
 def free_vram_gb() -> float:
     """Free VRAM on device 0. Torch-free fallback: nvidia-smi (llama-server
     serve images carry no torch)."""
-    from ..models.memory import get_available_vram_gb
 
     via_torch = get_available_vram_gb()
     if via_torch > 0:
@@ -271,7 +271,7 @@ def _stream(
     cancelled: Optional[Callable[[], bool]],
     idle_timeout_s: float,
 ) -> Iterator[Union[IncrementalTokenDelta, TokenUsage]]:
-    import requests
+    import requests  # lazy: llama runtime is reachable from `import gen_worker`; stay requests-free there
 
     prompt_tokens = completion_tokens = 0
     tokens_per_second = 0.0

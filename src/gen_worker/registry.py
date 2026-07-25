@@ -26,6 +26,11 @@ from .api.slot import Slot
 from .api.tree import derive_components, validate_no_sibling_parts
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
+from .families.base import GenerationDefaults
+from .warmup import validate_class_warmup
+import dataclasses
+from .api.compile_axis import warm_guidance_values
+from .cell_key import contract_digest
 
 _ITER_ORIGINS = (
     typing.Iterator, typing.Iterable, typing.AsyncIterator, typing.AsyncIterable,
@@ -91,7 +96,6 @@ class CompileCell:
         }
 
     def contract_digest(self) -> str:
-        from .cell_key import contract_digest
 
         return contract_digest(self.contract_facts())
 
@@ -193,7 +197,6 @@ class EndpointSpec:
         cfg = self.compile
         if cfg is None:
             return None
-        from .api.compile_axis import warm_guidance_values
 
         effective_text_len = self.text_len if self.text_len is not None else cfg.text_len
         return CompileCell(
@@ -243,7 +246,6 @@ def _derive_defaults_type(
     candidate = args[0]
     if isinstance(candidate, typing.TypeVar):
         return None
-    from .families.base import GenerationDefaults
 
     if not (isinstance(candidate, type) and issubclass(candidate, GenerationDefaults)):
         raise ValueError(
@@ -582,7 +584,6 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
     out = _apply_class_unions(out)
     # gw#470: boot warmup is default-on for GPU inference classes — fail at
     # walk time (discovery/CI/boot), never at first request.
-    from .warmup import validate_class_warmup
 
     validate_class_warmup(cls, decl, out)
     return out
@@ -598,9 +599,6 @@ def _apply_class_unions(specs: List[EndpointSpec]) -> List[EndpointSpec]:
     CLASSES keep divergent contracts by design (ernie's base/turbo are two
     checkpoints, two instances, two cells). Compile-less classes pass
     through untouched."""
-    import dataclasses
-
-    from .api.compile_axis import warm_guidance_values
 
     compiled = [s for s in specs if s.compile is not None]
     if not compiled:

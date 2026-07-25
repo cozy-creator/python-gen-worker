@@ -44,6 +44,7 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -848,7 +849,6 @@ def quantize_tree_w4a4(
     """Copy a diffusers tree, rewriting the denoiser's eligible 2D weights
     to the gw#540 contract triple. Eligible: ``*.weight``, 2D, float,
     in %% 32 == 0, out %% 16 == 0, name not matching ``exclude``."""
-    import shutil
 
     import torch
     from safetensors.torch import load_file, save_file

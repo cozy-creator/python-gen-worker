@@ -60,6 +60,8 @@ from typing import Any, Optional
 
 from . import activity as activity_mod
 from . import compile_cache as cc
+from .models.loading import pipeline_weight_lane
+from .models import provision
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +196,6 @@ def _fail_closed(pipe: Any, reason: str) -> bool:
     when the local mint cannot produce a cell either, the refusal stays
     TYPED (the same CompiledLaneUnavailableError the executor maps). Plain
     lanes keep the gw#555 never-raise miss policy (eager)."""
-    from .models.loading import pipeline_weight_lane
 
     lane = pipeline_weight_lane(pipe)
     if lane.startswith(("w8a8", "w4a4")):
@@ -218,7 +219,6 @@ def enable_compiled(
     mint attempt, never to silent slow eager (gw#564 found the raise
     aborting the mint path live on a 4090).
     """
-    from .models import provision
 
     family = str(getattr(cfg, "family", "") or "")
     try:
@@ -237,8 +237,6 @@ def enable_compiled(
     if not _cuda_ready():
         # apply() already logged; nothing to mint for
         return _fail_closed(pipe, "CUDA unavailable")
-
-    from .models.loading import pipeline_weight_lane
 
     # gw#561: the eager-miss rollback in provision.enable_compiled dropped
     # the branch lane; local store/mint must key + trace the DECLARED graph

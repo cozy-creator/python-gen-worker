@@ -34,6 +34,13 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from .writer import streaming_dtype_cast
+from .writer import streaming_fp8_storage_cast
+import json as _json
+import shutil as _shutil
+from ._hf_load import load_component_module
+import subprocess
+from .gguf_tools import (prepare_hf_source_tree_for_gguf, resolve_gguf_convert_script, run_hf_to_gguf_conversion)
 
 logger = logging.getLogger(__name__)
 
@@ -282,8 +289,6 @@ def _run_cast_inline(
     """bf16/fp16/fp32 streaming dtype cast."""
     import torch
 
-    from .writer import streaming_dtype_cast
-
     dtype = _normalize(target_dtype)
     if dtype in {"bf16"}:
         torch_dtype = torch.bfloat16
@@ -339,7 +344,6 @@ def _run_fp8_storage_inline(
     exactly. Stamps dtype ``fp8`` — the detector keys on F8_E4M3 headers.
     ``block_scope=True`` = the transformers-backbone lane (repeated-block
     params only)."""
-    from .writer import streaming_fp8_storage_cast
 
     result = streaming_fp8_storage_cast(
         Path(source_path), Path(out_dir), shard_prefix=shard_prefix,
@@ -444,7 +448,6 @@ def _run_bnb_inline(
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
-    import json as _json
     cfg_path = repo_dir / "config.json"
     try:
         cfg_blob = _json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.is_file() else {}
@@ -533,12 +536,8 @@ def _run_bnb_diffusers_inline(
     handles its own save/load via ``module.save_pretrained`` directly — no
     flatten helper needed.
     """
-    import json as _json
-    import shutil as _shutil
     import torch
     from transformers import BitsAndBytesConfig
-
-    from ._hf_load import load_component_module
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -657,13 +656,6 @@ def _run_gguf_inline(
     encoding: str,
 ) -> InlineConversionResult:
     """GGUF quantization — convert_hf_to_gguf.py (+ optional llama-quantize)."""
-    import subprocess
-
-    from .gguf_tools import (
-        prepare_hf_source_tree_for_gguf,
-        resolve_gguf_convert_script,
-        run_hf_to_gguf_conversion,
-    )
 
     dtype = _normalize(encoding)
     if dtype not in _INLINE_GGUF_ENCODINGS:

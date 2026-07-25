@@ -26,6 +26,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 import requests
+import socket
+from blake3 import blake3
+from ..api.errors import AuthError
+from ..request_context._helpers import _parse_owner_repo
+from gen_worker.models.refs import flavor_token as _token
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +78,6 @@ def _http_session() -> requests.Session:
     """Shared session with TCP keepalives so NAT/conntrack middleboxes don't
     evict the idle flow while the server verifies (no response bytes for
     minutes)."""
-    import socket
 
     global _SESSION
     if _SESSION is not None:
@@ -163,7 +167,6 @@ def _send_with_retries(what: str, send: Callable[[], requests.Response]) -> requ
 
 
 def blake3_file(path: Path, *, chunk: int = 8 * 1024 * 1024) -> str:
-    from blake3 import blake3
 
     h = blake3()
     with open(path, "rb") as f:
@@ -510,7 +513,6 @@ class HubClient:
         # token against [a-z0-9][a-z0-9._-]{0,63} — the internal dtype-axis
         # colon forms ("gguf:q4_k_m", "int8:awq") publish as "-" forms.
         # ONE implementation: gen_worker.models.refs.flavor_token (gw#492).
-        from gen_worker.models.refs import flavor_token as _token
 
         if tags:
             df = _token(default_flavor)
@@ -665,8 +667,6 @@ def publish_dataset_revision(
     grows dedicated columns. Raises ``AuthError`` on 401/403 and
     ``RuntimeError`` on any other HTTP failure.
     """
-    from ..api.errors import AuthError
-    from ..request_context._helpers import _parse_owner_repo
 
     owner, name = _parse_owner_repo(destination_dataset)
     base = (base_url or "").strip().rstrip("/")

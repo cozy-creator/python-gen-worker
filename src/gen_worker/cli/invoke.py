@@ -36,6 +36,7 @@ from typing import Any, List, Optional
 from . import run as run_mod
 from . import transport
 from .serve import DEFAULT_SOCKET_PATH
+from .args import ArgError, build_payload, looks_like_field_token
 
 
 # --------------------------------------------------------------------------
@@ -218,7 +219,6 @@ def _resolve_payload(args: argparse.Namespace) -> Any:
     A single JSON/@file/- blob takes the thin path. Otherwise the tokens are
     ergonomic ``field=value`` args coerced against the function's schema (#350).
     """
-    from .args import ArgError, build_payload, looks_like_field_token
 
     tokens: List[str] = list(getattr(args, "args", []) or [])
     if not tokens:

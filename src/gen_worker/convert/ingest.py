@@ -16,7 +16,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, NoReturn, Optional, Sequence
 
+import hashlib
+import re
+import struct
+
 from gen_worker.api.errors import ValidationError
+from gen_worker.models.download import (
+    _HF_DOWNLOAD_MAX_SECONDS,
+    _HF_DOWNLOAD_STALL_TIMEOUT_S,
+    _civitai_select_files,
+    _run_with_stall_watchdog,
+    download_civitai,
+    fetch_civitai_model_version,
+)
 
 from ..net import hf, install_hf_http_timeouts
 from .classifier import RepoClassification, apply_source_include, classify_repo
@@ -75,7 +87,6 @@ def _detect_snapshot_dtype(root: Path) -> str:
     ('bf16' / 'fp16' / 'fp32' / 'fp8', '' when undetectable). Civitai
     version metadata is unreliable (fp labels routinely contradict the
     file bytes), so read the headers."""
-    import struct
 
     counts: dict[str, int] = {}
     try:
@@ -274,7 +285,6 @@ def _civitai_manifest_revision(file_names: list[str]) -> str:
     """The clone-side civitai 'revision': a hash over the downloaded file
     listing (civitai has no commit sha). MUST stay identical between
     plan_civitai and ingest_civitai so bank hits match full-clone runs."""
-    import hashlib
 
     manifest = json.dumps(
         [{"name": n} for n in sorted(file_names)], sort_keys=True, separators=(",", ":"))
@@ -330,7 +340,6 @@ def plan_civitai(
     gguf_quant: str | None = None,
 ) -> CivitaiSourcePlan:
     """Fetch one civitai model version's metadata (no downloads)."""
-    from gen_worker.models.download import _civitai_select_files, fetch_civitai_model_version
 
     version_id = int(model_version_id or 0)
     if version_id <= 0:
@@ -366,12 +375,6 @@ def _snapshot_download_with_retries(
         GatedRepoError,
         RepositoryNotFoundError,
         RevisionNotFoundError,
-    )
-
-    from gen_worker.models.download import (
-        _HF_DOWNLOAD_MAX_SECONDS,
-        _HF_DOWNLOAD_STALL_TIMEOUT_S,
-        _run_with_stall_watchdog,
     )
 
     attempts = _download_attempts()
@@ -519,7 +522,6 @@ def _is_multi_weight_names(names: Iterable[str]) -> bool:
     TOP-LEVEL weight file names form more than one logical weight set
     (HF-convention shards collapse into one). Callers pass basenames only."""
     global _SHARD_NAME_RE
-    import re
 
     if _SHARD_NAME_RE is None:
         _SHARD_NAME_RE = re.compile(r"^(.+)-(\d+)-of-(\d+)\.(safetensors|gguf)$")
@@ -584,7 +586,6 @@ def ingest_civitai(
     gguf_quant: str | None = None,
 ) -> IngestedSource:
     """Fetch one civitai model version into ``dest_dir`` (bounded provider API)."""
-    from gen_worker.models.download import download_civitai, fetch_civitai_model_version
 
     version_id = int(model_version_id or 0)
     if version_id <= 0:

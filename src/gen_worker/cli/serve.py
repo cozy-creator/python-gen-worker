@@ -56,6 +56,8 @@ from . import run as run_mod
 from . import transport
 from .local_context import _stderr_emitter, build_local_context
 from .protocol import PROTOCOL_VERSION, gen_worker_version
+from ..api.binding import BINDING_TYPES
+from ..models import provision
 
 
 DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
@@ -586,7 +588,6 @@ def _resolve_static_models(
     All bindings are static picks now; resolved at boot so weights land in
     VRAM during ``setup()``.
     """
-    from ..api.binding import BINDING_TYPES
 
     static = {
         k: v for k, v in (bindings or {}).items()
@@ -594,7 +595,6 @@ def _resolve_static_models(
     }
     if not static:
         return {}
-    from ..models import provision
 
     return provision.resolve_bindings(
         static, offline=offline, emit=_stderr_emitter,
