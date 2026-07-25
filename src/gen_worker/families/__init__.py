@@ -11,7 +11,7 @@ from __future__ import annotations
 from .base import (
     KIND_CHECKPOINT,
     KIND_LORA,
-    FamilyDefaults,
+    GenerationDefaults,
     export_all_schemas,
     export_json_schema,
     family,
@@ -25,7 +25,7 @@ from .wan import WanDefaults
 __all__ = [
     "KIND_CHECKPOINT",
     "KIND_LORA",
-    "FamilyDefaults",
+    "GenerationDefaults",
     "SdxlDefaults",
     "SdxlLoraDefaults",
     "SdxlScheduler",

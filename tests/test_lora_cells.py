@@ -1,25 +1,49 @@
-"""Lora-bucket compile cells (gw#561): Compile.lora_bucket declaration, lane
-parsing/labels, branch-bearing lane apply/rollback through the real arming
-path, and the lane-exact cell pick — all against real modules (CPU; the
-GPU build/adopt/tax proof runs on the pod rig)."""
+"""Lora-bucket compile cells (gw#561, SDK v2 pgw#647): the decorator-level
+``@endpoint(lora_bucket=...)`` declaration, lane parsing/labels,
+branch-bearing lane apply/rollback through the real arming path, and the
+lane-exact cell pick — all against real modules (CPU; the GPU
+build/adopt/tax proof runs on the pod rig)."""
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pytest
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("accelerate")
 
-from gen_worker import compile_cache
-from gen_worker.api.decorators import Compile
+from gen_worker import Compile, endpoint, compile_cache
 from gen_worker.executor import _cell_lane_matches
 from gen_worker.models import provision
 from gen_worker.models.w8a8 import detect_w8a8_artifact, load_w8a8_denoiser, quantize_tree_w8a8
 from gen_worker.models.w8a8_lora import RANK_BUCKETS, branch_bucket
+from gen_worker.registry import CompileCell, collect_from_namespace
+
+
+class _In(msgspec.Struct):
+    prompt: str = ""
+
+
+class _Out(msgspec.Struct):
+    ok: bool = True
+
+
+def _cfg(
+    family: str, *, shapes=((64, 64),), targets=("unet",), lora_bucket=0,
+) -> CompileCell:
+    """The enriched compile-cell configuration the machinery consumes in v2
+    (``EndpointSpec.compile_cell()``): lora_bucket lives here, never on
+    ``Compile``."""
+    return CompileCell(
+        shapes=tuple(tuple(s) for s in shapes), targets=tuple(targets),
+        family=family, regional=False, text_len=0, dynamic=(),
+        lora_bucket=int(lora_bucket), guidance_scales=(),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -72,13 +96,30 @@ def plain_pipe() -> Any:
 # ---------------------------------------------------------------------------
 
 
-def test_compile_lora_bucket_validation() -> None:
-    cfg = Compile(shapes=((64, 64),), family="f", lora_bucket=32)
-    assert cfg.lora_bucket == 32
-    assert Compile(shapes=((64, 64),), family="f").lora_bucket == 0
+def test_endpoint_lora_bucket_validation() -> None:
+    """SDK v2: lora_bucket is a DECORATOR declaration (it shapes the graph
+    family whether or not compile= is present); Compile no longer carries it."""
+
+    @endpoint(lora_bucket=32)
+    def gen32(ctx, p: _In) -> _Out:
+        return _Out()
+
+    specs = collect_from_namespace(types.SimpleNamespace(gen32=gen32))
+    assert specs[0].lora_bucket == 32
+
+    @endpoint
+    def gen0(ctx, p: _In) -> _Out:
+        return _Out()
+
+    assert collect_from_namespace(
+        types.SimpleNamespace(gen0=gen0))[0].lora_bucket == 0
+
     for bad in (-1, 8, 17, 256):
         with pytest.raises(ValueError):
-            Compile(shapes=((64, 64),), family="f", lora_bucket=bad)
+            endpoint(lora_bucket=bad)
+
+    with pytest.raises(TypeError):
+        Compile(shapes=((64, 64),), family="f", lora_bucket=32)  # type: ignore[call-arg]
 
 
 def test_lane_bucket_parses_stamp_and_token_forms() -> None:
@@ -145,7 +186,7 @@ def test_apply_lora_lane_requires_denoiser() -> None:
 def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None:
     """No cell + no CUDA => stays eager; the declared branch lane must not
     leak into eager serving (canonical zeroed slots cost +21-32% eager)."""
-    cfg = Compile(shapes=((64, 64),), family="loracells-test", lora_bucket=32)
+    cfg = _cfg("loracells-test", lora_bucket=32)
     armed = provision.enable_compiled(plain_pipe, cfg, cache_dir=None, artifact=None)
     assert armed is False
     assert branch_bucket(plain_pipe.unet) == 0
@@ -155,7 +196,7 @@ def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None
 
 
 def test_enable_compiled_w8a8_fail_closed_keeps_contract(w8a8_pipe: Any) -> None:
-    cfg = Compile(shapes=((64, 64),), family="loracells-test", lora_bucket=128)
+    cfg = _cfg("loracells-test", lora_bucket=128)
     with pytest.raises(compile_cache.CompiledLaneUnavailableError):
         provision.enable_compiled(w8a8_pipe, cfg, cache_dir=None, artifact=None)
 
@@ -208,8 +249,20 @@ def test_rank_buckets_cover_declared_cells() -> None:
 
 
 def test_discovery_carries_lora_bucket() -> None:
-    cfg = Compile(shapes=((64, 64),), family="f", lora_bucket=64)
-    assert cfg.lora_bucket == 64
+    @endpoint(lora_bucket=64, compile=Compile(
+        shapes=((64, 64),), family="f", text_len=0))
+    def gen64(ctx, p: _In) -> _Out:
+        return _Out()
+
+    spec = collect_from_namespace(types.SimpleNamespace(gen64=gen64))[0]
+    assert spec.lora_bucket == 64
+    # The compile machinery consumes the enriched CompileCell, which folds
+    # the decorator-level bucket into the declared graph family.
+    cell = spec.compile_cell()
+    assert cell is not None
+    assert cell.lora_bucket == 64
+    assert cell.family == "f"
+    assert cell.contract_facts()["lora_bucket"] == 64
     # metadata parity: producer meta records the bucket beside the lane
     meta = compile_cache.artifact_metadata(
         family="f", weight_lane="w8a8-lora64", lora_bucket=64)
@@ -230,8 +283,7 @@ def test_enable_compiled_skips_lane_on_component_slot_without_target() -> None:
             self.decoder = torch.nn.Linear(8, 8)
 
     vae = _Vae()
-    cfg = Compile(shapes=((64, 64),), family="loracells-test",
-                  targets=("unet",), lora_bucket=64)
+    cfg = _cfg("loracells-test", lora_bucket=64)
     armed = provision.enable_compiled(vae, cfg, cache_dir=None, artifact=None)
     assert armed is False
 
@@ -261,18 +313,18 @@ def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
             super().__init__()
             self.decoder = torch.nn.Linear(8, 8)
 
+    cfg = _cfg("loracells-test", lora_bucket=64)
     src = tmp_path / "cellsrc"
     (src / "inductor" / "ab").mkdir(parents=True)
     (src / "inductor" / "ab" / "graph.py").write_text("code")
     meta = compile_cache.artifact_metadata(
         family="loracells-test", shapes=[(64, 64)], targets=["unet"],
         weight_lane="lora64", lora_bucket=64,
+        shape_contract=compile_cache.declared_contract_facts(cfg),
     )
     artifact = compile_cache.pack(src, tmp_path / "cell.tar.gz", meta)
 
     vae = _Vae()
-    cfg = Compile(shapes=((64, 64),), family="loracells-test",
-                  targets=("unet",), lora_bucket=64)
     armed = provision.enable_compiled(
         vae, cfg, cache_dir=tmp_path / "cache", artifact=artifact)
     assert armed is False

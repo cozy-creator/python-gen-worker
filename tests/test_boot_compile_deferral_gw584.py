@@ -50,7 +50,7 @@ from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.api.slot import Slot
 from gen_worker.config.settings import Settings
 from gen_worker.executor import Executor
-from gen_worker.families.base import FamilyDefaults, family
+from gen_worker.families.base import GenerationDefaults, family
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -58,7 +58,7 @@ from gen_worker.registry import EndpointSpec
 
 
 @family("gw584-testfam")
-class _Fam(FamilyDefaults):
+class _Fam(GenerationDefaults):
     steps: int = 7
 
 
@@ -135,15 +135,17 @@ def _slot_spec(setup_calls: List[str]) -> EndpointSpec:
             return _Out()
 
     default = Hub("acme/slotted-default", tag="prod")
+    # SDK v2: Slot(default_config=...) is deleted — the config schema is the
+    # handler's derived defaults type (ctx: RequestContext[_Fam]), carried on
+    # the spec as defaults_type.
     slots = {"pipeline": Slot(
-        _StubPipeline, selected_by="model",
-        default_checkpoint=default, default_config=_Fam(),
+        _StubPipeline, selected_by="model", default_checkpoint=default,
     )}
     return EndpointSpec(
         name="slotted", method=Endpoint.generate, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint,
         attr_name="generate", models={"pipeline": default}, slots=slots,
-        slot_family={"pipeline": "gw584-testfam"},
+        slot_family={"pipeline": "gw584-testfam"}, defaults_type=_Fam,
     )
 
 

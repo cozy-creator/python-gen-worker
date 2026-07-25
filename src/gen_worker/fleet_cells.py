@@ -398,6 +398,8 @@ def enable_compiled(
     try:
         key = cell_key_mod.compute(
             family, pipeline_weight_lane(pipe), bucket,
+            contract=cell_key_mod.contract_digest(
+                cc.declared_contract_facts(cfg)),
             regional=bool(getattr(cfg, "regional", False)),
         ).digest
     except Exception as exc:  # noqa: BLE001 — key axes must be computable
@@ -654,6 +656,7 @@ def republish_after_shape_warm(
             lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
             graph_signature=graph_signature,
             weight_contract=weight_contract,
+            shape_contract=cc.declared_contract_facts(cfg),
         )
         label = cc.flavor_label(
             meta["sku"], meta["torch"], meta.get("weight_lane", ""))

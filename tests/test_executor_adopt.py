@@ -14,7 +14,17 @@ from types import SimpleNamespace
 import msgspec
 import pytest
 
-from gen_worker import Compile, ImageAsset, RequestContext, Resources, endpoint
+from typing import Annotated
+
+from gen_worker import (
+    AxisClass,
+    Compile,
+    CompileAxis,
+    ImageAsset,
+    RequestContext,
+    Resources,
+    endpoint,
+)
 from gen_worker import compile_cache as cc
 from gen_worker.models import provision
 from gen_worker.api.binding import Hub
@@ -37,6 +47,16 @@ OP_B = "adopt-operation-b"
 
 class _In(msgspec.Struct):
     prompt: str = ""
+
+
+class _AxisIn(msgspec.Struct):
+    """Payload with a CompileAxis-partitioned guidance field (SDK v2)."""
+
+    prompt: str = ""
+    guidance_scale: Annotated[float, CompileAxis(classes=(
+        AxisClass("cfg_off", match=lambda v: v == 0, warm=0.0),
+        AxisClass("cfg_on", match=lambda v: v != 0, warm=5.0),
+    ))] = 5.0
 
 
 class _Out(msgspec.Struct):
@@ -385,7 +405,7 @@ def test_endpoint_without_warmup_exposes_no_adopt_target(tmp_path, monkeypatch):
         name="ep", method=_NoWarmupEndpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=_NoWarmupEndpoint,
         attr_name="run", models={"pipeline": Hub("acme/klein-finetune")},
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
     ex, sent = _wire_executor(spec, tmp_path)
     rec = ex._classes[spec.instance_key]
@@ -803,10 +823,11 @@ def test_same_family_base_and_lora_targets_remain_distinct(tmp_path):
         pass
 
     base = replace(_spec(), name="base")
+    # SDK v2: lora_bucket is a decorator kwarg -> EndpointSpec.lora_bucket,
+    # no longer a Compile field.
     turbo = replace(
-        _spec(Compile(
-            shapes=((768, 768),), family=FAMILY, lora_bucket=128)),
-        name="turbo", cls=_TurboEndpoint, method=_TurboEndpoint.run,
+        _spec(), name="turbo", cls=_TurboEndpoint, method=_TurboEndpoint.run,
+        lora_bucket=128,
     )
 
     async def _send(_msg):
@@ -958,7 +979,7 @@ def _cold_spec(binding=None) -> EndpointSpec:
         cls=_ColdEndpoint,
         attr_name="run",
         models={"pipeline": binding or Hub("acme/klein-finetune")},
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
 
 
@@ -1155,7 +1176,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     model_dir.mkdir()
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck1-" + "d" * 56
+    mint_key = "ck2-" + "d" * 56
     mint_ref = f"root/family-{FAMILY}#{mint_key}"
     mint_digest = "blake3:" + "e" * 64
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
@@ -1233,7 +1254,7 @@ def test_hub_redelivery_of_own_minted_key_is_a_noop_rearm(
     model_dir.mkdir()
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck1-" + "a1" * 28
+    mint_key = "ck2-" + "a1" * 28
     mint_ref = f"root/family-{FAMILY}#{mint_key}"
     mint_digest = "blake3:" + "e" * 64
     store_digest = "blake3:" + "f" * 64  # the store's snapshot-manifest form
@@ -1300,7 +1321,7 @@ def test_hub_redelivery_of_own_minted_key_is_a_noop_rearm(
         "advertised digest must align to the store's form")
 
     # A genuinely DIFFERENT key still vacates (identity actually moved).
-    other_key = "ck1-" + "b2" * 28
+    other_key = "ck2-" + "b2" * 28
     other_ref = f"root/family-{FAMILY}#{other_key}"
 
     class _OtherKey:
@@ -1342,10 +1363,10 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
         payload_type=_In, output_mode="single", cls=_NoProofEndpoint,
         attr_name="run",
         models={"pipeline": Hub("acme/klein-finetune", flavor="fp8-w8a8")},
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck1-" + "f" * 56
+    mint_key = "ck2-" + "f" * 56
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
     mint_artifact.parent.mkdir()
     mint_artifact.write_bytes(b"cell-bytes")
@@ -1408,7 +1429,7 @@ def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
 
     class _Key:
-        digest = "ck1-" + "9" * 56
+        digest = "ck2-" + "9" * 56
 
     monkeypatch.setattr(cell_key_mod, "compute", lambda *a, **k: _Key())
     captured: dict = {}
@@ -1482,7 +1503,7 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
         payload_type=_In, output_mode="single", cls=_MintingEndpoint,
         attr_name="run",
         models={"pipeline": Hub("acme/klein-finetune", flavor="fp8-w8a8")},
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
     model_ref = wire_ref(spec.models["pipeline"])
 
@@ -1586,7 +1607,7 @@ def test_pending_self_mint_unproven_fails_closed_and_never_publishes(
         payload_type=_In, output_mode="single", cls=_UnprovenEndpoint,
         attr_name="run",
         models={"pipeline": Hub("acme/klein-finetune", flavor="fp8-w8a8")},
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
     model_ref = wire_ref(spec.models["pipeline"])
 
@@ -1655,7 +1676,7 @@ def test_boot_warmup_proves_each_compile_object_independently(
         payload_type=_In, output_mode="single", cls=_DualEndpoint,
         attr_name="run",
         models={"first": Hub(first_ref), "second": Hub(second_ref)},
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
 
     async def _send(_msg):
@@ -1712,8 +1733,8 @@ def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
 
     @endpoint(
         models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((1024, 1024),), family=family),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
         warmup={"generate": {"prompt": "warmup"}, "generate_turbo": None},
     )
     class _SdxlEndpoint:
@@ -1778,8 +1799,8 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
 
     @endpoint(
         models={"pipeline": Hub("acme/flux-base", flavor="fp8-w8a8")},
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
         warmup={
             "generate": {"prompt": "warmup"},
             "edit": {"prompt": "warmup"},
@@ -1931,8 +1952,8 @@ def test_flux_real_guard_requires_object_activation_and_each_alias_execution(
 
     @endpoint(
         models={"pipeline": Hub("acme/flux-base")},
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
         warmup={
             "generate": {"prompt": "warmup"},
             "edit": {"prompt": "warmup"},
@@ -2040,8 +2061,8 @@ def test_compile_hit_on_other_object_cannot_certify_primary_object(
             "primary": Hub("acme/flux-primary"),
             "other": Hub("acme/flux-other"),
         },
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
         warmup={"generate": {"prompt": "warmup"}},
     )
     class _TwoObjectEndpoint:
@@ -2135,8 +2156,8 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     def _make_spec(model: str):
         @endpoint(
             models={"pipeline": Hub(model)},
-            resources=Resources(vram_gb=12),
-            compile=Compile(shapes=((768, 768),), family=FAMILY),
+            resources=Resources(gpu=True),
+            compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
             warmup={"generate": {"prompt": "warmup"}},
         )
         class _CheckpointEndpoint:
@@ -2243,7 +2264,7 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
             "pipeline": Hub("acme/sdxl", flavor="fp8-w8a8"),
             "vae": Hub("acme/sdxl-vae"),
         },
-        compile=Compile(shapes=((1024, 1024),), family=FAMILY),
+        compile=Compile(shapes=((1024, 1024),), family=FAMILY, text_len=0),
     )
     pipeline_ref = wire_ref(spec.models["pipeline"])
     vae_ref = wire_ref(spec.models["vae"])
@@ -2385,8 +2406,8 @@ def test_w8a8_custom_warmup_proof_attributes_to_siblings_except_declared_none(
 
     @endpoint(
         models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((1024, 1024),), family=family),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
         warmup={
             "generate": {"prompt": "warmup"},
             "edit": {"prompt": "warmup"},
@@ -2470,8 +2491,8 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
 
     @endpoint(
         models={"pipeline": Hub("acme/ltx-shaped", flavor="fp8-w8a8")},
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((1024, 1024),), family=family),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
     )
     class _LtxShapedEndpoint:
         def setup(self, pipeline: _LoadablePipe) -> None:
@@ -2532,8 +2553,8 @@ def _merged_lane_endpoint(record_warm):
             "t2i": Hub("acme/qwen-image", flavor="fp8-w8a8"),
             "edit": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
         },
-        resources=Resources(vram_gb=48),
-        compile=Compile(shapes=((1328, 1328),), family="qwen-image"),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((1328, 1328),), family="qwen-image", text_len=0),
         warmup={"generate": {"prompt": "warmup"}},
     )
     class _MergedEndpoint:
@@ -3310,8 +3331,8 @@ def test_multifunction_adoption_keeps_target_identity_through_guard_failure(
 
     @endpoint(
         models={"pipeline": Hub("acme/flux-base")},
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
         warmup={
             "generate": {"prompt": "warmup"},
             "edit": {"prompt": "warmup"},
@@ -3418,8 +3439,8 @@ def test_hot_adoption_rejects_an_unproven_advertised_function_alias(
 
     @endpoint(
         models={"pipeline": Hub("acme/flux-base")},
-        resources=Resources(vram_gb=24),
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        resources=Resources(gpu=True),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
         warmup={
             "generate": {"prompt": "warmup"},
             "edit": {"prompt": "warmup"},
@@ -3685,18 +3706,41 @@ def test_prepare_with_explicit_artifact_seeds(tmp_path):
 
 
 def test_manifest_carries_compile_block():
+    """SDK v2 manifest compile block: text_len/dynamic/shape_contract_digest
+    ride along; guidance_scales derive from the payload's CompileAxis
+    classes (Compile(guidance_scales=...) is deleted); lora_bucket comes
+    from the decorator kwarg — both fn-level and inside the compile block."""
     from gen_worker.discovery.discover import _extract_entries
 
-    @endpoint(compile=Compile(shapes=((768, 768), (1024, 1024)), family=FAMILY))
+    @endpoint(
+        lora_bucket=64,
+        compile=Compile(
+            shapes=((768, 768), (1024, 1024)), family=FAMILY, text_len=0,
+        ),
+    )
     class Ep:
-        def gen(self, ctx: RequestContext, data: _In) -> _Out:
+        def gen(self, ctx: RequestContext, data: _AxisIn) -> _Out:
             return _Out()
 
+    (spec,) = extract_specs(Ep)
+    assert spec.lora_bucket == 64
+    cell = spec.compile_cell()
+    assert cell is not None
     (entry,) = _extract_entries(Ep, "testmod")
+    assert entry["lora_bucket"] == 64
+    assert entry["compile_axes"] == [{
+        "field": "guidance_scale",
+        "classes": ["cfg_off", "cfg_on"],
+        "warm": [0.0, 5.0],
+    }]
     assert entry["compile"] == {
         "family": FAMILY,
         "shapes": [[768, 768], [1024, 1024]],
         "targets": ["transformer", "vae.decode"],
+        "text_len": 0,
+        "guidance_scales": [0.0, 5.0],
+        "shape_contract_digest": cell.contract_digest(),
+        "lora_bucket": 64,
     }
 
 
@@ -3757,7 +3801,7 @@ def test_fresh_boot_advertises_candidate_cell_lookups(monkeypatch):
     computed: list = []
 
     class _Key:
-        digest = "ck1-" + "5" * 56
+        digest = "ck2-" + "5" * 56
 
     def _compute(family, lane="", bucket=0, **kw):
         computed.append((family, lane))
@@ -3826,7 +3870,7 @@ def _dual_mint_boot(tmp_path, monkeypatch, *, publisher, warm_second: bool):
             "first": Hub("acme/qwen-image", flavor="fp8-w8a8"),
             "second": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
         },
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
 
     async def _send(_msg):
@@ -3989,7 +4033,7 @@ def _routed_mint_boot(tmp_path, monkeypatch, *, publisher):
             "second": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
         },
         resources=Resources(gpu=True),
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
         warmup={"run": {"prompt": "warmup"}},
     )
     class _RoutedMerged:
@@ -4026,7 +4070,7 @@ def _routed_mint_boot(tmp_path, monkeypatch, *, publisher):
             "first": Hub("acme/qwen-image", flavor="fp8-w8a8"),
             "second": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
         },
-        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
 
     async def _send(_msg):

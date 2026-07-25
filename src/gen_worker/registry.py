@@ -16,9 +16,11 @@ from typing import Any, Callable, Dict, List, Optional
 import msgspec
 
 from .api.binding import Binding, ModelRef
+from .api.compile_axis import extract_payload_axes
 from .api.decorators import ATTR, VARIANT_ATTR, Compile, EndpointDecl, Resources, VariantDecl
 from .api.formula import RuntimeFormula
 from .api.slot import DEFAULT_REGIMES, Slot
+from .api.tree import derive_components, validate_no_sibling_parts
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
 
@@ -33,6 +35,48 @@ def _is_struct(t: Any) -> bool:
         return isinstance(t, type) and issubclass(t, msgspec.Struct)
     except Exception:
         return False
+
+
+@dataclass(frozen=True)
+class CompileCell:
+    """The complete compile-cell configuration one endpoint function
+    declares (SDK v2): the ``Compile`` block enriched with the spec-level
+    facts that shape the traced graph family — the decorator-level
+    ``lora_bucket`` and the warm guidance representatives derived from the
+    payload's ``CompileAxis`` classes. This is the object the compile
+    machinery (compile_cache / fleet_cells / local_cells / trt_engine)
+    consumes; raw ``Compile`` never travels past the registry."""
+
+    shapes: tuple
+    targets: tuple
+    family: str
+    regional: bool
+    text_len: Optional[int]
+    dynamic: tuple
+    lora_bucket: int
+    guidance_scales: tuple
+
+    def contract_facts(self) -> Dict[str, Any]:
+        """Canonical declared-shape-contract facts — the ck2 ``contract``
+        axis digests exactly this (pgw#647: a worker on a newer contract
+        must never consume an older cell)."""
+        return {
+            "v": 2,
+            "shapes": sorted([int(v) for v in row] for row in self.shapes),
+            "targets": [str(t) for t in self.targets],
+            "text_len": self.text_len,
+            "dynamic": [
+                {"dim": d.dim, "min": d.min, "max": d.max} for d in self.dynamic
+            ],
+            "regional": bool(self.regional),
+            "lora_bucket": int(self.lora_bucket or 0),
+            "guidance": sorted(float(v) for v in self.guidance_scales),
+        }
+
+    def contract_digest(self) -> str:
+        from .cell_key import contract_digest
+
+        return contract_digest(self.contract_facts())
 
 
 @dataclass(frozen=True)
@@ -59,13 +103,28 @@ class EndpointSpec:
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
     # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
-    # (selected_by/default_checkpoint/default_config). A subset of
-    # `models`'s keys — bare bindings have no entry here.
+    # (selected_by/default_checkpoint). A subset of `models`'s keys — bare
+    # bindings have no entry here.
     slots: Dict[str, Slot] = field(default_factory=dict)
-    # Resolved family name per Slot (slot.family, or the endpoint's
-    # Compile(family=...) when the slot declares no fallback preset) —
+    # Resolved family name per Slot (the endpoint's Compile(family=...), or
+    # the handler's derived config schema's @family registration) —
     # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
     slot_family: Dict[str, str] = field(default_factory=dict)
+    # SDK v2 (pgw#647): the handler's DERIVED config schema — the D in
+    # `ctx: RequestContext[D]`. None when the handler annotates a bare
+    # context. Catalog recipe metadata decodes against this type; code owns
+    # the schema, the catalog owns the values (th#1116).
+    defaults_type: Optional[type] = None
+    # SDK v2: DERIVED component tree per introspectable pipeline slot —
+    # {slot: {part_name: "weights"|"config"}}. Published into the release
+    # manifest at build time (path vocabulary for per-path policy and
+    # component-level routing).
+    slot_components: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # SDK v2: compile-graph equivalence classes declared on payload fields
+    # (CompileAxis annotations) — replaces Compile(guidance_scales=...).
+    payload_axes: tuple = ()
+    # SDK v2: resident traced LoRA rank bucket (decorator-level; 0 = branchless).
+    lora_bucket: int = 0
     timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
@@ -98,11 +157,67 @@ class EndpointSpec:
     def needs_gpu(self) -> bool:
         return bool(self.resources.gpu)
 
+    def compile_cell(self) -> Optional[CompileCell]:
+        """The enriched compile-cell configuration (SDK v2), or None for
+        uncompiled functions. This — never the raw ``Compile`` — is what the
+        executor hands the compile machinery."""
+        cfg = self.compile
+        if cfg is None:
+            return None
+        from .api.compile_axis import warm_guidance_values
+
+        return CompileCell(
+            shapes=tuple(cfg.shapes),
+            targets=tuple(cfg.targets),
+            family=str(cfg.family or ""),
+            regional=bool(cfg.regional),
+            text_len=cfg.text_len,
+            dynamic=tuple(cfg.dynamic),
+            lora_bucket=int(self.lora_bucket or 0),
+            guidance_scales=warm_guidance_values(self.payload_axes),
+        )
+
     @property
     def instance_key(self) -> Any:
         """Specs sharing this key share one class instance (same class + same
         resolved binding set)."""
         return (self.cls, tuple(sorted(self.models.items())))
+
+
+def _derive_defaults_type(
+    owner: str, method: Callable[..., Any], ctx_param: str
+) -> Optional[type]:
+    """SDK v2 (pgw#647): the D in ``ctx: RequestContext[D]`` — the handler's
+    derived per-model config schema (``GenerationDefaults`` subclass).
+    ``None`` for a bare/unannotated context parameter. The annotation is the
+    ONLY declaration site: ``Slot(default_config=...)`` is deleted; the
+    catalog owns values (th#1116), code owns this schema."""
+    try:
+        hints = typing.get_type_hints(method, include_extras=False)
+    except Exception:
+        return None
+    ann = hints.get(ctx_param)
+    if ann is None:
+        return None
+    origin = typing.get_origin(ann)
+    if origin is None:
+        return None
+    args = typing.get_args(ann)
+    if not args or len(args) != 1:
+        return None
+    candidate = args[0]
+    if isinstance(candidate, typing.TypeVar):
+        return None
+    from .families.base import GenerationDefaults
+
+    if not (isinstance(candidate, type) and issubclass(candidate, GenerationDefaults)):
+        raise ValueError(
+            f"{owner}: context annotation {ann!r} parameterizes "
+            f"RequestContext with {candidate!r}, which is not a "
+            "GenerationDefaults subclass — the type argument is the "
+            "handler's per-model config schema"
+        )
+    return candidate
 
 
 def _inspect_return(owner: str, ret: Any) -> tuple[str, Optional[type], Optional[type]]:
@@ -262,13 +377,29 @@ def _spec_for_handler(
         )
     _validate_slot_selected_by(owner, slots, payload_type)
     _validate_compile_arms(owner, cls, decl.compile, models)
+    # SDK v2 lint: sibling-as-part declarations are deleted, not migrated.
+    validate_no_sibling_parts(owner, slots, models)
+    # SDK v2: the config schema derives from the handler's context
+    # annotation (`ctx: RequestContext[D]`), never from a Slot kwarg.
+    defaults_type = _derive_defaults_type(owner, method, ctx_param)
+    defaults_family = str(
+        getattr(defaults_type, "__gen_worker_family__", "") or ""
+    ) if defaults_type is not None else ""
     compile_family = decl.compile.family if decl.compile is not None else ""
     # Compile(family=...) is the explicit, functionally-load-bearing
-    # declaration (compile-cache keying) — it wins over a slot's own
-    # fallback-preset registration when both are present.
+    # declaration (compile-cache keying) — it wins over the derived config
+    # schema's own @family registration when both are present.
     slot_family = {
-        name: (compile_family or slot.family) for name, slot in slots.items()
+        name: (compile_family or defaults_family) for name in slots
     }
+    # SDK v2: derive each introspectable pipeline slot's component tree.
+    slot_components = {
+        name: tree for name, tree in (
+            (name, derive_components(slot.pipeline_cls))
+            for name, slot in slots.items()
+        ) if tree
+    }
+    payload_axes = extract_payload_axes(owner, payload_type)
     ret = hints.get("return")
     if ret is None:
         raise ValueError(f"{owner}: missing return type annotation")
@@ -322,6 +453,10 @@ def _spec_for_handler(
         models=dict(models),
         slots=dict(slots),
         slot_family=slot_family,
+        defaults_type=defaults_type,
+        slot_components=slot_components,
+        payload_axes=payload_axes,
+        lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0),
         runtime=decl.runtime,
         compile=decl.compile,
         child_calls=decl.child_calls,

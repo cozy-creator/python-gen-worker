@@ -56,7 +56,7 @@ def test_executor_setup_emits_monotonic_activity_phases():
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
-    @endpoint(resources=Resources(vram_gb=8))
+    @endpoint(resources=Resources(vram_gb_hint=8))
     class Ep:
         def setup(self) -> None:
             pass
@@ -97,7 +97,7 @@ def test_executor_setup_crash_emits_typed_activity_failed():
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
-    @endpoint(resources=Resources(vram_gb=8))
+    @endpoint(resources=Resources(vram_gb_hint=8))
     class Ep:
         def setup(self) -> None:
             raise RuntimeError("induced setup crash")

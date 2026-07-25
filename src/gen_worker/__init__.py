@@ -15,11 +15,22 @@ subclass from ``@endpoint(kind=...)`` before dispatch.
 
 from . import io
 from .api.binding import Civitai, HF, Hub, ModelRef, ModelScope
-from .api.decorators import Compile, ConfigParam, NoWarmup, Resources, endpoint, variant_of
+from .api.compile_axis import AxisClass, CompileAxis
+from .api.decorators import (
+    Compile,
+    ConfigParam,
+    DynamicDim,
+    NoWarmup,
+    Resources,
+    endpoint,
+    variant_of,
+)
 from .api.formula import RuntimeFormula
 from .api.slot import ResolvedSlot, Slot
-from .families import FamilyDefaults
+from .families import GenerationDefaults
 from .models.provision import arm_compile
+from .text_pin import TextLengthExceededError, pad_text_sequence
+from .view import for_request
 from .api.errors import (
     CanceledError,
     ChildCallError,
@@ -67,9 +78,16 @@ __all__ = [
     "variant_of",
     "Resources",
     "Compile",
+    "CompileAxis",
+    "AxisClass",
+    "DynamicDim",
     "ConfigParam",
     "NoWarmup",
     "arm_compile",
+    # SDK v2 per-request views + text pinning.
+    "for_request",
+    "pad_text_sequence",
+    "TextLengthExceededError",
     "HF",
     "Hub",
     "Civitai",
@@ -79,7 +97,7 @@ __all__ = [
     # Hub-resolved model slots (pgw#520) + the per-family defaults vocabulary.
     "Slot",
     "ResolvedSlot",
-    "FamilyDefaults",
+    "GenerationDefaults",
     # Context types.
     "RequestContext",
     "ConversionContext",

@@ -133,7 +133,7 @@ def plan_serve(
     recommended-VRAM hint alone; ``Resources(strict_vram=True)`` is the sole
     author opt-out of the CPU-touching rungs (offload / cpu).
     """
-    recommended = getattr(resources, "vram_gb", None)
+    recommended = getattr(resources, "vram_gb_hint", None)
     needs_gpu = bool(getattr(resources, "gpu", False))
     strict_vram = bool(getattr(resources, "strict_vram", False))
     wanted = _wanted(binding)

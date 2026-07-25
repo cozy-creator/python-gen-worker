@@ -175,15 +175,12 @@ def variant_fit(
     - ``fits``: full-VRAM residency expected.
     """
     needs_gpu = bool(getattr(resources, "gpu", False))
-    req_cc = getattr(resources, "compute_capability", None)
     libs = tuple(getattr(resources, "libraries", ()) or ())
     if needs_gpu and caps.gpu_sm <= 0:
         return FIT_INCOMPATIBLE, "no CUDA GPU detected"
-    if req_cc is not None and caps.gpu_sm < int(round(float(req_cc) * 10)):
-        return FIT_INCOMPATIBLE, (
-            f"requires compute capability >= {float(req_cc):g}, "
-            f"GPU is SM{caps.gpu_sm}"
-        )
+    # SDK v2 (pgw#647): no declared compute-capability gate — the fit
+    # ladder picks precision per card; only stored-flavor SM windows below
+    # (svdq/nvfp4) are genuinely hard.
     missing = [lib for lib in libs if lib not in (caps.installed_libs or [])]
     if missing:
         return FIT_INCOMPATIBLE, f"missing libraries: {', '.join(missing)}"
@@ -217,7 +214,7 @@ def variant_fit(
             f"nvfp4 stored flavor needs Blackwell (SM >= {NVFP4_FLAVOR_MIN_SM}); "
             f"GPU is SM{caps.gpu_sm}"
         )
-    vram = getattr(resources, "vram_gb", None)
+    vram = getattr(resources, "vram_gb_hint", None)
     # vram_gb recommends a card SIZE (total VRAM), so an idle card of exactly
     # that size counts as fitting: subtract the fixed driver/framebuffer/CUDA
     # reserve before comparing against measured free VRAM.

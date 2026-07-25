@@ -20,11 +20,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .base import FamilyDefaults, family
+from .base import GenerationDefaults, family
 
 
 @family("wan22")
-class WanDefaults(FamilyDefaults, frozen=True):
+class WanDefaults(GenerationDefaults, frozen=True):
     """Wan 2.2 MoE inference defaults + constraints.
 
     ``guidance`` is the high-noise expert's CFG scale; ``guidance_2`` is the

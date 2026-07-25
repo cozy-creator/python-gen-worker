@@ -15,11 +15,11 @@ from pathlib import Path
 import msgspec
 
 from gen_worker import Hub, RequestContext, Slot, endpoint
-from gen_worker.families.base import FamilyDefaults, family
+from gen_worker.families.base import GenerationDefaults, family
 
 
 @family("harness-slot-only-testfam")
-class _ToyDefaults(FamilyDefaults, frozen=True):
+class _ToyDefaults(GenerationDefaults, frozen=True):
     steps: int = 7
 
 
@@ -36,14 +36,14 @@ BOOT_UNREACHABLE_VAE = Hub("harness/boot-precedence-vae", tag="prod")
 
 
 @endpoint(models={
-    "pipeline": Slot(str, default_checkpoint=BOOT_UNREACHABLE_PIPELINE, default_config=_ToyDefaults()),
-    "vae": Slot(str, default_checkpoint=BOOT_UNREACHABLE_VAE, default_config=_ToyDefaults()),
+    "pipeline": Slot(str, default_checkpoint=BOOT_UNREACHABLE_PIPELINE),
+    "vae": Slot(str, default_checkpoint=BOOT_UNREACHABLE_VAE),
 })
 class SlotBootPrecedenceEndpoint:
     def setup(self, pipeline: str, vae: str) -> None:
         self.pipeline_path = pipeline
         self.vae_path = vae
 
-    def slot_boot_precedence(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+    def slot_boot_precedence(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         weights = Path(self.pipeline_path) / "model.safetensors"
         return EchoOut(response=weights.read_text())

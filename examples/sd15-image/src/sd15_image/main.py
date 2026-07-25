@@ -37,7 +37,7 @@ class SD15Output(msgspec.Struct):
         dtype="fp16",
         files=("*.json", "*.txt", "*.fp16.safetensors"),
     ),
-    resources=Resources(vram_gb=6),
+    resources=Resources(gpu=True),
 )
 class SD15Image:
     def setup(self, model: StableDiffusionPipeline) -> None:

@@ -15,7 +15,10 @@ Layers under test, all real logic (fakes only at the torch module boundary):
    last in LRU victim order.
 3. The packing juggle: a 24 GB budget holds several ~5 GB picks hot; only
    real pressure demotes the LRU one (planner logic real; modules faked).
-4. ``Slot.share_components`` declaration surface.
+4. Automatic content-keyed sharing (SDK v2, pgw#647): ``Slot.share_components``
+   is DELETED — every Slot-declared pipeline slot's components are share
+   candidates with no declaration; asserted through the real executor's
+   share plan against a really-materialized snapshot.
 5. THE JUGGLE, end to end over the real worker + hub-double: four checkpoints
    through ONE ``selected_by=`` slot all stay hot (zero re-setups on the
    second round).
@@ -214,21 +217,60 @@ def test_packing_juggle_24gb_card_holds_multiple_picks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Slot.share_components declaration.
+# 4. Automatic content-keyed sharing (SDK v2): no declaration surface left.
 # ---------------------------------------------------------------------------
 
 
-def test_slot_share_components_declaration() -> None:
+def test_slot_components_share_automatically_without_declaration(tmp_path) -> None:
+    """pgw#647 hard cut: ``Slot(share_components=...)`` is DELETED — sharing
+    is automatic by content address. Through the REAL executor + store (a
+    genuinely materialized snapshot), a Slot-declared pipeline slot's
+    components must enter the content-keyed share plan with NO sharing
+    declaration anywhere on the endpoint."""
     class _Pipe:
         @classmethod
         def from_pretrained(cls, path: str) -> "_Pipe":  # pragma: no cover
             return cls()
 
-    slot = Slot(_Pipe, share_components=("text_encoder", " vae ", ""))
-    assert slot.share_components == ("text_encoder", "vae")
-    with pytest.raises(ValueError, match="duplicate"):
-        Slot(_Pipe, share_components=("vae", "vae"))
-    assert Slot(_Pipe).share_components == ()
+    # The v1 opt-in surface is gone for real.
+    with pytest.raises(TypeError, match="share_components"):
+        Slot(_Pipe, share_components=("vae",))  # type: ignore[call-arg]
+
+    blobs = BlobHost(tmp_path)
+    ref = "harness/juggle-share:prod"
+    snap = blobs.snapshot("snap-share", [
+        blobs.file("w-share", b"weights-share",
+                   path_in_snapshot="transformer/weights.txt"),
+        blobs.file("te-share", b"te-bytes",
+                   path_in_snapshot="text_encoder/weights.txt"),
+        blobs.file("idx-share", b"{}", path_in_snapshot="model_index.json"),
+    ])
+    try:
+        with hub_double() as (scheduler, harness):
+            conn = scheduler.wait_connection(0)
+            conn.wait_for(is_ready)
+            executor = harness.worker.executor
+            toy_endpoints.JUGGLE_SETUPS.clear()
+            assert _juggle(conn, "share-1", ref, snap).startswith("weights-share")
+
+            rec = next(
+                r for r in executor._classes.values()
+                if r.ready and r.cls is toy_endpoints.JuggleEndpoint)
+            spec = next(s for s in rec.specs if s.name == "juggle-echo")
+            # The endpoint declares ONLY the Slot — no sharing anything.
+            assert "pipeline" in spec.slots
+            path = executor.store.local_path(ref)
+            assert path is not None
+            plan = executor._component_share_plan(
+                spec, {"pipeline": str(path)},
+                {"pipeline": toy_endpoints.ToyCheckpointPipeline},
+            )
+            # EVERY component of the Slot-declared pipeline slot is a share
+            # candidate; root-level files (model_index.json) never share.
+            assert plan is not None
+            assert set(plan["pipeline"]) == {"transformer", "text_encoder"}
+    finally:
+        blobs.shutdown()
 
 
 # ---------------------------------------------------------------------------

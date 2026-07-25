@@ -105,6 +105,7 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
         want = cell_key.compute(
             family, pipeline_weight_lane(pipe),
             int(getattr(cfg, "lora_bucket", 0) or 0),
+            contract=cell_key.contract_digest(cc.declared_contract_facts(cfg)),
             regional=bool(getattr(cfg, "regional", False)),
         )
         reason = cell_key.mismatch(meta, want)

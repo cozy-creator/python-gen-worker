@@ -55,8 +55,8 @@ def _spec() -> EndpointSpec:
         payload_type=_Payload, output_mode="single", cls=_Endpoint,
         attr_name="run",
         models={"checkpoint": Hub("acme/wai-illustrious", tag="prod", flavor="fp8-w8a8")},
-        resources=Resources(vram_gb=1.0),
-        compile=Compile(family="sdxl", shapes=((1024, 1024),)),
+        resources=Resources(gpu=True),
+        compile=Compile(family="sdxl", shapes=((1024, 1024),), text_len=0),
     )
 
 

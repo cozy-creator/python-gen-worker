@@ -198,6 +198,7 @@ class _SelectedFunction:
         resources: Any = None,
         slots: Optional[Dict[str, Any]] = None,
         handles: Tuple[str, ...] = (),
+        spec: Any = None,
     ) -> None:
         self.cls = cls
         self.attr_name = attr_name
@@ -211,6 +212,9 @@ class _SelectedFunction:
         self.resources = resources
         self.slots = slots or {}
         self.handles = tuple(handles)
+        # SDK v2: the full EndpointSpec (defaults_type / slot_family /
+        # payload_axes) for the hub-less resolution chain.
+        self.spec = spec
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
@@ -233,6 +237,7 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
             resources=es.resources,
             slots=dict(es.slots),
             handles=es.handles,
+            spec=es,
         )
         for es in collect_from_namespace(mod)
     ]
@@ -624,6 +629,24 @@ def _load_injected_model(
     if not sl.is_pipeline:
         return sl.obj
     compile_cfg = getattr(decl, "compile", None) if decl is not None else None
+    if compile_cfg is not None:
+        # SDK v2: the compile machinery consumes the enriched CompileCell
+        # (decorator-level lora_bucket + declared shape contract), never the
+        # raw Compile. Warm guidance stays empty locally — the local mint
+        # and its verify both compute from this same object, so the store
+        # is self-consistent.
+        from ..registry import CompileCell
+
+        compile_cfg = CompileCell(
+            shapes=tuple(compile_cfg.shapes),
+            targets=tuple(compile_cfg.targets),
+            family=str(compile_cfg.family or ""),
+            regional=bool(compile_cfg.regional),
+            text_len=compile_cfg.text_len,
+            dynamic=tuple(compile_cfg.dynamic),
+            lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0),
+            guidance_scales=(),
+        )
     if compile_cfg is not None and device.strip().lower() != "cpu":
         from ..local_cells import enable_compiled as enable_compiled_local
         from ..models.cache_paths import tensorhub_cas_dir
@@ -655,18 +678,23 @@ def _handler_kwargs(bound_method: Any, resolved_models: Dict[str, str]) -> Dict[
 
 
 def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
-    """Hub-less ``ctx.slots`` (pgw#520): no hub means no repo-metadata JSON
-    ever arrives, so every Slot resolves against its code ``fallback=``
-    preset (or errors when it has none) — exactly the th#767 "default= is
-    the ONLY resolution source in hub-less mode" contract."""
+    """Hub-less ``ctx.slots`` (SDK v2): no hub means no catalog recipe JSON
+    ever arrives, so every Slot resolves to the NEUTRAL schema defaults of
+    the handler's derived config schema (``RequestContext[D]``) — exactly
+    the hub's own neutral stamp, so hub-less and production agree."""
     from ..api.slot import resolve_slot
 
+    spec = getattr(selected, "spec", None)
+    defaults_cls = getattr(spec, "defaults_type", None)
+    slot_family = getattr(spec, "slot_family", {}) or {}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
     for name, slot in selected.slots.items():
         try:
             resolved[name] = resolve_slot(
                 name, slot, ref=selected.bindings.get(name),
+                defaults_cls=defaults_cls,
+                family=slot_family.get(name, ""),
             )
         except ValueError as exc:
             errors[name] = str(exc)

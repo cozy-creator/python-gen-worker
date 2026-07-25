@@ -1,7 +1,7 @@
 """``gen-worker families`` — the pgw#520 family-vocabulary CLI surface.
 
 ``export-schemas <dir>`` writes one ``<family>[.lora].schema.json`` per
-registered ``(family, kind)`` :class:`~gen_worker.families.FamilyDefaults`
+registered ``(family, kind)`` :class:`~gen_worker.families.GenerationDefaults`
 subclass — the JSON Schema (draft 2020-12, ``additionalProperties: false``)
 tensorhub validates repo inference-defaults metadata against at PUT time
 (th#767c checkpoint kind; th#767b lora kind — see
@@ -29,7 +29,7 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
         "families",
         help="Inspect / export the per-family inference-defaults vocabulary.",
         description=(
-            "Operate on the registered gen_worker.families.FamilyDefaults "
+            "Operate on the registered gen_worker.families.GenerationDefaults "
             "vocabulary (pgw#520): each family's JSON Schema is the contract "
             "tensorhub validates repo inference-defaults metadata against."
         ),
@@ -45,7 +45,7 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
     export.add_argument(
         "--module", dest="module", default=None,
         help=(
-            "Import this module first so its FamilyDefaults subclasses "
+            "Import this module first so its GenerationDefaults subclasses "
             "register (e.g. an endpoint project's main package). Ships-only "
             "families export without this flag."
         ),

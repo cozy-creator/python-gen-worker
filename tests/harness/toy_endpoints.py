@@ -18,11 +18,11 @@ import msgspec
 
 from gen_worker import ConfigParam, Hub, RequestContext, Slot, ValidationError, endpoint
 from gen_worker.api.streaming import StreamResult, TokenUsage
-from gen_worker.families.base import FamilyDefaults, family
+from gen_worker.families.base import GenerationDefaults, family
 
 
 @family("harness-testfam")
-class _ToyDefaults(FamilyDefaults, frozen=True):
+class _ToyDefaults(GenerationDefaults, frozen=True):
     steps: int = 7
 
 
@@ -157,8 +157,8 @@ BOOT_UNREACHABLE_VAE = Hub("harness/boot-precedence-vae", tag="prod")
 
 
 @endpoint(models={
-    "pipeline": Slot(str, default_checkpoint=BOOT_UNREACHABLE_PIPELINE, default_config=_ToyDefaults()),
-    "vae": Slot(str, default_checkpoint=BOOT_UNREACHABLE_VAE, default_config=_ToyDefaults()),
+    "pipeline": Slot(str, default_checkpoint=BOOT_UNREACHABLE_PIPELINE),
+    "vae": Slot(str, default_checkpoint=BOOT_UNREACHABLE_VAE),
 })
 class SlotBootPrecedenceEndpoint:
     """Both slot defaults are tensorhub-sourced; neither may be boot-set-up
@@ -168,7 +168,7 @@ class SlotBootPrecedenceEndpoint:
         self.pipeline_path = pipeline
         self.vae_path = vae
 
-    def slot_boot_precedence(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+    def slot_boot_precedence(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         weights = Path(self.pipeline_path) / "model.safetensors"
         return EchoOut(response=weights.read_text())
 
@@ -177,7 +177,7 @@ DECLARED_PIPELINE = Hub("harness/slot-identity-declared", tag="prod")
 
 
 @endpoint(models={
-    "pipeline": Slot(str, default_checkpoint=DECLARED_PIPELINE, default_config=_ToyDefaults()),
+    "pipeline": Slot(str, default_checkpoint=DECLARED_PIPELINE),
 })
 class SlotIdentityFixedEndpoint:
     """FIXED slot (no selected_by=): a dispatched pick naming a DIFFERENT
@@ -186,7 +186,7 @@ class SlotIdentityFixedEndpoint:
     def setup(self, pipeline: str) -> None:
         self.pipeline_path = pipeline
 
-    def slot_identity_fixed(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+    def slot_identity_fixed(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         resolved = ctx.slots["pipeline"]
         ref = resolved.ref
         return EchoOut(response=f"{ref.source}:{ref.path}:{ref.tag}#{ref.flavor}")
@@ -198,7 +198,6 @@ CATALOG_DEFAULT_PIPELINE = Hub("harness/slot-catalog-default", tag="prod")
 @endpoint(models={
     "pipeline": Slot(
         str, selected_by="model", default_checkpoint=CATALOG_DEFAULT_PIPELINE,
-        default_config=_ToyDefaults(),
     ),
 })
 class SlotIdentityCatalogEndpoint:
@@ -208,7 +207,7 @@ class SlotIdentityCatalogEndpoint:
     def setup(self, pipeline: str) -> None:
         self.pipeline_path = pipeline
 
-    def slot_identity_catalog(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+    def slot_identity_catalog(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         resolved = ctx.slots["pipeline"]
         ref = resolved.ref
         return EchoOut(response=f"{ref.source}:{ref.path}:{ref.tag}#{ref.flavor}")
@@ -260,7 +259,6 @@ COMPOSED_SETUPS: list = []  # one entry per setup() run (identity-change proof)
 @endpoint(models={
     "pipeline": Slot(
         ToyComposedPipeline, default_checkpoint=COMPOSED_DECLARED,
-        default_config=_ToyDefaults(),
     ),
 })
 class ComposedEndpoint:
@@ -268,7 +266,7 @@ class ComposedEndpoint:
         COMPOSED_SETUPS.append(id(self))
         self.pipe = pipeline
 
-    def composed_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+    def composed_echo(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         p = self.pipe
         return EchoOut(response=(
             f"base={p.base_weights}|vae={p.vae.content}"
@@ -303,7 +301,7 @@ JUGGLE_SETUPS: list = []  # one entry per setup() run, in order
 @endpoint(models={
     "pipeline": Slot(
         ToyCheckpointPipeline, selected_by="model",
-        default_checkpoint=JUGGLE_DECLARED, default_config=_ToyDefaults(),
+        default_checkpoint=JUGGLE_DECLARED,
     ),
 })
 class JuggleEndpoint:
@@ -311,7 +309,7 @@ class JuggleEndpoint:
         JUGGLE_SETUPS.append(pipeline.weights)
         self.pipe = pipeline
 
-    def juggle_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+    def juggle_echo(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         return EchoOut(
             response=f"{self.pipe.weights}|setups={len(JUGGLE_SETUPS)}")
 

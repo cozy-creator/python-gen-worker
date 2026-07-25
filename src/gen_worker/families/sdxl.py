@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional, Tuple
 
-from .base import FamilyDefaults, family
+from .base import GenerationDefaults, family
 
 SdxlScheduler = Literal[
     "euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras",
@@ -17,7 +17,7 @@ SdxlScheduler = Literal[
 
 
 @family("sdxl")
-class SdxlDefaults(FamilyDefaults, frozen=True):
+class SdxlDefaults(GenerationDefaults, frozen=True):
     """SDXL inference defaults + constraints.
 
     ``max_guidance`` is a CLAMP constraint (e.g. a distilled/turbo lineage
@@ -35,7 +35,7 @@ class SdxlDefaults(FamilyDefaults, frozen=True):
 
 
 @family("sdxl", kind="lora")
-class SdxlLoraDefaults(FamilyDefaults, frozen=True):
+class SdxlLoraDefaults(GenerationDefaults, frozen=True):
     """SDXL LoRA overlay recipe opinions (pgw#516 settled foundation).
 
     A LoRA repo's OWN metadata — trained-in trigger words, the weight the

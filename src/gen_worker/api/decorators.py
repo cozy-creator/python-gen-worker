@@ -9,9 +9,9 @@
   (not ``setup``/``warmup``/``shutdown``, not ``_``-prefixed) is a routable
   function; helpers must be underscore-prefixed::
 
-      @endpoint(model=HF("org/repo", dtype="bf16"), resources=Resources(vram_gb=24))
+      @endpoint(model=HF("org/repo", dtype="bf16"), resources=Resources(gpu=True))
       class Generate:
-          def setup(self, model: FluxPipeline): self.model = model
+          def setup(self, model: FluxPipeline): self.pipeline = model
           def generate(self, ctx, p: Input) -> Output: ...
 
 * ``kind="conversion" | "training" | "dataset"`` selects the context subclass.
@@ -33,7 +33,6 @@ methods; only weight-sharing forces one class.
 from __future__ import annotations
 
 import inspect
-import math
 import re
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, overload
 
@@ -51,72 +50,64 @@ RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
 class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
-    """Hardware envelope for one function: ``Resources(gpu, vram_gb,
-    compute_capability, libraries, ram_gb, vcpus)``.
+    """Hardware envelope for one function (SDK v2): ONLY what the endpoint
+    CANNOT RUN WITHOUT — ``Resources(gpu, gpu_count, libraries, vcpus)``.
 
-    ``vram_gb`` is the recommended minimum CARD size: the total VRAM (GB) of
-    the smallest card the function targets — ``vram_gb=24`` means "runs on a
-    24 GB card". It is an optional placement hint (the orchestrator may use
-    it to pick a GPU SKU), not a free-memory requirement: the platform
-    reserves ~1 GB (``GPU_VRAM_OVERHEAD_GB``) for driver/framebuffer/CUDA
-    context, so ``vram_gb=24`` serves on a 24 GB card even though only
-    ~23.6 GB is free.
+    v2 hard cut (pgw#647): ``vram_gb``, ``ram_gb`` and
+    ``compute_capability`` are DELETED. th#683's prove-and-profile gate
+    MEASURES the real VRAM requirement per lane and shape; host RAM is an
+    opportunistic latency tier (the authoritative bytes are on disk in the
+    content-addressed store); and precision-per-card is the fit ladder's
+    call, never a placement gate. "What it needs to run WELL" belongs to the
+    ladder / residency planner / economics gate — all of which have
+    measurements the endpoint author does not.
 
-    ``Resources(vram_gb=12)`` implies ``gpu=True`` — declaring VRAM without a
-    GPU is a contradiction, not an under-declaration.
+    ``vram_gb_hint`` is the one survivor of ``vram_gb``: an OPTIONAL
+    first-build placement hint used only before profiling measurements
+    exist. It is never a gate, never a runtime ceiling, and never a
+    per-load reservation. Declaring it implies ``gpu=True``.
 
-    ``vram_gb`` is never a hard gate by itself: a smaller card still serves
-    the function through the runtime fit ladder (fp8 storage / emergency
-    4-bit / CPU offload / CPU-only), degraded but running. Set
-    ``strict_vram=True`` only for bindings that cannot tolerate CPU-resident
-    weights (a compiled fixed-shape graph, a TensorRT engine) — the worker
-    then refuses the CPU-touching rungs (offload / cpu) outright instead of
-    serving slowly. The on-GPU rungs (fp8 storage, emergency 4-bit) remain
-    available under ``strict_vram``.
+    ``strict_vram=True`` is a genuine incapability declaration for bindings
+    that cannot tolerate CPU-resident weights (a compiled fixed-shape
+    graph, a TensorRT engine): the worker refuses the CPU-touching fit
+    rungs (offload / cpu) outright instead of serving slowly. The on-GPU
+    rungs (fp8 storage, emergency 4-bit) remain available.
 
-    ``ram_gb`` / ``vcpus`` (gw#490) declare the HOST-side ask: minimum host
-    RAM (GB) and vCPU count the pod must be created with. Video-class
-    endpoints need both (pinned TE park + CPU-heavy encode); the hub maps
-    them to provider pod-creation minimums (th#740) and destroys
-    under-allocated pods at create. Host asks do not imply ``gpu=True``.
+    ``vcpus`` (gw#490) declares the host-side vCPU ask (CPU-heavy encode);
+    it does not imply ``gpu=True``. ``gpu_count`` (>1 later feeds
+    ``DeviceRequest`` — pgw#648) declares how many devices one instance
+    needs; endpoint code NEVER picks devices.
     """
 
     gpu: bool = False
-    vram_gb: float | None = None
-    compute_capability: float | None = None
+    gpu_count: int = 1
     libraries: tuple[str, ...] = ()
     strict_vram: bool = False
-    ram_gb: float | None = None
     vcpus: int | None = None
+    vram_gb_hint: float | None = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
-        if self.vram_gb is not None:
-            v = float(self.vram_gb)
-            if v <= 0:
-                raise ValueError(f"vram_gb must be positive, got {v}")
-            force(self, "vram_gb", v)
-        if self.compute_capability is not None:
-            c = float(self.compute_capability)
-            if c <= 0:
-                raise ValueError(f"compute_capability must be positive, got {c}")
-            force(self, "compute_capability", c)
         if self.libraries:
             force(self, "libraries", tuple(
                 str(x).strip() for x in self.libraries if str(x).strip()
             ))
-        if self.vram_gb is not None or self.compute_capability is not None:
+        n_gpu = int(self.gpu_count)
+        if n_gpu <= 0:
+            raise ValueError(f"gpu_count must be positive, got {self.gpu_count}")
+        force(self, "gpu_count", n_gpu)
+        if self.vram_gb_hint is not None:
+            v = float(self.vram_gb_hint)
+            if v <= 0:
+                raise ValueError(f"vram_gb_hint must be positive, got {v}")
+            force(self, "vram_gb_hint", v)
+        if n_gpu > 1 or self.vram_gb_hint is not None:
             force(self, "gpu", True)
-        if self.ram_gb is not None:
-            r = float(self.ram_gb)
-            if r <= 0:
-                raise ValueError(f"ram_gb must be positive, got {r}")
-            force(self, "ram_gb", r)
         if self.vcpus is not None:
-            n = int(self.vcpus)
-            if n <= 0:
-                raise ValueError(f"vcpus must be positive, got {n}")
-            force(self, "vcpus", n)
+            c = int(self.vcpus)
+            if c <= 0:
+                raise ValueError(f"vcpus must be positive, got {c}")
+            force(self, "vcpus", c)
 
 
 class NoWarmup(msgspec.Struct, frozen=True):
@@ -419,37 +410,99 @@ def _validate_env_decl(owner: str, env: Any) -> Tuple[str, ...]:
     return tuple(out)
 
 
-class Compile(msgspec.Struct, frozen=True):
-    """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
+class DynamicDim(msgspec.Struct, frozen=True):
+    """One DECLARED dynamic dim of the compile shape contract (SDK v2).
 
-    ``Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024)))``
-    names the model FAMILY (caches key on the traced graph, so every
-    fine-tune of a family shares one artifact) and the shape set the compile
-    job warms. A shape row is ``(width, height)`` for image models or
-    ``(width, height, frames)`` for video models (ie#381): video DiT graphs
-    key on the token count, which includes the frame axis, so every
-    (resolution, duration) preset pair is its own graph. Two-stage presets
-    contribute BOTH their base and refined resolutions as rows.
+    ``dim`` names the logical axis (``"batch"`` | ``"sequence"``); ``min``/
+    ``max`` bound it. The SDK translates the declaration into explicit
+    ``mark_dynamic(t, dim, min=, max=)`` marks BEFORE the first compile —
+    dynamism only where declared, never discovered.
+
+    ``min`` must be >= 2: torch's 0/1 specialization is not overridable
+    (ie#543 measured — marking a size-1 dim dynamic is refused), so size 1
+    always gets its own free specialized graph and a declared range starts
+    at 2. Measured cost of a declared-dynamic dim: +0.6% to +5.5%, with no
+    fp8 fallback — a viable tool, just not needed for batch today (ie#542:
+    ~1.0x at our operating point; the axis stays SUPPORTED so a future
+    model/GPU with SM headroom turns it on by declaration, not re-plumbing).
+    """
+
+    dim: str
+    min: int
+    max: int
+
+    def __post_init__(self) -> None:
+        force = msgspec.structs.force_setattr
+        d = str(self.dim or "").strip().lower()
+        if d not in ("batch", "sequence"):
+            raise ValueError(
+                f'DynamicDim.dim must be "batch" or "sequence", got {self.dim!r}'
+            )
+        force(self, "dim", d)
+        lo, hi = int(self.min), int(self.max)
+        if lo < 2:
+            raise ValueError(
+                f"DynamicDim({d!r}).min must be >= 2 (torch 0/1 "
+                f"specialization is not overridable; size 1 gets its own "
+                f"free specialized graph), got {lo}"
+            )
+        if hi <= lo:
+            raise ValueError(f"DynamicDim({d!r}).max must exceed min, got {lo}..{hi}")
+        force(self, "min", lo)
+        force(self, "max", hi)
+
+
+class Compile(msgspec.Struct, frozen=True):
+    """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384),
+    carrying the DECLARED shape contract (SDK v2, pgw#647): the compiler is
+    TOLD every static bucket and every dynamic range up front; it never
+    discovers a shape from traffic.
+
+    ``Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024)),
+    text_len=512)`` names the model FAMILY (caches key on the traced graph,
+    so every fine-tune of a family shares one artifact), the spatial shape
+    buckets the compile job warms, and the PINNED text-sequence length. A
+    shape row is ``(width, height)`` for image models or ``(width, height,
+    frames)`` for video models (ie#381). Two-stage presets contribute BOTH
+    their base and refined resolutions as rows.
 
     SHAPES DERIVE FROM THE PAYLOAD PRESET ENUM (ie#345 fleet policy): when
     the endpoint's payload uses size buckets, ``shapes`` must be exactly
     that bucket table — one source of truth, 100% cache coverage of legal
-    requests. Endpoints still accepting free width/height use the family's
-    dialect-default shapes until they adopt buckets. CFG is a graph shape
-    too: CFG variants trace batch-2 graphs, distilled variants batch-1.
-    ``guidance_scales`` declares the image regimes Forge must warm into the
-    same family cell; for example ``(5.0, 0.0)`` captures CFG and no-CFG calls
-    when they share one module graph. A LoRA-mutated graph needs its own lane.
-    Empty preserves the pipeline's default. Declaring this does NOT force compilation: the
-    worker arms torch.compile only when a verified cache artifact for
-    (family, SKU, torch, triton) is seeded — otherwise it stays eager.
-    See ``gen_worker.compile_cache``.
+    requests.
+
+    ``text_len`` is the text-sequence axis ie#544 proved was missing: a
+    prompt-length-dependent sequence dim reaching a statically-compiled
+    denoiser mints a new graph per distinct prompt length — unbounded and
+    un-warmable. Every ``compile=`` endpoint MUST state it (a walk-time
+    lint enforces this): a positive value pins the token length (pad
+    embeddings with :func:`gen_worker.pad_text_sequence` — a pin that fixes
+    only the SIZE is not a pin, dynamo guards on STRIDES); ``0`` declares
+    "this endpoint has no text conditioning" explicitly; alternatively
+    declare the axis dynamic via ``dynamic=(DynamicDim("sequence", min=...,
+    max=...),)``.
+
+    CFG regimes are graph shapes too, but they are a PAYLOAD-FIELD fact:
+    annotate the guidance field with :class:`~gen_worker.CompileAxis`
+    equivalence classes (``Compile(guidance_scales=...)`` is deleted in
+    v2). The warm plan derives from the cross-product of axis classes x
+    shape buckets.
+
+    Declaring this does NOT force compilation: the worker arms
+    torch.compile only when a verified cache artifact for (family, SKU,
+    torch, triton) is seeded — otherwise it stays eager. See
+    ``gen_worker.compile_cache``.
     """
 
     shapes: tuple[tuple[int, ...], ...]
     targets: tuple[str, ...] = ("transformer", "vae.decode")
     family: str = ""
-    guidance_scales: tuple[float, ...] = ()
+    # SDK v2 text-sequence axis (ie#544): None = undeclared (walk-time lint
+    # failure for compile= endpoints); 0 = explicitly unconditioned; >0 =
+    # pinned token length.
+    text_len: Optional[int] = None
+    # SDK v2 declared-dynamic dims (min/max ranges -> explicit marks).
+    dynamic: tuple[DynamicDim, ...] = ()
     # Regional compilation (diffusers compile_repeated_blocks): compile the
     # target's repeated transformer blocks instead of the whole forward.
     # REQUIRED for big fp8 layerwise-cast models (ie#381, measured on LTX
@@ -459,12 +512,6 @@ class Compile(msgspec.Struct, frozen=True):
     # graph per shape, reused across blocks). Cells record the mode — a
     # mode drift consumer stays eager (cache would miss anyway).
     regional: bool = False
-    # gw#561: dynamic-LoRA endpoints declare the traced rank bucket. The
-    # worker then serves the branch-bearing graph family: canonical zeroed
-    # rank-<bucket> branches enabled at load (gw#547 compiled-lane
-    # contract), only `<lane>-lora<bucket>` cells adopt, and adapter swaps
-    # stay buffer copies — never a recompile. 0 = branchless (today).
-    lora_bucket: int = 0
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -484,25 +531,48 @@ class Compile(msgspec.Struct, frozen=True):
             raise ValueError("Compile.targets must not be empty")
         force(self, "targets", targets)
         force(self, "family", str(self.family or "").strip())
-        guidance_scales = tuple(float(v) for v in self.guidance_scales)
-        if any(not math.isfinite(v) or v < 0.0 for v in guidance_scales):
-            raise ValueError(
-                "Compile.guidance_scales must contain finite non-negative values, "
-                f"got {self.guidance_scales!r}"
-            )
-        if len(set(guidance_scales)) != len(guidance_scales):
-            raise ValueError("Compile.guidance_scales must not contain duplicates")
-        force(self, "guidance_scales", guidance_scales)
-        bucket = int(self.lora_bucket or 0)
-        if bucket:
-            from ..models.w8a8_lora import RANK_BUCKETS
-
-            if bucket not in RANK_BUCKETS:
+        if self.text_len is not None:
+            tl = int(self.text_len)
+            if tl < 0:
                 raise ValueError(
-                    f"Compile.lora_bucket must be 0 or one of {RANK_BUCKETS}, "
-                    f"got {self.lora_bucket!r}"
+                    f"Compile.text_len must be >= 0 (0 = explicitly "
+                    f"unconditioned), got {self.text_len!r}"
                 )
-        force(self, "lora_bucket", bucket)
+            force(self, "text_len", tl)
+        dyn = tuple(self.dynamic)
+        if any(not isinstance(d, DynamicDim) for d in dyn):
+            raise TypeError("Compile.dynamic must be a tuple of DynamicDim rows")
+        if len({d.dim for d in dyn}) != len(dyn):
+            raise ValueError("Compile.dynamic repeats a dim")
+        force(self, "dynamic", dyn)
+
+    @property
+    def sequence_dynamic(self) -> Optional[DynamicDim]:
+        for d in self.dynamic:
+            if d.dim == "sequence":
+                return d
+        return None
+
+    @property
+    def batch_dynamic(self) -> Optional[DynamicDim]:
+        for d in self.dynamic:
+            if d.dim == "batch":
+                return d
+        return None
+
+    def contract_axes(self) -> Dict[str, Any]:
+        """The canonical shape-contract facts (feeds the cell key's
+        contract digest — pgw#647: a worker on a newer contract must never
+        consume an older cell)."""
+        return {
+            "shapes": [list(s) for s in self.shapes],
+            "targets": list(self.targets),
+            "text_len": self.text_len,
+            "dynamic": [
+                {"dim": d.dim, "min": d.min, "max": d.max} for d in self.dynamic
+            ],
+            "regional": bool(self.regional),
+        }
 
 
 class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
@@ -512,9 +582,9 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     resources: Resources = msgspec.field(default_factory=Resources)
     models: Mapping[str, Binding] = msgspec.field(default_factory=dict)
     # Slot-declared entries in `models=`/`model=` (pgw#520): a subset of
-    # `models`' keys, carrying the Slot's selected_by/default_checkpoint/
-    # default_config metadata that `models` (a plain Binding map, for
-    # back-compat with every existing model-injection call site) can't hold.
+    # `models`' keys, carrying the Slot's selected_by/default_checkpoint
+    # metadata that `models` (a plain Binding map every model-injection
+    # call site understands) can't hold.
     slots: Mapping[str, Slot] = msgspec.field(default_factory=dict)
     runtime: Optional[str] = None
     name: Optional[str] = None  # function-shaped endpoints only
@@ -530,6 +600,14 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # requests would corrupt each other). ``reentrant=True`` is the explicit
     # opt-in for classes whose handlers genuinely mutate no instance state.
     reentrant: bool = False
+    # gw#561 / SDK v2: dynamic-LoRA endpoints declare the resident traced
+    # rank bucket at the DECORATOR (it shapes the graph family and the
+    # resident branch buffers whether or not compile= is present). The
+    # worker serves the branch-bearing graph family: canonical zeroed
+    # rank-<bucket> branches enabled at load (gw#547 compiled-lane
+    # contract), only `<lane>-lora<bucket>` cells adopt, and adapter swaps
+    # stay buffer copies — never a recompile. 0 = branchless.
+    lora_bucket: int = 0
     # gw#470 boot warmup: None = auto-synthesize from each handler's payload
     # schema; {method: payload-or-None} = declared warmup payloads (None
     # skips that method); NoWarmup(reason) = class-level opt-out.
@@ -618,6 +696,15 @@ def _validate_handler_shape(owner: str, fn: Callable[..., Any], *, is_method: bo
             f"(got params {[p.name for p in params]}). Handlers take the "
             "request context first and a msgspec.Struct payload second; "
             "prefix non-handler methods with an underscore."
+        )
+    if is_method and len(params) > 2:
+        raise TypeError(
+            f"@endpoint: {owner} must accept exactly (self, ctx, payload) — "
+            f"got extra params {[p.name for p in params[2:]]}. SDK v2 "
+            "(pgw#647): per-handler model args are rejected; setup(self, "
+            "pipeline, ...) runs once per instance and stores "
+            "self.pipeline — one live instance == one binding set, so the "
+            "runtime routed this request here BECAUSE the bindings match."
         )
 
 
@@ -747,17 +834,11 @@ def _resolve_single_slot(
                 f"@endpoint class {cls.__name__!r}: model= needs exactly one "
                 f"setup() parameter to name the slot (setup declares {named})."
             )
-        # No setup: slot name comes from the (single) handler's injected param.
-        injected: set[str] = set()
-        for attr, method in handlers:
-            for p in _handler_params(method, is_method=True)[2:]:
-                injected.add(p.name)
-        if len(injected) == 1:
-            return injected.pop()
         raise ValueError(
-            f"@endpoint class {cls.__name__!r}: model= with no setup() needs "
-            f"exactly one injected handler parameter after (ctx, payload) to "
-            f"name the slot (found {sorted(injected) or 'none'})."
+            f"@endpoint class {cls.__name__!r}: model= requires a setup() "
+            "method (SDK v2: instances own their models — setup(self, "
+            "pipeline) stores self.pipeline; handlers are (self, ctx, "
+            "payload) with no per-handler model args)."
         )
 
     name = _name_it()
@@ -777,6 +858,12 @@ def _validate_class_models(
     if not all_keys:
         return
     setup_kwargs = _setup_params(cls)
+    if setup_kwargs is None:
+        raise ValueError(
+            f"@endpoint class {cls.__name__!r}: models slot(s) "
+            f"{sorted(all_keys)} require a setup() method (SDK v2: "
+            "instances own their models; per-handler injection is deleted)."
+        )
     if setup_kwargs is not None:
         has_var_kw = any(
             p.kind is inspect.Parameter.VAR_KEYWORD for p in setup_kwargs.values()
@@ -853,6 +940,7 @@ def _decorate_class(
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     reentrant: bool = False,
+    lora_bucket: int = 0,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
@@ -874,7 +962,7 @@ def _decorate_class(
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=runtime, compile=compile, child_calls=child_calls,
-        reentrant=reentrant,
+        reentrant=reentrant, lora_bucket=lora_bucket,
         warmup=_validate_warmup_decl(cls.__name__, warmup),
         regimes=_validate_class_regimes(
             cls.__name__, regimes, {attr for attr, _ in handlers}
@@ -910,6 +998,7 @@ def _decorate_function(
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     reentrant: bool = False,
+    lora_bucket: int = 0,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
@@ -956,7 +1045,7 @@ def _decorate_function(
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=None, name=(name or fn.__name__), is_function=True,
-        compile=compile, child_calls=child_calls,
+        compile=compile, child_calls=child_calls, lora_bucket=lora_bucket,
         regimes={"": _validate_function_regimes(fn.__name__, regimes)},
         handles=_validate_handles(fn.__name__, handles),
         runtime_formula={"": formulas["*"]} if "*" in formulas else {},
@@ -983,6 +1072,7 @@ def endpoint(
     compile: Optional[Compile] = ...,
     child_calls: bool = ...,
     reentrant: bool = ...,
+    lora_bucket: int = ...,
     warmup: Optional[WarmupDecl] = ...,
     regimes: Optional[RegimesDecl] = ...,
     handles: Optional[Any] = ...,
@@ -1003,6 +1093,7 @@ def endpoint(
     compile: Optional[Compile] = None,
     child_calls: bool = False,
     reentrant: bool = False,
+    lora_bucket: int = 0,
     warmup: Optional[WarmupDecl] = None,
     regimes: Optional[RegimesDecl] = None,
     handles: Optional[Any] = None,
@@ -1013,8 +1104,8 @@ def endpoint(
 
     ``model=``/``models=`` values are a ``Binding`` (a fixed pick — HF/Hub/
     Civitai/ModelScope) or a :class:`~gen_worker.api.slot.Slot` (a
-    hub-resolved slot: ``selected_by=``, ``default_checkpoint=``,
-    ``default_config=``; pgw#520). A bare binding is sugar for
+    hub-resolved slot: ``selected_by=``, ``default_checkpoint=``; SDK v2).
+    A bare binding is sugar for
     ``Slot(<inferred pipeline class>, default_checkpoint=ref)`` with no hub
     involvement — both forms can mix in one ``models={}`` dict.
     """
@@ -1029,6 +1120,27 @@ def endpoint(
         raise TypeError(
             f"@endpoint compile= must be a Compile, got {type(compile).__name__}"
         )
+    if compile is not None and kind == "inference" \
+            and compile.text_len is None and compile.sequence_dynamic is None:
+        raise ValueError(
+            "@endpoint compile=: no text-sequence axis declared (SDK v2 "
+            "lint, ie#544). A variable text dim reaching a statically "
+            "compiled denoiser mints a new graph per prompt length — "
+            "unbounded and un-warmable. Declare Compile(text_len=<pinned "
+            "token length>) (pad embeddings with gen_worker."
+            "pad_text_sequence), Compile(text_len=0) for an explicitly "
+            "unconditioned model, or a dynamic range via "
+            "Compile(dynamic=(DynamicDim('sequence', min=.., max=..),))."
+        )
+    bucket = int(lora_bucket or 0)
+    if bucket:
+        from ..models.w8a8_lora import RANK_BUCKETS
+
+        if bucket not in RANK_BUCKETS:
+            raise ValueError(
+                f"@endpoint lora_bucket must be 0 or one of {RANK_BUCKETS}, "
+                f"got {lora_bucket!r}"
+            )
     model_map, slot_map = _normalize_models(model, models)
     owner = getattr(target, "__name__", "<endpoint>") if target is not None else "<endpoint>"
     engine_runtime, runtime_formulas = _split_runtime_kwarg(owner, runtime)
@@ -1042,7 +1154,8 @@ def endpoint(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=engine_runtime,
                 runtime_formula=runtime_formulas, compile=compile,
-                child_calls=child_calls, reentrant=reentrant, warmup=warmup,
+                child_calls=child_calls, reentrant=reentrant,
+                lora_bucket=bucket, warmup=warmup,
                 regimes=regimes, handles=handles, config=config, env=env,
             )
         if inspect.isfunction(obj):
@@ -1050,7 +1163,8 @@ def endpoint(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=engine_runtime,
                 runtime_formula=runtime_formulas, name=name, compile=compile,
-                child_calls=child_calls, reentrant=reentrant, warmup=warmup,
+                child_calls=child_calls, reentrant=reentrant,
+                lora_bucket=bucket, warmup=warmup,
                 regimes=regimes, handles=handles, config=config, env=env,
             )
         raise TypeError(
@@ -1063,7 +1177,7 @@ def endpoint(
 
 
 __all__ = [
-    "Compile", "ConfigParam", "EndpointDecl", "NoWarmup", "RegimesDecl",
-    "Resources", "SlotLike", "VariantDecl", "WarmupDecl", "endpoint",
-    "variant_of",
+    "Compile", "ConfigParam", "DynamicDim", "EndpointDecl", "NoWarmup",
+    "RegimesDecl", "Resources", "SlotLike", "VariantDecl", "WarmupDecl",
+    "endpoint", "variant_of",
 ]

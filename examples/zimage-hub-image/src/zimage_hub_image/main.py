@@ -40,7 +40,7 @@ class ZImageOutput(msgspec.Struct):
     height: int
 
 
-@endpoint(model=Hub(HUB_REF, tag="prod"), resources=Resources(vram_gb=22))
+@endpoint(model=Hub(HUB_REF, tag="prod"), resources=Resources(gpu=True))
 class ZImageTurbo:
     def setup(self, model: ZImagePipeline) -> None:
         self._pipe = model

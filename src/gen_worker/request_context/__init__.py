@@ -49,6 +49,7 @@ LogLevel = Literal["debug", "info", "warning", "error"]
 
 from ..api.errors import AuthError
 from ..api.slot import ResolvedSlot
+from ..families.base import GenerationDefaults
 from ..io import DEFAULT_IMAGE_FORMAT, DEFAULT_IMAGE_QUALITY, encode_image
 from ..stage_timing import StageTimer
 from ..api.types import (
@@ -138,8 +139,31 @@ from ._helpers import (
 
 from ._stream import _RequestOutputStream
 
-class RequestContext:
-    """Context object passed to request handlers, allowing cancellation."""
+from typing import Generic, TypeVar
+
+D = TypeVar("D", bound=GenerationDefaults)
+
+
+class RequestContext(Generic[D]):
+    """Context object passed to request handlers.
+
+    SDK v2 (pgw#647): ``ctx`` carries only REQUEST-SCOPED facts — resolved
+    refs/digests (honest output metadata), the typed per-model config
+    (``ctx.defaults``), progress/cancel, request id, timing. Model
+    instances live on the endpoint object (``self.pipeline``, stored by
+    ``setup()``); the runtime routed this request here because the
+    instance's bindings match.
+
+    The type parameter is the handler's derived config schema:
+    ``ctx: RequestContext[SdxlDefaults]`` — the registry derives the schema
+    from this annotation (catalog values decode against it, th#1116).
+
+    Output contract: RETURN the output object (``ImageOutput`` etc.); the
+    SDK owns encode + upload. A handler that hand-uploads inside its body
+    opts out of the encode/upload tail overlap (gw#516) — the contract is
+    "return, don't upload". The blocking ``ctx.save_*`` methods gain
+    ``async`` twins in pgw#652 Phase 1 (an addition, not a break).
+    """
 
     def __init__(
         self,
@@ -269,13 +293,12 @@ class RequestContext:
 
     @property
     def slots(self) -> Mapping[str, "ResolvedSlot[Any]"]:
-        """The pgw#520 resolution chain, one entry per ``Slot``-declared
-        model slot: ``ctx.slots["pipeline"].ref`` / ``.defaults`` — repo
-        metadata merged over the endpoint's code ``default_config`` preset
-        (which LOSES to repo metadata when both are present). A slot with
-        no repo metadata and no ``Slot(default_config=...)`` raises on
-        access (not at dispatch) — read it only when your handler needs it.
-        """
+        """One entry per ``Slot``-declared model slot:
+        ``ctx.slots["pipeline"].ref`` / ``.defaults`` / ``.regime`` — the
+        catalog-resolved recipe decoded against the handler's derived
+        config schema (SDK v2; ``ctx.defaults`` is the root-slot
+        shortcut). A slot that failed resolution raises on access (not at
+        dispatch) — read it only when your handler needs it."""
         return self._slots
 
     def _set_resolved_slots(
@@ -287,6 +310,74 @@ class RequestContext:
         resolve step runs after context construction, unlike the executor
         which has every input up front."""
         self._slots = _SlotTable(resolved, errors or {})
+
+    def _root_slot(self) -> "ResolvedSlot[Any]":
+        """The root slot's resolution: the slot named "pipeline" when
+        present, else the single resolved slot."""
+        resolved = self._slots._resolved
+        if "pipeline" in resolved:
+            return self._slots["pipeline"]
+        if len(resolved) == 1:
+            return next(iter(resolved.values()))
+        if not resolved and self._slots._errors:
+            # Surface the deferred resolution error, not a KeyError.
+            name = next(iter(self._slots._errors))
+            return self._slots[name]
+        raise ValueError(
+            f"ctx has {len(resolved)} resolved slots ({sorted(resolved)}); "
+            "ctx.defaults/ctx.for_request need an unambiguous root — read "
+            "ctx.slots[name] explicitly"
+        )
+
+    @property
+    def defaults(self) -> D:
+        """The resolved per-model config for this request's ROOT slot,
+        typed as the handler's ``RequestContext[D]`` annotation: the
+        catalog-resolved recipe (th#1116) decoded against the derived
+        schema, with per-lora field overrides applied (pgw#516). Payload
+        values still win over these — that precedence is handler logic."""
+        d = self._root_slot().defaults
+        if d is None:
+            raise ValueError(
+                "ctx.defaults: no config schema derived for this handler — "
+                "annotate the context parameter as RequestContext[YourDefaults]"
+            )
+        return d
+
+    def for_request(
+        self,
+        pipeline: Any,
+        *,
+        sampler: str = "",
+        seed: Optional[int] = None,
+        generator: Optional["torch.Generator"] = None,
+        scheduler_config: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """A per-request VIEW of ``pipeline`` (SDK v2): same module objects
+        (shared weights; the compiled graph stays bound), OWN scheduler —
+        cloned from the instance scheduler's config, with the resolved
+        checkpoint's regime applied (v_prediction is a checkpoint fact the
+        SDK applies here, never payload logic) and ``sampler`` selecting
+        the scheduler class from the SDK table (``gen_worker.view.SAMPLERS``).
+
+        Never assign ``self.pipeline.scheduler`` per request — that is an
+        instance mutation two concurrent requests corrupt each other
+        through, and a module swap the compiled graph guards against.
+        """
+        from ..view import for_request as _view_for_request
+
+        regime = "standard"
+        try:
+            regime = self._root_slot().regime
+        except (ValueError, KeyError):
+            pass
+        gen = generator
+        if gen is None and seed is not None:
+            gen = self.generator(seed)
+        return _view_for_request(
+            pipeline, sampler=sampler, regime=regime, generator=gen,
+            scheduler_config=scheduler_config,
+        )
 
     @property
     def device(self) -> "torch.device":
