@@ -22,6 +22,7 @@ from .refs import TensorhubRef
 from .. import activity as _activity
 from ..capability import InsufficientDiskError
 from ..s3_transfer import S3TransferGrant, download_file_with_grant
+from .loading import safetensors_file_valid
 
 _log = logging.getLogger("gen_worker.download")
 
@@ -778,7 +779,6 @@ def _verify_materialized_tree(
     BLAKE3; reassembled chunked originals (which the manifest digests only
     part-wise) get the structural safetensors check. Returns
     ``(ok, bad)`` — hex digests in ``bad`` name blobs to quarantine."""
-    from .loading import safetensors_file_valid
 
     bad: List[str] = []
     covered: Set[Path] = set()

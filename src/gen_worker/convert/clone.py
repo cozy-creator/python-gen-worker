@@ -47,6 +47,10 @@ from .writer import (
     shard_safetensors_by_offset,
     snapshot_weight_groups,
 )
+from .convert import run_inline_conversion
+from .layout import infer_model_family_variant_from_hint
+from ..api.slot import OBJECTIVES
+from gen_worker.models.refs import flavor_token
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +90,6 @@ class OutputSpec:
 
     @property
     def label(self) -> str:
-        from gen_worker.models.refs import flavor_token
 
         return flavor_token(f"{self.dtype}-{self.file_layout}-{self.file_type}")
 
@@ -317,7 +320,6 @@ def build_flavor_tree(
     Returns ``(tree_root, attrs)``. Raises ``InlineConversionNotPossible``
     for calibrated dtypes.
     """
-    from .convert import run_inline_conversion
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -647,7 +649,6 @@ def _hf_plan_looks_like_ltx2(plan: Any) -> bool:
     token themselves, so :func:`layout.infer_model_family_variant_from_hint`
     resolves it from paths alone — the same signal
     ``detect_huggingface_source_layout`` uses post-download."""
-    from .layout import infer_model_family_variant_from_hint
 
     for p in getattr(plan, "paths", None) or ():
         if infer_model_family_variant_from_hint(str(p)) == "ltx2":
@@ -864,7 +865,6 @@ def run_clone(
     objective: str | None = None,
     distilled: bool = False,
 ) -> CloneResult:
-    from ..api.slot import OBJECTIVES
 
     provider = str(provider or "").strip().lower()
     destination = normalize_destination_ref(destination_repo)

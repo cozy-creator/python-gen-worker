@@ -59,8 +59,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+import requests
+
+from . import cell_key
 from . import compile_cache as cc
-from .models import provision
+from .convert.hub import blake3_file
+# module import (not `from .loading import pipeline_weight_lane`): tests
+# monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
+from .models import loading, provision
+from .models.memory import low_vram_mode
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +199,6 @@ class CellPublisher:
     # -- wire ---------------------------------------------------------------
 
     def _post(self, path: str, payload: dict, *, timeout: float) -> dict:
-        import requests
 
         resp = requests.post(
             f"{self.base_url}{path}",
@@ -226,7 +232,6 @@ class CellPublisher:
         publish-complete bookkeeping. Raises on any failure; the caller
         treats every raise as non-fatal to serving.
         """
-        from . import cell_key
 
         key = str(meta.get("cell_key") or "").strip()
         if not key:
@@ -381,8 +386,6 @@ def enable_compiled(
             "capture would re-point the process-global inductor cache dir "
             "away from it (gw#608)", selection_bug)
 
-    from .models.loading import pipeline_weight_lane
-
     # gw#561: the eager-miss rollback in provision.enable_compiled dropped
     # the branch lane; the mint must key + trace the DECLARED graph family.
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
@@ -393,12 +396,11 @@ def enable_compiled(
     # lane/declared shapes+targets/module structure) — never the traced FX
     # graph bytes — so the ref the hub's self-attested dispatch fence needs
     # is known BEFORE any compile has happened.
-    from . import cell_key as cell_key_mod
 
     try:
-        key = cell_key_mod.compute(
-            family, pipeline_weight_lane(pipe), bucket,
-            contract=cell_key_mod.contract_digest(
+        key = cell_key.compute(
+            family, loading.pipeline_weight_lane(pipe), bucket,
+            contract=cell_key.contract_digest(
                 cc.declared_contract_facts(cfg)),
             regional=bool(getattr(cfg, "regional", False)),
         ).digest
@@ -449,7 +451,7 @@ def enable_compiled(
         capture_dir = mint_root / "capture"
         label = cc.flavor_label(
             cc.runtime_key()["sku"], cc.runtime_key()["torch"],
-            pipeline_weight_lane(pipe))
+            loading.pipeline_weight_lane(pipe))
         target = mint_root / f"{label}.tar.gz"
 
     try:
@@ -524,8 +526,6 @@ def finalize_self_mint(
         _unregister(pending)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return None
-
-    from .convert.hub import blake3_file
 
     key = str(meta.get("cell_key") or "").strip() or pending.cell_key
     minted = SelfMint(
@@ -637,8 +637,6 @@ def republish_after_shape_warm(
             "hot-swap: live cache root %s has no inductor tree; nothing to "
             "republish", live_root)
         return False
-    from .models.loading import pipeline_weight_lane
-    from .models.memory import low_vram_mode
 
     tmp_root = Path(tempfile.mkdtemp(prefix="cellrepub-"))
     try:
@@ -652,7 +650,7 @@ def republish_after_shape_warm(
             low_vram_mode=low_vram_mode(pipe),
             compile_mode=(
                 "regional" if getattr(cfg, "regional", False) else "whole"),
-            weight_lane=pipeline_weight_lane(pipe),
+            weight_lane=loading.pipeline_weight_lane(pipe),
             lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
             graph_signature=graph_signature,
             weight_contract=weight_contract,
@@ -703,9 +701,8 @@ def _fail_closed(
     ``selection_bug``, when set, is a genuine mint-impossibility exit that
     ALSO followed a caught cell_selection_bug (th#1031) — chained onto the
     raised refusal so the caller's report is never dropped."""
-    from .models.loading import pipeline_weight_lane
 
-    lane = pipeline_weight_lane(pipe)
+    lane = loading.pipeline_weight_lane(pipe)
     if lane.startswith(("w8a8", "w4a4")):
         refusal = cc.CompiledLaneUnavailableError(
             f"{lane[:4].upper()} requires a compile cell and the self-mint "

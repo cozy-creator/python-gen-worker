@@ -28,6 +28,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Tuple
+from . import compile_cache
 
 logger = logging.getLogger(__name__)
 
@@ -396,7 +397,6 @@ def _run_warm(job: _WarmJob) -> None:
 
 
 def router_of(pipeline: Any) -> Optional[Router]:
-    from . import compile_cache
 
     marker = getattr(pipeline, compile_cache._MARKER_ATTR, None) or {}
     signal = marker.get("failure_signal")

@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import msgspec
 
 from .protocol import CAPABILITIES, PROTOCOL_VERSION, gen_worker_version
+from ..api.binding import ModelRef
+from ..models.hub_policy import detect_worker_capabilities
+from ..models.memory import get_available_vram_gb
+from ..models.hub_policy import (FIT_EMERGENCY, FIT_EMERGENCY_FP8, FIT_GGUF, FIT_OFFLOAD, TensorhubWorkerCapabilities, variant_fit)
 
 if TYPE_CHECKING:
     from .run import _SelectedFunction
@@ -21,7 +25,6 @@ if TYPE_CHECKING:
 
 def describe_binding(binding: Any) -> Dict[str, Any]:
     """Introspect one model binding into a JSON-able dict (no model load)."""
-    from ..api.binding import ModelRef
 
     if isinstance(binding, ModelRef):
         out: Dict[str, Any] = {
@@ -78,8 +81,6 @@ def _describe_resources(resources: Any) -> Dict[str, Any]:
 def detected_capabilities() -> Dict[str, Any]:
     """This machine's capabilities block (#380): SM, torch/cuda, installed
     quant libs, free VRAM. Imports torch; loads no model."""
-    from ..models.hub_policy import detect_worker_capabilities
-    from ..models.memory import get_available_vram_gb
 
     caps = detect_worker_capabilities()
     out = caps.to_dict()
@@ -133,14 +134,6 @@ def function_entries(
     ``serve --list-functions --json``. With ``detected`` (the
     ``detected_capabilities()`` block), each entry carries a ``fit`` verdict
     (``fits | offload | incompatible``) computed from its ``Resources``."""
-    from ..models.hub_policy import (
-        FIT_EMERGENCY,
-        FIT_EMERGENCY_FP8,
-        FIT_GGUF,
-        FIT_OFFLOAD,
-        TensorhubWorkerCapabilities,
-        variant_fit,
-    )
 
     caps: Optional[TensorhubWorkerCapabilities] = None
     free_gb = 0.0

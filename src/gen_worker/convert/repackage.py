@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from .writer import ConversionImplementationError
+import importlib
 
 if TYPE_CHECKING:
     import torch
@@ -251,7 +252,6 @@ def _load_component_from_config_repo(
     config repo. DiT-only fine-tunes (common on civitai for z-image) ship no
     text-encoder/VAE weights — sourcing them from the base repo is exactly the
     CAS dedup story: the fine-tune tree stores only its denoiser."""
-    import importlib
 
     comp_cls = None
     for lib in ("transformers", "diffusers"):
@@ -585,8 +585,6 @@ def _convert_sd_text_enc_state_dict_v20(text_enc_dict: dict[str, torch.Tensor]) 
         ("text_projection.weight", "text_projection"),
     ]
 
-    import re
-
     protected = {re.escape(src): dst for src, dst in textenc_conversion_lst}
     pattern = re.compile("|".join(protected.keys()))
 
@@ -808,8 +806,6 @@ def _convert_sdxl_text_enc_state_dict(text_enc_dict: dict[str, torch.Tensor]) ->
         ("positional_embedding", "positional_embedding"),
         ("text_projection", "text_projection"),
     ]
-
-    import re
 
     protected = {re.escape(src): dst for src, dst in textenc_conversion_lst}
     pattern = re.compile("|".join(protected.keys()))

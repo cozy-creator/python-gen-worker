@@ -229,7 +229,7 @@ def extract_payload_axes(owner: str, payload_type: type) -> Tuple[PayloadAxis, .
 def warm_guidance_values(axes: Sequence[PayloadAxis]) -> Tuple[float, ...]:
     """The warm representatives of the guidance axis, when one is declared.
 
-    Compile warm calls key CFG regimes off the ``guidance_scale`` /
+    Compile warm calls key CFG graph classes off the ``guidance_scale`` /
     ``guidance`` / ``cfg`` payload field's declared classes — the v2
     replacement for the deleted ``Compile(guidance_scales=...)`` tuple.
     """

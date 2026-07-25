@@ -50,7 +50,18 @@ LogLevel = Literal["debug", "info", "warning", "error"]
 from ..api.errors import AuthError
 from ..api.slot import ResolvedSlot
 from ..families.base import GenerationDefaults
-from ..io import DEFAULT_IMAGE_FORMAT, DEFAULT_IMAGE_QUALITY, encode_image
+from ..deferred_outputs import (
+    DeferredImageAsset,
+    DeferredTail,
+    PendingOutput,
+    fill_from,
+)
+from ..io import (
+    DEFAULT_IMAGE_FORMAT,
+    DEFAULT_IMAGE_QUALITY,
+    encode_image,
+    image_format,
+)
 from ..stage_timing import StageTimer
 from ..api.types import (
     Asset,
@@ -233,6 +244,11 @@ class RequestContext(Generic[D]):
         # decode->finalize handoff, so the worker's finalizing-job count (and
         # the hub's StateDelta view of it) tracks the encode/upload tail.
         self._on_finalize_release: Optional[Callable[[], None]] = None
+
+        # th#1130: outputs whose encode+upload run in the finalize tail,
+        # after the executor releases the GPU permit. Disarmed by default —
+        # CLI runs, endpoint unit tests and streaming handlers stay eager.
+        self._deferred = DeferredTail()
 
         # th#1111: per-stage timing for this request. Framework hooks
         # (permit wait, input fetch, encode, stamp, upload, denoise steps)
@@ -961,19 +977,66 @@ class RequestContext(Generic[D]):
         ``format`` is ``webp`` (the platform default), ``png``, or ``jpg``.
         ``quality`` applies to webp/jpg; ``lossless`` is webp-only. The
         extension is derived from the format when ``ref`` has no suffix.
+
+        On the serve path the encode + C2PA stamp + upload are DEFERRED to the
+        finalize tail (th#1130): the returned handle carries its ``ref``
+        immediately and its bytes fields fill in after the handler returns and
+        the GPU permit is released, so the ~1.1s webp encode overlaps the next
+        request's denoise instead of holding the card. Nothing about the
+        contract changes — return the asset in your output struct as before.
+        Reading a bytes field (``size_bytes``, ``sha256``, ``inline_bytes``,
+        ...) inside the handler is still correct; it just encodes inline and
+        loses the overlap for that request.
         """
-        with self._stages.stage("image_encode"):
-            payload, ext = encode_image(
-                image, format=format, quality=quality, lossless=lossless,
-                **encode_kwargs,
-            )
+        _pil_format, ext = image_format(format)
         if ref is None or str(ref).strip() == "":
             ref = f"outputs/{self.request_id}/image{ext}"
         else:
             ref = _normalize_output_ref(str(ref))
             if Path(ref).suffix == "":
                 ref += ext
-        return _as_asset(self.save_bytes(ref, payload), ImageAsset)
+        if not self._deferred.armed:
+            with self._stages.stage("image_encode"):
+                payload, _ext = encode_image(
+                    image, format=format, quality=quality, lossless=lossless,
+                    **encode_kwargs,
+                )
+            return _as_asset(self.save_bytes(ref, payload), ImageAsset)
+
+        # Snapshot the pixels: a handler that keeps mutating its PIL object
+        # must not change what gets uploaded. A few ms of memcpy against a
+        # ~1.1s encode.
+        copier = getattr(image, "copy", None)
+        snapshot = copier() if callable(copier) else image
+        handle = DeferredImageAsset(ref=ref, owner=self._owner)
+        target = ref
+
+        def _materialize() -> None:
+            with self._stages.stage("image_encode"):
+                payload, _ext = encode_image(
+                    snapshot, format=format, quality=quality,
+                    lossless=lossless, **encode_kwargs,
+                )
+            fill_from(handle, self.save_bytes(target, payload))
+
+        pending = PendingOutput(ref, _materialize)
+        handle.__dict__["_gw_pending"] = pending
+        self._deferred.defer(pending)
+        return handle
+
+    # -- deferred finalize tail (th#1130) ---------------------------------
+
+    def _arm_deferred_outputs(self) -> None:
+        """Worker-internal: let ``save_image`` defer its encode+upload to the
+        finalize tail. Armed by the executor only where a post-handler tail
+        exists (never for streaming handlers, which serialize mid-handler)."""
+        self._deferred.armed = True
+
+    def _drain_deferred_outputs(self) -> int:
+        """Worker-internal: materialize the deferred outputs. Called by the
+        executor AFTER the GPU permit is released, so this is the work that
+        overlaps the next request's compute. Returns how many ran here."""
+        return self._deferred.drain()
 
     def save_audio(
         self,

@@ -5,6 +5,7 @@ from typing import Any, List, Optional
 
 from ..config import get_settings
 from .refs import TensorhubRef
+import requests
 
 
 # In-memory shape of a resolved cozy: ref. PRODUCTION workers never resolve
@@ -81,7 +82,6 @@ def resolve_repo(
     for private. Returns the manifest + presigned GET URLs ready for
     ``cozy_snapshot.ensure_snapshot_async``.
     """
-    import requests
 
     base = hub_base_url(base_url)
     if not base:

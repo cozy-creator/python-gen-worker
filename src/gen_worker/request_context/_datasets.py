@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..api.errors import AuthError, SnapshotBuildFailedError
+import requests
+import blake3
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,6 @@ def lookup_dataset_id(base: str, token: str, tenant: str, name: str) -> str:
     dataset UUIDs and skip the lookup — a grant-scoped read_dataset capability
     token cannot list datasets at all.
     """
-    import requests
 
     url = f"{base}/api/v1/datasets?tenant={urllib.parse.quote(tenant, safe='')}"
     headers = {"Authorization": f"Bearer {token}"}
@@ -131,7 +132,6 @@ def fetch_materialize_manifest(
     ``SnapshotBuildFailedError``; transient transport/5xx errors retry within
     the same budget (hub restart mid-build).
     """
-    import requests
 
     url = (
         f"{base}/api/v1/datasets/{urllib.parse.quote(dataset_id, safe='')}"
@@ -222,8 +222,6 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     Writes to ``dest.tmp`` then renames, so a partial download can never be
     mistaken for a complete shard.
     """
-    import blake3
-    import requests
 
     tmp = dest.with_name(dest.name + ".tmp")
     hasher = blake3.blake3() if expected_digest.startswith("blake3:") else None

@@ -25,6 +25,7 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+import importlib.metadata as md
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,6 @@ def svdq_stack_reason() -> Optional[str]:
     """Non-raising stack check against the INSTALLED environment (importlib
     metadata only — does not import nunchaku's CUDA extension). Returns the
     failure reason, or None when the svdq lane is servable here."""
-    import importlib.metadata as md
 
     try:
         nunchaku_version = md.version("nunchaku")

@@ -127,7 +127,7 @@ def from_axes(axes: Mapping[str, str]) -> CellKey:
 
 
 def _canonical_lane(weight_lane: str, lora_bucket: int = 0) -> str:
-    from . import compile_cache as cc
+    from . import compile_cache as cc  # cycle: compile_cache imports cell_key
 
     base, observed = cc.lane_bucket(str(weight_lane or ""))
     bucket = observed or int(lora_bucket or 0)
@@ -170,7 +170,7 @@ def compute(
     :class:`CellKeyError` when a required axis is unavailable — callers on
     non-CUDA runtimes simply have no key.
     """
-    from . import compile_cache as cc
+    from . import compile_cache as cc  # cycle: compile_cache imports cell_key
 
     rt = cc.runtime_key()
     if image_digest is None:

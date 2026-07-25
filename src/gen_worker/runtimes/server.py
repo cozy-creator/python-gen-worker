@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Sequence
+from .llama import plan_for, resolve_gguf
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,6 @@ def llama_server(
     are sized to the free-VRAM budget (gw#402) and the boot degrades
     through fewer GPU layers rather than failing.
     """
-    from .llama import plan_for, resolve_gguf
 
     gguf_path = str(resolve_gguf(model_source))
     args = [str(a) for a in extra_args]

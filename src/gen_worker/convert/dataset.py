@@ -60,6 +60,7 @@ import base64
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
+import random
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -148,7 +149,6 @@ class Dataset:
         batches at ``batch_size``. Deterministic seeded shuffle. Suitable
         input for modelopt's ``forward_loop`` and GPTQ/AWQ calibration.
         """
-        import random
 
         import torch
         from torch.utils.data import DataLoader, TensorDataset

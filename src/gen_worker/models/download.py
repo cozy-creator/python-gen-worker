@@ -31,6 +31,8 @@ from ..api.errors import ValidationError
 from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
+import hashlib
+from fnmatch import fnmatch
 
 if TYPE_CHECKING:
     from .hub_client import WorkerResolvedRepo
@@ -424,26 +426,34 @@ def components_present(paths: Sequence[str], components: Sequence[str]) -> bool:
 def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) -> set[str]:
     """Repo files matched by ``patterns`` — huggingface_hub semantics
     (fnmatch; a trailing ``/`` means the whole directory)."""
-    from fnmatch import fnmatch
 
     pats = [p + "*" if p.endswith("/") else p for p in patterns]
     return {f for f in repo_files if any(fnmatch(f, p) for p in pats)}
 
 
-# HF snapshot-download guards (#379): stall window (no byte progress), wall-
-# clock cap (0 = off), and the accidental-huge-repo cap (0 = off). No
-# deployment has ever overridden these (pgw#514 dead-config sweep found zero
-# producers for the env vars that used to back them), so they're fixed
-# constants rather than Settings fields.
+# HF snapshot-download guards (#379): the progress window and the
+# accidental-huge-repo cap (0 = off). No deployment has ever overridden these
+# (pgw#514 dead-config sweep found zero producers for the env vars that used
+# to back them), so they're fixed constants rather than Settings fields.
+#
+# pgw#655: the bound is a PROGRESS-RATE FLOOR, never a wall clock. A wall-clock
+# cap cannot distinguish a healthy 200GB pull from a wedge, so it is either
+# useless (the 0.0 it sat at for its whole life) or it kills real downloads;
+# the honest question is "is this transfer still moving fast enough to ever
+# finish?". A transfer that cannot put _HF_DOWNLOAD_MIN_WINDOW_BYTES on disk
+# within _HF_DOWNLOAD_STALL_TIMEOUT_S is stalled — including the trickle that
+# used to reset the old any-progress watchdog forever with a byte a minute.
+# 8 MiB / 180s ~= 46 KiB/s: three orders of magnitude under any real pod link,
+# and still 60+ hours for a 10GB checkpoint, so nothing healthy is near it.
 _HF_DOWNLOAD_STALL_TIMEOUT_S = 180.0
-_HF_DOWNLOAD_MAX_SECONDS = 0.0
+_HF_DOWNLOAD_MIN_WINDOW_BYTES = 8 * 1024 * 1024
 _HF_MAX_REPO_BYTES = 60_000_000_000
 
 
 class DownloadStalledError(RuntimeError):
-    """Raised when a blocking snapshot download makes no byte progress for the
-    stall window (or exceeds the wall-clock cap) — a bounded, observable
-    failure instead of a silent hang (#379)."""
+    """Raised when a blocking snapshot download fails the progress-rate floor
+    (less than ``min_window_bytes`` of new bytes within the stall window) — a
+    bounded, observable failure instead of a silent hang (#379, pgw#655)."""
 
 
 def _scan_bytes(root: Path) -> int:
@@ -474,13 +484,15 @@ def _run_with_stall_watchdog(
     progress_callback: Optional[ProgressFn],
     total_hint: Optional[int],
     stall_timeout: float,
-    wall_clock_max: float,
+    min_window_bytes: int = _HF_DOWNLOAD_MIN_WINDOW_BYTES,
     scan_bytes: Callable[[Path], int] = _scan_bytes,
     poll_interval: float = 0.5,
 ) -> str:
     """Run a blocking download on a daemon thread; the watchdog doubles as the
     progress reporter (scans bytes-on-disk under ``progress_root``) and raises
-    :class:`DownloadStalledError` on no-progress / wall-clock breach."""
+    :class:`DownloadStalledError` when the transfer falls below the progress
+    floor: fewer than ``min_window_bytes`` new bytes within ``stall_timeout``
+    (pgw#655 — a trickle is a stall, and there is no wall-clock cap)."""
     holder: Dict[str, Any] = {}
 
     def _run() -> None:
@@ -496,7 +508,11 @@ def _run_with_stall_watchdog(
 
     started_at = time.monotonic()
     last_bytes = 0
-    last_progress_at = started_at
+    # Progress window: bytes on disk when the current window opened, and when
+    # it opened. The window closes (and reopens from here) the moment the
+    # floor is cleared; it never resets on a byte, so a trickle expires it.
+    window_bytes = 0
+    window_opened_at = started_at
     while not holder.get("done"):
         dl_thread.join(timeout=poll_interval)
         if holder.get("done"):
@@ -509,25 +525,26 @@ def _run_with_stall_watchdog(
                 seen = last_bytes
             if seen > last_bytes:
                 last_bytes = seen
-                last_progress_at = now
                 if progress_callback is not None:
                     try:
                         progress_callback(seen, total_hint)
                     except Exception:
                         pass
-            elif stall_timeout > 0 and (now - last_progress_at) > stall_timeout:
+            if seen - window_bytes >= max(int(min_window_bytes), 1):
+                window_bytes = seen
+                window_opened_at = now
+            elif stall_timeout > 0 and (now - window_opened_at) > stall_timeout:
+                moved = seen - window_bytes
                 logger.error(
-                    "download STALLED %s: no byte progress for %.0fs (downloaded=%d bytes); "
-                    "abandoning the wedged thread (#379)", label, now - last_progress_at, last_bytes,
+                    "download STALLED %s: %d bytes in the last %.0fs (floor %d bytes; "
+                    "downloaded=%d total); abandoning the wedged thread (#379, pgw#655)",
+                    label, moved, now - window_opened_at, int(min_window_bytes), last_bytes,
                 )
                 raise DownloadStalledError(
-                    f"download({label}) stalled: no progress for "
-                    f"{stall_timeout:.0f}s after {last_bytes} bytes"
+                    f"download({label}) stalled: only {moved} bytes in "
+                    f"{stall_timeout:.0f}s (floor {int(min_window_bytes)} bytes) "
+                    f"after {last_bytes} bytes"
                 )
-        if wall_clock_max > 0 and (now - started_at) > wall_clock_max:
-            raise DownloadStalledError(
-                f"download({label}) exceeded {wall_clock_max:.0f}s wall-clock cap"
-            )
 
     if "exc" in holder:
         raise holder["exc"]
@@ -563,7 +580,7 @@ def download_hf(
     per-component flavor picking (bf16 > fp16 > untagged), just over a
     smaller candidate set.
     """
-    from ..net import hf
+    from ..net import hf  # lazy: net imports requests; keeps `import gen_worker` light
 
     try:
         hub = hf()  # gw#456: no HF socket may wait forever
@@ -667,7 +684,6 @@ def download_hf(
         progress_callback=progress,
         total_hint=total_hint,
         stall_timeout=_HF_DOWNLOAD_STALL_TIMEOUT_S,
-        wall_clock_max=_HF_DOWNLOAD_MAX_SECONDS,
     )
     if progress is not None:
         try:
@@ -716,8 +732,7 @@ def parse_civitai_version_id(raw: str) -> int:
 
 
 def _civitai_get_json(url: str, api_key: str = "") -> dict[str, Any]:
-    import requests
-    from urllib.parse import urlparse
+    import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
     headers: Dict[str, str] = {}
     if api_key and urlparse(url).hostname in _CIVITAI_AUTH_HOSTS:
@@ -843,10 +858,8 @@ def _civitai_stream_one(
     expected_sha256: str,
     on_bytes: Callable[[int], None],
 ) -> int:
-    import hashlib
 
     import requests
-    from urllib.parse import urlparse
 
     headers: Dict[str, str] = {}
     if api_key and urlparse(url).hostname in _CIVITAI_AUTH_HOSTS:

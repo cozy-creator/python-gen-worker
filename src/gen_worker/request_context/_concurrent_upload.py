@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 from typing import Any
+from gen_worker.request_context._helpers import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,6 @@ def budget_gate_from_capability_jwt(token: str) -> BudgetGate:
     in dev/test paths without a server-issued JWT.
     """
     # Import locally to avoid a module-level circular dep on _helpers.
-    from gen_worker.request_context._helpers import _decode_unverified_jwt_claims
 
     claims = _decode_unverified_jwt_claims(token) if token else {}
 

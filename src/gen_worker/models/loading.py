@@ -11,6 +11,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .ladder import EMERGENCY_NF4_VRAM_FACTOR, NF4_WEIGHT_BYTES_FACTOR
+import importlib
+import importlib.util
+import os
+import struct
+import sys
+
+from .memory import get_available_vram_gb, meta_tensors
+from .svdq import detect_svdq_artifact, load_svdq_pipeline
+from .w4a4 import detect_w4a4_artifact, load_w4a4_pipeline, load_w4a4_root_pipeline
+from .w8a8 import detect_w8a8_artifact, load_w8a8_pipeline, load_w8a8_root_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +82,6 @@ def safetensors_file_valid(path: Path) -> bool:
     header must parse and the file must contain every declared tensor byte.
     Catches truncation (pod-churn-interrupted writes, gw#408) without hashing;
     zero-page corruption inside tensor data needs the digest check instead."""
-    import struct
 
     try:
         p = Path(path)
@@ -106,7 +115,6 @@ def detect_on_disk_dtype(model_path: Path) -> str:
     this a bf16 snapshot silently loads via diffusers' fp32 default — 2x the
     VRAM. "fp8" marks an fp8-E4M3-stored flavor whose storage precision must
     be preserved (see :func:`apply_fp8_storage`)."""
-    import struct
 
     counts: Dict[str, int] = {}
     try:
@@ -543,6 +551,7 @@ def detect_gguf_snapshot(path: Path) -> Optional[tuple[Path, str]]:
     p = Path(path)
     if not p.is_dir() or not (p / "model_index.json").exists():
         return None
+    # cycle: gguf_local imports loading at module top
     from .gguf_local import gguf_qtype, read_marker
 
     marker = read_marker(p)
@@ -567,7 +576,6 @@ def load_gguf_pipeline(
     components: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Load a GGUF denoiser into the remaining components' base tree."""
-    import importlib
 
     import torch
     from diffusers import GGUFQuantizationConfig
@@ -641,7 +649,6 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
     combined header with rebased offsets, then stream-copy each tensor's byte
     range. No torch/safetensors dependency, no RAM spike. Idempotent: the
     merged file is cached next to the shards."""
-    import struct
 
     merged = snapshot_dir / index_path.name[: -len(".index.json")]
     if merged.exists():
@@ -699,7 +706,6 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
                     out.write(buf)
                     remaining -= len(buf)
         out.flush()
-        import os
 
         os.fsync(out.fileno())  # durable before rename (gw#408)
     tmp.rename(merged)
@@ -870,7 +876,6 @@ def load_component_override(
     ``<component>/`` subtree when present, else its root. ``dtype`` (the
     base binding's) wins; otherwise the override's on-disk dtype is
     honored. Blocking; callers on an event loop run it off-thread."""
-    import importlib
 
     entry = model_index_entry(base_path, component)
     if entry is None:
@@ -903,7 +908,6 @@ def load_component_override(
 
 
 def _safetensors_data_bytes(p: Path) -> int:
-    import struct
 
     with open(p, "rb") as f:
         raw = f.read(8)
@@ -923,7 +927,6 @@ def _safetensors_data_bytes(p: Path) -> int:
 
 def _safetensors_fp8_bytes(p: Path) -> int:
     """Bytes of F8_E4M3-stored tensors in one safetensors file (header-only)."""
-    import struct
 
     with open(p, "rb") as f:
         raw = f.read(8)
@@ -983,8 +986,6 @@ def bitsandbytes_available() -> bool:
     constructs fine without bitsandbytes and the load then dies deep in
     ``validate_environment`` (PackageNotFoundError -> setup_failed). An
     unavailable rung must be SKIPPED, never attempted."""
-    import importlib.util
-    import sys
 
     if "bitsandbytes" in sys.modules:
         return True
@@ -1092,7 +1093,6 @@ def _adaptive_fit_rung(
     emergency-quantize."""
     if not emergency_quant_enabled():
         return "", None
-    from .memory import get_available_vram_gb
 
     free_gb = get_available_vram_gb()
     if free_gb <= 0:
@@ -1194,7 +1194,6 @@ def load_from_pretrained(
     # pipeline. Detection precedes every other rung; failures are typed
     # (SvdqStackError / SvdqHardwareError / SvdqSnapshotError), never a
     # mid-denoise crash.
-    from .svdq import detect_svdq_artifact, load_svdq_pipeline
 
     svdq_art = detect_svdq_artifact(Path(path))
     if svdq_art is not None and callable(getattr(cls, "from_pretrained", None)):
@@ -1205,11 +1204,6 @@ def load_from_pretrained(
     # scaled-mm lane (fp8 resident, no per-layer cast); hosts without usable
     # scaled_mm dequant once to bf16-resident. Precedes the storage-cast
     # rungs — a scale-free fp8 tree never detects here.
-    from .w8a8 import (
-        detect_w8a8_artifact,
-        load_w8a8_pipeline,
-        load_w8a8_root_pipeline,
-    )
 
     w8a8_art = detect_w8a8_artifact(Path(path))
     if w8a8_art is not None and callable(getattr(cls, "from_pretrained", None)):
@@ -1240,11 +1234,6 @@ def load_from_pretrained(
     # take the blockwise fp4 scaled_mm lane on Blackwell (sm_100+); other
     # qualifying hosts dequant once to bf16-resident. Disjoint from w8a8
     # detection (uint8 vs e4m3 weights) and from scale-free trees.
-    from .w4a4 import (
-        detect_w4a4_artifact,
-        load_w4a4_pipeline,
-        load_w4a4_root_pipeline,
-    )
 
     w4a4_art = detect_w4a4_artifact(Path(path))
     if w4a4_art is not None and callable(getattr(cls, "from_pretrained", None)):
@@ -1356,7 +1345,6 @@ def load_from_pretrained(
             kwargs.pop("variant", None)
             kwargs.pop("quantization_config", None)
             pipe = cls.from_pretrained(path, **kwargs)
-    from .memory import meta_tensors
 
     unmaterialized = meta_tensors(pipe)
     if unmaterialized:

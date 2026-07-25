@@ -14,6 +14,7 @@ import time
 from typing import Callable, Optional, Tuple
 
 from .request_context import _decode_unverified_jwt_claims
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,6 @@ def renew_once(
     Raises ``RenewDenied`` on terminal refusals (401/403/404/409) and
     ``RuntimeError`` on transient failures (5xx / malformed response).
     """
-    import requests
 
     url = f"{file_base_url.rstrip('/')}/v1/worker/capability/renew"
     resp = requests.post(

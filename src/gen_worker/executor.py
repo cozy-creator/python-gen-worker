@@ -65,6 +65,7 @@ from .models import disk_telemetry
 from .models import provision
 from .models import residency as residency_mod
 from .models.memory import (
+    aflush_memory,
     deeper_offload_mode,
     degraded_log_line,
     estimate_cuda_resident_gb,
@@ -2051,6 +2052,32 @@ class _WarmupEvidence:
     functions_by_object: Dict[int, set[str]] = dc_field(default_factory=dict)
 
 
+# gw#661: setup failures whose contract is "will be re-attempted". These are
+# reported to the hub as a still-RUNNING activity, not the FAILED terminal —
+# the hub reads FAILED as "no progress here" (th#1160) and condemns the pod.
+_TRANSIENT_SETUP_ERRORS = (InsufficientDiskError, RetryableError, MissingSnapshotError)
+
+# Consecutive transient losses on ONE record before the condition is this
+# function's terminal truth. Each attempt already carries its own internal
+# wait (the lane gate polls VRAM headroom for 45s), so this is minutes of
+# real patience, not a tight spin.
+MAX_TRANSIENT_SETUP_ATTEMPTS = 5
+
+
+def _setup_error_will_retry(exc: BaseException) -> bool:
+    """Whether this setup loss is contractually re-attempted (gw#661).
+
+    CompiledLaneUnavailableError subclasses RetryableError but the worker
+    DOES give up on it — it disables every handler requiring the unproven
+    lane — so it is a failure, not a retry.
+    """
+    if not isinstance(exc, _TRANSIENT_SETUP_ERRORS):
+        return False
+    from .compile_cache import CompiledLaneUnavailableError
+
+    return not isinstance(exc, CompiledLaneUnavailableError)
+
+
 @dataclass
 class _ClassRecord:
     cls: type
@@ -2099,6 +2126,8 @@ class _ClassRecord:
     # IDs are minted after successful setup and cleared before vacate; they do
     # not derive from mutable refs, authored specs, or object memory addresses.
     compile_targets: Dict[str, _CompileTargetRecord] = dc_field(default_factory=dict)
+    # gw#661: consecutive will-retry setup losses; reset by any success.
+    transient_setup_failures: int = 0
 
 
 @dataclass
@@ -4335,7 +4364,23 @@ class Executor:
                         intent_id=intent_id,
                     )
             except BaseException as exc:
-                act.failed(exc)
+                # gw#661: a will-retry condition is not a failure. Only
+                # exhausting the budget is, and then the hub must see it.
+                will_retry = _setup_error_will_retry(exc)
+                exhausted = False
+                if will_retry:
+                    rec.transient_setup_failures += 1
+                    exhausted = (
+                        rec.transient_setup_failures >= MAX_TRANSIENT_SETUP_ATTEMPTS
+                    )
+                if will_retry and not exhausted:
+                    act.retrying(
+                        exc,
+                        rec.transient_setup_failures,
+                        MAX_TRANSIENT_SETUP_ATTEMPTS,
+                    )
+                else:
+                    act.failed(exc)
                 # Setup is a transaction: endpoint construction, tenant
                 # setup/warmup, residency registration, and compile-target
                 # publication either all reach READY or all ownership is
@@ -4371,7 +4416,7 @@ class Executor:
                 if isinstance(exc, CompiledLaneUnavailableError):
                     self._mark_compile_setup_unavailable(rec, spec, str(exc))
                     self._on_state_change()
-                self._mark_setup_failed(rec, exc)
+                self._mark_setup_failed(rec, exc, exhausted=exhausted)
                 raise
             if rec.failed is not None:
                 # Recovery (desired-state retry succeeded): lift the
@@ -4379,6 +4424,7 @@ class Executor:
                 rec.failed = None
                 for s in rec.specs:
                     self.unavailable.pop(s.name, None)
+            rec.transient_setup_failures = 0
             rec.instance = instance
             rec.ready = True
             act.completed()
@@ -4637,13 +4683,21 @@ class Executor:
 
             await _to_thread_complete(_consume)
 
-    def _mark_setup_failed(self, rec: _ClassRecord, exc: BaseException) -> None:
-        if isinstance(exc, (InsufficientDiskError, RetryableError, MissingSnapshotError)):
+    def _mark_setup_failed(
+        self, rec: _ClassRecord, exc: BaseException, *, exhausted: bool = False,
+    ) -> None:
+        if isinstance(exc, _TRANSIENT_SETUP_ERRORS) and not exhausted:
             # Transient pressure (disk GC frees space / warm-tier RAM drains /
             # the hub re-mints a snapshot): fail the op RETRYABLE, never
             # disable the function.
             return
-        if isinstance(exc, HardwareUnmetError):
+        if isinstance(exc, _TRANSIENT_SETUP_ERRORS):
+            # gw#661: the budget is spent. "Retryable" described the class of
+            # error, not an infinite entitlement — a condition that survives
+            # every attempt is this function's terminal truth (th#1159's
+            # genuinely-unfittable VRAM lane is the case this exists for).
+            reason, axes = "retry_exhausted", {}
+        elif isinstance(exc, HardwareUnmetError):
             reason = getattr(exc, "reason", "hardware_unmet")
             axes = {str(k): str(v) for k, v in (exc.axes() or {}).items()}
         else:
@@ -4653,6 +4707,39 @@ class Executor:
         for s in rec.specs:
             self.unavailable[s.name] = (reason, detail, axes)
         self._on_state_change()
+
+    def mark_ref_unmaterializable(self, ref: str, detail: str) -> List[str]:
+        """pgw#655: a model this worker fetches ITSELF never landed — gate
+        every function that statically binds it.
+
+        The alternative (log and continue) is what produced the live wedge:
+        the worker walked on to READY, advertised the function, and the hub
+        dispatched paid GPU jobs that each re-discovered the missing model as
+        a per-request load failure. A worker never advertises a function whose
+        model is absent. This is deliberately NOT a process kill — a sibling
+        function whose model DID land keeps serving, exactly as a hardware
+        gate leaves the rest of the endpoint alive.
+
+        Hub-resolved slots are excluded: their refs arrive by delivery
+        (pgw#532), so the worker never prefetches them and their absence at
+        boot is not a failure.
+        """
+        gated: List[str] = []
+        for name, spec in self.specs.items():
+            bound = any(
+                ref in _binding_wire_refs(binding)
+                for slot, binding in spec.models.items()
+                if slot not in spec.slots
+            )
+            if not bound:
+                continue
+            self.unavailable[name] = (
+                "model_unavailable", _sanitize(detail), {"ref": ref},
+            )
+            gated.append(name)
+        if gated:
+            self._on_state_change()
+        return sorted(gated)
 
     @staticmethod
     def _record_has_setup_ownership(rec: _ClassRecord) -> bool:
@@ -4689,12 +4776,7 @@ class Executor:
             return
         async with self._load_lock:
             released = await self._vacate_record(rec)
-        await asyncio.to_thread(gc.collect)
-        if torch is not None and torch.cuda.is_available():
-            try:
-                await asyncio.to_thread(torch.cuda.empty_cache)
-            except Exception:
-                pass
+        await aflush_memory()
         released_pinned = await asyncio.to_thread(
             release_unused_pinned_host_cache)
         logger.info(
@@ -4712,12 +4794,7 @@ class Executor:
             return
         self._pending_alloc_purge = False
         freed_before = time.monotonic()
-        await asyncio.to_thread(gc.collect)
-        if torch is not None and torch.cuda.is_available():
-            try:
-                await asyncio.to_thread(torch.cuda.empty_cache)
-            except Exception:
-                pass
+        await aflush_memory()
         logger.info(
             "purged prior cancelled-setup allocations in %.1fs",
             time.monotonic() - freed_before,
@@ -7365,11 +7442,10 @@ class Executor:
         if server is not None:
             await asyncio.to_thread(server.stop)
         server = None
-        if torch is not None and torch.cuda.is_available():
-            try:
-                await asyncio.to_thread(torch.cuda.empty_cache)
-            except Exception:
-                pass
+        # No gc pass here: the caller holds the load lock and the departing
+        # objects' owners were just dropped above, so only the allocator cache
+        # needs returning (pgw#657 fold).
+        await aflush_memory(collect=False)
         # gw#494: inspect exactly what the instance BOOKED (held_refs) —
         # re-deriving from spec.models would inspect the wrong keys after a
         # resolution rebind. A multiply-held ref stays resident until its last
@@ -7683,6 +7759,15 @@ class Executor:
             **producer_kwargs,
         )
         job.ctx = ctx
+        # th#1130 / pgw#652 Phase 0: let ctx.save_image defer its encode +
+        # C2PA stamp + upload to the finalize tail, which this method drains
+        # AFTER releasing the GPU permit. The handler's RETURN is the
+        # terminality signal — no endpoint change, and an N-image loop cannot
+        # release the permit early because save_image no longer releases
+        # anything. Streaming handlers are excluded: they serialize items
+        # MID-handler, so their outputs have no post-handler tail to ride.
+        if spec.output_mode != "stream" and not spec.is_async_gen:
+            ctx._arm_deferred_outputs()
         if job.cancel_requested:
             ctx._cancel()
         if run.capability_token and self.file_base_url:
@@ -7907,9 +7992,49 @@ class Executor:
                             await asyncio.to_thread(
                                 self._adapters.deactivate, ref, pipe, run.request_id
                             )
+            # The peak is read BEFORE the permit is released: the next job
+            # resets the CUDA peak-allocator watermark when it takes the GPU,
+            # and the finalize tail below runs concurrently with it.
+            peak_vram = self._peak_vram_bytes(gpu_index)
+            # Handler GPU work is done — free the slot before the deferred
+            # encode/upload tail, the result-blob upload and the result send,
+            # so the next job's compute starts now.
+            overlapped = False
+            released_at: Optional[float] = None
+            if lease is not None:
+                overlapped = not lease.yield_slot()
+                released_at = lease.released_at
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+            )
+            # th#1130: THE tail. Slotless by construction (the permit is gone
+            # above), on a thread so the event loop keeps dispatching. Inside
+            # the try, so a failing encode fails the request cleanly instead
+            # of reporting OK with a hollow asset.
+            if ctx._deferred.pending():
+                from .video_encode import finalize_permit
+
+                def _drain() -> int:
+                    # gw#516 back-pressure: bound how many slotless CPU
+                    # finalizes stack up, same permit the video path takes.
+                    with finalize_permit():
+                        return ctx._drain_deferred_outputs()
+
+                drained = await asyncio.to_thread(_drain)
+                logger.info(
+                    "finalize tail: %d deferred output(s) encoded+uploaded "
+                    "slotless for request %s", drained, run.request_id)
+            handler_done = time.monotonic()
+            # th#1111: the stage map's window must cover the tail it now
+            # contains, so image_encode/credential_stamp/upload land in
+            # total.tail and the map still closes against runtime_ms.
+            ctx._stages.handler_close()
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output, lane=job.lane,
-                                    runtime_terms=_runtime_term_values(spec, payload, ctx))
+                                    runtime_terms=_runtime_term_values(spec, payload, ctx),
+                                    peak_vram_bytes=peak_vram)
             # pgw#652: the request just told us what a concurrent one costs.
             # Only a completed run is evidence — a cancelled or OOM-killed job
             # never reached its real peak.
@@ -7918,12 +8043,7 @@ class Executor:
                     self._activation_key(spec),
                     metrics.peak_vram_bytes - alloc_at_start,
                 )
-            handler_done = time.monotonic()
-            # Handler GPU work is done — free the slot before result-blob
-            # upload and result send so the next job's compute starts now.
             if lease is not None:
-                overlapped = not lease.yield_slot()
-                released_at = lease.released_at
                 if released_at is not None:
                     # gw#516 typed split of runtime_ms: how long the GPU slot
                     # was actually held vs the slotless finalize tail.
@@ -7931,23 +8051,21 @@ class Executor:
                         0, int((released_at - started) * 1000))
                     metrics.finalize_wall_ms = max(
                         0, int((handler_done - released_at) * 1000))
-                if overlapped and released_at is not None:
-                    # The handler released terminally at the decode->finalize
-                    # handoff (gw#476/gw#516): the whole encode/upload tail
-                    # overlapped the next request.
+                if released_at is not None and handler_done > released_at:
+                    # The encode/upload tail ran slotless, overlapping the next
+                    # request. `handoff` says who ended the GPU phase: the
+                    # HANDLER at the decode->finalize signal (gw#476/gw#516
+                    # write_video/write_image), or the EXECUTOR at handler
+                    # return with a deferred tail behind it (th#1130).
                     logger.info(
-                        "FINALIZE_OVERLAP fn=%s request=%s slot_held_ms=%d "
-                        "handler_wall_ms=%d overlap_ms=%d",
+                        "FINALIZE_OVERLAP fn=%s request=%s handoff=%s "
+                        "slot_held_ms=%d handler_wall_ms=%d overlap_ms=%d",
                         spec.name, run.request_id,
+                        "handler" if overlapped else "executor",
                         int((released_at - started) * 1000),
                         int((handler_done - started) * 1000),
                         int((handler_done - released_at) * 1000),
                     )
-            self._intent_transition(
-                job.intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
-            )
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the
@@ -8388,6 +8506,15 @@ class Executor:
     async def _serialize_output(
         self, ctx: RequestContext, run: pb.RunJob, output: Any
     ) -> Tuple[Optional[bytes], Optional[str]]:
+        # th#1130 safety net: msgpack reads struct fields straight off the C
+        # layout, so an un-drained deferred asset would serialize as nulls.
+        # _run_job_pinned always drains first; this catches any future path
+        # that does not, loudly rather than by shipping a hollow asset.
+        if ctx._deferred.pending():
+            logger.error(
+                "deferred outputs reached serialization un-drained for %s — "
+                "materializing inline", run.request_id)
+            await asyncio.to_thread(ctx._drain_deferred_outputs)
         data = msgspec.msgpack.encode(output)
         if len(data) <= INLINE_RESULT_MAX_BYTES:
             return data, None
@@ -8403,10 +8530,22 @@ class Executor:
             logger.warning("result blob upload failed for %s: %s", run.request_id, exc)
             raise RetryableError("output upload failed") from exc
 
+    @staticmethod
+    def _peak_vram_bytes(gpu_index: int) -> int:
+        """This job's CUDA peak-allocator high-water mark (reset when it took
+        the GPU). 0 without torch/CUDA."""
+        if torch is not None and torch.cuda.is_available():
+            try:
+                return int(torch.cuda.max_memory_allocated(gpu_index))
+            except Exception:
+                return 0
+        return 0
+
     def _metrics(
         self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int,
         output: Any = None, lane: str = "",
         runtime_terms: "Optional[Dict[str, float]]" = None,
+        peak_vram_bytes: "Optional[int]" = None,
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
         # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
@@ -8419,12 +8558,12 @@ class Executor:
             rss_at_end = int(psutil.Process().memory_info().rss)
         except Exception:
             pass
-        peak_vram = 0
-        if torch is not None and torch.cuda.is_available():
-            try:
-                peak_vram = int(torch.cuda.max_memory_allocated(gpu_index))
-            except Exception:
-                pass
+        # th#1130: the caller reads the peak before releasing the GPU permit
+        # (the next job resets the watermark), and passes it in.
+        peak_vram = (
+            self._peak_vram_bytes(gpu_index) if peak_vram_bytes is None
+            else int(peak_vram_bytes)
+        )
         duration_s, output_count = _scan_output_assets(output)
         usage = _output_token_usage(output)
         return pb.JobMetrics(

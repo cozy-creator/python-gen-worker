@@ -136,6 +136,24 @@ IMAGE_FORMATS: dict[str, tuple[str, str]] = {
 }
 
 
+def image_format(format: str = DEFAULT_IMAGE_FORMAT) -> tuple[str, str]:
+    """``(PIL format, file extension)`` for a tenant-facing format name.
+
+    Split out of :func:`encode_image` so the deferred-tail path (th#1130) can
+    validate the format and derive the ref's extension EAGERLY, at the
+    ``save_image`` call — a bad format must raise in the handler, never in the
+    finalize tail.
+    """
+    fmt = str(format or DEFAULT_IMAGE_FORMAT).strip().lower()
+    try:
+        return IMAGE_FORMATS[fmt]
+    except KeyError:
+        raise ValidationError(
+            f"unsupported image format {format!r}; expected one of "
+            f"{', '.join(sorted(IMAGE_FORMATS))}"
+        ) from None
+
+
 def encode_image(
     image: Any,
     *,
@@ -156,14 +174,7 @@ def encode_image(
     :class:`~gen_worker.api.errors.ValidationError` rather than surfacing a
     PIL traceback.
     """
-    fmt = str(format or DEFAULT_IMAGE_FORMAT).strip().lower()
-    try:
-        pil_format, ext = IMAGE_FORMATS[fmt]
-    except KeyError:
-        raise ValidationError(
-            f"unsupported image format {format!r}; expected one of "
-            f"{', '.join(sorted(IMAGE_FORMATS))}"
-        ) from None
+    pil_format, ext = image_format(format)
 
     img = image
     # JPEG has no alpha channel and no palette; convert or PIL raises.
@@ -388,6 +399,7 @@ __all__ = [
     "read_image",
     "read_audio",
     "encode_image",
+    "image_format",
     "write_image",
     "DEFAULT_IMAGE_FORMAT",
     "DEFAULT_IMAGE_QUALITY",

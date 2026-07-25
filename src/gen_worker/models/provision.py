@@ -18,6 +18,7 @@ ModelScope downloads — through the same download layer.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import time
@@ -25,8 +26,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
+from ..api.binding import ModelRef, wire_ref
 from ..config import get_settings
-from .loading import model_index_components
+from .cache_paths import tensorhub_cas_dir
+from .errors import UrlExpiredError
+from .ladder import maybe_rebind_family_fp8
+from .loading import load_from_pretrained, model_index_components
+from .memory import place_pipeline
+from .refs import parse_model_ref
 
 __all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
 
@@ -112,9 +119,6 @@ def load_slot(
             and callable(getattr(annotation, "from_pretrained", None))):
         return SlotLoad(obj=path)
 
-    from .loading import load_from_pretrained
-    from .memory import place_pipeline
-
     dtype = str(getattr(binding, "dtype", "") or "")
     storage_dtype = force_storage_dtype or str(getattr(binding, "storage_dtype", "") or "")
     out = SlotLoad(obj=None, is_pipeline=True, ran=(dtype or "bf16"))
@@ -197,7 +201,7 @@ def enable_compiled(
     adopt. Staying eager rolls the branches back — canonical zeroed slots
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
-    from .. import compile_cache, trt_engine
+    from .. import compile_cache, trt_engine  # lazy: keeps `import gen_worker` off the compile/pb stack
 
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket and not compile_cache.has_compile_target(pipe, cfg):
@@ -404,7 +408,6 @@ def resolve_bindings(
     instead of silently running the slot's default — ``cozy run`` only ever
     runs a Slot's ``default_checkpoint`` ref locally.
     """
-    from ..api.binding import ModelRef, wire_ref
 
     out: Dict[str, str] = {}
     for param_name, binding in bindings.items():
@@ -440,10 +443,7 @@ def _local_flavor_fold(binding: Any, slot: Any) -> Any:
     """Local AUTO flavor folds over ONE shared resolve: family fp8 (th#964)
     first, then the GGUF small-VRAM pick (cl#27). Fail-open — any resolve or
     probe error keeps the binding as declared. Production stays hub-owned."""
-    from ..api.binding import wire_ref
-    from .gguf_local import maybe_rebind_gguf
-    from .ladder import maybe_rebind_family_fp8
-    from .refs import parse_model_ref
+    from .gguf_local import maybe_rebind_gguf  # cycle: gguf_local imports loading
 
     if (
         getattr(binding, "source", "") != "tensorhub"
@@ -520,10 +520,8 @@ def _fetch_tensorhub_snapshot(
     covers the FULL-repo case — a components=-scoped ref must be fetched
     online at least once per component set.
     """
-    import asyncio
-
+    # lazy: cozy_snapshot/hub_client import requests; keeps `import gen_worker` light
     from .cozy_snapshot import ensure_snapshot_async, snapshot_dir_key
-    from .errors import UrlExpiredError
     from .hub_client import HubResolveError, resolve_repo
 
     canonical = thref.canonical()
@@ -605,8 +603,6 @@ def resolve_local_path(
     pipeline component subfolders (+ root config files) — see
     ``download.select_component_paths`` / ``cozy_snapshot.snapshot_dir_key``.
     """
-    from .cache_paths import tensorhub_cas_dir
-    from .refs import parse_model_ref
 
     env_cas = get_settings().tensorhub_cas_dir.strip()
     cache_dir = Path(env_cas) if env_cas else Path(tensorhub_cas_dir())

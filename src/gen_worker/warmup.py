@@ -65,6 +65,7 @@ import msgspec
 from .api.compile_axis import PayloadAxis
 from .api.decorators import EndpointDecl, NoWarmup
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
+import inspect
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from .registry import EndpointSpec
@@ -410,7 +411,6 @@ def validate_at_decoration(cls: type, decl: EndpointDecl) -> None:
     """Best-effort decoration-time enforcement (fails at import, the
     earliest possible moment). Unresolvable type hints defer silently to
     the authoritative walk-time check (``validate_class_warmup``)."""
-    import inspect
 
     if decl.kind != "inference" or not decl.resources.gpu:
         return

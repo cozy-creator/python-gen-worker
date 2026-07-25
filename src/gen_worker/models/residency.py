@@ -40,6 +40,8 @@ from .memory import (
     log_ram_budget_once,
     repair_device_placement,
 )
+from .pinned_swap import swap_object
+from .pinned_swap import cached_swap_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +205,6 @@ def _move_obj(obj: Any, device: str) -> None:
     CUDA OOM here used to book a half-moved pipeline as resident (gw#409)."""
     if obj is None or _obj_manages_own_device(obj):
         return
-    from .pinned_swap import swap_object
 
     if swap_object(obj, device):
         return
@@ -502,7 +503,6 @@ class Residency:
             # the host thrashes into the keepalive-stall livelock. Bytes
             # already staged in the pinned swap cache (gw#551) are resident
             # host RAM — only the uncached remainder is a fresh demand.
-            from .pinned_swap import cached_swap_bytes
 
             need_gb = float(e.vram_hint or e.vram_bytes) / _GiB
             if need_gb <= 0.0:

@@ -24,6 +24,10 @@ import sys
 from typing import Any, Dict, Tuple
 
 from ..api.binding import ModelRef
+from ..api.binding import wire_ref
+from ..models.gguf_local import maybe_rebind_gguf
+from ..models.provision import resolve_local_path
+from .run import (_collect_class_methods, _ensure_sys_path, _load_project_main)
 
 
 def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
@@ -50,14 +54,6 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
 
 def _handle_prefetch(args: argparse.Namespace) -> int:
     # Reuse run's discovery + the shared hub-less resolver (models/provision).
-    from ..api.binding import wire_ref
-    from ..models.gguf_local import maybe_rebind_gguf
-    from ..models.provision import resolve_local_path
-    from .run import (
-        _collect_class_methods,
-        _ensure_sys_path,
-        _load_project_main,
-    )
 
     if args.json:
         def emit(ev: Dict[str, Any]) -> None:

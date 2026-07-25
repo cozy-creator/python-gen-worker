@@ -9,6 +9,8 @@ Usage:
 """
 
 import os
+import faulthandler
+import signal
 
 # Reduce CUDA allocator fragmentation for tight-VRAM single-process workers.
 # Set BEFORE any module imports torch (PyTorch reads this env var only at
@@ -231,8 +233,6 @@ def _install_stack_dump_handler() -> None:
     by CPython and by torch; faulthandler writes without allocating, so it
     works even when the process is wedged on memory.
     """
-    import faulthandler
-    import signal
 
     try:
         faulthandler.register(signal.SIGUSR2, all_threads=True, chain=True)
