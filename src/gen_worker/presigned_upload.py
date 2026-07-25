@@ -66,6 +66,7 @@ from ._upload_transport import (
 from . import activity as _activity
 from . import progress as _progress
 from .api.errors import ArtifactTransferError, AuthError, CanceledError
+from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,20 @@ _FINALIZE_RETRY_BACKOFF_S = 0.5
 # the in-flight attempt finishes, /complete's `sess.Finalized` fast path
 # returns the same 200 success payload to the next poll, no data lost.
 _COMPLETE_IN_PROGRESS_POLL_S = 5.0
-_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600.0
+
+# gw#666 (th#1166 finding E): the old `_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600`
+# FAILED THE JOB after 10 minutes of wall time — the worker had already
+# uploaded every byte and then discarded the result because the hub was still
+# stitching a large multipart object. A clock cannot distinguish "assembly is
+# taking a while" from "nothing is happening"; the hub's own answer can.
+#
+# Each `409 upload_complete_in_progress` is a DEFINITE answer: the hub is up
+# and holds the completion lock. The hub sets that lock NX with a TTL and
+# never renews it, so a dead holder's lock expires and the next poll takes
+# over the verify — a 409 therefore cannot persist without live work behind
+# it. Only silence (no HTTP answer at all) accumulates the window, which is
+# derived from the call cadence: two full finalize-length attempts.
+_COMPLETE_SILENCE_WINDOW_S = 2.0 * _FINALIZE_TIMEOUT_S
 
 # Default part size sent by server, but we read it from the response.
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
@@ -432,37 +446,42 @@ def _poll_until_finalized(
     synchronously and can outlast whatever timeout sits in front of it, so the
     CLIENT'S view (5xx/timeout) can lag the server's. /complete is idempotent
     once finalized (`sess.Finalized` fast path returns the same success
-    payload), so re-POST it instead of treating the race as fatal."""
-    deadline = time.monotonic() + _COMPLETE_IN_PROGRESS_MAX_WAIT_S
+    payload), so re-POST it instead of treating the race as fatal.
+
+    The wait is bounded by SILENCE, never by a clock (gw#666): a hub that
+    keeps answering 409 is a hub actively assembling the object we just
+    uploaded, and failing the job at that moment throws the whole upload
+    away for nothing."""
+    contact = SilenceWindow(_COMPLETE_SILENCE_WINDOW_S)
     while True:
         if cancel_check and cancel_check():
             raise CanceledError("canceled")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if contact.stalled():
             raise ArtifactTransferError(
-                "tensorhub upload finalize: gave up waiting for a concurrent "
-                "completion to finish (upload_complete_in_progress persisted "
-                f"past {_COMPLETE_IN_PROGRESS_MAX_WAIT_S:.0f}s)",
+                "tensorhub upload finalize: the hub stopped answering while a "
+                "completion was in progress (no response for "
+                f"{contact.silent_for():.0f}s, window {contact.window_s:.0f}s)",
                 provider="tensorhub",
                 phase="complete",
                 retryable=True,
                 status_code=409,
             )
-        time.sleep(min(_COMPLETE_IN_PROGRESS_POLL_S, remaining))
+        time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
         try:
             resp = session.post(
                 complete_url, headers=complete_headers, data=json.dumps(payload),
                 timeout=_FINALIZE_TIMEOUT_S,
             )
         except requests.RequestException:
-            continue  # transient — keep polling within the deadline
+            continue  # no answer: the silence window is the only give-up
         code = resp.status_code
         if code in (401, 403):
             raise AuthError(f"file save unauthorized ({code})")
         if 200 <= code < 300:
             return _parse_json_response(resp, phase="complete")
         if code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
-            continue  # still racing the first attempt
+            contact.touch()  # definite answer: assembly is live, keep waiting
+            continue
         # Any other terminal error: stop polling, surface it normally.
         raise ArtifactTransferError(
             f"tensorhub upload finalize failed: {_response_body_sample(resp)}",

@@ -6,7 +6,6 @@ import logging
 import os
 import random
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -15,17 +14,30 @@ import requests
 from blake3 import blake3
 
 from ..capability import InsufficientDiskError
+from ..stall import ProgressFloor
 from .errors import UrlExpiredError
 
 _log = logging.getLogger(__name__)
 
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
-# Retry policy: transient network errors get a long budget; verification
-# failures (size/blake3 mismatch) mean the source blob is likely corrupt —
-# 2 re-downloads, then give up. UrlExpiredError / ENOSPC never retry.
+# Retry policy. Verification failures (size/blake3 mismatch) mean the source
+# blob is likely corrupt — 2 re-downloads, then give up. UrlExpiredError /
+# ENOSPC never retry.
+#
+# gw#666 (th#1166 finding C): the transient half used to give up after
+# `_MAX_RETRY_TIME_S = 3600.0` of WALL time, however many bytes had landed —
+# a clock cannot tell a 200GB blob crawling in over a bad pod uplink from a
+# wedge, and resume-on-retry means the slow case was genuinely converging.
+# The give-up is now a PROGRESS question: `_TRANSIENT_MAX_TRIES` counts
+# CONSECUTIVE transient failures that failed to move the byte floor, and any
+# attempt that delivers `_RETRY_PROGRESS_FLOOR_BYTES` resets the count. A
+# link that keeps landing bytes is never "30 strikes and out"; a link that
+# delivers nothing gives up in 30 attempts as before. The floor matches
+# models/download.py's gw#655 progress-rate floor, and the per-attempt
+# network timeouts (60s connect / 180s read) still bound each try.
 _TRANSIENT_MAX_TRIES = 30
-_MAX_RETRY_TIME_S = 3600.0
+_RETRY_PROGRESS_FLOOR_BYTES = 8 * 1024 * 1024
 _VERIFY_MAX_FAILURES = 3  # initial try + 2 retries
 _RETRY_BACKOFF_CAP_S = 30.0
 
@@ -56,9 +68,19 @@ async def _download_one_file(
     on_bytes: Optional[Callable[[int], None]] = None,
 ) -> None:
     loop = asyncio.get_running_loop()
-    started = time.monotonic()
     transient_failures = 0
     verify_failures = 0
+    # Bytes this call has actually pulled down, across attempts — the only
+    # honest evidence that the transfer is still alive.
+    delivered = 0
+    floor = ProgressFloor(_RETRY_PROGRESS_FLOOR_BYTES)
+
+    def _count_bytes(n: int) -> None:
+        nonlocal delivered
+        delivered += n
+        if on_bytes is not None:
+            on_bytes(n)
+
     # Writer-unique for the lifetime of this call (stable across its own
     # retries, so HTTP Range resume-on-retry still works) but distinct from
     # every OTHER writer of this digest — including a different PROCESS.
@@ -72,7 +94,7 @@ async def _download_one_file(
                 None,
                 lambda: _download_one_file_sync(
                     url, dst, expected_size, expected_blake3,
-                    on_bytes=on_bytes, writer_id=writer_id,
+                    on_bytes=_count_bytes, writer_id=writer_id,
                 ),
             )
             return
@@ -87,9 +109,14 @@ async def _download_one_file(
                 verify_failures += 1
                 failures, cap = verify_failures, _VERIFY_MAX_FAILURES
             else:
+                # Bytes that landed since the last give-up check are real
+                # progress; a flaky link that keeps delivering starts its
+                # strike count over rather than accumulating toward a cap.
+                if floor.cleared(delivered):
+                    transient_failures = 0
                 transient_failures += 1
                 failures, cap = transient_failures, _TRANSIENT_MAX_TRIES
-            if failures >= cap or time.monotonic() - started >= _MAX_RETRY_TIME_S:
+            if failures >= cap:
                 raise
             delay = random.uniform(0.5, 1.0) * min(_RETRY_BACKOFF_CAP_S, 2.0 ** failures)
             _log.warning("download of %s failed (%s, failure %d/%d): %s; retrying in %.1fs",
