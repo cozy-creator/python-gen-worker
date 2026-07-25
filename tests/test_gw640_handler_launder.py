@@ -119,3 +119,54 @@ def test_transport_failures_are_still_plain_transport_failures():
 
     with pytest.raises(ConnectionError):
         asyncio.run(t._recv_loop(_EofStream()))
+
+
+# --- gw#640 secondary half: stop EMITTING malformed shadow state ------------
+
+
+def test_waiting_intent_always_carries_blocker_retry_or_deadline():
+    """The hub's shadow validator requires one of the three on a WAITING state.
+
+    compat-synthesized intents (`compat-materialize-*`, minted by
+    ensure_local_intent OUTSIDE a DesiredStateCommand, so they never get the
+    command's first_action deadline) carried none of the three. That is the
+    exact snapshot the hub rejected for twelve straight th#1085 runs.
+    """
+    from gen_worker.intent_registry import IntentRegistry
+    from gen_worker.pb import worker_scheduler_pb2 as p
+
+    reg = IntentRegistry("release-1", ["artifact-stat"])
+    intent_id = reg.ensure_local_intent("materialize", "tensorhub/tiny:prod")
+    assert intent_id.startswith("compat-materialize-"), intent_id
+
+    reg.transition(
+        intent_id,
+        p.LIFECYCLE_INTENT_STATUS_WAITING,
+        p.LIFECYCLE_INTENT_STAGE_FETCHING,
+        reason=p.LIFECYCLE_WAIT_REASON_NETWORK_RETRY,
+    )
+    state = next(s for s in reg.snapshot().intents if s.intent_id == intent_id)
+    blocked = bool(state.blocker_intent_id) or bool(state.blocker_request.request_id)
+    assert blocked or state.next_retry_at_unix_ms > 0 or state.deadline_at_unix_ms > 0, (
+        "a WAITING intent with no blocker and no retry must get a fallback "
+        "deadline, or the hub rejects the whole snapshot"
+    )
+
+
+def test_explicit_waiting_fields_are_not_overwritten():
+    """The fallback must only fill a genuine gap."""
+    from gen_worker.intent_registry import IntentRegistry
+    from gen_worker.pb import worker_scheduler_pb2 as p
+
+    reg = IntentRegistry("release-1", ["artifact-stat"])
+    intent_id = reg.ensure_local_intent("materialize", "tensorhub/tiny:prod")
+    reg.transition(
+        intent_id,
+        p.LIFECYCLE_INTENT_STATUS_WAITING,
+        p.LIFECYCLE_INTENT_STAGE_FETCHING,
+        reason=p.LIFECYCLE_WAIT_REASON_NETWORK_RETRY,
+        next_retry_at_unix_ms=1234,
+    )
+    state = next(s for s in reg.snapshot().intents if s.intent_id == intent_id)
+    assert state.next_retry_at_unix_ms == 1234
+    assert state.deadline_at_unix_ms == 0, "an explicit retry time needs no deadline"
