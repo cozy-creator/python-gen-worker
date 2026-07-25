@@ -248,9 +248,56 @@ def find_adapter_file(snapshot_path: Path, *, ref: str = "") -> Path:
     return files[0]
 
 
+# Matrix halves of one low-rank pair, all three key grammars: kohya
+# (`…lora_down/up.weight`), diffusers attn-processor (`…lora.down/up.weight`),
+# peft (`…lora_A/B[.<adapter>].weight`). Group 1 = module prefix, group 2/3 =
+# which half.
+_LORA_PAIR_RE = re.compile(
+    r"^(.*?)\.(?:lora[._])?(down|up)\.weight$"
+    r"|^(.*?)\.lora_([AB])(?:\.[\w-]+)?\.weight$"
+)
+
+
+def _reject_zero_delta(state_dict: Dict[str, Any], *, ref: str = "") -> None:
+    """th#1036 attach-but-invisible rule, ONE implementation (ie#552): the
+    adapter's low-rank product must be provably nonzero, or attaching it
+    silently serves the bare base model (e.g. undistilled output labeled
+    turbo). Delta per module is ``up @ down`` — a pair with EITHER half
+    all-zero contributes nothing, and alpha keys are nonzero by construction
+    so they can never vouch. Accept as soon as one pair has both halves
+    nonzero; refuse typed otherwise."""
+    pairs: Dict[str, Dict[str, bool]] = {}
+    for key, t in state_dict.items():
+        m = _LORA_PAIR_RE.match(key)
+        if m is None or not hasattr(t, "is_floating_point"):
+            continue
+        prefix = m.group(1) if m.group(1) is not None else m.group(3)
+        half = m.group(2) if m.group(2) is not None else m.group(4)
+        half = "down" if half in ("down", "A") else "up"
+        entry = pairs.setdefault(prefix, {})
+        if entry.get(half):
+            continue
+        try:
+            nonzero = bool((t != 0).any())
+        except Exception:  # exotic dtype without eq — cannot vouch either way
+            continue
+        entry[half] = nonzero
+        if entry.get("down") and entry.get("up"):
+            return
+    raise RefCompatibilitySurprise(
+        "adapter carries NO visible delta (no lora down/up pair with both "
+        "halves nonzero) — attaching it would be invisible (th#1036); "
+        "refusing",
+        ref=ref,
+        axis="state_dict",
+    )
+
+
 def load_adapter_state_dict(path: Path, *, ref: str = "") -> Dict[str, Any]:
     """Parse + validate one adapter file. Injects missing kohya ``alpha``
-    keys (alpha = rank) so diffusers doesn't error."""
+    keys (alpha = rank) so diffusers doesn't error. Zero-delta extractions
+    are refused here — every consumer (executor overlays, BYO per-request
+    loras, endpoint code) inherits th#1036's guard from this one seam."""
     from safetensors.torch import load_file as load_safetensors
     import torch
 
@@ -266,6 +313,7 @@ def load_adapter_state_dict(path: Path, *, ref: str = "") -> Dict[str, Any]:
             f"unreadable adapter safetensors: {exc}", ref=ref, axis="state_dict"
         ) from exc
     validate_lora_keys(state_dict.keys(), ref=ref)
+    _reject_zero_delta(state_dict, ref=ref)
     for key in list(state_dict.keys()):
         if key.endswith("lora_down.weight"):
             alpha_key = key[: -len("lora_down.weight")] + "alpha"
