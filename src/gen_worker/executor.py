@@ -7683,15 +7683,6 @@ class Executor:
             **producer_kwargs,
         )
         job.ctx = ctx
-        # th#1130 / pgw#652 Phase 0: let ctx.save_image defer its encode +
-        # C2PA stamp + upload to the finalize tail, which this method drains
-        # AFTER releasing the GPU permit. The handler's RETURN is the
-        # terminality signal — no endpoint change, and an N-image loop cannot
-        # release the permit early because save_image no longer releases
-        # anything. Streaming handlers are excluded: they serialize items
-        # MID-handler, so their outputs have no post-handler tail to ride.
-        if spec.output_mode != "stream" and not spec.is_async_gen:
-            ctx._arm_deferred_outputs()
         if job.cancel_requested:
             ctx._cancel()
         if run.capability_token and self.file_base_url:
@@ -7916,49 +7907,9 @@ class Executor:
                             await asyncio.to_thread(
                                 self._adapters.deactivate, ref, pipe, run.request_id
                             )
-            # The peak is read BEFORE the permit is released: the next job
-            # resets the CUDA peak-allocator watermark when it takes the GPU,
-            # and the finalize tail below runs concurrently with it.
-            peak_vram = self._peak_vram_bytes(gpu_index)
-            # Handler GPU work is done — free the slot before the deferred
-            # encode/upload tail, the result-blob upload and the result send,
-            # so the next job's compute starts now.
-            overlapped = False
-            released_at: Optional[float] = None
-            if lease is not None:
-                overlapped = not lease.yield_slot()
-                released_at = lease.released_at
-            self._intent_transition(
-                job.intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
-            )
-            # th#1130: THE tail. Slotless by construction (the permit is gone
-            # above), on a thread so the event loop keeps dispatching. Inside
-            # the try, so a failing encode fails the request cleanly instead
-            # of reporting OK with a hollow asset.
-            if ctx._deferred.pending():
-                from .video_encode import finalize_permit
-
-                def _drain() -> int:
-                    # gw#516 back-pressure: bound how many slotless CPU
-                    # finalizes stack up, same permit the video path takes.
-                    with finalize_permit():
-                        return ctx._drain_deferred_outputs()
-
-                drained = await asyncio.to_thread(_drain)
-                logger.info(
-                    "finalize tail: %d deferred output(s) encoded+uploaded "
-                    "slotless for request %s", drained, run.request_id)
-            handler_done = time.monotonic()
-            # th#1111: the stage map's window must cover the tail it now
-            # contains, so image_encode/credential_stamp/upload land in
-            # total.tail and the map still closes against runtime_ms.
-            ctx._stages.handler_close()
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output, lane=job.lane,
-                                    runtime_terms=_runtime_term_values(spec, payload, ctx),
-                                    peak_vram_bytes=peak_vram)
+                                    runtime_terms=_runtime_term_values(spec, payload, ctx))
             # pgw#652: the request just told us what a concurrent one costs.
             # Only a completed run is evidence — a cancelled or OOM-killed job
             # never reached its real peak.
@@ -7967,7 +7918,12 @@ class Executor:
                     self._activation_key(spec),
                     metrics.peak_vram_bytes - alloc_at_start,
                 )
+            handler_done = time.monotonic()
+            # Handler GPU work is done — free the slot before result-blob
+            # upload and result send so the next job's compute starts now.
             if lease is not None:
+                overlapped = not lease.yield_slot()
+                released_at = lease.released_at
                 if released_at is not None:
                     # gw#516 typed split of runtime_ms: how long the GPU slot
                     # was actually held vs the slotless finalize tail.
