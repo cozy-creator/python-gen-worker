@@ -41,6 +41,10 @@ import msgspec
 from .binding import BINDING_TYPES, Binding
 from .formula import RuntimeFormula
 from .slot import OBJECTIVES, Slot
+from ..models import lanes as lanespec
+from ..runtimes.server import ServerHandle
+from .tree import is_introspectable
+from ..warmup import validate_at_decoration
 
 T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
@@ -276,7 +280,6 @@ def _validate_handles(owner: str, handles: Any) -> Tuple[str, ...]:
     behavioral divergence only, never inventory. Tokens are concrete lane
     BODIES (no `+eager|+compiled`: execution is platform-managed). Nothing
     declared = fully platform-managed lanes, exactly as before."""
-    from ..models import lanes as lanespec
 
     if handles is None:
         return ()
@@ -547,7 +550,7 @@ class Compile(msgspec.Struct, frozen=True):
     declare the axis dynamic via ``dynamic=(DynamicDim("sequence", min=...,
     max=...),)``.
 
-    CFG regimes are graph shapes too, but they are a PAYLOAD-FIELD fact:
+    CFG graph classes are graph shapes too, but they are a PAYLOAD-FIELD fact:
     annotate the guidance field with :class:`~gen_worker.CompileAxis`
     equivalence classes (``Compile(guidance_scales=...)`` is deleted in
     v2). The warm plan derives from the cross-product of axis classes x
@@ -863,7 +866,6 @@ def _is_server_handle_param(p: inspect.Parameter) -> bool:
     ann = p.annotation
     if ann is inspect.Parameter.empty:
         return False
-    from ..runtimes.server import ServerHandle
 
     if ann is ServerHandle:
         return True
@@ -973,7 +975,6 @@ def _validate_lora_state_dict(owner: str, slots: Dict[str, Slot], lora_bucket: i
     pipeline class is endpoint-internal) and are skipped."""
     if not lora_bucket or not slots:
         return
-    from .tree import is_introspectable
 
     roots = [s for s in slots.values() if s.root]
     root = roots[0] if roots else slots.get("pipeline") or (
@@ -1104,7 +1105,6 @@ def _decorate_class(
     # gw#470: default-on boot warmup — fail unwarmable GPU inference classes
     # at import when type hints resolve here (walk time re-checks). Lazy
     # import: warmup.py imports this module.
-    from ..warmup import validate_at_decoration
 
     validate_at_decoration(cls, decl)
     return cls

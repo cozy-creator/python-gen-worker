@@ -23,7 +23,7 @@ are CODE: only the platform's first-party compile job publishes shared ones.
 Artifact = deterministic ``.tar.gz``::
 
     metadata.json      key: family, sku/torch/triton/cuda, shapes, targets,
-                       image guidance regimes, diffusers/transformers
+                       image guidance classes, diffusers/transformers
                        versions (+ source_ref info)
     inductor/**        TORCHINDUCTOR_CACHE_DIR contents
     triton/**          TRITON_CACHE_DIR contents
@@ -62,7 +62,19 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+import inspect
+import pickle
+import sys
+
+from . import cell_key, hot_swap
 from .api.errors import RetryableError
+from .models import w8a8_lora
+from .models.loading import load_from_pretrained, pipeline_weight_lane
+from .models.loading import pipeline_weight_lane as _traced_lane
+from .models.memory import low_vram_mode, place_pipeline, reconcile_resident_mode
+from .models.refs import parse_model_ref
+from .models.w8a8_lora import RANK_BUCKETS
+from .registry import CompileCell
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +305,6 @@ def compile_target_lane_error(weight_lane: str, lora_bucket: int) -> str:
     base, observed = lane_bucket(lane)
     if base not in ("", "fp8-hooks", "w8a16", "w8a8", "w4a4"):
         return f"unsupported pipeline_weight_lane {lane!r}"
-    from .models.w8a8_lora import RANK_BUCKETS
 
     if observed not in (0, *RANK_BUCKETS):
         return f"unsupported LoRA bucket {observed} in lane {lane!r}"
@@ -333,7 +344,6 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
     """(family, flavor) from a system cell ref
     (``root/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
     grammar (gw#492); ('', '') when the ref is not a system-family ref."""
-    from .models.refs import parse_model_ref
 
     try:
         parsed = parse_model_ref(str(ref or ""))
@@ -372,7 +382,6 @@ def is_cache_ref(ref: str, family: str = "") -> bool:
     one specific family). Cells are flavored either with the legacy human
     label (``inductor-<sku>-torch<mm>[-lane]``) or, post-th#883, with the
     worker-computed cell key itself (``ck2-<sha256>`` — pull-by-key)."""
-    from . import cell_key
 
     fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
@@ -438,7 +447,7 @@ def artifact_metadata(
     layerwise-cast; the hooks are traced INTO the graphs, ie#381) and is
     parity-checked at :func:`enable` like ``low_vram_mode``. Shape rows are
     (w, h) or (w, h, frames); ``guidance_scales`` records the image CFG /
-    no-CFG graph regimes captured for every 2-D row — see ``Compile``."""
+    no-CFG graph classes captured for every 2-D row — see ``Compile``."""
     meta: Dict[str, Any] = {
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
@@ -464,7 +473,6 @@ def artifact_metadata(
     # describe. Derived FROM the metadata (never probed separately), so the
     # stamp can never disagree with the axes it summarizes. Callers that
     # later override a key axis (build()'s serving image digest) re-stamp.
-    from . import cell_key
 
     return cell_key.stamp(meta)
 
@@ -643,7 +651,6 @@ def _disable_aot_autograd_cache() -> None:
     the installed config entry's ``env_value_force`` mutated here (torch
     already imported — tools, tests, embedders)."""
     os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "0"
-    import sys
 
     if "torch" not in sys.modules:
         return
@@ -662,7 +669,6 @@ def _disable_aot_autograd_cache() -> None:
 def _reset_inductor_latch() -> None:
     """Clear inductor's in-memory caches that may have latched the previous
     cache-dir paths (torch's own ``temporary_cache_dir`` does the same)."""
-    import sys
 
     if "torch" not in sys.modules:
         return
@@ -762,7 +768,6 @@ def toolchain_present() -> bool:
 
 def _fx_entry_lines(data: bytes) -> Tuple[str, list]:
     """(key, hash-details lines) from one pickled FxGraphCache entry."""
-    import pickle
 
     obj = pickle.loads(data)
     key = str(getattr(obj, "_fx_graph_cache_key", "") or "")
@@ -854,7 +859,6 @@ def fx_cache_failure_report(artifact: Optional[Path] = None) -> str:
     - cell_keys=0             => the artifact itself was unreadable here.
 
     Every sub-probe degrades to an err token; this never raises."""
-    import pickle
 
     out: list = []
     seeded_lines: Dict[str, list] = {}
@@ -1182,7 +1186,6 @@ def mode_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     want = str(meta.get("low_vram_mode") or "")
     if not want:
         return ""
-    from .models.memory import low_vram_mode
 
     have = low_vram_mode(pipeline)
     if want != have:
@@ -1200,7 +1203,6 @@ def apply_lora_lane(pipeline: Any, bucket: int) -> bool:
     publish/adopt the wrong graph."""
     if not bucket:
         return False
-    from .models import w8a8_lora
 
     denoiser = w8a8_lora.branch_target(pipeline)
     if denoiser is None:
@@ -1217,7 +1219,6 @@ def drop_lora_lane(pipeline: Any) -> None:
     """Undo :func:`apply_lora_lane`: drop the branch buffers and restore the
     branchless lane stamp (the eager rollback — canonical zeroed branches
     cost +21-32% eager, gw#547)."""
-    from .models import w8a8_lora
 
     denoiser = w8a8_lora.branch_target(pipeline)
     if denoiser is None:
@@ -1233,7 +1234,6 @@ def lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     versa — both directions are guaranteed FX-graph misses that would serve
     eager while reporting adopted (the gw#391 bug class)."""
     want = str(meta.get("weight_lane") or "")
-    from .models.loading import pipeline_weight_lane
 
     have = pipeline_weight_lane(pipeline)
     if want != have:
@@ -1420,7 +1420,6 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
         "targets": graph_targets,
     }
     encoded = json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()
-    from .models.loading import pipeline_weight_lane
 
     lane = pipeline_weight_lane(pipeline)
     weight_contract: Dict[str, Any] = {"lane": lane}
@@ -1470,7 +1469,6 @@ def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callabl
     mark torch cannot honor raises ``ConstraintViolationError`` at
     compile/warm time — a LOUD build failure, never a silent fallback to
     recompilation (the mint's warm calls do not guard)."""
-    import functools
 
     import torch
 
@@ -1501,13 +1499,12 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
 
     ``execution_contract()[0]`` is intentionally only the module-graph
     signature. Scheduler fencing needs the complete contract: declared graph
-    shapes/targets/CFG regimes, whole-vs-regional mode, actual weight lane and
+    shapes/targets/CFG classes, whole-vs-regional mode, actual weight lane and
     activation-scaling schema, LoRA bucket, and observed low-VRAM preparation.
     Tensor values and checkpoint identities remain excluded so compatible
     fine-tunes share one family cell.
     """
     graph_signature, weight_contract = execution_contract(pipeline, cfg)
-    from .models.memory import low_vram_mode
 
     text_lens = tuple(getattr(cfg, "text_lens", ()) or ())
     if not text_lens and getattr(cfg, "text_len", None) is not None:
@@ -1914,10 +1911,8 @@ def apply(
         logger.debug("compile-cache: could not raise recompile limit", exc_info=True)
 
     regional = bool(getattr(cfg, "regional", False))
-    from .models.loading import pipeline_weight_lane
 
     fail_closed = pipeline_weight_lane(pipeline).startswith(("w8a8", "w4a4"))
-    from . import hot_swap
 
     failure_signal: Dict[str, Any] = {
         "callback": None,
@@ -2116,7 +2111,6 @@ def _reconcile_resident_mode(meta: Optional[Dict[str, Any]], pipeline: Any) -> N
     if not meta:
         return
     want = str(meta.get("low_vram_mode") or "")
-    from .models.memory import low_vram_mode, reconcile_resident_mode
 
     resident = ("off", "vae_only")
     have = low_vram_mode(pipeline)
@@ -2339,7 +2333,7 @@ def _warm_call(
     count only, so a plain single-pipeline call traces the same graph the
     serving path (including a two-stage refine, whose latents arrive from an
     upsampler of identical shape) will look up. Video calls force the
-    batch-1 no-CFG serving regime (CFG is a graph shape — ``Compile``) and
+    batch-1 no-CFG serving class (CFG is a graph shape — ``Compile``) and
     skip decode unless a vae target is declared. Image calls run once per
     explicitly declared guidance scale, capturing CFG and no-CFG graphs in
     one family cell.
@@ -2350,7 +2344,6 @@ def _warm_call(
     ``true_cfg_scale`` + a non-None ``negative_prompt`` — warming through
     ``guidance_scale`` there traces the SAME unconditioned graph for every
     declared scale and the serving CFG lookup can never hit."""
-    import inspect
 
     import torch
 
@@ -2456,9 +2449,6 @@ def build(
     first call per shape is the compile cost. Raises on any compile failure
     or an empty capture; a silently-eager build must never publish.
     """
-    from .models.loading import load_from_pretrained
-    from .models.memory import place_pipeline
-    from .registry import CompileCell
 
     _W8A8_MINT_NEEDS_DIGEST = (
         "W8A8 cell mint requires serving_image_digest (the endpoint "
@@ -2518,7 +2508,6 @@ def build(
     # traced under travels in the metadata for adopt-time parity checks. Run
     # on a pod with the same free-VRAM class as the target workers.
     placed = place_pipeline(pipe)
-    from .models.loading import pipeline_weight_lane as _traced_lane
 
     if _traced_lane(pipe).startswith(("w8a8", "w4a4")) and not str(
         serving_image_digest
@@ -2562,7 +2551,6 @@ def build(
             "was inductor already latched to another dir in this process?"
         )
 
-    from .models.loading import pipeline_weight_lane
 
     graph_signature, weight_contract = execution_contract(pipe, cfg)
     meta = artifact_metadata(
@@ -2596,7 +2584,6 @@ def build(
     # forge's echo — a demand-driven mint names the exact worker-computed
     # key it must satisfy, and publishing a cell under a key its own axes
     # do not describe would be a permanently un-armable store entry.
-    from . import cell_key
 
     cell_key.stamp(meta)
     if str(requested_cell_key or "").strip():
@@ -2675,8 +2662,6 @@ def mint_artifact(
         raise RuntimeError(
             "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR"
         )
-    from .models.loading import pipeline_weight_lane
-    from .models.memory import low_vram_mode
 
     # gw#564: record the execution contract exactly like the production
     # build — w8a8 cells are contract_drift-gated on the graph signature and
@@ -2805,8 +2790,6 @@ def finish_fleet_mint(
             f"the warmup proof compiled {expected_graphs} graph(s) — "
             "partial capture, refusing to publish"
         )
-    from .models.loading import pipeline_weight_lane
-    from .models.memory import low_vram_mode
 
     # gw#564: record the execution contract exactly like the production
     # build — w8a8 cells are contract_drift-gated on the graph signature and
