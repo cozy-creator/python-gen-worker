@@ -30,6 +30,7 @@ import socket
 from blake3 import blake3
 from ..api.errors import AuthError
 from ..request_context._helpers import _parse_owner_repo
+from ..stall import SilenceWindow
 from gen_worker.models.refs import flavor_token as _token
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,21 @@ _COMPLETE_IN_PROGRESS_POLL_S = 5.0
 # each attempt can legitimately take a full verify. Found live twice on the
 # flux2-klein-4b clone (te#44 J9 runs 7+8: RemoteDisconnected at ~4m50s).
 _COMPLETE_NETWORK_RETRY_DELAY_S = 15.0
-_COMPLETE_NETWORK_MAX_WAIT_S = 1800.0
+
+# gw#666 (th#1166 finding D): the old `_COMPLETE_NETWORK_MAX_WAIT_S = 1800.0`
+# abandoned the publish at 30 minutes of wall time — throwing away a commit
+# whose bytes were already uploaded, because a stopwatch expired while the
+# hub was still verifying them.
+#
+# The hub tells us which case we are in. A `409 upload_complete_in_progress`
+# is a DEFINITE answer: the hub is up and something holds the completion lock
+# (which the hub sets NX with a TTL and never renews, so the 409 cannot
+# outlive a dead holder). While those keep arriving the verify is advancing
+# and there is nothing to give up on. What is NOT definite is silence — a
+# severed connection or an edge-masked 5xx tells us nothing — so only those
+# accumulate the window below. It is derived from the call cadence: two full
+# verify-length attempts' worth of hearing nothing definite.
+_COMPLETE_SILENCE_WINDOW_S = 2.0 * _COMPLETE_TIMEOUT_S
 
 _SESSION: Optional[requests.Session] = None
 
@@ -283,35 +298,44 @@ class HubClient:
         as fatal: /complete is idempotent once finalized (tensorhub's
         sess.Finalized fast path returns the same success payload), so
         re-POSTing catches up to whatever the in-flight attempt decides.
-        Network-severed attempts get the same treatment on a longer clock
-        (_COMPLETE_NETWORK_MAX_WAIT_S): each re-POST may re-run a full
-        multi-minute verify, so give it room instead of failing the commit."""
-        deadline = time.monotonic() + _COMPLETE_NETWORK_MAX_WAIT_S
+        Network-severed attempts get the same treatment, bounded by SILENCE
+        rather than a clock (gw#666): every 409 in-progress answer is proof
+        the hub is up and verifying, so the loop waits as long as the hub
+        keeps saying so, and gives up only after _COMPLETE_SILENCE_WINDOW_S
+        with no definite answer at all."""
+        contact = SilenceWindow(_COMPLETE_SILENCE_WINDOW_S)
         while True:
             try:
                 resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
             except HubPublishError:
-                if time.monotonic() >= deadline:
+                if contact.stalled():
                     raise
-                logger.warning("POST %s network-severed; re-POSTing (idempotent complete)", complete_path)
+                logger.warning(
+                    "POST %s network-severed; re-POSTing (idempotent complete; "
+                    "no definite answer for %.0fs of %.0fs)",
+                    complete_path, contact.silent_for(), contact.window_s)
                 time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
                 continue
             if resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
-                if time.monotonic() >= deadline:
-                    return resp
+                # The hub is alive AND a verify holds the lock: that is
+                # progress, not a reason to give up. Wait it out.
+                contact.touch()
                 time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
                 continue
             if resp.status_code >= 500:
                 # gw#565: an edge/tunnel in front of tensorhub (ngrok) times
                 # out DURING the synchronous verify and answers 5xx while the
                 # server is still working. A returned 5xx is the same case as
-                # a severed connection — re-POST on the patient clock; the
-                # sess.Finalized fast path answers the catch-up POST.
-                if time.monotonic() >= deadline:
+                # a severed connection — it says nothing definite, so it does
+                # NOT refresh the window; the sess.Finalized fast path answers
+                # the catch-up POST if the verify did land.
+                if contact.stalled():
                     return resp
                 logger.warning(
-                    "POST %s returned %d (edge-masked verify?); re-POSTing (idempotent complete)",
-                    complete_path, resp.status_code)
+                    "POST %s returned %d (edge-masked verify?); re-POSTing "
+                    "(idempotent complete; no definite answer for %.0fs of %.0fs)",
+                    complete_path, resp.status_code,
+                    contact.silent_for(), contact.window_s)
                 time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
                 continue
             return resp

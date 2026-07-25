@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.64.0 (2026-07-25) — the warm tax dies: contract-keyed warm runs; wall clocks become liveness
+
+The P0 for the sdxl multi-checkpoint stress test (pgw#654 warm-tax fix,
+measured by the ie#546 canary on 0.61.0), plus gw#665/gw#666 (the last
+fixed wall clocks become liveness checks — ONE breaking deletion) and
+pgw#647 gap #2.
+
+### pgw#654 — warm RUNS are contract-keyed, never instance-keyed
+
+The 0.61.0 derived warm plan re-ran per CHECKPOINT INSTANCE: first boots
+took ~28–32 min (18 real eager denoises at 1MP+; was ~3.3 min on 0.60.x)
+and every juggle swap paid a ~9-min warm re-run on top of its genuine
+~74s transfer+load. Multi-checkpoint juggling — the v2 flagship — now
+works as designed:
+
+- **Warm-run memory is keyed by CONTRACT** (endpoint class + per-slot
+  precision-lane facts + component overrides — never the checkpoint ref).
+  The plan executes once per contract per process; a further checkpoint
+  instance of the same family runs ONE clamped verification job (proves
+  the fresh weights compose and forward pre-READY; supplies the calls>0
+  the compile proof needs). Swap cost is transfer + VRAM load, bounded by
+  the residency path, never a warm-plan re-run. Allocator pool,
+  cuBLAS/cuDNN heuristics and dynamo's in-memory compiled code are
+  process-global — that is what makes the inheritance sound. Inheritance
+  is refused while a self-mint capture is pending or an armed cell is not
+  yet proven in-process (those boots keep the full plan and full proof).
+- **Eager lanes stop paying the cross-product.** When nothing is armed or
+  minting, the boot warm runs ONE shape representative per (function,
+  guidance class) — allocator peak and kernel-heuristic warm are
+  shape-driven, not coverage-driven; nothing is being traced. Numeric
+  shape axes (megapixels-style) keep their max-area bucket; enum axes
+  keep the first declared class. The full class x bucket product still
+  runs whenever a compile artifact is armed or minting.
+- **Synthesized warm payloads clamp step fields** (`num_inference_steps`
+  / `steps`) to their declared floor (`msgspec.Meta` ge/gt honored) —
+  the traced graph and the allocator peak are step-count independent, so
+  a warm run never pays a full recipe's steps even on an endpoint that
+  forgot `ctx.boot_warmup`. A `@worker_function(warm=...)` override still
+  wins.
+- New pod-side benchmark: `benchmarks/swap_latency.py` — per-component
+  disk->VRAM load, VRAM->host-RAM demote, resident re-pick promote,
+  component-first swap by content address (in-place copy vs replace; a
+  DMD-distilled sibling is the same case), H2D copy-stream overlap with
+  compute-interference measurement. Refuses to run off-pod.
+
+### pgw#647 gap #2 — component overrides inherit the composition's dtype
+
+`load_component_override` resolves dtype as: base binding's declared
+dtype, else the base COMPOSITION's compute dtype
+(`composition_compute_dtype`: fp8-stored bases map to their bf16 compute
+default), else — last resort — the override's own on-disk dtype. The old
+override-on-disk fallback loaded the fp32-stored `sdxl-vae-fp16-fix` into
+a bf16 pipeline and setup died on the first latent (ie#546 canary, 2/2
+pods). The VAE-override deploy path is unblocked.
+
+### `ctx.adjustments` — the public read side of the adjustment ledger
+
+`RequestContext.adjustments` returns an immutable tuple of the
+`ctx.adjusted`/`ctx.clamp` rows. Endpoint test suites migrate off the
+private `ctx._adjustments` read at their next relock.
+
+### gw#666 — BREAKING: `boot_timeout_s` is DELETED (fixed durations -> liveness)
+
+The last five gen-worker wall clocks became liveness checks
+(`gen_worker.stall`: `SilenceWindow` over the engine's own output +
+`ProgressFloor`). `ServerProcess`/`vllm_server`/`llama_server` no longer
+accept `boot_timeout_s` — pass `stall_window_s` (silence window, not a
+boot budget) if you must tune it; an engine that keeps talking boots for
+as long as it needs. **Migration (ie#558): both qwen3.6 endpoints on ie
+master (`qwen3.6-35b-a3b`, `qwen3.6-27b-mtp-gguf`, currently pinned
+0.61.0) pass `boot_timeout_s=1800` — delete the argument in the same
+commit that bumps their pin, or the import dies at decoration time.**
+
+### gw#665 — the conversion toolchain is bounded by silence, not a 2-hour wall
+
+Conversion subprocesses (`subproc.LineTail`) are killed on output
+SILENCE, not on a fixed wall clock — a talking 3-hour GGUF conversion
+finishes; a silent hang dies fast.
+
 ## 0.63.0 (2026-07-25) — debt sweep: a worker never advertises a model it does not have
 
 Four fleet-debt issues from Paul's audit (pgw#655 / #656 / #657) plus the SDK half of

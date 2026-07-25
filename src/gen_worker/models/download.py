@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -29,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..api.errors import ValidationError
 from ..config import get_settings
+from ..stall import ProgressFloor, SilenceWindow
 from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
 import hashlib
@@ -506,18 +508,16 @@ def _run_with_stall_watchdog(
     dl_thread = threading.Thread(target=_run, name="model-download", daemon=True)
     dl_thread.start()
 
-    started_at = time.monotonic()
     last_bytes = 0
-    # Progress window: bytes on disk when the current window opened, and when
-    # it opened. The window closes (and reopens from here) the moment the
-    # floor is cleared; it never resets on a byte, so a trickle expires it.
-    window_bytes = 0
-    window_opened_at = started_at
+    # The progress window as two shared values (gw#666): the floor decides
+    # what counts as an advance (a trickle never does), the window decides how
+    # long an unadvanced loop may run. Same pair now guards the CAS fetch.
+    floor = ProgressFloor(max(int(min_window_bytes), 1))
+    window = SilenceWindow(stall_timeout if stall_timeout > 0 else math.inf)
     while not holder.get("done"):
         dl_thread.join(timeout=poll_interval)
         if holder.get("done"):
             break
-        now = time.monotonic()
         if progress_root is not None:
             try:
                 seen = scan_bytes(progress_root)
@@ -530,15 +530,14 @@ def _run_with_stall_watchdog(
                         progress_callback(seen, total_hint)
                     except Exception:
                         pass
-            if seen - window_bytes >= max(int(min_window_bytes), 1):
-                window_bytes = seen
-                window_opened_at = now
-            elif stall_timeout > 0 and (now - window_opened_at) > stall_timeout:
-                moved = seen - window_bytes
+            if floor.cleared(seen):
+                window.touch()
+            elif window.stalled():
+                moved, silent_for = floor.moved(seen), window.silent_for()
                 logger.error(
                     "download STALLED %s: %d bytes in the last %.0fs (floor %d bytes; "
                     "downloaded=%d total); abandoning the wedged thread (#379, pgw#655)",
-                    label, moved, now - window_opened_at, int(min_window_bytes), last_bytes,
+                    label, moved, silent_for, int(min_window_bytes), last_bytes,
                 )
                 raise DownloadStalledError(
                     f"download({label}) stalled: only {moved} bytes in "

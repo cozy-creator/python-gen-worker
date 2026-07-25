@@ -1906,7 +1906,12 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert recovered.incarnation_id != target.incarnation_id
     assert recovered.active_compile_ref == cell_ref
     assert list(recovered.function_names) == ["edit", "generate"]
-    assert calls == {"generate": 2, "edit": 2}
+    # pgw#654 warm-tax fix: the recovery re-setup shares the boot's warm
+    # contract and re-arms a cell already proven in-process, so it runs ONE
+    # verification job (here: edit, the plan's first row) whose proof
+    # inherits full-plan attribution — function_names above show both
+    # aliases recovered. A broken re-arm still fails closed on that call.
+    assert calls == {"generate": 1, "edit": 2}
     assert "edit" not in ex.unavailable
     assert "generate" not in ex.unavailable
     assert ex.unavailable["unrelated-hardware-gate"][0] == "hardware_unmet"

@@ -9,6 +9,7 @@ line parsing — e.g. mapping trainer output to ``ctx.progress(...)``.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -20,11 +21,89 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .api.errors import CanceledError
 from .runtime_config import SNAPSHOT_PATH_ENV
+from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TERM_GRACE_S = 10.0
 _POLL_INTERVAL_S = 0.2
+
+
+class LineTail:
+    """Reader thread over a child's merged stdout+stderr.
+
+    Streams every line to ``on_line`` and stamps a :class:`SilenceWindow`, so
+    "the child has said nothing for N seconds" is answerable at any moment.
+    Draining is not optional: a child whose pipe fills BLOCKS, so whoever
+    captures output must keep reading for the process's whole life.
+
+    ``run_process`` uses it to bound a run-to-completion tool (gw#665);
+    ``runtimes.server`` uses it to bound an engine BOOT while keeping the
+    child alive afterwards (gw#666).
+    """
+
+    __slots__ = ("_proc", "_on_line", "_window", "_thread")
+
+    def __init__(
+        self,
+        proc: "subprocess.Popen[str]",
+        *,
+        window_s: float,
+        on_line: Optional[Callable[[str], None]] = None,
+        name: str = "subproc-tail",
+    ) -> None:
+        self._proc = proc
+        self._on_line = on_line
+        self._window = SilenceWindow(window_s)
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+
+    def start(self) -> "LineTail":
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        stdout = self._proc.stdout
+        assert stdout is not None
+        for raw in stdout:
+            self._window.touch()
+            line = raw.rstrip("\n")
+            if self._on_line is None:
+                continue
+            try:
+                self._on_line(line)
+            except Exception:
+                logger.exception("subprocess output callback failed")
+        stdout.close()
+
+    def silent_for(self) -> float:
+        return self._window.silent_for()
+
+    def stalled(self) -> bool:
+        return self._window.stalled()
+
+    @property
+    def window_s(self) -> float:
+        return self._window.window_s
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        self._thread.join(timeout=timeout)
+
+
+class ProcessStalledError(RuntimeError):
+    """The child produced no output for its stall window — presumed wedged.
+
+    Raised only by ``run_process(stall_window_s=...)``. It is the
+    progress-based replacement for a wall-clock ``timeout=``: a long job that
+    keeps talking is never killed, a silent one is killed quickly.
+    """
+
+    def __init__(self, cmd: Sequence[str], silent_for_s: float, window_s: float) -> None:
+        super().__init__(
+            f"subprocess produced no output for {silent_for_s:.0f}s "
+            f"(stall window {window_s:.0f}s): {' '.join(cmd)}"
+        )
+        self.silent_for_s = silent_for_s
+        self.window_s = window_s
 
 
 def run_process(
@@ -35,6 +114,7 @@ def run_process(
     cwd: "str | os.PathLike[str] | None" = None,
     env: Optional[Mapping[str, str]] = None,
     term_grace_s: float = _DEFAULT_TERM_GRACE_S,
+    stall_window_s: Optional[float] = None,
 ) -> int:
     """Run ``cmd``, streaming merged stdout+stderr lines to ``on_line``.
 
@@ -44,6 +124,12 @@ def run_process(
     - ``on_line``: called from a reader thread with each output line
       (trailing newline stripped). Exceptions in the callback are logged
       and swallowed — a bad parse must not kill the trainer.
+    - ``stall_window_s``: optional PROGRESS watchdog. Every output line is an
+      advance; the group is terminated and ``ProcessStalledError`` raised only
+      once the child has been silent this long. ``None`` (default) = no
+      watchdog. There is deliberately no total-runtime bound: a wall clock
+      cannot tell a healthy 3-hour quantize from a wedge, so it is either
+      useless or it kills real work (gw#655's residency-design principle).
     - Returns the process exit code on natural exit (callers decide whether
       nonzero is fatal).
     """
@@ -69,20 +155,12 @@ def run_process(
             start_new_session=True,  # own process group → group-wide signals
         )
 
-        def _tail() -> None:
-            assert proc.stdout is not None
-            for raw in proc.stdout:
-                line = raw.rstrip("\n")
-                if on_line is None:
-                    continue
-                try:
-                    on_line(line)
-                except Exception:
-                    logger.exception("run_process on_line callback failed")
-            proc.stdout.close()
-
-        reader = threading.Thread(target=_tail, name="subproc-tail", daemon=True)
-        reader.start()
+        window = (
+            float(stall_window_s)
+            if stall_window_s is not None and stall_window_s > 0
+            else math.inf
+        )
+        reader = LineTail(proc, window_s=window, on_line=on_line).start()
 
         try:
             while True:
@@ -94,6 +172,11 @@ def run_process(
                     _terminate_group(proc, term_grace_s=term_grace_s)
                     reader.join(timeout=5.0)
                     raise CanceledError("subprocess cancelled")
+                if reader.stalled():
+                    silent_for = reader.silent_for()
+                    _terminate_group(proc, term_grace_s=term_grace_s)
+                    reader.join(timeout=5.0)
+                    raise ProcessStalledError(cmd, silent_for, window)
                 time.sleep(_POLL_INTERVAL_S)
         finally:
             if proc.poll() is None:  # unexpected exit path (exception in caller)

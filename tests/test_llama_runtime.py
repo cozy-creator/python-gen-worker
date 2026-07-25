@@ -279,7 +279,7 @@ def llama_path(monkeypatch) -> None:
 @needs_llama
 @pytest.mark.integration
 def test_real_server_stream_and_usage(tiny_gguf_dir, llama_path) -> None:
-    handle = llama_server(str(tiny_gguf_dir), boot_timeout_s=120).start()
+    handle = llama_server(str(tiny_gguf_dir)).start()
     try:
         deltas = list(completion_deltas(
             handle, "Once upon a time", max_tokens=16, temperature=0.0))
@@ -311,7 +311,7 @@ def test_real_server_terminal_output_via_executor(tiny_gguf_dir, llama_path) -> 
     from gen_worker.pb import worker_scheduler_pb2 as pb
     from gen_worker.registry import EndpointSpec
 
-    handle = llama_server(str(tiny_gguf_dir), boot_timeout_s=120).start()
+    handle = llama_server(str(tiny_gguf_dir)).start()
 
     class _In(msgspec.Struct):
         prompt: str = "Once upon a time"
@@ -376,7 +376,7 @@ def test_real_gguf_header_info(tiny_gguf_dir) -> None:
 def test_gpu_smoke_offload_and_measured_vram(tiny_gguf_dir, llama_path) -> None:
     from gen_worker.runtimes.server import process_vram_bytes
 
-    boot = llama_server(str(tiny_gguf_dir), boot_timeout_s=300)
+    boot = llama_server(str(tiny_gguf_dir))
     handle = boot.start()
     try:
         deltas = list(completion_deltas(handle, "Once", max_tokens=4, temperature=0.0))
