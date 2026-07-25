@@ -299,8 +299,9 @@ def test_derived_warm_plan_cross_products_axes_per_function() -> None:
     built = [j.build("/tmp") for j in by_fn["generate"]]
     combos = {(p.aspect_ratio, p.guidance_scale) for p in built}
     assert combos == {("1:1", 0.0), ("1:1", 5.0), ("16:9", 0.0), ("16:9", 5.0)}
-    # Defaulted non-axis fields keep their defaults; required strs synthesize.
-    assert all(p.steps == 2 and p.prompt == "warmup" for p in built)
+    # Required strs synthesize; step fields clamp to their declared floor
+    # (pgw#654 warm-tax fix — a warm run never pays a full recipe's steps).
+    assert all(p.steps == 1 and p.prompt == "warmup" for p in built)
 
 
 def test_warm_override_applies_to_non_axis_fields_only() -> None:
