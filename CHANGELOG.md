@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.60.1 (2026-07-25) — pgw#654: the false fleet-wide "model load failure"
+
+**Fixes the 0.56.0–0.60.0 defect that broke every real model release on the
+new floor (ie#544: qwen-image, z-image, ernie — 3/3 `release_broken` /
+`model_load_failure_streak`).** The worker loaded its models fine and went
+READY; the first real jobs then killed it: the post-RunJob residency re-pass
+asked `ensure_intent` for already-converged (terminal SUCCEEDED) command
+work, got `""` back by design, and `reported_await("")` armed `guard_await`'s
+2.0s unreported-wait fail-closed while `wait_idle()` blocked on the in-flight
+job — `UnreportedIntentWait` → `WORKER_PHASE_ERROR` exactly 2s after first
+dispatch → the hub counted a startup failure on a healthy worker and tripped
+the release breaker. Toy/CPU gates never caught it because their jobs finish
+inside the grace period.
+
+- `IntentRegistry.ensure_intent` now mints a worker-local compat carrier for
+  re-verified command work instead of returning `""` — every long await
+  stays reportable; the fail-closed guard remains for waits that genuinely
+  carry no intent id.
+- `apply_command` supersedes COMMAND-BORN intents only. Worker-local
+  job/setup/materialize obligations survive a generation bump — previously a
+  bump terminalized a live job's intent mid-flight.
+- Observability (the reason this took a fleet outage to see): every
+  `WORKER_PHASE_ERROR` entry now dials its cause through the gw#640
+  worker-fatal carrier (`Lifecycle._enter_error_phase` →
+  `report_worker_error_async`), so the hub persists a durable, queryable
+  `pod_events` row (class `hardware_unsuitable`, reason `worker_fatal`) with
+  the exception + traceback. The hub previously stored only
+  `detail="worker phase reported error"`, and the worker's lifecycle
+  snapshot carrying the failed intent was itself dropped by hub shadow
+  validation — double blindness.
+
 ## 0.60.0 (2026-07-25) — SDK v2: THE breaking cut (pgw#647)
 
 **HARD CUT, no compatibility window.** Design of record:

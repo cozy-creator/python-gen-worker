@@ -110,6 +110,23 @@ def report_worker_fatal(
         return False
 
 
+async def report_worker_error_async(settings: Optional[Settings], detail: str) -> bool:
+    """pgw#654: dial the hub from a STILL-LIVE worker that just entered
+    WORKER_PHASE_ERROR — same carrier and durable ``pod_events`` row as the
+    process-death fatal. The hub persists only the bare phase flip ("worker
+    phase reported error"), so without this the cause of a phase error was
+    unreachable (RunPod exposes no logs API, and a malformed lifecycle
+    snapshot is dropped by hub shadow validation). Best-effort on the
+    caller's running loop; opens its own short Connect like every report."""
+    if settings is None or not (settings.orchestrator_public_addr or "").strip():
+        return False
+    try:
+        return await _report_async(settings, _build_report(settings, _clip(detail)))
+    except Exception:
+        logger.warning("worker-error report failed entirely", exc_info=True)
+        return False
+
+
 def report_worker_detail(settings: Optional[Settings], detail: str) -> bool:
     """Dial the hub with an already-formatted fatal detail (gw#640 post-mortem).
 
