@@ -639,6 +639,61 @@ class HubClient:
         }
 
 
+_DATASET_PAGE_LIMIT = 200  # tensorhub's cap; a larger value is clamped there.
+_DATASET_PAGE_CEILING = 1000  # pages, i.e. 200k datasets — a runaway guard.
+
+
+def _find_dataset_id(
+    base: str, headers: dict[str, str], owner: str, name: str,
+) -> str:
+    """dataset_id of ``owner/name``, or "" when it genuinely does not exist.
+
+    Raises ``AuthError``/``RuntimeError`` rather than returning "" on any
+    response it cannot READ — the caller creates on "", so a swallowed error
+    is a duplicate dataset (pgw#656).
+    """
+    wanted = name.lower()
+    cursor = ""
+    seen_pages = 0
+    while True:
+        query = {"org": owner, "limit": str(_DATASET_PAGE_LIMIT)}
+        if cursor:
+            query["cursor"] = cursor
+        resp = requests.get(
+            f"{base}/api/v1/datasets?{urllib.parse.urlencode(query)}",
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code in (401, 403):
+            raise AuthError(f"dataset list unauthorized ({resp.status_code})")
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(
+                f"dataset list failed ({resp.status_code}): {resp.text[:256]}"
+            )
+        try:
+            body = resp.json() if resp.text else {}
+            items = list(body.get("items") or [])
+        except (ValueError, AttributeError) as exc:
+            raise RuntimeError(
+                f"dataset list returned unreadable JSON: {exc}"
+            ) from exc
+        for it in items:
+            if str(it.get("name") or "").lower() == wanted:
+                return str(it.get("dataset_id") or "")
+        next_cursor = str(body.get("next_cursor") or "").strip()
+        seen_pages += 1
+        # No cursor, no movement, or a server that ignores paging: stop. Never
+        # spin — but never silently truncate the search either.
+        if not next_cursor or next_cursor == cursor or not items:
+            return ""
+        if seen_pages >= _DATASET_PAGE_CEILING:
+            raise RuntimeError(
+                f"dataset list did not terminate after {seen_pages} pages "
+                f"(org={owner}); refusing to create a possible duplicate"
+            )
+        cursor = next_cursor
+
+
 def publish_dataset_revision(
     *,
     base_url: str,
@@ -656,7 +711,10 @@ def publish_dataset_revision(
     Hub-API plumbing for ``DatasetContext.publish_dataset_revision`` (which
     documents the tenant-facing contract). The flow:
 
-    1. Resolve ``destination_dataset`` (owner/name) against tensorhub.
+    1. Resolve ``destination_dataset`` (owner/name) against tensorhub — the
+       FULL cursor-paginated listing, and any unreadable response raises
+       rather than reading as "no such dataset" (pgw#656: every silent miss
+       here becomes a duplicate dataset in step 2).
     2. If the dataset row doesn't exist: ``POST /api/v1/datasets`` with
        ``{tenant, name, visibility, schema: features_json}``.
     3. Otherwise: ``PATCH /api/v1/datasets/:id`` to update the schema
@@ -664,7 +722,7 @@ def publish_dataset_revision(
 
     ``kind`` / ``dataset_info`` / ``snapshot_manifest`` ride inside
     ``features_json`` under reserved ``__cozy_*__`` keys until tensorhub
-    grows dedicated columns. Raises ``AuthError`` on 401/403 and
+    grows dedicated columns (th#1162). Raises ``AuthError`` on 401/403 and
     ``RuntimeError`` on any other HTTP failure.
     """
 
@@ -694,21 +752,20 @@ def publish_dataset_revision(
     if snapshot_manifest:
         features_payload["__cozy_snapshot_manifest__"] = snapshot_manifest
 
-    # Step 1: look up any existing dataset by (tenant, name). tensorhub
-    # lists by ?tenant= and we filter client-side; this is O(N) but N is
-    # small (typically <100 datasets per org in practice).
-    list_url = f"{base}/api/v1/datasets?tenant={urllib.parse.quote(owner, safe='')}"
-    list_resp = requests.get(list_url, headers=headers, timeout=30)
-    existing_id = ""
-    if 200 <= list_resp.status_code < 300:
-        try:
-            items = list_resp.json().get("items") or []
-            for it in items:
-                if str(it.get("name") or "").lower() == name.lower():
-                    existing_id = str(it.get("dataset_id") or "")
-                    break
-        except Exception:
-            pass
+    # Step 1: look up any existing dataset by (owner, name).
+    #
+    # pgw#656: every way this lookup can fail to SEE an existing row ends in
+    # step 2a — CREATE — i.e. a duplicate dataset, silently. So it fails loud
+    # instead of falling through, and it walks the whole listing:
+    #   * a non-2xx / unparseable response now raises (it used to be
+    #     indistinguishable from "no such dataset");
+    #   * the listing is CURSOR-paginated (tensorhub caps `limit` at 200 and
+    #     returns `next_cursor`), where it used to read one default page of 50
+    #     and call that the org's whole dataset set;
+    #   * the filter is `?org=`, which is the parameter the handler actually
+    #     reads — `?tenant=` was silently ignored and the result only
+    #     happened to be right because the token's own org was the default.
+    existing_id = _find_dataset_id(base, headers, owner, name)
 
     if not existing_id:
         # Step 2a: create.
