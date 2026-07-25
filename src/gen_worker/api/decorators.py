@@ -44,7 +44,6 @@ from .slot import OBJECTIVES, Slot
 from ..models import lanes as lanespec
 from ..runtimes.server import ServerHandle
 from .tree import is_introspectable
-from ..warmup import validate_at_decoration
 
 T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
@@ -1105,6 +1104,7 @@ def _decorate_class(
     # gw#470: default-on boot warmup — fail unwarmable GPU inference classes
     # at import when type hints resolve here (walk time re-checks). Lazy
     # import: warmup.py imports this module.
+    from ..warmup import validate_at_decoration
 
     validate_at_decoration(cls, decl)
     return cls
