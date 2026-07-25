@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.56.4 (2026-07-25)
+
+- **gw#640 (secondary half): a WAITING lifecycle intent always carries a
+  blocker, a retry time, or a deadline.** The hub's shadow validator requires
+  one of the three. Compat-synthesized intents (`ensure_local_intent` ->
+  `compat-materialize-*` / `compat-setup-*`) are minted OUTSIDE a
+  `DesiredStateCommand`, so they never received the command's `first_action`
+  deadline and carried none of the three — and that malformed state is what the
+  hub rejected on every reconnect for twelve consecutive th#1085 cold-boot runs
+  (it used to reject it by ENDING THE RPC, which is fixed hub-side). Guaranteed
+  now at `IntentRegistry.transition`, the single choke point, rather than at
+  each call site; an explicitly supplied blocker/retry/deadline is never
+  overwritten. Without this the hub correctly DROPS the snapshot, so the shadow
+  projection never converges even though the worker and its jobs are healthy.
+
 ## 0.56.3 (2026-07-24)
 
 - **gw#640: a message-handler exception is no longer indistinguishable from a
