@@ -36,7 +36,16 @@ hit, never a second trace.
 
 Handlers SHOULD cheapen non-graph work on ``ctx.boot_warmup`` (e.g.
 ``steps = 1 if ctx.boot_warmup else steps``): the allocator peak is
-shape-driven and the traced graph is step-count-independent.
+shape-driven and the traced graph is step-count-independent. The SDK no
+longer trusts that alone: synthesized payloads CLAMP step-count fields
+(:data:`_STEP_FIELDS`) to their declared floor, so a warm run never pays a
+full recipe's steps even on an endpoint that forgot the clamp.
+
+Warm RUNS are further bounded by :func:`select_runs` (the pgw#654 warm-tax
+fix): eager lanes run one shape representative per guidance class instead
+of the full cross-product, and a checkpoint INSTANCE whose warm contract
+already executed in this process runs a single verification job — juggle
+swaps cost weights transfer + load, never a warm-plan re-run.
 
 Remaining class-level surfaces: a class-defined ``warmup()`` method wins
 outright (fully custom — the LTX two-stage synthetic);
@@ -58,7 +67,16 @@ import typing
 import wave
 import zlib
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    AbstractSet,
+    Any,
+    Callable,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import msgspec
 
@@ -276,13 +294,21 @@ class WarmupJob:
     function whose graph set contains this run's class (proof attribution
     is by GRAPH COVERAGE: an alias is proven once ALL of its graph classes
     proved — pgw#654/pgw#647 gap #1); ``declared`` is True when a
-    ``@worker_function(warm=...)`` override applied."""
+    ``@worker_function(warm=...)`` override applied.
+
+    ``eager_group`` and ``shape_rank`` drive :func:`select_runs`'s
+    eager-lane reduction: jobs sharing an ``eager_group`` (function +
+    guidance classes + text pin) trace the SAME batch regime and differ
+    only in shape; ``shape_rank`` orders them so the reduction keeps the
+    largest (allocator-peak) representative."""
 
     spec: "EndpointSpec"
     build: _Factory
     declared: bool
     graph_key: Tuple = ()
     covers: Tuple[str, ...] = ()
+    eager_group: Tuple = ()
+    shape_rank: Tuple = ()
 
 
 @dataclass(frozen=True)
@@ -296,6 +322,57 @@ class WarmupSkip:
 # so its graph falls in the class containing 0 — that mapping is what lets
 # generate's cfg_off trace cover turbo's (pgw#647 gap #1).
 _GUIDANCE_FIELDS = ("guidance_scale", "guidance", "cfg", "true_cfg_scale")
+
+# Step-count payload fields (post-gap-#4 family vocabulary). The traced
+# graph and the allocator peak are step-count INDEPENDENT (the denoise loop
+# repeats one graph), so synthesized warm payloads clamp these to the
+# field's declared floor — a warm run must never pay a full recipe's steps
+# (the 0.61.0 ~30-min boot regression; ie#546 canary measurement).
+_STEP_FIELDS = ("num_inference_steps", "steps")
+
+
+def _numeric_floor(t: Any) -> Tuple[bool, int]:
+    """(is_numeric_field, declared floor) for a payload field type: unwraps
+    Annotated/Optional, honors ``msgspec.Meta`` ge/gt bounds, floor >= 1."""
+    lo = 1
+    while typing.get_origin(t) is typing.Annotated:
+        args = typing.get_args(t)
+        for extra in args[1:]:
+            if isinstance(extra, msgspec.Meta):
+                if extra.ge is not None:
+                    lo = max(lo, int(extra.ge))
+                if extra.gt is not None:
+                    lo = max(lo, int(extra.gt) + 1)
+        t = args[0]
+    origin = typing.get_origin(t)
+    if origin in (typing.Union, py_types.UnionType):
+        for arm in typing.get_args(t):
+            if arm is type(None):
+                continue
+            ok, arm_lo = _numeric_floor(arm)
+            if ok:
+                return True, max(lo, arm_lo)
+        return False, lo
+    if t is int or t is float:
+        return True, lo
+    return False, lo
+
+
+def _step_clamps(
+    payload_type: type, axis_fields: AbstractSet[str], overrides: Any,
+) -> dict:
+    """{field: floor} for step-count fields this plan clamps: known fields
+    from :data:`_STEP_FIELDS` that are neither axes nor warm-overridden."""
+    out: dict = {}
+    for f in msgspec.structs.fields(payload_type):
+        if f.name not in _STEP_FIELDS:
+            continue
+        if f.name in axis_fields or f.name in dict(overrides or {}):
+            continue
+        ok, lo = _numeric_floor(f.type)
+        if ok:
+            out[f.name] = lo
+    return out
 
 
 def _axis_combos(
@@ -347,8 +424,10 @@ def _job_factory(
     base: _Factory,
     combo: Tuple[Tuple[str, str, Any], ...],
     overrides: Any,
+    clamps: Optional[dict] = None,
 ) -> _Factory:
-    changes = {f: w for f, _, w in combo}
+    changes = dict(clamps or {})
+    changes.update({f: w for f, _, w in combo})
     changes.update(dict(overrides or {}))
 
     def build(dir_path: str) -> Any:
@@ -358,6 +437,90 @@ def _job_factory(
         return msgspec.structs.replace(payload, **changes)
 
     return build
+
+
+def _shape_rank(
+    spec: "EndpointSpec", combo: Tuple[Tuple[str, str, Any], ...],
+) -> Tuple:
+    """Sortable preference over one function's combos, HIGHER = preferred by
+    the eager reduction: per non-guidance axis, a numeric warm value ranks
+    by magnitude (megapixels-style axes keep their max-area bucket), a
+    non-numeric one by reverse declaration order (first declared class
+    wins). Structure is identical across one spec's combos, so tuples
+    compare cleanly."""
+    order: dict = {}
+    for a in getattr(spec, "payload_axes", ()) or ():
+        for i, n in enumerate(a.class_names):
+            order[(a.field, n)] = i
+    rank: List[Tuple[int, float]] = []
+    for field, cls_name, warm in combo:
+        if field in _GUIDANCE_FIELDS:
+            continue
+        if isinstance(warm, (int, float)) and not isinstance(warm, bool):
+            rank.append((1, float(warm)))
+        else:
+            rank.append((0, -float(order.get((field, cls_name), 0))))
+    return tuple(rank)
+
+
+def _eager_group(
+    spec: "EndpointSpec", combo: Tuple[Tuple[str, str, Any], ...],
+) -> Tuple:
+    """Jobs sharing this key trace the same batch regime (function +
+    guidance classes + text pin) and differ only in shape."""
+    guid = tuple(
+        (f, c) for f, c, _ in combo if f in _GUIDANCE_FIELDS
+    )
+    return (spec.name, guid, getattr(spec, "text_len", None))
+
+
+def select_runs(
+    jobs: Sequence[WarmupJob],
+    *,
+    tracing: bool,
+    executed: AbstractSet[Tuple] = frozenset(),
+) -> Tuple[List[WarmupJob], str]:
+    """The subset of the derived plan one setup actually EXECUTES, with the
+    mode: ``"full"`` | ``"eager"`` | ``"verify"`` (pgw#654 warm-tax fix; the
+    ie#546 canary measured the full plan re-running per checkpoint
+    INSTANCE: ~30-min first boots and a ~9-min tax on every juggle swap).
+
+    - ``tracing=True`` (a compile artifact is armed or minting): the FULL
+      plan — every graph class must trace into the capture / prove against
+      the cell.
+    - ``tracing=False`` (eager lane — nothing armed, nothing minting): one
+      run per (function, guidance class), collapsed to a single shape
+      representative (:func:`_shape_rank`). Eager warm cost is allocator-
+      pool growth plus kernel-heuristic selection — shape-driven, not
+      coverage-driven (gw#470) — and nothing is being traced, so the class
+      x bucket cross-product buys nothing.
+    - ``executed`` covering every selected run's ``graph_key``: ONE clamped
+      verification run. Allocator pool, cuBLAS/cuDNN heuristics and
+      dynamo's in-memory compiled code are PROCESS-global, and handler code
+      paths were exercised when this contract first warmed — a new
+      checkpoint INSTANCE of the same contract shares all of it. The single
+      run proves the fresh weights compose and forward end-to-end before
+      READY (and, on compiled lanes, provides the calls>0 the pgw#637
+      in-memory/cache-hit proof needs). The caller passes ``executed``
+      non-empty only when inheritance is sound (same contract, proven
+      cells, no pending mint).
+    """
+    runs = list(jobs)
+    if not runs:
+        return [], "full"
+    mode = "full"
+    if not tracing:
+        best: dict = {}
+        for wj in runs:
+            cur = best.get(wj.eager_group)
+            if cur is None or wj.shape_rank > cur.shape_rank:
+                best[wj.eager_group] = wj
+        chosen = {id(wj) for wj in best.values()}
+        runs = [wj for wj in runs if id(wj) in chosen]
+        mode = "eager"
+    if executed and all(wj.graph_key in executed for wj in runs):
+        return [runs[0]], "verify"
+    return runs, mode
 
 
 def plan(
@@ -391,6 +554,10 @@ def plan(
             skips.append(WarmupSkip(s, f"not auto-synthesizable: {reason}"))
             continue
         overrides = dict(getattr(s, "warm_overrides", {}) or {})
+        axis_fields = {
+            a.field for a in (getattr(s, "payload_axes", ()) or ())
+        }
+        clamps = _step_clamps(s.payload_type, axis_fields, overrides)
         seen: set = set()
         for combo in _axis_combos(tuple(getattr(s, "payload_axes", ()) or ())):
             sig = _combo_signature(s, combo, union_axes)
@@ -399,10 +566,12 @@ def plan(
             seen.add(sig)
             jobs.append(WarmupJob(
                 spec=s,
-                build=_job_factory(base, combo, overrides),
+                build=_job_factory(base, combo, overrides, clamps),
                 declared=bool(overrides),
                 graph_key=(s.name,) + sig,
                 covers=(s.name,),
+                eager_group=_eager_group(s, combo),
+                shape_rank=_shape_rank(s, combo),
             ))
     return jobs, skips
 
