@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.67.3 (2026-07-26) — th#1211: the svdq 5 GB guard cited a cap that does not exist
+
+`MAX_SVDQ_FILE_BYTES` was `5 * 1000**3`, justified in-comment as an "R2
+single-PUT cap". There is no such cap in this stack: the hub's
+checkpoint-commit grant allows **64 GiB/file**
+(`checkpointGrantMaxBytesPerFile`), uploads leave as presigned **multipart**
+parts (the hub issues `part_urls`/`part_size`), and a 46 GB monolithic
+`ltx-2.3-22b-dev.safetensors` has already been published raw through this
+platform. The guard therefore refused **every** nunchaku-supported family
+except z-image-turbo — qwen-image at 11.5–13.1 GB and flux.1 at 6.8–7.0 GB
+were both blocked, even though the comment claimed flux fit.
+
+- `MAX_SVDQ_FILE_BYTES` is now `64 * 1024**3`, aligned with the hub's real
+  per-file ceiling, so it still refuses a genuinely absurd file. Comment
+  cites `checkpointGrantMaxBytesPerFile` so the next reader does not inherit
+  the myth.
+- The real constraint the guard was groping for is unchanged and still
+  honored: a nunchaku checkpoint must publish **whole**, because resharding
+  strips the `__metadata__` its loader reads. Verified the svdq lane never
+  reaches `clone.py`'s resharder — `build_svdq_flavor_tree` hardlinks the
+  single file itself, and `publish` → `publish_flavors` → `HubClient` goes
+  straight to the hub's part plan.
+- Same myth corrected in `models/loading.py`'s `_single_file_checkpoint`
+  docstring.
+
+Unblocks: mirroring the official nunchaku qwen-image fp4 artifact (th#1211's
+speed benchmark) and flux.1's 7 GB artifacts.
+
 ## 0.67.1 (2026-07-26) — pgw#675 override dtype + pgw#676 native-crash attribution (the sdxl retag blockers)
 
 ### pgw#675: a component override now loads at the dtype the base tree's LOAD LANE computes at
