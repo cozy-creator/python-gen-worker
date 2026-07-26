@@ -41,6 +41,7 @@ from .api.errors import (
     ChildRequestCanceledError,
     ChildRequestFailedError,
     FatalError,
+    IllegalCombination,
     RetryableError,
     ValidationError,
 )
@@ -123,6 +124,7 @@ __all__ = [
     "RetryableError",
     "ValidationError",
     "FatalError",
+    "IllegalCombination",
     # th#826 call-out primitive (ctx.call_endpoint / ctx.workflow_checkpoint).
     "ChildRequest",
     "ChildCallError",

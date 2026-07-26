@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..families.facts import component_dtype_for_class
 from .ladder import EMERGENCY_NF4_VRAM_FACTOR, NF4_WEIGHT_BYTES_FACTOR
 import importlib
 import importlib.util
@@ -851,6 +852,47 @@ def model_index_components(path: str | Path) -> set:
         return set()
 
 
+def model_index_component_classes(path: str | Path) -> Dict[str, str]:
+    """``{component: class name}`` the snapshot's ``model_index.json`` declares.
+
+    The authoritative component-class vocabulary at LOAD time (pgw#667): a
+    fine-tune may substitute a class, and the bytes on disk decide. Empty when
+    there is no readable ``model_index.json`` (single-file checkpoints,
+    transformers layouts)."""
+    out: Dict[str, str] = {}
+    try:
+        with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
+            index = json.load(f)
+    except Exception:
+        return out
+    if not isinstance(index, dict):
+        return out
+    for key, entry in index.items():
+        if str(key).startswith("_"):
+            continue
+        if (isinstance(entry, (list, tuple)) and len(entry) == 2
+                and all(isinstance(e, str) and e for e in entry)):
+            out[str(key)] = entry[1]
+    return out
+
+
+def component_load_dtypes(
+    pipeline_cls: Any, path: str | Path,
+) -> Dict[str, Any]:
+    """``{component: ComponentDtype}`` this composition's parts require at LOAD
+    time (pgw#667) — the snapshot's own ``model_index.json`` classes first, the
+    pipeline class's ``__init__`` annotations as the fallback.
+
+    Empty for every uniform composition, which is the common case: the caller
+    then keeps its single scalar ``torch_dtype`` and nothing changes."""
+    from ..api.tree import component_dtypes
+
+    cls = pipeline_cls if isinstance(pipeline_cls, type) else None
+    return dict(component_dtypes(
+        cls, model_index_classes=model_index_component_classes(path),
+    ))
+
+
 def model_index_entry(path: str | Path, component: str) -> Optional[tuple]:
     """``(library, class_name)`` the tree's model_index.json declares for
     ``component``, or None when absent/unreadable."""
@@ -883,6 +925,45 @@ def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
     if sniffed in ("bf16", "fp16"):
         return sniffed
     return ""
+
+
+def _component_dtype_map(
+    cls: Any, path: str | Path, scalar_dtype: Any,
+) -> Optional[Dict[str, Any]]:
+    """diffusers' per-component ``torch_dtype`` map for this composition, or
+    None when every part loads at the composition's own dtype (pgw#667).
+
+    Shape is diffusers': ``{"default": <compute dtype>, "<part>": <wider
+    dtype>}``. A part is included only when its declared load dtype DIFFERS
+    from the composition default — a fact that agrees with the default is a
+    no-op and stays out of the kwargs so nothing changes for uniform trees.
+    Returns None on a torch-less host (the loader fails on its own terms) and
+    on loaders with no component vocabulary at all.
+    """
+    facts = component_load_dtypes(cls, path)
+    if not facts:
+        return None
+    try:
+        default = scalar_dtype if scalar_dtype is not None else get_torch_dtype("bf16")
+    except ImportError:
+        return None
+    out: Dict[str, Any] = {}
+    for part, fact in facts.items():
+        try:
+            wanted = get_torch_dtype(fact.dtype)
+        except ImportError:
+            return None
+        if wanted is default:
+            continue
+        out[part] = wanted
+        logger.info(
+            "COMPONENT_DTYPE model=%s: loading %r at %s (composition default "
+            "%s) — %s", path, part, fact.dtype, default, fact.reason,
+        )
+    if not out:
+        return None
+    out["default"] = default
+    return out
 
 
 def load_component_override(
@@ -921,8 +1002,14 @@ def load_component_override(
     if not src.is_dir():
         src = Path(override_path)
     kwargs: Dict[str, Any] = {}
+    # pgw#667: a component with a declared load-dtype fact keeps it when it is
+    # SUBSTITUTED too — the fact is a property of the component class, and the
+    # substituted tree's part must be resident at the same precision the base
+    # part required or the composition is silently degraded.
+    fact = component_dtype_for_class(class_name)
     wanted = (
-        composition_compute_dtype(base_path, dtype)
+        (fact.dtype if fact is not None else "")
+        or composition_compute_dtype(base_path, dtype)
         or detect_on_disk_dtype(src)
     )
     if wanted in ("bf16", "fp16", "bfloat16", "float16", "fp32", "float32"):
@@ -1366,13 +1453,37 @@ def load_from_pretrained(
         kwargs.pop("variant", None)
         pipe = cls.from_single_file(str(single), **kwargs)
     else:
+        # pgw#667: a part whose dtype opinion is WIDER than the composition's
+        # compute dtype must come off disk that way — upcasting a bf16-loaded
+        # component afterwards recovers no precision, it only hides the
+        # truncation. diffusers takes a per-component dtype MAP (a "default"
+        # key plus per-part overrides), so the widening happens inside the one
+        # from_pretrained instead of a hand-assembled sibling load.
+        scalar_dtype = kwargs.get("torch_dtype")
+        per_component = _component_dtype_map(cls, path, scalar_dtype)
+        if per_component:
+            kwargs["torch_dtype"] = per_component
         try:
             pipe = cls.from_pretrained(path, **kwargs)
         except (TypeError, ValueError):
             # Not every loader takes variant=/quantization_config= (transformers
             # models, single-file components); retry with the bare essentials.
+            # A dict torch_dtype is in the same class — a loader that predates
+            # per-component dtypes must not lose the load entirely, so it
+            # collapses back to the composition's single compute dtype.
             kwargs.pop("variant", None)
             kwargs.pop("quantization_config", None)
+            if isinstance(kwargs.get("torch_dtype"), dict):
+                if scalar_dtype is None:
+                    kwargs.pop("torch_dtype", None)
+                else:
+                    kwargs["torch_dtype"] = scalar_dtype
+                logger.warning(
+                    "COMPONENT_DTYPE model=%s: %s.from_pretrained rejected a "
+                    "per-component torch_dtype map; retrying at the "
+                    "composition's single compute dtype (widened parts will "
+                    "load truncated)", path, getattr(cls, "__name__", cls),
+                )
             pipe = cls.from_pretrained(path, **kwargs)
 
     unmaterialized = meta_tensors(pipe)
@@ -1439,7 +1550,9 @@ __all__ = [
     "bitsandbytes_available",
     "runtime_fp8_storage_supported",
     "emergency_quantization_config",
+    "component_load_dtypes",
     "model_index_components",
+    "model_index_component_classes",
     "snapshot_component_weight_bytes",
     "load_from_pretrained",
     "load_gguf_pipeline",

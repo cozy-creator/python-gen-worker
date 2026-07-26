@@ -19,6 +19,11 @@ avoid pulling in pydantic. The source-loader layering (env → .env → secrets 
 """
 import msgspec
 
+# gw#668 sentinel: no boot-only environment (``WORKER_CONFIG_GENERATION``) was
+# ever injected into this process. Distinct from generation 0, which is a real
+# — and genuinely ancient — injected generation.
+BOOT_CONFIG_GENERATION_ABSENT = -1
+
 
 class Settings(msgspec.Struct, frozen=True, kw_only=True):
     """Worker-process configuration. Loaded once at startup, passed by reference.
@@ -55,10 +60,18 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # config-generation push; per-invoke subprocesses read it). Empty =
     # runtime_config.DEFAULT_SNAPSHOT_PATH.
     config_snapshot_path: str = ""  # GEN_WORKER_CONFIG_SNAPSHOT_PATH
-    # Config generation whose boot-only environment was injected when this
-    # pod was created. A missing stamp is deliberately stale, not inferred
-    # from the first desired-state command.
-    boot_config_generation: int = 0  # WORKER_CONFIG_GENERATION
+    # Config generation whose boot-only environment was injected when this pod
+    # was created. Never inferred from the first desired-state command.
+    #
+    # gw#668: the DEFAULT is the sentinel -1, meaning "no boot-only
+    # environment was ever injected into this process" — which is not the same
+    # fact as "the injected boot config is generation 0". Tensorhub injects
+    # WORKER_CONFIG_GENERATION only into pod-launch env, so a host-process
+    # worker (the e2e local-worker shape, the dev loop, any BYO/externally
+    # managed fleet) never receives one; conflating the two made every such
+    # worker report BOOT_STALE for its whole life, with a remedy (pod
+    # replacement) that does not exist for a pod-less worker.
+    boot_config_generation: int = BOOT_CONFIG_GENERATION_ABSENT  # WORKER_CONFIG_GENERATION
 
     # Immutable image provenance stamped by Tensorhub from the release image
     # variant it selected for this pod.

@@ -56,19 +56,35 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     """Hardware envelope for one function (SDK v2): ONLY what the endpoint
     CANNOT RUN WITHOUT — ``Resources(gpu, gpu_count, libraries, vcpus)``.
 
-    v2 hard cut (pgw#647): ``vram_gb``, ``ram_gb`` and
-    ``compute_capability`` are DELETED. th#683's prove-and-profile gate
-    MEASURES the real VRAM requirement per lane and shape; host RAM is an
-    opportunistic latency tier (the authoritative bytes are on disk in the
-    content-addressed store); and precision-per-card is the fit ladder's
-    call, never a placement gate. "What it needs to run WELL" belongs to the
-    ladder / residency planner / economics gate — all of which have
-    measurements the endpoint author does not.
+    v2 hard cut (pgw#647): ``vram_gb`` and ``compute_capability`` are
+    DELETED. th#683's prove-and-profile gate MEASURES the real VRAM
+    requirement per lane and shape, and precision-per-card is the fit
+    ladder's call, never a placement gate. "What it needs to run WELL"
+    belongs to the ladder / residency planner / economics gate — all of
+    which have measurements the endpoint author does not.
 
     ``vram_gb_hint`` is the one survivor of ``vram_gb``: an OPTIONAL
     first-build placement hint used only before profiling measurements
     exist. It is never a gate, never a runtime ceiling, and never a
     per-load reservation. Declaring it implies ``gpu=True``.
+
+    ``ram_gb_hint`` (pgw#670) is its HOST-side twin, restored after the v2
+    cut deleted ``ram_gb`` on the reasoning that host RAM is an
+    opportunistic latency tier. For ltx-video-2.3 it was neither
+    opportunistic nor a guess: ie#484 measured 179-301 s mp4-encode and
+    147 s VAE-decode tails on host-starved allocations at IDENTICAL GPU
+    step-ms, ie#492 sized the floor at 64 GB from that failure, and the hub
+    consumed it (pod-create minimum + th#740 read-back-and-reject). Without
+    it a starved allocation DEGRADES SILENTLY — a slow request, not a
+    refused pod — which is exactly what the declaration existed to prevent.
+    Like ``vram_gb_hint`` it is an ALLOCATION-time ask (the hub's
+    ``min_ram_gb``), never a runtime gate: nothing refuses a request because
+    host RAM is low. It does not imply ``gpu=True`` — the components are
+    pinned host staging, model-load staging, frame/encoder buffers and
+    page-cache headroom, and a CPU-only encode lane needs them too.
+    Asymmetry note: ``vcpus`` survived the v2 cut and covers the CPU side of
+    the very same encode tail, which is what made the RAM deletion read as
+    accidental rather than principled.
 
     ``strict_vram=True`` is a genuine incapability declaration for bindings
     that cannot tolerate CPU-resident weights (a compiled fixed-shape
@@ -88,6 +104,24 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     strict_vram: bool = False
     vcpus: int | None = None
     vram_gb_hint: float | None = None
+    ram_gb_hint: float | None = None
+
+    def manifest_dict(self) -> dict:
+        """The manifest ``resources{}`` projection (pgw#670).
+
+        The declaration and the wire name differ for exactly one field: the
+        builder's host-floor key is ``ram_gb`` (which it maps to the
+        scheduler's ``min_ram_gb`` — pod-create minimum plus th#740's
+        read-back-and-reject), so ``ram_gb_hint`` is projected under that
+        name. One mapping, in one place, rather than a second spelling for
+        endpoint authors to get wrong.
+        """
+        raw = msgspec.to_builtins(self)
+        out: dict = dict(raw) if isinstance(raw, dict) else {}
+        ram = out.pop("ram_gb_hint", None)
+        if ram is not None:
+            out["ram_gb"] = ram
+        return out
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -106,6 +140,11 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             force(self, "vram_gb_hint", v)
         if n_gpu > 1 or self.vram_gb_hint is not None:
             force(self, "gpu", True)
+        if self.ram_gb_hint is not None:
+            r = float(self.ram_gb_hint)
+            if r <= 0:
+                raise ValueError(f"ram_gb_hint must be positive, got {r}")
+            force(self, "ram_gb_hint", r)
         if self.vcpus is not None:
             c = int(self.vcpus)
             if c <= 0:

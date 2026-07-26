@@ -582,7 +582,10 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
     for es in extract_specs(obj, walked_module=module_name):
         res_dict: Dict[str, Any] = {}
         try:
-            raw = msgspec.to_builtins(es.resources)
+            # pgw#670: Resources owns its own manifest projection (the one
+            # declaration -> wire-name mapping lives there, not here).
+            project = getattr(es.resources, "manifest_dict", None)
+            raw = project() if callable(project) else msgspec.to_builtins(es.resources)
             if isinstance(raw, dict):
                 res_dict.update(raw)
         except Exception:

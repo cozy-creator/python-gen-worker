@@ -6,6 +6,34 @@ class ValidationError(WorkerError):
     """Bad user input; do not retry."""
 
 
+class IllegalCombination(ValidationError, ValueError):
+    """This combination of payload field VALUES is outside the endpoint's
+    contract, even though each field is individually legal (pgw#669).
+
+    Raise it from a payload struct's ``__post_init__`` for inter-field
+    constraints — ltx-video-2.3's 4K is 16:9 and B200-only, its ultrawide is
+    1080p-class and frame-capped, its 48 fps caps at 10 s: 29 of 120 axis
+    combinations are legal, and the rest are not requests the endpoint can
+    serve.
+
+    Why the type matters. ``CompileAxis`` partitions fields INDEPENDENTLY, so
+    the derived warm plan (:mod:`gen_worker.warmup`) is the cross-product of
+    those partitions — for a sparse legal set most of that product is
+    unbuildable, and a plain ``ValueError`` there is indistinguishable from a
+    genuine payload-synthesis BUG. This type is the endpoint DECLARING "not
+    legal, by contract": the plan skips those combinations and states the
+    coverage it actually achieved, while every other exception still fails the
+    load loudly. Declaring axes therefore stops being a boot hazard, and the
+    computable "fully warmed?" property survives.
+
+    It subclasses BOTH ``ValidationError`` (so the worker classifies a
+    request carrying such a combination as bad input, never infra) and
+    ``ValueError`` (so msgspec still converts it to a wire
+    ``ValidationError`` when raised inside ``__post_init__`` during decode —
+    the wire behaviour is unchanged).
+    """
+
+
 class RetryableError(WorkerError):
     """Indicates the job can be retried safely."""
 
