@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.71.0 (2026-07-26) — pgw#685: a NATIVE svdq engine — SVDQuant checkpoints without nunchaku
+
+The layout converter, the serving module, and engine selection for serving
+svdq-fp4 on **every** Blackwell part through stock `torch._scaled_mm` instead of
+nunchaku's `sm_120a`-only kernels. Not yet wired into the default load path —
+see the named gap below.
+
+- **`models/svdq_layout.py`** inverts nunchaku's v1 single-file layout: the
+  `qweight` `mma.sync m16n8k64` FRAGMENT interleave and the `wscales` transpose
+  + 8-lane/stride-4/4-pack swizzle, both by replaying the packer's permutes
+  backwards (guaranteed bijective) rather than re-deriving index math. Decoding
+  lands in a LOGICAL domain first, which is what makes nunchaku's fused
+  `to_qkv` splittable into diffusers' separate `to_q`/`to_k`/`to_v` — exact
+  along the output dim, partitioning `proj_up` while SHARING `proj_down`.
+- **`models/svdq_native.py`** — `SvdqLinear`: `W4A4Linear` plus the three things
+  an SVDQuant checkpoint needs. A per-OUTPUT-CHANNEL second-level weight scale
+  (`wcscales`) as well as the scalar `wtscale`; the low-rank branch
+  `y += (x @ proj_down) @ proj_up.T`, which is what makes 4-bit survive
+  qwen-class outliers (plain nvfp4 PTQ measured lpips 0.63-0.69 vs the official
+  svdq artifact's 0.105); and `smooth_factor`, which DIVIDES the activation
+  feeding the 4-bit branch **only** — the low-rank branch consumes RAW x,
+  because deepcompressor pre-divides `proj_down` at export. Activation scaling
+  is always DYNAMIC: an svdq checkpoint carries no `input_scale` at all.
+- **Degrade, never refuse**: `fold_to_dense` collapses the 4-bit weight, the
+  smoothing vector and the low-rank branch into ONE plain bf16 Linear
+  (`W_eff = W_q / smooth + proj_up @ proj_down.T`, exact in the dequant limit),
+  so an svdq artifact stays servable on hardware with no fp4 tensor cores.
+- **Engine selection** (`svdq.svdq_engine_candidates` / `select_svdq_engine`):
+  `"native"` is preferred for fp4 — no nunchaku wheel, no diffusers signature
+  window, no pin-matrix row, no torch downgrade (the gw#405 / th#1211 coupling
+  class), and it covers sm_100/103 which nunchaku never will. int4 stays
+  nunchaku-only (a different single-level group-64 scale path). An explicit
+  override (`GEN_WORKER_SVDQ_ENGINE`, or the `override=` argument) is honored
+  STRICTLY — the other engine is never silently substituted.
+- **The native SM window is Blackwell only** (sm_100/103/120/121). torch's own
+  nvfp4 gate is `major >= 9 || (8,9)`, which admits sm_89/sm_90, but neither Ada
+  nor Hopper has fp4 tensor cores; below Blackwell the honest degrade is fp8
+  rowwise, which we already ship. Nothing emulates fp4.
+- **Named gap — deliberately NOT the default load path yet.** A real qwen svdq
+  artifact also carries its modulation layers as AWQ W4A16 (`wzeros`, group 64,
+  int32-packed, ~33% of the parameters but negligible FLOPs). That decoder is not
+  written, and shipping it unverified would be worse than declaring it, so
+  `loading.py` routing and the `ladder.py` svdq placement are UNCHANGED:
+  widening admission before a real artifact can fully load would strand
+  requests.
+
 ## 0.69.0 (2026-07-26) — pgw#685: one fused triton kernel for the nvfp4 activation quantizer
 
 The `#nvfp4-w4a4` lane's per-call activation quantization was ~8 pure-torch

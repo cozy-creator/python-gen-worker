@@ -192,12 +192,81 @@ def svdq_stack_reason() -> Optional[str]:
 
 
 def svdq_precision_for_sm(gpu_sm: int) -> str:
-    """"fp4" / "int4" / "" — which svdq kernel family this GPU can run."""
+    """"fp4" / "int4" / "" — which svdq kernel family NUNCHAKU can run here."""
     if gpu_sm in SVDQ_FP4_SMS:
         return "fp4"
     if gpu_sm in SVDQ_INT4_SMS:
         return "int4"
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Engine selection (pgw#685) — nunchaku is no longer the only way to serve an
+# svdq artifact.
+# ---------------------------------------------------------------------------
+
+SVDQ_ENGINES = ("native", "nunchaku")
+_ENGINE_ENV = "GEN_WORKER_SVDQ_ENGINE"
+
+
+def svdq_engine_override() -> str:
+    """Operational kill-switch: pin the engine for this process. Empty (the
+    default) means "choose per artifact + host"."""
+    import os
+
+    raw = str(os.environ.get(_ENGINE_ENV, "") or "").strip().lower()
+    if raw and raw not in SVDQ_ENGINES:
+        raise SvdqError(
+            f"{_ENGINE_ENV}={raw!r} is not a known svdq engine "
+            f"({', '.join(SVDQ_ENGINES)})")
+    return raw
+
+
+def svdq_engine_candidates(precision: str) -> tuple[str, ...]:
+    """Engines that could serve this precision, best first.
+
+    NATIVE is preferred for fp4: no nunchaku wheel, no diffusers signature
+    window, no pin-matrix row, no torch downgrade (gw#405 / th#1211's whole
+    blocker class), it compiles, and it covers sm_100/103 which nunchaku never
+    will. int4 has no native implementation — the native module is nvfp4
+    block-scaled ``_scaled_mm``, and int4 svdq is a different (single-level,
+    group-64) scale path."""
+    if str(precision) == "int4":
+        return ("nunchaku",)
+    return ("native", "nunchaku")
+
+
+def select_svdq_engine(precision: str, *, override: str = "",
+                       ) -> tuple[str, dict[str, str]]:
+    """Pick the engine for an svdq artifact on THIS host.
+
+    Returns ``(engine, reasons)`` — ``engine`` is "" when none can serve, and
+    ``reasons`` maps each rejected engine to why, so the caller can raise one
+    error naming every closed door. An explicit ``override`` is honored
+    strictly: if that engine cannot serve, nothing else is substituted."""
+    from .svdq_native import svdq_native_reason
+
+    chosen = str(override or "").strip().lower() or svdq_engine_override()
+    if chosen and chosen not in SVDQ_ENGINES:
+        raise SvdqError(f"unknown svdq engine {chosen!r} "
+                        f"({', '.join(SVDQ_ENGINES)})")
+
+    candidates = ((chosen,) if chosen
+                  else svdq_engine_candidates(precision))
+    reasons: dict[str, str] = {}
+    for engine in candidates:
+        if engine == "native":
+            if str(precision) == "int4":
+                reasons[engine] = ("the native engine implements nvfp4 only; "
+                                   "int4 svdq is a different scale path")
+                continue
+            reason = svdq_native_reason()
+        else:
+            reason = svdq_stack_reason()
+        if reason is None:
+            return engine, reasons
+        reasons[engine] = reason
+    return "", reasons
 
 
 # ---------------------------------------------------------------------------
