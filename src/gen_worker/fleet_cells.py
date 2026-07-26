@@ -63,6 +63,7 @@ import requests
 
 from . import cell_key
 from . import compile_cache as cc
+from . import guard_closure
 from .convert.hub import blake3_file
 # module import (not `from .loading import pipeline_weight_lane`): tests
 # monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
@@ -690,6 +691,11 @@ def republish_after_shape_warm(
 
     tmp_root = Path(tempfile.mkdtemp(prefix="cellrepub-"))
     try:
+        # pgw#681: the grown cell must stay guard-closed — a background
+        # novel-signature warm that baked an out-of-contract guard refuses
+        # to republish (caught below, non-fatal to serving, loudly named).
+        guard_manifest = guard_closure.assert_closure(
+            pipe, cfg, label=family)
         graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
         meta = cc.artifact_metadata(
             family=family,
@@ -706,6 +712,7 @@ def republish_after_shape_warm(
             weight_contract=weight_contract,
             shape_contract=cc.declared_contract_facts(cfg),
         )
+        meta[guard_closure.MANIFEST_KEY] = guard_manifest
         label = cc.flavor_label(
             meta["sku"], meta["torch"], meta.get("weight_lane", ""))
         artifact = cc.pack(Path(live_root), tmp_root / f"{label}.tar.gz", meta)

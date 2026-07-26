@@ -46,7 +46,43 @@ tapes (real dynamo guards, real RecompileError, real warm thread) + the
 full `handle_run_job` tenant path; with the window neutralized (the pre-fix
 tree) the same input pays a silent inline recompile with zero confession.
 
-## 0.67.3 (2026-07-26) — th#1211: the svdq 5 GB guard cited a cap that does not exist
+## Unreleased — pgw#681: graph determinism — guard-closure gate + boundary canonicalization
+
+Dynamo's guard set IS the exhaustive dependency list of a compiled graph, so
+cell portability is now proven by construction instead of discovered one
+guard-miss at a time. SDK-generic, parameterized only by the declared
+contract — zero per-endpoint/per-family code (Paul's mandate).
+
+- **Guard-closure gate** (`gen_worker.guard_closure`): every mint path
+  (`finish_fleet_mint`, `mint_artifact`, `build`, the pgw#622 shape-warm
+  republish) now extracts the complete live guard set per compiled graph
+  (torch 2.13 structured `GuardManager` walk via
+  `_debug_get_cache_entry_list` → `guard_manager.root` child/leaf traversal
+  + `verbose_code_parts()`, repr-parse fallback) and classifies each guard
+  by source root: module-rooted = weights/structure identity, global-rooted
+  = code identity (both ck2-pinned), input-rooted + ambient = the CLOSED
+  WORLD every guard type must be contract-covered in. An out-of-contract
+  guard (e.g. an undeclared scalar baked in as `EQUALS_MATCH`) fails the
+  mint RED naming the exact variable; an unprovable closure (no extractable
+  graphs) also refuses. Downstream posture unchanged: pgw#672 degrades to
+  explicit eager, never a pod death.
+- **Boundary canonicalization** (`guard_closure.canonical_ingress`,
+  installed by `compile_cache.apply` at the single compiled-graph ingress,
+  mint and consumer symmetrically): tensor strides are pinned to the
+  canonical contiguous layout — including the ie#544 trap where a size-1
+  dim keeps `is_contiguous()` true under an arbitrary stride and
+  `.contiguous()` is a no-op (residue rebuilt via `as_strided`); a
+  stride-perturbed serving input now HITS the minted graph instead of
+  paying a recompile (red-verified both directions). Per-path dtype drift
+  raises a NAMED `GuardBoundaryError` instead of a silent recompile.
+- **Full guard reporting**: the complete classified guard dump rides every
+  cell as `metadata.json`'s `guard_manifest` (deterministic: comments
+  stripped, ASLR ids scrubbed, rows sorted) — into CAS and the publish
+  metadata. Audit surfaces: `guard_closure.audit_armed(pipeline, cfg)` for
+  a live armed cell, and `python -m gen_worker.guard_closure <cells...>`
+  as the runnable N-cold-pod closure/zero-miss check (exit 0 closed +
+  consistent, 2 leaks, 3 divergence; per-host ambient state compared by
+  presence, content kept in the dump).
 
 `MAX_SVDQ_FILE_BYTES` was `5 * 1000**3`, justified in-comment as an "R2
 single-PUT cap". There is no such cap in this stack: the hub's

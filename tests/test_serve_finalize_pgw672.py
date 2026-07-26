@@ -50,6 +50,7 @@ import pytest
 import gen_worker.executor as executor_mod
 from gen_worker import Compile, cell_key as cell_key_mod
 from gen_worker import compile_cache as cc
+from gen_worker import guard_closure
 from gen_worker import fleet_cells, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
@@ -251,6 +252,15 @@ class _Rig:
         monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
         monkeypatch.setattr(cc, "toolchain_present", lambda: True)
         monkeypatch.setattr(cc, "apply", _sim_apply_factory(self.sim))
+        # pgw#681 gate at its torch boundary, simmed like apply's compile
+        # leaf: _Sim never touches dynamo, so extraction would honestly
+        # report closure unprovable and refuse every finalize.
+        monkeypatch.setattr(
+            guard_closure, "assert_closure",
+            lambda pipe, cfg, label="": {
+                "v": 1, "graphs": [{"target": "transformer", "code": "sim",
+                                    "entry": 0, "guards": []}],
+                "verdicts": {}, "leaks": []})
         monkeypatch.setattr(
             cc, "inductor_counters", lambda: dict(self.sim.counters))
         monkeypatch.setattr(cell_key_mod, "compute", _fake_key_compute)
