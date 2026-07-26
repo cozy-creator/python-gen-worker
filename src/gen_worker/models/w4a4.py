@@ -488,12 +488,15 @@ def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
 
 
 def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
-                       compute_dtype: Any = None, mode: str = "") -> Any:
+                       compute_dtype: Any = None, mode: str = "",
+                       cls: Any = None) -> Any:
     """Materialize the quantized denoiser: skeleton on meta, quantized
     Linears swapped for W4A4Linear, tensors assigned from the shards.
     ``mode`` "blockwise" | "dequant" (default: probe). Layers whose dims
     break fp4 scaled_mm alignment are dequantized individually (AWQ-lite
-    ``pre_quant_scale`` folds back into the dequantized weight)."""
+    ``pre_quant_scale`` folds back into the dequantized weight).
+    ``cls`` pins the module class (the component path already resolved it
+    from the BASE composition's model_index); default: this tree's own."""
     import torch
     import torch.nn as nn
     from accelerate import init_empty_weights
@@ -503,7 +506,8 @@ def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
     if mode not in ("blockwise", "dequant"):
         mode = w4a4_gemm_mode() or "dequant"
 
-    cls = _denoiser_class(root, art.component)
+    if cls is None:
+        cls = _denoiser_class(root, art.component)
     cfg = dict(cls.load_config(str(root / art.component)))
     cfg.pop("quantization_config", None)
     with init_empty_weights():
