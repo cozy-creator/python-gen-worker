@@ -112,6 +112,10 @@ _LOCK_TYPE = type(threading.Lock())
 # object's hit certify another's silence, which gw#603/gw#611 forbid.
 _PROVEN_CELLS_LOCK = threading.Lock()
 _PROVEN_CELLS: set[str] = set()
+# pgw#672: cells whose serve/finalize proof FAILED in this process. Consulted
+# at selection and self-mint arm time so one boot never loops adopt-fail /
+# mint-fail on the identical identity (the L4 churn loop's worker half).
+_QUARANTINED_CELLS: set[str] = set()
 # Live armed pipelines (weakly held): the disproof path must never
 # ``torch._dynamo.reset()`` globally while a HEALTHY sibling's compiled
 # code is live — the global reset killed the first checkpoint's proven
@@ -119,18 +123,55 @@ _PROVEN_CELLS: set[str] = set()
 _ARMED_PIPELINES: Optional["weakref.WeakSet[Any]"] = None
 
 
-def record_cell_proven(ref: str) -> None:
-    """Mark one cell identity as served-and-proven in this process."""
+def _cell_ref_identity(ref: str) -> str:
+    """Process-registry identity for one cell ref (pgw#672 / th#1166).
+
+    The SAME cell can be named in two forms — the mint path's
+    ``system_repo(family)#<key>`` vs the store's delivered ref (tag/digest
+    decorated). Exact-string matching between those forms manufactured
+    false negatives in the pgw#637 escape. A key-flavored ref collapses to
+    its (family, key); anything else keeps its literal string."""
     ref = str(ref or "").strip()
     if not ref:
+        return ""
+    family, flavor = parse_cell_ref(ref)
+    if family and flavor:
+        from . import cell_key
+
+        if cell_key.is_key(flavor):
+            return f"{family}#{flavor}"
+    return ref
+
+
+def record_cell_proven(ref: str) -> None:
+    """Mark one cell identity as served-and-proven in this process."""
+    identity = _cell_ref_identity(ref)
+    if not identity:
         return
     with _PROVEN_CELLS_LOCK:
-        _PROVEN_CELLS.add(ref)
+        _PROVEN_CELLS.add(identity)
 
 
 def cell_proven_in_process(ref: str) -> bool:
+    identity = _cell_ref_identity(ref)
     with _PROVEN_CELLS_LOCK:
-        return str(ref or "").strip() in _PROVEN_CELLS
+        return bool(identity) and identity in _PROVEN_CELLS
+
+
+def record_cell_quarantined(ref: str) -> None:
+    """Mark one cell identity as proof-failed in this process (pgw#672)."""
+    identity = _cell_ref_identity(ref)
+    if not identity:
+        return
+    with _PROVEN_CELLS_LOCK:
+        _QUARANTINED_CELLS.add(identity)
+        _PROVEN_CELLS.discard(identity)
+
+
+def cell_quarantined_in_process(ref: str) -> bool:
+    identity = _cell_ref_identity(ref)
+    with _PROVEN_CELLS_LOCK:
+        return bool(identity) and identity in _QUARANTINED_CELLS
 
 
 def _armed_pipelines() -> "weakref.WeakSet[Any]":
@@ -200,6 +241,76 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
             if _has_entries(getattr(type(child), "forward", None)):
                 return True
     return False
+
+
+def reset_target_code(pipeline: Any) -> int:
+    """Drop dynamo's in-memory compiled code for ``pipeline``'s armed compile
+    targets (pgw#672 root-cause fix, honesty half).
+
+    Dynamo keys its code cache on the target's class-shared ``__code__``, so
+    in a WARM process a later arm's proof warmup is served straight from a
+    sibling's resident compiled code with ZERO FX/AOT counter movement —
+    a pending self-mint then captures nothing (``finish_fleet_mint:
+    captured nothing``) and a seeded adoption proves nothing (hits=0,
+    misses=0), the exact ``warmups=N, calls=N, cache_hits=0,
+    cache_misses=0`` live loop. Calling this immediately before a proof
+    window forces the warmup through the real lookup path: a mint truly
+    compiles into its capture dir, an adoption truly hits its seeded FX
+    entries.
+
+    Sibling safety: the live cache root is an ADDITIVE union
+    (:func:`_merge_staged_cache`), so a healthy sibling whose in-memory
+    code this reset also drops (shared ``__code__``) re-traces into an FX
+    cache HIT on its next call — seconds, never a recompile. Callers run
+    inside the exclusive-GPU proof window or an idle adopt, so no compiled
+    frame is mid-flight during the reset.
+
+    Returns the number of code objects reset (0 when dynamo/torch is
+    unavailable or nothing is armed — a fresh process is a no-op).
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if not marker:
+        return 0
+    try:
+        import torch._dynamo
+    except Exception:
+        return 0
+    codes: list[Any] = []
+    for _owner, _attr, fn in marker.get("originals") or ():
+        code = getattr(getattr(fn, "__func__", fn), "__code__", None)
+        if code is not None:
+            codes.append(code)
+    for mod in marker.get("regional_mods") or ():
+        try:
+            children = list(mod.modules())
+        except Exception:
+            logger.warning(
+                "compile-cache: could not enumerate regional submodules of %s "
+                "for the proof-window code reset", type(mod).__name__,
+                exc_info=True)
+            continue
+        for child in children:
+            fwd = getattr(type(child), "forward", None)
+            code = getattr(getattr(fwd, "__func__", fwd), "__code__", None)
+            if code is not None:
+                codes.append(code)
+    reset = 0
+    for code in dict.fromkeys(codes):
+        try:
+            torch._dynamo.reset_code(code)
+            reset += 1
+        except Exception:
+            # pgw#657: a silent skip here is indistinguishable from "no stale
+            # in-memory code existed" — say it, the proof may be dishonest.
+            logger.warning(
+                "compile-cache: dynamo reset_code failed for %r — the proof "
+                "warmup may be served from stale in-memory compiled code",
+                code, exc_info=True)
+    if reset:
+        logger.info(
+            "compile-cache: dropped in-memory compiled code for %d target "
+            "code object(s) ahead of the proof window (pgw#672)", reset)
+    return reset
 
 
 # ---------------------------------------------------------------------------
@@ -1724,8 +1835,6 @@ def _guarded(
         if state["revocation_error"]:
             raise CompiledLaneUnavailableError(state["revocation_error"])
         if state["failed"]:
-            if fail_closed:
-                raise CompiledLaneUnavailableError(state["detail"])
             return original(*args, **kwargs)
         # pgw#622: a novel input signature serves EAGER immediately while a
         # background thread warms the compiled path, then hot-swaps.
@@ -1742,21 +1851,26 @@ def _guarded(
             if router is not None:
                 router.mark_warm(sig)
             return result
-        except Exception as exc:  # noqa: BLE001 — optional lanes may use eager
+        except Exception as exc:  # noqa: BLE001 — every lane degrades to eager
             state["failed"] = True
             state["detail"] = (
                 f"compiled {'W8A8 ' if fail_closed else ''}target {label} failed: "
                 f"{type(exc).__name__}: {exc}"
             )
-            # Revoke scheduler-visible compiled proof synchronously before
-            # either the optional eager fallback or mandatory W8A8 error.
+            # Revoke scheduler-visible compiled proof synchronously before the
+            # eager fallback: the tier flips to explicit eager on the wire.
             revoke(state["detail"])
-            if fail_closed:
-                logger.error("compile-cache: %s", state["detail"])
-                raise CompiledLaneUnavailableError(state["detail"]) from exc
-            logger.warning(
-                "compile-cache: compiled %s failed (%s: %s); eager for the rest "
-                "of this process", label, type(exc).__name__, exc,
+            # pgw#672/pgw#673 posture: a broken optimization must never kill a
+            # serving worker. Mandatory lanes used to raise here (and the
+            # setup/dispatch paths then disabled every declared function —
+            # sm120 CantSplit retired the pod for $0.25 of nothing). They now
+            # degrade like every other lane, LOUDLY: the revocation above is
+            # the wire-visible tier flip, never silent eager (gw#586).
+            log = logger.error if fail_closed else logger.warning
+            log(
+                "compile-cache: compiled %s failed (%s: %s); serving eager for "
+                "the rest of this process%s", label, type(exc).__name__, exc,
+                " (mandatory lane DEGRADED, pgw#672)" if fail_closed else "",
             )
             return original(*args, **kwargs)
 
@@ -1825,7 +1939,7 @@ def _guarded_regional(
                 result = original(*args, **kwargs)
                 record_success(before)
                 return result
-            except Exception as exc:  # noqa: BLE001 — optional lanes may use eager
+            except Exception as exc:  # noqa: BLE001 — every lane degrades to eager
                 state["failed"] = True
                 state["detail"] = (
                     f"regional compiled {'W8A8 ' if fail_closed else ''}"
@@ -1850,15 +1964,17 @@ def _guarded_regional(
                         raise CompiledLaneUnavailableError(
                             state["revocation_error"]
                         ) from callback_exc
-                if fail_closed:
-                    logger.error("compile-cache: %s", state["detail"])
-                    raise CompiledLaneUnavailableError(state["detail"]) from exc
-                logger.warning(
-                    "compile-cache: regional-compiled %s failed (%s: %s); eager "
-                    "for the rest of this process", label, type(exc).__name__, exc,
+                # pgw#672/pgw#673 posture: mandatory lanes degrade to explicit
+                # eager (revocation above flips the wire tier) instead of
+                # raising — a broken optimization never kills serving.
+                log = logger.error if fail_closed else logger.warning
+                log(
+                    "compile-cache: regional-compiled %s failed (%s: %s); "
+                    "eager for the rest of this process%s",
+                    label, type(exc).__name__, exc,
+                    " (mandatory lane DEGRADED, pgw#672)" if fail_closed
+                    else "",
                 )
-        if fail_closed:
-            raise CompiledLaneUnavailableError(state["detail"])
         return original(*args, **kwargs)
 
     return wrapper
@@ -2185,6 +2301,11 @@ def arm_staged_artifact(
             except Exception:
                 unwrap(pipeline)
                 raise
+            # pgw#672: hot adoption runs idle-only; drop stale in-memory
+            # compiled code so the adoption's proof warmup consults the
+            # just-seeded FX entries (a real hit) instead of being served
+            # counter-silently by a prior arm's resident code.
+            reset_target_code(pipeline)
             return meta
     finally:
         staged.close()
@@ -2885,6 +3006,11 @@ __all__ = [
     "prepare",
     "resolve_pipeline_class",
     "runtime_key",
+    "record_cell_proven",
+    "record_cell_quarantined",
+    "cell_proven_in_process",
+    "cell_quarantined_in_process",
+    "reset_target_code",
     "seed_artifact",
     "seed_env",
     "set_guard_failure_callback",

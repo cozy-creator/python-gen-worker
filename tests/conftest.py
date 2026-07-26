@@ -61,3 +61,22 @@ def _fresh_delivered_seed_flag():
     _cc._DELIVERED_SEEDED = False
 
 
+@pytest.fixture(autouse=True)
+def _fresh_cell_ledgers():
+    """pgw#672 process ledgers (quarantined identities, in-process finalized
+    mints) are process-lifetime in production; clear them between tests so a
+    proof failure in one test cannot poison another's arm/selection."""
+    from gen_worker import compile_cache as _cc
+    from gen_worker import fleet_cells as _fc
+
+    def _clear() -> None:
+        with _cc._PROVEN_CELLS_LOCK:
+            getattr(_cc, "_QUARANTINED_CELLS", set()).clear()
+        with _fc._PENDING_LOCK:
+            getattr(_fc, "_FINALIZED", {}).clear()
+
+    _clear()
+    yield
+    _clear()
+
+

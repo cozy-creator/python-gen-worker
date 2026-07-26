@@ -6,6 +6,7 @@ a compile-cache snapshot on RunJob.snapshots reaches compile_cache.enable."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -1399,15 +1400,16 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
     _NoProofEndpoint.setups = _NoProofEndpoint.warmups = _NoProofEndpoint.runs = 0
 
-    with pytest.raises(
-        cc.CompiledLaneUnavailableError,
-        match="did not serve their own warmup graph",
-    ):
-        asyncio.run(ex.ensure_setup(
-            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    # pgw#672: the disproven mandatory-lane mint DEGRADES to explicit eager
+    # instead of failing the boot closed — the function stays dispatchable,
+    # nothing is advertised, and the identity is quarantined in-process.
+    asyncio.run(ex.ensure_setup(
+        spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
     assert _NoProofEndpoint.warmups == 1, "the proof must have actually run"
     assert ex.compile_targets() == [], "an unproven self-mint must not advertise"
-    assert ex.unavailable[spec.name][0] == "compile_cell_failed"
+    assert spec.name not in ex.unavailable
+    assert ex.serving_tiers() == {spec.name: "eager"}
+    assert cc.cell_quarantined_in_process(f"root/family-{FAMILY}#{mint_key}")
 
 
 def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
@@ -1632,15 +1634,15 @@ def test_pending_self_mint_unproven_fails_closed_and_never_publishes(
             p, cfg, ex.store._cache_dir, artifact, publisher=pub))
     _UnprovenEndpoint.setups = _UnprovenEndpoint.warmups = 0
 
-    with pytest.raises(
-        cc.CompiledLaneUnavailableError,
-        match="did not serve their own warmup graph",
-    ):
-        asyncio.run(ex.ensure_setup(
-            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    # pgw#672: an unproven mandatory-lane self-mint DEGRADES to explicit
+    # eager — the boot completes, nothing is advertised, nothing publishes,
+    # and the function stays dispatchable.
+    asyncio.run(ex.ensure_setup(
+        spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
     assert _UnprovenEndpoint.warmups == 1, "the proof must have actually run"
     assert ex.compile_targets() == [], "an unproven self-mint must not advertise"
-    assert ex.unavailable[spec.name][0] == "compile_cell_failed"
+    assert spec.name not in ex.unavailable
+    assert ex.serving_tiers() == {spec.name: "eager"}
     # The capture was abandoned, never packed.
     mint_root = captured["dir"].parent
     assert not mint_root.exists(), "an uncertified capture must be discarded"
@@ -1856,7 +1858,10 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert target.active_compile_ref == cell_ref
 
     # Replay binds a real operation identity to the boot-attached active cell,
-    # then a runtime guard failure disables every alias on the exact target.
+    # then a runtime guard failure revokes the compiled identity — pgw#672:
+    # the aliases STAY dispatchable at explicit eager tier (a broken
+    # optimization never kills a serving worker); the identity is
+    # quarantined in-process so it is never re-adopted this boot.
     _adopt(
         ex,
         ref=cell_ref,
@@ -1881,12 +1886,14 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
         await asyncio.sleep(0)
 
     asyncio.run(_trip())
-    assert rec.stale is True
-    assert set(ex.unavailable) >= {"edit", "generate"}
-    assert all(
-        ex.unavailable[name][0] == "compile_cell_failed"
-        for name in ("edit", "generate")
-    )
+    # pgw#672: no reload churn, no function disable — serving continues.
+    assert rec.stale is False
+    assert "edit" not in ex.unavailable
+    assert "generate" not in ex.unavailable
+    (tripped,) = ex.compile_targets()
+    assert tripped.active_compile_ref == ""
+    assert ex.serving_tiers() == {"edit": "eager", "generate": "eager"}
+    assert cc.cell_quarantined_in_process(cell_ref)
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert len(failed) == 1
     assert failed[0].error == "adopt_failed:runtime_guard"
@@ -1895,28 +1902,9 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     lifecycle = Lifecycle(
         SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
     failed_delta = lifecycle._state_delta()
-    assert "edit" not in failed_delta.available_functions
-    assert "generate" not in failed_delta.available_functions
-
-    # Declarative reconciliation replaces the stale incarnation. Only after
-    # the new exact active target proves both aliases are its owned marks
-    # cleared; unrelated unavailable reasons would remain untouched.
-    asyncio.run(ex.ensure_setup(generate, snapshots))
-    (recovered,) = ex.compile_targets()
-    assert recovered.incarnation_id != target.incarnation_id
-    assert recovered.active_compile_ref == cell_ref
-    assert list(recovered.function_names) == ["edit", "generate"]
-    # pgw#654 warm-tax fix: the recovery re-setup shares the boot's warm
-    # contract and re-arms a cell already proven in-process, so it runs ONE
-    # verification job (here: edit, the plan's first row) whose proof
-    # inherits full-plan attribution — function_names above show both
-    # aliases recovered. A broken re-arm still fails closed on that call.
-    assert calls == {"generate": 1, "edit": 2}
-    assert "edit" not in ex.unavailable
-    assert "generate" not in ex.unavailable
+    assert "edit" in failed_delta.available_functions
+    assert "generate" in failed_delta.available_functions
     assert ex.unavailable["unrelated-hardware-gate"][0] == "hardware_unmet"
-    recovered_delta = lifecycle._state_delta()
-    assert {"edit", "generate"}.issubset(recovered_delta.available_functions)
 
 
 @pytest.mark.parametrize(
@@ -2615,35 +2603,41 @@ def test_w8a8_unexercised_sibling_stays_armed_unproven(
     assert generate.name not in ex.unavailable
 
 
-def test_w8a8_exercised_miss_fails_closed_despite_unexercised_sibling(
-    tmp_path, monkeypatch,
+def test_w8a8_exercised_miss_degrades_despite_unexercised_sibling(
+    tmp_path, monkeypatch, caplog,
 ):
     """gw#595(b) keeps gw#586 shut: an EXERCISED object that misses its own
-    warmup graph disproves the cell and fails closed — the unexercised
-    sibling exemption never launders a genuine parity defect."""
+    warmup graph disproves the cell — the unexercised sibling exemption
+    never launders a genuine parity defect. pgw#672: the disproof now
+    degrades to explicit eager instead of killing the boot."""
     cls = _merged_lane_endpoint(
         lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
     specs = extract_specs(cls)
     (generate,) = specs
     ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
 
-    with pytest.raises(
-        cc.CompiledLaneUnavailableError,
-        match="did not serve their own warmup graph",
-    ) as excinfo:
+    # pgw#672: the disproven proof DEGRADES to explicit eager — setup
+    # completes, nothing is advertised, and the gw#608 self-discriminating
+    # counts (compile_seconds ~0 = crediting bug vs minutes = recompile)
+    # land in the loud degrade record instead of a fatal raise.
+    with caplog.at_level(logging.ERROR, logger="gen_worker.executor"):
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
             wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
             cell_ref: pb.Snapshot(digest=DIGEST_A),
         }))
     assert ex.compile_targets() == []
-    # gw#608: the wire-visible detail must self-discriminate crediting bugs
-    # (~0s) from real recompiles (minutes) with zero pod-log access.
-    assert "compile_seconds=" in str(excinfo.value)
+    assert generate.name not in ex.unavailable
+    degrade = [
+        r for r in caplog.records
+        if "did not serve their own warmup graph" in r.getMessage()
+    ]
+    assert degrade and "compile_seconds=" in degrade[0].getMessage()
+    assert "DEGRADED" in degrade[0].getMessage()
 
 
 def test_store_served_failure_names_diverging_fx_key_component(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, caplog,
 ):
     """gw#608 forensics wiring: a store-served warmup-proof failure diffs the
     boot's freshly saved FX entries against the seeded cell's and puts the
@@ -2661,39 +2655,40 @@ def test_store_served_failure_names_diverging_fx_key_component(
                       "inductor_config[foo]: cell=cell-value != "
                       "boot=boot-value"))
 
-    with pytest.raises(
-        cc.CompiledLaneUnavailableError,
-        match="did not serve their own warmup graph",
-    ) as excinfo:
+    # pgw#672: the disproof degrades; the forensics ride the degrade record.
+    with caplog.at_level(logging.ERROR, logger="gen_worker.executor"):
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
             wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
             cell_ref: pb.Snapshot(digest=DIGEST_A),
         }))
-    detail = str(excinfo.value)
+    assert generate.name not in ex.unavailable
+    (detail,) = [
+        r.getMessage() for r in caplog.records
+        if "did not serve their own warmup graph" in r.getMessage()
+    ]
     assert "fx forensics" in detail
     assert "inductor_config[foo]" in detail
     assert "cell=cell-value" in detail and "boot=boot-value" in detail
 
 
-def test_w8a8_all_objects_unexercised_fails_closed(tmp_path, monkeypatch):
+def test_w8a8_all_objects_unexercised_degrades_to_eager(tmp_path, monkeypatch):
     """gw#595(b): with ZERO proven objects the cell is entirely unverified —
-    a warmup that exercises nothing cannot arm anything."""
+    a warmup that exercises nothing cannot arm anything. pgw#672: the boot
+    completes at explicit eager instead of failing closed."""
     cls = _merged_lane_endpoint(lambda self: None)
     specs = extract_specs(cls)
     (generate,) = specs
     ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
 
-    with pytest.raises(
-        cc.CompiledLaneUnavailableError,
-        match="did not serve their own warmup graph",
-    ):
-        asyncio.run(ex.ensure_setup(generate, {
-            wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
-            wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
-            cell_ref: pb.Snapshot(digest=DIGEST_A),
-        }))
+    asyncio.run(ex.ensure_setup(generate, {
+        wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
+        wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
     assert ex.compile_targets() == []
+    assert generate.name not in ex.unavailable
+    assert ex.serving_tiers()[generate.name] == "eager"
 
 
 def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
@@ -2781,7 +2776,7 @@ def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
         )
 
 
-def test_w8a8_setup_with_no_addressable_compile_object_fails(tmp_path, monkeypatch):
+def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, monkeypatch):
     import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
@@ -2812,12 +2807,15 @@ def test_w8a8_setup_with_no_addressable_compile_object_fails(tmp_path, monkeypat
     )
     monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
 
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="no addressable"):
-        asyncio.run(ex.ensure_setup(spec, {
-            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-            cell_ref: pb.Snapshot(digest=DIGEST_A),
-        }))
+    # pgw#672: no addressable compile target => the functions serve
+    # explicit eager; the boot never dies for a missing optimization.
+    asyncio.run(ex.ensure_setup(spec, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
     assert ex.compile_targets() == []
+    assert spec.name not in ex.unavailable
+    assert ex.serving_tiers()[spec.name] == "eager"
 
 
 def test_desired_w8a8_cell_digest_and_ref_changes_vacate_then_rebuild(
@@ -3203,7 +3201,12 @@ def test_runtime_guard_revokes_state_emits_one_causal_failure_and_quarantines(
     assert revoked.incarnation_id == active_id
     assert revoked.active_compile_ref == ""
     assert revoked.active_compile_snapshot_digest == ""
-    assert rec.stale is True
+    # pgw#672: the record is NOT marked stale and the aliases stay
+    # dispatchable — the object serves explicit eager; the identity is
+    # quarantined per-target and process-wide.
+    assert rec.stale is False
+    assert spec.name not in ex.unavailable
+    assert cc.cell_quarantined_in_process(active_ref)
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert len(failed) == 1
     assert failed[0].error == "adopt_failed:runtime_guard"

@@ -175,6 +175,16 @@ class Activity:
             updated_at_unix_ms=int(time.time() * 1000),
         ))
 
+    def note(self, detail: str) -> None:
+        """One RUNNING report carrying a typed detail (pgw#672: the
+        degrade-to-eager confession rides the activity stream so the hub
+        sees WHY a compiled lane is now serving eager — loud, never a
+        terminal state)."""
+        if self._done:
+            return
+        self._report(
+            pb.ActivityState.ACTIVITY_STATE_RUNNING, detail=detail[:2000])
+
     def completed(self) -> None:
         if not self._done:
             self._done = True
@@ -231,6 +241,15 @@ def current_phase(phase: str, step: int = 0, total: int = 0) -> None:
         act = _current
     if act is not None and not act._done:
         act.phase(phase, step, total)
+
+
+def current_note(detail: str) -> None:
+    """Attach a typed detail to the current activity (pgw#672 degrade
+    visibility); no-op when none is running."""
+    with _lock:
+        act = _current
+    if act is not None and not act._done:
+        act.note(detail)
 
 
 def _end(act: Activity) -> None:

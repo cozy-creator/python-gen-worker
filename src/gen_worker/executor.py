@@ -3043,7 +3043,11 @@ class Executor:
 
         The target remains addressable with an empty active identity so the
         causal failure can be correlated regardless of event/StateDelta order.
-        A mandatory W8A8 object cannot serve eager; its next setup reloads it.
+        pgw#672: mandatory (w8a8/w4a4) lanes no longer disable their aliases
+        or force a reload here — the guard wrapper degrades the object to
+        explicit eager serving and this revocation flips the wire tier; the
+        failed identity is quarantined (per-target AND process-wide) so it is
+        never re-adopted or re-minted this boot.
         """
         if rec.compile_targets.get(target.incarnation_id) is not target:
             raise RuntimeError("compiled target is no longer live")
@@ -3060,18 +3064,12 @@ class Executor:
             target.active_compile_ref = ""
             target.active_compile_snapshot_digest = ""
             target.active_adoption_operation_id = ""
-            mandatory_quant = target.pipeline_weight_lane.startswith(
-                _MANDATORY_LANES)
-            if mandatory_quant:
-                # Keep the same incarnation visible with an empty active
-                # identity until declarative reconciliation replaces it.
-                # RequiredCompileExecution then fails closed locally while
-                # Tensorhub can correlate the causal FAILED to this row.
-                rec.stale = True
-        if mandatory_quant:
-            self._mark_compile_target_unavailable(rec, target, detail)
+        from . import compile_cache
+
+        compile_cache.record_cell_quarantined(failed_ref)
         logger.warning(
-            "compile target %s runtime guard tripped; compiled proof revoked: %s",
+            "compile target %s runtime guard tripped; compiled proof revoked, "
+            "serving degrades to explicit eager: %s",
             target.incarnation_id,
             detail,
         )
@@ -3342,13 +3340,16 @@ class Executor:
                 (mandatory_quant or candidate_requested_lane)
                 and not expected_names <= set(target.function_names)
             ):
-                # Every REQUIRED alias must be proven; a proven superset
+                # Every REQUIRED alias should be proven; a proven superset
                 # (custom-warmup attribution covering a non-required
-                # sibling) is not a defect.
-                raise compile_cache.CompiledLaneUnavailableError(
+                # sibling) is not a defect. pgw#672: an unproven required
+                # alias now serves explicit eager (no compile attribution)
+                # instead of killing the whole setup.
+                logger.error(
                     "mandatory quantized-lane function proof incomplete "
-                    f"(expected={sorted(expected_names)!r} "
-                    f"proven={list(target.function_names)!r})"
+                    "(expected=%r proven=%r); unproven aliases serve "
+                    "explicit eager (pgw#672)",
+                    sorted(expected_names), list(target.function_names),
                 )
             if not target.function_names or not bindings_valid:
                 detail = (
@@ -3359,14 +3360,12 @@ class Executor:
                 logger.warning(
                     "compile target omitted for %s: %s", spec.name, detail,
                 )
-                if mandatory_quant or candidate_requested_lane:
-                    raise compile_cache.CompiledLaneUnavailableError(detail)
+                # pgw#672: mandatory lanes no longer raise here — the
+                # functions serve explicit eager instead of dying.
                 continue
             lane_error = compile_cache.compile_target_lane_error(
                 target.pipeline_weight_lane, target.lora_bucket)
             if lane_error:
-                if mandatory_quant or candidate_requested_lane:
-                    raise compile_cache.CompiledLaneUnavailableError(lane_error)
                 logger.warning(
                     "compile target omitted for %s: %s", spec.name, lane_error)
                 continue
@@ -3388,12 +3387,17 @@ class Executor:
                 )
                 continue
             if mandatory_quant and not active_ref:
-                # A quantized-lane object without a proven exact cell is not
-                # a READY serving target. The loader normally raises earlier;
-                # keep this final wire-state invariant fail closed too.
-                raise compile_cache.CompiledLaneUnavailableError(
-                    f"{target_quant_lane.upper()} compile target for "
-                    f"{spec.name!r} has no proven active Forge artifact"
+                # pgw#672: a quantized-lane object without a proven exact
+                # cell used to fail closed here. It now registers as an
+                # ADDRESSABLE, active-less target — serving_tier projects
+                # "eager" for its aliases and the hub sees the degrade; the
+                # incarnation stays adoptable so a later armed cell can
+                # restore the compiled tier without a reload.
+                logger.error(
+                    "%s compile target for %r has no proven active Forge "
+                    "artifact; registering active-less — its aliases serve "
+                    "explicit eager (pgw#672)",
+                    target_quant_lane.upper(), spec.name,
                 )
             with target.state_lock:
                 target.active_compile_ref = active_ref
@@ -3404,15 +3408,10 @@ class Executor:
             if active_ref and not self._bind_compile_guard(rec, target):
                 # Production wrappers always expose one of the two guard
                 # signals. A hand-built/custom wrapper without revocation
-                # cannot be advertised as compiled. W8A8 remains fail-closed.
+                # cannot be advertised as compiled (pgw#672: eager, loudly).
                 with target.state_lock:
                     target.active_compile_ref = ""
                     target.active_compile_snapshot_digest = ""
-                if mandatory_quant:
-                    raise compile_cache.CompiledLaneUnavailableError(
-                        f"{target_quant_lane.upper()} compile target for "
-                        f"{spec.name!r} has no runtime guard revocation signal"
-                    )
                 logger.warning(
                     "compile target %s has no runtime guard revocation signal; "
                     "advertising eager", incarnation_id,
@@ -3432,10 +3431,17 @@ class Executor:
                         "hot-swap: eager-while-compiling enabled for %s",
                         spec.name)
         if requested_lane and not rec.compile_targets:
-            raise compile_cache.CompiledLaneUnavailableError(
-                f"{requested_lane.upper()} setup for {spec.name!r} produced "
-                "no addressable compile-capable pipeline target"
+            # pgw#672: degrade, never die — the loaded pipeline serves its
+            # functions eagerly; the missing compile target is loud on the
+            # wire (serving_tier=eager) and in the activity stream.
+            logger.error(
+                "%s setup for %r produced no addressable compile-capable "
+                "pipeline target; serving explicit eager (pgw#672)",
+                requested_lane.upper(), spec.name,
             )
+            activity_mod.current_note(
+                f"{requested_lane} lane serving eager: no addressable "
+                "compile target survived the proof")
 
     def compile_targets(self) -> List[pb.CompileTarget]:
         """Full-replace READY compile-target snapshot for StateDelta."""
@@ -5241,6 +5247,22 @@ class Executor:
                     intent_id,
                     resume_stage=warmup_stage,
                 ):
+                    # pgw#672 honesty: drop stale in-memory compiled code for
+                    # every object under proof so the warmup MUST go through
+                    # the real lookup path — a mint truly compiles into its
+                    # capture, an adoption truly hits its seeded FX entries.
+                    # In a warm process, dynamo's class-keyed code cache
+                    # otherwise serves these calls counter-silently (calls>0,
+                    # hits=0, misses=0) and the proof disproves a healthy
+                    # lane. No sibling GPU work runs inside this window, so
+                    # the per-code reset is race-free; siblings re-trace to
+                    # FX hits afterwards (additive live root).
+                    for _cand in inj.compile_objects:
+                        _sel = inj.active_compile_artifacts.get(
+                            id(_cand.pipeline))
+                        if _sel is not None and not trt_engine.is_engine_ref(
+                                _sel.ref):
+                            compile_cache.reset_target_code(_cand.pipeline)
                     warmed, function_proofs = await run_warmup()
             else:
                 warmed, function_proofs = await run_warmup()
@@ -5386,7 +5408,18 @@ class Executor:
                         compile_cache.unwrap(pipe)
                         if spec.lora_bucket:
                             compile_cache.drop_lora_lane(pipe)
-                        inj.active_compile_artifacts.pop(id(pipe), None)
+                        # pgw#672: quarantine the disproven identity in this
+                        # process so neither selection nor a fresh self-mint
+                        # arm loops on it this boot.
+                        failed_sel = inj.active_compile_artifacts.pop(
+                            id(pipe), None)
+                        if failed_sel is not None:
+                            compile_cache.record_cell_quarantined(
+                                failed_sel.ref)
+                        failed_pending = inj.pending_self_mints.get(id(pipe))
+                        if failed_pending is not None:
+                            compile_cache.record_cell_quarantined(
+                                str(failed_pending.ref))
                         self._abandon_pending_mint(inj, pipe)
                     # gw#611: `calls` discriminates the failure classes on the
                     # wire — calls=0 is an orphaned/never-invoked wrapper (or
@@ -5440,14 +5473,32 @@ class Executor:
                             # divergence intact.
                             detail += f"; fx forensics: {forensics[:1500]}"
                     if quant_lane:
+                        # pgw#672 posture change: a failed serve/finalize
+                        # proof on a mandatory (w8a8/w4a4) lane used to raise
+                        # here -> cell_quarantined -> every declared function
+                        # disabled -> pod retired -> the replacement re-mints
+                        # the same key (5 cycles / 4 dead workers on the L4
+                        # burst). A broken optimization must never kill a
+                        # serving worker: withhold the unproven publish,
+                        # quarantine the identity (above), and DEGRADE to
+                        # explicit eager — serving_tier flips on the wire and
+                        # the activity carries the confession; never silent
+                        # (gw#586).
                         if mint_by_id:
                             from . import fleet_cells as fleet_cells_mod
 
                             for pending in mint_by_id.values():
                                 fleet_cells_mod.withhold_self_mint_publish(
-                                    pending, f"boot failed closed ({detail})")
-                        raise compile_cache.CompiledLaneUnavailableError(detail)
-                    logger.warning("%s; serving eager", detail)
+                                    pending,
+                                    f"proof failed; degraded to eager "
+                                    f"({detail})")
+                        logger.error(
+                            "%s; mandatory lane DEGRADED to explicit eager "
+                            "serving (pgw#672)", detail)
+                        activity_mod.current_note(
+                            f"compiled lane degraded to eager: {detail}")
+                    else:
+                        logger.warning("%s; serving eager", detail)
                 if unexercised:
                     from .models.loading import pipeline_weight_lane
                 for candidate in unexercised:
@@ -6323,6 +6374,22 @@ class Executor:
             # iteration order never chooses the artifact, while the existing
             # measured plain-lane TRT preference remains intact.
             candidates = trt_candidates or inductor_candidates
+        # pgw#672: never re-select an identity whose serve/finalize proof
+        # already failed in this process — one boot must not loop
+        # adopt-fail on the same cell.
+        quarantined = [
+            ref for ref, _snap in candidates
+            if compile_cache.cell_quarantined_in_process(ref)
+        ]
+        if quarantined:
+            logger.warning(
+                "skipping %d compiled-cell candidate(s) quarantined by a "
+                "failed proof in this process: %s (pgw#672)",
+                len(quarantined), ", ".join(sorted(quarantined)))
+            candidates = [
+                (ref, snap) for ref, snap in candidates
+                if ref not in set(quarantined)
+            ]
         candidates = sorted(candidates, key=lambda item: item[0])
         if want_lane and not candidates:
             # gw#587: the fail-closed cell WAIT is retired. A mandatory-lane
@@ -7089,6 +7156,13 @@ class Executor:
             if bg.abandon.is_set():
                 raise _MintAbandoned()
 
+        # pgw#672 honesty: a warm process may hold resident compiled code
+        # for these class-shared targets from an earlier same-family arm —
+        # the router's warm compiles would then capture NOTHING and the
+        # finalize below would pack an empty cell. Reset so the background
+        # compiles really trace into the pending capture.
+        for pipe in bg.pipes.values():
+            compile_cache.reset_target_code(pipe)
         exec_before = {
             pid: compile_cache.execution_count(pipe)
             for pid, pipe in bg.pipes.items()
@@ -8694,24 +8768,16 @@ class Executor:
             from .compile_cache import CompiledLaneUnavailableError
 
             if isinstance(exc, CompiledLaneUnavailableError):
-                # A seeded W8A8 graph failing at call time is a genuine lane
-                # failure, not an invitation to retry eager under the same
-                # advertised function. Remove this worker/function pair from
-                # dispatch until a fresh setup with a compatible cell.
-                found = None
-                if run.HasField("required_compile"):
-                    found = self._compile_target(
-                        run.required_compile.target_incarnation_id)
-                if found is not None and spec.name in found[1].function_names:
-                    self._mark_compile_target_unavailable(
-                        found[0], found[1], str(exc))
-                elif spec.name not in self.unavailable:
-                    # Defensive path for a custom compiled lane that raised
-                    # without a live protocol target. It is intentionally not
-                    # recovery-owned: no exact fresh target can prove it safe.
-                    self.unavailable[spec.name] = (
-                        "compile_cell_failed", _sanitize(str(exc)), {},
-                    )
+                # pgw#672: a compiled lane failing at call time fails THIS
+                # request, never the function — the guard wrapper has already
+                # degraded the object to explicit eager and revoked the
+                # compiled identity (tier flips on the wire). Disabling the
+                # function here was half of the quarantine->disable->die loop.
+                logger.error(
+                    "compiled lane unavailable during %s; request failed, "
+                    "function continues at eager tier: %s",
+                    spec.name, exc,
+                )
                 self._on_state_change()
             status, msg = _map_exception(exc)
             if status == pb.JOB_STATUS_FATAL:
