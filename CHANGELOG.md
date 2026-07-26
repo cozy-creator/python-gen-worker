@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.67.4 (2026-07-26) — pgw#680: guard-miss doctrine — fail-on-recompile at serve time
+
+The 187s incident class (ie#546 retag cycle): a tenant request whose inputs
+missed every cached guard set paid dynamo's INLINE recompile inside the
+request — and, single-flight, stalled every request queued behind it.
+Doctrine (Paul, verbatim intent): "instead of compiling [inline], it should
+throw an error, which we catch, then run in eager mode + compile [in
+background] and note the mismatch."
+
+- **Serve-window stance**: tenant request execution (the executor's
+  `tenant_serve_window`, entered around the handler call only) runs guarded
+  compiled targets under `torch._dynamo.config.error_on_recompile`, scoped
+  per call via `config.patch`. Chosen over
+  `torch.compiler.set_stance("fail_on_recompile")` deliberately: on torch
+  2.13 ConfigModule user overrides are thread-local ContextVars, so the
+  stance arms exactly the serving thread while the concurrent shape-warm
+  thread and background mint keep compiling; and `error_on_recompile` fires
+  only on a genuine recompile, composing with the multi-graph cache (warm
+  entries serve under it; a first compile never trips it). `set_stance` is
+  process-global and raises for any tensor frame. Warm/mint/adopt/boot
+  windows never enter the window — they exist to compile.
+- **The catch** (`compile_cache._guarded` / `_guarded_regional`): dynamo's
+  `RecompileError` serves THIS request eager immediately (regional: original
+  runs once under thread-scoped `config.patch(disable=True)` — block impls
+  untouched), never the permanent-degrade path: no revocation, no tier flip,
+  no quarantine — the lane is healthy for its known input classes.
+- **The confession is data**: every miss emits a typed `guard_miss`
+  activity event (`activity.emit_event` — one self-contained COMPLETED
+  update that never displaces an open activity's `_current` beat): phase =
+  the guard-reason class token (`compile_cache.guard_miss_reason_class`),
+  detail = torch's verbatim reason + signature identity + cell key + request
+  id (`postmortem.current_inflight_request`) + heal verdict — hub-countable
+  per (release, SKU, guard-reason); top-N reasons are one grep away.
+- **Background heal** (`hot_swap.Router.record_guard_miss`): the exact input
+  class recompiles through the existing shape-warm driver (nice +10, own
+  CUDA stream, zero-filled dummies of the failing request's args, dedup by
+  signature) so the SECOND request of the shape is compiled. Signatures
+  missing past `_GUARD_MISS_HEAL_LIMIT` (2) heals are per-request-volatile:
+  routed eager permanently on every router (including never-concurrent
+  mandatory lanes) instead of thrashing compile churn.
+
+Red-verified end to end (`tests/test_guard_miss_pgw680.py`): real-torch
+tapes (real dynamo guards, real RecompileError, real warm thread) + the
+full `handle_run_job` tenant path; with the window neutralized (the pre-fix
+tree) the same input pays a silent inline recompile with zero confession.
+
 ## 0.67.3 (2026-07-26) — th#1211: the svdq 5 GB guard cited a cap that does not exist
 
 `MAX_SVDQ_FILE_BYTES` was `5 * 1000**3`, justified in-comment as an "R2
