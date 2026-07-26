@@ -2852,8 +2852,37 @@ class Executor:
             torch_version=str(gpu_info.get("torch_version") or ""),
             installed_libs=list(libs),
         )
+        # pgw#676: per-pod native-crash streaks (SIGSEGV & friends recorded
+        # by the supervisor/boot-record post-mortem). A function that keeps
+        # killing the PROCESS on this card is refused here — loudly, typed —
+        # so its siblings keep serving instead of the whole pod crash-looping
+        # into th#878's wedge terminate. Per-SKU-instance by construction:
+        # the registry lives on the pod's container fs.
+        from . import postmortem
+
+        crash_streaks = postmortem.native_crash_streaks()
         for name, spec in self.specs.items():
             r = spec.resources
+            streak_row = crash_streaks.get(name)
+            streak = int((streak_row or {}).get("count") or 0)
+            if streak >= postmortem.NATIVE_CRASH_REFUSE_STREAK:
+                detail = (
+                    f"{streak} worker-process signal death(s) mid-"
+                    f"{(streak_row or {}).get('last_kind') or 'execution'} on "
+                    f"this pod (last={((streak_row or {}).get('last_signal')) or 'unknown'}); "
+                    "refusing this function on this hardware — siblings keep "
+                    "serving (pgw#676 degrade-never-die across process death)"
+                )
+                logger.error(
+                    "NATIVE CRASH STREAK: function %r disabled on this pod — %s",
+                    name, detail)
+                self.unavailable[name] = (
+                    "native_crash_streak", detail,
+                    {"streak": str(streak),
+                     "last_signal": str(
+                         (streak_row or {}).get("last_signal") or "")})
+                self._gate_owned.add(name)
+                continue
             # SDK v2 (pgw#647): NO compute-capability gate — precision per
             # card class is the fit ladder's decision (sdxl runs fine in
             # fp16 on sm75); only stored-flavor SM windows (svdq/nvfp4,
@@ -4839,21 +4868,30 @@ class Executor:
         self, spec: EndpointSpec, instance: Any, ctx: "RequestContext",
         payload: Any, kwargs: Dict[str, Any],
     ) -> None:
+        from . import postmortem
+
         bound = getattr(instance, spec.attr_name)
         call_kwargs = {spec.ctx_param: ctx, spec.payload_param: payload, **kwargs}
-        if spec.is_async_gen:
-            async for _ in bound(**call_kwargs):
-                pass
-        elif spec.is_async:
-            await bound(**call_kwargs)
-        else:
-            def _consume() -> None:
-                out = bound(**call_kwargs)
-                if spec.output_mode == "stream":
-                    for _ in out:
-                        pass
+        # pgw#676: warm forwards (foreground eager warm AND background mint
+        # seeds) get the same signal-death attribution as real requests.
+        inflight_token = postmortem.note_inflight(
+            "warmup", spec.name, request_id=str(ctx.request_id or ""))
+        try:
+            if spec.is_async_gen:
+                async for _ in bound(**call_kwargs):
+                    pass
+            elif spec.is_async:
+                await bound(**call_kwargs)
+            else:
+                def _consume() -> None:
+                    out = bound(**call_kwargs)
+                    if spec.output_mode == "stream":
+                        for _ in out:
+                            pass
 
-            await _to_thread_complete(_consume)
+                await _to_thread_complete(_consume)
+        finally:
+            postmortem.clear_inflight(inflight_token)
 
     def _mark_setup_failed(
         self, rec: _ClassRecord, exc: BaseException, *, exhausted: bool = False,
@@ -8680,6 +8718,14 @@ class Executor:
                                         self._adapters.deactivate, ref, pipe, run.request_id
                                     )
                         ctx.raise_if_cancelled("canceled")
+                        # pgw#676: name the execution before the GPU touches
+                        # it — a signal death mid-handler leaves this marker
+                        # for the supervisor's post-mortem attribution.
+                        from . import postmortem as postmortem_mod
+
+                        inflight_token = postmortem_mod.note_inflight(
+                            "request", spec.name,
+                            request_id=str(run.request_id or ""))
                         try:
                             output = await self._execute(
                                 job, spec, instance, ctx, payload, kwargs,
@@ -8691,6 +8737,10 @@ class Executor:
                             # cleanly at that rung.
                             await self._quarantine_for_oom(spec, ctx, exc)
                             raise
+                        finally:
+                            # Python-visible exits are not native crashes —
+                            # only a signal death leaves the marker behind.
+                            postmortem_mod.clear_inflight(inflight_token)
                     finally:
                         # Guaranteed-inactive on every exit (OK / cancel /
                         # deadline / handler error); attachments stay resident.

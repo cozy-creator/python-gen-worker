@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import signal
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -413,35 +414,279 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
         lifetime = max(0.0, time.time() - float(record.get("boot_unix") or 0.0))
     except (TypeError, ValueError):
         pass
+    extra: Dict[str, Any] = {
+        "previous_pid": record.get("pid"),
+        "limits_at_previous_boot": record.get("limits"),
+        "note": (
+            "the previous process left an unfinished boot record: it died "
+            "without its supervisor surviving to report (whole-cgroup OOM "
+            "kill, container restart, or external kill)"
+        ),
+    }
+    # pgw#676: the previous process's in-flight marker + fault dump are the
+    # death's attribution; consuming them here also feeds the crash registry
+    # so this boot's gate can refuse a crash-streak function.
+    extra.update(attribute_signal_death(signal_name="container_death"))
     return format_detail(
         phase="previous_container_death",
         verdict={"exit_code": None, "signaled": None},
         limits=limits,
         oom_kill_delta=max(0, now - before) if now >= before else None,
         lifetime_s=lifetime,
-        extra={
-            "previous_pid": record.get("pid"),
-            "limits_at_previous_boot": record.get("limits"),
-            "note": (
-                "the previous process left an unfinished boot record: it died "
-                "without its supervisor surviving to report (whole-cgroup OOM "
-                "kill, container restart, or external kill)"
-            ),
-        },
+        extra=extra,
     )
+
+
+# ---- in-flight marker + native-crash streaks (pgw#676) --------------------
+#
+# exit_code=139 used to reach the hub carrying NOTHING: no frame, no function,
+# and the restarted process would take the same request shape and die again —
+# six SIGSEGVs across two sm_86 pods, every `generate` burned 5 attempts deep,
+# and the pod billed until th#878's wedge terminate (~31 min). Three pieces
+# close that class:
+#
+#   * a faulthandler dump file the dying process writes below Python — the
+#     surviving supervisor attaches its tail, so a signal death carries the
+#     Python stacks of every thread;
+#   * an in-flight marker naming what was executing (function, kind,
+#     request id) — written at request/warmup start, cleared on finish;
+#   * a per-pod crash registry: a function whose in-flight execution died by
+#     signal ``NATIVE_CRASH_REFUSE_STREAK`` times is refused at the next
+#     boot's gate (degrade-never-die across process death: siblings keep
+#     serving, the refusal is loud and typed, the hub reroutes).
+
+_INFLIGHT_NAME = "gen-worker-inflight.json"
+_CRASH_REGISTRY_NAME = "gen-worker-crash-streaks.json"
+_FAULT_DUMP_NAME = "gen-worker-fault-dump.txt"
+
+#: Signal deaths mid-flight on one function, on one pod, before the gate
+#: refuses it. 2 = one free retry for a genuinely transient fault.
+NATIVE_CRASH_REFUSE_STREAK = 2
+
+_FAULT_DUMP_TAIL_BYTES = 8000
+
+
+def _sibling(name: str) -> Path:
+    """Same durable carrier the boot record chose."""
+    return BOOT_RECORD_PATH.parent / name
+
+
+INFLIGHT_PATH = _sibling(_INFLIGHT_NAME)
+CRASH_REGISTRY_PATH = _sibling(_CRASH_REGISTRY_NAME)
+FAULT_DUMP_PATH = _sibling(_FAULT_DUMP_NAME)
+
+_fault_dump_file: Optional[Any] = None
+
+
+def enable_fault_dump(path: Optional[Path] = None) -> None:
+    """Point ``faulthandler`` at a file the supervisor can read after we die.
+
+    ``faulthandler.enable`` writes every thread's Python stack from inside
+    the signal handler (SIGSEGV/SIGFPE/SIGABRT/SIGBUS) without allocating,
+    then the default action re-raises — so the file has content by the time
+    ``waitpid`` returns to the parent."""
+    import faulthandler
+
+    global _fault_dump_file
+    path = path or FAULT_DUMP_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _fault_dump_file = open(path, "w", buffering=1)
+        faulthandler.enable(file=_fault_dump_file, all_threads=True)
+    except (OSError, ValueError):
+        logger.warning("fault-dump file unavailable at %s; faulthandler "
+                       "falls back to stderr", path)
+        faulthandler.enable(all_threads=True)
+
+
+def fault_dump_tail(path: Optional[Path] = None,
+                    limit: int = _FAULT_DUMP_TAIL_BYTES) -> str:
+    path = path or FAULT_DUMP_PATH
+    try:
+        raw = path.read_text(errors="replace").strip()
+    except OSError:
+        return ""
+    return raw[-limit:]
+
+
+def clear_fault_dump(path: Optional[Path] = None) -> None:
+    path = path or FAULT_DUMP_PATH
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+_inflight_lock = threading.Lock()
+_inflight_active: Dict[int, Dict[str, Any]] = {}
+_inflight_next_token = 0
+
+
+def _write_inflight(path: Path) -> None:
+    try:
+        if not _inflight_active:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(
+            {"active": list(_inflight_active.values())}))
+    except OSError:
+        pass
+
+
+def note_inflight(
+    kind: str, function: str, *, request_id: str = "",
+    path: Optional[Path] = None,
+) -> int:
+    """Stamp an execution about to touch the GPU; returns a token for
+    :func:`clear_inflight`. The file carries EVERY active execution (a
+    background-mint seed can overlap another instance's request), so a
+    signal death attributes to all of them — usually exactly one. Cheap:
+    one tiny json write off the compute path."""
+    global _inflight_next_token
+    path = path or INFLIGHT_PATH
+    record = {
+        "kind": kind,
+        "function": function,
+        "request_id": request_id,
+        "pid": os.getpid(),
+        "started_unix": time.time(),
+    }
+    with _inflight_lock:
+        _inflight_next_token += 1
+        token = _inflight_next_token
+        _inflight_active[token] = record
+        _write_inflight(path)
+    return token
+
+
+def clear_inflight(
+    token: Optional[int] = None, path: Optional[Path] = None,
+) -> None:
+    """Retire one execution (or, with no token, every marker — boot/exit
+    hygiene)."""
+    path = path or INFLIGHT_PATH
+    with _inflight_lock:
+        if token is None:
+            _inflight_active.clear()
+        else:
+            _inflight_active.pop(token, None)
+        _write_inflight(path)
+
+
+def take_inflight(path: Optional[Path] = None) -> list[Dict[str, Any]]:
+    """Read and consume the active-execution list a dead process left."""
+    path = path or INFLIGHT_PATH
+    try:
+        raw = path.read_text()
+    except OSError:
+        return []
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(record, dict):
+        return []
+    active = record.get("active")
+    return [r for r in active if isinstance(r, dict)] if isinstance(
+        active, list) else []
+
+
+def record_native_crash(
+    function: str, *, kind: str = "", signal_name: str = "",
+    path: Optional[Path] = None,
+) -> int:
+    """Count one signal death attributed to ``function``; returns the new
+    streak. The registry lives on the pod's container fs, so it survives
+    process restarts and dies with the pod — per-SKU-instance by
+    construction."""
+    path = path or CRASH_REGISTRY_PATH
+    streaks = native_crash_streaks(path)
+    row = streaks.get(function) or {"count": 0}
+    row["count"] = int(row.get("count") or 0) + 1
+    row["last_kind"] = kind
+    row["last_signal"] = signal_name
+    row["last_unix"] = time.time()
+    streaks[function] = row
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(streaks, default=str))
+    except OSError:
+        pass
+    return int(row["count"])
+
+
+def native_crash_streaks(
+    path: Optional[Path] = None,
+) -> Dict[str, Dict[str, Any]]:
+    path = path or CRASH_REGISTRY_PATH
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(fn): row for fn, row in raw.items() if isinstance(row, dict)
+    }
+
+
+def attribute_signal_death(
+    *, signal_name: str,
+    inflight_path: Optional[Path] = None,
+    registry_path: Optional[Path] = None,
+    dump_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Everything the post-mortem reporter can attach to a signal death:
+    the in-flight markers (consumed), the fault-dump tail, and — for each
+    marker naming a function — the recorded crash streak."""
+    extra: Dict[str, Any] = {}
+    inflight = take_inflight(inflight_path)
+    if inflight:
+        extra["inflight"] = inflight
+        streaks: Dict[str, int] = {}
+        for row in inflight:
+            fn = str(row.get("function") or "")
+            if fn:
+                streaks[fn] = record_native_crash(
+                    fn, kind=str(row.get("kind") or ""),
+                    signal_name=signal_name, path=registry_path)
+        if streaks:
+            extra["native_crash_streaks"] = streaks
+    tail = fault_dump_tail(dump_path)
+    if tail:
+        extra["fault_dump_tail"] = tail
+    return extra
 
 
 __all__ = [
     "BOOT_RECORD_PATH",
+    "CRASH_REGISTRY_PATH",
+    "FAULT_DUMP_PATH",
+    "INFLIGHT_PATH",
+    "NATIVE_CRASH_REFUSE_STREAK",
+    "attribute_signal_death",
     "boot_record_is_volatile",
     "clear_boot_record",
+    "clear_fault_dump",
+    "clear_inflight",
     "container_limits",
     "cpu_quota_cores",
     "describe_exit",
     "effective_cpu_count",
+    "enable_fault_dump",
+    "fault_dump_tail",
     "format_detail",
+    "native_crash_streaks",
+    "note_inflight",
     "oom_kill_count",
     "previous_boot_detail",
+    "record_native_crash",
     "take_boot_record",
+    "take_inflight",
     "write_boot_record",
 ]

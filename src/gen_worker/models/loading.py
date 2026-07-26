@@ -908,19 +908,42 @@ def model_index_entry(path: str | Path, component: str) -> Optional[tuple]:
     return None
 
 
+#: Compute dtype of the quantized-artifact lanes when the binding declares
+#: none — MUST equal the ``compute_dtype or torch.bfloat16`` default in
+#: load_w8a8_pipeline / load_w4a4_pipeline / the svdq lane (test-guarded).
+QUANT_LANE_COMPUTE_DEFAULT = "bf16"
+
+
 def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
     """The compute dtype the COMPOSED pipeline will run at (pgw#647 gap #2):
-    the base binding's declared dtype when present, else the base tree's
-    on-disk dtype with fp8/quantized storage mapping to its bf16 compute
-    default (mirrors :func:`load_diffusers_pipeline`'s own selection).
-    ``""`` = unknown (an fp32-defaulting composition)."""
+    the base binding's declared dtype when present, else the dtype the base
+    tree's LOAD LANE actually computes at. ``""`` = unknown (an
+    fp32-defaulting composition).
+
+    Lane selection mirrors :func:`load_from_pretrained` (pgw#675): a
+    quantized-artifact tree (svdq / w8a8 / w4a4) computes at the lane's bf16
+    default regardless of the tree's MAJORITY on-disk dtype — a produced
+    ``#fp8-w8a8`` flavor quantizes only the repeated-block Linears and passes
+    every other tensor through at SOURCE precision, so a fine-tune mirrored
+    from an fp16 upstream sniffs majority-fp16 while its pipeline loads
+    ``torch_dtype=bf16``. The old majority sniff loaded a component override
+    fp16 into that bf16 composition and every warm/serve forward died with
+    ``Input type (c10::BFloat16) and bias type (c10::Half)`` (ie#546 sdxl
+    finale, 3/3 workers)."""
     if dtype:
         return dtype
-    sniffed = detect_on_disk_dtype(Path(base_path))
+    base = Path(base_path)
+    if (
+        detect_svdq_artifact(base) is not None
+        or detect_w8a8_artifact(base) is not None
+        or detect_w4a4_artifact(base) is not None
+    ):
+        return QUANT_LANE_COMPUTE_DEFAULT
+    sniffed = detect_on_disk_dtype(base)
     if sniffed == "fp8":
-        # fp8-stored flavors (w8a16/w8a8 alike) compute in bf16; per-layer
-        # storage precision is restored separately (apply_fp8_storage /
-        # the scaled-mm lane).
+        # Scale-free fp8 storage flavors compute at the bf16 default;
+        # per-layer storage precision is restored separately
+        # (apply_fp8_storage).
         return "bf16"
     if sniffed in ("bf16", "fp16"):
         return sniffed
