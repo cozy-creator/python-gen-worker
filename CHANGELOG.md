@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.68.1 (2026-07-26) — pgw#678 the lane handle is not the pipeline; pgw#683 shared-component identity carries the EFFECTIVE compute dtype
+
+Two P0s on the composition/residency path, both found live on the sdxl retag
+cycle (ie#546), both about ONE object being asked to be two things.
+
+- **pgw#678 — a `components.*` deploy override no longer makes a deploy-bound
+  LoRA unattachable.** `generate-turbo` was **0/6** WITH the fp16-fix VAE
+  override and **4/4** WITHOUT it on the same release, wheel and card, failing
+  `model slot does not support LoRA adapters`. `utils/lora.py` was byte-identical
+  across the two versions that bracketed it, because the defect was object
+  identity, not adapter code: an overridden component is popped out of the
+  content-keyed share plan, so the lane owns a non-empty EXCLUSIVE module set
+  and its residency entry is `nn.ModuleDict(exclusive)` — correct as the
+  MOVEMENT handle (LRU must move only lane-owned weights), fatal when read as
+  the pipeline. `branch_targets` finds no denoiser on a ModuleDict, the whole
+  adapter stays on the peft side, and the pipeline-capability check refuses.
+  The record now owns the pipeline identity (`_ClassRecord.slot_pipelines`);
+  residency keeps the movement handle. The adapter target, the explicit
+  deactivation sweep and the OOM offload rung all read the pipeline — the last
+  of those had been silently skipping every lane slot, since a ModuleDict
+  carries no `enable_*_offload`. A lane whose placement falls to an offload
+  rung now LEARNS that the ref is un-shareable on this host instead of
+  re-deriving the refused plan until `retry_exhausted`.
+- **pgw#683 — a composition can no longer be handed a foreign-precision
+  component, and a mixed one is refused at LOAD.** `RuntimeError: mat1 and mat2
+  must have the same dtype, but got BFloat16 and Half` killed
+  `self_mint_compile phase=warmup_forward` and cost `generate` on a live prod
+  release with NO component override on the wire, so pgw#675's lane-aware
+  default could not explain it. `LoadedComponentKey` keyed on the binding's
+  DECLARED dtype; hub bindings declare none, and a quantizer rewrites only the
+  DENOISER, so the VAE and text encoders of `X` and `X#fp8-w8a8` are
+  byte-identical — one cache entry across compositions that compute at
+  DIFFERENT dtypes (bf16 on a quant lane, fp16 for a plain fp16-stored
+  mirror). Identity now carries the EFFECTIVE compute dtype
+  (`composition_compute_dtype`), so components still alias by content but never
+  across a precision boundary. `apply_fp8_storage` gets the SCALAR compute
+  dtype (it could previously be handed pgw#667's per-component dtype MAP), and
+  the new `assert_uniform_compute_dtype` invariant runs on every worker-loaded
+  slot: a composition presenting two compute dtypes to its GEMMs fails at load
+  naming the component and the offending tensor, instead of torch naming
+  neither at warm unit 4/18. fp32 widening (pgw#667) and the fp8/fp4 storage
+  lanes stay legal, and introspection failures never fail a load.
+
 ## 0.68.0 (2026-07-26) — pgw#681 guard-closure gate + boundary canonicalization; gw#679 per-expert MoE LoRA branch routing
 
 Dynamo's guard set IS the exhaustive dependency list of a compiled graph, so
