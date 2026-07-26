@@ -14,14 +14,25 @@ from ..families.facts import component_dtype_for_class
 from .ladder import EMERGENCY_NF4_VRAM_FACTOR, NF4_WEIGHT_BYTES_FACTOR
 import importlib
 import importlib.util
+import inspect
 import os
 import struct
 import sys
 
 from .memory import get_available_vram_gb, meta_tensors
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
-from .w4a4 import detect_w4a4_artifact, load_w4a4_pipeline, load_w4a4_root_pipeline
-from .w8a8 import detect_w8a8_artifact, load_w8a8_pipeline, load_w8a8_root_pipeline
+from .w4a4 import (
+    detect_w4a4_artifact,
+    load_w4a4_denoiser,
+    load_w4a4_pipeline,
+    load_w4a4_root_pipeline,
+)
+from .w8a8 import (
+    detect_w8a8_artifact,
+    load_w8a8_denoiser,
+    load_w8a8_pipeline,
+    load_w8a8_root_pipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,10 +204,13 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
     )
 
 
+#: Denoiser component directory names — the only components a quantized
+#: artifact lane (w8a8 / w4a4 / svdq / gguf) ever covers.
+DENOISER_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
 # Pipeline components fp8 storage applies to: the denoiser dominates VRAM and
 # tolerates fp8-E4M3 weight rounding; text encoders / VAE stay at compute
 # precision (quality-safe default, QUANTIZATION-POLICY.md component policy).
-_FP8_STORAGE_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
+_FP8_STORAGE_COMPONENTS: tuple[str, ...] = DENOISER_COMPONENTS
 # The "+te" rung (component fit-ladder rung 2): the pipeline's text encoders.
 _FP8_TEXT_ENCODER_COMPONENTS: tuple[str, ...] = (
     "text_encoder", "text_encoder_2", "text_encoder_3",
@@ -1119,30 +1133,84 @@ def _component_dtype_map(
     return out
 
 
-def load_component_override(
-    base_path: str | Path, component: str, override_path: str | Path,
-    *, dtype: str = "",
+class ComponentLaneUnsupported(RuntimeError):
+    """This flavor has no component-level loader, so no honest one exists.
+
+    svdq and gguf materialize their denoiser INSIDE the pipeline build (a
+    nunchaku file / a single gguf checkpoint the pipeline class assembles).
+    Handing back a plain ``from_pretrained`` module for those would not be
+    what serving runs, so the component path refuses by name instead
+    (pgw#689: a benchmark that measures something other than the serve path
+    is worse than one that refuses)."""
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """True when ``fn`` can take ``name=`` (declared or via ``**kwargs``).
+
+    Replaces the ``except TypeError: retry without it`` idiom, which caught
+    ANY construction-time TypeError — including one raised deep inside
+    diffusers' quantization-config reconstruction — and retried a path that
+    failed identically, so the real cause never surfaced (pgw#689 defect 2).
+    Introspection failure means "pass it": the call then fails naming
+    itself."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    for param in sig.parameters.values():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == name and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
+
+
+def load_component(
+    tree: str | Path, component: str, *,
+    dtype: str = "", weights_tree: str | Path | None = None,
 ) -> Any:
-    """Load one named pipeline component from an OVERRIDE snapshot tree
-    (pgw#617 hierarchical bindings). The module class comes from the BASE
-    tree's model_index.json; weights come from the override tree's
-    ``<component>/`` subtree when present, else its root.
+    """THE production loader for ONE named pipeline component.
+
+    Every caller that needs a single component — the executor's pgw#617
+    substitution, the pgw#674 rotation preloader, the swap benchmark — goes
+    through here, so what they load is by construction what serving loads.
+
+    ``tree`` is the BASE composition: it names the module class
+    (model_index.json) and decides the compute dtype. ``weights_tree`` is
+    where the bytes live (default: ``tree``); an override binding points it
+    at its own snapshot, whose ``<component>/`` subtree is used when present,
+    else its root.
+
+    Quantized artifacts take their OWN lane, exactly as
+    :func:`load_from_pretrained` routes a whole pipeline: a w8a8/w4a4
+    denoiser is materialized by its artifact loader. A modelopt-produced
+    tree carries a ``quantization_config`` block diffusers reconstructs into
+    ``NVIDIAModelOptConfig``, whose constructor requires a ``quant_type``
+    the block does not supply — so a bare ``from_pretrained`` on the
+    denoiser dies at config reconstruction on every flavor the fleet
+    actually serves (pgw#689 defect 1). Lanes with no component-level
+    loader raise :class:`ComponentLaneUnsupported`.
 
     dtype resolution (pgw#647 gap #2): the base binding's declared dtype
-    wins; otherwise the override inherits the BASE COMPOSITION's compute
-    dtype (:func:`composition_compute_dtype`); the override's own on-disk
+    wins; otherwise the component inherits the BASE COMPOSITION's compute
+    dtype (:func:`composition_compute_dtype`); the weights' own on-disk
     dtype is only the last resort. Hub-resolved bindings carry no dtype, so
     the old override-on-disk fallback loaded e.g. the fp32-stored fp16-fix
-    VAE into a bf16 pipeline and setup died on the first latent
-    (ie#546 canary, 2/2 pods). Blocking; callers on an event loop run it
+    VAE into a bf16 pipeline and setup died on the first latent (ie#546
+    canary, 2/2 pods). Blocking; callers on an event loop run it
     off-thread."""
 
-    entry = model_index_entry(base_path, component)
+    base = Path(tree)
+    root = Path(weights_tree) if weights_tree is not None else base
+    entry = model_index_entry(base, component)
     if entry is None:
         raise ValueError(
             f"component {component!r} is not in the base composition "
             f"(model_index components: "
-            f"{sorted(model_index_components(base_path))})"
+            f"{sorted(model_index_components(base))})"
         )
     library, class_name = entry
     module = importlib.import_module(library)
@@ -1151,10 +1219,10 @@ def load_component_override(
         raise ValueError(
             f"{library}.{class_name} declares no from_pretrained loader"
         )
-    src = Path(override_path) / component
+    src = root / component
     if not src.is_dir():
-        src = Path(override_path)
-    kwargs: Dict[str, Any] = {}
+        src = root
+
     # pgw#667: a component with a declared load-dtype fact keeps it when it is
     # SUBSTITUTED too — the fact is a property of the component class, and the
     # substituted tree's part must be resident at the same precision the base
@@ -1162,18 +1230,63 @@ def load_component_override(
     fact = component_dtype_for_class(class_name)
     wanted = (
         (fact.dtype if fact is not None else "")
-        or composition_compute_dtype(base_path, dtype)
+        or composition_compute_dtype(base, dtype)
         or detect_on_disk_dtype(src)
     )
+    torch_dtype: Any = None
     if wanted in ("bf16", "fp16", "bfloat16", "float16", "fp32", "float32"):
         try:
-            kwargs["torch_dtype"] = get_torch_dtype(wanted)
+            torch_dtype = get_torch_dtype(wanted)
         except ImportError:
             pass  # torch-less environment: loader fails on its own terms
-    try:
-        return cls.from_pretrained(str(src), **kwargs)
-    except TypeError:
-        return cls.from_pretrained(str(src))
+
+    def _covers(artifact_component: str) -> bool:
+        """The artifact's weight set IS this component: a diffusers tree
+        names it, a bare override tree (root layout) has nothing else in
+        it."""
+        return artifact_component == component or (
+            not artifact_component and src == root
+        )
+
+    w8a8_art = detect_w8a8_artifact(root)
+    if w8a8_art is not None and _covers(w8a8_art.component):
+        return load_w8a8_denoiser(
+            root, w8a8_art, compute_dtype=torch_dtype, cls=cls)
+    w4a4_art = detect_w4a4_artifact(root)
+    if w4a4_art is not None and _covers(w4a4_art.component):
+        return load_w4a4_denoiser(
+            root, w4a4_art, compute_dtype=torch_dtype, cls=cls)
+    svdq_art = detect_svdq_artifact(root)
+    if svdq_art is not None and _covers(svdq_art.component):
+        raise ComponentLaneUnsupported(
+            f"component {component!r} of {root} is an svdq-{svdq_art.precision} "
+            f"artifact ({svdq_art.file.name}): its denoiser is built by the "
+            f"svdq engine during the PIPELINE load, so there is no "
+            f"component-level production loader to borrow"
+        )
+    if component in DENOISER_COMPONENTS and detect_gguf_snapshot(root):
+        raise ComponentLaneUnsupported(
+            f"component {component!r} of {root} is a GGUF denoiser: it is "
+            f"dequantized by the pipeline's own gguf loader, so there is no "
+            f"component-level production loader to borrow"
+        )
+
+    kwargs: Dict[str, Any] = {}
+    if torch_dtype is not None and _accepts_kwarg(
+            cls.from_pretrained, "torch_dtype"):
+        kwargs["torch_dtype"] = torch_dtype
+    return cls.from_pretrained(str(src), **kwargs)
+
+
+def load_component_override(
+    base_path: str | Path, component: str, override_path: str | Path,
+    *, dtype: str = "",
+) -> Any:
+    """Load one named pipeline component from an OVERRIDE snapshot tree
+    (pgw#617 hierarchical bindings) — :func:`load_component` with the
+    weights pointed at the override."""
+    return load_component(
+        base_path, component, dtype=dtype, weights_tree=override_path)
 
 
 def _safetensors_data_bytes(p: Path) -> int:
