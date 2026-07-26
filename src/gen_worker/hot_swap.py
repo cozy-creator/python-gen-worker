@@ -204,6 +204,22 @@ class Router:
             self.concurrent = False
             self.on_warmed = None
 
+    def suspend(self) -> None:
+        """Stop concurrent routing WITHOUT discarding warm/pending state
+        (pgw#671): novel signatures go back to today's sequential
+        compile-then-serve until :meth:`enable` is called again. Used
+        around an adoption's proof warmup, whose sequential semantics an
+        eager route would break."""
+        with self.lock:
+            self.concurrent = False
+            self.on_warmed = None
+
+    def stats(self) -> Tuple[int, int, int]:
+        """(warm, pending, failed) signature counts — the eager-first boot
+        mint driver's completion evidence (pgw#671)."""
+        with self.lock:
+            return len(self.warm), len(self.pending), len(self.bg_failed)
+
     def route(
         self, label: str, compiled: Callable[..., Any],
         args: tuple, kwargs: dict,

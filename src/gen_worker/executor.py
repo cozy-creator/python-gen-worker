@@ -503,6 +503,12 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
 #: `#fp8-w8a8` -> "w8a8" (gw#534), `#nvfp4-w4a4` -> "w4a4" (gw#540).
 _MANDATORY_LANES = ("w8a8", "w4a4")
 
+# pgw#671 eager-first boot: background-mint driver pacing. The abandon grace
+# bounds "finish the current unit" (one eager forward) before a hard cancel.
+_MINT_ABANDON_GRACE_S = 60.0
+_MINT_SEED_MAX_PASSES = 8
+_MINT_POLL_INTERVAL_S = 1.0
+
 
 def _cell_lane_matches(
     ref: str,
@@ -2128,6 +2134,49 @@ class _ClassRecord:
     compile_targets: Dict[str, _CompileTargetRecord] = dc_field(default_factory=dict)
     # gw#661: consecutive will-retry setup losses; reset by any success.
     transient_setup_failures: int = 0
+    # pgw#671 eager-first boot: the in-flight background self-mint for this
+    # record's live instance, when the boot went READY(eager) with the mint
+    # deferred. Cleared when the mint completes, is disproven, or is
+    # abandoned (peer-cell adoption, vacate, shutdown).
+    background_mint: Optional["_BackgroundMint"] = None
+
+
+class _MintAbandoned(Exception):
+    """The background mint was asked to stop (adoption/vacate/shutdown)."""
+
+
+@dataclass
+class _BackgroundMint:
+    """One deferred boot self-mint (pgw#671, worker half of th#1187).
+
+    The instance went READY serving EAGER; this carries everything the
+    background driver needs to seed the full derived warm plan through the
+    hot-swap routers, wait for the background compiles, prove, finalize,
+    publish, and hot-swap the record to compiled. ``abandon`` is the clean
+    stop signal — the driver checks it at unit boundaries (finish the
+    current forward, then discard wholesale; local state is never left
+    half-mutated)."""
+
+    spec: EndpointSpec
+    instance: Any
+    snapshots: Optional[Dict[str, "pb.Snapshot"]]
+    # id(pipeline) -> fleet_cells.PendingSelfMint (same objects the arming
+    # scope produced; shared captures keep their sharing structure).
+    pendings: Dict[int, Any]
+    # id(pipeline) -> the actual pipeline object (id() keys alone cannot
+    # keep the object alive or recover it).
+    pipes: Dict[int, Any]
+    # id(pipeline) -> arm-time placeholder selection (claimed key ref,
+    # digest empty until finalize) stashed out of the foreground install.
+    selections: Dict[int, "_CompileArtifactSelection"]
+    abandon: asyncio.Event = dc_field(default_factory=asyncio.Event)
+    task: Optional["asyncio.Task[None]"] = None
+    act: Optional[Any] = None  # the handed-over self_mint_compile Activity
+
+
+def _eager_first_boot_enabled() -> bool:
+    """pgw#671: default ON; env kill switch for emergencies only."""
+    return os.environ.get("GEN_WORKER_EAGER_FIRST_BOOT", "1").strip() != "0"
 
 
 @dataclass
@@ -4435,7 +4484,21 @@ class Executor:
             rec.transient_setup_failures = 0
             rec.instance = instance
             rec.ready = True
-            act.completed()
+            bg = rec.background_mint
+            if bg is not None and bg.task is None:
+                # pgw#671 eager-first boot: READY is advertised now (eager
+                # tier); the self_mint_compile activity is handed to the
+                # background driver — it stays RUNNING on the wire (the
+                # hub's minting classification and "serving (optimizing in
+                # background)" messaging key off exactly that) and only the
+                # driver completes or fails it.
+                bg.act = act
+                bg.task = asyncio.create_task(
+                    self._background_mint(rec, bg),
+                    name=f"eager-mint-{spec.name}",
+                )
+            else:
+                act.completed()
             self._intent_transition(
                 intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
@@ -5051,6 +5114,48 @@ class Executor:
                         # compiled call, never before.
                         if hasattr(mint, "capture_dir"):
                             inj.pending_self_mints[id(pipe)] = mint
+            # pgw#671 eager-first boot (worker half of th#1187): a fresh
+            # self-mint on an eager-compatible lane no longer gates READY.
+            # Stash the arm-time placeholder selections (their digest is
+            # empty until finalize — the install below must not see a half
+            # identity), enable the pgw#622 routers NOW (pre-proof) so the
+            # eager warm subset and every real request route EAGER while the
+            # background thread compiles each signature into the pending
+            # capture, and defer trace/proof/finalize/publish to the
+            # background driver spawned after READY. Everything downstream
+            # of this block then follows the plain-eager shape naturally:
+            # no active artifacts => no exclusive-GPU window, eager warm
+            # selection, no proof loop, targets registered active-less
+            # (advertising the requested cell key for peer adoption).
+            eager_first = self._eager_first_eligible(spec, inj)
+            if eager_first:
+                from . import hot_swap
+
+                mint_selections: Dict[int, _CompileArtifactSelection] = {}
+                mint_pipes: Dict[int, Any] = {}
+                for candidate in inj.compile_objects:
+                    pid = id(candidate.pipeline)
+                    if pid not in inj.pending_self_mints:
+                        continue
+                    sel = inj.active_compile_artifacts.pop(pid, None)
+                    if sel is not None:
+                        mint_selections[pid] = sel
+                    mint_pipes[pid] = candidate.pipeline
+                    hot_swap.enable(candidate.pipeline)
+                rec.background_mint = _BackgroundMint(
+                    spec=spec,
+                    instance=instance,
+                    snapshots=dict(snapshots) if snapshots else None,
+                    pendings=dict(inj.pending_self_mints),
+                    pipes=mint_pipes,
+                    selections=mint_selections,
+                )
+                logger.info(
+                    "eager-first boot for %s (pgw#671): READY at eager tier "
+                    "after the minimal warm pass; self-mint runs in the "
+                    "background and hot-swaps on arm",
+                    spec.name,
+                )
             # gw#587 serving bootstrap: the warmup PROOF gates every inductor
             # arm — delivered (store-served) AND self-minted alike. Only the
             # artifact SOURCE differs; a self-mint that does not actually
@@ -5109,14 +5214,17 @@ class Executor:
                 )
                 return evidence.count, evidence.functions_by_object
 
+            # pgw#671: an eager-first foreground pass is an eager warm, not
+            # the inductor compile — that runs in the background driver.
+            foreground_minting = bool(inj.pending_self_mints) and not eager_first
             activity_mod.current_phase(
                 activity_mod.PHASE_INDUCTOR_COMPILE
-                if inj.pending_self_mints
+                if foreground_minting
                 else activity_mod.PHASE_WARMUP_FORWARD
             )
             warmup_stage = (
                 pb.LIFECYCLE_INTENT_STAGE_COMPILING
-                if inj.pending_self_mints
+                if foreground_minting
                 else pb.LIFECYCLE_INTENT_STAGE_WARMING
             )
             self._intent_transition(
@@ -6796,6 +6904,401 @@ class Executor:
 
         return republish
 
+    # ---- pgw#671 eager-first boot (worker half of th#1187) -----------------
+
+    def _eager_first_eligible(
+        self, spec: EndpointSpec, inj: "_InjectionResult",
+    ) -> bool:
+        """Whether this setup may go READY(eager) with the mint deferred.
+
+        Eager-first applies ONLY to a boot whose every armed artifact is a
+        fresh self-mint on an eager-compatible lane: delivered cells keep
+        their sequential proof window (they pay ~0 compile), mandatory
+        quantized lanes never serve eager (gw#586), custom object warmups
+        have no derived plan for the driver to seed, and regional targets
+        have no separable eager callable to route to."""
+        if not _eager_first_boot_enabled():
+            return False
+        if not inj.pending_self_mints:
+            return False
+        if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
+            return False
+        cfg = spec.compile_cell()
+        if cfg is None or bool(getattr(cfg, "regional", False)):
+            return False
+        # Any armed artifact that is NOT a pending self-mint (delivered
+        # cell, TRT engine) keeps today's foreground proof for the whole
+        # record — mixing tiers inside one proof window is not worth it.
+        if set(inj.active_compile_artifacts) - set(inj.pending_self_mints):
+            return False
+        if self._mandatory_lane_of_bound(
+            wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
+        ):
+            return False
+        from . import hot_swap
+        from .models.loading import pipeline_weight_lane
+
+        saw_router = False
+        for candidate in inj.compile_objects:
+            if id(candidate.pipeline) not in inj.pending_self_mints:
+                continue
+            if pipeline_weight_lane(candidate.pipeline).startswith(
+                    _MANDATORY_LANES):
+                return False
+            router = hot_swap.router_of(candidate.pipeline)
+            if router is None or router.fail_closed:
+                return False
+            saw_router = True
+        return saw_router
+
+    def serving_tiers(self) -> Dict[str, str]:
+        """Per-function serving tier for the capability projection (th#1187
+        wire contract): ``"compiled"`` when a READY record's compile target
+        covering the function has a proven active artifact, ``"eager"``
+        otherwise (including functions without a compile declaration —
+        eager by construction). Never returns ``""``: the empty tier is
+        reserved for pre-0.65 workers on the wire."""
+        compiled: set[str] = set()
+        for rec in self._classes.values():
+            if not rec.ready:
+                continue
+            for target in rec.compile_targets.values():
+                with target.state_lock:
+                    if target.active_compile_ref:
+                        compiled.update(target.function_names)
+        return {
+            name: ("compiled" if name in compiled else "eager")
+            for name in self.available_functions()
+        }
+
+    async def abandon_background_mint(
+        self, rec: _ClassRecord, *, reason: str,
+    ) -> None:
+        """Cleanly stop an in-flight background mint (adopt-on-arm, vacate,
+        shutdown): signal, let the driver finish its current unit, then
+        cancel wholesale. Local state is never left half-mutated — the
+        capture is either finalized (a sibling proved it) or discarded."""
+        bg = rec.background_mint
+        if bg is None:
+            return
+        bg.abandon.set()
+        task = bg.task
+        if task is not None and not task.done():
+            logger.info(
+                "abandoning background mint for %s (%s)", bg.spec.name, reason)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=_MINT_ABANDON_GRACE_S)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        # The driver's own terminal path cleans up when it observed the
+        # signal; this covers a driver that never started or already died.
+        if rec.background_mint is bg:
+            self._abandon_mint_state(rec, bg)
+
+    def _abandon_mint_state(self, rec: _ClassRecord, bg: "_BackgroundMint") -> None:
+        """Discard-wholesale cleanup: suspend routing concurrency (novel
+        signatures return to sequential compile-then-serve) and abandon
+        every unfinalized capture. Serving is untouched — the record keeps
+        serving eager on the live instance."""
+        from . import fleet_cells as fleet_cells_mod
+        from . import hot_swap
+
+        for pipe in bg.pipes.values():
+            router = hot_swap.router_of(pipe)
+            if router is not None:
+                router.suspend()
+        for pending in {id(p): p for p in bg.pendings.values()}.values():
+            try:
+                fleet_cells_mod.abandon_self_mint(pending)
+            except Exception:
+                logger.exception("background mint capture cleanup failed")
+        if rec.background_mint is bg:
+            rec.background_mint = None
+
+    async def _background_mint(
+        self, rec: _ClassRecord, bg: "_BackgroundMint",
+    ) -> None:
+        """Drive one deferred boot self-mint to arm, off the serving path.
+
+        Owns the handed-over ``self_mint_compile`` activity: it stays
+        RUNNING on the wire for the whole background build (the hub's
+        minting classification consumes exactly that) and terminates here —
+        COMPLETED on arm or clean abandonment, FAILED on disproof/error
+        (serving stays eager either way; a mint failure never un-serves)."""
+        act = bg.act
+        assert act is not None
+        try:
+            with activity_mod.watchdog(act):
+                await self._background_mint_run(rec, bg, act)
+        except (_MintAbandoned, asyncio.CancelledError):
+            self._abandon_mint_state(rec, bg)
+            logger.info(
+                "background mint for %s abandoned cleanly; serving continues "
+                "at its current tier", bg.spec.name)
+            act.completed()
+        except Exception as exc:
+            self._abandon_mint_state(rec, bg)
+            logger.warning(
+                "background mint for %s failed (%s: %s); serving stays eager "
+                "for this process", bg.spec.name, type(exc).__name__, exc)
+            act.failed(exc)
+        else:
+            act.completed()
+        finally:
+            if rec.background_mint is bg:
+                rec.background_mint = None
+            self._on_state_change()
+
+    async def _background_mint_run(
+        self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
+    ) -> None:
+        from . import compile_cache
+        from . import fleet_cells as fleet_cells_mod
+        from . import hot_swap
+        from . import warmup as warmup_mod
+
+        spec = bg.spec
+        jobs, _skips = self._warmup_plan(spec, rec)
+        jobs, _mode = warmup_mod.select_runs(jobs, tracing=True)
+        if not jobs:
+            raise RuntimeError(
+                "eager-first mint has no derived warm jobs to seed")
+        routers: Dict[int, Any] = {}
+        for pid, pipe in bg.pipes.items():
+            router = hot_swap.router_of(pipe)
+            if router is None:
+                raise RuntimeError(
+                    "pipeline lost its hot-swap router mid-mint")
+            routers[pid] = router
+
+        def _stats() -> Tuple[int, int, int]:
+            warm = pending = failed = 0
+            for router in routers.values():
+                w, p, f = router.stats()
+                warm, pending, failed = warm + w, pending + p, failed + f
+            return warm, pending, failed
+
+        def _checkpoint() -> None:
+            if bg.abandon.is_set():
+                raise _MintAbandoned()
+
+        exec_before = {
+            pid: compile_cache.execution_count(pipe)
+            for pid, pipe in bg.pipes.items()
+        }
+        miss_before = {
+            pid: compile_cache.cache_miss_count(pipe)
+            for pid, pipe in bg.pipes.items()
+        }
+
+        async def _forward(wj: Any) -> None:
+            handler_kwargs = await self._handler_kwargs(
+                wj.spec, bg.snapshots or {})
+            with tempfile.TemporaryDirectory(prefix="gw-bgmint-") as tmp:
+                payload = wj.build(tmp)
+                if payload is None:
+                    return
+                ctx: RequestContext[Any] = RequestContext(
+                    request_id=f"bg-mint-{wj.spec.name}",
+                    local_output_dir=tmp,
+                    models={
+                        slot: wire_ref(b)
+                        for slot, b in wj.spec.models.items()
+                    },
+                    **_resolve_slots_kwargs(wj.spec, None),
+                    boot_warmup=True,
+                )
+                ctx._set_lane(self._served_lane(wj.spec))
+                ctx._set_config(self._effective_config(wj.spec))
+                await self._invoke_warmup(
+                    wj.spec, bg.instance, ctx, payload, handler_kwargs)
+
+        async def _unit(wj: Any) -> None:
+            """One warm forward, tenant work first, single-flight with real
+            requests (rec.run_lock) — the interference bound is one eager
+            forward, and the actual graph compiles run on the router's own
+            warm thread (nice +10, dedicated CUDA stream)."""
+            _checkpoint()
+            idle = asyncio.ensure_future(self.wait_idle())
+            stop = asyncio.ensure_future(bg.abandon.wait())
+            try:
+                await asyncio.wait(
+                    {idle, stop}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for fut in (idle, stop):
+                    if not fut.done():
+                        fut.cancel()
+            _checkpoint()
+            async with rec.run_lock:
+                await _forward(wj)
+
+        # Phase 1 — SEED: run the full derived plan through the enabled
+        # routers. Every novel signature serves EAGER here and enqueues its
+        # background compile into the pending capture; passes repeat until
+        # the signature vocabulary is stable (a full queue drops seeds — a
+        # later pass re-enqueues them) and no compile is pending.
+        seeding_pass = 0
+        while True:
+            seeding_pass += 1
+            if seeding_pass > _MINT_SEED_MAX_PASSES:
+                raise RuntimeError(
+                    f"mint seeding did not converge after "
+                    f"{_MINT_SEED_MAX_PASSES} passes")
+            before = _stats()
+            for idx, wj in enumerate(jobs, start=1):
+                act.phase(
+                    activity_mod.PHASE_WARMUP_FORWARD, idx, len(jobs))
+                try:
+                    await _unit(wj)
+                except _MintAbandoned:
+                    raise
+                except Exception as exc:
+                    if not is_cuda_oom(exc):
+                        raise
+                    logger.warning(
+                        "background mint seed %s OOMed (%s); backing off "
+                        "this pass", wj.spec.name, exc)
+                    if torch is not None and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    break
+            act.phase(activity_mod.PHASE_INDUCTOR_COMPILE)
+            while True:
+                _checkpoint()
+                _warm, pending, _failed = _stats()
+                if pending == 0:
+                    break
+                await asyncio.sleep(_MINT_POLL_INTERVAL_S)
+            after = _stats()
+            if after == before:
+                break
+        _warm, _pending, failed_sigs = _stats()
+        if failed_sigs:
+            raise RuntimeError(
+                f"{failed_sigs} signature(s) failed their background "
+                "compile; the capture is incomplete")
+
+        # Phase 2 — VERIFY: every signature is warm, so these forwards
+        # route COMPILED through the guarded wrappers — the successful
+        # compiled call IS the self-mint proof (gw#587: a fresh capture has
+        # nothing on disk to HIT against). Real tenant traffic since the
+        # swap counts as the same honest evidence.
+        act.phase(activity_mod.PHASE_WARMUP_FORWARD, 0, len(jobs))
+        def _unproven_pids() -> List[int]:
+            return [
+                pid for pid, pipe in bg.pipes.items()
+                if compile_cache.execution_count(pipe) <= exec_before[pid]
+            ]
+        for wj in jobs:
+            if not _unproven_pids():
+                break
+            await _unit(wj)
+        proven_pids = [
+            pid for pid in bg.pipes if pid not in set(_unproven_pids())
+        ]
+        if not proven_pids:
+            raise RuntimeError(
+                "no compile object served a compiled call after the "
+                "background warm; nothing to finalize")
+
+        # Phase 3 — FINALIZE the proven captures (pack; digest computed from
+        # the packed bytes), then decide publish per shared capture: a
+        # family cell ships only when EVERY sharer proved into it (gw#612).
+        act.phase(activity_mod.PHASE_SEAL_PUBLISH)
+        finalized: Dict[int, Any] = {}
+        for pid in proven_pids:
+            pipe = bg.pipes[pid]
+            pending_mint = bg.pendings.get(pid)
+            if pending_mint is None:
+                continue
+            miss_delta = max(
+                0, compile_cache.cache_miss_count(pipe) - miss_before[pid])
+            outcome = fleet_cells_mod.finalize_self_mint(
+                pipe, pending_mint, expected_graphs=miss_delta)
+            if outcome is None:
+                logger.warning(
+                    "background mint pack failed for %s; that object stays "
+                    "eager", spec.name)
+                continue
+            finalized[pid] = outcome
+            compile_cache.record_cell_proven(str(outcome.ref))
+        for pid in list(bg.pipes):
+            if pid in finalized:
+                continue
+            # Unexercised or unpacked on a non-mandatory lane: today's miss
+            # policy — unwrap and serve eager, never advertise unproven
+            # bytes (gw#586).
+            pipe = bg.pipes[pid]
+            pending_mint = bg.pendings.get(pid)
+            if pending_mint is not None:
+                fleet_cells_mod.abandon_self_mint(pending_mint)
+            compile_cache.unwrap(pipe)
+            if spec.lora_bucket:
+                compile_cache.drop_lora_lane(pipe)
+        sharers: Dict[int, List[int]] = {}
+        mints: Dict[int, Any] = {}
+        for pid, pending_mint in bg.pendings.items():
+            mints[id(pending_mint)] = pending_mint
+            sharers.setdefault(id(pending_mint), []).append(pid)
+        for mint_id, pending_mint in mints.items():
+            gap = [pid for pid in sharers[mint_id] if pid not in finalized]
+            if gap:
+                fleet_cells_mod.withhold_self_mint_publish(
+                    pending_mint,
+                    f"{len(gap)}/{len(sharers[mint_id])} capture-sharing "
+                    "compile object(s) never proved into the background "
+                    "capture")
+            else:
+                fleet_cells_mod.publish_self_mint(pending_mint)
+        if not finalized:
+            raise RuntimeError(
+                "background mint finalization produced no advertisable "
+                "cell; serving stays eager")
+
+        # Phase 4 — HOT-SWAP the advertisement: activate the finalized
+        # identity on the live targets (state stays READY throughout — the
+        # tier flips eager->compiled in the next capability projection) and
+        # keep pgw#622 alive for post-mint novel shapes.
+        act.phase(activity_mod.PHASE_FINALIZE)
+        for pid, outcome in finalized.items():
+            pipe = bg.pipes[pid]
+            for target in rec.compile_targets.values():
+                if target.pipeline is not pipe:
+                    continue
+                with target.state_lock:
+                    target.active_compile_ref = str(outcome.ref)
+                    target.active_compile_snapshot_digest = str(
+                        outcome.snapshot_digest)
+                    target.active_self_mint = True
+                if not self._bind_compile_guard(rec, target):
+                    with target.state_lock:
+                        target.active_compile_ref = ""
+                        target.active_compile_snapshot_digest = ""
+                    logger.warning(
+                        "compile target %s has no runtime guard revocation "
+                        "signal; advertising eager", target.incarnation_id)
+                    continue
+            hot_swap.enable(
+                pipe,
+                on_warmed=hot_swap.Debounce(
+                    self._shape_warm_republisher(spec, pipe)))
+        # Contract-keyed warm memory (pgw#654): the full plan executed in
+        # this process — compiled — so later checkpoint instances of this
+        # contract may inherit down to one verification run.
+        memory = self._warm_contract_runs.setdefault(
+            self._warm_contract_key(spec), set())
+        memory.update(wj.graph_key for wj in jobs)
+        logger.info(
+            "background mint for %s armed: %d compile object(s) hot-swapped "
+            "to compiled (tier flips in the next capability projection)",
+            spec.name, len(finalized))
+
     async def _report_cell_selection_bug(
         self,
         spec: EndpointSpec,
@@ -6873,6 +7376,7 @@ class Executor:
 
     async def shutdown_instances(self) -> None:
         for rec in self._classes.values():
+            await self.abandon_background_mint(rec, reason="worker shutdown")
             inst, rec.instance, rec.ready = rec.instance, None, False
             rec.compile_targets.clear()
             shutdown = getattr(inst, "shutdown", None)
@@ -7067,6 +7571,7 @@ class Executor:
         ANY failure => stay eager and report ``adopt_failed:<reason>``;
         adoption must never degrade service."""
         from . import compile_cache, trt_engine
+        from . import hot_swap as hot_swap_mod
 
         t0 = time.monotonic()
         staged_artifact: Any = None
@@ -7183,6 +7688,16 @@ class Executor:
             # The hub schedules adoption idle-only; defensive — never touch
             # a module while any job is in flight.
             return await fail("model_in_use")
+        # pgw#671 adopt-on-arm: a peer's upload armed this cell while our own
+        # background mint was building — adopt, abandoning our build cleanly
+        # (opportunistic adoption, never wait-for-peer). The router is also
+        # suspended so the adoption's proof warmup keeps its sequential
+        # semantics (an eager route would falsify the proof).
+        await self.abandon_background_mint(
+            expected_rec, reason=f"adopting peer cell {ref}")
+        adopt_router = hot_swap_mod.router_of(expected_target.pipeline)
+        if adopt_router is not None:
+            adopt_router.suspend()
         materialize_intent = self.store._materialize_intent(ref)
         self._intent_transition(
             intent_id,
@@ -7500,6 +8015,9 @@ class Executor:
 
     async def _vacate_record(self, rec: _ClassRecord) -> List[str]:
         """Tear an instance down and return refs whose owner was released."""
+        # pgw#671: a departing instance takes its background mint with it —
+        # stop the driver before any module teardown races a warm forward.
+        await self.abandon_background_mint(rec, reason="instance vacate")
         held_refs = self._record_refs(rec)
         held_objects = rec.held_objects
         released_refs: List[str] = []
