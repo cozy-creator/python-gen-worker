@@ -27,6 +27,7 @@ import pytest
 
 from gen_worker import cell_key as ck
 from gen_worker import compile_cache as cc
+from gen_worker import env_seal
 from gen_worker.models import w8a8_lora
 
 # --- the burst's recorded artifact metadata (cell_store checkpoint
@@ -66,6 +67,16 @@ _BURST_META: Dict[str, Any] = {
     "image_digest": _IMAGE_DIGEST,
     "libs": {"diffusers": "0.39.0", "transformers": "5.13.1"},
     "shape_contract": _SHAPE_CONTRACT,
+    # pgw#696 reconstruction: the ck2-era burst pre-dates env sealing; a
+    # fixed representative seal keeps the lane-only-divergence relations
+    # provable under ck4 (burst_runtime pins effective_seal to THIS dict,
+    # exactly as it pins every other runtime probe).
+    "env_seal": {
+        "seal_v": 1,
+        "posture": {"grad_enabled": "True"},
+        "config": {"cudnn_benchmark": "False"},
+        "inductor": "0" * 16,
+    },
 }
 
 # What the hub saw, verbatim — ck2-era historical evidence. The pgw#691 sku
@@ -94,6 +105,9 @@ def burst_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cc, "_lib_versions",
         lambda: {"diffusers": "0.39.0", "transformers": "5.13.1"})
+    monkeypatch.setattr(
+        env_seal, "effective_seal",
+        lambda: dict(_BURST_META["env_seal"]))
     monkeypatch.setenv("WORKER_IMAGE_DIGEST", _IMAGE_DIGEST)
 
 

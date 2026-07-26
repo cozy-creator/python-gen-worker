@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased (pgw#694: #695-#698) — execution-environment determinism hardening
+
+Four of the pgw#694 umbrella's five measures (the fifth, pgw#699, is a tracker-side
+harness). All red-verified against real torch state / real file trees; CPU only.
+
+- **#695 process-posture seal**: ONE canonical serving posture (grad, autocast,
+  torch-function stack, default device, deterministic-algos);
+  `guard_closure.establish_posture()` at boot, sealed into the guard manifest at mint
+  (manifest v2), re-asserted by `artifact_drift` before every arm — drift refuses the
+  arm NAMED, never a downstream guard miss. A mint in a non-canonical posture fails
+  red. `consolidate` flags cross-pod posture divergence.
+- **#696 config-surface freeze + ck4**: new `env_seal` module — canonical flag table
+  set explicitly at boot (`cudnn.allow_tf32` default-True pinned False,
+  float32_matmul_precision, TF32 matmul, cudnn.benchmark), unknown `TORCH*` env vars
+  refuse boot naming the var, portable inductor-config digest. Posture+config+inductor
+  fold into ONE versioned `env_seal` dict recorded verbatim in metadata; its digest is
+  a REQUIRED ck4 key axis recomputed from the recorded facts. KEY_SCHEME ck3 -> ck4
+  (final planned bump: seal_v versions the dict internally).
+- **#697 composition fingerprint**: module rows now carry hook presence; new
+  `composition_fingerprint()` stores per-module digests in metadata so a graph-
+  signature mismatch at adoption names the exact drifted module
+  (`transformer:lin2: cell ... != consumer ...`) — the pgw#683 bf16/Half class.
+  Fine-tunes still share cells (no tensor values in any row).
+- **#698 cubin-completeness gate**: `pack()` refuses (named kernels) when any kernel
+  ships PTX without an sm-exact cubin — closing the one path where the deliberately
+  unkeyed driver (gw#577) could re-enter behavior via PTX JIT.
+- **ck3-completion bug fix**: `verify()` still hard-pinned `sku` after the pgw#691
+  collapse — a same-sm cell minted on a different SKU refused to arm. sku is now
+  observability-only in verify; sm/cuda/torch/triton carry the hardware identity.
+
 ## 0.74.1 (2026-07-26) — pgw#692: `WanDefaults` carries the hub's recipe wire name
 
 **P0, every wan-2.2 request of every tier.** th#1174's migration

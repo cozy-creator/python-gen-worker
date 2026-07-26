@@ -37,7 +37,8 @@ _CONTRACT = ck.contract_digest(_FACTS)
 _AXES = {
     "format": "2", "kind": "inductor", "family": "ltx-2.3", "lane": "w8a8",
     "sm": "sm_100", "cuda": "13.0", "torch": "2.13.0+cu130",
-    "triton": "3.7.1", "gen_worker": "0.36.10", "contract": _CONTRACT,
+    "triton": "3.7.1", "gen_worker": "0.36.10",
+    "env_seal": "aa00bb11cc22dd33", "contract": _CONTRACT,
     "diffusers": "0.39.0", "transformers": "5.13.1",
     "image_digest": "sha256:abc",
 }
@@ -110,13 +111,15 @@ def test_sku_is_not_identity(fixed_runtime):
     assert _meta("a40", sm="sm_89")["cell_key"] != a40["cell_key"]
 
 
-def test_key_scheme_ck3_old_keys_never_half_match():
-    """The sku collapse changes every key, so the scheme is bumped: a ck2
-    digest is no longer a key at all — a clean MISS, never a half-match."""
+def test_key_scheme_ck4_old_keys_never_half_match():
+    """Each axis-set change bumps the scheme (sku collapse -> ck3, env_seal
+    -> ck4): an older digest is no longer a key at all — a clean MISS,
+    never a half-match."""
     key = ck.from_axes(_AXES).digest
-    assert key.startswith("ck3-")
-    assert not ck.is_key("ck2-" + "a" * 56)
-    assert "not a cell key" in ck.mismatch({}, "ck2-" + "a" * 56)
+    assert key.startswith("ck4-")
+    for dead in ("ck2-", "ck3-"):
+        assert not ck.is_key(dead + "a" * 56)
+        assert "not a cell key" in ck.mismatch({}, dead + "a" * 56)
 
 
 def test_compute_matches_artifact_metadata_stamp(fixed_runtime):
