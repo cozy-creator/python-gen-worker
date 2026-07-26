@@ -31,7 +31,12 @@ from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
 from .errors import UrlExpiredError
 from .ladder import maybe_rebind_family_fp8
-from .loading import load_from_pretrained, model_index_components
+from .loading import (
+    assert_uniform_compute_dtype,
+    composition_compute_dtype,
+    load_from_pretrained,
+    model_index_components,
+)
 from .memory import place_pipeline
 from .refs import parse_model_ref
 
@@ -146,6 +151,13 @@ def load_slot(
         allow_bf16_resident_upgrade=not force_storage_dtype,
     )
     out.obj = pipe
+
+    # pgw#683: the composition must present ONE compute dtype to its GEMMs.
+    # Fail HERE, naming the component and the tensor, instead of at warm unit
+    # 4/18 with torch's `mat1 and mat2 must have the same dtype` — which names
+    # neither, and which cost `generate` on a live prod release.
+    assert_uniform_compute_dtype(
+        pipe, composition_compute_dtype(path, dtype), label=f"slot {slot!r} ({ref})")
 
     rung = str(getattr(pipe, "_cozy_adaptive_rung", "") or "")
     cast_failed = getattr(
