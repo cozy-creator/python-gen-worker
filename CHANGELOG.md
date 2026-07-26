@@ -98,6 +98,53 @@ has the torch-2.12/cu13.0 wheel but was refused outright.
 - The 1.2 row is untouched and still rejects diffusers 0.39; the wheel-tag torch
   guard still fires (a torch2.12 wheel on torch 2.13 raises, as before).
 
+## 0.68.0 (2026-07-26) — gw#679: a denoiser is a SET — per-expert LoRA branch routing for MoE pipelines
+
+Wan 2.2 A14B is a dual-expert MoE (`transformer` high-noise + `transformer_2`
+low-noise) and its Lightning distillation is two adapters. `branch_target()`
+returned ONE denoiser, and diffusers' Wan converters rewrite every
+non-diffusers key onto the `transformer.` prefix whatever expert the file was
+trained for — so both halves landed rank-concatenated on the HIGH expert,
+`map_adapter` succeeded, and the LOW expert ran undistilled weights on a
+4-step distilled ladder. A wrong picture with a clean log. (Same failure
+class as ie#522's `fuse_lora(components=["transformer"])`, at runtime attach.)
+
+- **`branch_targets(pipe) -> {component: module}`** replaces `branch_target`:
+  every branch operation runs over the whole denoiser set
+  (`transformer`/`transformer_2`/`unet`). `enable_branch_lanes` /
+  `clear_branch_lanes` / `disable_branch_lanes` / `apply_branch_adapter_set` /
+  `pipeline_branch_bucket` / `stamp_lane(pipe)` are the set-level surface;
+  the per-module primitives are unchanged.
+- **Routing is DATA, not a wire field.** An adapter half declares its expert
+  in its own keys (`transformer.` / `transformer_2.`), which is how diffusers
+  already namespaces multi-denoiser pipelines. Per-expert mirrors carry the
+  prefix; one repo carrying both prefixes works identically. A `component`
+  field on the overlay was deliberately rejected — the fact is in the weights.
+- **Fail-closed, three ways.** On a multi-expert pipeline an adapter that
+  names no component is refused as ambiguous (checked on the RAW keys, before
+  the converter can synthesize a `transformer.` prefix); a key naming a
+  component the pipeline does not carry is refused on any topology; and a
+  compiled pipeline whose experts are not all armed refuses instead of
+  copying a half into nothing. Every refusal happens BEFORE any buffer is
+  touched — a half-attached MoE (distilled expert beside an undistilled one)
+  is never an outcome. The peft fallback is refused on multi-expert
+  pipelines: diffusers reaches the second expert only through a
+  `load_into_transformer_2=True` kwarg the fallback cannot pass.
+- **The bucket container is per component.** `Compile(lora_bucket=N)` /
+  `apply_lora_lane` arm every denoiser, and the whole set always shares ONE
+  bucket, so the pipeline carries one coherent graph family. The lane STRING
+  is unchanged (`<base>-lora<bucket>`): how many experts a family has is a
+  property of the pipeline class, not of the lane, so published cell keys
+  keep their meaning.
+- **Single-denoiser lanes (LTX/sdxl/qwen) are untouched by construction**:
+  with one target every denoiser key routes to it, prefixed or not, kohya-flat
+  `lora_unet_` included (never read as a component declaration — sd-scripts
+  emits it for transformer denoisers too), and no declaration is required.
+- Endpoint note: a Wan MoE family should declare BOTH experts as compile
+  targets (`Compile(targets=("transformer", "transformer_2", "vae.decode"))`)
+  — the container is armed on both either way, and canonical branches on an
+  uncompiled expert pay the eager branch tax.
+
 ## 0.67.1 (2026-07-26) — pgw#675 override dtype + pgw#676 native-crash attribution (the sdxl retag blockers)
 
 ### pgw#675: a component override now loads at the dtype the base tree's LOAD LANE computes at

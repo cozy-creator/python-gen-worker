@@ -230,10 +230,12 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
         swap_stats = []
         for ref, sd in lora_sds.items():
             if w8a8_lane:
-                den = w8a8_lora.branch_target(pipe)
+                targets = w8a8_lora.branch_targets(pipe)
                 dsd, rest = w8a8_lora.split_state_dict(sd)
+                routed = w8a8_lora.route_denoiser_keys(dsd, targets, ref=ref)
                 t0 = time.monotonic()
-                st = w8a8_lora.apply_branch_adapters(den, [(dsd, 1.0, ref)])
+                st = w8a8_lora.apply_branch_adapter_set(
+                    pipe, {c: [(d, 1.0, ref)] for c, d in routed.items()})
                 swap_stats.append({"ref": ref, **st})
                 if rest:
                     pipe.load_lora_weights(dict(rest), adapter_name="te")
@@ -248,7 +250,7 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
             for i, p in enumerate(PROMPTS):
                 imgs[(ref, i)] = _render(pipe, p, 4321 + i, steps)
             if w8a8_lane:
-                w8a8_lora.clear_branch_adapters(w8a8_lora.branch_target(pipe))
+                w8a8_lora.clear_branch_lanes(pipe)
                 if hasattr(pipe, "disable_lora"):
                     try:
                         pipe.disable_lora()

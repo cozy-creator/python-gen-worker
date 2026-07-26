@@ -1527,31 +1527,34 @@ def apply_lora_lane(pipeline: Any, bucket: int) -> bool:
     ``<base>-lora<bucket>`` lane stamp, so :func:`lane_drift` admits exactly
     the matching lora cells. Raises when the pipeline has no branch-capable
     denoiser — a declared bucket that cannot trace must fail loud, not
-    publish/adopt the wrong graph."""
+    publish/adopt the wrong graph.
+
+    gw#679: the container is allocated on EVERY denoiser the pipeline
+    carries, so a dual-expert MoE traces both experts branch-bearing and a
+    per-expert adapter set can land at request time without a recompile."""
     if not bucket:
         return False
 
-    denoiser = w8a8_lora.branch_target(pipeline)
-    if denoiser is None:
+    targets = w8a8_lora.enable_branch_lanes(pipeline, int(bucket))
+    if not targets:
         raise RuntimeError(
             "Compile.lora_bucket declared but the pipeline has no "
-            "branch-capable denoiser (transformer/unet)"
+            "branch-capable denoiser (transformer/transformer_2/unet)"
         )
-    w8a8_lora.enable_lora_branches(denoiser, int(bucket))
-    w8a8_lora.stamp_lane(pipeline, denoiser)
+    w8a8_lora.stamp_lane(pipeline, targets)
     return True
 
 
 def drop_lora_lane(pipeline: Any) -> None:
-    """Undo :func:`apply_lora_lane`: drop the branch buffers and restore the
-    branchless lane stamp (the eager rollback — canonical zeroed branches
-    cost +21-32% eager, gw#547)."""
+    """Undo :func:`apply_lora_lane`: drop the branch buffers on every
+    denoiser and restore the branchless lane stamp (the eager rollback —
+    canonical zeroed branches cost +21-32% eager, gw#547)."""
 
-    denoiser = w8a8_lora.branch_target(pipeline)
-    if denoiser is None:
+    targets = w8a8_lora.branch_targets(pipeline)
+    if not targets:
         return
-    w8a8_lora.disable_lora_branches(denoiser)
-    w8a8_lora.stamp_lane(pipeline, denoiser)
+    w8a8_lora.disable_branch_lanes(pipeline)
+    w8a8_lora.stamp_lane(pipeline, targets)
 
 
 def lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
