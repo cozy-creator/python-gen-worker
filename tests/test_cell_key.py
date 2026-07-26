@@ -36,7 +36,7 @@ _CONTRACT = ck.contract_digest(_FACTS)
 
 _AXES = {
     "format": "2", "kind": "inductor", "family": "ltx-2.3", "lane": "w8a8",
-    "sku": "b200", "sm": "sm_100", "cuda": "13.0", "torch": "2.13.0+cu130",
+    "sm": "sm_100", "cuda": "13.0", "torch": "2.13.0+cu130",
     "triton": "3.7.1", "gen_worker": "0.36.10", "contract": _CONTRACT,
     "diffusers": "0.39.0", "transformers": "5.13.1",
     "image_digest": "sha256:abc",
@@ -64,7 +64,7 @@ def test_key_deterministic_and_axis_sensitive():
     a = ck.from_axes(_AXES)
     assert a.digest == ck.from_axes(dict(_AXES)).digest
     assert ck.is_key(a.digest)
-    for axis in ("family", "lane", "sku", "torch", "gen_worker",
+    for axis in ("family", "lane", "sm", "torch", "gen_worker",
                  "contract", "image_digest"):
         bumped = dict(_AXES, **{axis: _AXES[axis] + "x"})
         assert ck.from_axes(bumped).digest != a.digest, axis
@@ -81,7 +81,42 @@ def test_unknown_and_missing_axes_refuse():
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(_AXES, cuda_driver="13020"))  # host lottery axis
     with pytest.raises(ck.CellKeyError):
+        ck.from_axes(dict(_AXES, sku="b200"))  # demoted to metadata (pgw#691)
+    with pytest.raises(ck.CellKeyError):
         ck.from_axes({k: v for k, v in _AXES.items() if k != "torch"})
+
+
+def test_sku_is_not_identity(fixed_runtime):
+    """pgw#691: the audited corpus held two byte-identical cell PAIRS split
+    only by sku (a40 vs rtx-3090 on sm_86; l4 vs rtx-4090 on sm_89) — 19%
+    redundant mints. No dynamo guard observes a SKU; sm + cuda + torch +
+    triton pin every hardware fact the guard set carries. Two artifacts
+    identical on every axis but sku share ONE identity; sm remains one."""
+
+    def _meta(sku, sm="sm_86"):
+        meta = cc.artifact_metadata(
+            family="sdxl", shapes=((768, 768),), targets=("transformer",),
+            shape_contract=_FACTS,
+        )
+        meta.update({"sku": sku, "sm": sm})
+        return ck.stamp(meta)
+
+    a40, rtx3090 = _meta("a40"), _meta("rtx-3090")
+    assert a40["cell_key"] == rtx3090["cell_key"]
+    # sku SURVIVES in metadata — the hub-side selection preference and the
+    # publish-intent anti-forgery attestation both read it from there.
+    assert a40["sku"] == "a40" and rtx3090["sku"] == "rtx-3090"
+    # sm stays identity: a different arch is a different cell.
+    assert _meta("a40", sm="sm_89")["cell_key"] != a40["cell_key"]
+
+
+def test_key_scheme_ck3_old_keys_never_half_match():
+    """The sku collapse changes every key, so the scheme is bumped: a ck2
+    digest is no longer a key at all — a clean MISS, never a half-match."""
+    key = ck.from_axes(_AXES).digest
+    assert key.startswith("ck3-")
+    assert not ck.is_key("ck2-" + "a" * 56)
+    assert "not a cell key" in ck.mismatch({}, "ck2-" + "a" * 56)
 
 
 def test_compute_matches_artifact_metadata_stamp(fixed_runtime):

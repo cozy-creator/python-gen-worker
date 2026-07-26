@@ -15,10 +15,12 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    unavailable. Extraction failure is NEVER silent: a mint whose closure
    cannot be proven fails red (pgw#657 fail-loud doctrine).
 
-2. **Closure classifier** (:func:`classify`): every guard is classified by
-   its SOURCE ROOT first — module-rooted (``L['self']…``) guards are the
-   weights/structure identity (covered by family + graph_signature +
-   weight_contract ck2 axes) and global-rooted (``G[…]``) guards are the
+2. **Closure classifier** (:func:`classify`): the RelationalGuard family
+   (aliasing, symbolic shapes) is judged by TYPE first — torch attaches it
+   to input managers, never predictably to one root (pgw#691). Every other
+   guard is classified by its SOURCE ROOT — module-rooted (``L['self']…``)
+   guards are the weights/structure identity (covered by family +
+   graph_signature + weight_contract key axes) and global-rooted (``G[…]``) guards are the
    code identity (covered by gen_worker/diffusers/transformers/image_digest
    axes); neither can vary per request. Cross-request variance enters ONLY
    through call inputs and ambient process state, so those two roots form a
@@ -75,7 +77,7 @@ MANIFEST_KEY = "guard_manifest"
 
 # Verdicts. LEAK is the only failing one.
 LEAK = "LEAK"
-RUNTIME_STATE = "runtime-state"          # ambient process state (ck2 runtime axes)
+RUNTIME_STATE = "runtime-state"          # ambient process state (cell-key runtime axes)
 CODE_IDENTITY = "code-identity"          # G[...] roots (version/image axes)
 MODULE_STRUCTURE = "module-structure"    # L['self'] roots (family/graph/weight axes)
 CONTRACT_SHAPE = "contract-shape"        # input tensor shape/stride/dtype/device
@@ -89,23 +91,51 @@ _COVERED = (
     CONTRACT_SCALAR, STRUCTURAL, CODE_CONSTANT, CANONICALIZED,
 )
 
+# The vocabulary below is built on the C++ leaf CLASS names the structured
+# walk yields (`type(leaf).__name__` over the 31 concrete LeafGuard
+# subclasses in torch._C._dynamo.guards on 2.13.0 — the repr-parse fallback
+# prints the same names). Python GuardBuilder create_fn names survive only
+# where they harmlessly alias a covered fact; they never reach the walk
+# (pgw#691 audit).
+
+# RelationalGuard family (C++): torch attaches these to the INPUT guard
+# managers — one row per participating value, never the root — so they are
+# judged by TYPE before any root dispatch. Root-first dispatch made
+# NO_TENSOR_ALIASING an unconditional LEAK on every graph with >=2 tensor
+# inputs (pgw#691 P0). Cross-input (non-)aliasing/overlap is fixed by the
+# endpoint call topology: the compiled target receives freshly materialized,
+# distinct tensors each request, so the relation cannot vary per call.
+_RELATIONAL_ALIASING = frozenset({
+    "NO_TENSOR_ALIASING", "OBJECT_ALIASING", "STORAGE_OVERLAPPING",
+    "DUPLICATE_INPUT",  # python GuardBuilder alias of OBJECT_ALIASING
+})
 # Ambient (root-attached) guard types covered by process/runtime identity.
+# DETERMINISTIC_ALGORITHMS/GRAD_MODE/TORCH_FUNCTION_STATE/FUNCTORCH_STACK_
+# MATCH/DUAL_LEVEL are python-side aliases whose facts GLOBAL_STATE and
+# DUAL_LEVEL_MATCH (the C++ names) carry on 2.13.
 _AMBIENT_COVERED = frozenset({
     "GLOBAL_STATE", "TORCH_FUNCTION_MODE_STACK", "DEFAULT_DEVICE",
-    "DETERMINISTIC_ALGORITHMS", "GRAD_MODE", "AUTOCAST_STATE",
-    "TORCH_FUNCTION_STATE", "NO_TENSOR_ALIASING", "DUPLICATE_INPUT",
-    "FUNCTORCH_STACK_MATCH", "DUAL_LEVEL",
+    "DUAL_LEVEL_MATCH", "DETERMINISTIC_ALGORITHMS", "GRAD_MODE",
+    "TORCH_FUNCTION_STATE", "FUNCTORCH_STACK_MATCH", "DUAL_LEVEL",
 })
 # Input-rooted guard types that assert call TOPOLOGY (types, lengths,
 # presence), which the endpoint call path fixes deterministically.
+# FAKE_SCRIPT_TYPE_MATCH asserts a torchscript-facing input type — same
+# topology fact as TYPE_MATCH.
 _STRUCTURAL_TYPES = frozenset({
     "TYPE_MATCH", "DIMENSION_DYNAMIC_MARKING_GUARD", "HASATTR", "NO_HASATTR",
     "LENGTH_CHECK", "DICT_LENGTH", "DICT_CONTAINS", "SET_CONTAINS",
-    "MAPPING_KEYS_MATCH", "KEYS_MATCH", "TUPLE_ITERATOR_LEN",
+    "MAPPING_KEYS_MATCH", "TUPLE_ITERATOR_LEN", "FAKE_SCRIPT_TYPE_MATCH",
     "RANGE_ITERATOR_MATCH", "NONE_MATCH", "NOT_NONE", "NOT_NONE_MATCH",
     "TRUE_MATCH", "FALSE_MATCH", "DISPATCH_KEY_SET_MATCH", "FLOAT_IS_NAN",
     "COMPLEX_IS_NAN", "SEQUENCE_LENGTH",
 })
+# Input-rooted object-identity guard types: an object-valued argument whose
+# identity dynamo guards (enum member, callable, config dict) can only be
+# bound by the endpoint's fixed call path, so it cannot vary per request;
+# across processes an identity mismatch is a MISS (the pgw#680 guard-miss
+# path recompiles), never wrongness — CODE_CONSTANT, not a leak.
+_IDENTITY_CONSTANT_TYPES = frozenset({"ID_MATCH", "DICT_VERSION"})
 
 _CANONICAL_DEPTH = 4
 
@@ -463,14 +493,51 @@ def _scalar_verdict(value: Any, pins: ContractPins) -> Tuple[str, str]:
     return LEAK, f"unclassifiable literal {type(value).__name__}"
 
 
+# `L['dt'] == torch.float32` / `L['mf'] == torch.contiguous_format` — the
+# RHS a torch singleton renders in verbose parts. `device(type='cuda',
+# index=0)` is how a torch.device literal renders.
+_TORCH_ATTR_RE = re.compile(r"^torch\.([A-Za-z_][A-Za-z0-9_]*)$")
+_TORCH_DEVICE_RE = re.compile(r"^(?:torch\.)?device\(type=")
+
+
+def _torch_object_verdict(rhs: str) -> Optional[Tuple[str, str]]:
+    """Verdict for an EQUALS_MATCH RHS that is a torch singleton rather than
+    a python literal (pgw#691 P1: diffusers compares dtypes constantly, and
+    ``ast.literal_eval`` reported them as false-positive LEAKs). Dtype at the
+    compiled boundary is already pinned twice over — the ``weight_lane`` key
+    axis and :func:`canonical_ingress`'s per-path dtype memo (which raises a
+    NAMED :class:`GuardBoundaryError` on drift); layout/memory_format ride
+    the same canonical-form pin, device rides the runtime key axes."""
+    if _TORCH_DEVICE_RE.match(rhs):
+        return CONTRACT_SHAPE, "runtime device axes (sm/cuda/torch)"
+    m = _TORCH_ATTR_RE.match(rhs)
+    if m is None:
+        return None
+    try:
+        import torch
+    except ImportError:  # classification without torch: stay conservative
+        return None
+    obj = getattr(torch, m.group(1), None)
+    if isinstance(obj, (torch.dtype, torch.layout, torch.memory_format)):
+        return CONTRACT_SHAPE, "weight_lane + ingress dtype memo"
+    return None
+
+
 def _classify_equals(expr: str, pins: ContractPins) -> Tuple[str, str]:
     _lhs, sep, rhs = expr.partition(" == ")
     if not sep:
         return LEAK, "unparseable EQUALS_MATCH expression"
+    # classify() receives the RAW verbose part; python literals survive the
+    # trailing "  # file:line" comment (the tokenizer eats it) but the
+    # torch-object regex must see a clean RHS.
+    rhs = _COMMENT_RE.sub("", rhs).strip()
     try:
-        value = ast.literal_eval(rhs.strip())
+        value = ast.literal_eval(rhs)
     except Exception:
-        return LEAK, f"unparseable EQUALS_MATCH literal {rhs.strip()[:60]!r}"
+        torch_verdict = _torch_object_verdict(rhs)
+        if torch_verdict is not None:
+            return torch_verdict
+        return LEAK, f"unparseable EQUALS_MATCH literal {rhs[:60]!r}"
     return _scalar_verdict(value, pins)
 
 
@@ -479,10 +546,23 @@ def classify(
 ) -> Tuple[str, str]:
     """(verdict, covering axis / leak reason) for one guard.
 
-    Module- and global-rooted guards are covered by construction (weights +
-    code identity, pinned by the ck2 key axes). Input-rooted and ambient
-    guards are the closed world: unknown types are LEAKS, never waved on.
+    The RelationalGuard family is judged by TYPE first — torch attaches it
+    to the input managers (and SYMBOLIC_SHAPE_GUARD to synthetic tuple
+    sources), never predictably to one root. Everything else dispatches on
+    the source root: module- and global-rooted guards are covered by
+    construction (weights + code identity, pinned by the cell-key axes);
+    input-rooted and ambient guards are the closed world — unknown types are
+    LEAKS, never waved on.
     """
+    if guard_type in _RELATIONAL_ALIASING:
+        return STRUCTURAL, "cross-input aliasing fixed by call topology"
+    if guard_type == "SYMBOLIC_SHAPE_GUARD":
+        # torch 2.13's shape-env relations (install_symbolic_shape_guard,
+        # enable_cpp_symbolic_shape_guards) — also a RelationalGuard,
+        # observed with synthetic sources like "(0, L['x'].size()[0])".
+        if pins.has_dynamic:
+            return CONTRACT_SHAPE, "declared dynamic-dim range"
+        return LEAK, "shape-env relation without declared dynamic dims"
     root = _source_root(source)
     if root == "self":
         return MODULE_STRUCTURE, "family + graph_signature + weight_contract"
@@ -490,7 +570,7 @@ def classify(
         return CODE_IDENTITY, "gen_worker/diffusers/transformers/image versions"
     if root == "ambient":
         if guard_type in _AMBIENT_COVERED:
-            return RUNTIME_STATE, "process runtime state (ck2 runtime axes)"
+            return RUNTIME_STATE, "process runtime state (cell-key runtime axes)"
         if guard_type == "LAMBDA_GUARD":
             if ("init_ambient_guards" in expr
                     or "top_saved_tensors_hooks" in expr):
@@ -507,6 +587,8 @@ def classify(
         return _classify_tensor_match(expr)
     if guard_type in _STRUCTURAL_TYPES:
         return STRUCTURAL, "call topology (deterministic per endpoint code)"
+    if guard_type in _IDENTITY_CONSTANT_TYPES:
+        return CODE_CONSTANT, "object identity of a call-path constant"
     if guard_type == "EQUALS_MATCH":
         return _classify_equals(expr, pins)
     if guard_type == "LAMBDA_GUARD" and (".size()" in expr or ".stride()" in expr):

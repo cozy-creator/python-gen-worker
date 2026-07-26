@@ -183,8 +183,8 @@ class _Harness:
         capture = mint_root / "capture"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
         pending = fleet_cells.PendingSelfMint(
-            family=FAMILY, cell_key="ck2-" + "a" * 56,
-            ref=f"{cc.system_repo(FAMILY)}#ck2-{'a' * 56}",
+            family=FAMILY, cell_key="ck3-" + "a" * 56,
+            ref=f"{cc.system_repo(FAMILY)}#ck3-{'a' * 56}",
             cfg=cfg, target=mint_root / "cell.tar.gz",
             capture_dir=capture, mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,

@@ -449,7 +449,7 @@ def _fake_key_compute(family: str, weight_lane: str = "", lora_bucket: int = 0,
     digest = hashlib.blake2s(
         f"{family}|{weight_lane}|{lora_bucket}|{contract}|{regional}".encode()
     ).hexdigest()[:56]
-    return SimpleNamespace(digest="ck2-" + digest, axes={})
+    return SimpleNamespace(digest="ck3-" + digest, axes={})
 
 
 SHAPE = (768, 768)

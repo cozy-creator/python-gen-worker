@@ -147,8 +147,11 @@ def test_classifier_closed_world() -> None:
         == gc.CONTRACT_SCALAR
     assert gc.classify("EQUALS_MATCH", "L['n']", "L['n'] == 999", pins) \
         == (gc.LEAK, "int 999 is not a declared contract pin")
+    # pgw#691: input-rooted ID_MATCH is the object identity of a call-path
+    # constant (enum member / callable bound by the endpoint call path) —
+    # covered, not a leak.
     assert gc.classify("ID_MATCH", "L['mask']", "___check_obj_id(...)", pins)[0] \
-        == gc.LEAK
+        == gc.CODE_CONSTANT
     assert gc.classify("WEIRD_NEW_GUARD", "L['x']", "whatever", pins)[0] == gc.LEAK
     # Ambient: known types covered, unknown leak.
     assert gc.classify("GLOBAL_STATE", "", "___check_global_state()", pins)[0] \
