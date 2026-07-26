@@ -144,6 +144,7 @@ def _build_svdq_linear_class() -> type:
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             self.rank = int(rank)
+            self.per_channel_scale = bool(per_channel_scale)
             if in_features % _K_ALIGN or out_features % _N_ALIGN:
                 raise SvdqNativeError(
                     f"SvdqLinear dims [{out_features}, {in_features}] break "
@@ -192,8 +193,9 @@ def _build_svdq_linear_class() -> type:
             y = _gemm_w4a4(xq, self.weight, sa_blocked, self.weight_scale,
                            x.dtype)
             y = y * (s2 * self.weight_scale_2).to(y.dtype)
-            if self.rank:
-                y = y + (x2 @ self.proj_down) @ self.proj_up.t()
+            down, up = self.proj_down, self.proj_up
+            if down is not None and up is not None:
+                y = y + (x2 @ down) @ up.t()
             if self.bias is not None:
                 y = y + self.bias
             return y.reshape(*shape[:-1], self.out_features)
@@ -202,7 +204,7 @@ def _build_svdq_linear_class() -> type:
             return (f"in_features={self.in_features}, "
                     f"out_features={self.out_features}, rank={self.rank}, "
                     f"bias={self.bias is not None}, "
-                    f"per_channel_scale={self.weight_scale_2.shape[-1] > 1}, "
+                    f"per_channel_scale={self.per_channel_scale}, "
                     f"smooth={self.smooth_factor is not None}")
 
     return _SvdqLinear
@@ -231,7 +233,7 @@ def build_svdq_linear(buf: SvdqBuffers, *, compute_dtype: Any = None,
     mod.weight_scale_2 = buf.weight_scale_2.float().to(dev)
     if buf.smooth_factor is not None:
         mod.smooth_factor = buf.smooth_factor.to(compute).reshape(-1).to(dev)
-    if buf.rank:
+    if buf.proj_down is not None and buf.proj_up is not None:
         mod.proj_down = buf.proj_down.to(compute).to(dev)
         mod.proj_up = buf.proj_up.to(compute).to(dev)
     if buf.bias is not None:
@@ -255,8 +257,9 @@ def fold_to_dense(dec: DecodedLinear, *, compute_dtype: Any = None) -> Any:
     w = dequantize_decoded(dec)
     if dec.smooth_factor is not None:
         w = w / dec.smooth_factor.float().reshape(1, -1)
-    if dec.rank:
-        w = w + (dec.proj_up.float() @ dec.proj_down.float().t())
+    up, down = dec.proj_up, dec.proj_down
+    if up is not None and down is not None:
+        w = w + (up.float() @ down.float().t())
     lin = nn.Linear(dec.in_features, dec.out_features,
                     bias=dec.bias is not None, dtype=compute)
     with torch.no_grad():
@@ -376,13 +379,187 @@ def swap_svdq_linears(
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Loading a whole nunchaku-format checkpoint natively.
+# ---------------------------------------------------------------------------
+
+# adaLN split counts per (diffusers class, module suffix). The exporter's
+# adanorm transform is NOT recoverable from the tensors, and a wrong count
+# yields a plausible weight with silently wrong output (svdq_awq), so an
+# unknown modulation layer REFUSES instead of guessing. Adding a family is a
+# one-line, reviewable change.
+_ADANORM_SPLITS: dict[tuple[str, str], int] = {
+    ("QwenImageTransformer2DModel", "img_mod.1"): 6,
+    ("QwenImageTransformer2DModel", "txt_mod.1"): 6,
+}
+
+
+def adanorm_splits_for(model_class: str, prefix: str) -> int:
+    """adaLN split count for one AWQ modulation layer, or a typed refusal."""
+    for (cls, suffix), n in _ADANORM_SPLITS.items():
+        if cls == model_class and prefix.endswith(suffix):
+            return n
+    raise SvdqNativeError(
+        f"unknown adaLN split count for AWQ layer {prefix!r} in "
+        f"{model_class} — the exporter's adanorm transform cannot be inferred "
+        f"from the tensors, and a wrong count corrupts output silently; add "
+        f"the (class, suffix) entry to _ADANORM_SPLITS after verifying it")
+
+
+def native_denoiser_class(model_class: str) -> Any:
+    """The diffusers class behind a nunchaku ``model_class`` name (the native
+    engine subclasses nothing — it loads the STOCK diffusers module)."""
+    import diffusers
+
+    name = (model_class[len("Nunchaku"):]
+            if model_class.startswith("Nunchaku") else model_class)
+    cls = getattr(diffusers, name, None)
+    if cls is None:
+        raise SvdqNativeError(
+            f"diffusers has no {name!r} (from checkpoint model_class "
+            f"{model_class!r})")
+    return cls
+
+
+def _group_by_prefix(names: Any) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for key in names:
+        if key == "__metadata__":
+            continue
+        prefix, _, leaf = key.rpartition(".")
+        groups.setdefault(prefix, []).append(leaf)
+    return groups
+
+
+def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
+                             mode: str = "") -> Any:
+    """Materialize a nunchaku-format svdq checkpoint as a STOCK diffusers
+    denoiser: skeleton on meta, W4A4 linears swapped for :class:`SvdqLinear`
+    (fused ``to_qkv`` split across the diffusers projections), AWQ modulation
+    layers decoded to bf16 Linears, everything else assigned verbatim."""
+    import json
+
+    import torch
+    from accelerate import init_empty_weights
+    from safetensors import safe_open
+
+    from .svdq import _read_safetensors_metadata
+    from .svdq_awq import decode_awq_linear, is_awq_linear
+    from .svdq_layout import decode_linear
+
+    compute = compute_dtype or torch.bfloat16
+    meta = _read_safetensors_metadata(art.file)
+    model_class = str(meta.get("model_class") or "")
+    cfg_raw = meta.get("config")
+    try:
+        cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else dict(cfg_raw or {})
+    except ValueError as exc:
+        raise SvdqNativeError(
+            f"svdq checkpoint {art.file.name} has an unparseable config") from exc
+    if not cfg:
+        raise SvdqNativeError(
+            f"svdq checkpoint {art.file.name} carries no config in its "
+            f"__metadata__ — cannot build the diffusers module")
+    cfg.pop("quantization_config", None)
+
+    cls = native_denoiser_class(model_class)
+    with init_empty_weights():
+        model = cls.from_config(cfg)
+
+    if mode not in ("blockwise", "dense"):
+        mode = "blockwise" if svdq_native_available() else "dense"
+
+    plain: Dict[str, Any] = {}
+    swapped = awq = 0
+    with safe_open(str(art.file), framework="pt", device="cpu") as fh:
+        groups = _group_by_prefix(fh.keys())
+        for prefix, leaves in sorted(groups.items()):
+            tensors = {leaf: fh.get_tensor(f"{prefix}.{leaf}") for leaf in leaves}
+            if is_awq_linear(tensors):
+                target = _module_at(model, prefix)
+                if target is None or not hasattr(target, "out_features"):
+                    raise SvdqNativeError(
+                        f"AWQ layer {prefix!r} has no Linear in "
+                        f"{type(model).__name__}")
+                splits = adanorm_splits_for(type(model).__name__, prefix)
+                _set_module(model, prefix, decode_awq_linear(
+                    tensors, int(target.out_features), int(target.in_features),
+                    adanorm_splits=splits, compute_dtype=compute))
+                awq += 1
+                continue
+            if "qweight" in tensors and "wscales" in tensors:
+                targets = plan_targets(model, prefix)
+                out_f = sum(o for _, o in targets)
+                in_f = int(_module_at(model, targets[0][0]).in_features)
+                dec = decode_linear(tensors, out_f, in_f)
+                swapped += swap_svdq_linears(
+                    model, {prefix: dec}, compute_dtype=compute,
+                    mode=mode)["linears"]
+                continue
+            for leaf, t in tensors.items():
+                key = f"{prefix}.{leaf}" if prefix else leaf
+                plain[key] = t.to(compute) if t.is_floating_point() else t
+
+    result = model.load_state_dict(plain, strict=False, assign=True)
+    still_meta = [n for n, p in model.named_parameters() if p.device.type == "meta"]
+    still_meta += [n for n, b in model.named_buffers() if b.device.type == "meta"]
+    if still_meta:
+        raise SvdqNativeError(
+            f"svdq native load left {len(still_meta)} tensor(s) on meta "
+            f"(e.g. {still_meta[:5]}) — checkpoint keys do not cover "
+            f"{type(model).__name__}")
+    if result.unexpected_keys:
+        logger.warning("svdq native load: %d unexpected checkpoint keys (e.g. %s)",
+                       len(result.unexpected_keys), list(result.unexpected_keys)[:5])
+    model.eval()
+    model._cozy_svdq_engine = SVDQ_ENGINE_NATIVE
+    model._cozy_svdq_mode = mode
+    logger.info(
+        "svdq native loader: %s mode=%s — %d W4A4 linears, %d AWQ modulation "
+        "layers, %d plain tensors", type(model).__name__, mode, swapped, awq,
+        len(plain))
+    return model
+
+
+def load_svdq_native_pipeline(cls: Any, path: Any, art: Any, *,
+                             compute_dtype: Any = None) -> Any:
+    """Build the pipeline with a natively-loaded svdq denoiser wired in.
+
+    Compute dtype is bf16 for the same reason the nunchaku lane pins it: the
+    checkpoint's scales and low-rank branch are bf16-oriented."""
+    import torch
+
+    from pathlib import Path
+
+    compute = compute_dtype or torch.bfloat16
+    if not art.component:
+        raise SvdqNativeError(
+            f"svdq snapshot {path} is a bare single-file transformer; a "
+            f"servable flavor must be a full diffusers tree with the "
+            f"checkpoint under its denoiser directory")
+    denoiser = load_svdq_native_denoiser(art, compute_dtype=compute)
+    pipe = cls.from_pretrained(str(Path(path)), torch_dtype=compute,
+                              **{art.component: denoiser})
+    try:
+        pipe._cozy_weight_lane = (
+            "svdq-native" if getattr(denoiser, "_cozy_svdq_mode", "") == "blockwise"
+            else "bf16-resident")
+    except Exception:  # noqa: BLE001
+        pass
+    return pipe
+
+
 __all__ = [
     "SVDQ_ENGINE_NATIVE",
     "SVDQ_ENGINE_NUNCHAKU",
     "SVDQ_NATIVE_FP4_SMS",
     "SvdqNativeError",
+    "adanorm_splits_for",
     "build_svdq_linear",
     "fold_to_dense",
+    "load_svdq_native_denoiser",
+    "load_svdq_native_pipeline",
+    "native_denoiser_class",
     "plan_targets",
     "svdq_linear_class",
     "svdq_native_available",

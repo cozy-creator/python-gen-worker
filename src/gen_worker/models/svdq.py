@@ -379,7 +379,28 @@ def check_svdq_loadable(art: SvdqArtifact) -> None:
         )
 
 
-def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
+def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact, *,
+                       engine: str = "") -> Any:
+    """Serve an svdq artifact through whichever ENGINE can run it here.
+
+    Engine choice is :func:`select_svdq_engine` (native preferred for fp4);
+    ``engine`` pins it explicitly. Callers need no engine awareness — this is
+    the single entry point the loading layer already uses."""
+    chosen, reasons = select_svdq_engine(art.precision, override=engine)
+    if not chosen:
+        detail = "; ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))
+        raise SvdqHardwareError(
+            f"no svdq engine can serve svdq-{art.precision} here — {detail}")
+    if chosen == "native":
+        from .svdq_native import load_svdq_native_pipeline
+
+        logger.info("svdq engine: native (%s %s r%d, file %s)",
+                    art.precision, art.component, art.rank, art.file.name)
+        return load_svdq_native_pipeline(cls, path, art)
+    return load_svdq_nunchaku_pipeline(cls, path, art)
+
+
+def load_svdq_nunchaku_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
     """Build the pipeline with the nunchaku transformer swapped in.
 
     Compute dtype is pinned to bf16 — nunchaku's kernels and the surrounding
@@ -416,6 +437,7 @@ def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
 
 
 __all__ = [
+    "SVDQ_ENGINES",
     "SVDQ_FP4_SMS",
     "SVDQ_INT4_SMS",
     "SvdqArtifact",
@@ -426,7 +448,11 @@ __all__ = [
     "check_svdq_loadable",
     "check_svdq_stack_versions",
     "detect_svdq_artifact",
+    "load_svdq_nunchaku_pipeline",
     "load_svdq_pipeline",
+    "select_svdq_engine",
+    "svdq_engine_candidates",
+    "svdq_engine_override",
     "svdq_precision_for_sm",
     "svdq_stack_reason",
 ]

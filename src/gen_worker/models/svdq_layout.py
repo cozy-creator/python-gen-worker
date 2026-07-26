@@ -193,7 +193,7 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
         raise SvdqLayoutError(
             "svdq linear has only one half of the low-rank branch")
     rank = int(down.shape[1]) if down is not None else 0
-    if down is not None:
+    if down is not None and up is not None:
         if int(down.shape[0]) != int(in_features):
             raise SvdqLayoutError(
                 f"proj_down {tuple(down.shape)} does not start with "

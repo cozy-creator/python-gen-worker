@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.74.0 (2026-07-26) — pgw#685 S2c: the native svdq engine actually serves
+
+Wires the native engine into the load path. `load_svdq_pipeline` now chooses an
+ENGINE (`select_svdq_engine`) instead of assuming nunchaku, so `loading.py` needs
+no change at all — the dispatch lives behind the entry point the loading layer
+already called.
+
+- **`load_svdq_native_denoiser`** materializes a nunchaku-format checkpoint as a
+  STOCK diffusers module: skeleton on meta, W4A4 linears swapped for
+  `SvdqLinear` (fused `to_qkv` / `add_qkv_proj` split across the diffusers
+  projections), AWQ modulation layers decoded to bf16 Linears, everything else
+  assigned verbatim, then a STRICT check that nothing is left on the meta device —
+  a checkpoint that does not cover the module fails loud instead of serving a
+  half-initialized denoiser.
+- **`adanorm_splits_for`** is a table keyed on (diffusers class, module suffix),
+  not an inference from `out_features // in_features`. An unknown modulation layer
+  REFUSES; the exporter's adaLN transform is unrecoverable from the tensors and a
+  wrong split count corrupts output silently.
+- **Verified against the REAL 13 GB `svdq-fp4_r128-qwen-image` artifact**, pod-side
+  (weights never touch the dev box). Every one of its 4573 tensors is accounted
+  for: 480 svdq W4A4 prefixes (360 direct + 120 fused-qkv splits), 120 AWQ
+  modulation layers, 247 plain — **zero unmapped in any category** against the
+  stock `QwenImageTransformer2DModel`. Both decoders produce finite,
+  structurally-correct values (rank 128 throughout; `per_channel` second-level
+  scale exactly on the two fused qkv layers and `per_tensor` elsewhere, as the
+  layout predicted). The assembled loader then ran end to end: 2-block truncation
+  in 7.0s / 3.65 GB RSS and the **full 60 blocks in 163s / 55.7 GB RSS**, nothing
+  left on meta, `to_q`/`to_k`/`to_v` present as three working 3072-wide Linears,
+  modulation decoded to `Linear`, and a live forward finite.
+- mypy: fixed 7 `Optional`-narrowing errors this lane introduced (5 in
+  `svdq_native.py`, 2 in `svdq_layout.py`) by narrowing through locals rather than
+  silencing them; `mypy src/gen_worker` is green across 155 files.
+
+Admission is still NOT widened: `ladder.py`'s svdq placement keeps
+`sm_allowed=(120,121)`, `engines=("nunchaku",)`. Native now SERVES where it is
+selected, but the hub does not yet schedule svdq-fp4 onto sm_100 — that flip wants
+the fp4 (`blockwise`) full-artifact load and a numerical A/B, neither of which is
+measured yet (the verified load ran in the `dense` fold, and no nunchaku wheel was
+present to difference against).
+
 ## 0.73.1 (2026-07-26)
 
 - **pgw#684: a fourth reserved repo field, `candidate`, for producer payloads
