@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 KIND_SELF_MINT_COMPILE = "self_mint_compile"
 KIND_WARMUP = "warmup"
+# pgw#680: one tenant request hit fail-on-recompile on a compiled lane and
+# was served eager; phase carries the guard-reason class token, detail the
+# full confession. The hub accepts any kind and logs completions verbatim,
+# so top-N reasons are countable per (worker -> release, SKU) hub-side.
+KIND_GUARD_MISS = "guard_miss"
 
 PHASE_LOAD = "load"
 PHASE_TRACE_GRAPH = "trace_graph"
@@ -223,6 +228,23 @@ class Activity:
             )[:2000],
         )
         _end(self)
+
+
+def emit_event(kind: str, detail: str, phase: str = "") -> None:
+    """One self-contained COMPLETED ActivityUpdate — a countable typed
+    EVENT (pgw#680 ``guard_miss``), not a running activity.
+
+    Deliberately bypasses :func:`begin`: begin() swaps the module-global
+    ``_current``, and ending an event would strand a concurrently open
+    long-running activity (background mint) without its progress beat.
+    Thread-safe; without a bound sink it lands on the logger like every
+    other report."""
+    _emit(pb.ActivityUpdate(
+        kind=kind, phase=phase[:300], seq=_next_seq(),
+        state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
+        detail=detail[:2000],
+        updated_at_unix_ms=int(time.time() * 1000),
+    ))
 
 
 def begin(kind: str, phase: str = "") -> Activity:

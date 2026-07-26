@@ -45,6 +45,12 @@ _SIG_DEPTH = 4
 # routing for that router (back to today's behavior) instead of spamming
 # warm jobs forever.
 _MAX_SIGS = 256
+# pgw#680: how many background heals one signature gets after serve-window
+# guard misses. A signature that keeps missing AFTER its heals compiled is
+# diverging on something dynamo guards but our signature does not capture
+# per REQUEST (not per shape class) — healing cannot converge; route it
+# eager permanently instead of thrashing compile churn.
+_GUARD_MISS_HEAL_LIMIT = 2
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +195,16 @@ class Router:
         self.warm: set = set()
         self.pending: set = set()
         self.bg_failed: set = set()
+        # pgw#680 guard-miss heal state. ``healing``: sigs with an in-flight
+        # serve-window heal — routed EAGER (even on non-concurrent routers)
+        # until the warm thread marks them warm. ``volatile``: sigs past
+        # _GUARD_MISS_HEAL_LIMIT — permanently eager-routed (per-request
+        # guard variance; compiling cannot converge). Both are populated
+        # ONLY from serve-window misses, so proof/warm windows — which rely
+        # on sequential COMPILED verdicts — are never rerouted by them.
+        self.healing: set = set()
+        self.volatile: set = set()
+        self.guard_miss_counts: dict = {}
 
     def enable(self, on_warmed: Optional[Callable[[], None]] = None) -> bool:
         if self.fail_closed:
@@ -229,6 +245,14 @@ class Router:
         original while the background warm compiles this signature."""
         sig = (label, signature(args, kwargs))
         with self.lock:
+            # pgw#680: guard-miss verdicts outrank the concurrent gate — a
+            # sig mid-heal (or proven per-request-volatile) serves eager on
+            # EVERY router, including the never-concurrent mandatory lanes,
+            # instead of re-raising the stance each request.
+            if sig in self.volatile:
+                return EAGER, sig
+            if sig in self.healing:
+                return EAGER, sig
             if not self.concurrent or self.closed:
                 return COMPILED, sig
             if sig in self.warm:
@@ -284,7 +308,74 @@ class Router:
         with self.lock:
             self.pending.discard(sig)
             self.bg_failed.discard(sig)
+            self.healing.discard(sig)
             self.warm.add(sig)
+
+    def record_guard_miss(
+        self, sig: Tuple[Any, ...], label: str,
+        compiled: Callable[..., Any], args: tuple, kwargs: dict,
+    ) -> str:
+        """pgw#680 background heal: schedule the recompile for the exact
+        input class that just guard-missed at serve time.
+
+        Optimistic rules of the existing warm driver apply unchanged: the
+        one shape-warm thread compiles at nice +10 on its own CUDA stream,
+        no request ever waits, and the job carries a zero-filled dummy of
+        the failing request's own args (never tenant content) so the heal
+        targets the exact class. Dedup by signature; sigs past
+        ``_GUARD_MISS_HEAL_LIMIT`` become permanently eager (``volatile``).
+        Returns the verdict: healing | volatile | closed | queue_full |
+        no_dummy."""
+        with self.lock:
+            if self.closed:
+                return "closed"
+            self.warm.discard(sig)
+            count = self.guard_miss_counts.get(sig, 0) + 1
+            self.guard_miss_counts[sig] = count
+            if sig in self.volatile:
+                return "volatile"
+            if count > _GUARD_MISS_HEAL_LIMIT:
+                self.volatile.add(sig)
+                self.healing.discard(sig)
+                self.pending.discard(sig)
+                logger.error(
+                    "hot-swap: %s guard-missed %d times despite heals — "
+                    "per-request guard variance our signatures do not "
+                    "capture; routing this signature EAGER from now on "
+                    "(pgw#680)", label, count)
+                return "volatile"
+            if sig in self.healing:
+                return "healing"
+            self.healing.add(sig)
+            self.pending.add(sig)
+        try:
+            job = _WarmJob(
+                router=self, label=label, sig=sig, compiled=compiled,
+                args=_dummy_value(args), kwargs=_dummy_value(kwargs),
+                device=_first_cuda_device(args, kwargs),
+                grad_mode=_grad_mode(), autocast_dtype=_autocast_dtype(),
+            )
+        except Exception:
+            logger.warning(
+                "hot-swap: guard-miss heal dummy for %s failed; the "
+                "signature stays eager until its next miss", label,
+                exc_info=True)
+            with self.lock:
+                self.pending.discard(sig)
+                self.healing.discard(sig)
+            return "no_dummy"
+        if not _submit(job):
+            with self.lock:
+                self.pending.discard(sig)
+                self.healing.discard(sig)
+            logger.warning(
+                "hot-swap: warm queue full; guard-missed %s heal retried on "
+                "a later request", label)
+            return "queue_full"
+        logger.info(
+            "hot-swap: background heal scheduled for guard-missed %s "
+            "signature (pgw#680)", label)
+        return "healing"
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +472,10 @@ def _run_warm(job: _WarmJob) -> None:
     except BaseException as exc:  # noqa: BLE001 — contained per-signature
         with router.lock:
             router.pending.discard(job.sig)
+            # pgw#680: a failed guard-miss heal keeps the signature eager
+            # via bg_failed (concurrent routers) — the healing veto must
+            # not outlive its job on the non-concurrent ones.
+            router.healing.discard(job.sig)
             router.bg_failed.add(job.sig)
         try:
             import torch

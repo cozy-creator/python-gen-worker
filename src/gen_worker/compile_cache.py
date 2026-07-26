@@ -41,6 +41,8 @@ compiled from — informational, never part of the match.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import ctypes
 import filecmp
 import functools
@@ -60,7 +62,7 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
 import inspect
 import pickle
@@ -311,6 +313,197 @@ def reset_target_code(pipeline: Any) -> int:
             "compile-cache: dropped in-memory compiled code for %d target "
             "code object(s) ahead of the proof window (pgw#672)", reset)
     return reset
+
+
+# ---------------------------------------------------------------------------
+# pgw#680: guard-miss doctrine — fail-on-recompile at serve time.
+#
+# The 187s incident class: a tenant request whose inputs miss every cached
+# guard set used to pay dynamo's INLINE recompile inside the request (and,
+# single-flight, stall every request queued behind it). Doctrine: tenant
+# requests on compiled lanes run under a fail-on-recompile stance; the raise
+# is caught in the guard wrappers, THIS request serves eager immediately, the
+# guard-failure reason is recorded verbatim (Activity event + hub-countable),
+# and the exact input class is healed by the existing background warm driver
+# so the SECOND request of that shape is compiled.
+#
+# Stance choice (deliberate, torch 2.13): ``torch._dynamo.config
+# .error_on_recompile`` scoped via ``config.patch`` around the guarded
+# compiled call — NOT ``torch.compiler.set_stance("fail_on_recompile")``.
+# Two reasons, both verified against torch 2.13.0:
+#   1. Scope. ConfigModule user overrides are ContextVars, i.e. THREAD-LOCAL
+#      (the same mechanics gw#608 measured for ``enable_autograd_cache``).
+#      The stance therefore arms exactly the serving thread's guarded call;
+#      the hot-swap shape-warm thread and the background mint driver — which
+#      run CONCURRENTLY with tenant requests by design (pgw#671) — keep
+#      compiling freely. ``set_stance`` mutates a module-global and swaps the
+#      process-wide eval-frame callback: it would fail every concurrent
+#      warm/mint compile for the duration of a tenant call.
+#   2. Semantics. ``error_on_recompile`` raises only on a genuine RECOMPILE
+#      (existing cache entries, none matching — the guard-miss), composing
+#      with the multi-graph cache: warm entries keep serving under it, and a
+#      first-ever compile of a new code object never trips it.
+#      ``fail_on_recompile``'s callback raises for ANY tensor frame reaching
+#      dynamo while set, first compiles included.
+#
+# Windows: only the tenant execute window (executor ``tenant_serve_window``)
+# arms the stance. Warm / mint / adopt / boot-proof windows never enter it —
+# they exist to compile — and the marking is positive (default off), so any
+# path not explicitly marked keeps today's semantics.
+# ---------------------------------------------------------------------------
+
+_SERVE_WINDOW: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gw_tenant_serve_window", default=False)
+
+
+@contextlib.contextmanager
+def tenant_serve_window() -> Iterator[None]:
+    """Mark the current context as tenant-request execution (pgw#680).
+
+    Entered by the executor around the tenant handler call ONLY. ContextVars
+    propagate through ``asyncio.to_thread``/``create_task``, so the handler
+    thread that ultimately invokes the guarded compiled targets sees it."""
+    token = _SERVE_WINDOW.set(True)
+    try:
+        yield
+    finally:
+        _SERVE_WINDOW.reset(token)
+
+
+def in_tenant_serve_window() -> bool:
+    return _SERVE_WINDOW.get()
+
+
+@contextlib.contextmanager
+def _fail_on_recompile() -> Iterator[bool]:
+    """Arm the serve-window recompile stance for the calling thread.
+
+    Yields True when armed. No-op (False) outside the tenant serve window
+    or when torch/dynamo is unavailable — proof/warm/mint windows and
+    non-torch environments keep exact current semantics."""
+    if not _SERVE_WINDOW.get():
+        yield False
+        return
+    try:
+        import torch._dynamo
+
+        patch = torch._dynamo.config.patch(error_on_recompile=True)
+    except Exception:
+        logger.debug(
+            "compile-cache: recompile stance unavailable", exc_info=True)
+        yield False
+        return
+    with patch:
+        yield True
+
+
+def _is_recompile_error(exc: BaseException) -> bool:
+    """True for dynamo's fail-on-recompile raise (the guard-miss signal)."""
+    try:
+        from torch._dynamo import exc as dexc
+
+        return isinstance(exc, dexc.RecompileError)
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
+class GuardMiss:
+    """One tenant request that hit fail-on-recompile on a compiled target.
+
+    ``reason`` is torch's verbatim message — per cached entry, the exact
+    guard that failed (size/stride/scalar specialization, …): the confession
+    is the data for the cell-reusability investigation (Paul's GPU-A/B
+    hypothesis). ``sig`` is the request's shape/axis identity as the hot-swap
+    router sees it; ``heal`` is the background-heal verdict."""
+
+    target: str
+    reason: str
+    sig: str
+    heal: str
+    misses: int
+
+
+_GUARD_REASON_LINE_RE = re.compile(r"^\s*-\s*(?:\d+/\d+:\s*)?(.+)$")
+
+
+def guard_miss_reason_class(reason: str) -> str:
+    """A short, stable class token for one verbatim guard-miss reason.
+
+    The first per-entry failure line, entry index stripped, whitespace
+    collapsed, clipped — so top-N reasons are one ``sort | uniq -c`` away on
+    the hub's activity log (per pgw#680 the reasons ARE the instrument)."""
+    for line in str(reason or "").splitlines():
+        m = _GUARD_REASON_LINE_RE.match(line)
+        if m:
+            return _clip(m.group(1), 120)
+    first = str(reason or "").strip().splitlines()
+    return _clip(first[0], 120) if first else "unclassified"
+
+
+def set_guard_miss_callback(
+    pipeline: Any, callback: Callable[[GuardMiss], None],
+) -> bool:
+    """Bind serve-time guard-miss telemetry to an armed consumer guard.
+
+    Observability only: a failing callback is logged and swallowed — it must
+    never break the eager serve of the request that confessed."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    signal = marker.get("failure_signal")
+    if not isinstance(signal, dict):
+        return False
+    signal["on_guard_miss"] = callback
+    return True
+
+
+def guard_miss_count(pipeline: Any) -> int:
+    """Serve-time guard misses observed on this exact pipeline's guards."""
+    return _proof_count(pipeline, "guard_misses")
+
+
+def _record_guard_miss(
+    label: str,
+    exc: BaseException,
+    args: tuple,
+    kwargs: dict,
+    failure_signal: Optional[Dict[str, Any]],
+    heal_target: Callable[..., Any],
+) -> GuardMiss:
+    """The catch half of pgw#680: count, heal, confess. Never raises."""
+    signal = failure_signal or {}
+    router = signal.get("router")
+    sig: Tuple[Any, ...] = (label, hot_swap.signature(args, kwargs))
+    heal = "no_router"
+    if isinstance(router, hot_swap.Router):
+        heal = router.record_guard_miss(sig, label, heal_target, args, kwargs)
+    misses = 1
+    lock = signal.get("lock")
+    if isinstance(lock, _LOCK_TYPE):
+        with lock:
+            misses = int(signal.get("guard_misses", 0)) + 1
+            signal["guard_misses"] = misses
+    miss = GuardMiss(
+        target=label,
+        reason=str(exc),
+        sig=repr(sig[1]),
+        heal=heal,
+        misses=misses,
+    )
+    logger.warning(
+        "compile-cache: guard-miss on compiled %s — serving THIS request "
+        "eager, background heal=%s (pgw#680; miss #%d for this object). "
+        "Torch's verbatim reason:\n%s",
+        label, heal, misses, miss.reason,
+    )
+    callback = signal.get("on_guard_miss")
+    if callable(callback):
+        try:
+            callback(miss)
+        except Exception:
+            logger.exception(
+                "compile-cache: guard-miss telemetry callback failed "
+                "(request still served eager)")
+    return miss
 
 
 # ---------------------------------------------------------------------------
@@ -1846,12 +2039,25 @@ def _guarded(
                 return original(*args, **kwargs)
         before = proof_before()
         try:
-            result = compiled(*args, **kwargs)
+            # pgw#680: tenant serve windows run fail-on-recompile — a guard
+            # miss raises instead of paying dynamo's inline recompile in the
+            # request. Warm cache entries serve normally under the stance;
+            # proof/warm/mint windows never arm it (see _fail_on_recompile).
+            with _fail_on_recompile():
+                result = compiled(*args, **kwargs)
             record_success(before)
             if router is not None:
                 router.mark_warm(sig)
             return result
         except Exception as exc:  # noqa: BLE001 — every lane degrades to eager
+            if _is_recompile_error(exc):
+                # pgw#680 catch: the compiled lane is HEALTHY for its known
+                # input classes — this request's class missed. Serve it eager
+                # now, confess loudly, heal the exact class in background.
+                # Never the permanent-degrade path below.
+                _record_guard_miss(
+                    label, exc, args, kwargs, failure_signal, compiled)
+                return original(*args, **kwargs)
             state["failed"] = True
             state["detail"] = (
                 f"compiled {'W8A8 ' if fail_closed else ''}target {label} failed: "
@@ -1929,6 +2135,24 @@ def _guarded_regional(
             signal["cache_misses"] = int(signal.get("cache_misses", 0)) + max(
                 0, int(stats.get("fxgraph_cache_miss", 0)))
 
+    def _eager_once(args: tuple, kwargs: dict) -> Any:
+        """One fully-eager call of the in-place-compiled module (pgw#680).
+
+        Regional blocks have no separable eager callable — the compiled
+        impls live ON the blocks — so the guard-miss eager serve runs the
+        original with dynamo disabled for this thread/call: existing
+        compiled entries are bypassed, nothing recompiles, block state is
+        untouched (verified on torch 2.13: ``config.disable`` is the same
+        thread-local ContextVar surface as the stance)."""
+        try:
+            import torch._dynamo
+
+            patch = torch._dynamo.config.patch(disable=True)
+        except Exception:
+            return original(*args, **kwargs)
+        with patch:
+            return original(*args, **kwargs)
+
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if state["revocation_error"]:
@@ -1936,10 +2160,17 @@ def _guarded_regional(
         if not state["failed"]:
             before = proof_before()
             try:
-                result = original(*args, **kwargs)
+                # pgw#680: the compiled block impls execute inside this
+                # call — the serve-window stance covers them here.
+                with _fail_on_recompile():
+                    result = original(*args, **kwargs)
                 record_success(before)
                 return result
             except Exception as exc:  # noqa: BLE001 — every lane degrades to eager
+                if _is_recompile_error(exc):
+                    _record_guard_miss(
+                        label, exc, args, kwargs, failure_signal, original)
+                    return _eager_once(args, kwargs)
                 state["failed"] = True
                 state["detail"] = (
                     f"regional compiled {'W8A8 ' if fail_closed else ''}"
@@ -2059,6 +2290,9 @@ def apply(
         "successful_calls": 0,
         "cache_hits": 0,
         "cache_misses": 0,
+        # pgw#680: serve-window guard misses (count) + telemetry callback.
+        "guard_misses": 0,
+        "on_guard_miss": None,
         # pgw#622: whole-graph consumer guards route novel signatures
         # through this; sequential until hot_swap.enable() post-proof.
         "router": hot_swap.Router(fail_closed=fail_closed) if guard else None,
@@ -2993,7 +3227,13 @@ __all__ = [
     "fx_cache_failure_report",
     "fx_key_forensics",
     "gen_worker_version",
+    "GuardMiss",
+    "guard_miss_count",
+    "guard_miss_reason_class",
     "has_compile_target",
+    "in_tenant_serve_window",
+    "set_guard_miss_callback",
+    "tenant_serve_window",
     "inductor_counters",
     "is_cache_ref",
     "lane_bucket",

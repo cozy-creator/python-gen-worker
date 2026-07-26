@@ -89,6 +89,7 @@ from .runtime_config import ConfigStore, extract_job_config
 from .stage_timing import stage_ms_for_metrics
 
 if typing.TYPE_CHECKING:
+    from . import compile_cache
     from . import fleet_cells
     from .models.hub_client import WorkerResolvedRepo
     from .models.serve_fit import ServePlan
@@ -3239,7 +3240,55 @@ class Executor:
 
         if trt_engine.set_guard_failure_callback(target.pipeline, callback):
             return True
-        return compile_cache.set_guard_failure_callback(target.pipeline, callback)
+        if not compile_cache.set_guard_failure_callback(
+            target.pipeline, callback,
+        ):
+            return False
+        # pgw#680: serve-window guard misses confess through the same
+        # target (telemetry only — no state mutation, no revocation). TRT
+        # engines never dynamo-recompile, so only torch guards bind this.
+        def miss_callback(miss: compile_cache.GuardMiss) -> None:
+            self._compile_guard_missed(rec, target, miss)
+
+        compile_cache.set_guard_miss_callback(target.pipeline, miss_callback)
+        return True
+
+    def _compile_guard_missed(
+        self,
+        rec: _ClassRecord,
+        target: _CompileTargetRecord,
+        miss: "compile_cache.GuardMiss",
+    ) -> None:
+        """pgw#680 confession: one tenant request hit fail-on-recompile.
+
+        Pure observability — the compiled identity stays active, the tier
+        stays compiled (the lane is healthy for its known input classes;
+        THIS class is healing in background). The typed event rides the
+        activity stream so the hub can count misses per (release, SKU,
+        guard-reason): kind=guard_miss, phase=reason class, detail=the
+        verbatim torch reason + shape identity + cell key + request id."""
+        from . import compile_cache, postmortem
+
+        with target.state_lock:
+            cell = target.active_compile_ref
+            digest = target.active_compile_snapshot_digest
+        reason_class = compile_cache.guard_miss_reason_class(miss.reason)
+        request_id = postmortem.current_inflight_request()
+        detail = (
+            f"fn={sorted(target.function_names)} target={miss.target} "
+            f"cell={cell or '<none>'} digest={digest[:16] or '<none>'} "
+            f"request={request_id or '<unknown>'} heal={miss.heal} "
+            f"miss_n={miss.misses} sig={miss.sig[:400]} "
+            f"reason={miss.reason}"
+        )
+        logger.warning(
+            "guard_miss (pgw#680): compiled %s served eager for request %s "
+            "— reason class %r, heal=%s, cell=%s",
+            miss.target, request_id or "<unknown>", reason_class, miss.heal,
+            cell or "<none>",
+        )
+        activity_mod.emit_event(
+            activity_mod.KIND_GUARD_MISS, detail, phase=reason_class)
 
     def _install_compile_targets(
         self,
@@ -8727,9 +8776,17 @@ class Executor:
                             "request", spec.name,
                             request_id=str(run.request_id or ""))
                         try:
-                            output = await self._execute(
-                                job, spec, instance, ctx, payload, kwargs,
-                                timeout_ms=timeout_ms, gpu_index=gpu_index)
+                            from . import compile_cache as compile_cache_mod
+
+                            # pgw#680: tenant execution is THE serve window —
+                            # compiled lanes run fail-on-recompile inside it
+                            # (guard miss => eager + heal, never an inline
+                            # compile). Warm/mint/adopt paths go through
+                            # _invoke_warmup and never enter this window.
+                            with compile_cache_mod.tenant_serve_window():
+                                output = await self._execute(
+                                    job, spec, instance, ctx, payload, kwargs,
+                                    timeout_ms=timeout_ms, gpu_index=gpu_index)
                         except BaseException as exc:
                             # A mid-inference CUDA OOM learns a per-ref floor,
                             # but the live object is quarantined. The hub
