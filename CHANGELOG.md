@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.70.0 (2026-07-26) — pgw#677: tenant work always wins the GPU — the background mint yields
+
+th#1187's promise was "serve at eager speed while the compile mint runs in
+background". Measured reality (ie#546 retag cycle): the mint's 18 warm units
+monopolized the per-instance run gate — 0 renders in 19 min on a fresh L4
+release, every concurrent request degraded ~8.6x (completions landing exactly
+as mint units freed the gate), and on sm_86 the ungated warm-thread compile
+racing a tenant LoRA-branch forward SIGSEGV'd the worker process (pgw#676's
+confirmed frame: `w8a8_lora._forward_with_branch` concurrent with
+`hot_swap._run_warm`'s `compile_wrapper`). Two defects in one lock: the run
+gate was too WIDE for latency (a "seed" unit could inline-compile for minutes
+while holding it) and too NARROW for safety (the real compiles ran outside it,
+against live tenant forwards).
+
+- **Background-turn gate (executor)**: mint seed units AND shape-warm/heal
+  compiles now run only inside a granted background TURN — single-flight with
+  each other, holding the GPU permit + the instance's run gate + a new
+  per-instance `turn_mutex`, granted only when the worker is tenant-idle
+  (compile turns additionally wait a short quiescence window). A tenant
+  request can wait at most ONE bounded background unit, ever.
+- **Preemption**: a tenant admission cooperatively cancels the in-flight
+  idle-granted seed forward (the driver re-queues the unit), so the boundary
+  a tenant waits on is the handler's next cancel poll — not the unit.
+- **Seeds never compile inline**: inside the new `hot_swap.mint_seed_window`
+  a novel signature always routes EAGER + background enqueue, even on a
+  degraded router. The VRAM-headroom degrade-to-inline-compile is retired for
+  turn-gated routers (the warm thread ensures headroom inside its exclusive
+  turn); ungated legacy routers keep it.
+- **Race exclusion (the pgw#676 class)**: the shape-warm thread's compile
+  executes the shared modules only while holding the instance `turn_mutex`,
+  which the tenant path holds across adapter mutation + handler — concurrent
+  branch-forward/compile execution is structurally impossible. The gate is
+  loop-free (threading primitives) so the warm thread needs no event loop.
+- **Minimum progress under sustained load**: a background lane blocked by
+  continuous tenant demand STEALS one bounded turn per debt window
+  (`_BG_STEAL_FLOOR_S`, duty cycle capped by `_BG_STEAL_DEBT_FACTOR`); stolen
+  turns are not preemptible, so an 18-unit mint always finishes.
+- **Honest metrics**: time a tenant request spends queued behind the instance
+  gate is attributed to a new `instance_gate_wait` stage and excluded from
+  `runtime_ms` — mint contention no longer bills as tenant compute (measured:
+  16.9s reported for 1.95s of real work).
+- Kill switch `GEN_WORKER_BG_YIELD=0` restores the pre-fix shape
+  (red-verification and emergencies only).
+
+Tapes: `tests/test_mint_gate_pgw677.py` — starvation shape red-verified via
+the kill switch (tenant queued behind an inline-compiling mint unit), the
+pgw#676 overlap red-verified impossible post-fix with the bounded wait
+attributed, mint completion under a sustained tenant stream, and the
+seed-window routing contract.
+
 ## 0.69.0 (2026-07-26) — pgw#685: one fused triton kernel for the nvfp4 activation quantizer
 
 The `#nvfp4-w4a4` lane's per-call activation quantization was ~8 pure-torch
