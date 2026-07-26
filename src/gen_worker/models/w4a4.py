@@ -24,10 +24,12 @@ Execution: quantized Linears become :class:`W4A4Linear` — blockwise
 cores, ~2x the fp8 rate: 4378 TFLOPS / 3.07x bf16 measured on B200, gw#540
 DP1). Activations are quantized per call: static per-tensor second-level
 scale from calibration (dynamic amax fallback), per-16-block e4m3 scales
-computed dynamically. torch's blockwise scaled_mm consumes scales in the
-cuBLAS 2-D tiled ("blocked") layout — weight scales are swizzled ONCE at
-load, activation scales per call (a reshape/permute that fuses under
-inductor). SM >= 100 only (sm_100/103 datacenter + sm_120/121 consumer
+computed dynamically. That per-call chain is ONE fused triton kernel
+(``nvfp4_quant``, pgw#685) which also writes the block scales straight into
+the cuBLAS 2-D tiled ("blocked") layout torch's blockwise scaled_mm consumes;
+weight scales are swizzled once at load. The fused kernel arms only when it
+is bit-identical to the pure-torch chain, which otherwise serves unchanged.
+SM >= 100 only (sm_100/103 datacenter + sm_120/121 consumer
 Blackwell); the hub never schedules the flavor below that. Hosts of a
 qualifying arch whose kernel probe, micro-benchmark, or numerics self-check
 fails DEQUANT once at load into plain bf16-resident weights — same
@@ -46,15 +48,24 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import shutil
 
+from .nvfp4_quant import (
+    BLOCK as _BLOCK,
+    E2M1_MAX as _E2M1_MAX,
+    FP8_MAX as _FP8_MAX,
+    SCALE_MIN as _SCALE_MIN,
+    cast_e2m1,
+    nvfp4_quantizer_mode,
+    pack_e2m1,
+    quantize_activation,
+    to_blocked_scales,
+    unpack_e2m1,
+)
+
 logger = logging.getLogger(__name__)
 
 W4A4_FLAVOR = "nvfp4-w4a4"
 # Blackwell fp4 tensor cores: sm_100/103 (B200/B300) + sm_120/121 (RTX 50xx).
 W4A4_MIN_SM = 100
-_E2M1_MAX = 6.0
-_FP8_MAX = 448.0
-_SCALE_MIN = 2.0 ** -9  # e4m3 underflow guard (modelopt clamp)
-_BLOCK = 16
 # torch fp4 scaled_mm operand checks: packed K/2 % 16 == 0 and both mat2
 # dims % 16 == 0 => in_features % 32 == 0, out_features % 16 == 0.
 _K_ALIGN = 32
@@ -165,84 +176,10 @@ def detect_w4a4_artifact(model_path: Path) -> Optional[W4a4Artifact]:
 
 
 # ---------------------------------------------------------------------------
-# e2m1 quantize/dequantize + the cuBLAS blocked-scale swizzle (pure torch —
-# used by the producer, the dequant lane, and W4A4Linear's activation quant).
+# Weight quantize/dequantize. The e2m1 cast, nibble pack and blocked-scale
+# swizzle primitives live in nvfp4_quant (shared with the fused activation
+# quantizer) and are re-exported from here for the producer + dequant lane.
 # ---------------------------------------------------------------------------
-
-
-def _e2m1_lut(device: Any) -> Any:
-    import torch
-
-    return torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-         -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-        device=device, dtype=torch.float32)
-
-
-def _e2m1_bounds(device: Any) -> Any:
-    import torch
-
-    return torch.tensor(
-        [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0],
-        device=device, dtype=torch.float32)
-
-
-def cast_e2m1(t: Any) -> Any:
-    """Float tensor -> e2m1 nibble codes (uint8, values 0-15). Round-to-
-    nearest with ties at the odd bounds (0.75/1.75/2.5) rounding UP —
-    byte-identical to modelopt's NVFP4QTensor._cast_fp4."""
-    import torch
-
-    v = t.float()
-    sign = (v < 0).to(torch.uint8)
-    a = v.abs()
-    ord_ = torch.searchsorted(
-        _e2m1_bounds(v.device), a.contiguous(), out_int32=True).to(torch.uint8)
-    tie = ((a == 0.75) | (a == 1.75) | (a == 2.5)).to(torch.uint8)
-    return (sign << 3) + ord_ + tie
-
-
-def pack_e2m1(codes: Any) -> Any:
-    """[..., K] nibble codes -> [..., K/2] packed uint8 (element 2j in the
-    LOW nibble — torch.float4_e2m1fn_x2 / modelopt convention). Explicitly
-    contiguous: cuBLASLt refuses strided fp4 operands
-    (CUBLAS_STATUS_NOT_SUPPORTED, found live on B200), and TensorIterator
-    may propagate the slice strides into the packed output."""
-    return ((codes[..., 1::2] << 4) | codes[..., 0::2]).contiguous()
-
-
-def unpack_e2m1(packed: Any) -> Any:
-    """[..., K/2] packed uint8 -> [..., K] float32 e2m1 values."""
-    import torch
-
-    lut = _e2m1_lut(packed.device)
-    shape = list(packed.shape)
-    shape[-1] = shape[-1] * 2
-    out = torch.empty(shape, dtype=torch.float32, device=packed.device)
-    out[..., 0::2] = lut[(packed & 0x0F).long()]
-    out[..., 1::2] = lut[(packed >> 4).long()]
-    return out
-
-
-def to_blocked_scales(scales: Any) -> Any:
-    """Flat per-block scales [rows, k_blocks] (e4m3) -> the cuBLAS 2-D tiled
-    layout torch's blockwise scaled_mm consumes: rows padded to 128, block
-    columns padded to 4, 128x4 tiles rearranged (32, 4, 4) — returned as a
-    contiguous 1-D e4m3 tensor (the kernel checks numel + contiguity only).
-    Same rearrangement as modelopt's swizzle_nvfp4_scales / torchao's
-    to_blocked."""
-    import torch
-
-    rows, cols = scales.shape
-    nrb = (rows + 127) // 128
-    ncb = (cols + 3) // 4
-    # fp8 has no pad/zeros kernels everywhere — swizzle a uint8 view.
-    raw = scales.view(torch.uint8)
-    padded = raw.new_zeros(nrb * 128, ncb * 4)
-    padded[:rows, :cols] = raw
-    blocks = padded.view(nrb, 128, ncb, 4).permute(0, 2, 1, 3)
-    out = blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1)
-    return out.contiguous().view(torch.float8_e4m3fn)
 
 
 def quantize_nvfp4_tensor(w: Any) -> tuple[Any, Any, Any]:
@@ -407,6 +344,9 @@ def w4a4_gemm_mode() -> str:
     except Exception as exc:  # noqa: BLE001 — bench failure => dequant lane
         logger.warning("w4a4: qualification failed (%s); dequant lane", exc)
         return ""
+    # Decide the activation quantizer HERE, at load: registering the fused
+    # kernel's custom op must never happen mid-trace under torch.compile.
+    nvfp4_quantizer_mode()
     return "blockwise"
 
 
@@ -424,13 +364,12 @@ def _build_module_class() -> type:
 
         Per call: optional AWQ-lite smoothing (``x *= pre_quant_scale``),
         per-tensor activation second-level scale (static ``input_scale``
-        from calibration, else dynamic amax/(6*448)), dynamic per-16-block
-        e4m3 scales, e2m1 cast + nibble pack, blockwise ``torch._scaled_mm``
-        (weight scales pre-swizzled at load, activation scales swizzled per
-        call), then the fp32 second-level epilogue ``y *= s2_act * s2_w``
-        and bias. The quantize/pack ops fuse under inductor — the win lives
-        in the compiled lane (gw#534's lesson holds one tier down). NOTE:
-        never ``.to(dtype=...)`` this module (device moves are fine)."""
+        from calibration, else dynamic amax/(6*448)), then ONE fused pass
+        (:func:`~.nvfp4_quant.quantize_activation`) for the per-16-block e4m3
+        scales + e2m1 cast + nibble pack + blocked-layout scale store,
+        blockwise ``torch._scaled_mm`` (weight scales pre-swizzled at load),
+        then the fp32 second-level epilogue ``y *= s2_act * s2_w`` and bias.
+        NOTE: never ``.to(dtype=...)`` this module (device moves are fine)."""
 
         weight: Any        # uint8 [out, in/2] packed e2m1 pairs
         weight_scale: Any  # e4m3 1-D, cuBLAS blocked layout (swizzled at load)
@@ -484,16 +423,12 @@ def _build_module_class() -> type:
             else:
                 s2 = (x2.abs().amax().float()
                       / (_E2M1_MAX * _FP8_MAX)).clamp(min=1e-12)
-            xb = x2.reshape(-1, self.in_features // _BLOCK, _BLOCK).float()
-            bmax = xb.abs().amax(dim=-1)
-            sa = (bmax / (_E2M1_MAX * s2)).clamp(
-                min=_SCALE_MIN, max=_FP8_MAX).to(torch.float8_e4m3fn)
-            q = xb / (sa.float().unsqueeze(-1) * s2)
-            codes = cast_e2m1(q.reshape(-1, self.in_features))
-            xq = pack_e2m1(codes)
+            # One fused triton pass (amax -> e4m3 scale -> e2m1 cast -> nibble
+            # pack -> blocked-layout scale store) when it armed for this
+            # device, else the bit-identical pure-torch chain.
+            xq, sa_blocked = quantize_activation(x2, s2)
             y = _gemm_w4a4(
-                xq, self.weight, to_blocked_scales(sa), self.weight_scale,
-                x.dtype)
+                xq, self.weight, sa_blocked, self.weight_scale, x.dtype)
             y = y * (s2 * self.weight_scale_2.reshape(())).to(y.dtype)
             if self.bias is not None:
                 y = y + self.bias
@@ -919,7 +854,9 @@ __all__ = [
     "load_w4a4_denoiser",
     "load_w4a4_pipeline",
     "load_w4a4_root_pipeline",
+    "nvfp4_quantizer_mode",
     "pack_e2m1",
+    "quantize_activation",
     "quantize_nvfp4_tensor",
     "quantize_tree_w4a4",
     "sanitize_w4a4_state_dict",

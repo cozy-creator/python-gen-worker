@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.69.0 (2026-07-26) — pgw#685: one fused triton kernel for the nvfp4 activation quantizer
+
+The `#nvfp4-w4a4` lane's per-call activation quantization was ~8 pure-torch
+passes (fp32 upcast, per-16-block amax, e4m3 scale, divide, `searchsorted`
+e2m1 cast, nibble pack, then a pad/permute swizzle of the scales into the
+cuBLAS blocked layout). gw#540 measured that chain — not the fp4 GEMM — as the
+whole reason the lane LOST to bf16. It is now ONE triton kernel.
+
+- **`gen_worker.models.nvfp4_quant`** owns the nvfp4 format primitives (moved
+  out of `w4a4.py`, which re-exports them unchanged) plus the fused kernel:
+  per-16 amax → e4m3 block scale → e2m1 RTN cast → nibble pack → block-scale
+  store **directly at its cuBLAS blocked-layout address**, in one pass.
+  Measured on RTX 5090 (sm_120) and B200 (sm_100): the quant step 6-36x
+  faster, taking the lane from 0.807x → 2.043x bf16 eager and 2.045x → 2.472x
+  compiled on sm_120, and 1.03x → 1.24x on sm_100 (pgw#682).
+- **Arch-portable by construction**: triton JITs per arch, so one source covers
+  sm_100/103 (B200/B300) and sm_120/121 (RTX 50xx / PRO 6000) — no nvcc
+  extension build, no per-family port. Launch config from the measured sweep:
+  128 blocks/program on both arches, 8 warps on sm_120/121 vs 4 on sm_100/103.
+- **`tl.math.div_rn`, deliberately.** Triton's `/` lowers to an approximate
+  divide; a 1-ulp drift lands values exactly on the 1.75 e2m1 tie boundary and
+  the ties-round-UP rule then flips a whole 4-bit code (0.16% of nibbles, 0.6%
+  output drift — small enough to read as noise).
+- **Arming is gated on BIT-IDENTITY against the pure-torch chain, not on a
+  tolerance**, on three probe shapes at load. The existing load-time numerics
+  self-check cannot see that class of bug (its threshold is 2e-2). A triton
+  release that changes rounding, or an arch we have not measured, falls back to
+  the reference chain rather than serving drifted numerics — never a refusal.
+- **Compile-safe**: registered as a `torch.library.custom_op` with an explicit
+  schema and a `register_fake`, so it is traced as an opaque call instead of
+  graph-breaking. Registration happens at load, never mid-trace.
+
 ## 0.68.1 (2026-07-26) — pgw#678 the lane handle is not the pipeline; pgw#683 shared-component identity carries the EFFECTIVE compute dtype
 
 Two P0s on the composition/residency path, both found live on the sdxl retag
