@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.73.0 (2026-07-26) — pgw#687: a cancel that never unwinds no longer absorbs the next job
+
+Cancelling a job mid-compute could wedge a worker permanently while every
+hub-side signal read healthy: connected, heartbeating, still advertising its
+functions. Live (th#1165): job A cancelled mid-modelopt-calibration, job B
+assigned to the same pod 61 s later, then ZERO events of any kind for 46
+minutes. The only symptom was absence.
+
+Mechanism: cancelling a SYNC handler is cooperative. `handle_cancel` sets
+`ctx.cancelled` and (for async handlers only) cancels the task; a thread
+running `asyncio.to_thread` cannot be cancelled at all. A handler that never
+polls the flag — a modelopt calibration loop — keeps running, so `_run_job`
+never returns, the GPU permit and the per-instance run gate are never
+released, and the next job parks in `_gpu_semaphore.acquire()`, a wait that
+emits nothing. Nothing watched the cancel -> terminal edge.
+
+- **The cancel -> terminal edge is now watched.** Past
+  `_CANCEL_UNWIND_GRACE_S` (45 s) the executor is presumed unable to return
+  to idle and FAILS CLOSED: every function goes `unavailable` with reason
+  `cancel_unwind_stuck` (a real `FnUnavailable` on the wire, not merely an
+  empty function set), and any job still parked pre-execution is failed
+  RETRYABLE so the hub replans it NOW instead of letting it sit eventless.
+  Reversible: a late unwind re-advertises exactly the functions we took.
+- **A thread that never honours the cancel replaces the pod** — process
+  recycle after a further `_CANCEL_UNWIND_RECYCLE_S` (300 s), the only way to
+  reclaim a wedged thread. Routed through the same injectable exit seam as
+  the deadline reaper.
+- The bound is on cancel -> terminal latency, never on handler progress, so
+  it does not re-introduce the wall-clock bound gw#666/th#1157/th#1160
+  forbid: a 51-minute silent source download is not a cancelled job and is
+  untouched.
+- A PRODUCER (conversion/training) handler cancelled mid-run now marks its
+  instance stale, so the next dispatch reloads clean — modelopt installs
+  module-level quantizer hooks that the next `setup()` would otherwise
+  inherit. Inference cancels are excluded on purpose: a cancelled forward
+  mutates nothing, and discarding a warm serving pipeline on every user
+  cancel would be its own regression.
+- `tests/test_cancel_unwind_pgw687.py` drives the real executor over the
+  hub-double with a handler that ignores cancellation. The red row
+  (`test_wedge_shape_without_the_guard_is_silent_absorption`) is kept
+  permanently: with the grace pushed out of reach it reproduces the pre-fix
+  silence, and the four fix rows fail without the watchdog.
+
 ## 0.72.0 (2026-07-26) — pgw#685 S2b: the AWQ W4A16 modulation decoder
 
 An svdq artifact does not quantize everything the same way. Its DiT Linears are

@@ -141,8 +141,25 @@ async def _to_thread_complete(func: Callable[..., Any], /, *args: Any, **kwargs:
 # them to /v1/requests/:id/events SSE as output.delta envelopes whose
 # payload.delta carries this JSON verbatim (th#640).
 EVENT_CONTENT_TYPE = "application/x-request-event+json"
-_CANCEL_GRACE_S = 5.0
 _STUCK_THREAD_RECYCLE_S = 30.0
+# pgw#687: a cancel that never unwinds. Cancellation of a SYNC handler is
+# cooperative — the thread cannot be killed — so a handler that never polls
+# ctx.cancelled (observed: a modelopt calibration loop) keeps the GPU permit
+# and its instance gate forever. The next assignment is then accepted and
+# parks pre-execution, emitting NOTHING: 46 minutes of silent absorption with
+# every hub-side signal reading healthy.
+#
+# The bound is on CANCEL -> TERMINAL latency, never on handler progress:
+# after a cancel there is no legitimate work left to protect, so this does
+# not re-introduce the wall-clock bound gw#666 / th#1157 / th#1160 forbid (a
+# 51-minute silent source download is untouched — it is not a cancelled job).
+_CANCEL_UNWIND_REASON = "cancel_unwind_stuck"
+#: Cancel -> terminal result. Past it the executor is presumed unable to
+#: return to idle: stop advertising and refuse work (REVERSIBLE).
+_CANCEL_UNWIND_GRACE_S = 45.0
+#: Further wait once quarantined. Past it the process is recycled so the pod
+#: is replaced — a wedged thread cannot be reclaimed any other way.
+_CANCEL_UNWIND_RECYCLE_S = 300.0
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
 # th#763: how long a cold tensorhub ref waits for the hub's re-minted
@@ -2328,6 +2345,12 @@ class _Job:
     finished: bool = False
     superseded: bool = False
     cancel_requested: bool = False
+    # pgw#687: True once this job owns its GPU permit + instance gate and the
+    # handler is (about to be) running. A job that is NOT executing is parked
+    # pre-execution — safe to fail RETRYABLE so the hub replans it elsewhere.
+    executing: bool = False
+    # pgw#687: watches cancel -> terminal for THIS job.
+    unwind_watch: Optional[asyncio.Task] = None
     # gw#516: True while the job is past the decode->finalize handoff (GPU
     # slot terminally released, encode/upload tail running, result unshipped).
     finalizing: bool = False
@@ -2484,6 +2507,14 @@ class Executor:
         )
         self.draining = False
         self.jobs: Dict[Tuple[str, int], _Job] = {}
+        # pgw#687 cancel-unwind quarantine: (request_id, attempt) -> detail for
+        # every cancel that has not reached a terminal result within the grace,
+        # and the function names WE marked unavailable for them.
+        self._unwind_stuck: Dict[Tuple[str, int], str] = {}
+        self._unwind_quarantined: set = set()
+        # Process replacement seam, shared with the deadline reaper: tests
+        # substitute a recorder instead of really exiting.
+        self._process_exit: Callable[[int], None] = os._exit
         self._idle = asyncio.Event()
         self._idle.set()
         # pgw#677 background-turn gate state. Threading primitives on
@@ -8538,6 +8569,7 @@ class Executor:
                     job.ctx._cancel()
                 if job.exec_task is not None:
                     job.exec_task.cancel()
+                self._arm_cancel_unwind_watch(job)
 
         intent_id = self._job_intent(run)
         if self.draining:
@@ -8616,6 +8648,121 @@ class Executor:
             job.ctx._cancel()  # cooperative: sync handlers poll ctx
         if job.exec_task is not None and job.spec is not None and job.spec.is_async:
             job.exec_task.cancel()  # async handlers are cancelled on the loop
+        self._arm_cancel_unwind_watch(job)
+
+    # ---- pgw#687 cancel unwind ---------------------------------------------
+
+    def _arm_cancel_unwind_watch(self, job: _Job) -> None:
+        """A cancel is only real once the job reaches a TERMINAL result.
+
+        Nothing else watches that edge: a sync handler that ignores
+        ``ctx.cancelled`` keeps its GPU permit and instance gate, and the next
+        assignment parks pre-execution forever with no event of any kind. So
+        watch cancel -> terminal, and if it never lands, refuse work loudly
+        (and ultimately replace the pod) instead of absorbing assignments.
+        """
+        if job.finished or job.unwind_watch is not None:
+            return
+
+        async def _watch() -> None:
+            try:
+                if await self._await_unwound(job, _CANCEL_UNWIND_GRACE_S):
+                    return
+                await self._enter_cancel_quarantine(job)
+                if await self._await_unwound(job, _CANCEL_UNWIND_RECYCLE_S):
+                    self._leave_cancel_quarantine(job)
+                    return
+                logger.critical(
+                    "handler for %s attempt=%d ignored cancel for %.0fs; "
+                    "recycling worker process so the pod is replaced",
+                    job.request_id, job.attempt,
+                    _CANCEL_UNWIND_GRACE_S + _CANCEL_UNWIND_RECYCLE_S,
+                )
+                self._process_exit(70)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("cancel-unwind watch failed for %s", job.request_id)
+
+        job.unwind_watch = asyncio.create_task(
+            _watch(), name=f"unwind-{job.request_id}")
+
+    @staticmethod
+    async def _await_unwound(job: _Job, timeout: float) -> bool:
+        """True iff the job reached a terminal result within ``timeout``."""
+        deadline = time.monotonic() + timeout
+        interval = min(0.25, max(timeout / 8.0, 0.01))
+        while True:
+            if job.finished:
+                return True
+            if time.monotonic() >= deadline:
+                return job.finished
+            await asyncio.sleep(interval)
+
+    async def _enter_cancel_quarantine(self, job: _Job) -> None:
+        """Fail closed: stop advertising, and refuse work already parked
+        behind the wedged job instead of letting it sit eventless."""
+        detail = (
+            f"cancel of request {job.request_id} attempt {job.attempt} has not "
+            f"unwound after {_CANCEL_UNWIND_GRACE_S:.0f}s; the handler still "
+            "holds the GPU permit / instance gate"
+        )
+        logger.critical("CANCEL_UNWIND_STUCK %s", detail)
+        self._unwind_stuck[(job.request_id, job.attempt)] = detail
+        for name in self.specs:
+            if name in self.unavailable:
+                continue  # never erase another owner's disable
+            self.unavailable[name] = (_CANCEL_UNWIND_REASON, _sanitize(detail), {})
+            self._unwind_quarantined.add(name)
+        for other in list(self.jobs.values()):
+            if other is job or other.finished or other.executing:
+                continue
+            logger.warning(
+                "refusing parked request %s attempt=%d: %s",
+                other.request_id, other.attempt, _CANCEL_UNWIND_REASON,
+            )
+            await self._finish(
+                other, pb.JOB_STATUS_RETRYABLE,
+                safe_message=f"worker unfit: {_CANCEL_UNWIND_REASON}",
+            )
+            if other.task is not None:
+                other.task.cancel()
+        self._on_state_change()
+
+    def _leave_cancel_quarantine(self, job: _Job) -> None:
+        """The unwind landed late — re-advertise what we (and only we) took."""
+        self._unwind_stuck.pop((job.request_id, job.attempt), None)
+        if self._unwind_stuck:
+            return  # another wedged cancel still open
+        for name in list(self._unwind_quarantined):
+            entry = self.unavailable.get(name)
+            if entry is not None and entry[0] == _CANCEL_UNWIND_REASON:
+                self.unavailable.pop(name, None)
+        restored = len(self._unwind_quarantined)
+        self._unwind_quarantined.clear()
+        logger.warning(
+            "cancel of %s attempt=%d unwound late; re-advertising %d function(s)",
+            job.request_id, job.attempt, restored,
+        )
+        self._on_state_change()
+
+    def _quarantine_after_cancel(self, spec: EndpointSpec, job: _Job) -> None:
+        """A PRODUCER handler cancelled mid-run leaves its own mutations on the
+        live instance (modelopt installs module-level quantizer hooks; a
+        trainer swaps in adapter/optimizer state), and the next ``setup()``
+        inherits them. Reload clean instead. Inference is excluded on purpose:
+        a cancelled forward mutates nothing, and discarding a warm serving
+        pipeline on every user cancel would be its own regression.
+        """
+        if spec.kind == "inference" or not job.executing:
+            return
+        rec = self._classes.get(spec.instance_key)
+        if rec is not None and rec.ready and not rec.stale:
+            rec.stale = True
+            logger.warning(
+                "%s cancelled mid-run for %s; marking the instance stale so the "
+                "next dispatch reloads it clean", spec.kind, spec.name,
+            )
 
     async def wait_idle(self, timeout: Optional[float] = None) -> bool:
         try:
@@ -9154,6 +9301,9 @@ class Executor:
             # run yet. The repeated check catches a replacement between
             # scheduler assignment/intake and this GPU turn.
             self._validate_required_compile(spec, run)
+            # pgw#687: past here this job owns the permit/gate — it is no
+            # longer refusable-in-place by the cancel-unwind quarantine.
+            job.executing = True
             self._intent_transition(
                 job.intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_RUNNING,
@@ -9376,6 +9526,8 @@ class Executor:
                 )
                 self._on_state_change()
             status, msg = _map_exception(exc)
+            if status == pb.JOB_STATUS_CANCELED:
+                self._quarantine_after_cancel(spec, job)
             if status == pb.JOB_STATUS_FATAL:
                 logger.exception("handler %s failed", spec.name)
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
@@ -9696,7 +9848,7 @@ class Executor:
                     "handler thread for %s ignored deadline+cancel for %.0fs; "
                     "recycling worker process", job.request_id, _STUCK_THREAD_RECYCLE_S,
                 )
-                os._exit(70)
+                self._process_exit(70)
             except BaseException:
                 pass  # thread finished (with error) — no recycle needed
 
