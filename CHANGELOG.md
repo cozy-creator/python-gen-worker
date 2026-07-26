@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.67.0 (2026-07-25) — pgw#674: rotation preload — the NEXT checkpoint stages while the current job computes
+
+Worker half of WORKER-RESIDENCY-DESIGN's Paul-ratified "Rotating
+double-buffer serving" (north star: load model-B while model-A runs
+inference; rotate on completion; GPU hot the entire time). Until now the
+only path acting on the hub's desired plan was lifecycle's reconcile —
+tenant-idle-gated and cancelled by every run_job — so every checkpoint hop
+paid the full visible swap (ie#546 measured ~14s: 11s repo-cas pull + 3s
+VRAM load).
+
+- **`Preloader`** (`gen_worker/preload.py`, executor-owned): level-triggered
+  background driver fed by the HelloAck desired set and poked at job
+  admit/finish. NOT idle-gated, NOT cancelled by run_job; stops on drain.
+  Stage ladder per desired instance: (1) bytes to local NVMe CAS
+  (`ensure_local` — kills the download term); (2) `fits()` with the
+  resident set protected -> full background `ensure_setup` = TRUE
+  DOUBLE-BUFFER, dispatch finds a ready record and the visible swap is ~0;
+  (3) otherwise COMPONENT-FIRST host staging: exclusive components (by
+  content digest; resident shared TE/VAE stay put by construction) load on
+  CPU on a dedicated nice+10 thread, get eagerly pinned, and are seeded
+  into the shared-component cache — the existing content-keyed injection
+  consumes them at dispatch (from_pretrained skips those disk loads).
+  pgw#638 fence intact: refs resident under a moved identity are left to
+  the idle-gated reconcile. Quantized flavors (fp8/svdq/w8a8/nf4) stop at
+  the disk tier.
+- **Copy-stream promotes** (`models/staging.py` + `pinned_swap`): weight
+  H2D rides a dedicated CUDA copy stream — copy engines are separate
+  hardware from the SMs, so a background promote overlaps the serving
+  job's compute; only the copy stream is synchronized, never the device.
+- **Bounded pinned pool** (`PinnedPool`): pinned host RAM is budget-gated
+  (measured available minus the residency floor, capped at half of total;
+  no knobs); refusal degrades to pageable. `prestage_module` builds the
+  pinned cache eagerly for CPU-staged modules so their FIRST promote is
+  full-PCIe.
+- **Benchmark vehicle** (closes the ie#546 "no delivery path" gap): the
+  swap-latency harness moved INTO the wheel
+  (`python -m gen_worker.benchmarks.swap_latency`; the repo-root script is
+  now a shim) and gained a `stage` case (disk -> CPU -> pin -> H2D on the
+  copy stream — the exact rotation path). `gen_worker.diagnostics.
+  SwapLatencyDiagnostics` exposes it as an ordinary worker function
+  (str-slot snapshot trees, NoWarmup), dispatchable through the normal
+  request path — th#1198's admin benchmark-run machinery.
+
 ## 0.66.0 (2026-07-25) — pgw#672: the minted cell serves itself; broken compiled lanes degrade, never die
 
 Live defect closed (ie#546 burst rerun #2, 0.64.0, L4): a worker minted and

@@ -1,0 +1,195 @@
+"""Pinned host staging + the dedicated H2D copy stream (pgw#674).
+
+Rotating double-buffer serving (WORKER-RESIDENCY-DESIGN, Paul-ratified)
+stages the NEXT checkpoint while the current job computes. Two shared
+facilities live here:
+
+- :class:`PinnedPool` — bounded accounting for pinned (page-locked) host
+  RAM. Pinned memory is unswappable; an unbounded pinned tier can push the
+  host into the gw#407 reclaim-thrash livelock exactly like an unbounded
+  warm tier. The budget is MEASURED (available RAM minus the residency
+  floor, hard-capped at half of total RAM) — no knobs, per the standing
+  no-developer-facing-residency-knobs rule. Reservations release by
+  weakref finalizer on the pinned tensor, so accounting tracks the actual
+  allocation lifetime with no explicit free protocol.
+
+- the process copy stream — a dedicated CUDA stream for weight H2D.
+  Copy engines are separate hardware from the SMs, so a pinned-memory H2D
+  on this stream runs concurrently with the serving job's compute instead
+  of serializing behind it on the default stream (pgw#652 overlap #2).
+  Interference is measured, not assumed: ``gen_worker.benchmarks.
+  swap_latency overlap`` reports the compute-throughput cost of a
+  concurrent copy.
+
+CPU-only hosts (and the CPU-only test suite) get honest no-ops: no CUDA
+means no copy stream and pinned allocation falls back to pageable.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import threading
+import weakref
+from typing import Any, Callable, Iterator, Optional
+
+from .memory import get_available_ram_gb, get_total_ram_gb
+
+logger = logging.getLogger(__name__)
+
+_GiB = 1024 ** 3
+
+# Mirrors residency's host-RAM floor policy (gw#407): the warm/pinned tiers
+# must never eat the host's working set. Kept numerically identical to
+# residency._RAM_FLOOR_GB / _RAM_FLOOR_FRACTION.
+_RAM_FLOOR_GB = 8.0
+_RAM_FLOOR_FRACTION = 0.2
+# Pinned memory is the harshest host allocation (unswappable): never let it
+# claim more than half of physical RAM even on an idle host.
+_PINNED_TOTAL_FRACTION = 0.5
+
+
+def _floor_bytes() -> int:
+    total = get_total_ram_gb()
+    if total <= 0:
+        return int(_RAM_FLOOR_GB * _GiB)
+    return int(min(_RAM_FLOOR_GB, max(1.0, total * _RAM_FLOOR_FRACTION)) * _GiB)
+
+
+class PinnedPool:
+    """Bounded pinned host-RAM accounting. Thread-safe.
+
+    ``try_reserve`` admits an allocation against the measured budget;
+    :func:`alloc_pinned_like` attaches the matching release to the pinned
+    tensor's lifetime. A refusal is not an error — callers fall back to
+    pageable memory (slower H2D, still correct).
+    """
+
+    def __init__(self, budget_fn: Optional[Callable[[], int]] = None) -> None:
+        self._budget_fn = budget_fn
+        self._lock = threading.Lock()
+        self._reserved = 0
+
+    def budget_bytes(self) -> int:
+        if self._budget_fn is not None:
+            return max(0, int(self._budget_fn()))
+        available = int(get_available_ram_gb() * _GiB)
+        total = int(get_total_ram_gb() * _GiB)
+        headroom = available - _floor_bytes()
+        if total > 0:
+            cap = int(total * _PINNED_TOTAL_FRACTION)
+            remaining = cap - self.reserved_bytes()
+            headroom = min(headroom, remaining)
+        return max(0, headroom)
+
+    def reserved_bytes(self) -> int:
+        with self._lock:
+            return self._reserved
+
+    def try_reserve(self, nbytes: int) -> bool:
+        nbytes = int(nbytes)
+        if nbytes <= 0:
+            return True
+        # budget_bytes() measures AVAILABLE ram, which already reflects prior
+        # pinned allocations that actually landed; only the total-RAM cap
+        # needs the reserved counter (handled inside budget_bytes).
+        if nbytes > self.budget_bytes():
+            return False
+        with self._lock:
+            self._reserved += nbytes
+        return True
+
+    def release(self, nbytes: int) -> None:
+        nbytes = int(nbytes)
+        if nbytes <= 0:
+            return
+        with self._lock:
+            self._reserved = max(0, self._reserved - nbytes)
+
+
+_pool = PinnedPool()
+
+
+def pinned_pool() -> PinnedPool:
+    return _pool
+
+
+def set_pinned_pool(pool: PinnedPool) -> PinnedPool:
+    """Swap the process pool (tests inject a deterministic budget)."""
+    global _pool
+    prev, _pool = _pool, pool
+    return prev
+
+
+def alloc_pinned_like(torch: Any, t: Any) -> Optional[Any]:
+    """A pinned host tensor shaped like ``t``, budget-gated through the
+    pool. ``None`` = refused or allocation failed; the caller uses pageable
+    memory instead. The pool reservation releases when the returned tensor
+    is garbage-collected (weakref finalizer), so accounting follows the
+    real lifetime."""
+    nbytes = int(t.numel()) * int(t.element_size())
+    if not _pool.try_reserve(nbytes):
+        logger.info(
+            "pinned pool refused %.2fGiB (reserved %.2fGiB, budget %.2fGiB)",
+            nbytes / _GiB, _pool.reserved_bytes() / _GiB,
+            _pool.budget_bytes() / _GiB,
+        )
+        return None
+    try:
+        host = torch.empty_like(t, device="cpu", pin_memory=True)
+    except Exception:
+        _pool.release(nbytes)
+        return None
+    weakref.finalize(host, _pool.release, nbytes)
+    return host
+
+
+# ---------------------------------------------------------------------------
+# The H2D copy stream
+# ---------------------------------------------------------------------------
+
+_stream_lock = threading.Lock()
+_stream: Any = None
+
+
+def copy_stream() -> Optional[Any]:
+    """The process-wide dedicated H2D copy stream; ``None`` off-CUDA."""
+    global _stream
+    try:
+        import torch
+    except Exception:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    with _stream_lock:
+        if _stream is None:
+            _stream = torch.cuda.Stream()
+        return _stream
+
+
+@contextlib.contextmanager
+def copy_stream_ctx() -> Iterator[Optional[Any]]:
+    """Run enclosed CUDA copies on the copy stream (no-op off-CUDA).
+
+    Yields the stream (or ``None``). Callers that need completion before
+    returning tensors to compute streams call ``stream.synchronize()`` —
+    NEVER ``torch.cuda.synchronize()``, which would also wait on the
+    serving job's queued compute kernels."""
+    stream = copy_stream()
+    if stream is None:
+        yield None
+        return
+    import torch
+
+    with torch.cuda.stream(stream):
+        yield stream
+
+
+__all__ = [
+    "PinnedPool",
+    "pinned_pool",
+    "set_pinned_pool",
+    "alloc_pinned_like",
+    "copy_stream",
+    "copy_stream_ctx",
+]
