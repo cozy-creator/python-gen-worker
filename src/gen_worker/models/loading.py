@@ -952,6 +952,134 @@ def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
     return ""
 
 
+class MixedComputeDtypeError(RuntimeError):
+    """A composed pipeline presents more than one COMPUTE dtype to its GEMMs.
+
+    pgw#683's invariant. torch's matmul/conv kernels take no dtype opinion
+    from the module — they raise mid-forward, with a message that names
+    neither the tensor nor the component::
+
+        RuntimeError: mat1 and mat2 must have the same dtype, but got
+        BFloat16 and Half      (an nn.Linear WITH bias: addmm)
+        RuntimeError: Input type (c10::BFloat16) and bias type (c10::Half)
+        should be the same     (a conv)
+
+    Live, that message arrived at ``self_mint_compile phase=warmup_forward``
+    warm unit 4/18 on an L4 and cost `generate` on a prod release, with
+    nothing in it to attribute the fault to a component, a ref or a load path.
+    This error is raised at LOAD instead, naming the component, the parameter
+    path and both dtypes.
+    """
+
+
+#: Dtypes a GEMM can actually compute in. Storage-only dtypes (fp8/fp4/int)
+#: are excluded on purpose: the w8a8/svdq/nvfp4 lanes and diffusers' layerwise
+#: casting hold weights at those precisions BY DESIGN and upcast per forward.
+_COMPUTE_DTYPE_NAMES = ("float16", "bfloat16", "float32", "float64")
+#: The pair that cannot interoperate and never legitimately coexists in one
+#: composition. fp32 is the DECLARED widening axis (pgw#667) and is reported
+#: but never fatal — widening is a precision decision, not a dtype collision.
+_INCOMPATIBLE_COMPUTE = ("float16", "bfloat16")
+
+
+def _gemm_param_dtypes(module: Any) -> Dict[str, str]:
+    """``{parameter path: dtype name}`` for every GEMM input under ``module``
+    — Linear/conv weights and biases, the tensors torch actually refuses to
+    mix. Norms/embeddings are excluded: they carry their own (legitimately
+    wider) precision and never meet a weight in one kernel."""
+    import torch.nn as nn
+
+    gemm_types = (
+        nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d,
+        nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
+    )
+    out: Dict[str, str] = {}
+    for name, leaf in module.named_modules():
+        if not isinstance(leaf, gemm_types):
+            continue
+        for attr in ("weight", "bias"):
+            t = getattr(leaf, attr, None)
+            dt = getattr(t, "dtype", None)
+            if dt is None:
+                continue
+            dt_name = str(dt).rsplit(".", 1)[-1]
+            if dt_name in _COMPUTE_DTYPE_NAMES:
+                out[f"{name}.{attr}" if name else attr] = dt_name
+    return out
+
+
+def assert_uniform_compute_dtype(
+    obj: Any, expected: str = "", *, label: str = "",
+) -> None:
+    """Refuse a MIXED-precision composition at LOAD (pgw#683).
+
+    Checks every GEMM input of every component: an fp16 weight and a bf16
+    weight in one composition means some forward will die on a dtype the
+    kernel cannot reconcile, and torch's message names nothing. Two verdicts
+    are fatal:
+
+    1. a single component that is internally fp16 AND bf16;
+    2. any component whose compute dtype is fp16/bf16 but is not ``expected``
+       (the composition's own compute dtype) — the cross-composition aliasing
+       shape: a content-keyed shared component loaded by another pick's record
+       at ITS dtype and injected here unconverted.
+
+    fp32 parts are legal (pgw#667 declares wider components deliberately) and
+    storage dtypes are legal (fp8/fp4 lanes upcast per forward), so neither
+    is counted. Introspection failures never fail a load — only a proven
+    collision does.
+    """
+    try:
+        comps = getattr(obj, "components", None)
+        if isinstance(comps, dict) and comps:
+            parts = [(str(n), m) for n, m in comps.items()
+                     if hasattr(m, "named_modules")]
+        elif hasattr(obj, "named_modules"):
+            parts = [(type(obj).__name__, obj)]
+        else:
+            return
+        seen: Dict[str, Dict[str, str]] = {}
+        for name, module in parts:
+            dtypes = _gemm_param_dtypes(module)
+            if dtypes:
+                seen[name] = dtypes
+    except Exception:  # introspection is best-effort; never fail a load on it
+        logger.debug("compute-dtype invariant could not inspect %r", label,
+                     exc_info=True)
+        return
+
+    what = label or type(obj).__name__
+    for name, dtypes in seen.items():
+        present = {d for d in dtypes.values() if d in _INCOMPATIBLE_COMPUTE}
+        if len(present) > 1:
+            offenders = sorted(
+                f"{p}={d}" for p, d in dtypes.items()
+                if d in _INCOMPATIBLE_COMPUTE
+            )
+            raise MixedComputeDtypeError(
+                f"{what}: component {name!r} is internally mixed-precision "
+                f"({'/'.join(sorted(present))}) — some forward will die on "
+                f"`mat1 and mat2 must have the same dtype`. Offending GEMM "
+                f"inputs: {offenders[:6]}"
+            )
+    if expected not in ("fp16", "bf16", "float16", "bfloat16"):
+        return
+    want = "float16" if expected in ("fp16", "float16") else "bfloat16"
+    for name, dtypes in seen.items():
+        wrong = sorted(
+            f"{p}={d}" for p, d in dtypes.items()
+            if d in _INCOMPATIBLE_COMPUTE and d != want
+        )
+        if wrong:
+            raise MixedComputeDtypeError(
+                f"{what}: component {name!r} loaded at "
+                f"{wrong[0].rsplit('=', 1)[-1]} inside a {want} composition — "
+                f"a foreign-precision component in a composed pipeline is the "
+                f"pgw#683 warmup/serve fatal. Offending GEMM inputs: "
+                f"{wrong[:6]}"
+            )
+
+
 def _component_dtype_map(
     cls: Any, path: str | Path, scalar_dtype: Any,
 ) -> Optional[Dict[str, Any]]:
@@ -1473,6 +1601,9 @@ def load_from_pretrained(
                 adaptive_rung = "nf4"
         if qc is not None:
             kwargs["quantization_config"] = qc
+    # The composition's ONE compute dtype, captured before pgw#667's
+    # per-component map can replace the kwarg with a dict (pgw#683).
+    scalar_dtype = kwargs.get("torch_dtype")
     single = _single_file_checkpoint(Path(path))
     if single is not None and callable(getattr(cls, "from_single_file", None)):
         kwargs.pop("variant", None)
@@ -1484,7 +1615,6 @@ def load_from_pretrained(
         # truncation. diffusers takes a per-component dtype MAP (a "default"
         # key plus per-part overrides), so the widening happens inside the one
         # from_pretrained instead of a hand-assembled sibling load.
-        scalar_dtype = kwargs.get("torch_dtype")
         per_component = _component_dtype_map(cls, path, scalar_dtype)
         if per_component:
             kwargs["torch_dtype"] = per_component
@@ -1518,7 +1648,13 @@ def load_from_pretrained(
             f"unmaterialized meta tensors (e.g. {unmaterialized[:3]})"
         )
     if fp8_storage and "quantization_config" not in kwargs:
-        applied = apply_fp8_storage(pipe, compute_dtype=kwargs.get("torch_dtype"),
+        # pgw#683: the SCALAR compute dtype — `kwargs["torch_dtype"]` may be
+        # pgw#667's per-component MAP by now, and a dict reaching
+        # `enable_layerwise_casting(compute_dtype=...)` either explodes into
+        # "serving at full precision" or arms windows that upcast to a
+        # non-dtype. The cast window's compute dtype is a composition-level
+        # fact, so it is the composition default that belongs here.
+        applied = apply_fp8_storage(pipe, compute_dtype=scalar_dtype,
                                     text_encoders=fp8_text_encoders)
         # th#737: make the outcome observable — a cast that silently no-ops
         # (denoiser-less pipeline) must surface as a structural degradation
@@ -1567,6 +1703,10 @@ __all__ = [
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
     "apply_fp8_storage",
+    "assert_uniform_compute_dtype",
+    "MixedComputeDtypeError",
+    "composition_compute_dtype",
+    "QUANT_LANE_COMPUTE_DEFAULT",
     "apply_block_window_offload",
     "bf16_resident_fits",
     "block_offload_active",
