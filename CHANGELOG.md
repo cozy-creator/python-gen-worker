@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.70.1 (2026-07-26) — pgw#689: the swap benchmark loads what SERVING loads; a broken diagnostic is not a broken release
+
+The SDK's own swap-latency benchmark could not load a QUANTIZED component
+tree — i.e. every flavor the fleet actually serves — so every `load` /
+`demote` / `stage` / `swap` row was unreachable on a real serving pod. It
+owned a second loader (`cls.from_pretrained` per component), and a
+modelopt-produced tree carries a `quantization_config` block diffusers
+rebuilds into `NVIDIAModelOptConfig`, whose constructor requires a
+`quant_type` the block does not supply.
+
+- **One component-load path (`models.loading.load_component`)**: everything
+  that loads a single component now goes through it — the executor's pgw#617
+  substitution, the pgw#674 rotation preloader (`load_component_override` is
+  a wrapper), and the benchmark. Quantized artifacts take their own lane
+  exactly as `load_from_pretrained` routes a whole pipeline; svdq/gguf, which
+  have no component-level loader, refuse by name
+  (`ComponentLaneUnsupported`) rather than measuring something serving never
+  runs.
+- **No more identical-retry `except TypeError`**: it caught any
+  construction-time TypeError (including one from deep inside quant-config
+  reconstruction) and retried a path that failed identically, destroying the
+  evidence. Whether a loader takes `torch_dtype` is now answered by
+  signature inspection.
+- **A diagnostic failure is its own outcome**: `SwapLatencyDiagnostics`
+  returns `status="refused"|"failed"` with the cause on a SUCCEEDING job
+  instead of raising. Raising fed the hub's fast-failure breaker — two
+  invokes tripped `model_load_failure_streak` and recycled a warm pod that
+  had just spent 26 minutes minting. A function that never serves tenant
+  traffic cannot cost a serving pod.
+- **`SwapLatencyInput.checkpoint`/`to` default to `""`**: a family-less
+  `Slot(str)` cannot carry a curated policy, a fixed slot rejects every
+  supplied value, and a required msgspec field cannot be omitted — without
+  the defaults no payload exists that the hub accepts.
+- **Discovery's out-of-package skip is LOUD**: `discovery/walk.py` dropped
+  decorated classes defined outside the walked package at INFO, which is how
+  an SDK diagnostics endpoint, re-exported exactly as its own docstring
+  instructed, vanished from a release silently. Now a WARNING naming the
+  class and the fix — subclass it locally, which is what the docstring says.
+
+
 ## 0.70.0 (2026-07-26) — pgw#677: tenant work always wins the GPU — the background mint yields
 
 th#1187's promise was "serve at eager speed while the compile mint runs in
