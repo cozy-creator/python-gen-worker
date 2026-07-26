@@ -2132,6 +2132,12 @@ class _ClassRecord:
     # wire ref, so a multiply-held ref needs this map to transfer its strong
     # representative when the latest owner leaves.
     held_objects: Dict[str, Any] = dc_field(default_factory=dict)
+    # pgw#678: slot -> the worker-constructed pipeline injected into setup.
+    # ``held_objects``/residency hold the LANE handle (an nn.ModuleDict of the
+    # lane's exclusive modules whenever any component is unshared), which is
+    # not a diffusers pipeline: adapters and the OOM offload rung must act on
+    # THIS map instead.
+    slot_pipelines: Dict[str, Any] = dc_field(default_factory=dict)
     # gw#494: a resolution re-pick moved the specs' bindings away from
     # held_refs; the instance serves the OLD pick and must be vacated.
     stale: bool = False
@@ -2223,6 +2229,12 @@ class _InjectionResult:
 
     kwargs: Dict[str, Any]
     loaded: Dict[str, Tuple[Any, int]]
+    # pgw#678: the worker-constructed PIPELINE per slot, kept apart from
+    # ``loaded`` for the same reason ``compile_objects`` is: a shared-component
+    # lane books an ``nn.ModuleDict`` of the lane's EXCLUSIVE modules as its
+    # residency/movement handle, so ``loaded``/``residency.obj`` is not the
+    # object adapters, offload rungs or the LoRA registry may act on.
+    slot_pipelines: Dict[str, Any] = dc_field(default_factory=dict)
     lane_slots: set = dc_field(default_factory=set)
     shared_keys: List[Any] = dc_field(default_factory=list)
     shared_bytes: int = 0
@@ -2384,6 +2396,12 @@ class Executor:
         # let an older rollback mutate a newer adoption.
         self._compile_cache_adoption_lock = asyncio.Lock()
         self._compile_cache_adoption_active = ""
+        # pgw#678: wire refs whose content-keyed share plan proved impossible
+        # on THIS host — the lane's placement fell to an offload rung, which
+        # the shared-component invariant refuses (hooks on a shared module
+        # poison sibling lanes). Learned once so the retry loads monolithically
+        # instead of re-deriving the same refused plan until retry_exhausted.
+        self._no_share_refs: typing.Set[str] = set()
         # pgw#548: worker-local capacity blocks retain the exact numeric
         # requirement that failed. They are cleared only by a later measured
         # observation after owner/pin release; no timer or prose retry path.
@@ -5845,6 +5863,9 @@ class Executor:
                 obj = inj.loaded.get(slot, (None, 0))[0]
                 if obj is not None or ref not in rec.held_objects:
                     rec.held_objects[ref] = obj
+            # pgw#678: the pipeline identities, kept out of held_objects (which
+            # is the residency/movement handle space).
+            rec.slot_pipelines = dict(inj.slot_pipelines)
             self._install_compile_targets(
                 rec,
                 spec,
@@ -6638,14 +6659,38 @@ class Executor:
             if binding is None:
                 return None
             ref = wire_ref(binding)
+            if ref in self._no_share_refs:
+                # pgw#678: this ref proved un-shareable on this host (its lane
+                # landed offloaded, which the shared-component invariant
+                # refuses). Retrying the same shared plan is a dead end —
+                # load it monolithically instead.
+                continue
+            # pgw#683: identity must carry the EFFECTIVE compute dtype, not the
+            # binding's DECLARED one. Hub bindings declare no dtype, so every
+            # flavor of a ref answered "" and byte-identical non-denoiser
+            # components (a quantizer only rewrites the denoiser, so the VAE and
+            # text encoders of `X` and `X#fp8-w8a8` are the SAME bytes) shared
+            # ONE cache entry across compositions that compute at DIFFERENT
+            # dtypes: a quant-artifact tree computes bf16, a plain fp16-stored
+            # mirror computes fp16. Whichever pick loaded first won, and the
+            # loser aliased a foreign-precision module into its own
+            # composition — a Half nn.Linear meeting a bf16 activation is
+            # `mat1 and mat2 must have the same dtype, but got BFloat16 and
+            # Half`, with no component override anywhere on the wire.
+            from .models.loading import composition_compute_dtype
+
+            effective_dtype = composition_compute_dtype(
+                paths[slot], str(getattr(binding, "dtype", "") or ""))
             digests = self.store.component_digests(ref, local_path=Path(paths[slot]))
             keys[slot] = {
                 comp: residency_mod.LoadedComponentKey.for_component(
                     content_digest=digest, component=comp, binding=binding,
-                    label=f"{ref}/{comp}",
+                    dtype=effective_dtype, label=f"{ref}/{comp}",
                 )
                 for comp, digest in digests.items() if comp
             }
+        if not keys:
+            return None
         counts: Dict[Any, int] = {}
         for slot_keys in keys.values():
             for k in slot_keys.values():
@@ -6865,6 +6910,9 @@ class Executor:
                             strict_vram=bool(spec.resources.strict_vram),
                         )
                     pipe = sl.obj
+                    # pgw#678: record the PIPELINE identity for this slot
+                    # before any lane bookkeeping can shadow it.
+                    result.slot_pipelines[slot] = pipe
                     # pgw#654: generic materialization tuning — per-request
                     # progress bars are worker noise on every diffusers
                     # pipeline; endpoints never write this line.
@@ -6899,10 +6947,18 @@ class Executor:
                     if slot_share and str(placed.get("mode") or "") not in (
                         "", "off", "vae_only", "cpu",
                     ):
+                        # pgw#678: LEARN it. Re-deriving the same share plan on
+                        # every retry made this a silent dead end
+                        # (retry_exhausted -> worker_function_unavailable, live
+                        # on the sdxl turbo lane). The ref is marked
+                        # un-shareable so the retry composes monolithically,
+                        # where an offload rung is legal.
+                        self._no_share_refs.add(ref)
                         raise RetryableError(
                             f"lane {slot!r} of {spec.name} placed "
                             f"{placed.get('mode')!r}: shared-component lanes "
-                            "require resident placement; retrying")
+                            "require resident placement; retrying without "
+                            "content-keyed sharing for this ref")
                     if spec.compile is not None:
                         # Opt-in acceleration against a pre-built per-SKU artifact:
                         # a TRT engine (#390, refit with this pipeline's weights)
@@ -8318,6 +8374,7 @@ class Executor:
         rec.held_bindings = []
         rec.lane_refs = set()
         rec.held_objects = {}
+        rec.slot_pipelines = {}  # pgw#678: pipelines die with the instance
         # Do not let this teardown frame itself retain a departing pipeline
         # while the cgroup probe decides whether capacity really progressed.
         old_obj = None
@@ -8810,7 +8867,8 @@ class Executor:
                                 continue
                             ref = wire_ref(spec.models[slot])
                             if self._adapters.needs_deactivation(ref):
-                                pipe = self.store.residency.obj(ref)
+                                # pgw#678: the PIPELINE, not the lane handle.
+                                pipe = self._slot_pipeline(spec, slot)
                                 if pipe is not None:
                                     await asyncio.to_thread(
                                         self._adapters.deactivate, ref, pipe, run.request_id
@@ -9099,9 +9157,35 @@ class Executor:
             out[slot] = prepared
         return out
 
+    def _slot_pipeline(self, spec: EndpointSpec, slot: str) -> Any:
+        """The worker-CONSTRUCTED pipeline object for ``slot``, or None.
+
+        pgw#678: this is NOT ``residency.obj(ref)``. A shared-component lane
+        books its EXCLUSIVE module set (an ``nn.ModuleDict``) as the residency
+        entry so LRU demote/promote moves only lane-owned weights — and
+        ``exclusive`` is non-empty exactly when some component does NOT ride
+        the shared cache, which a th#980 ``components.*`` deploy override
+        guarantees (the overridden component's bytes differ from the base's,
+        so it is popped out of the share plan). The registry handle was then
+        handed to ``LoraRegistry.activate`` as if it were the pipeline:
+        ``branch_targets`` finds no denoiser on a ModuleDict, ``_split_adapters``
+        never runs, and the residue meets ``isinstance(pipe,
+        LoraCapablePipeline) is False`` -> "model slot does not support LoRA
+        adapters" for every request (0/6 live on the sdxl turbo picks). The
+        record keeps the pipeline identity separately; residency keeps the
+        movement handle. Both facts are true — they are just not one object.
+        """
+        rec = self._classes.get(spec.instance_key)
+        pipe = (rec.slot_pipelines.get(slot) if rec is not None else None)
+        if pipe is not None:
+            return pipe
+        # Tenant-loaded slots have no worker-constructed pipeline; a
+        # monolithic worker-loaded slot's residency entry IS the pipeline.
+        return self.store.residency.obj(wire_ref(spec.models[slot]))
+
     def _adapter_target(self, spec: EndpointSpec, slot: str) -> Any:
         """The worker-managed pipeline object adapters for ``slot`` apply to."""
-        pipe = self.store.residency.obj(wire_ref(spec.models[slot]))
+        pipe = self._slot_pipeline(spec, slot)
         if pipe is None:
             raise ValidationError(
                 f"model slot {slot!r} has no worker-managed pipeline; "
@@ -9145,7 +9229,10 @@ class Executor:
         transitions: List[Tuple[str, str, str, float]] = []
         for slot in spec.models:
             ref = wire_ref(spec.models[slot])
-            obj = self.store.residency.obj(ref)
+            # pgw#678: a shared-component lane's residency entry is an
+            # nn.ModuleDict, which carries none of the offload methods below —
+            # the OOM rung would silently skip every lane slot.
+            obj = self._slot_pipeline(spec, slot)
             if obj is None:
                 continue
             if diffusers_component_type and isinstance(obj, diffusers_component_type):
