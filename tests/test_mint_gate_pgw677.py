@@ -457,6 +457,13 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
         # ...the wait is attributed, and runtime_ms excludes it.
         assert _stage_ms(res, "instance_gate_wait") >= 100
         assert res.metrics.runtime_ms < 400
+        # th#1111 invariant survives the new pre-handler stage: the map
+        # still closes against runtime_ms with a large gate wait present.
+        from gen_worker.stage_timing import reconciliation
+
+        attributed, total = reconciliation(dict(res.metrics.stage_ms))
+        assert total == res.metrics.runtime_ms
+        assert abs(attributed - total) <= 5, dict(res.metrics.stage_ms)
         await h_on.wait_mint()
 
     asyncio.run(_on())

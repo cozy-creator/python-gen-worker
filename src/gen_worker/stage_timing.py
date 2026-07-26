@@ -302,8 +302,11 @@ def _clipped(
 
 
 #: Stages recorded OUTSIDE the handler window: reported, never part of the
-#: ``runtime_ms`` reconciliation.
-PRE_HANDLER_STAGES = frozenset({"gpu_permit_wait", "input_fetch", "setup_wait"})
+#: ``runtime_ms`` reconciliation. ``instance_gate_wait`` is pgw#677's
+#: attribution of time queued behind the per-instance gate (typically a
+#: background mint/compile turn) — deliberately outside ``runtime_ms``.
+PRE_HANDLER_STAGES = frozenset(
+    {"gpu_permit_wait", "input_fetch", "setup_wait", "instance_gate_wait"})
 
 
 def reconciliation(stage_ms: Mapping[str, int]) -> Tuple[int, int]:
