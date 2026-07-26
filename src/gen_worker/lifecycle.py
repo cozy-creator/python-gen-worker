@@ -429,6 +429,13 @@ class Lifecycle:
                 generation=generation,
             )
             self._replace_residency_reconcile(desired, model_key=_semantic_model_key(ack, desired))
+            # pgw#674 rotation preload: the SAME desired set also feeds the
+            # background stager, which — unlike the reconcile above — is not
+            # tenant-idle-gated and not cancelled by run_job: it stages the
+            # NEXT instance while jobs compute (fence-conflicting refs are
+            # left to the idle-gated pass).
+            self.executor.preloader.update_desired(
+                list(desired.hot), dict(desired.snapshots), generation)
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello. Capacity evidence has causal priority over retained results;
         # other finite baseline messages follow it in the same prepend lane.
@@ -1130,6 +1137,7 @@ class Lifecycle:
         self.draining = True
         self.executor.draining = True
         self._cancel_residency_reconcile()
+        self.executor.preloader.stop()  # pgw#674: no staging into a drain
         # th#965: the heartbeat deliberately keeps beating through drain — a
         # worker hung mid-drain must still be detectable as dead. It is
         # cancelled after the stream closes in _finish_drain.

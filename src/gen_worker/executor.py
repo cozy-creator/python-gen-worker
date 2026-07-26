@@ -2414,6 +2414,12 @@ class Executor:
         self.jobs: Dict[Tuple[str, int], _Job] = {}
         self._idle = asyncio.Event()
         self._idle.set()
+        # pgw#674 rotation preload: stages the hub's desired NEXT instances
+        # (download -> pinned host -> VRAM double-buffer) WHILE jobs compute.
+        # Lifecycle feeds it desired state; job admit/finish pokes it.
+        from .preload import Preloader
+
+        self.preloader = Preloader(self)
         # gw#516: count of jobs in their slotless finalize tail. Mutated from
         # handler threads at the terminal slot release, so lock-guarded;
         # surfaced to the hub via StateDelta.finalizing_jobs.
@@ -8259,6 +8265,9 @@ class Executor:
         await self._send(pb.WorkerMessage(job_accepted=pb.JobAccepted(
             request_id=run.request_id, attempt=run.attempt)))
         job.task = asyncio.create_task(self._run_job(job, run), name=f"job-{run.request_id}")
+        # pgw#674: the serving set may have changed — re-derive what to
+        # stage next while this job computes.
+        self.preloader.poke()
 
     def handle_cancel(self, cancel: pb.CancelJob) -> None:
         job = self.jobs.get((cancel.request_id, cancel.attempt))
@@ -9340,6 +9349,8 @@ class Executor:
             for k in finished[: len(finished) - 1024]:
                 self.jobs.pop(k, None)
         self._maybe_idle()
+        # pgw#674: job completion is the rotation point — advance staging.
+        self.preloader.poke()
 
     def _maybe_idle(self) -> None:
         if not self.in_flight_keys():
