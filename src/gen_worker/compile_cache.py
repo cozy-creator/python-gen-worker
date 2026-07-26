@@ -618,6 +618,16 @@ def lane_token(weight_lane: str) -> str:
     return tok
 
 
+def cell_base_lane(pipeline: Any) -> str:
+    """Base weight lane for CELL-IDENTITY computation (advertised requested
+    keys, pull-by-key lookups, local-store lookups): the pipeline probe
+    first, then the denoiser's own lane markers — the identical resolution
+    the mint's ``stamp_lane`` memoizes, so requested == published by
+    construction (pgw#686). Dispatch/policy surfaces keep the raw
+    :func:`loading.pipeline_weight_lane` probe; this is cell identity only."""
+    return w8a8_lora.effective_base_lane(pipeline)
+
+
 def compile_target_lane_error(weight_lane: str, lora_bucket: int) -> str:
     """Return why a worker compile-target lane is not wire-canonical.
 
@@ -3236,6 +3246,7 @@ __all__ = [
     "artifact_metadata",
     "begin_fleet_mint",
     "capture_env",
+    "cell_base_lane",
     "drop_lora_lane",
     "cell_lane",
     "contract_drift",
