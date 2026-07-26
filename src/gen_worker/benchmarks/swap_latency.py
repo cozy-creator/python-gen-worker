@@ -13,7 +13,10 @@ an NFS mount) to compare source tiers; R2 cold-fetch is the store's job and
 is measured by the worker's own transfer telemetry, not here.
 
 Cases:
-  load        disk -> VRAM, per component (from_pretrained + .to(cuda))
+  load        disk -> VRAM, per component. Components load through the
+              PRODUCTION path (``models.loading.load_component``), so a
+              quantized flavor is materialized by its artifact loader and
+              the row measures what serving actually pays (pgw#689).
   demote      VRAM -> host RAM (pinned swap cache built on first demote)
   promote     host RAM -> VRAM — the resident re-pick
   swap        component-first A -> B: only components whose content digest
@@ -55,7 +58,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib
 import json
 import os
 import sys
@@ -134,17 +136,17 @@ def _cuda_bytes() -> int:
     return int(torch.cuda.memory_allocated())
 
 
-def _component_entries(tree: Path) -> Dict[str, Tuple[str, str]]:
-    """component name -> (library, class) from model_index.json."""
+def _component_names(tree: Path) -> List[str]:
+    """Loadable component names from model_index.json (sorted). The module
+    CLASS is not read here — :func:`_load_component` resolves it through the
+    production loader, which is the one place that mapping may live."""
     idx = json.loads((tree / "model_index.json").read_text())
-    out: Dict[str, Tuple[str, str]] = {}
-    for name, entry in idx.items():
-        if name.startswith("_") or not isinstance(entry, list) or len(entry) != 2:
-            continue
-        if entry[0] is None or entry[1] is None:
-            continue
-        out[name] = (str(entry[0]), str(entry[1]))
-    return out
+    return sorted(
+        name for name, entry in idx.items()
+        if not name.startswith("_")
+        and isinstance(entry, list) and len(entry) == 2
+        and entry[0] is not None and entry[1] is not None
+    )
 
 
 def component_digest(tree: Path, component: str) -> str:
@@ -172,10 +174,10 @@ def component_digest(tree: Path, component: str) -> str:
 def swap_plan(tree_a: Path, tree_b: Path) -> Tuple[List[str], List[str]]:
     """(differing, shared_by_content_address) component names for A -> B.
     Pure planning — runs anywhere, no CUDA needed."""
-    comps_b = _component_entries(tree_b)
+    comps_b = _component_names(tree_b)
     differing: List[str] = []
     shared: List[str] = []
-    for name in sorted(comps_b):
+    for name in comps_b:
         if not (tree_b / name).is_dir():
             continue
         if component_digest(tree_a, name) == component_digest(tree_b, name):
@@ -185,18 +187,20 @@ def swap_plan(tree_a: Path, tree_b: Path) -> Tuple[List[str], List[str]]:
     return differing, shared
 
 
-def _load_component(tree: Path, name: str, lib: str, cls_name: str) -> Any:
-    module = importlib.import_module(lib)
-    cls = getattr(module, cls_name)
-    src = tree / name
-    if callable(getattr(cls, "from_pretrained", None)):
-        try:
-            import torch
+def _load_component(tree: Path, name: str) -> Any:
+    """One component, through the PRODUCTION component-load path.
 
-            return cls.from_pretrained(str(src), torch_dtype=torch.bfloat16)
-        except TypeError:
-            return cls.from_pretrained(str(src))
-    raise OffPodError(f"component {name}: {lib}.{cls_name} has no from_pretrained")
+    The benchmark's whole purpose is measuring what serving pays, so it must
+    not own a second loader. ``models.loading.load_component`` is the same
+    function the executor's component substitution and the pgw#674 rotation
+    preloader call, and it routes quantized artifacts (w8a8 / w4a4) to their
+    lane loaders. The reimplementation this replaced called
+    ``cls.from_pretrained`` directly, which on any modelopt-produced flavor
+    — i.e. every tree the fleet actually serves — died reconstructing
+    ``NVIDIAModelOptConfig`` (pgw#689)."""
+    from ..models.loading import load_component
+
+    return load_component(tree, name)
 
 
 def _module_bytes(obj: Any) -> int:
@@ -214,11 +218,11 @@ def bench_load(tree: Path, emit: EmitFn) -> Dict[str, Any]:
     loaded: Dict[str, Any] = {}
     total_t0 = time.monotonic()
     total_bytes = 0
-    for name, (lib, cls_name) in sorted(_component_entries(tree).items()):
+    for name in _component_names(tree):
         if not (tree / name).is_dir():
             continue
         t0 = time.monotonic()
-        obj = _load_component(tree, name, lib, cls_name)
+        obj = _load_component(tree, name)
         host_s = time.monotonic() - t0
         t1 = time.monotonic()
         import torch
@@ -264,7 +268,6 @@ def bench_swap(
     """Component-first swap A -> B: only differing components move."""
     import torch
 
-    comps_b = _component_entries(tree_b)
     differing, shared = swap_plan(tree_a, tree_b)
     emit(Row("swap", f"{tree_a.name}->{tree_b.name}/plan", 0.0, 0,
              {"differing": differing, "shared_by_content_address": shared}))
@@ -274,8 +277,7 @@ def bench_swap(
     replaced_bytes = 0
     fresh: Dict[str, Any] = {}
     for name in differing:
-        lib, cls_name = comps_b[name]
-        obj = _load_component(tree_b, name, lib, cls_name)
+        obj = _load_component(tree_b, name)
         if isinstance(obj, torch.nn.Module):
             obj = obj.to("cuda")
         fresh[name] = obj
@@ -318,11 +320,11 @@ def bench_stage(tree: Path, emit: EmitFn) -> None:
 
     total_pin = 0
     total_h2d_s = 0.0
-    for name, (lib, cls_name) in sorted(_component_entries(tree).items()):
+    for name in _component_names(tree):
         if not (tree / name).is_dir():
             continue
         t0 = time.monotonic()
-        obj = _load_component(tree, name, lib, cls_name)
+        obj = _load_component(tree, name)
         load_s = time.monotonic() - t0
         if not isinstance(obj, torch.nn.Module):
             continue
