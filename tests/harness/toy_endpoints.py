@@ -361,3 +361,37 @@ class BillableEndpoint:
             text="x" * 200_000,
             usage=TokenUsage(prompt_tokens=4000, cached_tokens=100, completion_tokens=9000),
         )
+
+
+# ---------------------------------------------------------------------------
+# Optional slots: which lanes a release serves is DEPLOY config (th#980/
+# ie#524, th#1226). `edit` has a setup default, so a deploy may bind only
+# `t2i` and the endpoint still boots — the unbound lane refuses per-request
+# with a typed, client-visible error instead of crashing setup.
+# ---------------------------------------------------------------------------
+
+OPTIONAL_T2I = Hub("harness/optional-lane-t2i", tag="prod")
+OPTIONAL_EDIT = Hub("harness/optional-lane-edit", tag="prod")
+
+
+@endpoint(models={
+    "t2i": Slot(str, default_checkpoint=OPTIONAL_T2I, root=True),
+    "edit": Slot(str, default_checkpoint=OPTIONAL_EDIT),
+})
+class OptionalLaneEndpoint:
+    def setup(self, t2i: str, edit: str | None = None) -> None:
+        self.t2i_path = t2i
+        self.edit_path = edit
+
+    def optional_t2i(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
+        weights = Path(self.t2i_path) / "model.safetensors"
+        return EchoOut(response=f"t2i:{weights.read_text()}:edit_bound={self.edit_path is not None}")
+
+    def optional_edit(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
+        if self.edit_path is None:
+            raise ValidationError(
+                "slot 'edit' is not bound on this release — this deploy "
+                "serves the t2i lane only"
+            )
+        weights = Path(self.edit_path) / "model.safetensors"
+        return EchoOut(response=f"edit:{weights.read_text()}")

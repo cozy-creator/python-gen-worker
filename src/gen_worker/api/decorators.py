@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, overload
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, get_args, overload
 
 import msgspec
 
@@ -978,6 +978,46 @@ def _validate_class_models(
                 f"match no setup() parameter (setup declares "
                 f"{sorted(setup_kwargs)})."
             )
+        _derive_optional_slots(cls, slots, setup_kwargs)
+
+
+def _derive_optional_slots(
+    cls: type, slots: Dict[str, Slot], setup_kwargs: dict[str, inspect.Parameter]
+) -> None:
+    """A slot is OPTIONAL exactly when its ``setup()`` parameter has a
+    default — the signature is the single declaration, so code and manifest
+    can never disagree. Optional slots may be left unbound at deploy time
+    (which lanes a release serves is deploy config, th#980/ie#524); setup
+    then runs with the parameter's own default.
+
+    A defaulted parameter whose annotation cannot hold that default is a
+    decoration-time error: injection is typed off the annotation, and an
+    endpoint that writes ``edit: Pipe = None`` would type-lie to every
+    reader and to ``typing.get_type_hints``."""
+    for name, slot in slots.items():
+        param = setup_kwargs.get(name)
+        if param is None or param.default is inspect.Parameter.empty:
+            slot.optional = False
+            continue
+        slot.optional = True
+        if param.default is None and not _annotation_admits_none(param.annotation):
+            raise ValueError(
+                f"@endpoint class {cls.__name__!r}: setup parameter {name!r} "
+                f"defaults to None but its annotation "
+                f"({param.annotation!r}) does not admit None — an optional "
+                f"slot must be annotated e.g. "
+                f"{name}: {getattr(slot.pipeline_cls, '__name__', 'X')} | None = None"
+            )
+
+
+def _annotation_admits_none(ann: Any) -> bool:
+    """True for ``X | None`` / ``Optional[X]`` / bare ``None``, including the
+    string form a ``from __future__ import annotations`` module produces."""
+    if ann is inspect.Parameter.empty or ann is None or ann is type(None):
+        return True
+    if isinstance(ann, str):
+        return "None" in ann or ann.startswith("Optional[")
+    return type(None) in get_args(ann)
 
 
 def _validate_root_slot(owner: str, slots: Dict[str, Slot]) -> None:

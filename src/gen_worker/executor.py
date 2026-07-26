@@ -204,6 +204,18 @@ _REDACTIONS = (
 )
 
 
+def _unwrap_optional(ann: Any) -> Any:
+    """``X | None`` -> ``X``. An OPTIONAL slot is annotated ``Pipe | None =
+    None`` (that default is what declares it optional), but injection is
+    typed off the annotation — so the loader must see ``Pipe``, not the
+    union. Non-optional and non-union annotations pass through unchanged;
+    a union of 2+ real types is left alone (no basis to pick one)."""
+    args = [a for a in typing.get_args(ann) if a is not type(None)]
+    if len(args) == 1 and type(None) in typing.get_args(ann):
+        return args[0]
+    return ann
+
+
 def _sanitize(message: str) -> str:
     out = str(message or "").strip()
     for pat in _REDACTIONS:
@@ -4079,7 +4091,17 @@ class Executor:
                 continue
             run_comps[b.slot] = comps
         effective = dict(spec.models)
-        for slot in spec.slots:
+        for slot, decl in spec.slots.items():
+            if decl.optional and not run_refs.get(slot, ""):
+                # Unbound optional slot: the deploy chose not to serve this
+                # lane, and the deploy decides (th#980/ie#524) — a code
+                # default_checkpoint is a hub-less bootstrap, never a reason
+                # to resurrect a lane the hub did not bind. Dropping it from
+                # `effective` is what makes the rest fall out: `_setup_slots`
+                # skips it, nothing is materialized, and setup() runs with
+                # the parameter's own default.
+                effective.pop(slot, None)
+                continue
             binding = self._slot_dispatch_binding(
                 spec, slot, run_refs.get(slot, ""))
             slot_comps = run_comps.get(slot) or {}
@@ -4374,8 +4396,12 @@ class Executor:
         # fallback dispatch uses).
         declared = set(spec.models) | set(spec.slots)
         undeclared = sorted(set(bindings) - declared)
+        # An optional slot (setup param has a default) may be left unbound —
+        # a single-lane deploy of a multi-lane endpoint is legal config.
+        optional = {s for s, d in spec.slots.items() if d.optional}
         unbound = sorted(
-            s for s in declared if s not in bindings and s not in spec.models
+            s for s in declared
+            if s not in bindings and s not in spec.models and s not in optional
         )
         if len(bindings) != len(pairs) or undeclared or unbound:
             raise ValidationError(
@@ -6964,7 +6990,10 @@ class Executor:
         from .runtimes.server import ServerHandle
 
         try:
-            hints = typing.get_type_hints(setup)
+            hints = {
+                k: _unwrap_optional(v)
+                for k, v in typing.get_type_hints(setup).items()
+            }
         except Exception:
             hints = {}
         kwargs: Dict[str, Any] = {}
