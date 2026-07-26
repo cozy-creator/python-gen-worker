@@ -101,7 +101,8 @@ def test_store_verdict_hit(tmp_path):
     [
         ({"torch": "0.0.0+nope"}, "torch"),
         ({"gen_worker": "0.0.0-not-this"}, "gen_worker"),
-        ({"sku": "not-this-gpu"}, "sku"),
+        # pgw#691/ck3: sku is no longer identity — sm carries the arch pin.
+        ({"sm": "sm_00"}, "sm"),
         ({"format": 99}, "format"),
         ({"weight_lane": "fp8-hooks"}, "lane"),   # lane drift, symmetric
         ({"compile_mode": "regional"}, "mode"),

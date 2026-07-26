@@ -68,7 +68,7 @@ import inspect
 import pickle
 import sys
 
-from . import cell_key, guard_closure, hot_swap
+from . import cell_key, env_seal, guard_closure, hot_swap
 from .api.errors import RetryableError
 from .models import w8a8_lora
 from .models.loading import load_from_pretrained, pipeline_weight_lane
@@ -771,6 +771,7 @@ def artifact_metadata(
     graph_signature: str = "",
     weight_contract: Optional[Dict[str, Any]] = None,
     shape_contract: Optional[Dict[str, Any]] = None,
+    composition: Iterable[Tuple[str, str]] = (),
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
     identical content must be byte-identical). ``source_ref``/``source_digest``
@@ -804,6 +805,12 @@ def artifact_metadata(
         "graph_signature": str(graph_signature or ""),
         "weight_contract": dict(weight_contract or {}),
         "shape_contract": dict(shape_contract or {}),
+        # pgw#697: per-module fingerprint rows so an adoption refusal can
+        # name the exact drifted module, not just a digest mismatch.
+        "composition": [[str(p), str(d)] for p, d in composition],
+        # pgw#696: the execution-environment seal rides verbatim — the ck4
+        # env_seal axis is recomputed FROM it, never trusted as a stamp.
+        env_seal.SEAL_KEY: env_seal.effective_seal(),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
@@ -822,7 +829,11 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     if int(meta.get("format") or 0) != ARTIFACT_FORMAT:
         return f"format {meta.get('format')!r} != {ARTIFACT_FORMAT}"
     here = runtime_key()
-    for field in ("sku", "torch", "triton"):
+    # sku is NOT here (pgw#691/ck3): it left the identity axes — sm + cuda +
+    # torch + triton pin every hardware fact the compiled artifacts carry,
+    # and a same-sm cell minted on a different SKU must arm, not refuse.
+    # It stays recorded in metadata for observability and selection only.
+    for field in ("torch", "triton"):
         want, have = str(meta.get(field) or ""), here[field]
         if want != have:
             return f"{field} {want!r} != runtime {have!r}"
@@ -867,10 +878,68 @@ def _clean_tarinfo(ti: tarfile.TarInfo, executable: bool = False) -> tarfile.Tar
     return ti
 
 
+_ELF_MAGIC = b"\x7fELF"
+
+
+def _cubin_arch(path: Path) -> int:
+    """The SM arch a cubin was compiled for (nvidia ELF ``e_flags`` low
+    byte), 0 when the file is unreadable or not ELF."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(0x34)
+    except OSError:
+        return 0
+    if len(header) < 0x34 or not header.startswith(_ELF_MAGIC):
+        return 0
+    # EI_CLASS: 2 = ELF64 (e_flags at 0x30), 1 = ELF32 (e_flags at 0x24).
+    offset = 0x30 if header[4] == 2 else 0x24
+    flags = int.from_bytes(header[offset:offset + 4], "little")
+    return flags & 0xFF
+
+
+def _ptx_jit_gaps(
+    files: Iterable[Path], cache_root: Path, sm: str,
+) -> list[str]:
+    """PTX-JIT exposure per kernel (pgw#698). A kernel whose only compiled
+    form is PTX makes the HOST DRIVER's JIT compile it at load time — the
+    one path where the deliberately-unkeyed driver version (gw#577) can
+    re-enter compiled-kernel behavior. Every ``.ptx`` must ship a sibling
+    ``.cubin``, and when the artifact declares its sm the cubin arch must
+    match it exactly."""
+    want_arch = 0
+    if sm.startswith("sm_"):
+        try:
+            want_arch = int(sm[3:])
+        except ValueError:
+            want_arch = 0
+    kernels: Dict[Tuple[Path, str], Dict[str, Path]] = {}
+    for p in files:
+        if p.suffix in (".ptx", ".cubin"):
+            kernels.setdefault((p.parent, p.stem), {})[p.suffix] = p
+    gaps: list[str] = []
+    for (_parent, _stem), forms in sorted(
+        kernels.items(), key=lambda kv: str(kv[0][0] / kv[0][1]),
+    ):
+        ptx, cubin = forms.get(".ptx"), forms.get(".cubin")
+        if ptx is not None and cubin is None:
+            gaps.append(
+                f"{ptx.relative_to(cache_root)}: PTX only — no cubin, the "
+                "driver JIT would compile it")
+            continue
+        if cubin is not None and want_arch:
+            arch = _cubin_arch(cubin)
+            if arch and arch != want_arch:
+                gaps.append(
+                    f"{cubin.relative_to(cache_root)}: cubin arch sm_{arch} "
+                    f"!= artifact sm_{want_arch}")
+    return gaps
+
+
 def pack(cache_root: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
     """Deterministic artifact from a capture root holding ``inductor/`` and
     ``triton/``: sorted entries, zeroed times/owners, gzip mtime 0 — identical
-    content always packs to identical bytes."""
+    content always packs to identical bytes. Refuses (pgw#698) when any
+    kernel would rely on driver PTX JIT, naming the kernels."""
     cache_root = Path(cache_root)
     out_path = Path(out_path)
     files: list[Path] = []
@@ -882,6 +951,13 @@ def pack(cache_root: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
                 if p.is_file() and not p.name.endswith(_JUNK_SUFFIXES)
             )
     files.sort(key=lambda p: str(p.relative_to(cache_root)))
+    gaps = _ptx_jit_gaps(files, cache_root, str(metadata.get("sm") or ""))
+    if gaps:
+        shown = "; ".join(gaps[:10])
+        more = f" (+{len(gaps) - 10} more)" if len(gaps) > 10 else ""
+        raise RuntimeError(
+            f"cubin-completeness gate (pgw#698): {len(gaps)} kernel(s) "
+            f"would rely on driver PTX JIT — {shown}{more}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as raw:
@@ -1677,6 +1753,84 @@ def _direct_tensor_schema(module: Any) -> list[list[Any]]:
     return sorted(rows)
 
 
+def _module_hooks(module: Any) -> Dict[str, int]:
+    """Hook PRESENCE per module (pgw#697): installed hooks are traced into
+    the compiled graphs (fp8 layerwise-cast is hook-driven, ie#381), so a
+    hook-count drift is a composition drift. Counts only — never hook
+    identities or closures."""
+    out: Dict[str, int] = {}
+    for fact, attr in (
+        ("forward_pre", "_forward_pre_hooks"),
+        ("forward", "_forward_hooks"),
+        ("backward", "_backward_hooks"),
+        ("full_backward", "_full_backward_hooks"),
+    ):
+        hooks = getattr(module, attr, None)
+        count = len(hooks) if hooks is not None else 0
+        if count:
+            out[fact] = count
+    return out
+
+
+def _module_entry(path: str, module: Any) -> Dict[str, Any]:
+    """One module's composition facts: class, tensor schema, hook presence.
+    Exactly what the graph signature hashes and what the pgw#697 per-module
+    fingerprint digests — one builder so the two can never disagree."""
+    entry: Dict[str, Any] = {
+        "path": path,
+        "type": _type_name(module),
+        "tensors": _direct_tensor_schema(module),
+    }
+    hooks = _module_hooks(module)
+    if hooks:
+        entry["hooks"] = hooks
+    return entry
+
+
+def composition_fingerprint(pipeline: Any, cfg: Any) -> list[Tuple[str, str]]:
+    """``(path, digest)`` per resolved-target module — the pgw#697 adoption
+    fence. Digests the same per-module facts the graph signature hashes, so
+    a signature mismatch resolves to the exact drifted module (the pgw#683
+    class: one submodule left in Half inside a bf16 tree died as a raw
+    matmul RuntimeError — this names ``path: cell x != consumer y``
+    instead). Fine-tunes stay shared: no tensor VALUES enter any row."""
+    rows: list[Tuple[str, str]] = []
+    for target in tuple(getattr(cfg, "targets", ()) or ()):
+        resolved = _resolve_target(pipeline, str(target))
+        if resolved is None:
+            continue
+        owner, _attr, _fn = resolved
+        named = getattr(owner, "named_modules", None)
+        module_rows = list(named()) if callable(named) else [("", owner)]
+        for name, module in module_rows:
+            path = f"{target}:{name}" if name else str(target)
+            encoded = json.dumps(
+                _module_entry(path, module), sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            rows.append((path, hashlib.sha256(encoded).hexdigest()[:16]))
+    return sorted(rows)
+
+
+def _first_composition_difference(
+    cell_rows: Iterable[Iterable[str]], here_rows: Iterable[Tuple[str, str]],
+) -> str:
+    """Name the first module whose composition digest differs (or that only
+    one side has)."""
+    cell = {str(p): str(d) for p, d in cell_rows}
+    here = {str(p): str(d) for p, d in here_rows}
+    for path in sorted(set(cell) | set(here)):
+        want, have = cell.get(path), here.get(path)
+        if want == have:
+            continue
+        if want is None:
+            return f"module {path!r} exists only in the consumer pipeline"
+        if have is None:
+            return f"module {path!r} exists only in the cell"
+        return f"{path}: cell composition {want} != consumer {have}"
+    return ""
+
+
 def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     """Canonical family-graph and weight-lane contract for one loaded model.
 
@@ -1687,7 +1841,8 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     and is rejected before adoption.
 
     The signature hashes ONLY the traced module structure — the resolved
-    targets' module types, paths and tensor schemas — never the wrapping
+    targets' module types, paths, tensor schemas (param shapes/dtypes,
+    buffer dtypes) and hook presence (pgw#697) — never the wrapping
     pipeline class (gw#577): torch.compile wraps target callables such as
     ``transformer.forward``; the pipeline class never enters any traced
     graph. Conversion producers load via generic ``DiffusionPipeline``
@@ -1711,11 +1866,7 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
         module_rows = list(named()) if callable(named) else [("", owner)]
         for name, module in module_rows:
             path = f"{target}:{name}" if name else str(target)
-            modules.append({
-                "path": path,
-                "type": _type_name(module),
-                "tensors": _direct_tensor_schema(module),
-            })
+            modules.append(_module_entry(path, module))
             # A target such as vae.decode can overlap another declaration;
             # record each module once in the W8A8 manifest.
             if id(module) in seen_modules:
@@ -1931,6 +2082,14 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     ).startswith(("w8a8", "w4a4")):
         return ""  # legacy format-2 non-quantized-lane cell
     if meta_signature != signature:
+        # pgw#697: when the cell carries per-module fingerprint rows, name
+        # the exact drifted module instead of two digest prefixes.
+        cell_rows = meta.get("composition") or []
+        if cell_rows:
+            named = _first_composition_difference(
+                cell_rows, composition_fingerprint(pipeline, cfg))
+            if named:
+                return f"module composition: {named}"
         return (
             f"module graph signature: cell {meta_signature[:12]!r} != "
             f"consumer {signature[:12]!r}"
@@ -2583,6 +2742,18 @@ def artifact_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     have = str(meta.get("compile_mode") or "whole")
     if have != want:
         return f"cell compile_mode {have!r} != declared {want!r}"
+    # pgw#695: the cell's sealed mint posture must be the posture THIS
+    # process presents at arm time — a drift here would otherwise surface
+    # later as an undiagnosable ambient guard miss.
+    manifest = meta.get(guard_closure.MANIFEST_KEY)
+    if isinstance(manifest, dict) and manifest:
+        sealed = manifest.get(guard_closure.POSTURE_KEY)
+        if not isinstance(sealed, dict) or not sealed:
+            return "cell guard manifest carries no posture seal (pre-pgw#695 mint)"
+        try:
+            guard_closure.assert_posture(sealed, label="arm")
+        except guard_closure.PostureError as exc:
+            return str(exc)
     return ""
 
 
@@ -3027,6 +3198,7 @@ def build(
         graph_signature=graph_signature,
         weight_contract=weight_contract,
         shape_contract=declared_contract_facts(cfg),
+        composition=composition_fingerprint(pipe, cfg),
     )
     meta[guard_closure.MANIFEST_KEY] = guard_manifest
     if serving_image_digest:
@@ -3145,6 +3317,7 @@ def mint_artifact(
         graph_signature=graph_signature,
         weight_contract=weight_contract,
         shape_contract=declared_contract_facts(cfg),
+        composition=composition_fingerprint(pipe, cfg),
     )
     meta[guard_closure.MANIFEST_KEY] = guard_manifest
     tmp = target.with_suffix(".part")
@@ -3282,6 +3455,7 @@ def finish_fleet_mint(
         graph_signature=graph_signature,
         weight_contract=weight_contract,
         shape_contract=declared_contract_facts(cfg),
+        composition=composition_fingerprint(pipe, cfg),
     )
     meta[guard_closure.MANIFEST_KEY] = guard_manifest
     tmp = target.with_suffix(".part")
@@ -3313,6 +3487,7 @@ __all__ = [
     "cache_miss_count",
     "enable",
     "execution_count",
+    "composition_fingerprint",
     "execution_contract",
     "execution_contract_digest",
     "family_from_ref",

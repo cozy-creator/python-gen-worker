@@ -85,8 +85,13 @@ def test_verify_mismatches():
     other = dict(meta, torch="0.0.0")
     assert "torch" in cc.verify(other, family="sd15")
 
+    # pgw#691/ck3 completion: sku is metadata, not identity — a same-sm
+    # cell minted on a different SKU must arm (sm/cuda/torch/triton pin
+    # the hardware facts).
     other = dict(meta, sku="not-this-gpu")
-    assert "sku" in cc.verify(other, family="sd15")
+    assert cc.verify(other, family="sd15") == ""
+    other = dict(meta, sm="sm_00")
+    assert "sm" in cc.verify(other, family="sd15")
 
     assert "family" in cc.verify(meta, family="sdxl")
 
