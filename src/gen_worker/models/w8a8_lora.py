@@ -950,6 +950,32 @@ def apply_branch_adapter_set(
     return stats
 
 
+def effective_base_lane(pipe: Any) -> str:
+    """The branchless base weight lane CELL IDENTITY rides on — the ONE
+    resolution :func:`stamp_lane` memoizes: the memoized base, else the
+    pipeline's stamped/probed lane, else the denoiser's own lane markers
+    (:func:`branch_lane`), which see the w8a8 GEMM mode
+    (``_cozy_w8a8_mode``) that ``loading.pipeline_weight_lane`` cannot.
+
+    pgw#686: the advertised requested cell key and the minted/published cell
+    key MUST resolve the base lane identically — when they don't, the
+    published cell is never requested by any worker, adoption is
+    structurally impossible, and every cold pod re-mints (the ie#546 burst
+    stampede: requested ``""``/``"fp8-hooks"`` vs published ``"w8a8"``,
+    every other axis digest-identical)."""
+    base = getattr(pipe, "_cozy_lora_base_lane", None)
+    if base is not None:
+        return str(base)
+    from .loading import pipeline_weight_lane
+
+    lane = pipeline_weight_lane(pipe)
+    if lane:
+        return lane
+    for model in branch_targets(pipe).values():
+        return branch_lane(model)
+    return ""
+
+
 def stamp_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None) -> None:
     """Keep the compile-cache graph key honest: branch-bearing pipelines are
     a different graph family per (base lane, bucket) — lane_drift guards
@@ -967,12 +993,9 @@ def stamp_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None) -> None:
     sparse = any(bool(getattr(m, _SPARSE_ATTR, False)) for m in models)
     base = getattr(pipe, "_cozy_lora_base_lane", None)
     if base is None:
-        from .loading import pipeline_weight_lane
-
-        # The loader stamps _cozy_weight_lane on real pipelines; the
-        # denoiser's own lane markers are the fallback authority.
-        base = pipeline_weight_lane(pipe) or (
-            branch_lane(models[0]) if models else "")
+        # One brain (pgw#686): the same resolution the advertised requested
+        # key uses, so the stamped/published key can never diverge from it.
+        base = effective_base_lane(pipe)
         try:
             pipe._cozy_lora_base_lane = base
         except Exception:

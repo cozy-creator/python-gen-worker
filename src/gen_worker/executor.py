@@ -1951,6 +1951,16 @@ class ModelStore:
         return "download_failed"
 
 
+# pgw#686: base lanes speculated for pre-load pull-by-key cell lookups (no
+# pipeline exists yet to probe). Must cover every base lane a loader can
+# leave a pipeline on, or a cold worker can never pull the very cell its own
+# boot would mint — the ie#546 burst published on "w8a8" while lookups
+# speculated only ""/"fp8-hooks", so the armed cell was unreachable and all
+# 9 workers re-minted. Verify-on-receipt remains the arming gate; a wrong
+# speculation is only ever a benign extra lookup key.
+_SPECULATIVE_CELL_BASE_LANES = ("", "fp8-hooks", "w8a8")
+
+
 # ---------------------------------------------------------------------------
 # Endpoint instances (setup/warmup lifecycle)
 # ---------------------------------------------------------------------------
@@ -3074,8 +3084,15 @@ class Executor:
         try:
             from . import cell_key
 
+            # pgw#686: the KEY lane resolves through the one shared brain
+            # (compile_cache.cell_base_lane — probe, then denoiser markers),
+            # never the raw probe alone: the raw probe is blind to the w8a8
+            # GEMM mode, so its key names a cell no mint ever publishes and
+            # the fleet's armed cells are never adopted. The raw probe stays
+            # authoritative for the wire lane descriptor below.
             key = cell_key.compute(
-                str(getattr(cfg, "family", "") or ""), lane, bucket,
+                str(getattr(cfg, "family", "") or ""),
+                compile_cache.cell_base_lane(target.pipeline), bucket,
                 contract=cfg.contract_digest(),
                 regional=bool(getattr(cfg, "regional", False)))
             requested_key, requested_axes = key.digest, key.axes
@@ -3087,6 +3104,28 @@ class Executor:
             target.contract_digest = contract_digest
             target.requested_cell_key = requested_key
             target.requested_cell_axes = requested_axes
+
+    @staticmethod
+    def _warn_cell_key_divergence(spec_name: str, target: "_CompileTargetRecord") -> None:
+        """pgw#686 invariant: a SELF-MINTED active cell must carry exactly
+        the key an identical worker would REQUEST (requested_cell_key) —
+        anything else is fleet-wide silent zero-adoption: the published
+        cell sits armed in the store while every cold pod re-mints (the
+        ie#546 burst: 10 pods, 9 simultaneous mints, 0 adoptions). Loud
+        and greppable; never fatal to serving."""
+        with target.state_lock:
+            active = str(target.active_compile_ref or "")
+            self_mint = bool(target.active_self_mint)
+            requested = str(target.requested_cell_key or "")
+        if not (self_mint and active and requested):
+            return
+        if active.rpartition("#")[2] == requested:
+            return
+        logger.error(
+            "cell_key_divergence: self-minted active cell %s is not this "
+            "runtime's requested key %s for %s — the published cell can "
+            "never be adopted by an identical worker; the lane/axis probes "
+            "disagree (pgw#686)", active, requested, spec_name)
 
     def _compile_guard_failed(
         self,
@@ -3519,6 +3558,7 @@ class Executor:
                     "compile target %s has no runtime guard revocation signal; "
                     "advertising eager", incarnation_id,
                 )
+            self._warn_cell_key_divergence(spec.name, target)
             if target.active_compile_ref:
                 # pgw#622: post-proof, novel request shapes serve eager while
                 # the compiled path warms in the background; each completed
@@ -3608,7 +3648,9 @@ class Executor:
                 want_lane = self._mandatory_lane_of_bound(
                     wire_ref(binding) for binding in spec.models.values()
                 )
-                lanes = (want_lane,) if want_lane else ("", "fp8-hooks")
+                lanes = (
+                    (want_lane,) if want_lane
+                    else _SPECULATIVE_CELL_BASE_LANES)
                 for lane in lanes:
                     try:
                         digest = cell_key.compute(
@@ -6473,7 +6515,8 @@ class Executor:
         from . import cell_key
 
         candidate_keys: set[str] = set()
-        for lane in ((want_lane,) if want_lane else ("", "fp8-hooks")):
+        for lane in (
+                (want_lane,) if want_lane else _SPECULATIVE_CELL_BASE_LANES):
             try:
                 candidate_keys.add(cell_key.compute(
                     family, lane, want_bucket,
@@ -7518,6 +7561,12 @@ class Executor:
                     target.active_compile_snapshot_digest = str(
                         outcome.snapshot_digest)
                     target.active_self_mint = True
+                # pgw#686: the mint stamped the pipe's lane; re-advertise so
+                # the requested key names the key just published (the fleet
+                # adopts by requested key — a stale advertisement leaves the
+                # published cell unreachable), then assert the invariant.
+                self._refresh_compile_target(target)
+                self._warn_cell_key_divergence(spec.name, target)
                 if not self._bind_compile_guard(rec, target):
                     with target.state_lock:
                         target.active_compile_ref = ""
