@@ -445,6 +445,17 @@ message FunctionCapability {
   repeated ModelIdentity models = 6;
   string compile_target_incarnation_id = 7;
   FunctionCapabilityState state = 8;
+  // th#1187/pgw#671 eager-first boot: the tier this READY function currently
+  // serves at — "" (pre-0.65 worker / unknown), "eager", or "compiled".
+  // A tier field on READY, deliberately NOT a new state enum value: an old
+  // hub ignores the unknown field and keeps dispatching (correct — the
+  // function genuinely serves), whereas an unknown enum numeric would read
+  // as not-dispatchable and starve a serving-capable worker. Flips
+  // eager->compiled on hot-swap (own mint arming or peer-cell adoption)
+  // with NO state flap; "serving eager while minting" is the hub-derived
+  // pair (state=READY, serving_tier=eager, self_mint_compile activity
+  // running).
+  string serving_tier = 9;
 }
 
 enum FunctionCapabilityState {
