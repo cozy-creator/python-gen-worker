@@ -16,7 +16,15 @@ Derivation per handler:
    neutral schema values — deterministic).
 2. ``CompileAxis`` fields take each class's ``warm=`` representative,
    CROSS-PRODUCTED — that product IS the graph set, so "fully warmed?" is
-   computable.
+   computable. Axes partition fields INDEPENDENTLY, so for an endpoint with
+   real INTER-FIELD constraints most of that product is not a servable
+   request (pgw#669: ltx-video-2.3 has 29 legal combinations of 120). Such an
+   endpoint declares the sparsity by raising
+   :class:`~gen_worker.IllegalCombination` from its payload
+   ``__post_init__``; the plan drops exactly those rows and records the
+   coverage it achieved. Every OTHER exception during payload construction is
+   still a load failure — that is the whole point of the typed error: a
+   sparse legal set and a synthesis bug are no longer the same event.
 3. Required no-default fields synthesize neutral values by type: ``str``
    fills ``"warmup"`` (content never affects the graph; ``text_len`` pins
    the traced shape), ``ImageAsset``/``AudioAsset`` get a tiny generated
@@ -62,6 +70,7 @@ import enum
 import itertools
 import os
 import struct
+import tempfile
 import types as py_types
 import typing
 import wave
@@ -71,6 +80,7 @@ from typing import (
     AbstractSet,
     Any,
     Callable,
+    Dict,
     Iterable,
     List,
     Optional,
@@ -82,6 +92,7 @@ import msgspec
 
 from .api.compile_axis import PayloadAxis
 from .api.decorators import EndpointDecl, NoWarmup
+from .api.errors import IllegalCombination
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 import inspect
 
@@ -313,8 +324,18 @@ class WarmupJob:
 
 @dataclass(frozen=True)
 class WarmupSkip:
+    """One recorded reason a handler contributes fewer warm runs than the
+    naive derivation would.
+
+    ``illegal``/``combos`` are non-zero only for the pgw#669 sparse-legal-set
+    row: they turn "we warmed fewer graphs than the axis product" from a
+    silent degradation into an explicit, countable coverage claim ("29 of 120
+    combinations are legal; 29 warmed")."""
+
     spec: "EndpointSpec"
     reason: str
+    illegal: int = 0
+    combos: int = 0
 
 
 # Guidance-class axis fields (mirrors api.compile_axis.warm_guidance_values):
@@ -420,15 +441,27 @@ def _combo_signature(
     return tuple(sig)
 
 
+def _job_changes(
+    combo: Tuple[Tuple[str, str, Any], ...],
+    overrides: Any,
+    clamps: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """The field changes one planned combo applies over the base payload:
+    step clamps, then the axis warm representatives, then the declared
+    per-function overrides (last wins)."""
+    changes: Dict[str, Any] = dict(clamps or {})
+    changes.update({f: w for f, _, w in combo})
+    changes.update(dict(overrides or {}))
+    return changes
+
+
 def _job_factory(
     base: _Factory,
     combo: Tuple[Tuple[str, str, Any], ...],
     overrides: Any,
     clamps: Optional[dict] = None,
 ) -> _Factory:
-    changes = dict(clamps or {})
-    changes.update({f: w for f, _, w in combo})
-    changes.update(dict(overrides or {}))
+    changes = _job_changes(combo, overrides, clamps)
 
     def build(dir_path: str) -> Any:
         payload = base(dir_path)
@@ -437,6 +470,67 @@ def _job_factory(
         return msgspec.structs.replace(payload, **changes)
 
     return build
+
+
+def _legal_combos(
+    owner: str,
+    base: _Factory,
+    combos: Sequence[Tuple[Tuple[str, str, Any], ...]],
+    overrides: Any,
+    clamps: Optional[dict],
+) -> Tuple[List[Tuple[Tuple[str, str, Any], ...]], int]:
+    """``(legal combos, illegal count)`` — the pgw#669 sparsity filter.
+
+    Axes partition fields independently, so the cross-product can contain
+    combinations the endpoint's payload rejects by contract (ltx-video-2.3:
+    29 legal of 120). Each candidate is built ONCE here, at plan time, so an
+    illegal row never reaches the warm RUN — where a raise is a load failure.
+
+    Only :class:`~gen_worker.IllegalCombination` counts as "not legal". Any
+    other exception propagates: a payload the SDK cannot synthesize, or a
+    struct that rejects a warm representative for some other reason, is a
+    declaration/synthesis bug and must fail at the earliest possible moment
+    (discovery walk / CI) rather than degrade the coverage claim in silence.
+
+    Every combination being illegal is itself a declaration bug — axes that
+    admit no servable request — and raises.
+    """
+    legal: List[Tuple[Tuple[str, str, Any], ...]] = []
+    illegal = 0
+    first_reason = ""
+    with tempfile.TemporaryDirectory(prefix="gw-warmplan-") as tmp:
+        try:
+            payload = base(tmp)
+        except IllegalCombination as exc:
+            # The BASE payload is the schema's own neutral defaults. If those
+            # are not servable there is no legal row to derive from, and the
+            # declaration is wrong — say so rather than surfacing one field's
+            # message with no context.
+            raise ValueError(
+                f"{owner}: the payload's own DEFAULT values are declared "
+                f"IllegalCombination ({exc}) — the neutral schema defaults "
+                "must be a servable request; no warm plan can be derived "
+                "from them"
+            ) from exc
+        for combo in combos:
+            changes = _job_changes(combo, overrides, clamps)
+            try:
+                if changes:
+                    msgspec.structs.replace(payload, **changes)
+            except IllegalCombination as exc:
+                illegal += 1
+                if not first_reason:
+                    first_reason = str(exc)
+                continue
+            legal.append(combo)
+    if combos and not legal:
+        raise ValueError(
+            f"{owner}: every one of the {len(combos)} derived warm "
+            f"combinations is declared IllegalCombination (e.g. "
+            f"{first_reason!r}) — the CompileAxis declarations admit no "
+            "servable request, so no graph set can be derived"
+        )
+    return legal, illegal
 
 
 def _shape_rank(
@@ -558,8 +652,24 @@ def plan(
             a.field for a in (getattr(s, "payload_axes", ()) or ())
         }
         clamps = _step_clamps(s.payload_type, axis_fields, overrides)
+        axes = tuple(getattr(s, "payload_axes", ()) or ())
+        combos = _axis_combos(axes)
+        if axes:
+            # pgw#669: drop the combinations the endpoint declares illegal
+            # BEFORE they become planned runs, and record the coverage.
+            combos, illegal = _legal_combos(
+                s.name, base, combos, overrides, clamps)
+            if illegal:
+                skips.append(WarmupSkip(
+                    s,
+                    f"{illegal} of {illegal + len(combos)} axis combinations "
+                    f"are declared IllegalCombination (inter-field contract); "
+                    f"{len(combos)} legal graph classes planned",
+                    illegal=illegal,
+                    combos=illegal + len(combos),
+                ))
         seen: set = set()
-        for combo in _axis_combos(tuple(getattr(s, "payload_axes", ()) or ())):
+        for combo in combos:
             sig = _combo_signature(s, combo, union_axes)
             if sig in seen:
                 continue

@@ -1,5 +1,156 @@
 # Changelog
 
+## 0.67.0 (2026-07-25) — rotation preload + the three recorded SDK gaps
+
+Two lanes ride this train: pgw#674 (rotation preload) and the
+pgw#667/#669/#670 SDK-gap sweep (+ gw#668, th#1174's SDK half).
+
+### pgw#674: rotation preload — the NEXT checkpoint stages while the current job computes
+
+Worker half of WORKER-RESIDENCY-DESIGN's Paul-ratified "Rotating
+double-buffer serving" (north star: load model-B while model-A runs
+inference; rotate on completion; GPU hot the entire time). Until now the
+only path acting on the hub's desired plan was lifecycle's reconcile —
+tenant-idle-gated and cancelled by every run_job — so every checkpoint hop
+paid the full visible swap (ie#546 measured ~14s: 11s repo-cas pull + 3s
+VRAM load).
+
+- **`Preloader`** (`gen_worker/preload.py`, executor-owned): level-triggered
+  background driver fed by the HelloAck desired set and poked at job
+  admit/finish. NOT idle-gated, NOT cancelled by run_job; stops on drain.
+  Stage ladder per desired instance: (1) bytes to local NVMe CAS
+  (`ensure_local` — kills the download term); (2) `fits()` with the
+  resident set protected -> full background `ensure_setup` = TRUE
+  DOUBLE-BUFFER, dispatch finds a ready record and the visible swap is ~0;
+  (3) otherwise COMPONENT-FIRST host staging: exclusive components (by
+  content digest; resident shared TE/VAE stay put by construction) load on
+  CPU on a dedicated nice+10 thread, get eagerly pinned, and are seeded
+  into the shared-component cache — the existing content-keyed injection
+  consumes them at dispatch (from_pretrained skips those disk loads).
+  pgw#638 fence intact: refs resident under a moved identity are left to
+  the idle-gated reconcile. Quantized flavors (fp8/svdq/w8a8/nf4) stop at
+  the disk tier.
+- **Copy-stream promotes** (`models/staging.py` + `pinned_swap`): weight
+  H2D rides a dedicated CUDA copy stream — copy engines are separate
+  hardware from the SMs, so a background promote overlaps the serving
+  job's compute; only the copy stream is synchronized, never the device.
+- **Bounded pinned pool** (`PinnedPool`): pinned host RAM is budget-gated
+  (measured available minus the residency floor, capped at half of total;
+  no knobs); refusal degrades to pageable. `prestage_module` builds the
+  pinned cache eagerly for CPU-staged modules so their FIRST promote is
+  full-PCIe.
+- **Benchmark vehicle** (closes the ie#546 "no delivery path" gap): the
+  swap-latency harness moved INTO the wheel
+  (`python -m gen_worker.benchmarks.swap_latency`; the repo-root script is
+  now a shim) and gained a `stage` case (disk -> CPU -> pin -> H2D on the
+  copy stream — the exact rotation path). `gen_worker.diagnostics.
+  SwapLatencyDiagnostics` exposes it as an ordinary worker function
+  (str-slot snapshot trees, NoWarmup), dispatchable through the normal
+  request path — th#1198's admin benchmark-run machinery.
+
+### pgw#667: per-COMPONENT load dtype — wan's last migration blocker
+
+A component's dtype is part of its resident identity and is decided AT
+LOAD: upcasting a bf16-loaded tensor recovers no precision, it only hides
+the truncation. wan-2.2's VAE must come off disk fp32 while the transformer
+loads bf16, which the v2 SDK could not express — so wan kept its legacy
+`Slot(str)` self-loading shape and forfeited the derived component tree,
+the only wave-2 endpoint that could not migrate.
+
+- **`gen_worker.families.facts.COMPONENT_DTYPES`** is the ONE home for that
+  knowledge, keyed by the diffusers component CLASS name
+  (`AutoencoderKLWan -> fp32`, with its reason carried as data so the loader
+  logs WHY it widened a part). Keying on the class means every wan pipeline
+  class (T2V/I2V/V2V/TI2V) and every fine-tune inherits the fact with zero
+  endpoint declaration — the `SAMPLERS` posture: endpoint-private tables
+  must not exist. Deliberately not catalog recipe data (a stability floor is
+  an architecture fact, identical for every checkpoint) and deliberately not
+  a `Slot(component_dtypes=...)` declaration (the sibling-as-part shape v2
+  deleted).
+- **The derived tree carries it** — `api.tree.component_dtypes()` resolves
+  per-part classes from the pipeline class's `__init__` annotations at build
+  time and from the snapshot's own `model_index.json` at load time (the
+  latter authoritative: a fine-tune may substitute a class).
+  `components_manifest()` publishes `dtype` beside `kind`, so the hub gets
+  the precision in the same path vocabulary it already has for policy.
+- **Applied at materialize** — `load_from_pretrained` passes diffusers' own
+  per-component `torch_dtype` map (`{"default": bf16, "vae": fp32}`) instead
+  of one scalar; a fact agreeing with the composition default stays out of
+  the kwargs, so uniform trees are byte-identical. A loader that rejects the
+  map collapses back to the scalar with a loud warning.
+  `load_component_override` honors the fact for SUBSTITUTED parts too.
+
+### pgw#669: `CompileAxis` can express a SPARSE legal set; `for_request` owns the per-request-state enumeration
+
+`CompileAxis` partitions fields INDEPENDENTLY, so the derived warm plan is
+the cross-product of those partitions. For an endpoint with real inter-field
+constraints (ltx-video-2.3: **29 legal combinations of 120**) most of that
+product is not a servable request, and every illegal row failed the WORKER
+LOAD while the plan built its payloads — so declaring axes at all was a boot
+hazard.
+
+- **`IllegalCombination`** (new, exported): raise it from a payload
+  `__post_init__` for an inter-field constraint. The plan drops exactly
+  those rows and records a counted coverage claim ("5 of 12 axis
+  combinations are declared IllegalCombination; 7 legal graph classes
+  planned"); every OTHER exception still fails the load, so a sparse legal
+  set and a synthesis bug are no longer the same event. It subclasses both
+  `ValidationError` and `ValueError`, so the wire contract is unchanged (a
+  request carrying such a combination is still a msgspec `ValidationError`).
+  Axes admitting no legal combination, or neutral defaults that are
+  themselves illegal, are declaration bugs and raise at the walk (CI /
+  discovery), never at first request.
+- **`view.for_request` clones EVERY sampler**, not just the attribute named
+  `scheduler` (`discover_schedulers`, or an explicit `schedulers=(...)`). A
+  pipeline with a second stateful sampler — ltx's `audio_scheduler`, which
+  diffusers' own `__call__` drives with `retrieve_timesteps` and a `.step()`
+  per denoise step — kept SHARING it across concurrent requests: a
+  half-fixed pipeline that read as fully fixed. `sampler`/`objective`/
+  `scheduler_config` still apply to the primary scheduler only (they are the
+  denoiser's decision); secondaries are cloned faithfully from their own
+  config, which is the privacy fix they need.
+
+### pgw#670: `Resources(ram_gb_hint=)` — a measured host-RAM floor has a carrier again
+
+The v2 cut deleted `ram_gb` on the reasoning that host RAM is an
+opportunistic latency tier. For ltx-video-2.3 it was neither opportunistic
+nor a guess: ie#484 measured 179-301 s mp4-encode and 147 s VAE-decode tails
+on host-starved allocations at IDENTICAL GPU step-ms, and ie#492 sized the
+floor at 64 GB from that failure. `vcpus` survived the same cut and covers
+the CPU side of the very same encode tail, which made the deletion read as
+accidental. `ram_gb_hint` is an ALLOCATION-time ask (never a runtime gate)
+and does NOT imply `gpu=True`. `Resources.manifest_dict()` now owns the one
+declaration -> wire-name mapping, projecting it under the builder's existing
+`ram_gb` key (-> scheduler `min_ram_gb`: pod-create minimum plus th#740's
+read-back-and-reject), so the floor actually reaches placement.
+
+### gw#668: "no boot config was ever injected" is not "generation 0"
+
+`WORKER_CONFIG_GENERATION` is injected only into pod-launch env, so a
+host-process worker (the e2e local-worker shape, the dev loop, any BYO
+fleet) never receives one. `min(gen, 0)` conflated the two facts and every
+such worker reported `BOOT_STALE` for its whole life — with a remedy (pod
+replacement) that does not exist for a pod-less worker (th#1172: every
+local-worker e2e journey starved). `Settings.boot_config_generation` now
+defaults to the sentinel `-1` = "never injected", and the boot config class
+converges as NOT APPLICABLE for such a process. A pod-launched worker with a
+genuinely old stamp still reports `BOOT_STALE` so the th#1087 rollout
+replaces it.
+
+**BREAKING (internal):** `Settings.boot_config_generation` /
+`IntentRegistry(boot_config_generation=)` default to `-1`, not `0`. Anything
+constructing an `IntentRegistry` for a pod-launched shape must pass the
+stamp explicitly.
+
+### th#1174 (SDK half): `ddim_trailing`
+
+`gen_worker.view.SAMPLERS` defines `"ddim_trailing" -> ("DDIMScheduler",
+{"timestep_spacing": "trailing"})` — Hyper-SD's published recipe, which the
+hub already recognized in both sdxl schemas with no SDK definition to serve
+it. Added to the `SdxlScheduler` literal as well (widening the enum is safe
+on its own; no catalog row may be authored with the value until an endpoint
+pins a wheel that has it).
+
 ## 0.66.0 (2026-07-25) — pgw#672: the minted cell serves itself; broken compiled lanes degrade, never die
 
 Live defect closed (ie#546 burst rerun #2, 0.64.0, L4): a worker minted and

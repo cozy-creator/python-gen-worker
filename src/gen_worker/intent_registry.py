@@ -9,6 +9,7 @@ import uuid
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
+from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .pb import worker_scheduler_pb2 as pb
 
 _MAX_INTENTS = 128
@@ -91,7 +92,7 @@ class IntentRegistry:
         release_id: str,
         function_names: Iterable[str],
         *,
-        boot_config_generation: int = 0,
+        boot_config_generation: int = BOOT_CONFIG_GENERATION_ABSENT,
         on_change: Optional[Callable[[], None]] = None,
         unreported_wait_timeout_s: float = _UNREPORTED_WAIT_TIMEOUT_S,
     ) -> None:
@@ -108,6 +109,13 @@ class IntentRegistry:
         self._last_receipt: Optional[pb.GoalReceipt] = None
         self._command_receipts: "OrderedDict[tuple[int, bytes], pb.GoalReceipt]" = OrderedDict()
         self._target_config_generation = 0
+        # gw#668: two distinct facts, not one number. ``_boot_config_injected``
+        # False means no boot-only environment exists for this process to be
+        # stale against (a host-process/BYO worker: tensorhub injects
+        # WORKER_CONFIG_GENERATION only into pod-launch env), so the boot class
+        # is NOT APPLICABLE and converges. A pod-launched worker with a genuinely
+        # old stamp still reports BOOT_STALE so the th#1087 rollout replaces it.
+        self._boot_config_injected = int(boot_config_generation) >= 0
         self._boot_config_generation = max(0, int(boot_config_generation))
         self._intents: "OrderedDict[str, pb.IntentState]" = OrderedDict()
         self._intent_digests: dict[str, bytes] = {}
@@ -872,7 +880,18 @@ class IntentRegistry:
             # Only the pod-launch stamp proves which boot-only environment
             # this process received. The first command proves receipt, not
             # boot convergence.
-            current.boot_generation = min(gen, self._boot_config_generation)
+            #
+            # gw#668: unless there IS no boot-only environment. A process that
+            # was never pod-launched received no WORKER_CONFIG_GENERATION, so
+            # "stale boot config" is vacuous for it — there is nothing to be
+            # stale against, and the only advertised remedy (pod replacement)
+            # does not exist. Converge the class instead of pending it forever
+            # against every target >= 1.
+            current.boot_generation = (
+                min(gen, self._boot_config_generation)
+                if self._boot_config_injected
+                else gen
+            )
         elif changed_classes is not None:
             if not changed_classes.parameters:
                 current.parameter_snapshot_generation = gen

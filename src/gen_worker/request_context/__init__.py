@@ -24,6 +24,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     TypedDict,
 )
@@ -441,6 +442,7 @@ class RequestContext(Generic[D]):
         seed: Optional[int] = None,
         generator: Optional["torch.Generator"] = None,
         scheduler_config: Optional[Dict[str, Any]] = None,
+        schedulers: Optional[Sequence[str]] = None,
     ) -> Any:
         """A per-request VIEW of ``pipeline`` (SDK v2): same module objects
         (shared weights; the compiled graph stays bound), OWN scheduler —
@@ -453,6 +455,12 @@ class RequestContext(Generic[D]):
         ``slot`` names the resolving slot on a multi-slot class (gap #7);
         omitted, the declared root resolves. Ambiguity raises — never a
         silent objective-less fallback.
+
+        EVERY sampler-shaped attribute is cloned, not just ``scheduler``
+        (pgw#669: a second stateful sampler such as an ltx
+        ``audio_scheduler`` is otherwise still shared across concurrent
+        requests). ``schedulers=`` pins the set explicitly when discovery is
+        not wanted.
 
         Never assign ``self.pipeline.scheduler`` per request — that is an
         instance mutation two concurrent requests corrupt each other
@@ -470,7 +478,7 @@ class RequestContext(Generic[D]):
             gen = self.generator(seed)
         return _view_for_request(
             pipeline, sampler=sampler, objective=objective, generator=gen,
-            scheduler_config=scheduler_config,
+            scheduler_config=scheduler_config, schedulers=schedulers,
         )
 
     @property

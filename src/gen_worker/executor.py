@@ -38,6 +38,7 @@ from .api.errors import (
     ArtifactTransferError,
     CanceledError,
     ComponentSubstitutionError,
+    IllegalCombination,
     ModelSlotIdentityError,
     RetryableError,
     ValidationError,
@@ -2414,6 +2415,12 @@ class Executor:
         self.jobs: Dict[Tuple[str, int], _Job] = {}
         self._idle = asyncio.Event()
         self._idle.set()
+        # pgw#674 rotation preload: stages the hub's desired NEXT instances
+        # (download -> pinned host -> VRAM double-buffer) WHILE jobs compute.
+        # Lifecycle feeds it desired state; job admit/finish pokes it.
+        from .preload import Preloader
+
+        self.preloader = Preloader(self)
         # gw#516: count of jobs in their slotless finalize tail. Mutated from
         # handler threads at the terminal slot release, so lock-guarded;
         # surfaced to the hub via StateDelta.finalizing_jobs.
@@ -4629,7 +4636,14 @@ class Executor:
 
         jobs, skips = self._warmup_plan(spec, rec)
         for skip in skips:
-            logger.info("boot warmup skipped for %s: %s", skip.spec.name, skip.reason)
+            # pgw#669: an illegal-combination row is a COVERAGE claim, not a
+            # skipped handler — the handler still warms its legal graph set.
+            if getattr(skip, "illegal", 0):
+                logger.info("boot warm coverage for %s: %s",
+                            skip.spec.name, skip.reason)
+            else:
+                logger.info("boot warmup skipped for %s: %s",
+                            skip.spec.name, skip.reason)
         objects = tuple({id(obj): obj for obj in proof_objects}.values())
         # Tracing == some artifact is armed or minting on this setup; only
         # then does the full class x bucket cross-product buy anything (each
@@ -4679,6 +4693,17 @@ class Executor:
             with tempfile.TemporaryDirectory(prefix="gw-warmup-") as tmp:
                 try:
                     payload = build(tmp)
+                except IllegalCombination as exc:
+                    # pgw#669: the endpoint declares this field combination
+                    # outside its contract. The derived plan already filters
+                    # these at plan time; reaching here means a media-variant
+                    # row or a constraint only expressible against the fully
+                    # built payload. Not a boot failure either way — the
+                    # combination is not a servable request.
+                    logger.info(
+                        "boot warmup %s (%s): combination declared illegal, "
+                        "not warmed: %s", wj.spec.name, mode, exc)
+                    return True
                 except Exception as exc:
                     if not variant:
                         raise
@@ -8259,6 +8284,9 @@ class Executor:
         await self._send(pb.WorkerMessage(job_accepted=pb.JobAccepted(
             request_id=run.request_id, attempt=run.attempt)))
         job.task = asyncio.create_task(self._run_job(job, run), name=f"job-{run.request_id}")
+        # pgw#674: the serving set may have changed — re-derive what to
+        # stage next while this job computes.
+        self.preloader.poke()
 
     def handle_cancel(self, cancel: pb.CancelJob) -> None:
         job = self.jobs.get((cancel.request_id, cancel.attempt))
@@ -9340,6 +9368,8 @@ class Executor:
             for k in finished[: len(finished) - 1024]:
                 self.jobs.pop(k, None)
         self._maybe_idle()
+        # pgw#674: job completion is the rotation point — advance staging.
+        self.preloader.poke()
 
     def _maybe_idle(self) -> None:
         if not self.in_flight_keys():

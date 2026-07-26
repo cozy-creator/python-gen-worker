@@ -301,8 +301,14 @@ def test_config_classes_converge_separately_and_boot_change_stays_stale() -> Non
     assert registry.snapshot().capabilities[0].state == pb.FUNCTION_CAPABILITY_STATE_BOOT_STALE
 
 
-def test_first_command_cannot_infer_an_unstamped_boot_generation() -> None:
-    registry = IntentRegistry("release-1", ["echo"])
+def test_first_command_cannot_infer_a_stale_boot_generation() -> None:
+    # gw#668: the stamp is now passed EXPLICITLY. `boot_config_generation=0`
+    # means "a boot-only environment WAS injected, at generation 0" — genuinely
+    # ancient, so the first command must not infer convergence from it and the
+    # th#1087 rollout replaces the pod. (A pod-LESS worker, which never
+    # receives the env at all, is the separate case covered by
+    # test_boot_config_absent_gw668.py.)
+    registry = IntentRegistry("release-1", ["echo"], boot_config_generation=0)
     receipt = registry.apply_command(
         pb.DesiredStateCommand(
             worker_session_id=registry.worker_session_id,
