@@ -2278,7 +2278,12 @@ def mandatory_serving(pipeline: Any) -> bool:
             pass
         else:
             return lane.activation in (lanespec.ACT_W8A8, lanespec.ACT_W4A4)
-    return pipeline_weight_lane(pipeline).startswith(("w8a8", "w4a4"))
+    # Module-attr call (not the top-level import): tests monkeypatch
+    # models.loading.pipeline_weight_lane; stay late-bound.
+    from .models import loading as _loading
+
+    return _loading.pipeline_weight_lane(pipeline).startswith(
+        ("w8a8", "w4a4"))
 
 
 def apply(
