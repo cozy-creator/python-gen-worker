@@ -166,6 +166,17 @@ _COMPLETE_TIMEOUT_S = 30
 # live at a time; same-key sibling pipes join the existing capture.
 _PENDING_LOCK = threading.Lock()
 _PENDING: Dict[str, "PendingSelfMint"] = {}
+# pgw#672: cells this process already finalized (packed + folded into the
+# live cache root). A later same-key arm re-arms cache_ready from the folded
+# entries instead of opening a SECOND capture — which, with the first mint's
+# compiled code resident in dynamo's in-memory cache, would capture nothing
+# and disprove itself at finalize (the L4 churn loop).
+_FINALIZED: Dict[str, "SelfMint"] = {}
+
+
+def finalized_in_process(key: str) -> Optional["SelfMint"]:
+    with _PENDING_LOCK:
+        return _FINALIZED.get(str(key or "").strip())
 
 
 class CellPublishRefused(Exception):
@@ -411,6 +422,41 @@ def enable_compiled(
         return _fail_closed(
             pipe, f"self-mint key computation failed: {exc}", selection_bug)
 
+    # pgw#672: consult the process ledgers BEFORE opening a capture.
+    key_ref = f"{cc.system_repo(family)}#{key}"
+    if cc.cell_quarantined_in_process(key_ref):
+        # This exact identity already failed its serve/finalize proof in
+        # this process — re-minting it is the churn loop, not recovery.
+        # DEGRADE (explicit eager, mandatory lanes included): a broken
+        # optimization must never kill a serving worker.
+        logger.error(
+            "fleet-cells: declining self-mint for %s key=%s — this identity "
+            "was quarantined by a failed proof in this process; serving "
+            "eager (pgw#672)", family, key)
+        if bucket:
+            cc.drop_lora_lane(pipe)
+        return ArmOutcome(armed=False, selection_bug=selection_bug)
+    finalized_prior = finalized_in_process(key)
+    if finalized_prior is not None:
+        # This process already minted, proved, and FOLDED this exact cell
+        # into the live cache root — re-arm cache_ready from those entries
+        # (the proof warmup then serves a real FX hit) instead of opening a
+        # doomed second capture the resident compiled code would starve.
+        try:
+            armed_ready = cc.apply(pipe, cfg, cache_ready=True)
+        except Exception as exc:  # noqa: BLE001 — fall back to a fresh mint
+            logger.warning(
+                "fleet-cells: re-arm from the in-process finalized cell "
+                "failed (%s); falling through to a fresh mint", exc)
+            armed_ready = False
+        if armed_ready:
+            logger.info(
+                "fleet-cells: re-armed %s from this process's finalized "
+                "cell (key=%s) — no second capture (pgw#672)", family, key)
+            return ArmOutcome(
+                armed=True, self_mint=finalized_prior,
+                selection_bug=selection_bug)
+
     # gw#587 CORRECT FIX (the defect this replaces: the old design minted
     # via a separate producer-style ``mint_artifact``/``_warm_call`` BEFORE
     # the real serving warmup ran — a synthetic single-stage call that can
@@ -537,6 +583,10 @@ def finalize_self_mint(
     state["minted"] = minted
     state["meta"] = dict(meta)
     _unregister(pending)
+    with _PENDING_LOCK:
+        # pgw#672: remember the finalized identity so a later same-key arm
+        # in this process reuses the folded cell instead of re-minting.
+        _FINALIZED[key] = minted
     logger.info(
         "fleet-cells: self-mint proof passed for %s (key=%s, %.1f MB) — "
         "serving compiled; publish decided after sibling coverage is known",
@@ -732,6 +782,7 @@ __all__ = [
     "abandon_self_mint",
     "enable_compiled",
     "finalize_self_mint",
+    "finalized_in_process",
     "publish_self_mint",
     "republish_after_shape_warm",
     "withhold_self_mint_publish",

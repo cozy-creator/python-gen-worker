@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import tarfile
 import threading
@@ -230,8 +231,13 @@ def test_execution_contract_digest_covers_every_runtime_graph_axis():
     assert cc.execution_contract_digest(_Pipe(low_vram="model_offload"), base_cfg) != base
 
 
-def test_w8a8_guard_never_retries_eager():
-    calls = {"eager": 0}
+def test_w8a8_guard_degrades_to_eager_and_revokes(caplog):
+    """pgw#672/pgw#673: a failing mandatory-lane compiled call DEGRADES to
+    explicit eager (revocation flips the wire tier) instead of raising —
+    a broken optimization must never kill a serving worker. The old
+    behavior (raise, function disabled, pod retired) produced the sm120
+    CantSplit $0.25-for-nothing pods and the L4 finalize churn loop."""
+    calls = {"eager": 0, "revoked": []}
 
     def eager(value):
         calls["eager"] += 1
@@ -240,12 +246,17 @@ def test_w8a8_guard_never_retries_eager():
     def broken(_value):
         raise RuntimeError("graph miss")
 
-    guarded = cc._guarded(eager, broken, "transformer", fail_closed=True)
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="graph miss"):
-        guarded(1)
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="graph miss"):
-        guarded(2)
-    assert calls["eager"] == 0
+    signal = {"callback": calls["revoked"].append}
+    guarded = cc._guarded(
+        eager, broken, "transformer", fail_closed=True, failure_signal=signal)
+    with caplog.at_level(logging.ERROR, logger="gen_worker.compile_cache"):
+        assert guarded(1) == 1
+    assert guarded(2) == 2
+    assert calls["eager"] == 2
+    # Revoked exactly once, loudly, before the first eager fallback.
+    assert len(calls["revoked"]) == 1
+    assert "graph miss" in calls["revoked"][0]
+    assert any("DEGRADED" in r.message for r in caplog.records)
 
 
 def test_guard_revocation_failure_latches_fail_closed_for_optional_lane():

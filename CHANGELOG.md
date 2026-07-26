@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.66.0 (2026-07-25) — pgw#672: the minted cell serves itself; broken compiled lanes degrade, never die
+
+Live defect closed (ie#546 burst rerun #2, 0.64.0, L4): a worker minted and
+armed its ck2 cell, then failed its own finalize with
+`CompiledLaneUnavailableError: ... did not serve their own warmup graph
+(warmups=18, calls=18, cache_hits=0, cache_misses=0, compile_seconds=0.0)`
+-> cell quarantined -> both functions disabled -> pod retired -> the
+replacement re-minted the SAME key. 5 cycles, 4 dead workers, 6/36 requests
+served. Root cause: dynamo's in-memory code cache (keyed on the
+class-shared `__code__`; torch 2.13 inlined-module guards match any
+same-class instance) serves the proof warmup of a LATER same-family arm in
+a warm process — the pending capture stays empty (`finish_fleet_mint:
+captured nothing`), and warm re-proofs of a published cell read 0 hits / 0
+misses past the pgw#637 escape.
+
+- **Honest proof windows** (`compile_cache.reset_target_code`): a scoped
+  per-code dynamo reset runs immediately before every proof window — the
+  foreground exclusive-GPU warmup, the pgw#671 background-mint seed, and
+  hot adoption (`arm_staged_artifact`) — so the warmup MUST go through the
+  real lookup path: a mint truly compiles into its capture, an adoption
+  truly HITS its seeded FX entries. Sibling-safe: the live cache root is
+  an additive union, so a sibling whose shared code is dropped re-traces
+  into an FX hit (seconds), never a recompile.
+- **In-process finalized-mint reuse** (`fleet_cells._FINALIZED`): a cell
+  key this process already minted + folded re-arms `cache_ready` from the
+  live root (proven by a real FX hit) instead of opening a doomed second
+  capture.
+- **Degrade, never die (Paul's doctrine; also pgw#673):** a failed
+  serve/finalize proof, a failed compiled call (sm120 `InductorError:
+  CantSplit` class), or a tripped runtime guard now DEGRADES the object to
+  explicit eager serving — mandatory (w8a8/w4a4) lanes included. The
+  compiled identity is revoked (serving_tier flips to `"eager"` on the
+  wire, th#1187 field), the confession rides the activity stream
+  (`Activity.note`), the functions STAY dispatchable, and the pod stays
+  up. `compile_cell_failed` self-disables and the
+  `all_declared_functions_disabled` retire no longer exist on these paths.
+- **In-process cell quarantine** (`record_cell_quarantined`, key-normalized
+  refs — also fixes the th#1166 exact-string false-negative class in the
+  proven-cell registry): a proof-failed identity is never re-selected or
+  re-minted by the same process, breaking the fail/re-mint churn loop.
+  Cross-worker (hub-side) quarantine visibility remains a tensorhub
+  follow-up.
+- Red-verified over the REAL `ensure_setup` + fleet_cells miss policy in
+  `tests/test_serve_finalize_pgw672.py`: the pre-fix tree reproduces the
+  exact live signature (`cache_hits=0, cache_misses=0,
+  compile_seconds=0.0` + empty capture); the fixed tree mints, hits, and
+  finalizes.
+
 ## 0.65.0 (2026-07-25) — eager-first boot: READY in ~2 min, the mint compiles in the background
 
 pgw#671 (worker half of th#1187, Paul's ruling): the startup ladder no

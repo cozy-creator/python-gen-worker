@@ -329,12 +329,14 @@ def test_hub_delivery_selects_delivered_cell(tmp_path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_w8a8_setup_without_cell_fails_loud(tmp_path, monkeypatch) -> None:
-    """gw#587 moved the refusal, not the invariant: a mandatory-lane miss no
-    longer fail-closes BEFORE load (the worker proceeds to self-mint, which
-    requires the loaded pipeline — tenant setup necessarily runs), but an
-    armed compile object that cannot PROVE itself on the warmup still
-    refuses typed and loud — never a silent eager serve."""
+def test_w8a8_setup_without_cell_degrades_to_explicit_eager(
+    tmp_path, monkeypatch,
+) -> None:
+    """gw#587 moved the refusal to the proof gate; pgw#672 changed its
+    POSTURE: an armed compile object that cannot PROVE itself on the warmup
+    no longer kills the boot — it degrades to EXPLICIT eager (the tier is
+    on the wire, never silent), the function stays dispatchable, and no
+    compiled identity is ever advertised."""
     setup_calls: List[str] = []
     ex, _sent, _enables = _harness(tmp_path, monkeypatch,
                                    [_compile_spec(setup_calls)])
@@ -345,13 +347,17 @@ def test_w8a8_setup_without_cell_fails_loud(tmp_path, monkeypatch) -> None:
         function_name="generate",
         models=[pb.ModelBinding(slot="pipeline", ref=RESOLVED_REF)],
     )
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="W8A8"):
-        asyncio.run(ex.ensure_desired_instance(
-            desired, {RESOLVED_REF: _snapshot("aa" * 32)}))
-    # The load/setup ran (the self-mint's precondition); the typed refusal
-    # fired at the proof gate, so nothing was ever advertised.
+    asyncio.run(ex.ensure_desired_instance(
+        desired, {RESOLVED_REF: _snapshot("aa" * 32)}))
+    # The load/setup ran (the self-mint's precondition); the unprovable
+    # lane degraded at the proof gate: dispatchable at eager tier, nothing
+    # advertised as compiled.
     assert len(setup_calls) == 1
-    assert "generate" not in ex.available_functions()
+    assert "generate" in ex.available_functions()
+    assert ex.serving_tiers()["generate"] == "eager"
+    assert all(
+        not t.active_compile_ref for t in ex.compile_targets()
+    )
 
 
 # ---------------------------------------------------------------------------
