@@ -28,6 +28,30 @@ were both blocked, even though the comment claimed flux fit.
 Unblocks: mirroring the official nunchaku qwen-image fp4 artifact (th#1211's
 speed benchmark) and flux.1's 7 GB artifacts.
 
+### th#1211 G4: `_PIN_MATRIX` gains nunchaku 1.3 <-> diffusers 0.39 (UNVERIFIED)
+
+The matrix had ONE row (nunchaku 1.2 <-> diffusers 0.36), so
+`check_svdq_stack_versions` raised for every other nunchaku minor. That left no
+legal svdq stack for qwen-image, which serves diffusers 0.39: nunchaku 1.2.1 is
+in the matrix but demands 0.36 and caps at torch 2.11, while nunchaku 1.3.0dev
+has the torch-2.12/cu13.0 wheel but was refused outright.
+
+- New row `SvdqPin((1, 3), (0, 39), (0, 40))`, marked **UNVERIFIED** in-comment:
+  admitted on a STATIC signature check, with the live A/B still owed (closes
+  during th#1211's P2). Add-then-verify follows gw#405's own precedent, and the
+  row is inert until a nunchaku 1.3 wheel is actually installed — today only
+  th#1211's benchmark-only serve variant.
+- The static basis, recorded so the live check knows what to confirm: nunchaku's
+  `forward` and diffusers 0.39's have drifted positionally (nunchaku keeps
+  `txt_seq_lens`, 0.39 dropped it and added `additional_t_cond`, so position 6
+  onward misbinds on a positional call) — but diffusers 0.39's
+  `QwenImagePipeline` calls the transformer with **keyword arguments only** and
+  passes neither drifted param, so the gw#405 positional hazard is void and no
+  unexpected-kwarg error can fire on the t2i path. **Numerical equivalence is
+  NOT established by this.** t2i only; `QwenImageEditPlusPipeline` unchecked.
+- The 1.2 row is untouched and still rejects diffusers 0.39; the wheel-tag torch
+  guard still fires (a torch2.12 wheel on torch 2.13 raises, as before).
+
 ## 0.67.1 (2026-07-26) — pgw#675 override dtype + pgw#676 native-crash attribution (the sdxl retag blockers)
 
 ### pgw#675: a component override now loads at the dtype the base tree's LOAD LANE computes at
