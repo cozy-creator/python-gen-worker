@@ -61,6 +61,7 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 
+from . import activity as activity_mod
 from . import cell_key
 from . import compile_cache as cc
 from . import guard_closure
@@ -312,8 +313,19 @@ def _publish_async(publisher: CellPublisher, family: str, artifact: Path, meta: 
             publisher.publish(family, artifact, meta)
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
-        except Exception:
+            activity_mod.emit_event(
+                "self_mint_publish_failed",
+                f"family={family}: hub refused the publish: {exc}",
+                phase="refused",
+            )
+        except Exception as exc:  # noqa: BLE001 — reported, never fatal
             logger.warning("fleet-cells: publish failed; the next worker on this key re-mints", exc_info=True)
+            activity_mod.emit_event(
+                "self_mint_publish_failed",
+                f"family={family}: publish attempt failed: "
+                f"{type(exc).__name__}: {exc}",
+                phase="error",
+            )
         finally:
             shutil.rmtree(artifact.parent, ignore_errors=True)
 
@@ -569,6 +581,16 @@ def finalize_self_mint(
             "fleet-cells: self-mint pack failed after a passed proof (%s) — "
             "the compiled callables stay live for this process, but this "
             "boot cannot advertise or publish a cell", exc)
+        # pgw#677 reopen: this exit swallowed the pgw#681 closure-gate
+        # refusal (and every other pack failure) into unreachable pod logs
+        # — the ie#546 final cycle lost its root cause to exactly that.
+        # The reason now rides the wire as a typed, countable event.
+        activity_mod.emit_event(
+            "self_mint_abort",
+            f"pack/finalize failed for family={pending.family} "
+            f"key={pending.cell_key}: {type(exc).__name__}: {exc}",
+            phase="pack_failed",
+        )
         state["minted"] = None
         _unregister(pending)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
@@ -640,6 +662,13 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             "fleet-cells: SELF_MINT_WITHOUT_PUBLISH_SINK family=%s — cell "
             "stays local to this pod; the fleet store gains nothing",
             pending.family)
+        activity_mod.emit_event(
+            "self_mint_publish_withheld",
+            f"family={pending.family} key={pending.cell_key}: no publish "
+            "sink (file_base_url/worker JWT absent at arming time); cell "
+            "stays local to this pod",
+            phase="no_sink",
+        )
         shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
@@ -662,6 +691,14 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
         "fleet-cells: SELF_MINT_PUBLISH_WITHHELD family=%s key=%s — %s; "
         "cell stays local to this pod",
         pending.family, pending.cell_key, reason)
+    # pgw#677 reopen: the withhold decision is hub-relevant truth (the mint
+    # obligation stays undischarged and every cold pod re-mints) — it must
+    # never live only in unreachable pod logs.
+    activity_mod.emit_event(
+        "self_mint_publish_withheld",
+        f"family={pending.family} key={pending.cell_key}: {reason}",
+        phase="incomplete",
+    )
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
@@ -760,7 +797,11 @@ def _fail_closed(
     raised refusal so the caller's report is never dropped."""
 
     lane = loading.pipeline_weight_lane(pipe)
-    if lane.startswith(("w8a8", "w4a4")):
+    # pgw#677 reopen: ONE serveability brain (cc.mandatory_serving) — the
+    # hub-resolved execution lane outranks the weight-lane prefix, so an
+    # eager-serveable mixed lane (sdxl #fp8-w8a8 storage on fp8-w8a16
+    # execution) degrades to eager here instead of a typed refusal.
+    if cc.mandatory_serving(pipe):
         refusal = cc.CompiledLaneUnavailableError(
             f"{lane[:4].upper()} requires a compile cell and the self-mint "
             f"is unavailable ({reason})")

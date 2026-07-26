@@ -474,11 +474,14 @@ def _denoiser_class(root: Path, component: str) -> Any:
 
 
 def load_w8a8_denoiser(root: Path, art: W8a8Artifact, *,
-                       compute_dtype: Any = None, mode: str = "") -> Any:
+                       compute_dtype: Any = None, mode: str = "",
+                       cls: Any = None) -> Any:
     """Materialize the quantized denoiser: skeleton on meta, quantized
     Linears swapped for Fp8ScaledLinear, tensors assigned from the shards.
     ``mode`` "rowwise" | "pertensor" | "dequant" (default: probe). Layers
-    whose dims break scaled_mm's 16-alignment are dequantized individually."""
+    whose dims break scaled_mm's 16-alignment are dequantized individually.
+    ``cls`` pins the module class (the component path already resolved it
+    from the BASE composition's model_index); default: this tree's own."""
     import torch
     import torch.nn as nn
     from accelerate import init_empty_weights
@@ -488,7 +491,8 @@ def load_w8a8_denoiser(root: Path, art: W8a8Artifact, *,
     if mode not in ("rowwise", "pertensor", "dequant"):
         mode = w8a8_gemm_mode() or "dequant"
 
-    cls = _denoiser_class(root, art.component)
+    if cls is None:
+        cls = _denoiser_class(root, art.component)
     cfg = dict(cls.load_config(str(root / art.component)))
     cfg.pop("quantization_config", None)
     with init_empty_weights():

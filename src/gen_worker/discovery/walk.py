@@ -8,7 +8,11 @@ registry use this single walker so they can never drift apart.
 Invariants:
 
 * Objects whose ``__module__`` is outside the walked package tree are
-  skipped (third-party re-exports stay out).
+  skipped (third-party re-exports stay out) — LOUDLY, at WARNING, naming the
+  class and the fix (subclass it locally). The skip was silent until
+  pgw#689, which is how an SDK-provided diagnostics endpoint, re-exported
+  exactly as its own docstring instructed, vanished from a release with no
+  trace in any log.
 * Each object is yielded exactly once even when re-exported into multiple
   namespaces (dedup by ``id``).
 * A module that fails to IMPORT is a HARD failure
@@ -115,9 +119,18 @@ def _scan_module(
             obj_module != walked_package_name
             and not obj_module.startswith(walked_package_prefix)
         ):
-            logger.info(
-                "Skipping endpoint '%s.%s' — defined outside the walked "
-                "package '%s'.",
+            logger.warning(
+                "SKIPPING @endpoint '%s.%s' re-exported into '%s' — it is "
+                "DEFINED in '%s', outside the walked package '%s', so it "
+                "will NOT appear in endpoint.lock or the worker's route "
+                "table. A bare `from %s import %s` never publishes: SUBCLASS "
+                "it inside '%s' instead (the subclass inherits the "
+                "declaration and is declared here). pgw#689: this skip used "
+                "to be silent, and an SDK diagnostics endpoint went missing "
+                "for a whole release because of it.",
+                obj_module, getattr(obj, "__name__", "<unknown>"),
+                getattr(module, "__name__", "<unknown>"),
+                obj_module, walked_package_name,
                 obj_module, getattr(obj, "__name__", "<unknown>"),
                 walked_package_name,
             )
