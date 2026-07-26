@@ -250,9 +250,37 @@ def _install_stack_dump_handler() -> None:
     postmortem.enable_fault_dump()
 
 
+def _establish_env_seal() -> Dict[str, Any]:
+    """pgw#694/#696 boot wiring (the ONE executor-side hook): refuse unknown
+    ``TORCH*`` env vars, pin the canonical config surface, and record the
+    effective seal — BEFORE the CUDA probe or any model/compile work, so
+    every graph this process ever mints or serves runs under the sealed
+    posture and the ck4 ``env_seal`` axis describes reality. A process that
+    cannot be sealed must not advertise: the caller exits typed."""
+    from . import env_seal
+
+    seal = env_seal.establish()
+    _log_startup_phase(
+        "env_seal",
+        status="ok",
+        digest=env_seal.seal_digest(seal),
+        config=seal.get("config"),
+    )
+    return seal
+
+
 def _run_main() -> int:
     _log_startup_phase("boot", status="starting")
     _install_stack_dump_handler()
+    # pgw#696: seal the execution environment first — before settings can
+    # pull torch-adjacent config and before the CUDA probe touches the
+    # device. An unsealable process refuses to start, naming the variable.
+    try:
+        _establish_env_seal()
+    except Exception as e:
+        _log_worker_fatal("env_seal", e, exit_code=1)
+        logger.error(str(e))
+        return 1
     try:
         settings = get_settings()
     except Exception as e:
