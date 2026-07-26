@@ -206,10 +206,12 @@ class SourceRepo(msgspec.Struct):
     conversion or training job. Endpoints embed this type in their Input struct
     as the reserved-name field ``source``.
 
-    Also reused verbatim (pgw#594) for the second, independent reserved
-    field ``text_encoder`` — e.g. a text-encoder repo wholly separate from
-    the primary ``source`` model. Materialized the same way, into
-    ``ctx.text_encoder_path``.
+    Also reused verbatim for the other independent reserved repo fields,
+    materialized the same way into their own ctx paths: ``text_encoder``
+    (pgw#594) -> ``ctx.text_encoder_path``, e.g. a text-encoder repo wholly
+    separate from the primary ``source`` model; and ``candidate`` (pgw#684)
+    -> ``ctx.candidate_path``, the arm a two-ref quality eval compares
+    against ``source`` instead of building from.
 
     Fields:
       - ref: "owner/repo" | "owner/repo:tag[#flavor...]" | "owner/repo@<checkpoint-id>"

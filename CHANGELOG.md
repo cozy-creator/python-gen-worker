@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.73.1 (2026-07-26)
+
+- **pgw#684: a fourth reserved repo field, `candidate`, for producer payloads
+  (te#121 two-ref quality eval).** The executor's reserved repo names were
+  `source`/`destination`/`text_encoder`; a producer payload can now also declare
+  `candidate: SourceRepo | None = None` and get it materialized the same way as
+  `source` — into `ctx.candidate_path` (`ctx.candidate` for the raw dict), fully
+  independent of `ctx.source_path`. This is the arm a two-ref eval COMPARES
+  against `source` rather than a component it builds from, which is what lets a
+  quality gate point at one of OUR OWN hub artifacts (a mirror, or a flavor the
+  quant ladder just produced) instead of only a public HF/Civitai coordinate.
+  Generic mechanism: gen-worker has no eval awareness. Absent field (every
+  existing endpoint) is byte-for-byte unchanged — no extra `ensure_local` call,
+  `ctx.candidate_path` stays `None`. The reserved-name set is still a hardcoded
+  literal list; pgw#690 tracks making it declarative.
+- Also re-covers reserved-repo materialization in `tests/`, which had NO coverage
+  after th#960/pgw#609 Phase 3b (`0b437aa`) swept pgw#594's two test files.
+- Corrects a `uv.lock` drift: 0.73.0 bumped `pyproject.toml` but left the lock's
+  `gen-worker` entry at 0.72.0, so `uv lock --check` failed on that commit.
+
 ## 0.73.0 (2026-07-26) — pgw#687: a cancel that never unwinds no longer absorbs the next job
 
 Cancelling a job mid-compute could wedge a worker permanently while every
