@@ -511,6 +511,32 @@ _MINT_ABANDON_GRACE_S = 60.0
 _MINT_SEED_MAX_PASSES = 8
 _MINT_POLL_INTERVAL_S = 1.0
 
+# pgw#677 background-turn gate: tenant requests always win the GPU; mint
+# seeds and shape-warm compiles run only in granted turns.
+#: Minimum continuous demand-blocked time before the background lane may
+#: STEAL one turn (the minimum-progress guarantee — background work still
+#: finishes under sustained tenant load).
+_BG_STEAL_FLOOR_S = 30.0
+#: A turn that ran against live demand "costs" this multiple of its own
+#: duration before the next steal — bounds the stolen duty cycle to
+#: 1/(1+factor) even when every turn is a multi-minute compile.
+_BG_STEAL_DEBT_FACTOR = 4.0
+#: Idle-granted COMPILE turns additionally wait for this much tenant quiet
+#: (arrivals cluster; this slashes the arrive-mid-compile collision).
+_BG_COMPILE_QUIESCENCE_S = 5.0
+#: How long one shape-warm thread admission attempt may wait before the job
+#: re-queues (TurnGateBusy) — bounds head-of-line blocking of the global
+#: warm queue; the persistent blocked-since clock keeps steals honest.
+_BG_THREAD_ADMIT_WAIT_S = 0.5
+
+
+def _bg_yield_enabled() -> bool:
+    """pgw#677: default ON; env kill switch for red-verification and
+    emergencies only. OFF restores the pre-fix shape: mint seeds idle-gate
+    + hold the bare run gate (inline compiles included) and shape-warm
+    compiles run ungated against tenant forwards."""
+    return os.environ.get("GEN_WORKER_BG_YIELD", "1").strip() != "0"
+
 
 def _cell_lane_matches(
     ref: str,
@@ -1951,6 +1977,16 @@ class ModelStore:
         return "download_failed"
 
 
+# pgw#686: base lanes speculated for pre-load pull-by-key cell lookups (no
+# pipeline exists yet to probe). Must cover every base lane a loader can
+# leave a pipeline on, or a cold worker can never pull the very cell its own
+# boot would mint — the ie#546 burst published on "w8a8" while lookups
+# speculated only ""/"fp8-hooks", so the armed cell was unreachable and all
+# 9 workers re-minted. Verify-on-receipt remains the arming gate; a wrong
+# speculation is only ever a benign extra lookup key.
+_SPECULATIVE_CELL_BASE_LANES = ("", "fp8-hooks", "w8a8")
+
+
 # ---------------------------------------------------------------------------
 # Endpoint instances (setup/warmup lifecycle)
 # ---------------------------------------------------------------------------
@@ -2102,6 +2138,13 @@ class _ClassRecord:
     # endpoint class declared ``reentrant=True``. One-job-per-GPU used to
     # mask this; multi-GPU permits and multi-residency do not.
     run_lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
+    # pgw#677: module-exclusion mutex between loop-side executors (tenant
+    # handler + adapter mutation, mint seed forwards — all already
+    # serialized under run_lock) and the loop-LESS shape-warm thread, whose
+    # compile executes these same modules. threading.Lock on purpose: the
+    # warm thread must take it without an event loop; loop-side users take
+    # it via a joined to_thread so the loop never blocks.
+    turn_mutex: threading.Lock = dc_field(default_factory=threading.Lock)
     # Content-keyed shared components this record holds (gw#479): released
     # (refcount--) at vacate so the entries become LRU/drain candidates.
     shared_keys: List[Any] = dc_field(default_factory=list)
@@ -2153,6 +2196,11 @@ class _MintAbandoned(Exception):
     """The background mint was asked to stop (adoption/vacate/shutdown)."""
 
 
+class _SeedPreempted(Exception):
+    """pgw#677: a tenant arrival cooperatively cancelled the in-flight mint
+    seed forward; the driver re-queues the unit and yields the turn."""
+
+
 @dataclass
 class _BackgroundMint:
     """One deferred boot self-mint (pgw#671, worker half of th#1187).
@@ -2180,6 +2228,10 @@ class _BackgroundMint:
     abandon: asyncio.Event = dc_field(default_factory=asyncio.Event)
     task: Optional["asyncio.Task[None]"] = None
     act: Optional[Any] = None  # the handed-over self_mint_compile Activity
+    # pgw#677: the RequestContext of the in-flight PREEMPTIBLE seed forward
+    # (idle-granted turns only — stolen turns run to completion). A tenant
+    # admission cancels it; the driver re-queues the unit.
+    seed_ctx: Optional[Any] = None
 
 
 def _eager_first_boot_enabled() -> bool:
@@ -2434,6 +2486,21 @@ class Executor:
         self.jobs: Dict[Tuple[str, int], _Job] = {}
         self._idle = asyncio.Event()
         self._idle.set()
+        # pgw#677 background-turn gate state. Threading primitives on
+        # purpose: the shape-warm thread must block on them without a
+        # running event loop. _bg_unit_mutex = single-flight across ALL
+        # background GPU consumers (mint seed units + shape-warm compiles);
+        # _bg_quiet mirrors _idle for thread-side waits; the debt floats
+        # implement the minimum-progress steal accounting.
+        self._bg_unit_mutex = threading.Lock()
+        self._bg_state_lock = threading.Lock()
+        self._bg_quiet = threading.Event()
+        self._bg_quiet.set()
+        self._bg_steal_debt_until = 0.0
+        self._bg_last_tenant_activity = 0.0
+        # First refused thread-turn admission (spans TurnGateBusy requeue
+        # cycles); None once admitted. The steal clock reads it.
+        self._bg_blocked_since: Optional[float] = None
         # pgw#674 rotation preload: stages the hub's desired NEXT instances
         # (download -> pinned host -> VRAM double-buffer) WHILE jobs compute.
         # Lifecycle feeds it desired state; job admit/finish pokes it.
@@ -3074,8 +3141,15 @@ class Executor:
         try:
             from . import cell_key
 
+            # pgw#686: the KEY lane resolves through the one shared brain
+            # (compile_cache.cell_base_lane — probe, then denoiser markers),
+            # never the raw probe alone: the raw probe is blind to the w8a8
+            # GEMM mode, so its key names a cell no mint ever publishes and
+            # the fleet's armed cells are never adopted. The raw probe stays
+            # authoritative for the wire lane descriptor below.
             key = cell_key.compute(
-                str(getattr(cfg, "family", "") or ""), lane, bucket,
+                str(getattr(cfg, "family", "") or ""),
+                compile_cache.cell_base_lane(target.pipeline), bucket,
                 contract=cfg.contract_digest(),
                 regional=bool(getattr(cfg, "regional", False)))
             requested_key, requested_axes = key.digest, key.axes
@@ -3087,6 +3161,28 @@ class Executor:
             target.contract_digest = contract_digest
             target.requested_cell_key = requested_key
             target.requested_cell_axes = requested_axes
+
+    @staticmethod
+    def _warn_cell_key_divergence(spec_name: str, target: "_CompileTargetRecord") -> None:
+        """pgw#686 invariant: a SELF-MINTED active cell must carry exactly
+        the key an identical worker would REQUEST (requested_cell_key) —
+        anything else is fleet-wide silent zero-adoption: the published
+        cell sits armed in the store while every cold pod re-mints (the
+        ie#546 burst: 10 pods, 9 simultaneous mints, 0 adoptions). Loud
+        and greppable; never fatal to serving."""
+        with target.state_lock:
+            active = str(target.active_compile_ref or "")
+            self_mint = bool(target.active_self_mint)
+            requested = str(target.requested_cell_key or "")
+        if not (self_mint and active and requested):
+            return
+        if active.rpartition("#")[2] == requested:
+            return
+        logger.error(
+            "cell_key_divergence: self-minted active cell %s is not this "
+            "runtime's requested key %s for %s — the published cell can "
+            "never be adopted by an identical worker; the lane/axis probes "
+            "disagree (pgw#686)", active, requested, spec_name)
 
     def _compile_guard_failed(
         self,
@@ -3252,6 +3348,11 @@ class Executor:
     ) -> bool:
         """Bind one live wrapper's first failure to exact target revocation."""
         from . import compile_cache, trt_engine
+
+        # pgw#677: every shape-warm/heal compile for this pipeline must run
+        # inside a background GPU turn (yield to tenant demand; mutual
+        # exclusion with tenant forwards on this instance).
+        self._wire_turn_gate(rec, target.pipeline)
 
         def callback(detail: str) -> None:
             self._compile_guard_failed(rec, target, detail)
@@ -3519,6 +3620,7 @@ class Executor:
                     "compile target %s has no runtime guard revocation signal; "
                     "advertising eager", incarnation_id,
                 )
+            self._warn_cell_key_divergence(spec.name, target)
             if target.active_compile_ref:
                 # pgw#622: post-proof, novel request shapes serve eager while
                 # the compiled path warms in the background; each completed
@@ -3608,7 +3710,9 @@ class Executor:
                 want_lane = self._mandatory_lane_of_bound(
                     wire_ref(binding) for binding in spec.models.values()
                 )
-                lanes = (want_lane,) if want_lane else ("", "fp8-hooks")
+                lanes = (
+                    (want_lane,) if want_lane
+                    else _SPECULATIVE_CELL_BASE_LANES)
                 for lane in lanes:
                     try:
                         digest = cell_key.compute(
@@ -5278,6 +5382,10 @@ class Executor:
                         mint_selections[pid] = sel
                     mint_pipes[pid] = candidate.pipeline
                     hot_swap.enable(candidate.pipeline)
+                    # pgw#677: the mint's own background compiles are the
+                    # first consumers of the turn gate — wire it before the
+                    # first seed can enqueue a warm job.
+                    self._wire_turn_gate(rec, candidate.pipeline)
                 rec.background_mint = _BackgroundMint(
                     spec=spec,
                     instance=instance,
@@ -6473,7 +6581,8 @@ class Executor:
         from . import cell_key
 
         candidate_keys: set[str] = set()
-        for lane in ((want_lane,) if want_lane else ("", "fp8-hooks")):
+        for lane in (
+                (want_lane,) if want_lane else _SPECULATIVE_CELL_BASE_LANES):
             try:
                 candidate_keys.add(cell_key.compute(
                     family, lane, want_bucket,
@@ -7340,7 +7449,7 @@ class Executor:
             for pid, pipe in bg.pipes.items()
         }
 
-        async def _forward(wj: Any) -> None:
+        async def _forward(wj: Any, *, preemptible: bool = False) -> None:
             handler_kwargs = await self._handler_kwargs(
                 wj.spec, bg.snapshots or {})
             with tempfile.TemporaryDirectory(prefix="gw-bgmint-") as tmp:
@@ -7359,27 +7468,92 @@ class Executor:
                 )
                 ctx._set_lane(self._served_lane(wj.spec))
                 ctx._set_config(self._effective_config(wj.spec))
-                await self._invoke_warmup(
-                    wj.spec, bg.instance, ctx, payload, handler_kwargs)
+                if preemptible:
+                    bg.seed_ctx = ctx
+                    # Registration race: demand that arrived after the turn
+                    # was granted but before this ctx existed must still
+                    # preempt — check it here, not only at admission.
+                    if not self._bg_quiet.is_set():
+                        ctx._cancel()
+                try:
+                    # pgw#677: the seed window forces EAGER routing — a seed
+                    # must never pay an inline Dynamo+Inductor compile while
+                    # it holds the run gate (the measured 3.5-7 min units).
+                    with hot_swap.mint_seed_window():
+                        await self._invoke_warmup(
+                            wj.spec, bg.instance, ctx, payload,
+                            handler_kwargs)
+                except CanceledError:
+                    if preemptible and ctx.cancelled:
+                        raise _SeedPreempted()
+                    raise
+                finally:
+                    bg.seed_ctx = None
 
-        async def _unit(wj: Any) -> None:
-            """One warm forward, tenant work first, single-flight with real
-            requests (rec.run_lock) — the interference bound is one eager
-            forward, and the actual graph compiles run on the router's own
-            warm thread (nice +10, dedicated CUDA stream)."""
+        async def _unit(wj: Any) -> bool:
+            """One warm forward inside a background GPU turn (pgw#677):
+            tenant work always wins the gate — the turn is granted when the
+            worker is tenant-idle (or stolen under the minimum-progress
+            rule), the forward routes EAGER by construction (seed window),
+            and the actual graph compiles run on the router's warm thread
+            in their own turns. False = preempted by a tenant arrival; the
+            caller re-queues the unit."""
             _checkpoint()
-            idle = asyncio.ensure_future(self.wait_idle())
-            stop = asyncio.ensure_future(bg.abandon.wait())
-            try:
-                await asyncio.wait(
-                    {idle, stop}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                for fut in (idle, stop):
-                    if not fut.done():
-                        fut.cancel()
-            _checkpoint()
-            async with rec.run_lock:
-                await _forward(wj)
+            if not _bg_yield_enabled():
+                # Legacy shape (kill switch / red-verification): idle-gate
+                # between units, bare run gate around the forward.
+                idle = asyncio.ensure_future(self.wait_idle())
+                stop = asyncio.ensure_future(bg.abandon.wait())
+                try:
+                    await asyncio.wait(
+                        {idle, stop}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for fut in (idle, stop):
+                        if not fut.done():
+                            fut.cancel()
+                _checkpoint()
+                async with rec.run_lock:
+                    await _forward(wj)
+                return True
+            async with self._bg_turn(rec, "seed", abort=bg.abandon) as stole:
+                _checkpoint()
+                try:
+                    # A stolen turn runs to completion (the steal already
+                    # paid its debt); an idle-granted turn yields to any
+                    # tenant arrival at the handler's next cancel poll.
+                    await _forward(wj, preemptible=not stole)
+                except _SeedPreempted:
+                    return False
+            return True
+
+        async def _seed_pass(jobs_now: List[Any]) -> None:
+            """One full-plan seed pass; preempted units re-queue within the
+            pass (a preemption is not plan progress — the pass semantics
+            stay 'every unit ran to completion once')."""
+            pending_units = list(jobs_now)
+            completed = 0
+            while pending_units:
+                wj = pending_units.pop(0)
+                act.phase(
+                    activity_mod.PHASE_WARMUP_FORWARD,
+                    min(completed + 1, len(jobs_now)), len(jobs_now))
+                try:
+                    done = await _unit(wj)
+                except _MintAbandoned:
+                    raise
+                except Exception as exc:
+                    if not is_cuda_oom(exc):
+                        raise
+                    logger.warning(
+                        "background mint seed %s OOMed (%s); backing off "
+                        "this pass", wj.spec.name, exc)
+                    if torch is not None and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    return
+                if done:
+                    completed += 1
+                else:
+                    pending_units.append(wj)
 
         # Phase 1 — SEED: run the full derived plan through the enabled
         # routers. Every novel signature serves EAGER here and enqueues its
@@ -7394,22 +7568,7 @@ class Executor:
                     f"mint seeding did not converge after "
                     f"{_MINT_SEED_MAX_PASSES} passes")
             before = _stats()
-            for idx, wj in enumerate(jobs, start=1):
-                act.phase(
-                    activity_mod.PHASE_WARMUP_FORWARD, idx, len(jobs))
-                try:
-                    await _unit(wj)
-                except _MintAbandoned:
-                    raise
-                except Exception as exc:
-                    if not is_cuda_oom(exc):
-                        raise
-                    logger.warning(
-                        "background mint seed %s OOMed (%s); backing off "
-                        "this pass", wj.spec.name, exc)
-                    if torch is not None and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    break
+            await _seed_pass(jobs)
             act.phase(activity_mod.PHASE_INDUCTOR_COMPILE)
             while True:
                 _checkpoint()
@@ -7440,7 +7599,8 @@ class Executor:
         for wj in jobs:
             if not _unproven_pids():
                 break
-            await _unit(wj)
+            while not await _unit(wj):
+                _checkpoint()
         proven_pids = [
             pid for pid in bg.pipes if pid not in set(_unproven_pids())
         ]
@@ -7518,6 +7678,12 @@ class Executor:
                     target.active_compile_snapshot_digest = str(
                         outcome.snapshot_digest)
                     target.active_self_mint = True
+                # pgw#686: the mint stamped the pipe's lane; re-advertise so
+                # the requested key names the key just published (the fleet
+                # adopts by requested key — a stale advertisement leaves the
+                # published cell unreachable), then assert the invariant.
+                self._refresh_compile_target(target)
+                self._warn_cell_key_divergence(spec.name, target)
                 if not self._bind_compile_guard(rec, target):
                     with target.state_lock:
                         target.active_compile_ref = ""
@@ -8424,6 +8590,12 @@ class Executor:
         )
         self.jobs[key] = job
         self._idle.clear()
+        # pgw#677: tenant demand exists NOW — no new background turn is
+        # granted (outside the minimum-progress rule) and any preemptible
+        # in-flight mint seed is cooperatively cancelled.
+        self._bg_quiet.clear()
+        self._bg_last_tenant_activity = time.monotonic()
+        self._preempt_background_seeds()
         logger.info("job admitted %s attempt=%d", run.request_id, run.attempt)
         await self._send(pb.WorkerMessage(job_accepted=pb.JobAccepted(
             request_id=run.request_id, attempt=run.attempt)))
@@ -8451,6 +8623,216 @@ class Executor:
             return True
         except asyncio.TimeoutError:
             return False
+
+    # ---- pgw#677 background-turn gate --------------------------------------
+    #
+    # Doctrine: tenant requests ALWAYS win the GPU; background work (mint
+    # seed units, shape-warm/heal compiles) yields. A background unit runs
+    # only inside a granted TURN: single-flight with every other background
+    # unit, holding the GPU permit + the owning instance's run gate, so it
+    # can never race a tenant forward on shared mutable state (the pgw#676
+    # SIGSEGV class) nor contend for the device (the measured 8.6x tenant
+    # degradation). Turns are granted when the worker is tenant-idle; under
+    # sustained load the minimum-progress rule STEALS one bounded turn per
+    # debt window so the mint still finishes (starvation both ways
+    # considered). A tenant arriving mid-turn waits at most ONE unit — and
+    # preempts idle-granted seed units cooperatively.
+
+    def _bg_admit(
+        self,
+        kind: str,
+        abort_check: Callable[[], None],
+        max_wait: Optional[float] = None,
+    ) -> bool:
+        """Thread-BLOCKING admission: wait until the worker is tenant-quiet
+        (plus compile quiescence) or the minimum-progress steal is due.
+        Returns ``stole``. ``abort_check`` raises to give up. With
+        ``max_wait`` set, raises ``hot_swap.TurnGateBusy`` instead of
+        waiting past it — the shape-warm thread re-queues rather than
+        head-of-line blocking every other router's jobs."""
+        attempt_start = time.monotonic()
+        blocked_since = attempt_start
+        # The steal clock spans requeue cycles (TurnGateBusy re-queues the
+        # job): continuous demand-block is measured from the FIRST refused
+        # admission, not per attempt.
+        if max_wait is not None:
+            with self._bg_state_lock:
+                if self._bg_blocked_since is not None:
+                    blocked_since = self._bg_blocked_since
+
+        def _admitted() -> None:
+            if max_wait is not None:
+                with self._bg_state_lock:
+                    self._bg_blocked_since = None
+
+        while True:
+            abort_check()
+            now = time.monotonic()
+            if self._bg_quiet.is_set():
+                quiet_for = now - self._bg_last_tenant_activity
+                if kind != "compile" or quiet_for >= _BG_COMPILE_QUIESCENCE_S:
+                    _admitted()
+                    return False
+                wait_s = max(_BG_COMPILE_QUIESCENCE_S - quiet_for, 0.0)
+            else:
+                with self._bg_state_lock:
+                    due = max(
+                        self._bg_steal_debt_until,
+                        blocked_since + _BG_STEAL_FLOOR_S,
+                    )
+                if now >= due:
+                    _admitted()
+                    return True
+                wait_s = due - now
+            if max_wait is not None and now - attempt_start >= max_wait:
+                with self._bg_state_lock:
+                    if self._bg_blocked_since is None:
+                        self._bg_blocked_since = blocked_since
+                from . import hot_swap
+
+                raise hot_swap.TurnGateBusy(kind)
+            if self._bg_quiet.is_set():
+                time.sleep(min(wait_s, 0.25))
+            else:
+                self._bg_quiet.wait(timeout=min(wait_s, 0.25))
+
+    def _bg_charge_debt(self, stole: bool, duration: float) -> None:
+        """A turn that ran against (or into) live tenant demand charges its
+        cost — the stolen background duty cycle stays bounded at
+        1/(1+debt_factor)."""
+        if stole or not self._bg_quiet.is_set():
+            with self._bg_state_lock:
+                self._bg_steal_debt_until = time.monotonic() + max(
+                    _BG_STEAL_FLOOR_S, _BG_STEAL_DEBT_FACTOR * duration)
+
+    @staticmethod
+    def _bg_mutex_acquire(
+        mutex: threading.Lock, abort_check: Callable[[], None],
+    ) -> None:
+        """Thread-blocking mutex acquire with an abort escape hatch."""
+        while not mutex.acquire(timeout=0.5):
+            abort_check()
+
+    async def _bg_locked(
+        self, mutex: threading.Lock, abort_check: Callable[[], None],
+    ) -> None:
+        """Loop-side acquire of a threading mutex, cancellation-safe: on
+        cancel the worker thread is JOINED and an acquire it completed is
+        released, so the mutex can never leak held."""
+        work = asyncio.create_task(
+            asyncio.to_thread(self._bg_mutex_acquire, mutex, abort_check))
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            try:
+                await work
+            except BaseException:
+                pass
+            else:
+                mutex.release()
+            raise
+
+    @asynccontextmanager
+    async def _bg_turn(
+        self,
+        rec: _ClassRecord,
+        kind: str,
+        abort: Optional[asyncio.Event] = None,
+    ) -> typing.AsyncIterator[bool]:
+        """Grant the mint driver one background GPU turn; yields ``stole``
+        (True when granted against live tenant demand under the
+        minimum-progress rule — stolen turns are not preemptible)."""
+
+        def abort_check() -> None:
+            if abort is not None and abort.is_set():
+                raise _MintAbandoned()
+            if self.draining:
+                if abort is not None:
+                    raise _MintAbandoned()
+                from . import hot_swap
+
+                raise hot_swap.TurnGateClosed("worker draining")
+
+        await self._bg_locked(self._bg_unit_mutex, abort_check)
+        try:
+            stole = await asyncio.to_thread(self._bg_admit, kind, abort_check)
+            turn_t0 = time.monotonic()
+            # Same order as the tenant path (permit -> run_lock ->
+            # turn_mutex): a tenant landing on ANOTHER instance mid-seed
+            # waits one bounded seed instead of contending for the device.
+            await self._gpu_semaphore.acquire()
+            try:
+                async with rec.run_lock:
+                    await self._bg_locked(rec.turn_mutex, abort_check)
+                    try:
+                        yield stole
+                    finally:
+                        rec.turn_mutex.release()
+                        self._bg_charge_debt(
+                            stole, time.monotonic() - turn_t0)
+            finally:
+                self._gpu_semaphore.release()
+        finally:
+            self._bg_unit_mutex.release()
+
+    def _bg_turn_threaded(
+        self, rec: _ClassRecord,
+    ) -> Callable[[str], typing.ContextManager[None]]:
+        """Thread-callable turn factory handed to hot-swap routers: the one
+        shape-warm thread blocks here — loop-free by construction — until
+        its turn is granted, then owns the instance's modules for exactly
+        one compile."""
+        from . import hot_swap
+
+        @contextmanager
+        def turn(kind: str) -> typing.Iterator[None]:
+            def abort_check() -> None:
+                if self.draining:
+                    raise hot_swap.TurnGateClosed("worker draining")
+
+            self._bg_mutex_acquire(self._bg_unit_mutex, abort_check)
+            try:
+                # Bounded admission: refused turns raise TurnGateBusy and
+                # the warm job RE-QUEUES — the one shape-warm thread never
+                # head-of-line blocks other routers' jobs behind one
+                # instance's demand-blocked compile.
+                stole = self._bg_admit(
+                    kind, abort_check, max_wait=_BG_THREAD_ADMIT_WAIT_S)
+                turn_t0 = time.monotonic()
+                self._bg_mutex_acquire(rec.turn_mutex, abort_check)
+                try:
+                    yield
+                finally:
+                    rec.turn_mutex.release()
+                    self._bg_charge_debt(stole, time.monotonic() - turn_t0)
+            finally:
+                self._bg_unit_mutex.release()
+
+        return turn
+
+    def _wire_turn_gate(self, rec: _ClassRecord, pipeline: Any) -> None:
+        """Hand this pipeline's hot-swap router the background-turn gate so
+        every shape-warm/heal compile serializes with — and yields to —
+        tenant work (pgw#677). Idempotent; no-op without a router."""
+        if not _bg_yield_enabled():
+            return
+        from . import hot_swap
+
+        router = hot_swap.router_of(pipeline)
+        if router is not None:
+            router.set_turn_gate(self._bg_turn_threaded(rec))
+
+    def _preempt_background_seeds(self) -> None:
+        """pgw#677: a tenant admission preempts the in-flight PREEMPTIBLE
+        mint seed at its next cooperative cancel point; the driver
+        re-queues the unit and the tenant takes the gate."""
+        for rec in self._classes.values():
+            bg = rec.background_mint
+            if bg is None:
+                continue
+            ctx = bg.seed_ctx
+            if ctx is not None and not ctx.cancelled:
+                ctx._cancel()
 
     async def abort_all(self, safe_message: str = "worker draining") -> None:
         for job in list(self.jobs.values()):
@@ -8795,10 +9177,31 @@ class Executor:
             # picks) still run concurrently; ``reentrant=True`` classes opt
             # out. Ordering: acquired AFTER the GPU permit and never held
             # while acquiring one — no cycle.
+            gate_t0 = time.monotonic()
             async with AsyncExitStack() as run_gate:
                 if spec.cls is not None and not spec.reentrant:
-                    await run_gate.enter_async_context(
-                        self._classes[spec.instance_key].run_lock)
+                    rec_gate = self._classes[spec.instance_key]
+                    await run_gate.enter_async_context(rec_gate.run_lock)
+                    # pgw#677: exclude the shape-warm thread's compile from
+                    # this request's whole mutation+forward window — the
+                    # ungated overlap was the pgw#676 SIGSEGV race and the
+                    # measured 8.6x mint-window degradation. Bounded: at
+                    # most one in-flight compile.
+                    await self._bg_locked(
+                        rec_gate.turn_mutex, lambda: None)
+                    run_gate.callback(rec_gate.turn_mutex.release)
+                    gate_wait = time.monotonic() - gate_t0
+                    if gate_wait >= 0.001:
+                        # pgw#677: time queued behind the instance gate
+                        # (typically a background mint/compile turn) is NOT
+                        # this request's compute — attribute it as its own
+                        # pre-handler stage and restart the compute clock,
+                        # so runtime_ms stops billing mint contention to
+                        # the tenant (measured: 16.9s reported for 1.95s of
+                        # real work).
+                        ctx._stages.record_pre(
+                            "instance_gate_wait", gate_wait)
+                        started = time.monotonic()
                 with self.store.residency.executing(*exec_refs, *adapter_refs):
                     active: List[Tuple[str, Any]] = []
                     try:
@@ -9566,8 +9969,12 @@ class Executor:
         self.preloader.poke()
 
     def _maybe_idle(self) -> None:
+        # pgw#677: compile-turn quiescence keys off the last tenant
+        # admission OR finish — arrivals cluster around completions.
+        self._bg_last_tenant_activity = time.monotonic()
         if not self.in_flight_keys():
             self._idle.set()
+            self._bg_quiet.set()
 
 
 class _DeadlineExceeded(Exception):

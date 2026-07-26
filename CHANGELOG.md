@@ -1,5 +1,91 @@
 # Changelog
 
+## 0.70.0 (2026-07-26) — pgw#677: tenant work always wins the GPU — the background mint yields
+
+th#1187's promise was "serve at eager speed while the compile mint runs in
+background". Measured reality (ie#546 retag cycle): the mint's 18 warm units
+monopolized the per-instance run gate — 0 renders in 19 min on a fresh L4
+release, every concurrent request degraded ~8.6x (completions landing exactly
+as mint units freed the gate), and on sm_86 the ungated warm-thread compile
+racing a tenant LoRA-branch forward SIGSEGV'd the worker process (pgw#676's
+confirmed frame: `w8a8_lora._forward_with_branch` concurrent with
+`hot_swap._run_warm`'s `compile_wrapper`). Two defects in one lock: the run
+gate was too WIDE for latency (a "seed" unit could inline-compile for minutes
+while holding it) and too NARROW for safety (the real compiles ran outside it,
+against live tenant forwards).
+
+- **Background-turn gate (executor)**: mint seed units AND shape-warm/heal
+  compiles now run only inside a granted background TURN — single-flight with
+  each other, holding the GPU permit + the instance's run gate + a new
+  per-instance `turn_mutex`, granted only when the worker is tenant-idle
+  (compile turns additionally wait a short quiescence window). A tenant
+  request can wait at most ONE bounded background unit, ever.
+- **Preemption**: a tenant admission cooperatively cancels the in-flight
+  idle-granted seed forward (the driver re-queues the unit), so the boundary
+  a tenant waits on is the handler's next cancel poll — not the unit.
+- **Seeds never compile inline**: inside the new `hot_swap.mint_seed_window`
+  a novel signature always routes EAGER + background enqueue, even on a
+  degraded router. The VRAM-headroom degrade-to-inline-compile is retired for
+  turn-gated routers (the warm thread ensures headroom inside its exclusive
+  turn); ungated legacy routers keep it.
+- **Race exclusion (the pgw#676 class)**: the shape-warm thread's compile
+  executes the shared modules only while holding the instance `turn_mutex`,
+  which the tenant path holds across adapter mutation + handler — concurrent
+  branch-forward/compile execution is structurally impossible. The gate is
+  loop-free (threading primitives) so the warm thread needs no event loop.
+- **Minimum progress under sustained load**: a background lane blocked by
+  continuous tenant demand STEALS one bounded turn per debt window
+  (`_BG_STEAL_FLOOR_S`, duty cycle capped by `_BG_STEAL_DEBT_FACTOR`); stolen
+  turns are not preemptible, so an 18-unit mint always finishes.
+- **Honest metrics**: time a tenant request spends queued behind the instance
+  gate is attributed to a new `instance_gate_wait` stage and excluded from
+  `runtime_ms` — mint contention no longer bills as tenant compute (measured:
+  16.9s reported for 1.95s of real work).
+- Kill switch `GEN_WORKER_BG_YIELD=0` restores the pre-fix shape
+  (red-verification and emergencies only).
+
+Tapes: `tests/test_mint_gate_pgw677.py` — starvation shape red-verified via
+the kill switch (tenant queued behind an inline-compiling mint unit), the
+pgw#676 overlap red-verified impossible post-fix with the bounded wait
+attributed, mint completion under a sustained tenant stream, and the
+seed-window routing contract.
+
+Also in this train: **pgw#686** — cell adoption key parity (one base-lane
+brain for requested keys, mint stamps, lookups and the local store), the
+fix behind burst pods re-minting instead of adopting.
+
+## 0.69.0 (2026-07-26) — pgw#685: one fused triton kernel for the nvfp4 activation quantizer
+
+The `#nvfp4-w4a4` lane's per-call activation quantization was ~8 pure-torch
+passes (fp32 upcast, per-16-block amax, e4m3 scale, divide, `searchsorted`
+e2m1 cast, nibble pack, then a pad/permute swizzle of the scales into the
+cuBLAS blocked layout). gw#540 measured that chain — not the fp4 GEMM — as the
+whole reason the lane LOST to bf16. It is now ONE triton kernel.
+
+- **`gen_worker.models.nvfp4_quant`** owns the nvfp4 format primitives (moved
+  out of `w4a4.py`, which re-exports them unchanged) plus the fused kernel:
+  per-16 amax → e4m3 block scale → e2m1 RTN cast → nibble pack → block-scale
+  store **directly at its cuBLAS blocked-layout address**, in one pass.
+  Measured on RTX 5090 (sm_120) and B200 (sm_100): the quant step 6-36x
+  faster, taking the lane from 0.807x → 2.043x bf16 eager and 2.045x → 2.472x
+  compiled on sm_120, and 1.03x → 1.24x on sm_100 (pgw#682).
+- **Arch-portable by construction**: triton JITs per arch, so one source covers
+  sm_100/103 (B200/B300) and sm_120/121 (RTX 50xx / PRO 6000) — no nvcc
+  extension build, no per-family port. Launch config from the measured sweep:
+  128 blocks/program on both arches, 8 warps on sm_120/121 vs 4 on sm_100/103.
+- **`tl.math.div_rn`, deliberately.** Triton's `/` lowers to an approximate
+  divide; a 1-ulp drift lands values exactly on the 1.75 e2m1 tie boundary and
+  the ties-round-UP rule then flips a whole 4-bit code (0.16% of nibbles, 0.6%
+  output drift — small enough to read as noise).
+- **Arming is gated on BIT-IDENTITY against the pure-torch chain, not on a
+  tolerance**, on three probe shapes at load. The existing load-time numerics
+  self-check cannot see that class of bug (its threshold is 2e-2). A triton
+  release that changes rounding, or an arch we have not measured, falls back to
+  the reference chain rather than serving drifted numerics — never a refusal.
+- **Compile-safe**: registered as a `torch.library.custom_op` with an explicit
+  schema and a `register_fake`, so it is traced as an opaque call instead of
+  graph-breaking. Registration happens at load, never mid-trace.
+
 ## 0.68.1 (2026-07-26) — pgw#678 the lane handle is not the pipeline; pgw#683 shared-component identity carries the EFFECTIVE compute dtype
 
 Two P0s on the composition/residency path, both found live on the sdxl retag
