@@ -1012,6 +1012,11 @@ class IntentRegistry:
                 for target in executor.compile_targets()
                 for name in target.function_names
             }
+            # pgw#671 (th#1187 wire contract): per-function serving tier —
+            # "eager" | "compiled" — carried only on READY capabilities; ""
+            # is reserved for pre-0.65 workers.
+            tiers_fn = getattr(executor, "serving_tiers", None)
+            tiers: dict[str, str] = tiers_fn() if callable(tiers_fn) else {}
             config_state = int(self._config_application.state)
             target_generation = int(
                 self._config_application.target_generation or executor.runtime_config.generation
@@ -1071,6 +1076,11 @@ class IntentRegistry:
                         ],
                         compile_target_incarnation_id=compile_targets.get(name, ""),
                         state=state,
+                        serving_tier=(
+                            tiers.get(name, "")
+                            if state == pb.FUNCTION_CAPABILITY_STATE_READY
+                            else ""
+                        ),
                     )
                 )
         old = b"".join(item.SerializeToString(deterministic=True) for item in self._capabilities)

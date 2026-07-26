@@ -700,7 +700,7 @@ class ModelIdentity(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., snapshot_digest: _Optional[bytes] = ..., tier: _Optional[_Union[ResidencyTier, str]] = ..., residency_generation: _Optional[int] = ...) -> None: ...
 
 class FunctionCapability(_message.Message):
-    __slots__ = ("function_name", "release_id", "config_generation", "binding_digest", "lane", "models", "compile_target_incarnation_id", "state")
+    __slots__ = ("function_name", "release_id", "config_generation", "binding_digest", "lane", "models", "compile_target_incarnation_id", "state", "serving_tier")
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
     CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
@@ -709,6 +709,7 @@ class FunctionCapability(_message.Message):
     MODELS_FIELD_NUMBER: _ClassVar[int]
     COMPILE_TARGET_INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
+    SERVING_TIER_FIELD_NUMBER: _ClassVar[int]
     function_name: str
     release_id: str
     config_generation: int
@@ -717,7 +718,8 @@ class FunctionCapability(_message.Message):
     models: _containers.RepeatedCompositeFieldContainer[ModelIdentity]
     compile_target_incarnation_id: str
     state: FunctionCapabilityState
-    def __init__(self, function_name: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., binding_digest: _Optional[bytes] = ..., lane: _Optional[str] = ..., models: _Optional[_Iterable[_Union[ModelIdentity, _Mapping]]] = ..., compile_target_incarnation_id: _Optional[str] = ..., state: _Optional[_Union[FunctionCapabilityState, str]] = ...) -> None: ...
+    serving_tier: str
+    def __init__(self, function_name: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., binding_digest: _Optional[bytes] = ..., lane: _Optional[str] = ..., models: _Optional[_Iterable[_Union[ModelIdentity, _Mapping]]] = ..., compile_target_incarnation_id: _Optional[str] = ..., state: _Optional[_Union[FunctionCapabilityState, str]] = ..., serving_tier: _Optional[str] = ...) -> None: ...
 
 class ConfigClassMask(_message.Message):
     __slots__ = ("parameters", "bindings", "boot")

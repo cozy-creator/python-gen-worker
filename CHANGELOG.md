@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.65.0 (2026-07-25) — eager-first boot: READY in ~2 min, the mint compiles in the background
+
+pgw#671 (worker half of th#1187, Paul's ruling): the startup ladder no
+longer serializes `pipeline_loading -> self_mint_compile -> ready`. On an
+eager-compatible lane whose boot would self-mint, the worker goes READY at
+the **EAGER tier** as soon as weights load and the derived warm plan's
+eager pass completes, serves real requests at eager speed, and runs the
+whole mint as a background task through the pgw#622 hot-swap routers —
+then hot-swaps to compiled when the cell arms (its own mint finishing, or
+a peer's upload adopted opportunistically). The pre-0.65 behavior — first
+render blocked 15–30 min behind the full trace/proof — is gone.
+
+- **Wire contract (th#1187):** `FunctionCapability` gains field 9,
+  `serving_tier` (`"" | "eager" | "compiled"`), carried on READY only. A
+  tier field, deliberately NOT a new state enum value — an old hub ignores
+  it and keeps dispatching (fail-closed to today's behavior). The tier
+  flips `eager -> compiled` on arm with no capability-state flap.
+  "Serving eager while minting" needs no new signal: it is the hub-derived
+  pair (READY + `self_mint_compile` activity running); the activity now
+  outlives READY and terminates from the background driver.
+- **Background driver:** seeds the FULL derived plan through the routers
+  (each novel signature serves eager and compiles on the router's warm
+  thread — nice +10, dedicated CUDA stream, VRAM-headroom guarded), waits
+  for the compiles, proves with the standard cold-proof (a successful
+  compiled call on a fresh capture), packs and publishes via the existing
+  attested gate, and activates the identity on the live targets.
+  Interference bound: tenant work is preferred (idle-gated units,
+  single-flight with real requests) — at most one eager forward.
+- **Adopt-on-arm, clean abandonment:** a peer cell arriving mid-build
+  (ModelOp ADOPT) abandons the local build cleanly — finish the current
+  unit or discard wholesale; nothing half-packed is ever advertised or
+  published. Vacate/shutdown abandon the same way.
+- **A mint failure never un-serves:** the function stays READY(eager) for
+  the process with a typed activity failure on the wire.
+- **Unchanged on purpose:** mandatory-quantized lanes (w8a8/w4a4) keep the
+  sequential fail-closed boot (eager is not a production lane there,
+  gw#586); delivered-cell boots keep their ~0-cost sequential proof;
+  0.64.0's warm-inheritance refusal while a self-mint capture is pending
+  stays (purely local sequencing — the capture must trace every graph).
+- Kill switch: `GEN_WORKER_EAGER_FIRST_BOOT=0` restores the 0.64.0
+  ladder.
+
 ## 0.64.0 (2026-07-25) — the warm tax dies: contract-keyed warm runs; wall clocks become liveness
 
 The P0 for the sdxl multi-checkpoint stress test (pgw#654 warm-tax fix,
