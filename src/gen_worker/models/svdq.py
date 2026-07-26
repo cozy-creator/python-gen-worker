@@ -76,6 +76,19 @@ class SvdqPin:
 _PIN_MATRIX: tuple[SvdqPin, ...] = (
     # 1.2.x: CI-pinned to diffusers 0.36 (verified live in gw#405).
     SvdqPin((1, 2), (0, 36), (0, 37)),
+    # 1.3.x <-> diffusers 0.39: UNVERIFIED — static signature check only, live
+    # A/B still owed (th#1211 G4/G4a). Admitted add-then-verify per gw#405's own
+    # precedent; inert until a nunchaku 1.3 wheel is actually installed, which
+    # today is only th#1211's benchmark-only serve variant.
+    # Static basis: nunchaku's forward and diffusers 0.39's HAVE drifted
+    # positionally (nunchaku keeps txt_seq_lens, 0.39 dropped it and added
+    # additional_t_cond, so position 6+ misbinds on a positional call), BUT
+    # diffusers 0.39's QwenImagePipeline calls the transformer with keyword
+    # arguments only and never passes either drifted param — so the gw#405
+    # positional hazard is void and no unexpected-kwarg error can fire on the
+    # t2i path. Numerical equivalence is NOT established by that check.
+    # t2i only: QwenImageEditPlusPipeline was not checked.
+    SvdqPin((1, 3), (0, 39), (0, 40)),
 )
 
 
