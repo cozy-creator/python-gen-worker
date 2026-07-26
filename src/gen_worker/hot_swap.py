@@ -26,14 +26,52 @@ import os
 import queue
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, ContextManager, Iterator, Optional, Tuple
 from . import compile_cache
 
 logger = logging.getLogger(__name__)
 
 EAGER = "eager"
 COMPILED = "compiled"
+
+
+class TurnGateClosed(Exception):
+    """The executor's background-turn gate is gone (shutdown/drain); the
+    warm job is dropped, its signature stays eager (pgw#677)."""
+
+
+class TurnGateBusy(Exception):
+    """No background turn within the bounded admission window (live tenant
+    demand). The warm job re-queues instead of blocking the ONE shape-warm
+    thread — a blocked compile for one instance must never head-of-line
+    delay every other router's jobs (pgw#677)."""
+
+
+# pgw#677: the background mint's seed forwards run inside this window. A
+# novel signature seen here must NEVER compile inline — the seed holds the
+# per-instance run gate, and an inline Dynamo+Inductor compile turns a
+# ~seconds eager forward into a minutes-long gate hold (the measured
+# 3.5-7 min warm units that starved every tenant request). Inside the
+# window, route() forces EAGER + background enqueue regardless of the
+# concurrent flag or VRAM headroom.
+_MINT_SEED: ContextVar[bool] = ContextVar("gw_mint_seed_window", default=False)
+
+
+@contextlib.contextmanager
+def mint_seed_window() -> Iterator[None]:
+    """Mark the current context (and its to_thread descendants) as a mint
+    seed forward (pgw#677)."""
+    token = _MINT_SEED.set(True)
+    try:
+        yield
+    finally:
+        _MINT_SEED.reset(token)
+
+
+def in_mint_seed_window() -> bool:
+    return _MINT_SEED.get()
 
 # Concurrent warm transient ~= one extra batch of activations. Conservative
 # free-VRAM floor; below it the request degrades to sequential (never OOM).
@@ -175,6 +213,10 @@ class _WarmJob:
     device: Optional[int]
     grad_mode: str  # "grad" | "no_grad" | "inference"
     autocast_dtype: Optional[Any]
+    # pgw#677: the executor's background GPU turn — the compile executes
+    # ONLY inside it (yields to tenant demand; mutually exclusive with
+    # tenant forwards on the owning instance). None = ungated legacy.
+    turn: Optional[Callable[[str], ContextManager[None]]] = None
 
 
 class Router:
@@ -205,6 +247,18 @@ class Router:
         self.healing: set = set()
         self.volatile: set = set()
         self.guard_miss_counts: dict = {}
+        # pgw#677: executor-provided background-turn factory. When set,
+        # every warm job for this router executes inside a turn, and
+        # route() stops degrading novel signatures to inline compiles on
+        # tight VRAM headroom (the warm thread ensures headroom inside its
+        # exclusive turn instead).
+        self.turn_gate: Optional[Callable[[str], ContextManager[None]]] = None
+
+    def set_turn_gate(
+        self, turn_gate: Optional[Callable[[str], ContextManager[None]]],
+    ) -> None:
+        with self.lock:
+            self.turn_gate = turn_gate
 
     def enable(self, on_warmed: Optional[Callable[[], None]] = None) -> bool:
         if self.fail_closed:
@@ -244,6 +298,7 @@ class Router:
         (sequential compile on a miss — today's behavior); EAGER serves the
         original while the background warm compiles this signature."""
         sig = (label, signature(args, kwargs))
+        seed = _MINT_SEED.get()
         with self.lock:
             # pgw#680: guard-miss verdicts outrank the concurrent gate — a
             # sig mid-heal (or proven per-request-volatile) serves eager on
@@ -253,7 +308,13 @@ class Router:
                 return EAGER, sig
             if sig in self.healing:
                 return EAGER, sig
-            if not self.concurrent or self.closed:
+            if self.closed:
+                return COMPILED, sig
+            # pgw#677: a mint seed forward holds the per-instance run gate —
+            # it must never pay an inline compile there. The seed's only job
+            # is vocabulary discovery: EAGER + background enqueue, even when
+            # concurrent routing is off for ordinary requests.
+            if not self.concurrent and not seed:
                 return COMPILED, sig
             if sig in self.warm:
                 return COMPILED, sig
@@ -269,18 +330,24 @@ class Router:
                 self.concurrent = False
                 return COMPILED, sig
             device = _first_cuda_device(args, kwargs)
-            if not _headroom_ok(device):
+            # pgw#677: with a turn gate the warm thread owns the device while
+            # it compiles (no concurrent transient to protect against) and
+            # ensures headroom itself; only ungated legacy routers keep the
+            # degrade-to-inline-compile fallback — and never for seeds.
+            if (self.turn_gate is None and not seed
+                    and not _headroom_ok(device)):
                 logger.warning(
                     "hot-swap: tight VRAM headroom for novel %s signature; "
                     "degrading to sequential compile-then-serve", label)
                 return COMPILED, sig
             self.pending.add(sig)
+            turn = self.turn_gate
         try:
             job = _WarmJob(
                 router=self, label=label, sig=sig, compiled=compiled,
                 args=_dummy_value(args), kwargs=_dummy_value(kwargs),
                 device=device, grad_mode=_grad_mode(),
-                autocast_dtype=_autocast_dtype(),
+                autocast_dtype=_autocast_dtype(), turn=turn,
             )
         except Exception:
             logger.warning(
@@ -348,12 +415,14 @@ class Router:
                 return "healing"
             self.healing.add(sig)
             self.pending.add(sig)
+            turn = self.turn_gate
         try:
             job = _WarmJob(
                 router=self, label=label, sig=sig, compiled=compiled,
                 args=_dummy_value(args), kwargs=_dummy_value(kwargs),
                 device=_first_cuda_device(args, kwargs),
                 grad_mode=_grad_mode(), autocast_dtype=_autocast_dtype(),
+                turn=turn,
             )
         except Exception:
             logger.warning(
@@ -440,12 +509,69 @@ def _worker_loop() -> None:
             _QUEUE.task_done()
 
 
+def _ensure_headroom(device: Optional[int]) -> None:
+    """Best-effort VRAM headroom for the warm forward: inside an exclusive
+    background turn the only reclaimable pressure is allocator cache
+    (pgw#677 — this replaces route()'s degrade-to-inline-compile). A real
+    OOM is still caught per-signature by the caller."""
+    if device is None:
+        return
+    try:
+        import torch
+
+        if not _headroom_ok(device):
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def _run_warm(job: _WarmJob) -> None:
     router = job.router
     with router.lock:
         if router.closed:
             router.pending.discard(job.sig)
             return
+    if job.turn is not None:
+        # pgw#677: the compile + dummy forward execute the SAME modules the
+        # serving path runs (and inductor benchmarks on the same device) —
+        # ungated, that raced live tenant forwards: measured 8.6x tenant
+        # latency during mints and the pgw#676 sm_86 SIGSEGV
+        # (_forward_with_branch concurrent with compile_wrapper). The turn
+        # yields to tenant demand and excludes tenant forwards for the
+        # bounded duration of ONE compile.
+        try:
+            with job.turn("compile"):
+                with router.lock:
+                    if router.closed:
+                        router.pending.discard(job.sig)
+                        return
+                _ensure_headroom(job.device)
+                _run_warm_gated(job)
+        except TurnGateBusy:
+            # Live tenant demand: re-queue rather than block the one warm
+            # thread — other routers' jobs keep flowing; this one retries
+            # (and is eventually admitted by idle or the steal rule).
+            if not _submit(job):
+                with router.lock:
+                    router.pending.discard(job.sig)
+                    router.healing.discard(job.sig)
+                logger.warning(
+                    "hot-swap: warm queue full while yielding to tenant "
+                    "demand; %s stays eager (retried on a later request)",
+                    job.label)
+        except TurnGateClosed:
+            with router.lock:
+                router.pending.discard(job.sig)
+                router.healing.discard(job.sig)
+            logger.info(
+                "hot-swap: background turn gate closed; dropping warm job "
+                "for %s (stays eager)", job.label)
+        return
+    _run_warm_gated(job)
+
+
+def _run_warm_gated(job: _WarmJob) -> None:
+    router = job.router
     t0 = time.monotonic()
     try:
         with contextlib.ExitStack() as stack:
