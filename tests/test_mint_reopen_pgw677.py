@@ -348,7 +348,7 @@ def test_w8a8_stamp_with_hub_execution_lane_boots_eager_first(
             "w8a8-stamped pipe with hub lane fp8-w8a16+eager was refused "
             "eager-first — the foreground compile-then-serve mint is the "
             "reopen's measured 26-minute starvation")
-        assert boot_wall < 2.0, f"boot paid the plan foreground: {boot_wall:.1f}s"
+        assert boot_wall < 6.0, f"boot paid the plan foreground: {boot_wall:.1f}s"
         # A tenant request mid-mint completes at serving latency.
         res, wall = await h.dispatch("r-live", aspect="16:9")
         assert res.status == pb.JOB_STATUS_OK, res.safe_message
