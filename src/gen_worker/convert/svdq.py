@@ -27,11 +27,17 @@ from ..net import hf
 
 logger = logging.getLogger(__name__)
 
-# R2 single-PUT cap (clone.py reshards bigger files) — but sharding a nunchaku
-# checkpoint strips the __metadata__ its loader needs, so oversize svdq
-# artifacts are refused until component-level reassembly lands (qwen-image
-# files are 11.5-13.1 GB; z-image/flux fit). Tracked in the qwen rollout issue.
-MAX_SVDQ_FILE_BYTES = 5 * 1000**3
+# Aligned with the hub's real per-file ceiling: the checkpoint-commit grant
+# allows 64 GiB/file (tensorhub checkpointGrantMaxBytesPerFile), and uploads go
+# out as presigned MULTIPART parts (hub issues part_urls/part_size), so a large
+# single file is just more parts. The old 5 GB value cited an "R2 single-PUT
+# cap" that does not exist in this stack — it wrongly blocked every nunchaku
+# family except z-image (qwen-image 11.5-13.1 GB, flux.1 6.8-7.0 GB).
+# Sharding a nunchaku checkpoint WOULD strip the __metadata__ its loader needs,
+# which is why it must publish whole — and publishing whole is allowed. The
+# svdq lane never reaches clone.py's resharder: build_svdq_flavor_tree hardlinks
+# the file itself, and publish_flavors goes straight to the hub client. th#1211.
+MAX_SVDQ_FILE_BYTES = 64 * 1024**3
 
 
 def svdq_flavor_label(art: SvdqArtifact) -> str:
@@ -62,9 +68,10 @@ def build_svdq_flavor_tree(
     size = svdq_file.stat().st_size
     if size > MAX_SVDQ_FILE_BYTES:
         raise ValueError(
-            f"svdq file {svdq_file.name} is {size / 1e9:.1f} GB > single-PUT "
-            f"cap; sharding would strip nunchaku metadata — component-level "
-            f"reassembly is not implemented yet (gw#415 follow-up)"
+            f"svdq file {svdq_file.name} is {size / 1e9:.1f} GB > "
+            f"{MAX_SVDQ_FILE_BYTES / 1024**3:.0f} GiB hub per-file ceiling; it "
+            f"must publish whole (sharding strips nunchaku metadata), so there "
+            f"is no fallback for a file this large"
         )
     if component is None:
         component = next(

@@ -620,9 +620,11 @@ def _single_file_checkpoint(path: Path) -> Optional[Path]:
     ``*.safetensors`` when no ``model_index.json``/``config.json`` exists
     (e.g. Illustrious-XL, civitai checkpoints).
 
-    Mirrors reshard any >5GB safetensors into byte-offset shards + an
-    ``*.safetensors.index.json`` (R2 single-PUT cap), so a big single-file
-    checkpoint arrives as N shards. Those are reassembled once into the
+    Mirrors reshard oversize safetensors into byte-offset shards + an
+    ``*.safetensors.index.json`` (the HF shard convention — NOT an "R2
+    single-PUT cap"; no such cap exists here, uploads are multipart and the
+    hub grants 64 GiB/file), so a big single-file checkpoint arrives as N
+    shards. Those are reassembled once into the
     original file (mmap-backed, ~disk-copy cost) and cached in the snapshot
     dir — ``from_single_file`` only takes one file."""
     if path.is_file():

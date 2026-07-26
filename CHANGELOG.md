@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.67.3 (2026-07-26) — th#1211: the svdq 5 GB guard cited a cap that does not exist
+
+`MAX_SVDQ_FILE_BYTES` was `5 * 1000**3`, justified in-comment as an "R2
+single-PUT cap". There is no such cap in this stack: the hub's
+checkpoint-commit grant allows **64 GiB/file**
+(`checkpointGrantMaxBytesPerFile`), uploads leave as presigned **multipart**
+parts (the hub issues `part_urls`/`part_size`), and a 46 GB monolithic
+`ltx-2.3-22b-dev.safetensors` has already been published raw through this
+platform. The guard therefore refused **every** nunchaku-supported family
+except z-image-turbo — qwen-image at 11.5–13.1 GB and flux.1 at 6.8–7.0 GB
+were both blocked, even though the comment claimed flux fit.
+
+- `MAX_SVDQ_FILE_BYTES` is now `64 * 1024**3`, aligned with the hub's real
+  per-file ceiling, so it still refuses a genuinely absurd file. Comment
+  cites `checkpointGrantMaxBytesPerFile` so the next reader does not inherit
+  the myth.
+- The real constraint the guard was groping for is unchanged and still
+  honored: a nunchaku checkpoint must publish **whole**, because resharding
+  strips the `__metadata__` its loader reads. Verified the svdq lane never
+  reaches `clone.py`'s resharder — `build_svdq_flavor_tree` hardlinks the
+  single file itself, and `publish` → `publish_flavors` → `HubClient` goes
+  straight to the hub's part plan.
+- Same myth corrected in `models/loading.py`'s `_single_file_checkpoint`
+  docstring.
+
+Unblocks: mirroring the official nunchaku qwen-image fp4 artifact (th#1211's
+speed benchmark) and flux.1's 7 GB artifacts.
+
+### th#1211 G4: `_PIN_MATRIX` gains nunchaku 1.3 <-> diffusers 0.39 (UNVERIFIED)
+
+The matrix had ONE row (nunchaku 1.2 <-> diffusers 0.36), so
+`check_svdq_stack_versions` raised for every other nunchaku minor. That left no
+legal svdq stack for qwen-image, which serves diffusers 0.39: nunchaku 1.2.1 is
+in the matrix but demands 0.36 and caps at torch 2.11, while nunchaku 1.3.0dev
+has the torch-2.12/cu13.0 wheel but was refused outright.
+
+- New row `SvdqPin((1, 3), (0, 39), (0, 40))`, marked **UNVERIFIED** in-comment:
+  admitted on a STATIC signature check, with the live A/B still owed (closes
+  during th#1211's P2). Add-then-verify follows gw#405's own precedent, and the
+  row is inert until a nunchaku 1.3 wheel is actually installed — today only
+  th#1211's benchmark-only serve variant.
+- The static basis, recorded so the live check knows what to confirm: nunchaku's
+  `forward` and diffusers 0.39's have drifted positionally (nunchaku keeps
+  `txt_seq_lens`, 0.39 dropped it and added `additional_t_cond`, so position 6
+  onward misbinds on a positional call) — but diffusers 0.39's
+  `QwenImagePipeline` calls the transformer with **keyword arguments only** and
+  passes neither drifted param, so the gw#405 positional hazard is void and no
+  unexpected-kwarg error can fire on the t2i path. **Numerical equivalence is
+  NOT established by this.** t2i only; `QwenImageEditPlusPipeline` unchecked.
+- The 1.2 row is untouched and still rejects diffusers 0.39; the wheel-tag torch
+  guard still fires (a torch2.12 wheel on torch 2.13 raises, as before).
+
 ## 0.67.1 (2026-07-26) — pgw#675 override dtype + pgw#676 native-crash attribution (the sdxl retag blockers)
 
 ### pgw#675: a component override now loads at the dtype the base tree's LOAD LANE computes at
