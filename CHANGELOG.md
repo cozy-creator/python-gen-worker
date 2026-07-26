@@ -50,6 +50,10 @@ pgw#676 overlap red-verified impossible post-fix with the bounded wait
 attributed, mint completion under a sustained tenant stream, and the
 seed-window routing contract.
 
+Also in this train: **pgw#686** — cell adoption key parity (one base-lane
+brain for requested keys, mint stamps, lookups and the local store), the
+fix behind burst pods re-minting instead of adopting.
+
 ## 0.69.0 (2026-07-26) — pgw#685: one fused triton kernel for the nvfp4 activation quantizer
 
 The `#nvfp4-w4a4` lane's per-call activation quantization was ~8 pure-torch
