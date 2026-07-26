@@ -27,6 +27,7 @@ from gen_worker import (
     endpoint,
 )
 from gen_worker import compile_cache as cc
+from gen_worker import guard_closure
 from gen_worker.models import provision
 from gen_worker.api.binding import Hub
 from gen_worker.api.binding import wire_ref
@@ -1412,6 +1413,13 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     assert cc.cell_quarantined_in_process(f"root/family-{FAMILY}#{mint_key}")
 
 
+def _sim_guard_closure(pipe, cfg, label=""):
+    """A closed pgw#681 manifest for rigs whose compiles never touch dynamo."""
+    return {"v": 1, "graphs": [{"target": "transformer", "code": "sim",
+                                "entry": 0, "guards": []}],
+            "verdicts": {}, "leaks": []}
+
+
 def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
     """Wire the REAL fleet_cells miss path (prove-produces-the-mint) into an
     Executor boot: delivered arm refuses (mandatory miss), the cold-capture
@@ -1442,6 +1450,10 @@ def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
         _mark_fake_guard(p)
 
     monkeypatch.setattr(cc, "begin_fleet_mint", _begin)
+    # pgw#681 gate at its torch boundary, simmed like cc.apply's compile
+    # leaf: this rig's "compiles" never touch dynamo, so extraction would
+    # honestly report closure unprovable and refuse every finalize.
+    monkeypatch.setattr(guard_closure, "assert_closure", _sim_guard_closure)
     return captured, _Key.digest
 
 

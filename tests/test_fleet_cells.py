@@ -22,6 +22,7 @@ import pytest
 from gen_worker import cell_key
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
+from gen_worker import guard_closure
 from gen_worker.models import provision
 
 
@@ -67,6 +68,14 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
     monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: False)
     monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
+    # pgw#681 gate at its torch boundary, simmed: these rigs never compile
+    # through dynamo, so extraction would honestly refuse every finalize.
+    monkeypatch.setattr(
+        guard_closure, "assert_closure",
+        lambda pipe, cfg, label="": {
+            "v": 1, "graphs": [{"target": "transformer", "code": "sim",
+                                "entry": 0, "guards": []}],
+            "verdicts": {}, "leaks": []})
 
     class _Key:
         digest = key

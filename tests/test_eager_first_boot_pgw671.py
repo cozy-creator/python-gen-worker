@@ -52,7 +52,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap
+from gen_worker import fleet_cells, guard_closure, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.intent_registry import IntentRegistry
@@ -162,6 +162,15 @@ class _Harness:
         monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
+        # pgw#681 gate at its torch boundary, simmed: this rig's compiles
+        # never touch dynamo, so extraction would honestly report closure
+        # unprovable and refuse every finalize.
+        monkeypatch.setattr(
+            guard_closure, "assert_closure",
+            lambda pipe, cfg, label="": {
+                "v": 1, "graphs": [{"target": "transformer", "code": "sim",
+                                    "entry": 0, "guards": []}],
+                "verdicts": {}, "leaks": []})
         self.ex = Executor(self.specs, _send, store=store)
 
     # -- the compile-arm leaf ------------------------------------------------

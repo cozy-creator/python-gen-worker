@@ -16,7 +16,7 @@ import time
 import torch
 
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap
+from gen_worker import fleet_cells, guard_closure, hot_swap
 
 
 def _wait(predicate, timeout=30.0):
@@ -330,6 +330,15 @@ def _pin_identity(monkeypatch):
     }
     monkeypatch.setattr(cc, "runtime_key", lambda: dict(key))
     monkeypatch.setattr(cc, "gen_worker_version", lambda: "0.0.0-test")
+    # pgw#681 gate at its torch boundary, simmed: these republish rigs
+    # never compile through dynamo, so extraction would honestly report
+    # closure unprovable and refuse the republish.
+    monkeypatch.setattr(
+        guard_closure, "assert_closure",
+        lambda pipe, cfg, label="": {
+            "v": 1, "graphs": [{"target": "transformer", "code": "sim",
+                                "entry": 0, "guards": []}],
+            "verdicts": {}, "leaks": []})
 
 
 def test_republish_packs_live_root_under_same_key(monkeypatch, tmp_path):

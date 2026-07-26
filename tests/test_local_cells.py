@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker import compile_cache as cc
+from gen_worker import guard_closure
 from gen_worker import local_cells as lc
 
 
@@ -133,6 +134,19 @@ def _fake_compile_and_warm(pipe, cfg, **kw):
     TORCHINDUCTOR/TRITON cache env points (what inductor would do)."""
     Path(os.environ["TORCHINDUCTOR_CACHE_DIR"], "graph.so").write_bytes(b"\x7fELF-ish")
     Path(os.environ["TRITON_CACHE_DIR"], "kern.cubin").write_bytes(b"cubin")
+
+
+@pytest.fixture(autouse=True)
+def _sim_guard_closure(monkeypatch):
+    """pgw#681 gate at its torch boundary, simmed like _fake_compile_and_warm:
+    these rigs never compile through dynamo, so extraction would honestly
+    report closure unprovable and refuse every mint."""
+    monkeypatch.setattr(
+        guard_closure, "assert_closure",
+        lambda pipe, cfg, label="": {
+            "v": 1, "graphs": [{"target": "transformer", "code": "sim",
+                                "entry": 0, "guards": []}],
+            "verdicts": {}, "leaks": []})
 
 
 def test_mint_saves_atomically_and_roundtrips(monkeypatch, tmp_path):

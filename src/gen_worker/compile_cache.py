@@ -68,7 +68,7 @@ import inspect
 import pickle
 import sys
 
-from . import cell_key, hot_swap
+from . import cell_key, guard_closure, hot_swap
 from .api.errors import RetryableError
 from .models import w8a8_lora
 from .models.loading import load_from_pretrained, pipeline_weight_lane
@@ -2319,15 +2319,20 @@ def apply(
             # place; the guard wrapper clears them on the first failure.
             _apply_declared_shape_config(cfg)
             owner.compile_repeated_blocks(dynamic=None)
+            # pgw#681: regional entry crosses the same canonical boundary as
+            # whole-graph entry — block guards mint over canonical inputs.
+            ingress = guard_closure.canonical_ingress(fn, target)
             if guard:
                 setattr(owner, attr, _guarded_regional(
                     owner,
-                    fn,
+                    ingress,
                     target,
                     fail_closed=fail_closed,
                     failure_signal=failure_signal,
                 ))
-                originals.append((owner, attr, fn))
+            else:
+                setattr(owner, attr, ingress)
+            originals.append((owner, attr, fn))
             regional_mods.append(owner)
             applied.append(target)
             continue
@@ -2356,6 +2361,10 @@ def apply(
         declared_dynamic = tuple(getattr(cfg, "dynamic", ()) or ())
         if declared_dynamic:
             compiled = _with_declared_marks(compiled, declared_dynamic)
+        # pgw#681: the single compiled-graph ingress — canonical strides +
+        # dtype asserts OUTSIDE the declared marks, so the marks (and the
+        # traced guards) always see the canonical form serving presents.
+        compiled = guard_closure.canonical_ingress(compiled, target)
         setattr(owner, attr, _guarded(
             fn,
             compiled,
@@ -2932,6 +2941,9 @@ def build(
             "was inductor already latched to another dir in this process?"
         )
 
+    # pgw#681: guard-closure gate — the platform build fails red on any
+    # guard the declared contract does not pin, naming the variable.
+    guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
 
     graph_signature, weight_contract = execution_contract(pipe, cfg)
     meta = artifact_metadata(
@@ -2949,6 +2961,7 @@ def build(
         weight_contract=weight_contract,
         shape_contract=declared_contract_facts(cfg),
     )
+    meta[guard_closure.MANIFEST_KEY] = guard_manifest
     if serving_image_digest:
         # The producer image contains a compiler; the graph is consumed by
         # the endpoint's serving image. Tensorhub supplies that immutable OCI
@@ -3044,6 +3057,10 @@ def mint_artifact(
             "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR"
         )
 
+    # pgw#681: guard-closure gate — a leak fails the mint red, naming the
+    # variable; the manifest rides the cell as its dependency dump.
+    guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
+
     # gw#564: record the execution contract exactly like the production
     # build — w8a8 cells are contract_drift-gated on the graph signature and
     # weight-lane manifest, so a mint without them can never re-adopt.
@@ -3062,6 +3079,7 @@ def mint_artifact(
         weight_contract=weight_contract,
         shape_contract=declared_contract_facts(cfg),
     )
+    meta[guard_closure.MANIFEST_KEY] = guard_manifest
     tmp = target.with_suffix(".part")
     target.parent.mkdir(parents=True, exist_ok=True)
     pack(capture, tmp, meta)
@@ -3172,6 +3190,12 @@ def finish_fleet_mint(
             "partial capture, refusing to publish"
         )
 
+    # pgw#681: the guard-closure gate. The proof confirmed the graphs SERVE;
+    # this confirms they depend on NOTHING the contract does not pin — an
+    # out-of-contract guard fails the mint red, naming the variable. The
+    # returned manifest rides the cell as its dependency dump.
+    guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
+
     # gw#564: record the execution contract exactly like the production
     # build — w8a8 cells are contract_drift-gated on the graph signature and
     # weight-lane manifest, so a mint without them can never re-adopt. Both
@@ -3192,6 +3216,7 @@ def finish_fleet_mint(
         weight_contract=weight_contract,
         shape_contract=declared_contract_facts(cfg),
     )
+    meta[guard_closure.MANIFEST_KEY] = guard_manifest
     tmp = target.with_suffix(".part")
     target.parent.mkdir(parents=True, exist_ok=True)
     pack(capture, tmp, meta)
