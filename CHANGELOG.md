@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.68.0 (2026-07-26) — pgw#681 guard-closure gate + boundary canonicalization; gw#679 per-expert MoE LoRA branch routing
+
+Dynamo's guard set IS the exhaustive dependency list of a compiled graph, so
+cell portability is now proven by construction instead of discovered one
+guard-miss at a time. SDK-generic, parameterized only by the declared
+contract — zero per-endpoint/per-family code (Paul's mandate).
+
+- **Guard-closure gate** (`gen_worker.guard_closure`): every mint path
+  (`finish_fleet_mint`, `mint_artifact`, `build`, the pgw#622 shape-warm
+  republish) now extracts the complete live guard set per compiled graph
+  (torch 2.13 structured `GuardManager` walk via
+  `_debug_get_cache_entry_list` → `guard_manager.root` child/leaf traversal
+  + `verbose_code_parts()`, repr-parse fallback) and classifies each guard
+  by source root: module-rooted = weights/structure identity, global-rooted
+  = code identity (both ck2-pinned), input-rooted + ambient = the CLOSED
+  WORLD every guard type must be contract-covered in. An out-of-contract
+  guard (e.g. an undeclared scalar baked in as `EQUALS_MATCH`) fails the
+  mint RED naming the exact variable; an unprovable closure (no extractable
+  graphs) also refuses. Downstream posture unchanged: pgw#672 degrades to
+  explicit eager, never a pod death.
+- **Boundary canonicalization** (`guard_closure.canonical_ingress`,
+  installed by `compile_cache.apply` at the single compiled-graph ingress,
+  mint and consumer symmetrically): tensor strides are pinned to the
+  canonical contiguous layout — including the ie#544 trap where a size-1
+  dim keeps `is_contiguous()` true under an arbitrary stride and
+  `.contiguous()` is a no-op (residue rebuilt via `as_strided`); a
+  stride-perturbed serving input now HITS the minted graph instead of
+  paying a recompile (red-verified both directions). Per-path dtype drift
+  raises a NAMED `GuardBoundaryError` instead of a silent recompile.
+- **Full guard reporting**: the complete classified guard dump rides every
+  cell as `metadata.json`'s `guard_manifest` (deterministic: comments
+  stripped, ASLR ids scrubbed, rows sorted) — into CAS and the publish
+  metadata. Audit surfaces: `guard_closure.audit_armed(pipeline, cfg)` for
+  a live armed cell, and `python -m gen_worker.guard_closure <cells...>`
+  as the runnable N-cold-pod closure/zero-miss check (exit 0 closed +
+  consistent, 2 leaks, 3 divergence; per-host ambient state compared by
+  presence, content kept in the dump).
+
+**gw#679: a denoiser is a SET — per-expert LoRA branch routing for MoE pipelines.**
+
+Wan 2.2 A14B is a dual-expert MoE (`transformer` high-noise + `transformer_2`
+low-noise) and its Lightning distillation is two adapters. `branch_target()`
+returned ONE denoiser, and diffusers' Wan converters rewrite every
+non-diffusers key onto the `transformer.` prefix whatever expert the file was
+trained for — so both halves landed rank-concatenated on the HIGH expert,
+`map_adapter` succeeded, and the LOW expert ran undistilled weights on a
+4-step distilled ladder. A wrong picture with a clean log. (Same failure
+class as ie#522's `fuse_lora(components=["transformer"])`, at runtime attach.)
+
+- **`branch_targets(pipe) -> {component: module}`** replaces `branch_target`:
+  every branch operation runs over the whole denoiser set
+  (`transformer`/`transformer_2`/`unet`). `enable_branch_lanes` /
+  `clear_branch_lanes` / `disable_branch_lanes` / `apply_branch_adapter_set` /
+  `pipeline_branch_bucket` / `stamp_lane(pipe)` are the set-level surface;
+  the per-module primitives are unchanged.
+- **Routing is DATA, not a wire field.** An adapter half declares its expert
+  in its own keys (`transformer.` / `transformer_2.`), which is how diffusers
+  already namespaces multi-denoiser pipelines. Per-expert mirrors carry the
+  prefix; one repo carrying both prefixes works identically. A `component`
+  field on the overlay was deliberately rejected — the fact is in the weights.
+- **Fail-closed, three ways.** On a multi-expert pipeline an adapter that
+  names no component is refused as ambiguous (checked on the RAW keys, before
+  the converter can synthesize a `transformer.` prefix); a key naming a
+  component the pipeline does not carry is refused on any topology; and a
+  compiled pipeline whose experts are not all armed refuses instead of
+  copying a half into nothing. Every refusal happens BEFORE any buffer is
+  touched — a half-attached MoE (distilled expert beside an undistilled one)
+  is never an outcome. The peft fallback is refused on multi-expert
+  pipelines: diffusers reaches the second expert only through a
+  `load_into_transformer_2=True` kwarg the fallback cannot pass.
+- **The bucket container is per component.** `Compile(lora_bucket=N)` /
+  `apply_lora_lane` arm every denoiser, and the whole set always shares ONE
+  bucket, so the pipeline carries one coherent graph family. The lane STRING
+  is unchanged (`<base>-lora<bucket>`): how many experts a family has is a
+  property of the pipeline class, not of the lane, so published cell keys
+  keep their meaning.
+- **Single-denoiser lanes (LTX/sdxl/qwen) are untouched by construction**:
+  with one target every denoiser key routes to it, prefixed or not, kohya-flat
+  `lora_unet_` included (never read as a component declaration — sd-scripts
+  emits it for transformer denoisers too), and no declaration is required.
+- Endpoint note: a Wan MoE family should declare BOTH experts as compile
+  targets (`Compile(targets=("transformer", "transformer_2", "vae.decode"))`)
+  — the container is armed on both either way, and canonical branches on an
+  uncompiled expert pay the eager branch tax.
+
 ## 0.67.4 (2026-07-26) — pgw#680: guard-miss doctrine — fail-on-recompile at serve time
 
 The 187s incident class (ie#546 retag cycle): a tenant request whose inputs
@@ -46,43 +131,7 @@ tapes (real dynamo guards, real RecompileError, real warm thread) + the
 full `handle_run_job` tenant path; with the window neutralized (the pre-fix
 tree) the same input pays a silent inline recompile with zero confession.
 
-## Unreleased — pgw#681: graph determinism — guard-closure gate + boundary canonicalization
-
-Dynamo's guard set IS the exhaustive dependency list of a compiled graph, so
-cell portability is now proven by construction instead of discovered one
-guard-miss at a time. SDK-generic, parameterized only by the declared
-contract — zero per-endpoint/per-family code (Paul's mandate).
-
-- **Guard-closure gate** (`gen_worker.guard_closure`): every mint path
-  (`finish_fleet_mint`, `mint_artifact`, `build`, the pgw#622 shape-warm
-  republish) now extracts the complete live guard set per compiled graph
-  (torch 2.13 structured `GuardManager` walk via
-  `_debug_get_cache_entry_list` → `guard_manager.root` child/leaf traversal
-  + `verbose_code_parts()`, repr-parse fallback) and classifies each guard
-  by source root: module-rooted = weights/structure identity, global-rooted
-  = code identity (both ck2-pinned), input-rooted + ambient = the CLOSED
-  WORLD every guard type must be contract-covered in. An out-of-contract
-  guard (e.g. an undeclared scalar baked in as `EQUALS_MATCH`) fails the
-  mint RED naming the exact variable; an unprovable closure (no extractable
-  graphs) also refuses. Downstream posture unchanged: pgw#672 degrades to
-  explicit eager, never a pod death.
-- **Boundary canonicalization** (`guard_closure.canonical_ingress`,
-  installed by `compile_cache.apply` at the single compiled-graph ingress,
-  mint and consumer symmetrically): tensor strides are pinned to the
-  canonical contiguous layout — including the ie#544 trap where a size-1
-  dim keeps `is_contiguous()` true under an arbitrary stride and
-  `.contiguous()` is a no-op (residue rebuilt via `as_strided`); a
-  stride-perturbed serving input now HITS the minted graph instead of
-  paying a recompile (red-verified both directions). Per-path dtype drift
-  raises a NAMED `GuardBoundaryError` instead of a silent recompile.
-- **Full guard reporting**: the complete classified guard dump rides every
-  cell as `metadata.json`'s `guard_manifest` (deterministic: comments
-  stripped, ASLR ids scrubbed, rows sorted) — into CAS and the publish
-  metadata. Audit surfaces: `guard_closure.audit_armed(pipeline, cfg)` for
-  a live armed cell, and `python -m gen_worker.guard_closure <cells...>`
-  as the runnable N-cold-pod closure/zero-miss check (exit 0 closed +
-  consistent, 2 leaks, 3 divergence; per-host ambient state compared by
-  presence, content kept in the dump).
+## 0.67.3 (2026-07-26) — th#1211: the svdq 5 GB guard cited a cap that does not exist
 
 `MAX_SVDQ_FILE_BYTES` was `5 * 1000**3`, justified in-comment as an "R2
 single-PUT cap". There is no such cap in this stack: the hub's
@@ -133,53 +182,6 @@ has the torch-2.12/cu13.0 wheel but was refused outright.
   NOT established by this.** t2i only; `QwenImageEditPlusPipeline` unchecked.
 - The 1.2 row is untouched and still rejects diffusers 0.39; the wheel-tag torch
   guard still fires (a torch2.12 wheel on torch 2.13 raises, as before).
-
-## 0.68.0 (2026-07-26) — gw#679: a denoiser is a SET — per-expert LoRA branch routing for MoE pipelines
-
-Wan 2.2 A14B is a dual-expert MoE (`transformer` high-noise + `transformer_2`
-low-noise) and its Lightning distillation is two adapters. `branch_target()`
-returned ONE denoiser, and diffusers' Wan converters rewrite every
-non-diffusers key onto the `transformer.` prefix whatever expert the file was
-trained for — so both halves landed rank-concatenated on the HIGH expert,
-`map_adapter` succeeded, and the LOW expert ran undistilled weights on a
-4-step distilled ladder. A wrong picture with a clean log. (Same failure
-class as ie#522's `fuse_lora(components=["transformer"])`, at runtime attach.)
-
-- **`branch_targets(pipe) -> {component: module}`** replaces `branch_target`:
-  every branch operation runs over the whole denoiser set
-  (`transformer`/`transformer_2`/`unet`). `enable_branch_lanes` /
-  `clear_branch_lanes` / `disable_branch_lanes` / `apply_branch_adapter_set` /
-  `pipeline_branch_bucket` / `stamp_lane(pipe)` are the set-level surface;
-  the per-module primitives are unchanged.
-- **Routing is DATA, not a wire field.** An adapter half declares its expert
-  in its own keys (`transformer.` / `transformer_2.`), which is how diffusers
-  already namespaces multi-denoiser pipelines. Per-expert mirrors carry the
-  prefix; one repo carrying both prefixes works identically. A `component`
-  field on the overlay was deliberately rejected — the fact is in the weights.
-- **Fail-closed, three ways.** On a multi-expert pipeline an adapter that
-  names no component is refused as ambiguous (checked on the RAW keys, before
-  the converter can synthesize a `transformer.` prefix); a key naming a
-  component the pipeline does not carry is refused on any topology; and a
-  compiled pipeline whose experts are not all armed refuses instead of
-  copying a half into nothing. Every refusal happens BEFORE any buffer is
-  touched — a half-attached MoE (distilled expert beside an undistilled one)
-  is never an outcome. The peft fallback is refused on multi-expert
-  pipelines: diffusers reaches the second expert only through a
-  `load_into_transformer_2=True` kwarg the fallback cannot pass.
-- **The bucket container is per component.** `Compile(lora_bucket=N)` /
-  `apply_lora_lane` arm every denoiser, and the whole set always shares ONE
-  bucket, so the pipeline carries one coherent graph family. The lane STRING
-  is unchanged (`<base>-lora<bucket>`): how many experts a family has is a
-  property of the pipeline class, not of the lane, so published cell keys
-  keep their meaning.
-- **Single-denoiser lanes (LTX/sdxl/qwen) are untouched by construction**:
-  with one target every denoiser key routes to it, prefixed or not, kohya-flat
-  `lora_unet_` included (never read as a component declaration — sd-scripts
-  emits it for transformer denoisers too), and no declaration is required.
-- Endpoint note: a Wan MoE family should declare BOTH experts as compile
-  targets (`Compile(targets=("transformer", "transformer_2", "vae.decode"))`)
-  — the container is armed on both either way, and canonical branches on an
-  uncompiled expert pay the eager branch tax.
 
 ## 0.67.1 (2026-07-26) — pgw#675 override dtype + pgw#676 native-crash attribution (the sdxl retag blockers)
 
