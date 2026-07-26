@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.74.1 (2026-07-26) — pgw#692: `WanDefaults` carries the hub's recipe wire name
+
+**P0, every wan-2.2 request of every tier.** th#1174's migration
+`0046_recipe_steps_rename_hidream_wan22` renamed the recipe field `steps` ->
+`num_inference_steps` in the hub's `wan22.schema.json` and in every stored
+`repo_inference_defaults` / `release_slot_recipe` row (chaos, 2026-07-26
+00:12:20Z) — but the SDK half never shipped, so the hub-stamped recipe hit
+`GenerationDefaults`' `forbid_unknown_fields` and every request died at slot
+resolution, before handler code:
+
+```
+ValueError: slot 'pipeline': catalog inference-defaults metadata failed
+WanDefaults validation: Object contains unknown field `num_inference_steps`
+```
+
+- `WanDefaults.steps` -> `WanDefaults.num_inference_steps`. The hub is the
+  half that is right: `RuntimeFormula` resolves its terms by same-named
+  lookup across payload and `ctx.defaults`, and the
+  `PUT .../metadata/inference-defaults` route refuses a `steps` spelling
+  outright (`additionalProperties: false`).
+- Full audit of the registered vocabularies against the hub's family schemas:
+  `SdxlDefaults` and `SdxlLoraDefaults` keep `steps` (0040/0046 deliberately
+  left sdxl and qwen-image alone) and match field-for-field; wan22 was the
+  only skew in this repo. `HiDreamO1Defaults` has the identical exposure but
+  lives in `inference-endpoints/hidream-o1-image` — cross-repo, tracked on
+  pgw#692.
+- Guard (`tests/test_family_wire_names_pgw692.py`): every registered family's
+  `__struct_fields__` is asserted against a recorded snapshot of its hub
+  schema `properties`, so a one-sided rename can never be silent again.
+
 ## 0.74.0 (2026-07-26) — pgw#685 S2c: the native svdq engine actually serves
 
 Wires the native engine into the load path. `load_svdq_pipeline` now chooses an
