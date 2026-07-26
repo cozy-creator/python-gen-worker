@@ -574,6 +574,17 @@ def clear_inflight(
         _write_inflight(path)
 
 
+def current_inflight_request(kind: str = "request") -> str:
+    """The request id of the newest LIVE in-flight execution of ``kind``
+    (pgw#680: joins a serve-time guard-miss confession to the exact request
+    that hit it). '' when none is marked."""
+    with _inflight_lock:
+        for _token, record in sorted(_inflight_active.items(), reverse=True):
+            if record.get("kind") == kind and record.get("request_id"):
+                return str(record["request_id"])
+    return ""
+
+
 def take_inflight(path: Optional[Path] = None) -> list[Dict[str, Any]]:
     """Read and consume the active-execution list a dead process left."""
     path = path or INFLIGHT_PATH
@@ -676,6 +687,7 @@ __all__ = [
     "clear_inflight",
     "container_limits",
     "cpu_quota_cores",
+    "current_inflight_request",
     "describe_exit",
     "effective_cpu_count",
     "enable_fault_dump",
