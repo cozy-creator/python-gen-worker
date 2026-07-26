@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.72.0 (2026-07-26) — pgw#685 S2b: the AWQ W4A16 modulation decoder
+
+An svdq artifact does not quantize everything the same way. Its DiT Linears are
+W4A4 nvfp4 with a low-rank branch; its adaLN MODULATION layers (`img_mod` /
+`txt_mod`, which consume the timestep embedding rather than the token stream) are
+AWQ **W4A16** — a completely different layout. `models/svdq_awq.py` decodes them,
+which was the one thing blocking a real artifact from loading natively.
+
+- The layout is the inverse of deepcompressor's
+  `convert_to_nunchaku_w4x16_linear_weight` -> `convert_to_tinychat_w4x16y16_linear_weight`
+  -> `pack_w4` chain, and the tests invert that UPSTREAM code bit-exactly rather
+  than a paraphrase of it: within each run of 32 input elements output nibble `j`
+  packs elements `{j, 8+j, 16+j, 24+j}`, then the int16 grid is shuffled
+  `[oc/4, 4, ic/64, 16] -> permute(0, 2, 1, 3)` and stored as int32 pairs.
+  Confirmed against the real artifact's geometry (`qweight I32 [4608, 1536]`,
+  `wscales`/`wzeros BF16 [48, 18432]`, group 64).
+- Dequant is an **ADD**, not a subtract — `W = codes * wscales + wzeros` — because
+  the exporter stores the zero point already scaled AND negated.
+- `ceil_num_groups` padding is handled: trailing all-zero scale rows are the pad,
+  not groups. Reading 16 stored rows as 16 groups where only 2 are live would
+  rescale every weight in the layer.
+- **The trap this decoder exists to get right (`adanorm_splits`):** for modulation
+  layers the exporter ALSO interleaves output channels (stored row `j*splits + s`
+  is original row `s*(oc/splits) + j`) and ADDS 1 to the bias of splits `1` and
+  `splits-2` — adaLN's `1 + scale` folded into the artifact. Both are undone. The
+  split count is a REQUIRED argument defaulting to 1, never inferred: a wrong
+  count still yields a full-rank, plausible-looking weight and silently wrong
+  images, which `test_decoding_with_the_wrong_split_count_is_visibly_wrong` pins
+  at >0.5 relative error against <0.15 for the correct count.
+
+Also recorded from the S1 card verification, because it will otherwise look like a
+bug in the fused quantizer: compiled-vs-eager output for a `W4A4Linear` is NOT
+bit-identical, and that is inductor reassociating the bf16 second-level epilogue,
+not the kernel. Measured on a 5090 with the fused kernel disabled, the PURE-TORCH
+chain drifts **7.4x MORE** (5.9e-3) than the fused path (7.9e-4); the custom op
+itself is bit-exact under `fullgraph=True`.
+
 ## 0.71.0 (2026-07-26) — pgw#685: a NATIVE svdq engine — SVDQuant checkpoints without nunchaku
 
 The layout converter, the serving module, and engine selection for serving
