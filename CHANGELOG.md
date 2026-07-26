@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased (pgw#691) — guard-closure classifier fixes + sku key collapse
+
+The offline audit (546 real torch-2.13 guard rows) proved the pgw#681 mint
+gate would refuse 100% of sdxl mints. Four fixes, all red-verified against
+real dynamo guard trees (CPU, `backend="eager"`):
+
+- **P0**: the RelationalGuard family (`NO_TENSOR_ALIASING`,
+  `OBJECT_ALIASING`, `STORAGE_OVERLAPPING`) is judged by TYPE before root
+  dispatch — torch attaches it to the INPUT managers, so the old root-first
+  dispatch leaked on every graph with >=2 tensor inputs.
+- Vocabulary rebuilt on the C++ leaf-class names the guard walk yields:
+  `SYMBOLIC_SHAPE_GUARD` (2.13's shape-env facts, incl. its synthetic tuple
+  sources) rides declared dynamic dims; input-rooted
+  `ID_MATCH`/`DICT_VERSION` classify as the object identity of a call-path
+  constant; `DUAL_LEVEL_MATCH`/`FAKE_SCRIPT_TYPE_MATCH` named; phantoms
+  (`AUTOCAST_STATE`, `KEYS_MATCH`) dropped.
+- `EQUALS_MATCH` against torch singletons (`L['dt'] == torch.float32`,
+  memory formats, device literals) is covered by weight_lane + the ingress
+  dtype memo instead of leaking "unparseable".
+- **ck2 → ck3**: `sku` left the cell-key identity axes (two byte-identical
+  cell pairs split only by sku in the audited corpus; no guard observes a
+  SKU — sm/cuda/torch/triton pin the hardware facts). `sku` stays in cell
+  metadata (publish-intent attestation unchanged); same-sku preference among
+  same-key candidates is a hub-side selection follow-up. Old ck2 keys fail
+  `is_key` outright — clean MISS, never a half-match. Hub-side confirmed
+  scheme-agnostic (`IsCellKey` shape check only, th#1183).
+
 ## 0.74.0 (2026-07-26) — pgw#685 S2c: the native svdq engine actually serves
 
 Wires the native engine into the load path. `load_svdq_pipeline` now chooses an
