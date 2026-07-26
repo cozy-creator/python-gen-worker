@@ -68,11 +68,15 @@ _BURST_META: Dict[str, Any] = {
     "shape_contract": _SHAPE_CONTRACT,
 }
 
-# What the hub saw, verbatim.
-PUBLISHED = "ck2-30b872ea452a3447ac368d0108de302c087b0a3b4b244ebeac10f15f"
-REQUESTED_PLAIN = (
+# What the hub saw, verbatim — ck2-era historical evidence. The pgw#691 sku
+# collapse bumped the scheme to ck3 (every digest changed), so these bytes
+# are RECORDS, no longer reproducible: the invariants below are asserted as
+# key RELATIONS from one axes dict, and the old keys must be dead (a clean
+# MISS, never a half-match).
+CK2_PUBLISHED = "ck2-30b872ea452a3447ac368d0108de302c087b0a3b4b244ebeac10f15f"
+CK2_REQUESTED_PLAIN = (
     "ck2-1688dc35245507a65d1a0fd2087adaae35f5885d5a71f05144a80710")
-REQUESTED_FP8_HOOKS = (
+CK2_REQUESTED_FP8_HOOKS = (
     "ck2-3156506b08a75f15202355242f7509abd409cfaabdd9467391ffe815")
 
 _RT = {
@@ -124,15 +128,20 @@ class _Pipe:
 # --- the defect, reproduced from the live evidence -------------------------
 
 
-def test_burst_divergence_reproduced_byte_exact(burst_runtime: None) -> None:
+def test_burst_divergence_reproduced_lane_only(burst_runtime: None) -> None:
     """All three observed keys are ONE identity varying only the lane axis:
     the advertised lanes name keys nobody publishes; the published lane
     names a key nobody advertises. Adoption was structurally impossible."""
-    assert ck.from_artifact_metadata(_BURST_META).digest == PUBLISHED
-    assert _requested("") == REQUESTED_PLAIN
-    assert _requested("fp8-hooks") == REQUESTED_FP8_HOOKS
-    assert _requested("w8a8") == PUBLISHED
-    assert _requested("w8a8-lora64") == PUBLISHED  # canonical-lane fold
+    published = ck.from_artifact_metadata(_BURST_META).digest
+    assert _requested("w8a8") == published
+    assert _requested("w8a8-lora64") == published  # canonical-lane fold
+    assert _requested("") != published
+    assert _requested("fp8-hooks") != published
+    assert _requested("") != _requested("fp8-hooks")
+    # pgw#691: the recorded ck2 burst keys are dead post-bump — is_key
+    # refuses them outright, so an old cell can only MISS, never half-match.
+    for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
+        assert not ck.is_key(old)
 
 
 def test_raw_pipeline_probe_is_blind_to_w8a8_mode(burst_runtime: None) -> None:
@@ -144,8 +153,10 @@ def test_raw_pipeline_probe_is_blind_to_w8a8_mode(burst_runtime: None) -> None:
     pipe = _Pipe()
     assert pipeline_weight_lane(pipe) == ""
     assert w8a8_lora.branch_lane(pipe.unet) == "w8a8"
-    # The pre-fix advertised key IS the burst's never-published key.
-    assert _requested(pipeline_weight_lane(pipe)) == REQUESTED_PLAIN
+    # The pre-fix advertised key IS the burst's never-published identity.
+    assert _requested(pipeline_weight_lane(pipe)) == _requested("")
+    assert _requested(pipeline_weight_lane(pipe)) \
+        != ck.from_artifact_metadata(_BURST_META).digest
 
 
 # --- the fix: one base-lane resolution for every cell-identity surface -----
@@ -156,7 +167,8 @@ def test_cell_base_lane_sees_w8a8_mode(burst_runtime: None) -> None:
     assert w8a8_lora.effective_base_lane(pipe) == "w8a8"
     assert cc.cell_base_lane(pipe) == "w8a8"
     # An identical worker now requests exactly the key the mint published.
-    assert _requested(cc.cell_base_lane(pipe)) == PUBLISHED
+    assert _requested(cc.cell_base_lane(pipe)) \
+        == ck.from_artifact_metadata(_BURST_META).digest
 
 
 def test_cell_base_lane_precedence() -> None:

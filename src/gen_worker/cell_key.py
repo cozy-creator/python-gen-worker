@@ -19,7 +19,6 @@ facts that actually change compiled-kernel identity:
     family        graph identity: fine-tunes of one family share cells
     lane          canonical traced weight lane token ("", w8a16, w8a8,
                   [-loraN]) — lane graphs differ (gw#534/gw#561)
-    sku           GPU SKU slug
     sm            compute capability (sm_100, ...)
     cuda          CUDA runtime the torch wheel was built for
     torch/triton  exact wheel versions (triton's disk cache keys on the
@@ -37,6 +36,16 @@ facts that actually change compiled-kernel identity:
     diffusers/transformers  exact lib versions when installed
     image_digest  the SERVING image OCI digest (absent for local runtimes)
 
+The GPU SKU is deliberately NOT a key axis (pgw#691, ck3): no dynamo guard
+observes a SKU — the only hardware facts the guard set carries are already
+pinned by sm + cuda + torch + triton (the same argument that keeps the host
+driver out of the key, gw#577). Keying on it was proven to mint byte-
+identical cells twice (a40 vs rtx-3090 on sm_86; l4 vs rtx-4090 on sm_89 —
+19% redundant mints in the audited corpus). ``sku`` stays in cell METADATA;
+preferring a same-sku cell among same-key candidates (autotune quality) is
+a hub-side SELECTION concern, not identity — the worker lookup is
+pull-by-exact-key and has no multi-candidate point.
+
 A wrong key can only produce a MISS (eager + demand + forge), never a
 refusal: verify-on-receipt of a self-requested cell degenerates to a digest
 check, and any failure to arm one is by construction a selection-logic bug
@@ -52,7 +61,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
-KEY_SCHEME = "ck2"
+# ck2 -> ck3 (pgw#691): sku left the identity axes; the scheme bump makes
+# every pre-collapse key a clean MISS instead of a half-match.
+KEY_SCHEME = "ck3"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
 # (th#597 C5: [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64
@@ -61,7 +72,7 @@ _DIGEST_HEX = 56
 
 # Axes that must be non-empty for a computable key: a runtime that cannot
 # state them has no cell identity (CPU-only build, failed CUDA probe).
-_REQUIRED = ("format", "kind", "family", "sku", "sm", "cuda", "torch",
+_REQUIRED = ("format", "kind", "family", "sm", "cuda", "torch",
              "triton", "gen_worker", "contract")
 # Axes that may be legitimately absent ("" => omitted from canonical form):
 # image_digest is absent on local runtimes; libs may not be installed; lane
@@ -182,7 +193,6 @@ def compute(
         "family": str(family or ""),
         "lane": _canonical_lane(weight_lane, lora_bucket),
         "mode": "regional" if regional else "",
-        "sku": rt["sku"],
         "sm": rt["sm"],
         "cuda": rt["cuda"],
         "torch": rt["torch"],
@@ -211,8 +221,8 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     contract_facts = meta.get("shape_contract")
     if not isinstance(contract_facts, dict) or not contract_facts:
         raise CellKeyError(
-            "artifact records no shape_contract block (pre-ck2 cell); no "
-            "ck2 identity — a newer-contract worker must not consume it"
+            "artifact records no shape_contract block (pre-cell-key cell); "
+            "no key identity — a newer-contract worker must not consume it"
         )
     return from_axes({
         "format": str(meta.get("format") or ""),
@@ -223,7 +233,6 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
             int(meta.get("lora_bucket") or 0),
         ),
         "mode": "" if mode == "whole" else mode,
-        "sku": str(meta.get("sku") or ""),
         "sm": str(meta.get("sm") or ""),
         "cuda": str(meta.get("cuda") or ""),
         "torch": str(meta.get("torch") or ""),
