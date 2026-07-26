@@ -24,13 +24,23 @@ routing; pinning it at publish keeps diffusers version drift deterministic
 Instance identity = root binding + override map: a swapped part changes
 identity, so the compile cell DERIVES facts like "this cell must not claim
 ``vae.decode``" instead of relying on an author comment.
+
+pgw#667: a part's LOAD DTYPE is part of that identity too. The tree therefore
+carries a per-component dtype opinion (:func:`component_dtypes`), resolved from
+the component's CLASS against the one facts table
+(``gen_worker.families.facts``) — not declared per endpoint. It is published
+with the tree at build time and applied at MATERIALIZE time by
+``gen_worker.models.loading`` (a wide component cannot be recovered by
+upcasting after a narrow load).
 """
 
 from __future__ import annotations
 
 import inspect
 from pathlib import PurePath
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
+
+from ..families.facts import ComponentDtype, component_dtypes_for_classes
 
 # Part-name prefixes that are configuration, not weights. Everything else a
 # pipeline class declares as a component is treated as weight-bearing.
@@ -101,13 +111,82 @@ def derive_components(pipeline_cls: type) -> Optional[Dict[str, str]]:
     return {n: part_kind(n) for n in names}
 
 
+def component_classes(pipeline_cls: type) -> Dict[str, str]:
+    """``{part_name: component class NAME}`` from the pipeline class's
+    ``__init__`` annotations.
+
+    diffusers annotates every component it composes (``vae:
+    AutoencoderKLWan``), so the class vocabulary is derivable at BUILD time
+    with no snapshot and no instantiation — which is what lets the per-component
+    dtype opinion be published with the tree. Unannotated or non-class
+    annotations are simply absent; the load path's ``model_index.json`` is the
+    authoritative source when one exists.
+    """
+    if not isinstance(pipeline_cls, type):
+        return {}
+    try:
+        init = inspect.getattr_static(pipeline_cls, "__init__")
+    except AttributeError:
+        return {}
+    raw = getattr(init, "__annotations__", None) or {}
+    out: Dict[str, str] = {}
+    for name, ann in raw.items():
+        if name in ("self", "return", "args", "kwargs"):
+            continue
+        if isinstance(ann, type):
+            out[str(name)] = ann.__name__
+        elif isinstance(ann, str) and ann.isidentifier():
+            # PEP 563 / quoted annotation: the bare name is what the facts
+            # table keys on, so no resolution (and no import) is needed.
+            out[str(name)] = ann
+    return out
+
+
+def component_dtypes(
+    pipeline_cls: Optional[type] = None,
+    *,
+    model_index_classes: Optional[Mapping[str, str]] = None,
+) -> Dict[str, ComponentDtype]:
+    """``{part_name: ComponentDtype}`` — the load-dtype opinions this
+    composition's parts carry (pgw#667). Empty means "loads uniformly at the
+    composition's compute dtype", which is the overwhelmingly common case.
+
+    ``model_index_classes`` (``{part: class name}`` read from a snapshot's
+    ``model_index.json``) is AUTHORITATIVE where present: a fine-tune may
+    substitute a component class, and the bytes on disk decide. The pipeline
+    class's ``__init__`` annotations fill in the rest (and are the only source
+    at build time, before any snapshot exists).
+    """
+    classes: Dict[str, str] = {}
+    if pipeline_cls is not None:
+        classes.update(component_classes(pipeline_cls))
+    for part, cls_name in (model_index_classes or {}).items():
+        if str(cls_name or "").strip():
+            classes[str(part)] = str(cls_name).strip()
+    return component_dtypes_for_classes(classes)
+
+
 def components_manifest(pipeline_cls: type) -> Optional[List[Dict[str, str]]]:
     """The manifest projection of the derived tree: ordered
-    ``[{name, kind}, ...]`` rows, or None for non-introspectable classes."""
+    ``[{name, kind}, ...]`` rows, or None for non-introspectable classes.
+
+    A part carrying a pgw#667 load-dtype fact also publishes ``dtype`` — the
+    hub needs it in the path vocabulary for the same reason it needs ``kind``:
+    a component override at ``pipeline.vae`` must be materialized at the same
+    precision the base part requires.
+    """
     tree = derive_components(pipeline_cls)
     if tree is None:
         return None
-    return [{"name": n, "kind": k} for n, k in sorted(tree.items())]
+    dtypes = component_dtypes(pipeline_cls)
+    rows: List[Dict[str, str]] = []
+    for n, k in sorted(tree.items()):
+        row: Dict[str, str] = {"name": n, "kind": k}
+        fact = dtypes.get(n)
+        if fact is not None:
+            row["dtype"] = fact.dtype
+        rows.append(row)
+    return rows
 
 
 def validate_no_sibling_parts(
@@ -171,6 +250,9 @@ def validate_no_sibling_parts(
 __all__ = [
     "KIND_CONFIG",
     "KIND_WEIGHTS",
+    "ComponentDtype",
+    "component_classes",
+    "component_dtypes",
     "components_manifest",
     "derive_components",
     "is_introspectable",

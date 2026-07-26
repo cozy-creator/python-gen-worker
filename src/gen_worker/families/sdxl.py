@@ -12,7 +12,11 @@ from .base import GenerationDefaults, family
 SdxlScheduler = Literal[
     "euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras",
     # Distilled-checkpoint schedulers (few-step, near-zero CFG).
-    "lcm", "euler_trailing",
+    # th#1174: Hyper-SD's published recipe is DDIM + trailing spacing; the hub
+    # recognizes the key in both sdxl schemas, and widening this enum is safe
+    # on its own (no catalog row may be AUTHORED with it until an endpoint pins
+    # a wheel that defines it — see gen_worker.view.SAMPLERS).
+    "lcm", "euler_trailing", "ddim_trailing",
 ]
 
 

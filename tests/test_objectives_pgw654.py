@@ -336,6 +336,30 @@ def test_sampler_table_defines_euler_trailing_and_dpmpp_completely() -> None:
         assert extra["final_sigmas_type"] == "zero"
 
 
+def test_sampler_table_defines_ddim_trailing() -> None:
+    """th#1174: the hub already RECOGNIZES `ddim_trailing` in both sdxl
+    schemas; the SDK owed the definition (Hyper-SD's published recipe is DDIM
+    with trailing timestep spacing). Resolvable against real diffusers, and
+    exported in the sdxl family enum so a catalog row can name it."""
+    pytest.importorskip("diffusers")
+    import typing
+
+    import diffusers
+
+    from gen_worker.families.sdxl import SdxlScheduler
+    from gen_worker.view import SAMPLERS, clone_scheduler
+
+    cls_name, extra = SAMPLERS["ddim_trailing"]
+    assert cls_name == "DDIMScheduler"
+    assert extra == {"timestep_spacing": "trailing"}
+    assert "ddim_trailing" in typing.get_args(SdxlScheduler)
+
+    base = diffusers.EulerDiscreteScheduler()
+    fresh = clone_scheduler(_StubPipe(base), sampler="ddim_trailing")
+    assert isinstance(fresh, diffusers.DDIMScheduler)
+    assert fresh.config["timestep_spacing"] == "trailing"
+
+
 # ---------------------------------------------------------------------------
 # convert: objective-correct scheduler config in produced snapshots
 # ---------------------------------------------------------------------------

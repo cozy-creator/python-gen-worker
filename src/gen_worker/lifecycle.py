@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
 from .config import Settings
+from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
 from .intent_registry import IntentRegistry, UnreportedIntentWait
 from .pb import worker_scheduler_pb2 as pb
@@ -164,9 +165,13 @@ class Lifecycle:
         self.intent_registry = IntentRegistry(
             self.release_id,
             executor.specs.keys(),
-            boot_config_generation=int(
-                getattr(settings, "boot_config_generation", 0) or 0
-            ),
+            # gw#668: pass the value THROUGH, sentinel and all — a missing
+            # WORKER_CONFIG_GENERATION is "no boot-only env was injected"
+            # (-1), never "generation 0".
+            boot_config_generation=int(getattr(
+                settings, "boot_config_generation",
+                BOOT_CONFIG_GENERATION_ABSENT,
+            )),
             on_change=self.state_changed,
         )
         self.executor.bind_intent_registry(self.intent_registry)
