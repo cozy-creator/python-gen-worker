@@ -2234,6 +2234,53 @@ def _vae_supports_channels_last(vae: Any) -> bool:
         return False
 
 
+#: The hub-resolved execution-lane descriptor for the checkpoint this
+#: pipeline serves (th#913 ``lane`` string), stamped by the executor at
+#: injection time. Consumed by :func:`mandatory_serving` only — cell keys
+#: keep the weight-lane brain (pgw#686).
+EXECUTION_LANE_ATTR = "_cozy_execution_lane"
+
+#: Setup-scoped fallback (pgw#677 reopen): the executor opens this window
+#: around one record's whole setup, so pipelines armed through ANY path —
+#: slot injection or a self-loaded ``arm_compile`` inside ``setup()``
+#: (ArmingScope) — get the same lane stamped by :func:`apply`.
+_SETUP_EXEC_LANE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "gw_setup_execution_lane", default="")
+
+
+def mandatory_serving(pipeline: Any) -> bool:
+    """ONE brain for "may this pipeline serve eager?" (pgw#677 reopen).
+
+    Mandatory-ness follows the hub-resolved EXECUTION lane whenever the
+    executor stamped one (``_cozy_execution_lane``, th#913/th#1059): only
+    real w8a8/w4a4 ACTIVATION execution forbids the eager tier. The weight
+    -lane stamp stays the CELL IDENTITY brain (pgw#686) — but it names the
+    storage/branch family, not serveability: sdxl's mixed ``#fp8-w8a8``
+    storage stamps ``w8a8-lora64`` while the hub serves it as
+    ``fp8-w8a16+eager``, and classifying that stamp as mandatory silently
+    routed the whole boot into the FOREGROUND compile-then-serve mint (the
+    reopen's measured 26-minute tenant starvation). Without lane evidence
+    the stamp remains the fail-closed fallback."""
+    lane_str = str(getattr(pipeline, EXECUTION_LANE_ATTR, "") or "").strip()
+    if not lane_str:
+        lane_str = _SETUP_EXEC_LANE.get().strip()
+        if lane_str:
+            try:
+                setattr(pipeline, EXECUTION_LANE_ATTR, lane_str)
+            except Exception:
+                pass
+    if lane_str:
+        from .models import lanes as lanespec
+
+        try:
+            lane = lanespec.parse_lane(lane_str)
+        except ValueError:
+            pass
+        else:
+            return lane.activation in (lanespec.ACT_W8A8, lanespec.ACT_W4A4)
+    return pipeline_weight_lane(pipeline).startswith(("w8a8", "w4a4"))
+
+
 def apply(
     pipeline: Any,
     cfg: Any,
@@ -2295,7 +2342,12 @@ def apply(
 
     regional = bool(getattr(cfg, "regional", False))
 
-    fail_closed = pipeline_weight_lane(pipeline).startswith(("w8a8", "w4a4"))
+    # pgw#677 reopen: fail-closed follows the ONE serveability brain — the
+    # hub-resolved execution lane when stamped, the weight-lane prefix
+    # otherwise. A fail-closed router can never enable eager-while-compiling
+    # routing, so misclassifying an eager-serveable lane here re-creates the
+    # sequential inline-compile boot for the whole record.
+    fail_closed = mandatory_serving(pipeline)
 
     failure_signal: Dict[str, Any] = {
         "callback": None,

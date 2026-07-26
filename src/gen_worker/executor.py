@@ -213,9 +213,8 @@ def _sanitize(message: str) -> str:
 
 def _reserved_repo_info(payload: Any, field_name: str) -> Dict[str, Any]:
     """``payload.source`` / ``payload.destination`` / ``payload.text_encoder``
-    / ``payload.candidate`` as a plain dict ({} when absent). Producer payloads
-    carry these reserved-name structs (#376, pgw#594, pgw#684). The set of
-    names is hardcoded here; pgw#690 tracks making it declarative."""
+    as a plain dict ({} when absent). Producer payloads carry these
+    reserved-name structs (#376, pgw#594)."""
     obj = getattr(payload, field_name, None)
     if obj is None:
         return {}
@@ -527,6 +526,9 @@ _MANDATORY_LANES = ("w8a8", "w4a4")
 # bounds "finish the current unit" (one eager forward) before a hard cancel.
 _MINT_ABANDON_GRACE_S = 60.0
 _MINT_SEED_MAX_PASSES = 8
+#: Consecutive OOM-truncated seed passes before the mint aborts loudly
+#: (pgw#677 reopen: never finalize a partial capture off an OOM'd plan).
+_MINT_OOM_MAX_PASSES = 3
 _MINT_POLL_INTERVAL_S = 1.0
 
 # pgw#677 background-turn gate: tenant requests always win the GPU; mint
@@ -535,6 +537,14 @@ _MINT_POLL_INTERVAL_S = 1.0
 #: STEAL one turn (the minimum-progress guarantee — background work still
 #: finishes under sustained tenant load).
 _BG_STEAL_FLOOR_S = 30.0
+#: COMPILE turns get a far higher steal floor (pgw#677 reopen sizing
+#: correction): a stolen turn is not preemptible, and a real inductor
+#: compile is 4-7 unabortable minutes on an L4 — ~100x the advertised
+#: 30-90s residual. Compiles therefore run in tenant-idle gaps (arrivals
+#: cluster around completions, so gaps exist under real load) and may
+#: steal only against MINUTES of truly continuous demand — and when one
+#: does, it announces itself on the wire (``bg_turn_steal``).
+_BG_COMPILE_STEAL_FLOOR_S = 600.0
 #: A turn that ran against live demand "costs" this multiple of its own
 #: duration before the next steal — bounds the stolen duty cycle to
 #: 1/(1+factor) even when every turn is a multi-minute compile.
@@ -2112,6 +2122,10 @@ class _WarmupEvidence:
 
     count: int = 0
     functions_by_object: Dict[int, set[str]] = dc_field(default_factory=dict)
+    #: pgw#677 reopen: non-empty when the warm plan was CUT SHORT (OOM
+    #: backoff) — names the truncation. A truncated plan must never publish
+    #: its partial capture as the family cell.
+    aborted: str = ""
 
 
 # gw#661: setup failures whose contract is "will be re-attempted". These are
@@ -3813,6 +3827,17 @@ class Executor:
                 return lane
         return ""
 
+    def _execution_lane_for_ref(self, ref: str) -> str:
+        """The hub-resolved th#913 execution-lane descriptor for ``ref``
+        (declared or resolved form), "" when the hub sent no lane."""
+        ref = (ref or "").strip()
+        for declared, pick in (self._model_resolutions or {}).items():
+            resolved_ref = (pick[0] or declared).strip()
+            lane_str = (pick[2] or "").strip()
+            if lane_str and ref in (declared.strip(), resolved_ref):
+                return lane_str
+        return ""
+
     def _validate_required_compile(
         self, spec: EndpointSpec, run: pb.RunJob,
     ) -> None:
@@ -4968,6 +4993,20 @@ class Executor:
                         "boot warmup %s OOMed (%s) — skipping remaining "
                         "warmups; the first-request fit ladder owns this",
                         wj.spec.name, exc)
+                    # pgw#677 reopen: a truncated plan is recorded — the
+                    # caller withholds any pending mint's publish (the
+                    # partial cell would brick adopters) — and, when this
+                    # boot IS minting, the truncation reaches the hub as a
+                    # typed event instead of dying in pod logs.
+                    evidence.aborted = (
+                        f"cuda_oom at warm unit "
+                        f"{evidence.count + 1} ({wj.spec.name}): {exc}")
+                    if tracing:
+                        activity_mod.emit_event(
+                            "self_mint_abort",
+                            f"boot warm plan cut short: {evidence.aborted}",
+                            phase="warmup_oom",
+                        )
                     if torch is not None and torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     return False
@@ -5221,6 +5260,36 @@ class Executor:
     ) -> Any:
         assert spec.cls is not None  # guarded by ensure_setup
         setup_slots = self._setup_slots(spec)
+        # pgw#677 reopen: open the setup-scoped execution-lane window so
+        # EVERY arm path (slot injection AND self-loaded arm_compile via
+        # ArmingScope) stamps its pipelines with the hub-resolved th#913
+        # lane — the ONE serveability brain compile_cache.mandatory_serving
+        # reads. ContextVars ride to_thread, so the tenant setup thread and
+        # its arms inherit the window.
+        from . import compile_cache as _cc_lane
+
+        _setup_exec_lane = ""
+        for _slot in setup_slots:
+            _setup_exec_lane = self._execution_lane_for_ref(
+                wire_ref(spec.models[_slot]))
+            if _setup_exec_lane:
+                break
+        _lane_token = _cc_lane._SETUP_EXEC_LANE.set(_setup_exec_lane)
+        try:
+            return await self._setup_locked_inner(
+                spec, rec, snapshots, intent_id=intent_id,
+                setup_slots=setup_slots)
+        finally:
+            _cc_lane._SETUP_EXEC_LANE.reset(_lane_token)
+
+    async def _setup_locked_inner(
+        self, spec: EndpointSpec, rec: _ClassRecord,
+        snapshots: Optional[Dict[str, pb.Snapshot]],
+        *,
+        intent_id: str = "",
+        setup_slots: List[str],
+    ) -> Any:
+        assert spec.cls is not None
         # gw#494: residency keys for this setup are derived ONCE, here, in
         # resolved space; downloads, booking and the record's held_refs all
         # use these exact strings (a HelloAck rebind during an await below
@@ -5454,7 +5523,7 @@ class Executor:
             }
             warmup = getattr(instance, "warmup", None)
 
-            async def run_warmup() -> Tuple[int, Dict[int, set[str]]]:
+            async def run_warmup() -> Tuple[int, Dict[int, set[str]], str]:
                 if callable(warmup):
                     warm_t0 = time.monotonic()
                     if asyncio.iscoroutinefunction(warmup):
@@ -5465,7 +5534,7 @@ class Executor:
                         logger.info(
                             "compile-cache warmup %s completed in %.1fs",
                             spec.name, time.monotonic() - warm_t0)
-                    return 1, {}
+                    return 1, {}, ""
 
                 # gw#470: no custom warmup() — run every declared handler of
                 # this instance group. A failure propagates as a load failure.
@@ -5488,7 +5557,8 @@ class Executor:
                         for sel in inj.active_compile_artifacts.values()
                     ),
                 )
-                return evidence.count, evidence.functions_by_object
+                return (evidence.count, evidence.functions_by_object,
+                        evidence.aborted)
 
             # pgw#671: an eager-first foreground pass is an eager warm, not
             # the inductor compile — that runs in the background driver.
@@ -5533,9 +5603,9 @@ class Executor:
                         if _sel is not None and not trt_engine.is_engine_ref(
                                 _sel.ref):
                             compile_cache.reset_target_code(_cand.pipeline)
-                    warmed, function_proofs = await run_warmup()
+                    warmed, function_proofs, warm_aborted = await run_warmup()
             else:
-                warmed, function_proofs = await run_warmup()
+                warmed, function_proofs, warm_aborted = await run_warmup()
             compile_seconds = (
                 compile_cache.compile_wall_seconds() - compile_seconds_before
                 if proves_inductor else 0.0)
@@ -5767,6 +5837,14 @@ class Executor:
                             "serving (pgw#672)", detail)
                         activity_mod.current_note(
                             f"compiled lane degraded to eager: {detail}")
+                        # pgw#677 reopen: countable typed event — the
+                        # degrade + withheld publish must be visible
+                        # without pod logs.
+                        activity_mod.emit_event(
+                            "self_mint_abort",
+                            f"proof failed; degraded to eager: {detail}",
+                            phase="proof_failed",
+                        )
                     else:
                         logger.warning("%s; serving eager", detail)
                 if unexercised:
@@ -5849,7 +5927,17 @@ class Executor:
                             oid for oid in sharers
                             if oid not in proven_mint_objs
                         ]
-                        if gap:
+                        if warm_aborted:
+                            # pgw#677 reopen: a plan cut short (OOM backoff)
+                            # can leave every OBJECT looking proven while
+                            # whole graph CLASSES are missing — publishing
+                            # that partial pack bricks every adopting boot.
+                            fleet_cells_mod.withhold_self_mint_publish(
+                                pending,
+                                f"warm plan cut short ({warm_aborted}); "
+                                "planned graphs are absent from the packed "
+                                "cell")
+                        elif gap:
                             fleet_cells_mod.withhold_self_mint_publish(
                                 pending,
                                 f"{len(gap)}/{len(sharers)} capture-sharing "
@@ -7064,6 +7152,24 @@ class Executor:
                         # stays eager. ``compile_artifact`` is hub-attached (#569).
                         from . import compile_cache
 
+                        # pgw#677 reopen: stamp the hub-resolved execution
+                        # lane on the pipe BEFORE arming, so the router's
+                        # fail_closed and the eager-first eligibility both
+                        # read the ONE serveability brain
+                        # (compile_cache.mandatory_serving) instead of the
+                        # weight-lane prefix. Never overwritten once set.
+                        exec_lane = self._execution_lane_for_ref(ref)
+                        if exec_lane and not getattr(
+                                pipe, compile_cache.EXECUTION_LANE_ATTR,
+                                None):
+                            try:
+                                setattr(
+                                    pipe,
+                                    compile_cache.EXECUTION_LANE_ATTR,
+                                    exec_lane)
+                            except Exception:
+                                pass
+
                         try:
                             outcome = await _to_thread_complete(
                                 self._enable_compiled,
@@ -7311,15 +7417,23 @@ class Executor:
             wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
         ):
             return False
-        from . import hot_swap
-        from .models.loading import pipeline_weight_lane
+        from . import compile_cache, hot_swap
 
         saw_router = False
         for candidate in inj.compile_objects:
             if id(candidate.pipeline) not in inj.pending_self_mints:
                 continue
-            if pipeline_weight_lane(candidate.pipeline).startswith(
-                    _MANDATORY_LANES):
+            # pgw#677 reopen: THE live break. The weight-lane stamp names
+            # cell identity (pgw#686), not serveability — sdxl's mixed
+            # ``#fp8-w8a8`` storage stamps ``w8a8-lora64`` while the hub
+            # serves it ``fp8-w8a16+eager``. Classifying that stamp as
+            # mandatory silently sent the whole boot down the FOREGROUND
+            # compile-then-serve mint: the first tenant request sat inside
+            # ensure_setup for the full 18-unit inline-compile plan (the
+            # measured 26-minute starvation on three cold L4 pods, zero
+            # renders, gate machinery never engaged). Serveability follows
+            # the ONE brain: hub execution lane first, stamp as fallback.
+            if compile_cache.mandatory_serving(candidate.pipeline):
                 return False
             router = hot_swap.router_of(candidate.pipeline)
             if router is None or router.fail_closed:
@@ -7418,12 +7532,27 @@ class Executor:
             logger.info(
                 "background mint for %s abandoned cleanly; serving continues "
                 "at its current tier", bg.spec.name)
+            activity_mod.emit_event(
+                "self_mint_abort",
+                f"background mint for {bg.spec.name} abandoned "
+                "(adopt-on-arm / vacate / shutdown); serving continues at "
+                "its current tier",
+                phase="abandoned",
+            )
             act.completed()
         except Exception as exc:
             self._abandon_mint_state(rec, bg)
             logger.warning(
                 "background mint for %s failed (%s: %s); serving stays eager "
                 "for this process", bg.spec.name, type(exc).__name__, exc)
+            # pgw#677 reopen: the abort cause rides the wire typed and
+            # countable, in addition to the FAILED activity terminal.
+            activity_mod.emit_event(
+                "self_mint_abort",
+                f"background mint for {bg.spec.name} failed: "
+                f"{type(exc).__name__}: {exc}",
+                phase="error",
+            )
             act.failed(exc)
         else:
             act.completed()
@@ -7558,10 +7687,14 @@ class Executor:
                     return False
             return True
 
-        async def _seed_pass(jobs_now: List[Any]) -> None:
+        async def _seed_pass(jobs_now: List[Any]) -> bool:
             """One full-plan seed pass; preempted units re-queue within the
             pass (a preemption is not plan progress — the pass semantics
-            stay 'every unit ran to completion once')."""
+            stay 'every unit ran to completion once'). False = the pass was
+            CUT SHORT by an OOM backoff — the caller must never treat such
+            a pass as converged (pgw#677 reopen: an OOM-truncated plan that
+            converged silently is how a partial capture reached finalize at
+            unit 8/18 with nothing publishable)."""
             pending_units = list(jobs_now)
             completed = 0
             while pending_units:
@@ -7579,13 +7712,22 @@ class Executor:
                     logger.warning(
                         "background mint seed %s OOMed (%s); backing off "
                         "this pass", wj.spec.name, exc)
+                    activity_mod.emit_event(
+                        "self_mint_abort",
+                        f"seed pass cut short by CUDA OOM at unit "
+                        f"{completed + 1}/{len(jobs_now)} "
+                        f"({wj.spec.name}): {exc}; backing off and "
+                        "retrying the pass",
+                        phase="warmup_oom",
+                    )
                     if torch is not None and torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    return
+                    return False
                 if done:
                     completed += 1
                 else:
                     pending_units.append(wj)
+            return True
 
         # Phase 1 — SEED: run the full derived plan through the enabled
         # routers. Every novel signature serves EAGER here and enqueues its
@@ -7593,6 +7735,7 @@ class Executor:
         # the signature vocabulary is stable (a full queue drops seeds — a
         # later pass re-enqueues them) and no compile is pending.
         seeding_pass = 0
+        oom_passes = 0
         while True:
             seeding_pass += 1
             if seeding_pass > _MINT_SEED_MAX_PASSES:
@@ -7600,7 +7743,7 @@ class Executor:
                     f"mint seeding did not converge after "
                     f"{_MINT_SEED_MAX_PASSES} passes")
             before = _stats()
-            await _seed_pass(jobs)
+            pass_ok = await _seed_pass(jobs)
             act.phase(activity_mod.PHASE_INDUCTOR_COMPILE)
             while True:
                 _checkpoint()
@@ -7608,6 +7751,20 @@ class Executor:
                 if pending == 0:
                     break
                 await asyncio.sleep(_MINT_POLL_INTERVAL_S)
+            if not pass_ok:
+                # pgw#677 reopen: an OOM-truncated pass is NEVER
+                # convergence — stats can be stable precisely because the
+                # remaining units never ran. Retry (bounded by the pass
+                # cap); a persistent OOM aborts the mint loudly instead of
+                # finalizing a partial capture.
+                oom_passes += 1
+                if oom_passes >= _MINT_OOM_MAX_PASSES:
+                    raise RuntimeError(
+                        f"mint aborted: the warm plan OOMed on "
+                        f"{oom_passes} consecutive passes; refusing to "
+                        "finalize a partial capture")
+                continue
+            oom_passes = 0
             after = _stats()
             if after == before:
                 break
@@ -7616,6 +7773,12 @@ class Executor:
             raise RuntimeError(
                 f"{failed_sigs} signature(s) failed their background "
                 "compile; the capture is incomplete")
+        dropped = sum(r.seed_dropped for r in routers.values())
+        if dropped:
+            raise RuntimeError(
+                f"{dropped} mint seed signature(s) could not enqueue their "
+                "background compile (vocabulary overflow or dummy-batch "
+                "failure); the capture would be incomplete")
 
         # Phase 2 — VERIFY: every signature is warm, so these forwards
         # route COMPILED through the guarded wrappers — the successful
@@ -8823,13 +8986,29 @@ class Executor:
                     return False
                 wait_s = max(_BG_COMPILE_QUIESCENCE_S - quiet_for, 0.0)
             else:
+                floor = (
+                    _BG_COMPILE_STEAL_FLOOR_S if kind == "compile"
+                    else _BG_STEAL_FLOOR_S)
                 with self._bg_state_lock:
                     due = max(
                         self._bg_steal_debt_until,
-                        blocked_since + _BG_STEAL_FLOOR_S,
+                        blocked_since + floor,
                     )
                 if now >= due:
                     _admitted()
+                    if kind == "compile":
+                        # pgw#677 reopen: a stolen compile turn stalls the
+                        # next tenant on this instance for one unabortable
+                        # multi-minute compile — never silently.
+                        activity_mod.emit_event(
+                            "bg_turn_steal",
+                            f"stole a background compile turn after "
+                            f"{now - blocked_since:.0f}s of continuous "
+                            "tenant demand; the next tenant on this "
+                            "instance waits out one unabortable compile "
+                            "(attributed to instance_gate_wait)",
+                            phase="compile",
+                        )
                     return True
                 wait_s = due - now
             if max_wait is not None and now - attempt_start >= max_wait:
@@ -9091,11 +9270,6 @@ class Executor:
         # (e.g. a text-encoder repo separate from the primary `source` DiT).
         # Absent on every existing payload struct — stays {} and is a no-op.
         text_encoder_info = _reserved_repo_info(payload, "text_encoder") if producer else {}
-        # pgw#684/te#121: a second repo to COMPARE against, not to build from —
-        # a two-ref quality gate loads its reference from `source` and the arm
-        # under test from `candidate`. Absent on every existing payload
-        # struct — stays {} and is a no-op.
-        candidate_info = _reserved_repo_info(payload, "candidate") if producer else {}
 
         # gw#453: arm repo-CAS checkpoint routing for producer jobs. Without
         # kind/destination_repo/job_id the ctx's _repo_job_upload_scope() is
@@ -9119,7 +9293,6 @@ class Executor:
                 source_info=source_info,
                 destination_info=destination_info,
                 text_encoder_info=text_encoder_info,
-                candidate_info=candidate_info,
                 hf_token=getattr(self._settings, "hf_token", "") or "",
             )
 
@@ -9198,11 +9371,6 @@ class Executor:
                 await self._materialize_source(
                     ctx, text_encoder_info, snapshots,
                     set_path=ctx._set_text_encoder_path, field_name="text_encoder",
-                )
-            if candidate_info:
-                await self._materialize_source(
-                    ctx, candidate_info, snapshots,
-                    set_path=ctx._set_candidate_path, field_name="candidate",
                 )
             if producer:
                 await self._materialize_datasets(ctx, payload)

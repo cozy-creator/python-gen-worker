@@ -247,6 +247,11 @@ class Router:
         self.healing: set = set()
         self.volatile: set = set()
         self.guard_miss_counts: dict = {}
+        # pgw#677 reopen: seeds that could NOT enqueue their background
+        # compile (vocabulary overflow / dummy failure). A nonzero count
+        # means the mint's capture would be incomplete — the driver aborts
+        # loudly instead of finalizing/publishing a partial cell.
+        self.seed_dropped = 0
         # pgw#677: executor-provided background-turn factory. When set,
         # every warm job for this router executes inside a turn, and
         # route() stops degrading novel signatures to inline compiles on
@@ -328,6 +333,12 @@ class Router:
                     "disabling concurrent routing for this pipeline",
                     _MAX_SIGS)
                 self.concurrent = False
+                # pgw#677 reopen: NEVER inline-compile inside a seed — the
+                # seed holds the run gate. The sig stays eager (unwarmed);
+                # the mint driver's convergence loop fails LOUDLY instead.
+                if seed:
+                    self.seed_dropped += 1
+                    return EAGER, sig
                 return COMPILED, sig
             device = _first_cuda_device(args, kwargs)
             # pgw#677: with a turn gate the warm thread owns the device while
@@ -350,11 +361,21 @@ class Router:
                 autocast_dtype=_autocast_dtype(), turn=turn,
             )
         except Exception:
+            with self.lock:
+                self.pending.discard(sig)
+            if seed:
+                # pgw#677 reopen: a seed must never pay the inline compile,
+                # even when its dummy cannot be built — the signature stays
+                # eager and the mint's convergence loop reports it loudly.
+                with self.lock:
+                    self.seed_dropped += 1
+                logger.warning(
+                    "hot-swap: dummy batch for %s failed in a mint seed; "
+                    "the signature stays eager", label, exc_info=True)
+                return EAGER, sig
             logger.warning(
                 "hot-swap: dummy batch for %s failed; sequential compile",
                 label, exc_info=True)
-            with self.lock:
-                self.pending.discard(sig)
             return COMPILED, sig
         if not _submit(job):
             with self.lock:
