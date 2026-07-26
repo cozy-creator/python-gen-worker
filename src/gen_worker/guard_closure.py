@@ -1,0 +1,794 @@
+"""Guard-closure gate + boundary canonicalization (pgw#681).
+
+Dynamo's guard set for a compiled graph IS the exhaustive list of everything
+that graph depends on — so closure against the declared compile contract is
+machine-checkable. Three pieces, all SDK-generic (parameterized ONLY by the
+declared ``CompileCell`` contract — never per-endpoint or per-family code):
+
+1. **Extraction** (:func:`extract`): post-mint, walk every compiled graph's
+   live guard tree. The robust torch 2.13 surface (probed on 2.13.0+cu130):
+   ``torch._dynamo.eval_frame._debug_get_cache_entry_list(code)`` →
+   ``entry.guard_manager.root`` → recursive ``get_child_managers()`` (each
+   carries ``get_source()``) + ``get_leaf_guards()`` (each carries its type
+   name and ``verbose_code_parts()``). A repr parse of the guard manager's
+   ``TREE_GUARD_MANAGER`` dump is the fallback when the structured walk is
+   unavailable. Extraction failure is NEVER silent: a mint whose closure
+   cannot be proven fails red (pgw#657 fail-loud doctrine).
+
+2. **Closure classifier** (:func:`classify`): every guard is classified by
+   its SOURCE ROOT first — module-rooted (``L['self']…``) guards are the
+   weights/structure identity (covered by family + graph_signature +
+   weight_contract ck2 axes) and global-rooted (``G[…]``) guards are the
+   code identity (covered by gen_worker/diffusers/transformers/image_digest
+   axes); neither can vary per request. Cross-request variance enters ONLY
+   through call inputs and ambient process state, so those two roots form a
+   CLOSED WORLD: every input/ambient guard type must be explicitly covered
+   by the contract (declared shapes/dynamic dims, pinned scalars, structural
+   constants) or canonicalized away at the ingress — anything else is a
+   LEAK, and a leak fails the mint naming the exact variable.
+
+3. **Boundary canonicalization** (:func:`canonical_ingress`): one wrapper at
+   the single compiled-graph ingress (installed by ``compile_cache.apply``
+   for every target, mint and consumer alike, so the traced guards and the
+   serving inputs see the SAME canonical form). Tensor strides are pinned to
+   the canonical contiguous layout — ``.contiguous()`` alone is NOT the pin:
+   a size-1 dim makes ``is_contiguous()`` true under an arbitrary stride and
+   ``.contiguous()`` a no-op while TENSOR_MATCH still guards the exact
+   stride tuple (ie#544, reproduced: entries 1→2 on ``stride=(8,999,1)`` for
+   size ``(4,1,8)``), so the residue case rebuilds via ``as_strided``.
+   Tensor dtypes are memo-asserted per argument path — a drift raises a
+   NAMED :class:`GuardBoundaryError` instead of a silent recompile. Scalar
+   policy is enforced at the mint gate (only contract-pinned scalars may be
+   baked into guards; declared dynamism rides ``mark_dynamic``) — the
+   ingress never rewrites scalar values.
+
+The full guard dump rides the cell as ``metadata.json``'s
+``guard_manifest`` block (deterministic: comments stripped, ASLR ids
+scrubbed, rows sorted) — every armed cell carries its complete dependency
+manifest into CAS and the publish-intent metadata. The audit surface
+(:func:`audit_armed` for a live armed pipeline, :func:`consolidate` +
+``python -m gen_worker.guard_closure`` over N pods' cells/manifests) is the
+N-cold-pod zero-miss closure check: exit 0 = closed and consistent, 2 =
+leaks, 3 = cross-pod divergence.
+
+Note: ``_debug_get_cache_entry_list`` keys on the class-shared ``__code__``
+(pgw#637), so a warm process's dump can include same-family sibling entries;
+classification is source-based, so siblings classify identically.
+"""
+
+from __future__ import annotations
+
+import ast
+import functools
+import json
+import logging
+import re
+import tarfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
+
+MANIFEST_VERSION = 1
+MANIFEST_KEY = "guard_manifest"
+
+# Verdicts. LEAK is the only failing one.
+LEAK = "LEAK"
+RUNTIME_STATE = "runtime-state"          # ambient process state (ck2 runtime axes)
+CODE_IDENTITY = "code-identity"          # G[...] roots (version/image axes)
+MODULE_STRUCTURE = "module-structure"    # L['self'] roots (family/graph/weight axes)
+CONTRACT_SHAPE = "contract-shape"        # input tensor shape/stride/dtype/device
+CONTRACT_SCALAR = "contract-scalar"      # input scalar pinned by the contract
+STRUCTURAL = "structural"                # type/len/None/bool topology of the call
+CODE_CONSTANT = "code-constant"          # string constants from the call path
+CANONICALIZED = "canonicalized-stride"   # stride axes the ingress pins
+
+_COVERED = (
+    RUNTIME_STATE, CODE_IDENTITY, MODULE_STRUCTURE, CONTRACT_SHAPE,
+    CONTRACT_SCALAR, STRUCTURAL, CODE_CONSTANT, CANONICALIZED,
+)
+
+# Ambient (root-attached) guard types covered by process/runtime identity.
+_AMBIENT_COVERED = frozenset({
+    "GLOBAL_STATE", "TORCH_FUNCTION_MODE_STACK", "DEFAULT_DEVICE",
+    "DETERMINISTIC_ALGORITHMS", "GRAD_MODE", "AUTOCAST_STATE",
+    "TORCH_FUNCTION_STATE", "NO_TENSOR_ALIASING", "DUPLICATE_INPUT",
+    "FUNCTORCH_STACK_MATCH", "DUAL_LEVEL",
+})
+# Input-rooted guard types that assert call TOPOLOGY (types, lengths,
+# presence), which the endpoint call path fixes deterministically.
+_STRUCTURAL_TYPES = frozenset({
+    "TYPE_MATCH", "DIMENSION_DYNAMIC_MARKING_GUARD", "HASATTR", "NO_HASATTR",
+    "LENGTH_CHECK", "DICT_LENGTH", "DICT_CONTAINS", "SET_CONTAINS",
+    "MAPPING_KEYS_MATCH", "KEYS_MATCH", "TUPLE_ITERATOR_LEN",
+    "RANGE_ITERATOR_MATCH", "NONE_MATCH", "NOT_NONE", "NOT_NONE_MATCH",
+    "TRUE_MATCH", "FALSE_MATCH", "DISPATCH_KEY_SET_MATCH", "FLOAT_IS_NAN",
+    "COMPLEX_IS_NAN", "SEQUENCE_LENGTH",
+})
+
+_CANONICAL_DEPTH = 4
+
+# `___check_obj_id(x, 129760138209744)` / `___check_type_id(x, 21008688)`
+# embed process memory addresses (ASLR) — scrub for cross-pod determinism.
+_ID_SCRUB_RE = re.compile(r"(___check_(?:obj|type)_id\(.*?,\s*)\d+(\))")
+_COMMENT_RE = re.compile(r"\s{2,}#.*$", re.DOTALL)
+_TENSOR_MATCH_RE = re.compile(r"size=\[([^\]]*)\], stride=\[([^\]]*)\]")
+_SOURCE_LOCAL_RE = re.compile(r"^L\['([^']+)'\]")
+
+
+class GuardClosureError(RuntimeError):
+    """The mint's guard set is not closed over the declared contract (or
+    could not be extracted). The message names every leaking variable."""
+
+
+class GuardBoundaryError(RuntimeError):
+    """An input crossed the compiled-graph ingress outside the canonical
+    boundary (dtype drift). Named — never a silent recompile. Consumer
+    guards catch it into the pgw#672 explicit-eager degrade; mint arms
+    (``guard=False``) let it fail the mint red."""
+
+
+@dataclass(frozen=True)
+class GuardRecord:
+    """One classified dynamo guard."""
+
+    guard_type: str
+    source: str  # "" for root/ambient guards
+    expr: str    # comment-stripped, id-scrubbed
+    verdict: str
+    axis: str    # covering contract/runtime axis, or the leak reason
+
+    def row(self) -> Dict[str, str]:
+        return {
+            "type": self.guard_type, "source": self.source,
+            "expr": self.expr, "verdict": self.verdict, "axis": self.axis,
+        }
+
+
+@dataclass(frozen=True)
+class GraphGuards:
+    """The complete guard set of one compiled graph (one cache entry)."""
+
+    target: str
+    code: str
+    entry: int
+    guards: Tuple[GuardRecord, ...]
+
+
+@dataclass(frozen=True)
+class ClosureReport:
+    """The audit view for one armed pipeline / minted cell."""
+
+    graphs: Tuple[GraphGuards, ...]
+
+    @property
+    def leaks(self) -> Tuple[str, ...]:
+        out: List[str] = []
+        for g in self.graphs:
+            for r in g.guards:
+                if r.verdict == LEAK:
+                    out.append(
+                        f"target={g.target} {r.guard_type} "
+                        f"{r.source or '<ambient>'}: {r.expr} ({r.axis})")
+        return tuple(out)
+
+    @property
+    def closed(self) -> bool:
+        return bool(self.graphs) and not self.leaks
+
+    def verdict_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for g in self.graphs:
+            for r in g.guards:
+                counts[r.verdict] = counts.get(r.verdict, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def manifest(self) -> Dict[str, Any]:
+        """Deterministic JSON manifest — the durable per-cell guard dump."""
+        return {
+            "v": MANIFEST_VERSION,
+            "graphs": [
+                {
+                    "target": g.target, "code": g.code, "entry": g.entry,
+                    "guards": [r.row() for r in g.guards],
+                }
+                for g in self.graphs
+            ],
+            "verdicts": self.verdict_counts(),
+            "leaks": list(self.leaks),
+        }
+
+    def text(self) -> str:
+        lines = [
+            f"guard closure: {len(self.graphs)} graph(s), "
+            f"verdicts={self.verdict_counts()}",
+        ]
+        for leak in self.leaks:
+            lines.append(f"  LEAK {leak}")
+        if not self.graphs:
+            lines.append("  (no compiled graphs extractable)")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Contract pins
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ContractPins:
+    """The scalar/dynamic vocabulary one declared contract admits into
+    guards. 0/1 are torch's own free specializations; everything else must
+    be a declared axis value."""
+
+    ints: frozenset
+    floats: frozenset
+    has_dynamic: bool
+
+
+def contract_pins(cfg: Any) -> ContractPins:
+    ints = {0, 1}
+    for row in tuple(getattr(cfg, "shapes", ()) or ()):
+        ints.update(int(v) for v in row)
+    ints.update(int(v) for v in tuple(getattr(cfg, "text_lens", ()) or ()))
+    text_len = getattr(cfg, "text_len", None)
+    if text_len is not None:
+        ints.add(int(text_len))
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    if bucket:
+        ints.add(bucket)
+    dynamic = tuple(getattr(cfg, "dynamic", ()) or ())
+    for d in dynamic:
+        ints.add(int(getattr(d, "min", 0)))
+        ints.add(int(getattr(d, "max", 0)))
+    floats = {0.0, 1.0}
+    floats.update(float(v) for v in tuple(getattr(cfg, "guidance_scales", ()) or ()))
+    return ContractPins(
+        ints=frozenset(ints), floats=frozenset(floats),
+        has_dynamic=bool(dynamic))
+
+
+# ---------------------------------------------------------------------------
+# Extraction
+# ---------------------------------------------------------------------------
+
+
+def _normalize(expr: str) -> str:
+    out = _COMMENT_RE.sub("", str(expr)).strip()
+    return _ID_SCRUB_RE.sub(r"\g<1><id>\g<2>", out)
+
+
+def _walk_manager(manager: Any, source: str, out: List[Tuple[str, str, str]]) -> None:
+    for leaf in manager.get_leaf_guards():
+        parts_attr = getattr(leaf, "verbose_code_parts", None)
+        parts = list(parts_attr() if callable(parts_attr) else (parts_attr or ()))
+        if not parts:
+            parts = [type(leaf).__name__]
+        for part in parts:
+            out.append((type(leaf).__name__, source, str(part)))
+    for child in manager.get_child_managers():
+        get_source = getattr(child, "get_source", None)
+        child_source = str(get_source()) if callable(get_source) else source
+        _walk_manager(child, child_source or source, out)
+
+
+_TREE_LEAF_RE = re.compile(r"^\|(?: \|)* \+- ([A-Z0-9_]+): (.*)$")
+_TREE_MGR_RE = re.compile(r"^\|(?: \|)* \+- \w*GuardManager: source=([^,]+),")
+
+
+def _parse_tree_repr(dump: str) -> List[Tuple[str, str, str]]:
+    """Fallback: parse the ``TREE_GUARD_MANAGER`` repr into (type, source,
+    raw expr) rows. Depth-tracked so leaves attach to the nearest manager."""
+    out: List[Tuple[str, str, str]] = []
+    source_by_depth: Dict[int, str] = {}
+    for line in dump.splitlines():
+        depth = line.count("| ")
+        mgr = _TREE_MGR_RE.match(line)
+        if mgr:
+            source_by_depth[depth] = mgr.group(1).strip()
+            continue
+        leaf = _TREE_LEAF_RE.match(line)
+        if leaf:
+            source = ""
+            for d in sorted(source_by_depth):
+                if d < depth:
+                    source = source_by_depth[d]
+            out.append((leaf.group(1), source, leaf.group(2)))
+    return out
+
+
+def _code_of(fn: Any) -> Optional[Any]:
+    return getattr(getattr(fn, "__func__", fn), "__code__", None)
+
+
+def _entry_guard_rows(entry: Any) -> List[Tuple[str, str, str]]:
+    manager = getattr(entry, "guard_manager", None)
+    if manager is None:
+        raise GuardClosureError(
+            "dynamo cache entry exposes no guard_manager — the guard debug "
+            "surface changed; closure is unprovable on this torch")
+    root = getattr(manager, "root", None)
+    if root is not None:
+        try:
+            rows: List[Tuple[str, str, str]] = []
+            _walk_manager(root, "", rows)
+            if rows:
+                return rows
+        except Exception:
+            logger.warning(
+                "guard-closure: structured guard walk failed; falling back "
+                "to the repr parse", exc_info=True)
+    rows = _parse_tree_repr(str(manager))
+    if not rows:
+        raise GuardClosureError(
+            "no guards extractable from a live cache entry (structured walk "
+            "and repr parse both empty) — closure is unprovable")
+    return rows
+
+
+def extract_target_guards(
+    fn: Any, target: str, cfg: Any,
+) -> List[GraphGuards]:
+    """Classified guard sets for every live compiled graph on ``fn``."""
+    code = _code_of(fn)
+    if code is None:
+        return []
+    from torch._dynamo.eval_frame import _debug_get_cache_entry_list
+
+    pins = contract_pins(cfg)
+    graphs: List[GraphGuards] = []
+    for index, entry in enumerate(_debug_get_cache_entry_list(code)):
+        records = sorted(
+            {
+                _classify_row(guard_type, source, raw, pins)
+                for guard_type, source, raw in _entry_guard_rows(entry)
+            },
+            key=lambda r: (r.guard_type, r.source, r.expr),
+        )
+        graphs.append(GraphGuards(
+            target=str(target), code=str(getattr(code, "co_qualname", code.co_name)),
+            entry=index, guards=tuple(records),
+        ))
+    return graphs
+
+
+def extract(pipeline: Any, cfg: Any) -> ClosureReport:
+    """Classified guard sets for every compiled graph on an armed pipeline
+    (whole-graph targets via the marker's originals; regional targets via
+    the repeated-block forwards — same enumeration the in-memory compile
+    probe trusts)."""
+    from . import compile_cache as cc
+
+    marker = getattr(pipeline, cc._MARKER_ATTR, None) or {}
+    graphs: List[GraphGuards] = []
+    seen_codes: set = set()
+    for _owner, attr, fn in marker.get("originals") or ():
+        code = _code_of(fn)
+        if code is None or id(code) in seen_codes:
+            continue
+        seen_codes.add(id(code))
+        graphs.extend(extract_target_guards(fn, str(attr), cfg))
+    for mod in marker.get("regional_mods") or ():
+        try:
+            children = list(mod.modules())
+        except Exception:
+            logger.warning(
+                "guard-closure: could not enumerate regional submodules of "
+                "%s", type(mod).__name__, exc_info=True)
+            continue
+        for child in children:
+            fwd = getattr(type(child), "forward", None)
+            code = _code_of(fwd)
+            if code is None or id(code) in seen_codes:
+                continue
+            seen_codes.add(id(code))
+            graphs.extend(extract_target_guards(
+                fwd, f"{type(child).__name__}.forward", cfg))
+    graphs.sort(key=lambda g: (g.target, g.code, g.entry))
+    return ClosureReport(graphs=tuple(graphs))
+
+
+# ---------------------------------------------------------------------------
+# Classification
+# ---------------------------------------------------------------------------
+
+
+def _source_root(source: str) -> str:
+    s = str(source or "").strip()
+    if not s:
+        return "ambient"
+    if s.startswith("G[") or s.startswith("G."):
+        return "global"
+    m = _SOURCE_LOCAL_RE.match(s)
+    if m is None:
+        return "other"
+    return "self" if m.group(1) == "self" else "input"
+
+
+def _contiguous_strides(shape: Sequence) -> Tuple[int, ...]:
+    out: List[int] = []
+    step = 1
+    for dim in reversed([int(v) for v in shape]):
+        out.append(step)
+        step *= max(dim, 1)
+    return tuple(reversed(out))
+
+
+def _classify_tensor_match(expr: str) -> Tuple[str, str]:
+    m = _TENSOR_MATCH_RE.search(expr)
+    if m is None:
+        return CONTRACT_SHAPE, "shapes/dtype/device (contract + lane)"
+    size_txt = [v.strip() for v in m.group(1).split(",") if v.strip()]
+    stride_txt = [v.strip() for v in m.group(2).split(",") if v.strip()]
+    if any(v == "None" for v in size_txt):
+        # Declared-dynamic dims record None; dependent strides follow suit.
+        return CONTRACT_SHAPE, "declared dynamic dims"
+    try:
+        size = [int(v) for v in size_txt]
+        stride = tuple(int(v) for v in stride_txt if v != "None")
+    except ValueError:
+        return CONTRACT_SHAPE, "shapes/dtype/device (contract + lane)"
+    want = _contiguous_strides(size)
+    have = tuple(
+        int(v) if v != "None" else want[i]
+        for i, v in enumerate(stride_txt)
+    ) if len(stride_txt) == len(size) else stride
+    if have != want:
+        return LEAK, (
+            f"non-canonical stride {list(have)} for size {size} survived "
+            "the ingress pin")
+    return CANONICALIZED, "ingress stride pin + contract shapes"
+
+
+def _scalar_verdict(value: Any, pins: ContractPins) -> Tuple[str, str]:
+    if value is None or isinstance(value, bool):
+        return STRUCTURAL, "call-path constant"
+    if isinstance(value, (str, bytes)):
+        return CODE_CONSTANT, "call-path string constant"
+    if isinstance(value, int):
+        if value in pins.ints:
+            return CONTRACT_SCALAR, "declared contract int"
+        return LEAK, f"int {value} is not a declared contract pin"
+    if isinstance(value, float):
+        if value in pins.floats or (value.is_integer() and int(value) in pins.ints):
+            return CONTRACT_SCALAR, "declared contract float"
+        return LEAK, f"float {value} is not a declared contract pin"
+    if isinstance(value, (tuple, list)):
+        for v in value:
+            verdict, axis = _scalar_verdict(v, pins)
+            if verdict == LEAK:
+                return LEAK, f"element {axis}"
+        return CONTRACT_SCALAR, "declared contract sequence"
+    return LEAK, f"unclassifiable literal {type(value).__name__}"
+
+
+def _classify_equals(expr: str, pins: ContractPins) -> Tuple[str, str]:
+    _lhs, sep, rhs = expr.partition(" == ")
+    if not sep:
+        return LEAK, "unparseable EQUALS_MATCH expression"
+    try:
+        value = ast.literal_eval(rhs.strip())
+    except Exception:
+        return LEAK, f"unparseable EQUALS_MATCH literal {rhs.strip()[:60]!r}"
+    return _scalar_verdict(value, pins)
+
+
+def classify(
+    guard_type: str, source: str, expr: str, pins: ContractPins,
+) -> Tuple[str, str]:
+    """(verdict, covering axis / leak reason) for one guard.
+
+    Module- and global-rooted guards are covered by construction (weights +
+    code identity, pinned by the ck2 key axes). Input-rooted and ambient
+    guards are the closed world: unknown types are LEAKS, never waved on.
+    """
+    root = _source_root(source)
+    if root == "self":
+        return MODULE_STRUCTURE, "family + graph_signature + weight_contract"
+    if root == "global":
+        return CODE_IDENTITY, "gen_worker/diffusers/transformers/image versions"
+    if root == "ambient":
+        if guard_type in _AMBIENT_COVERED:
+            return RUNTIME_STATE, "process runtime state (ck2 runtime axes)"
+        if guard_type == "LAMBDA_GUARD":
+            if ("init_ambient_guards" in expr
+                    or "top_saved_tensors_hooks" in expr):
+                return RUNTIME_STATE, "torch ambient state"
+            if ".size()" in expr or ".stride()" in expr:
+                if pins.has_dynamic:
+                    return CONTRACT_SHAPE, "declared dynamic-dim range"
+                return LEAK, "shape-env relation without declared dynamic dims"
+        return LEAK, f"unclassified ambient guard {guard_type}"
+    if root == "other":
+        return LEAK, f"unrecognized guard source {source!r}"
+    # input-rooted
+    if guard_type == "TENSOR_MATCH":
+        return _classify_tensor_match(expr)
+    if guard_type in _STRUCTURAL_TYPES:
+        return STRUCTURAL, "call topology (deterministic per endpoint code)"
+    if guard_type == "EQUALS_MATCH":
+        return _classify_equals(expr, pins)
+    if guard_type == "LAMBDA_GUARD" and (".size()" in expr or ".stride()" in expr):
+        if pins.has_dynamic:
+            return CONTRACT_SHAPE, "declared dynamic-dim range"
+        return LEAK, "shape-env relation without declared dynamic dims"
+    return LEAK, f"input-dependent guard {guard_type} outside the contract"
+
+
+def _classify_row(
+    guard_type: str, source: str, raw_expr: str, pins: ContractPins,
+) -> GuardRecord:
+    verdict, axis = classify(guard_type, source, raw_expr, pins)
+    return GuardRecord(
+        guard_type=str(guard_type), source=str(source or ""),
+        expr=_normalize(raw_expr), verdict=verdict, axis=axis)
+
+
+# ---------------------------------------------------------------------------
+# The mint gate + armed-cell audit
+# ---------------------------------------------------------------------------
+
+
+def audit_armed(pipeline: Any, cfg: Any) -> ClosureReport:
+    """The auditable diagnostics view of an armed pipeline's guard closure."""
+    return extract(pipeline, cfg)
+
+
+def assert_closure(pipeline: Any, cfg: Any, label: str = "") -> Dict[str, Any]:
+    """The guard-closure mint gate: every compiled graph's guard set must be
+    closed over the declared contract. Returns the deterministic guard
+    manifest to embed in the cell metadata; raises :class:`GuardClosureError`
+    naming every out-of-contract variable (mint red — downstream the pgw#672
+    posture degrades to explicit eager, never a pod death)."""
+    report = audit_armed(pipeline, cfg)
+    name = label or type(pipeline).__name__
+    if not report.graphs:
+        raise GuardClosureError(
+            f"guard-closure gate ({name}): no compiled graphs extractable "
+            "from the armed targets — closure is unprovable, refusing the "
+            "mint")
+    if report.leaks:
+        leak_lines = "\n  ".join(report.leaks)
+        raise GuardClosureError(
+            f"guard-closure gate ({name}): {len(report.leaks)} out-of-"
+            f"contract guard(s) — the mint depends on variables the "
+            f"contract does not pin:\n  {leak_lines}")
+    logger.info(
+        "guard-closure gate (%s): CLOSED — %d graph(s), verdicts=%s",
+        name, len(report.graphs), report.verdict_counts())
+    return report.manifest()
+
+
+# ---------------------------------------------------------------------------
+# Boundary canonicalization (the single compiled-graph ingress)
+# ---------------------------------------------------------------------------
+
+
+def canonical_strides(shape: Sequence) -> Tuple[int, ...]:
+    """The canonical contiguous stride tuple torch mints for fresh tensors."""
+    return _contiguous_strides(shape)
+
+
+def _canonical_tensor(t: Any, path: str, label: str, dtypes: Dict[str, str]) -> Any:
+    want = _contiguous_strides(t.shape)
+    if tuple(t.stride()) != want:
+        t = t.contiguous()
+        if tuple(t.stride()) != want:
+            # ie#544: a size-1 dim keeps is_contiguous() true under an
+            # arbitrary stride, making .contiguous() a no-op while
+            # TENSOR_MATCH guards the exact stride tuple. The layout is
+            # already contiguous, so restating the strides is safe.
+            t = t.as_strided(tuple(int(v) for v in t.shape), want)
+    seen = dtypes.setdefault(path, str(t.dtype))
+    if seen != str(t.dtype):
+        raise GuardBoundaryError(
+            f"compiled ingress {label}: {path} arrived as {t.dtype} but "
+            f"this boundary first observed {seen} — out-of-contract dtype "
+            "drift at the compiled graph boundary")
+    return t
+
+
+def _canonical_value(
+    value: Any, path: str, label: str, dtypes: Dict[str, str],
+    torch_mod: Any, depth: int = 0,
+) -> Any:
+    if isinstance(value, torch_mod.Tensor):
+        return _canonical_tensor(value, path, label, dtypes)
+    if depth >= _CANONICAL_DEPTH:
+        return value
+    if isinstance(value, tuple):
+        return tuple(
+            _canonical_value(v, f"{path}[{i}]", label, dtypes, torch_mod, depth + 1)
+            for i, v in enumerate(value))
+    if isinstance(value, list):
+        return [
+            _canonical_value(v, f"{path}[{i}]", label, dtypes, torch_mod, depth + 1)
+            for i, v in enumerate(value)]
+    if isinstance(value, dict):
+        return {
+            k: _canonical_value(v, f"{path}[{k!r}]", label, dtypes, torch_mod, depth + 1)
+            for k, v in value.items()}
+    return value
+
+
+def canonical_ingress(fn: Callable[..., Any], label: str) -> Callable[..., Any]:
+    """Wrap the compiled callable so every entry crosses one canonical
+    boundary: contiguous-canonical strides (stride-perturbed inputs HIT the
+    minted graph instead of recompiling) and per-path dtype asserts.
+    Installed symmetrically for mint capture and consumer serving, so the
+    traced guards describe exactly the form serving presents."""
+    dtypes: Dict[str, str] = {}
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        import torch
+
+        canon_args = tuple(
+            _canonical_value(a, f"args[{i}]", label, dtypes, torch)
+            for i, a in enumerate(args))
+        canon_kwargs = {
+            k: _canonical_value(v, f"kwargs[{k!r}]", label, dtypes, torch)
+            for k, v in kwargs.items()}
+        return fn(*canon_args, **canon_kwargs)
+
+    setattr(wrapper, "_cozy_canonical_ingress", label)
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Fleet consolidation: the N-cold-pod zero-miss closure check
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FleetAudit:
+    """Consolidated closure audit across N cells/pods of one release."""
+
+    names: Tuple[str, ...]
+    leaks: Tuple[str, ...]          # "name: leak line"
+    divergence: Tuple[str, ...]     # guards not present in every manifest
+    guard_total: int
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.names) and not self.leaks and not self.divergence
+
+    def text(self) -> str:
+        lines = [
+            f"fleet guard audit: {len(self.names)} manifest(s), "
+            f"{self.guard_total} guard row(s), {len(self.leaks)} leak(s), "
+            f"{len(self.divergence)} divergent row(s)",
+        ]
+        lines.extend(f"  LEAK {v}" for v in self.leaks)
+        lines.extend(f"  DIVERGENT {v}" for v in self.divergence)
+        if self.ok:
+            lines.append("  CLOSED: every guard is contract-covered and "
+                         "identical across all manifests")
+        return "\n".join(lines)
+
+
+def _comparison_key(target: str, guard: Mapping[str, Any]) -> Tuple[str, ...]:
+    guard_type = str(guard.get("type") or "")
+    source = str(guard.get("source") or "")
+    # Ambient state dumps embed per-host facts (num_threads); their
+    # PRESENCE is compared across pods, their content stays in the dump.
+    if guard_type in _AMBIENT_COVERED:
+        return (target, guard_type, source)
+    return (target, guard_type, source, str(guard.get("expr") or ""))
+
+
+def consolidate(manifests: Mapping[str, Mapping[str, Any]]) -> FleetAudit:
+    """Compare N cells' guard manifests: closure (no leaks anywhere) and
+    determinism (every guard row present in every manifest)."""
+    leaks: List[str] = []
+    per_name: Dict[str, set] = {}
+    total = 0
+    for name, manifest in sorted(manifests.items()):
+        keys: set = set()
+        for leak in manifest.get("leaks") or ():
+            leaks.append(f"{name}: {leak}")
+        for graph in manifest.get("graphs") or ():
+            target = str(graph.get("target") or "")
+            for guard in graph.get("guards") or ():
+                total += 1
+                keys.add(_comparison_key(target, guard))
+        per_name[name] = keys
+    divergence: List[str] = []
+    if len(per_name) > 1:
+        union: set = set().union(*per_name.values())
+        for key in sorted(union):
+            missing = sorted(n for n, keys in per_name.items() if key not in keys)
+            if missing:
+                divergence.append(f"{'/'.join(map(str, key))} absent from {missing}")
+    return FleetAudit(
+        names=tuple(sorted(per_name)), leaks=tuple(leaks),
+        divergence=tuple(divergence), guard_total=total)
+
+
+def load_manifest(path: Path) -> Dict[str, Any]:
+    """A guard manifest from a raw ``.json`` dump or a cell ``.tar.gz``
+    (the ``guard_manifest`` block of its metadata.json)."""
+    path = Path(path)
+    if path.suffix == ".json":
+        data = json.loads(path.read_text())
+        found = data.get(MANIFEST_KEY, data) if isinstance(data, dict) else None
+    else:
+        from . import compile_cache as cc
+
+        found = None
+        with tarfile.open(path, mode="r:*") as tar:
+            member = tar.getmember(cc.METADATA_NAME)
+            f = tar.extractfile(member)
+            meta = json.loads(f.read().decode()) if f else {}
+            found = meta.get(MANIFEST_KEY)
+    if not isinstance(found, dict) or not found.get("graphs"):
+        raise GuardClosureError(
+            f"{path} carries no guard manifest — pre-pgw#681 cell or bare "
+            "dump; the closure of this cell is unproven")
+    return found
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """``python -m gen_worker.guard_closure <cell.tar.gz|manifest.json>...``
+    — the runnable N-cold-pod closure check. Exit 0 closed+consistent,
+    2 leaks, 3 divergence (or unreadable manifests)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="gen_worker.guard_closure",
+        description="Audit guard-closure manifests across N cells/pods.")
+    parser.add_argument("paths", nargs="+", type=Path)
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    manifests: Dict[str, Mapping[str, Any]] = {}
+    broken = False
+    for p in args.paths:
+        try:
+            manifests[str(p)] = load_manifest(p)
+        except Exception as exc:  # noqa: BLE001 — named per input, audit continues
+            broken = True
+            print(f"UNREADABLE {p}: {exc}")
+    audit = consolidate(manifests)
+    print(audit.text())
+    if audit.leaks:
+        return 2
+    if broken or audit.divergence or not manifests:
+        return 3
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
+
+
+__all__ = [
+    "CANONICALIZED",
+    "CODE_CONSTANT",
+    "CODE_IDENTITY",
+    "CONTRACT_SCALAR",
+    "CONTRACT_SHAPE",
+    "ClosureReport",
+    "ContractPins",
+    "FleetAudit",
+    "GraphGuards",
+    "GuardBoundaryError",
+    "GuardClosureError",
+    "GuardRecord",
+    "LEAK",
+    "MANIFEST_KEY",
+    "MANIFEST_VERSION",
+    "MODULE_STRUCTURE",
+    "RUNTIME_STATE",
+    "STRUCTURAL",
+    "assert_closure",
+    "audit_armed",
+    "canonical_ingress",
+    "canonical_strides",
+    "classify",
+    "consolidate",
+    "contract_pins",
+    "extract",
+    "extract_target_guards",
+    "load_manifest",
+    "main",
+]
