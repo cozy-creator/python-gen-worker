@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.67.1 (2026-07-26) — pgw#675 override dtype + pgw#676 native-crash attribution (the sdxl retag blockers)
+
+### pgw#675: a component override now loads at the dtype the base tree's LOAD LANE computes at
+
+`composition_compute_dtype` (pgw#647 gap #2) picked the compute dtype by
+MAJORITY on-disk sniff. A produced `#fp8-w8a8` flavor quantizes only the
+repeated-block Linears; every other tensor passes through at SOURCE
+precision — so an fp16-mirrored fine-tune sniffs majority-fp16 (measured on
+the live sdxl snapshot: 1902 F16 / 739 F8_E4M3 / 739 F32) while
+`load_w8a8_pipeline` loads the composition at its bf16 compute default. The
+fp16-fix VAE override therefore loaded Half into a bf16-activation pipeline
+and EVERY forward through it — foreground eager warm, background-mint seed,
+serve — died with `RuntimeError: Input type (c10::BFloat16) and bias type
+(c10::Half) should be the same` (ie#546 sdxl finale: 3/3 workers, release
+unprovable; the defect was latent since 0.64.0 and surfaced when the hub's
+th#1134 fix + the finale's full-binding deploy first actually delivered a
+`components.vae` override to a worker).
+
+- `composition_compute_dtype` is now LANE-aware: a quantized-artifact tree
+  (svdq / w8a8 / w4a4) answers the lane's bf16 compute default
+  (`QUANT_LANE_COMPUTE_DEFAULT`, test-guarded against the loaders'
+  `compute_dtype or torch.bfloat16`); the majority sniff only decides for
+  plain trees. Binding-declared dtype still wins outright; pgw#667
+  per-component facts still take precedence for fragile parts.
+- Because every path (warm, eager, serve, background mint) forwards through
+  the ONE instance built at setup, fixing the load fixes them all — there
+  was no per-path cast to re-apply.
+- Tapes (`tests/test_override_dtype_pgw675.py`, red-verified on the pre-fix
+  tree): the REAL producer (`streaming_w8a8_cast`) builds a majority-fp16
+  w8a8 tree, the REAL `load_component_override` loads a REAL tiny diffusers
+  `AutoencoderKL`, and bf16 latents decode through it on CPU — pre-fix the
+  override lands `torch.float16` (the exact crash precondition), post-fix
+  `torch.bfloat16` end to end.
+
+### pgw#676: native crashes are named, attributed, and stop crash-looping the pod
+
+gen-worker 0.66.0 SIGSEGV'd (`exit_code=139`) on the 28-step CFG-on
+`generate` shape on RTX A4500 (sm_86) — 6x across two pods, every request
+burned 5 attempts deep, pod billed until th#878's wedge terminate — and the
+hub saw NOTHING but the exit code. Degrade-never-die now extends below
+Python:
+
+- **faulthandler dump file** (`postmortem.enable_fault_dump`, on from the
+  entrypoint): SIGSEGV/SIGABRT/SIGBUS/SIGFPE write every thread's Python
+  stack to a file the surviving supervisor attaches — exit 139 carries
+  frames.
+- **In-flight markers** (`postmortem.note_inflight`): real requests and
+  warm forwards (foreground AND background mint) stamp what is executing;
+  a signal death attributes to the exact function + request id. Token
+  stack, so overlapping executions all stay visible.
+- **Per-pod crash-streak refusal**: the supervisor (and the next-boot
+  container-death path) records the attributed crash; after
+  `NATIVE_CRASH_REFUSE_STREAK` (2) signal deaths mid-flight on one
+  function, `gate_functions` refuses THAT function on THIS pod —
+  `native_crash_streak`, loud and typed — while siblings (turbo completed
+  on the same A4500s) keep serving. The registry lives on the pod's fs:
+  per-SKU-instance by construction.
+- Hub half filed as th#1205 (placement rented the sm_86 card KNOWING it was
+  below the preferred arch): respect the arch floor or gate on th#1198
+  benchmark rows, and feed `native_crash_streak` into the fence.
+- Tapes (`tests/test_native_crash_streak_pgw676.py`, red-verified): a real
+  fork + real NULL-deref SIGSEGV produces an attributed post-mortem with
+  frames; the gate refuses `generate` after 2 recorded deaths and leaves
+  `generate-turbo` serving.
+
 ## 0.67.0 (2026-07-25) — rotation preload + the three recorded SDK gaps
 
 Two lanes ride this train: pgw#674 (rotation preload) and the

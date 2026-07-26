@@ -242,6 +242,12 @@ def _install_stack_dump_handler() -> None:
         logger.info(
             "pgw#639: SIGUSR2 dumps all thread stacks to stderr (pid=%d)",
             os.getpid())
+    # pgw#676: fatal signals (SIGSEGV/SIGABRT/SIGBUS/SIGFPE) dump every
+    # thread's stack to a file the surviving supervisor attaches to its
+    # post-mortem — exit_code=139 carries frames instead of nothing.
+    from . import postmortem
+
+    postmortem.enable_fault_dump()
 
 
 def _run_main() -> int:
