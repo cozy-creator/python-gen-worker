@@ -1,6 +1,50 @@
 # Changelog
 
-## 0.70.1 (2026-07-26) — pgw#689: the swap benchmark loads what SERVING loads; a broken diagnostic is not a broken release
+## 0.70.1 (2026-07-26) — pgw#677 REOPEN: the fix that did not hold live — one serveability brain, compile-steal sizing, and every mint refusal on the wire; plus pgw#689
+
+The ie#546 final verification cycle reproduced the 0.70.0 starvation
+verbatim on three cold L4 pods with the gate armed: one tenant `generate`
+held 26m25s behind 4-7-minute mint units, finalize at unit 8/18, and not
+one publish-intent from any of six workers. Root causes (each red-taped in
+`tests/test_mint_reopen_pgw677.py`):
+
+### pgw#677 reopen
+
+- **One serveability brain (`compile_cache.mandatory_serving`)** — THE live
+  break. sdxl's mixed `#fp8-w8a8`-storage checkpoint stamps
+  `_cozy_weight_lane` `w8a8*` (cell identity, pgw#686) while the hub serves
+  it `fp8-w8a16+eager`. `_eager_first_eligible` and the router's
+  `fail_closed` read the weight-lane PREFIX, classified the boot
+  mandatory-quantized, and silently fell back to the FOREGROUND
+  compile-then-serve mint — the tenant sat inside `ensure_setup` for the
+  whole inline-compile plan and none of the 0.70.0 gate/preemption
+  machinery ever ran. Serveability now follows the hub-resolved th#913
+  execution lane (only real w8a8/w4a4 ACTIVATIONS forbid eager), stamped on
+  every arm path via a setup-scoped window; without lane evidence the
+  weight-lane stamp remains the fail-closed fallback (the qwen real-w8a8
+  shape keeps its foreground proof).
+- **Stolen-compile sizing (the ~100x correction)**: a stolen turn is not
+  preemptible and a real inductor compile is 4-7 unabortable minutes, not
+  the advertised 30-90s. Compile turns now steal only after
+  `_BG_COMPILE_STEAL_FLOOR_S` (600s) of continuous tenant demand — real
+  traffic has idle gaps between completions, and that is where compiles
+  run — and a granted compile steal announces itself as a typed
+  `bg_turn_steal` event. Seed turns keep the 30s floor.
+- **The mint→publish break is typed on the wire, every door**: the cycle
+  lost its root cause to unreachable pod logs; never again. `self_mint_abort`
+  (pack/closure-gate refusal with the pgw#681 leak named verbatim, warmup
+  OOM, proof-failed degrade, abandon, driver error),
+  `self_mint_publish_withheld` (gw#612 sharer gap, missing publish sink),
+  `self_mint_publish_failed` (hub refusal / upload error).
+- **A truncated warm plan can never finalize a partial capture**: an
+  OOM-cut seed pass no longer satisfies the convergence check (bounded
+  retries, then a loud abort); the foreground path withholds publish on a
+  cut-short plan; `Router.route`'s seed-window holes (`_MAX_SIGS` overflow,
+  dummy-batch failure) route EAGER and count `seed_dropped` so the driver
+  refuses an incomplete capture instead of inline-compiling under the run
+  gate.
+
+### pgw#689: the swap benchmark loads what SERVING loads; a broken diagnostic is not a broken release
 
 The SDK's own swap-latency benchmark could not load a QUANTIZED component
 tree — i.e. every flavor the fleet actually serves — so every `load` /
