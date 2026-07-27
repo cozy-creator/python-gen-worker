@@ -205,12 +205,12 @@ def test_pipeline_named_slot_is_the_implicit_root() -> None:
 def test_ctx_root_resolution_honors_declared_root_and_explicit_slot() -> None:
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
     t2i = resolve_slot("t2i", Slot(object), ref=HF("acme/t2i"),
-                       defaults_cls=SdxlDefaults, objective="flow")
+                       defaults_cls=ExampleDefaults, objective="flow")
     edit = resolve_slot("edit", Slot(object), ref=HF("acme/edit"),
-                        defaults_cls=SdxlDefaults, objective="flow")
+                        defaults_cls=ExampleDefaults, objective="flow")
     ctx: RequestContext = RequestContext(
         request_id="r1", resolved_slots={"t2i": t2i, "edit": edit},
         root_slot="t2i",
@@ -222,10 +222,10 @@ def test_ctx_root_resolution_honors_declared_root_and_explicit_slot() -> None:
 def test_ctx_ambiguous_root_raises_never_falls_back() -> None:
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
-    a = resolve_slot("a", Slot(object), ref=HF("acme/a"), defaults_cls=SdxlDefaults)
-    b = resolve_slot("b", Slot(object), ref=HF("acme/b"), defaults_cls=SdxlDefaults)
+    a = resolve_slot("a", Slot(object), ref=HF("acme/a"), defaults_cls=ExampleDefaults)
+    b = resolve_slot("b", Slot(object), ref=HF("acme/b"), defaults_cls=ExampleDefaults)
     ctx: RequestContext = RequestContext(
         request_id="r1", resolved_slots={"a": a, "b": b},
     )

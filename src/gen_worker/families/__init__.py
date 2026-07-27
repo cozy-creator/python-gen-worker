@@ -1,9 +1,15 @@
 """Per-family inference-defaults vocabulary (pgw#520 / th#767).
 
-Importing this package registers every SHIPPED family (``sdxl``, ...) —
-third-party families register themselves the same way, decorating with
-``@family("...")`` anywhere that gets imported before ``gen-worker families
-export-schemas`` or a build's discovery walk runs.
+This package ships the REGISTRY and nothing else. A family's vocabulary is
+declared by the endpoint that owns the family — decorate a
+:class:`GenerationDefaults` subclass with ``@family("...")`` anywhere that gets
+imported before ``gen-worker families export-schemas --module <endpoint>`` or a
+build's discovery walk runs.
+
+pgw#740 (B1): ``SdxlDefaults`` / ``WanDefaults`` used to ship here. No SDK code
+ever consumed them, and a vocabulary in the library is a vocabulary that needs a
+wheel release to change — they now live in inference-endpoints/sdxl and
+inference-endpoints/wan-2.2 respectively.
 """
 
 from __future__ import annotations
@@ -19,17 +25,11 @@ from .base import (
     family_registry,
     schema_filename,
 )
-from .sdxl import SdxlDefaults, SdxlLoraDefaults, SdxlScheduler
-from .wan import WanDefaults
 
 __all__ = [
     "KIND_CHECKPOINT",
     "KIND_LORA",
     "GenerationDefaults",
-    "SdxlDefaults",
-    "SdxlLoraDefaults",
-    "SdxlScheduler",
-    "WanDefaults",
     "export_all_schemas",
     "export_json_schema",
     "family",

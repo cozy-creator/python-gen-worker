@@ -169,9 +169,22 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   (`UNet2DModel.get_time_embed`, measured). Buffers restore the correct answer
   with no hook and no property override.
 - Measured on CPU against the hook lane, real tiny UNets: identical coverage set,
-  **bitwise-equal outputs**, and **identical resident bytes per dtype** — pgw#704's
-  "+11.6% VRAM" was the prototype swapping `nn.Linear` only, leaving convs
-  bf16-resident. At upstream coverage that trade does not exist.
+  **bitwise-equal outputs**, coverage parity on resident bytes. pgw#704's "+11.6%
+  VRAM" is not usable either way — that prototype swapped `nn.Linear` only,
+  leaving convs bf16-resident.
+- **The pun must rebind the outgoing Parameter, or VRAM goes UP ~50%.** A class
+  pun replaces the weight tensor OBJECT, so anything still holding the original
+  `Parameter` — accelerate device hooks, `low_cpu_mem_usage` bookkeeping, any
+  earlier `list(model.parameters())` — keeps the bf16 storage alive next to the
+  fp8 copy. An L4 measured fp8-storage 7.35 GB vs plain bf16 4.89 GB (**+50.3%**,
+  both copies resident); reproduced on CPU at +49.9%. `_to_storage_buffer` now
+  rebinds the outgoing Parameter onto the fp8 storage, restoring the hook lane's
+  property that every holder follows the cast. A module-only residency walk
+  cannot see this failure — the tape now holds the parameters the way a pod does.
+- `restructure_fp8_storage` releases the freed bf16 blocks to the driver
+  (`empty_cache`, never initializing CUDA): the fit ladder reads driver-level
+  free VRAM, so ~half a denoiser sitting in torch's caching allocator would make
+  the rung decision moments later see free VRAM as taken.
 - Latent bug fixed on the way: `apply_block_window_offload` re-moved just-parked
   weights back onto the device whenever they were buffers (i.e. the w8a8 lane
   today), so the degraded rung silently saved nothing.
@@ -179,6 +192,62 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   instead of plain attributes — `register_buffer` no longer has to pop `__dict__`
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
+
+## 0.75.2 (2026-07-27) — pgw#737: the self-mint never takes the tenant request down again
+
+The ie#535 wan-2.2 1.3.1 go-live spent $2.61 and rendered zero frames. On both tiers and both
+80 GiB H100s the gw#587 fleet self-mint ran `inductor_compile` against a **~54.2 GiB resident
+bf16 MoE** (two 14B experts plus LoRA branch containers), OOMed its warm plan three times,
+and the **tenant request died with it** — 78.07 GiB peak, 26 of 40 denoise steps banked and
+lost, `JOB_STATUS_RETRYABLE`. The hub then re-dispatched that deterministic failure 5 times
+and bought a second H100 for it (th#1228 class, now priced).
+
+gw#587's premise — the serving worker's boot warmup IS a perfect mint by construction — holds
+only while the capture FITS. Nothing checked. Three fixes:
+
+- **A VRAM pre-budget, before anything is armed** (`gen_worker/mint_budget.py`). The gate sits
+  at the eager-first arm decision, not just in the background driver: enabling the routers is
+  already the first allocation of a capture (the boot warm's own forwards enqueue background
+  compiles). It is a MEASUREMENT, not a model of the graph — the CUDA peak high-water minus
+  the resident set is the largest transient the process has actually sustained (this family's
+  activation working set at serving shapes, once a forward has run; the driver re-checks after
+  the boot warm), floored by a quarter of the resident set. A mint needs two of those working
+  sets — its own seed forwards, plus what the capture retains for the tenant's next peak to
+  fit around — on top of a flat inductor working-set floor. Not fitting is not an error:
+  the targets go back to true eager, the branch lane is dropped, the allocator is emptied, the
+  cell stays ABSENT, and one structured line —
+  `mint_skipped reason=insufficient_vram headroom=24.99GiB needed~=31.10GiB resident=54.20GiB
+  activation=13.55GiB(measured)` — is logged and put on the wire as a typed
+  `self_mint_skipped` event. No env knob: a roomier config, or a smaller-resident flavor,
+  mints the same cell later.
+- **A survivable abort.** The mint is architecturally OFF the request (pgw#671 background
+  driver), so nothing banked is lost by an abort — what killed the tenant was the capture's
+  RESIDENT cost. Every mint terminal (declined, failed, OOM-aborted) now unwraps its targets,
+  closes their routers so no queued warm job can still compile onto the card, drops the branch
+  buffers and empties the allocator. An OOM'd seed pass re-budgets on the allocator state the
+  OOM just measured and declines instead of retrying into the tenant three more times. And
+  from the tenant's side (`_evict_mint_for_oom`): a request that OOMs with a mint in flight
+  EVICTS the mint — the one co-resident consumer this worker put on the card itself — and
+  re-runs on the clean allocator.
+- **Eager serving is a SUCCESS path.** The re-run request returns `JOB_STATUS_OK`, so there is
+  nothing for the hub's ladder to re-dispatch or buy a pod for, and a declined mint terminates
+  its `self_mint_compile` activity COMPLETED (a mint we declined is an outcome, not a worker
+  failure).
+
+Fence: `tests/test_mint_vram_budget_pgw737.py` — the wan-2.2 card declines and an sdxl-class
+residency on the same rig still mints; stubbing either fix turns the tapes red with the exact
+live symptoms (a capture attempted anyway / `JOB_STATUS_RETRYABLE: out of memory`).
+
+Proven on a real card (one L4, 22 GiB, `cozy-creator-tracker/scripts/pgw737/`, $0.27): with
+14.49 GiB resident the gate declines — `mint_skipped reason=insufficient_vram headroom=7.28GiB
+needed~=11.24GiB resident=14.49GiB activation=3.62GiB(estimated)` — zero captures are
+attempted, capture residue is 0.01 GiB and the request completes in 7.9s at an 18.5 GiB peak
+(the pre-forward estimate, 3.62 GiB, called the measured tenant activation of 4.0 GiB within
+10%). The same arm with the gate stubbed out mints, charges the tenant 1.01 GiB of retained
+capture and takes 17.3s; one rung tighter (16.04 GiB resident, 5.80 GiB free) the stubbed arm's
+request DIES `JOB_STATUS_RETRYABLE: out of memory` — the live wan-2.2 symptom — while the gated
+arm declines cleanly. A roomier card (8.5-11.6 GiB resident) mints in every arm: no false
+declines.
 
 ## 0.75.1 (2026-07-27) — the 0.71-0.75 promotion train stamp; pgw#700 arc + pgw#684 restore
 

@@ -5,7 +5,7 @@ The model SET is catalog, not code: tensorhub owns the mapping from a
 declaration shrinks to the ROOT of the component tree::
 
     from gen_worker import HF, RequestContext, Slot, endpoint
-    from gen_worker.families import SdxlDefaults
+    from myendpoint.defaults import SdxlDefaults  # your endpoint's own vocabulary
 
     @endpoint(models={
         "pipeline": Slot(StableDiffusionXLPipeline, selected_by="model"),

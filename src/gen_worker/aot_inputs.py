@@ -43,7 +43,11 @@ SDXL_TIME_IDS = 6
 
 InputBuilder = Callable[[Any, "ExportSpec"], Tuple[Tuple[Any, ...], Dict[str, Any]]]
 
-_BUILDERS: Dict[str, InputBuilder] = {}
+#: Keyed by ``(family, target)`` — NOT by family (ie#566 G1). A family's compile
+#: targets are unrelated modules with unrelated call contracts: wan's span the
+#: denoiser AND the VAE, and a family-only key made ``vae.decode`` unmintable for
+#: EVERY family, not just wan. ``target=""`` registers a family-wide fallback.
+_BUILDERS: Dict[Tuple[str, str], InputBuilder] = {}
 
 
 class InputContractError(RuntimeError):
@@ -51,26 +55,37 @@ class InputContractError(RuntimeError):
     satisfied from the composed pipeline."""
 
 
-def inputs_for(family: str) -> Callable[[InputBuilder], InputBuilder]:
-    """Register the example-input builder for one family."""
+def inputs_for(family: str, target: str = "") -> Callable[[InputBuilder], InputBuilder]:
+    """Register the example-input builder for one ``(family, target)``.
+
+    ``target=""`` registers a family-wide fallback for families whose every
+    compile target happens to share a call contract.
+    """
 
     def register(fn: InputBuilder) -> InputBuilder:
-        _BUILDERS[str(family)] = fn
+        _BUILDERS[(str(family), str(target))] = fn
         return fn
 
     return register
 
 
-def builder_for(family: str) -> InputBuilder:
-    fn = _BUILDERS.get(str(family))
-    if fn is None:
-        raise InputContractError(
-            f"no AOT export-input contract registered for family "
-            f"{family!r} (have: {sorted(_BUILDERS)!r}) — a family's forward "
-            f"signature is family knowledge and must be declared before it "
-            f"can be exported"
-        )
-    return fn
+def builder_for(family: str, target: str = "") -> InputBuilder:
+    """The builder for ``(family, target)``, falling back to the family default.
+
+    Exact ``(family, target)`` wins; a family-wide registration answers the rest.
+    A family with a registered denoiser but no VAE builder must FAIL for the VAE
+    rather than silently feed it denoiser inputs.
+    """
+    fam, tgt = str(family), str(target)
+    for key in ((fam, tgt), (fam, "")):
+        fn = _BUILDERS.get(key)
+        if fn is not None:
+            return fn
+    known = sorted(f"{f}/{t or '*'}" for f, t in _BUILDERS)
+    raise InputContractError(
+        f"no AOT export-input contract registered for {fam!r} target {tgt!r} "
+        f"(have: {known!r}) — a target's call contract is family knowledge and "
+        f"must be declared before it can be exported")
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +93,7 @@ def builder_for(family: str) -> InputBuilder:
 # ---------------------------------------------------------------------------
 
 
-@inputs_for("sdxl")
+@inputs_for("sdxl", "unet")
 def sdxl_unet_inputs(
     module: Any, spec: "ExportSpec",
 ) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
@@ -103,7 +118,7 @@ def sdxl_unet_inputs(
     width, height = int(spec.shapes[0][0]), int(spec.shapes[0][1])
     scale = 8
     latent_h, latent_w = height // scale, width // scale
-    batch = 2 if _has_cfg(spec) else 1
+    batch = spec.batch or (2 if _sdxl_cfg_batched(spec) else 1)
     text_len = int(spec.text_lens[0]) if spec.text_lens else 77
     config = getattr(module, "config", None)
     latent_channels = int(getattr(config, "in_channels", 4) or 4)
@@ -154,12 +169,17 @@ def lifted_lora_kwargs(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
     }
 
 
-def _has_cfg(spec: "ExportSpec") -> bool:
-    """Whether this cell's graph class is CFG-batched (ie#345).
+def _sdxl_cfg_batched(spec: "ExportSpec") -> bool:
+    """Whether THIS SDXL cell's graph class is CFG-batched (ie#345).
 
-    A CFG variant runs batch-2 graphs and a distilled variant batch-1; one
-    class per artifact, never both. ``guidance_scales`` is the declaration:
-    any scale above 1 means the batch is doubled.
+    **Deliberately SDXL-specific, and not a general rule (ie#566 G2.)** SDXL runs
+    CFG as one batch-2 forward, so guidance changes the traced SHAPE. wan does
+    not: its CFG is two SEQUENTIAL batch-1 forwards (`pipeline_wan.py:596-615`),
+    so guidance changes the call COUNT and the traced shape is batch-1 either
+    way. Inferring batch from ``guidance_scales`` family-agnostically doubled
+    wan's batch and traced a graph the serving path never calls.
+
+    Any family whose batching differs sets ``ExportSpec.batch`` explicitly.
     """
     return any(float(g) > 1.0 for g in spec.guidance_scales) \
         or not spec.guidance_scales
@@ -232,7 +252,7 @@ def compose(
     """
     from diffusers import DiffusionPipeline
 
-    builder = builder_for(spec.family)
+    builder = builder_for(spec.family, spec.target)
     load_cls: Any = DiffusionPipeline
     pipeline_class = str(request.get("pipeline_class") or "").strip()
     if pipeline_class:

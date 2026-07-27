@@ -157,24 +157,24 @@ def test_double_worker_function_rejected() -> None:
 def test_resolved_slot_carries_objective_facts() -> None:
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import Slot, resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
     resolved = resolve_slot(
         "pipeline", Slot(object), ref=HF("acme/gonzalomo-xl"),
-        defaults_cls=SdxlDefaults, objective="flow", distilled=True,
+        defaults_cls=ExampleDefaults, objective="flow", distilled=True,
     )
     assert resolved.objective == "flow"
     assert resolved.distilled is True
-    assert isinstance(resolved.defaults, SdxlDefaults)
+    assert isinstance(resolved.defaults, ExampleDefaults)
 
 
 def test_resolve_slot_defaults_to_unstamped() -> None:
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import Slot, resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
     resolved = resolve_slot(
-        "pipeline", Slot(object), ref=HF("acme/plain-xl"), defaults_cls=SdxlDefaults,
+        "pipeline", Slot(object), ref=HF("acme/plain-xl"), defaults_cls=ExampleDefaults,
     )
     assert resolved.objective == ""
     assert resolved.distilled is False
@@ -183,12 +183,12 @@ def test_resolve_slot_defaults_to_unstamped() -> None:
 def test_objective_mismatch_raises_typed_backstop_error() -> None:
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
     with pytest.raises(ObjectiveMismatchError, match="flow"):
         resolve_slot(
             "pipeline", Slot(object), ref=HF("acme/z-image"),
-            defaults_cls=SdxlDefaults,
+            defaults_cls=ExampleDefaults,
             objective="flow", allowed_objectives=("epsilon", "v_prediction"),
         )
 
@@ -196,12 +196,12 @@ def test_objective_mismatch_raises_typed_backstop_error() -> None:
 def test_distilled_mismatch_raises_typed_backstop_error() -> None:
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
     with pytest.raises(ObjectiveMismatchError, match="distilled"):
         resolve_slot(
             "pipeline", Slot(object), ref=HF("acme/dmd2-merge"),
-            defaults_cls=SdxlDefaults,
+            defaults_cls=ExampleDefaults,
             objective="epsilon", distilled=True, allowed_distilled=False,
         )
 
@@ -211,11 +211,11 @@ def test_unstamped_checkpoint_passes_the_backstop() -> None:
     # (objective "") must not be refused by a declared contract.
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import Slot, resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
     resolved = resolve_slot(
         "pipeline", Slot(object), ref=HF("acme/plain-xl"),
-        defaults_cls=SdxlDefaults,
+        defaults_cls=ExampleDefaults,
         allowed_objectives=("epsilon",), allowed_distilled=False,
     )
     assert resolved.objective == ""
@@ -224,11 +224,11 @@ def test_unstamped_checkpoint_passes_the_backstop() -> None:
 def test_stamped_facts_within_contract_resolve_cleanly() -> None:
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import Slot, resolve_slot
-    from gen_worker.families import SdxlDefaults
+    from _example_family import ExampleDefaults
 
     resolved = resolve_slot(
         "pipeline", Slot(object), ref=HF("acme/gonzalomo-xl"),
-        defaults_cls=SdxlDefaults,
+        defaults_cls=ExampleDefaults,
         objective="epsilon", distilled=True,
         allowed_objectives=("epsilon",), allowed_distilled=None,
     )
@@ -338,21 +338,21 @@ def test_sampler_table_defines_euler_trailing_and_dpmpp_completely() -> None:
 
 def test_sampler_table_defines_ddim_trailing() -> None:
     """th#1174: the hub already RECOGNIZES `ddim_trailing` in both sdxl
-    schemas; the SDK owed the definition (Hyper-SD's published recipe is DDIM
-    with trailing timestep spacing). Resolvable against real diffusers, and
-    exported in the sdxl family enum so a catalog row can name it."""
+    schemas; the SDK owed the DEFINITION (Hyper-SD's published recipe is DDIM
+    with trailing timestep spacing), resolvable against real diffusers.
+
+    pgw#740 (B1): the companion assertion — that the sdxl family enum exports
+    the key so a catalog row can name it — is an SDXL fact and moved to the
+    sdxl endpoint's own tests along with `SdxlScheduler`."""
     pytest.importorskip("diffusers")
-    import typing
 
     import diffusers
 
-    from gen_worker.families.sdxl import SdxlScheduler
     from gen_worker.view import SAMPLERS, clone_scheduler
 
     cls_name, extra = SAMPLERS["ddim_trailing"]
     assert cls_name == "DDIMScheduler"
     assert extra == {"timestep_spacing": "trailing"}
-    assert "ddim_trailing" in typing.get_args(SdxlScheduler)
 
     base = diffusers.EulerDiscreteScheduler()
     fresh = clone_scheduler(_StubPipe(base), sampler="ddim_trailing")

@@ -349,35 +349,56 @@ def program_constant_fqns(program: Any) -> Tuple[str, ...]:
 
 
 def program_package_drift(program: Any, package: Path) -> List[str]:
-    """Named reasons the package's constant table is not the program's.
+    """Named reasons the package's constant table cannot be served.
 
-    The two are derived independently — one from the ``ExportedProgram``, one
-    from the compiled artifact's own generated wrapper — so requiring them to
-    agree is a genuine cross-check rather than a restatement.
+    **The check is ASYMMETRIC, and first light is what taught us why.** The two
+    sets are derived independently — one from the ``ExportedProgram``, one from
+    the compiled artifact's own generated wrapper — but they are not required to
+    be EQUAL, because the two directions mean opposite things:
 
-    It exists because of a measured pgw#728 finding: **strict and non-strict
-    export produce DIFFERENT constant sets** (2960 vs 4208 placeholders on the
-    surveyed family). We ship strict as doctrine, so a mint whose recorded
-    manifest came from one trace mode while its package came from the other
-    would ship a manifest describing bytes the artifact does not want — and the
-    consumer's bound gate would then refuse every declared-but-unwanted FQN, or
-    worse leave an unwanted-but-undeclared one UNBOUND, which is the segfault
-    precondition. This is drift the env seal cannot see: both traces run in the
-    identical environment with the identical toolchain.
+    * **package-only** (the artifact declares a constant the program did not
+      lift) is FATAL. Nothing would bind it, and invoking a code-only package
+      with an unbound constant segfaults inside ``AOTICompiledModel.__call__``,
+      killing the worker rather than failing the request.
+    * **program-only** (the program lifted a constant the compiled artifact does
+      not want) is BENIGN and routine: the compiler fused or folded it away, so
+      the artifact genuinely has no use for it. Measured on the first real SDXL
+      w8a8 mint — program 2423, package 2422, the difference being
+      ``unet.conv_out.bias``, which AOTI fused into the convolution epilogue.
+
+    An earlier version of this gate demanded equality and therefore refused
+    EVERY real mint, which is why it is written down here rather than quietly
+    relaxed. The manifest is built FROM the package, so program-only drift never
+    threatens the manifest's fidelity — it is recorded for observability by
+    :func:`eliminated_constants` and is not an error.
+
+    The pgw#728 concern (strict and non-strict traces lift different constant
+    sets) is still covered: a mode mix shows up as package-only entries, because
+    the package would want constants the recorded program never lifted.
     """
     want = set(program_constant_fqns(program))
     have = {c.fqn for c in declared_constants(Path(package))}
-    if want == have:
+    package_only = sorted(have - want)
+    if not package_only:
         return []
-    only_program = sorted(want - have)
-    only_package = sorted(have - want)
     return [
-        f"the exported program and the compiled package declare different "
-        f"constant sets (program {len(want)}, package {len(have)}); "
-        f"program-only={only_program[:6]!r} package-only={only_package[:6]!r} "
-        f"— the manifest would not describe the artifact it ships with "
-        f"(pgw#728: strict and non-strict traces differ here)"
+        f"the compiled package declares {len(package_only)} constant(s) the "
+        f"exported program never lifted, e.g. {package_only[:6]!r} — nothing "
+        f"would bind them and the first call would segfault (pgw#704 B1; a "
+        f"strict/non-strict trace mix surfaces here, pgw#728)"
     ]
+
+
+def eliminated_constants(program: Any, package: Path) -> List[str]:
+    """Constants the program lifted that the compiled artifact does not want.
+
+    Routine compiler fusion (conv+bias, folded scalars). Recorded as
+    observability so a surprising JUMP in the count is visible, rather than
+    silently discarded — the count is stable for a given recipe.
+    """
+    want = set(program_constant_fqns(program))
+    have = {c.fqn for c in declared_constants(Path(package))}
+    return sorted(want - have)
 
 
 def strict_mode_drift(meta: Any, strict: bool) -> List[str]:
@@ -544,6 +565,7 @@ __all__ = [
     "elf_section_sizes",
     "input_contract",
     "literal_constants",
+    "eliminated_constants",
     "program_constant_fqns",
     "program_package_drift",
     "strict_mode_drift",

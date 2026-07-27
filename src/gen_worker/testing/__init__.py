@@ -9,7 +9,7 @@ pairs::
 
     from gen_worker.testing import fake_context
     from gen_worker import HF
-    from gen_worker.families import SdxlDefaults
+    from myendpoint.defaults import SdxlDefaults  # your endpoint's own vocabulary
 
     ctx = fake_context(slots={
         "pipeline": (HF("stabilityai/stable-diffusion-xl-base-1.0"), SdxlDefaults(steps=28)),

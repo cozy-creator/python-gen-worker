@@ -602,6 +602,41 @@ def bind_call_inputs(
     return out
 
 
+def marshal_positional(
+    contract: ArtifactContract,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+) -> List[Any]:
+    """Flatten one call into the package's POSITIONAL signature.
+
+    MEASURED on the first-light pod (pgw#721 S8 / #723): an AOTI package
+    takes **positional inputs only** — splatting the pipeline's kwargs at it
+    dies with ``Ran into a kwarg keyword mismatch: Got [...] but expected
+    []`` before any compiled code runs. Diffusers, meanwhile, calls a
+    denoiser with a mix of positional and (nested) keyword arguments, so the
+    serve path cannot pass the call through untouched: it has to flatten to
+    the exact order export recorded, or it feeds the right tensor to the
+    wrong graph input.
+
+    ``position`` in the declared contract is that order. Every declared
+    input must be present — a package has a FIXED flat arity, so a missing
+    one cannot be skipped without silently shifting every later argument
+    into the wrong slot. That is a named refusal, not a best effort.
+    """
+    bound = bind_call_inputs(contract, args, kwargs)
+    feeds: List[Any] = []
+    for spec in sorted(contract.inputs, key=lambda s: s.position):
+        if spec.name not in bound:
+            raise IngressContractError(
+                "input_missing",
+                f"declared input {spec.name!r} (position {spec.position}) is "
+                "absent; an AOTI package has a fixed flat arity and takes "
+                "positional inputs only, so a missing input would shift "
+                "every later argument into the wrong graph slot")
+        feeds.append(bound[spec.name])
+    return feeds
+
+
 def assert_ingress(
     contract: ArtifactContract,
     args: Sequence[Any],
@@ -787,6 +822,16 @@ class ArtifactRunner:
         # check_full_update=True is the artifact's own assertion that the
         # update covers its ENTIRE table. We already proved set equality
         # above; this makes torch refuse rather than leave a hole.
+        #
+        # MEASURED (pgw#721 S8 first light, L4/torch 2.9.1+cu128): this HOLDS
+        # on a real sdxl w8a8 cell — 2,422 constants, all state_dict-sourced,
+        # declared and package sets identical, strict update accepted.
+        # CAVEAT, still open: that artifact folded NOTHING (zero literals,
+        # zero from_folded), so strictness is UNTESTED against a folding
+        # artifact. If a folding cell ever refuses here, the choice is to
+        # relax to check_full_update=False (keeping our own set-equality
+        # proof above as the real gate) or to have the mint ship the folded
+        # bytes — decide on evidence, not by loosening the gate first.
         self.package.load_constants(values, check_full_update=True)
         self.bound_fqns = tuple(sorted(values))
         self.bound = True
@@ -805,10 +850,11 @@ class ArtifactRunner:
         self.assert_ready()
         try:
             assert_ingress(self.contract, args, kwargs)
+            feeds = marshal_positional(self.contract, args, kwargs)
         except IngressContractError as exc:
             self.refusals[exc.reason] = self.refusals.get(exc.reason, 0) + 1
             raise
-        out = self.package(*args, **kwargs)
+        out = self.package(*feeds)
         self.calls += 1
         return out
 
@@ -1182,6 +1228,7 @@ __all__ = [
     "is_armed",
     "lifted_call_kwargs",
     "load_and_wrap",
+    "marshal_positional",
     "pack",
     "range_digest",
     "resolve_constants",

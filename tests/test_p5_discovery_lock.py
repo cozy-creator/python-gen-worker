@@ -33,7 +33,7 @@ def test_slot_endpoint_emits_slots_block(tmp_pkg: Path) -> None:
     _write(pkg, """
         import msgspec
         from gen_worker import HF, RequestContext, Resources, Slot, endpoint
-        from gen_worker.families import SdxlDefaults
+        from _example_family import ExampleDefaults
 
         class In_(msgspec.Struct):
             prompt: str = ""
@@ -53,7 +53,7 @@ def test_slot_endpoint_emits_slots_block(tmp_pkg: Path) -> None:
         )
         class Gen:
             def setup(self, pipeline: object) -> None: ...
-            def generate(self, ctx: RequestContext[SdxlDefaults], data: In_) -> Out_:
+            def generate(self, ctx: RequestContext[ExampleDefaults], data: In_) -> Out_:
                 return Out_(y="ok")
     """)
 
@@ -63,16 +63,16 @@ def test_slot_endpoint_emits_slots_block(tmp_pkg: Path) -> None:
     assert slot["name"] == "pipeline"
     assert slot["selected_by"] == "model"
     # SDK v2: family comes from the handler's derived config schema (the
-    # RequestContext[SdxlDefaults] annotation's @family registration).
-    assert slot["family"] == "sdxl"
+    # RequestContext[ExampleDefaults] annotation's @family registration).
+    assert slot["family"] == "example"
     # default_config is DELETED from the slots block; ``object`` is not an
     # introspectable pipeline class, so no component tree is derived either.
     assert "default_config" not in slot
     assert "components" not in slot
     # The derived config schema rides the fn dict (th#1116: code owns the
     # schema, the catalog owns the values).
-    assert fn["config_schema"] == "SdxlDefaults"
-    assert fn["config_family"] == "sdxl"
+    assert fn["config_schema"] == "ExampleDefaults"
+    assert fn["config_family"] == "example"
     # SDK v2 resources: gpu is the binary incapability declaration;
     # vram_gb_hint the optional placement hint (vram_gb/compute_capability
     # are deleted).

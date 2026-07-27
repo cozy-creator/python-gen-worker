@@ -758,12 +758,20 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # (from_pretrained's torch_dtype already does it — we simply skip the fp8
 # storage lane that would re-cast down). fp8 storage remains only when bf16
 # does not fit.
-# STALE PREMISE, do not re-litigate from this number alone: the +44%/+73% tax
-# was measured on the HOOK form of this lane, which pgw#727 replaced with
-# module structure (14.8% faster under dynamo on an L4; the hook form was
-# compile-hostile). The preference above is unchanged and still correct on the
-# VRAM argument, but the tax figure no longer describes the lane and must be
-# re-measured on a pod before it is quoted at a rung decision (pgw#727).
+# PREMISE REPLACED — the +44%/+73% figure above measured the HOOK form of this
+# lane, which pgw#727 replaced with module structure. RE-MEASURED on an L4
+# (pgw#727 pod session): cast tax vs plain bf16 is **+1.9% for the structural
+# storage lane** and +27.7% for the hooks it replaced, and the storage lane is
+# 20.2% faster than hooks compiled. So the tax this upgrade exists to dodge is
+# an order of magnitude smaller than the number that justified it.
+#
+# The upgrade below is DELIBERATELY LEFT ON — flipping a prod serving-fit
+# policy (Paul's "never voluntary W8A16" ruling, and it moves cells between the
+# "" and "fp8-hooks" lane keys) is a coordinator/Paul decision, not a
+# refactor's. But it is now trading ~2x weight VRAM for ~1.9% latency, which is
+# the wrong side of every fit decision that VRAM headroom feeds (batch,
+# resolution, concurrency, and the ladder rungs below this one, which cost far
+# more than 1.9%). Decision-ready proposal + the numbers are on pgw#727.
 BF16_RESIDENT_MARGIN_GB = 4.0  # activations + allocator headroom
 
 # The pipeline's weight lane, part of the compile-cache graph key (gw#534):

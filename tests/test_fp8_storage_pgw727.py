@@ -9,8 +9,10 @@ The lane the SDK ships must be:
 2. coverage-equivalent to diffusers' own rule — same leaf set, so residency
    and numerics cannot silently drift when upstream changes its rule;
 3. numerically equivalent — bitwise-equal outputs vs the hook lane;
-4. residency-equivalent — identical resident bytes per dtype (pgw#704 S12-c's
-   "+11.6% VRAM" was the prototype swapping ``nn.Linear`` only);
+4. residency-honest on BOTH axes: coverage parity with the hook lane (module
+   walk) AND no orphaned bf16 originals when something outside the module
+   still holds the Parameters — an L4 measured +50.3% before that fix, and a
+   module-only walk cannot see it;
 5. exportable, where the hook lane is REFUSED by ``torch.export``;
 6. a DIFFERENT traced graph, visible as a different
    ``compile_cache.execution_contract`` signature (new cell keys — intended)
@@ -23,6 +25,7 @@ The lane the SDK ships must be:
 from __future__ import annotations
 
 import copy
+import gc
 from typing import Any, Dict, List
 
 import pytest
@@ -172,10 +175,81 @@ def test_outputs_are_bitwise_equal_to_the_hook_lane(lanes: Dict[str, Any]) -> No
 
 
 def test_residency_is_identical(lanes: Dict[str, Any]) -> None:
-    """pgw#704 S12-c measured +11.6% VRAM for the restructure. That was the
-    prototype swapping ``nn.Linear`` ONLY, leaving convs bf16-resident; at
-    upstream coverage the trade does not exist."""
+    """Coverage parity with the hook lane: the same leaves hold the same bytes
+    at the same precision. NOTE this walks the MODULE only — it is blind to a
+    storage retained by an external holder, which is a separate (and measured,
+    see below) failure mode. Both facts are needed; neither implies the other."""
     assert _resident_bytes(lanes["hooked"]) == _resident_bytes(lanes["restructured"])
+
+
+def _distinct_storage_bytes(*roots: Any) -> Dict[str, int]:
+    """Bytes per dtype over DISTINCT storages reachable from ``roots`` (which
+    may be modules or plain tensor lists). Deduped by storage pointer, so a
+    tensor and a view of it count once — and a bf16 original that is no longer
+    on the module but is still held elsewhere DOES count."""
+    seen: set = set()
+    out: Dict[str, int] = {}
+    for root in roots:
+        tensors: List[Any] = (
+            list(root.parameters()) + list(root.buffers())
+            if hasattr(root, "parameters") else list(root)
+        )
+        for t in tensors:
+            storage = t.untyped_storage()
+            if storage.data_ptr() in seen:
+                continue
+            seen.add(storage.data_ptr())
+            key = str(t.dtype)
+            out[key] = out.get(key, 0) + storage.nbytes()
+    return out
+
+
+def test_no_bf16_original_survives_an_external_holder() -> None:
+    """THE VRAM test, and the one the first cut of this tape got wrong.
+
+    A class pun replaces the weight tensor OBJECT. Anything still holding the
+    original ``Parameter`` — accelerate's device hooks, ``low_cpu_mem_usage``
+    bookkeeping, any earlier ``list(model.parameters())`` — therefore kept the
+    bf16 storage alive next to the new fp8 copy. Measured on an L4: fp8 storage
+    7.35 GB vs plain bf16 4.89 GB, i.e. +50.3%, i.e. BOTH copies resident;
+    reproduced here at +49.9% before the fix. The hook lane never had this
+    failure mode: ``module.to(dtype=)`` swaps storage INSIDE the Parameter, so
+    holders follow the cast. ``_to_storage_buffer`` restores that property by
+    rebinding the outgoing Parameter onto the fp8 storage.
+
+    A module-only walk CANNOT see this (the leaked tensor is no longer on the
+    module), which is exactly why the original tape passed while an L4 said
+    otherwise. This one holds the parameters the way a pod does."""
+    unet = _tiny_unet()
+    before = _distinct_storage_bytes(unet)
+    held = list(unet.parameters())  # what accelerate/low_cpu_mem_usage does
+
+    covered = fp8_storage.restructure_fp8_storage(
+        unet, storage_dtype=STORAGE, compute_dtype=COMPUTE)
+    gc.collect()
+
+    after = _distinct_storage_bytes(unet, held)
+    total_before, total_after = sum(before.values()), sum(after.values())
+    assert total_after < total_before * 0.6, (
+        f"fp8 storage must HALVE resident weight bytes, not add to them: "
+        f"{total_before} -> {total_after} ({after})")
+    # Every held Parameter of a covered leaf (weight AND bias) now points at
+    # fp8 storage — i.e. the holder followed the cast, as under the hook lane.
+    expected = sum(
+        1
+        for path in covered
+        for attr in ("weight", "bias")
+        if getattr(unet.get_submodule(path), attr, None) is not None
+    )
+    assert sum(1 for p in held if p.dtype is STORAGE) == expected
+    # No bf16 storage survives except the leaves upstream deliberately skips.
+    skipped_bytes = sum(
+        t.untyped_storage().nbytes()
+        for name, leaf in unet.named_modules()
+        if not fp8_storage.is_fp8_storage_leaf(leaf)
+        for t in list(leaf.parameters(recurse=False)) + list(leaf.buffers(recurse=False))
+    )
+    assert after.get(str(COMPUTE), 0) <= skipped_bytes
 
 
 def test_restructured_lane_exports_and_the_hook_lane_is_refused(

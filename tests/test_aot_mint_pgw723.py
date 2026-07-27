@@ -339,40 +339,72 @@ def test_program_and_package_constant_sets_agree_for_a_real_mint(
         _export_lifted(), packages["code_only"]) == []
 
 
-def test_constant_set_drift_is_refused_and_names_the_fqns(
+def test_package_only_drift_is_refused_and_names_the_fqns(
     packages: Dict[str, Path],
 ) -> None:
-    """The mechanism that catches a strict/non-strict mix.
+    """The FATAL direction: the artifact wants a constant nothing declared.
 
-    pgw#728 measured strict and non-strict export lifting DIFFERENT constant
-    sets (2960 vs 4208 placeholders on the surveyed family), so a mint whose
-    manifest came from one trace mode and whose package came from the other
-    ships a manifest describing bytes the artifact does not want. The tiny
-    modules here are too simple for the two modes to diverge, so the drift is
-    induced directly — what is pinned is that a manifest/package mismatch is
-    REFUSED and NAMED, whatever produced it.
+    Nothing would bind it, and invoking a code-only package with an unbound
+    constant segfaults inside AOTICompiledModel.__call__. A strict/non-strict
+    trace mix (pgw#728) surfaces here too.
     """
-    reasons = aot_package.program_package_drift(
-        _export_module(BakedBufferModule().eval()), packages["code_only"])
+    class _Empty:
+        graph_signature = None
+        constants: Dict[str, Any] = {}
+
+    reasons = aot_package.program_package_drift(_Empty(), packages["code_only"])
     assert reasons
     joined = " ".join(reasons)
-    assert "different" in joined
-    assert "lora_a" in joined or "scale_table" in joined
-    assert "pgw#728" in joined
+    assert "never lifted" in joined and "segfault" in joined
+    assert "proj.weight" in joined or "scale_table" in joined
 
 
-def test_mint_refuses_a_package_whose_constants_are_not_the_programs(
+def test_program_only_drift_is_BENIGN(packages: Dict[str, Path]) -> None:
+    """The routine direction: the compiler fused a lifted constant away.
+
+    Measured on the first real SDXL w8a8 mint — program 2423 vs package 2422,
+    the difference being ``unet.conv_out.bias`` folded into the conv epilogue.
+    An equality-demanding gate refused EVERY real mint, so this test exists to
+    stop anyone restoring the symmetry.
+    """
+    real = set(aot_package.program_constant_fqns(_export_lifted()))
+    assert real
+
+    class _Extra:
+        graph_signature = None
+        constants = {name: None for name in real | {"fused.away.bias"}}
+
+    assert aot_package.program_package_drift(_Extra(), packages["code_only"]) == []
+    assert "fused.away.bias" in aot_package.eliminated_constants(
+        _Extra(), packages["code_only"])
+
+
+def test_mint_refuses_a_package_wanting_undeclared_constants(
     tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wired into the mint, not merely available."""
-    monkeypatch.setattr(
-        aot_package, "program_constant_fqns",
-        lambda _p: ("a.totally.different.tensor",))
+    monkeypatch.setattr(aot_package, "program_constant_fqns", lambda _p: ())
     with pytest.raises(aot_mint.MintRefused, match="constant-set drift"):
         aot_mint.mint(
             LiftedModule().eval(), _spec(), tmp_path,
             example_inputs=_example_inputs)
     assert not list(tmp_path.glob("*.tar.gz"))
+
+
+def test_mint_records_fused_constants_without_refusing(
+    tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler fusion must be observable but never fatal."""
+    real = aot_package.program_constant_fqns
+
+    monkeypatch.setattr(
+        aot_package, "program_constant_fqns",
+        lambda p: tuple(real(p)) + ("definitely.fused.away",))
+    result = aot_mint.mint(
+        LiftedModule().eval(), _spec(), tmp_path,
+        example_inputs=_example_inputs)
+    meta = aot_serve.unpack_metadata(result.artifact)
+    assert "definitely.fused.away" in meta["graph"]["fused_constants"]
 
 
 def test_strict_mode_drift_is_refused_by_name() -> None:
@@ -1029,3 +1061,134 @@ def test_unknown_family_has_no_input_contract() -> None:
 
     with pytest.raises(aot_inputs.InputContractError, match="no AOT export"):
         aot_inputs.builder_for("madeup")
+
+
+# ---------------------------------------------------------------------------
+# ie#566 — the four wan blockers
+# ---------------------------------------------------------------------------
+
+
+def test_G1_builders_are_keyed_by_family_AND_target() -> None:
+    """A family's compile targets are unrelated modules with unrelated call
+    contracts. Keying by family alone made ``vae.decode`` unmintable for EVERY
+    family, not just wan."""
+    from gen_worker import aot_inputs
+
+    assert aot_inputs.builder_for("sdxl", "unet") is aot_inputs.sdxl_unet_inputs
+    with pytest.raises(aot_inputs.InputContractError, match="vae.decode"):
+        aot_inputs.builder_for("sdxl", "vae.decode")
+
+
+def test_G1_family_wide_fallback_answers_any_target() -> None:
+    from gen_worker import aot_inputs
+
+    marker = object()
+
+    @aot_inputs.inputs_for("faux")
+    def _any(module: Any, spec: Any) -> Any:
+        return marker
+
+    try:
+        assert aot_inputs.builder_for("faux", "unet") is _any
+        assert aot_inputs.builder_for("faux", "vae.decode") is _any
+    finally:
+        aot_inputs._BUILDERS.pop(("faux", ""), None)
+
+
+def test_G1b_dotted_target_preserves_the_bound_signature() -> None:
+    """A bare forward(*args, **kwargs) erases the parameter names that
+    ``dynamic_shapes`` binds by — so every declared dynamic dim on a dotted
+    target silently failed to bind."""
+    class Vae(torch.nn.Module):
+        def forward(self, z: torch.Tensor) -> torch.Tensor:
+            return z
+
+        def decode(self, latent: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+            return latent * scale
+
+    target = aot_mint._CallableTarget(Vae(), "decode")
+    names = aot_mint._input_names(target, (torch.zeros(1),), {})
+    assert names == ("latent",), names
+    # ...and the erased form would have produced no bindable name at all.
+    spec = aot_mint.dynamic_shapes_spec(
+        (aot_mint.DynamicDim("latent", 0, 2, 8),), names)
+    assert 0 in spec["latent"]
+
+
+def test_G1b_signature_stamp_does_not_leak_between_targets() -> None:
+    class Two(torch.nn.Module):
+        def forward(self, z: torch.Tensor) -> torch.Tensor:
+            return z
+
+        def decode(self, latent: torch.Tensor) -> torch.Tensor:
+            return latent
+
+        def encode(self, pixels: torch.Tensor) -> torch.Tensor:
+            return pixels
+
+    owner = Two()
+    a = aot_mint._CallableTarget(owner, "decode")
+    b = aot_mint._CallableTarget(owner, "encode")
+    assert aot_mint._input_names(a, (torch.zeros(1),), {}) == ("latent",)
+    assert aot_mint._input_names(b, (torch.zeros(1),), {}) == ("pixels",)
+
+
+def test_G2_batch_is_declared_not_inferred_from_guidance() -> None:
+    """wan's CFG is two SEQUENTIAL batch-1 forwards, so guidance changes the call
+    COUNT, not the traced shape. Inferring batch from guidance family-agnostically
+    traced a graph the serving path never calls."""
+    from gen_worker import aot_inputs
+
+    unet = LiftedModule()
+    cfg_spec = aot_mint.ExportSpec(
+        family="sdxl", target="unet", shapes=((1024, 1024),),
+        guidance_scales=(6.0,))
+    assert aot_inputs._sdxl_cfg_batched(cfg_spec) is True
+
+    # An explicit declaration overrides the SDXL heuristic entirely.
+    pinned = aot_mint.ExportSpec(
+        family="sdxl", target="unet", shapes=((1024, 1024),),
+        guidance_scales=(6.0,), batch=1)
+    args, _ = aot_inputs.sdxl_unet_inputs(unet, pinned)
+    assert args[0].shape[0] == 1, "declared batch must win over the heuristic"
+    args2, _ = aot_inputs.sdxl_unet_inputs(unet, cfg_spec)
+    assert args2[0].shape[0] == 2
+
+
+def test_G3_cross_input_collapse_is_DETECTED() -> None:
+    """The measured FALSE PASS: each symbol keeps a healthy range, yet a static
+    per-token dim that is a function of H*W pins the graph to one shape."""
+    class Tokened(torch.nn.Module):
+        def forward(self, x: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+            return x.flatten(2).sum(-1) + tokens.sum()
+
+    h, w = 16, 24
+    program = torch.export.export(
+        Tokened().eval(),
+        (torch.randn(2, 4, h, w), torch.randn(h * w)),
+        dynamic_shapes={
+            "x": {2: torch.export.Dim("h", min=8, max=32),
+                  3: torch.export.Dim("w", min=8, max=32)},
+            "tokens": None,
+        },
+        strict=True,
+    )
+    dims = (aot_mint.DynamicDim("x", 2, 8, 32),
+            aot_mint.DynamicDim("x", 3, 8, 32))
+    gaps = aot_mint.declared_range_gaps(program, dims)
+    assert gaps, "a static dim equal to H*W must not pass the gate"
+    joined = " ".join(gaps)
+    assert "tokens[0]" in joined and "STATIC 384" in joined
+    assert "ie#566 G3" in joined
+
+
+def test_G3_does_not_fire_on_an_honest_dynamic_export() -> None:
+    """Fail-closed must not mean fail-always."""
+    dims = (aot_mint.DynamicDim("x", 0, 8, 16),)
+    assert aot_mint.declared_range_gaps(_export_lifted(lo=8, hi=16), dims) == []
+
+
+def test_G3_names_an_input_the_program_does_not_take() -> None:
+    gaps = aot_mint.declared_range_gaps(
+        _export_lifted(), (aot_mint.DynamicDim("nope", 0, 2, 8),))
+    assert gaps and "not a user input" in " ".join(gaps)

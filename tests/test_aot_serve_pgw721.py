@@ -941,8 +941,11 @@ def test_wrapper_splats_the_lifted_pair_into_the_artifact_call():
     # the pipeline calls the denoiser WITHOUT the adapter kwargs
     assert module.forward(*_in_range_call()[0]) == "ARTIFACT_OUTPUT"
     args, kwargs = package.invocations[0]
-    assert kwargs["lora_a"] is binding.tensors[0]
-    assert kwargs["lora_b"] is binding.tensors[1]
+    # POSITIONAL-only, measured on pod: the package takes a fixed flat arity
+    # and refuses kwargs, so the adapter must land in its declared SLOT.
+    assert kwargs == {}
+    assert args[3] is binding.tensors[0]
+    assert args[4] is binding.tensors[1]
 
 
 def test_wrapper_splats_the_lifted_pair_into_the_EAGER_fallback_too():
@@ -985,11 +988,11 @@ def test_adapter_swap_needs_no_artifact_interaction():
     aot.wrap_module(module, runner, meta)
 
     module.forward(*_in_range_call()[0])
-    first = package.invocations[0][1]["lora_a"]
+    first = package.invocations[0][0][3]
 
     # a swap writes THROUGH the same tensor object (in place); nothing rebinds
     module.forward(*_in_range_call()[0])
-    second = package.invocations[1][1]["lora_a"]
+    second = package.invocations[1][0][3]
     assert first is second is binding.tensors[0]
     assert package.loaded == bound_before   # constant table untouched
     assert package.full_update_asked is True
@@ -1007,13 +1010,13 @@ def test_lifted_pair_is_resolved_per_call_not_captured():
     aot.wrap_module(module, runner, meta)
 
     module.forward(*_in_range_call()[0])
-    assert package.invocations[0][1]["lora_a"] is first.tensors[0]
+    assert package.invocations[0][0][3] is first.tensors[0]
 
     # a re-install swaps the binding OBJECT: the next call must follow it
     second = _lift(module, _binding())
     assert second is not first
     module.forward(*_in_range_call()[0])
-    assert package.invocations[1][1]["lora_a"] is second.tensors[0]
+    assert package.invocations[1][0][3] is second.tensors[0]
 
     # dropping lifting entirely leaves a MANDATORY declared input absent —
     # B2 refuses by name and serves eager rather than reusing a dead pointer
@@ -1089,5 +1092,54 @@ def test_enable_arms_a_lifted_module_against_a_lifted_cell(
 
     assert aot.enable(pipeline, Cfg(), tmp_path / "c", art) is True
     assert module.forward(*_in_range_call()[0]) == "ARTIFACT_OUTPUT"
-    assert package.invocations[0][1]["lora_a"] is binding.tensors[0]
+    assert package.invocations[0][0][3] is binding.tensors[0]
     assert aot.execution_count(pipeline) == 1
+
+
+def test_artifact_is_called_positionally_never_with_kwargs():
+    """MEASURED on the first-light pod: an AOTI package takes POSITIONAL
+    inputs only — splatting kwargs at it dies with "Ran into a kwarg keyword
+    mismatch: Got [...] but expected []" before any compiled code runs.
+    Diffusers calls a denoiser with a mix of positional and keyword args, so
+    the serve path must flatten to the order export recorded."""
+    package = FakePackage()
+    runner = _runner(package)
+    runner.bind(FakeModule().state_dict(), {})
+    a, t, e = _in_range_call()[0]
+
+    # caller uses kwargs for everything except the first arg
+    runner(a, timestep=t, encoder_hidden_states=e)
+    args, kwargs = package.invocations[0]
+    assert kwargs == {}, "the package refuses kwargs"
+    assert args == (a, t, e), "flattened into declared position order"
+
+    # and a caller that reverses the kwarg order still lands correctly
+    runner(a, encoder_hidden_states=e, timestep=t)
+    assert package.invocations[1][0] == (a, t, e)
+
+
+def test_marshal_positional_refuses_a_missing_input_rather_than_shifting():
+    """A package has a fixed flat arity: skipping an absent input would slide
+    every later argument into the wrong graph slot."""
+    contract = _contract()
+    a, t, e = _in_range_call()[0]
+    assert aot.marshal_positional(contract, (a, t, e), {}) == [a, t, e]
+
+    # a required input absent -> refused by name (bind_call_inputs)
+    with pytest.raises(aot.IngressContractError) as excinfo:
+        aot.marshal_positional(contract, (a, t), {})
+    assert excinfo.value.reason == "input_missing"
+    assert "encoder_hidden_states" in str(excinfo.value)
+
+    # an OPTIONAL declared input absent is what ingress alone would permit —
+    # marshalling still refuses it, because skipping it would shift every
+    # later argument into the wrong graph slot.
+    meta = _meta(inputs=INPUTS + [
+        {"name": "added_cond", "position": 3, "dtype": "bfloat16",
+         "shape": [2, 2816], "optional": True}])
+    opt = _contract(meta)
+    assert aot.assert_ingress(opt, (a, t, e), {})          # ingress: fine
+    with pytest.raises(aot.IngressContractError) as excinfo:
+        aot.marshal_positional(opt, (a, t, e), {})
+    assert excinfo.value.reason == "input_missing"
+    assert "wrong graph slot" in str(excinfo.value)
