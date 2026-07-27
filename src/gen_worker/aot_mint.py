@@ -148,6 +148,12 @@ class ExportSpec:
     precision: str = "bf16"
     lora_bucket: int = 0
     shapes: Tuple[Tuple[int, ...], ...] = ()
+    #: Traced batch. 0 = the family's input builder decides. Declared rather
+    #: than inferred from ``guidance_scales`` because CFG batching is a FAMILY
+    #: fact: sdxl runs CFG as one batch-2 forward, wan as two sequential batch-1
+    #: forwards, so guidance changes wan's call COUNT and not its shape
+    #: (ie#566 G2).
+    batch: int = 0
     text_lens: Tuple[int, ...] = ()
     guidance_scales: Tuple[float, ...] = ()
     dynamic: Tuple[DynamicDim, ...] = ()
@@ -252,40 +258,186 @@ def export_program(
         ) from exc
 
 
+def _placeholder_shapes(program: Any) -> Dict[str, Tuple[Any, ...]]:
+    """``{user input name: shape tuple}`` from the exported placeholders."""
+    signature = getattr(program, "graph_signature", None)
+    user_inputs = [str(n) for n in getattr(signature, "user_inputs", ()) or ()]
+    by_node: Dict[str, Any] = {}
+    graph = getattr(getattr(program, "graph_module", None), "graph", None)
+    for node in getattr(graph, "nodes", ()) or ():
+        if getattr(node, "op", "") == "placeholder":
+            by_node[str(node.name)] = node.meta.get("val")
+    out: Dict[str, Tuple[Any, ...]] = {}
+    for name in user_inputs:
+        val = by_node.get(name)
+        if val is not None:
+            out[name] = tuple(getattr(val, "shape", ()) or ())
+    return out
+
+
+def _free_symbols(dim: Any) -> Tuple[Any, ...]:
+    node = getattr(dim, "node", None)
+    expr = getattr(node, "expr", None)
+    return tuple(getattr(expr, "free_symbols", ()) or ()) if expr is not None else ()
+
+
+def _shape_env(program: Any) -> Any:
+    for shape in _placeholder_shapes(program).values():
+        for dim in shape:
+            env = getattr(getattr(dim, "node", None), "shape_env", None)
+            if env is not None:
+                return env
+    return None
+
+
 def declared_range_gaps(
     program: Any, dims: Sequence[DynamicDim],
 ) -> List[str]:
-    """Named reasons the exported program's ranges do not match the declaration.
+    """Named reasons the export did not honour the declared dynamic contract.
 
-    An export that SPECIALIZED a dim we declared dynamic produces an artifact
-    serving exactly one shape while its metadata advertises a range — and B2
-    measured that nothing at runtime refuses the difference. So a silently
-    specialized dim fails the mint rather than shipping.
+    An export that specialized — or silently PINNED — a dim we advertise as
+    dynamic produces an artifact serving one shape while its metadata claims a
+    range, and pgw#704 B2 measured that nothing at runtime refuses the
+    difference. So this must fail the mint, not ship.
 
-    Bounds are compared as SETS of pairs, not by symbol name: symbol names
-    (``s6``, ``s27``) are trace-order artifacts that shift with unrelated graph
-    changes, while the bound pairs are the contract.
+    Three checks, because presence of a range entry is NOT proof (ie#566 G3 —
+    a measured FALSE PASS: wan ti2v-5b declared symbolic H/W, exported clean,
+    passed a presence-only gate, and yet a static per-token input of 27,280
+    pinned H*W to exactly one shape):
+
+    1. **specialization** — the declared axis is a plain int in the exported
+       placeholder, so the dim never became symbolic at all;
+    2. **solved range** — the governing symbol's range in the exported program
+       must COVER the declared ``[min, max]``. A collapsed (``lower == upper``)
+       or narrowed range is a pin, and the artifact admits less traffic than it
+       advertises;
+    3. **cross-input collapse** — a STATIC dim on ANOTHER input whose value is a
+       multiple of the product of the declared dims' trace-time values. Such a
+       dim is an algebraic function of the "dynamic" extents, so it silently
+       fixes them even though each symbol still reports a healthy range. This is
+       the check the presence-only gate lacked.
     """
-    ranges = getattr(program, "range_constraints", {}) or {}
-    have: set[Tuple[int, int]] = set()
-    for interval in ranges.values():
-        try:
-            have.add((int(interval.lower), int(interval.upper)))
-        except (TypeError, ValueError, OverflowError, AttributeError):
-            continue
-    want = sorted({(d.min, d.max) for d in dims if d.min != d.max})
     gaps: List[str] = []
-    if len(have) < len(want):
-        gaps.append(
-            f"declared {len(want)} dynamic dim(s) but the exported program "
-            f"carries {len(have)} bounded range constraint(s) — export "
-            f"specialized a dim the declaration advertises as dynamic")
-    for row in want:
-        if row not in have:
+    shapes = _placeholder_shapes(program)
+    ranges = getattr(program, "range_constraints", {}) or {}
+    env = _shape_env(program)
+    hints = dict(getattr(env, "var_to_val", {}) or {}) if env is not None else {}
+
+    declared_symbols: List[Any] = []
+    for d in dims:
+        if d.min == d.max:
+            continue
+        shape = shapes.get(d.input_name)
+        if shape is None:
             gaps.append(
-                f"declared range {list(row)} is absent from the exported "
-                f"program's range constraints {sorted(have)!r}")
+                f"declared dynamic dim names input {d.input_name!r}, which is "
+                f"not a user input of the exported program "
+                f"(inputs: {sorted(shapes)!r})")
+            continue
+        if d.axis >= len(shape):
+            gaps.append(
+                f"{d.input_name}[{d.axis}] is out of range for the exported "
+                f"shape {tuple(str(x) for x in shape)!r}")
+            continue
+        dim = shape[d.axis]
+        text = str(dim)
+        if text.lstrip("-").isdigit():
+            gaps.append(
+                f"{d.input_name}[{d.axis}] exported as the STATIC value {text} "
+                f"but is declared dynamic [{d.min}, {d.max}] — export "
+                f"specialized a dim the declaration advertises as dynamic")
+            continue
+        syms = _free_symbols(dim)
+        declared_symbols.extend(syms)
+        covered = False
+        for sym in syms:
+            interval = ranges.get(sym)
+            if interval is None:
+                continue
+            try:
+                lo, hi = int(interval.lower), int(interval.upper)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if lo == hi:
+                gaps.append(
+                    f"{d.input_name}[{d.axis}] symbol {sym} solved to the "
+                    f"single value {lo} — the declared range [{d.min}, {d.max}] "
+                    f"is advertised but the artifact admits ONE shape")
+                covered = True
+                break
+            # The symbol may carry a multiple-of factor (8*s95), so compare the
+            # DECLARED bounds against the symbol's own solved bounds scaled by
+            # the factor the declaration states.
+            factor = max(1, int(d.multiple_of or 1))
+            want_lo, want_hi = d.min // factor, d.max // factor
+            if lo > want_lo or hi < want_hi:
+                gaps.append(
+                    f"{d.input_name}[{d.axis}] symbol {sym} solved to "
+                    f"[{lo * factor}, {hi * factor}] which does not cover the "
+                    f"declared [{d.min}, {d.max}] — the artifact admits less "
+                    f"traffic than it advertises")
+            covered = True
+            break
+        if not covered and not syms:
+            gaps.append(
+                f"{d.input_name}[{d.axis}] is symbolic ({text}) but carries no "
+                f"resolvable symbol; its admissible range is unprovable")
+
+    gaps.extend(_cross_input_collapse(shapes, dims, declared_symbols, hints))
     return gaps
+
+
+def _cross_input_collapse(
+    shapes: Mapping[str, Tuple[Any, ...]],
+    dims: Sequence[DynamicDim],
+    declared_symbols: Sequence[Any],
+    hints: Mapping[Any, Any],
+) -> List[str]:
+    """Static dims on OTHER inputs that pin the declared dynamic extents.
+
+    ie#566 G3, measured on wan ti2v-5b: H and W were declared symbolic and each
+    kept a healthy solved range, but a per-token input of static length 27,280
+    is an algebraic function of H*W — so the graph serves exactly the traced
+    shape regardless. Every per-symbol check passes; only comparing the static
+    dims against the PRODUCT of the trace-time extents finds it.
+
+    Fail-closed by design: the remedy is to declare that input's dim dynamic too
+    (or make it independent of H*W), and B2 doctrine forbids shipping the silent
+    version while we decide.
+    """
+    values: List[int] = []
+    for sym in declared_symbols:
+        try:
+            values.append(int(hints[sym]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(values) < 2:
+        return []
+    product = 1
+    for v in values:
+        product *= v
+    if product <= 1:
+        return []
+    declared_inputs = {d.input_name for d in dims}
+    out: List[str] = []
+    for name, shape in sorted(shapes.items()):
+        if name in declared_inputs:
+            continue
+        for axis, dim in enumerate(shape):
+            text = str(dim)
+            if not text.lstrip("-").isdigit():
+                continue
+            n = int(text)
+            if n >= product and n % product == 0:
+                out.append(
+                    f"{name}[{axis}] is STATIC {n}, a multiple of {product} — "
+                    f"the product of the declared dynamic extents "
+                    f"{values!r}. That dim is an algebraic function of the "
+                    f"'dynamic' axes, so the graph is pinned to the traced "
+                    f"shape even though each symbol reports a range "
+                    f"(ie#566 G3). Declare {name}[{axis}] dynamic too, or make "
+                    f"it independent of the latent extent")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -749,17 +901,28 @@ def mint_target(
 class _CallableTarget:
     """Adapts a non-``forward`` target (``vae.decode``) to a module for export.
 
-    ``torch.export`` traces ``forward``; a target like ``vae.decode`` is a
-    bound method on a module whose ``forward`` does something else. Wrapping
-    keeps the owner's parameters reachable (so they lift as constants normally)
-    while presenting the declared callable as the traced entrypoint.
+    ``torch.export`` traces ``forward``; a target like ``vae.decode`` is a bound
+    method on a module whose ``forward`` does something else. Wrapping keeps the
+    owner's parameters reachable (so they lift as constants normally) while
+    presenting the declared callable as the traced entrypoint.
+
+    **The wrapper COPIES the bound method's signature (ie#566 G1b).** A bare
+    ``forward(*args, **kwargs)`` erases the parameter names, and
+    :func:`_input_names` reads exactly those names to build the
+    ``dynamic_shapes`` dict — so an erased signature silently yields zero
+    bindable inputs and EVERY declared dynamic dim on a dotted target fails to
+    bind. Signature preservation is the whole reason this class can carry a
+    dynamic contract at all.
     """
 
     def __init__(self, owner: Any, attr: str) -> None:
+        import inspect
+
         import torch.nn as nn
 
         self._owner = owner
         self._attr = str(attr)
+        bound = getattr(owner, self._attr)
 
         class _Wrapper(nn.Module):
             def __init__(self, owner: Any, attr: str) -> None:
@@ -769,6 +932,24 @@ class _CallableTarget:
 
             def forward(self, *args: Any, **kwargs: Any) -> Any:
                 return getattr(self.owner, self._attr)(*args, **kwargs)
+
+        # Per-instance class, so stamping cannot leak across targets. ``self``
+        # must be prepended: the stamp lands on the UNBOUND function, and
+        # ``inspect.signature`` of the BOUND ``forward`` strips its first
+        # parameter — without the filler it would strip the target's real first
+        # argument and shift every name by one (silently mis-binding every
+        # declared dynamic dim, which is the ie#566 G1b bug in a subtler form).
+        try:
+            sig = inspect.signature(bound)
+            _Wrapper.forward.__signature__ = sig.replace(  # type: ignore[attr-defined]
+                parameters=[inspect.Parameter(
+                    "self", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+                + list(sig.parameters.values()))
+        except (TypeError, ValueError) as exc:
+            raise MintRefused(
+                f"cannot read the signature of target {self._attr!r} on "
+                f"{type(owner).__name__} ({exc}); without it no declared "
+                f"dynamic dim could bind (ie#566 G1b)") from exc
 
         self._module = _Wrapper(owner, self._attr)
 
@@ -830,6 +1011,7 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         precision=str(body.get("precision") or "bf16"),
         lora_bucket=int(body.get("lora_bucket") or 0),
         shapes=tuple(tuple(int(v) for v in row) for row in body.get("shapes") or ()),
+        batch=int(body.get("batch") or 0),
         text_lens=tuple(int(v) for v in body.get("text_lens") or ()),
         guidance_scales=tuple(float(v) for v in body.get("guidance_scales") or ()),
         dynamic=dims,
