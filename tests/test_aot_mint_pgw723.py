@@ -1015,7 +1015,8 @@ def test_cli_loads_a_full_request(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The SDXL input contract
+# The generic input machinery (the sdxl contract itself is a DECLARATION in
+# the sdxl endpoint since pgw#739 — see test_aot_declaration_pgw739.py)
 # ---------------------------------------------------------------------------
 
 
@@ -1059,7 +1060,7 @@ def test_sdxl_lora_bucket_zero_takes_no_adapter_arguments() -> None:
 def test_unknown_family_has_no_input_contract() -> None:
     from gen_worker import aot_inputs
 
-    with pytest.raises(aot_inputs.InputContractError, match="no AOT export"):
+    with pytest.raises(aot_inputs.InputContractError, match="DECLARED"):
         aot_inputs.builder_for("madeup")
 
 
@@ -1071,12 +1072,20 @@ def test_unknown_family_has_no_input_contract() -> None:
 def test_G1_builders_are_keyed_by_family_AND_target() -> None:
     """A family's compile targets are unrelated modules with unrelated call
     contracts. Keying by family alone made ``vae.decode`` unmintable for EVERY
-    family, not just wan."""
+    family, not just wan. (sdxl's own contract is an endpoint DECLARATION now
+    — pgw#739 — so the keying property is proven on a hand registration.)"""
     from gen_worker import aot_inputs
 
-    assert aot_inputs.builder_for("sdxl", "unet") is aot_inputs.sdxl_unet_inputs
-    with pytest.raises(aot_inputs.InputContractError, match="vae.decode"):
-        aot_inputs.builder_for("sdxl", "vae.decode")
+    def _denoiser(module: Any, spec: Any) -> Any:  # pragma: no cover - key only
+        return (), {}
+
+    aot_inputs._BUILDERS[("keyfam", "unet")] = _denoiser
+    try:
+        assert aot_inputs.builder_for("keyfam", "unet") is _denoiser
+        with pytest.raises(aot_inputs.InputContractError, match="vae.decode"):
+            aot_inputs.builder_for("keyfam", "vae.decode")
+    finally:
+        aot_inputs._BUILDERS.pop(("keyfam", "unet"), None)
 
 
 def test_G1_family_wide_fallback_answers_any_target() -> None:
@@ -1134,25 +1143,30 @@ def test_G1b_signature_stamp_does_not_leak_between_targets() -> None:
 
 
 def test_G2_batch_is_declared_not_inferred_from_guidance() -> None:
-    """wan's CFG is two SEQUENTIAL batch-1 forwards, so guidance changes the call
-    COUNT, not the traced shape. Inferring batch from guidance family-agnostically
-    traced a graph the serving path never calls."""
-    from gen_worker import aot_inputs
+    """wan's CFG is two SEQUENTIAL batch-1 forwards, so guidance changes the
+    call COUNT, not the traced shape. The guidance heuristic that guessed
+    batch died with the sdxl SDK builder (pgw#739): batch is now a declared
+    coordinate — ``B`` is a Dim, the CFG regime is a Fork, and the class ROW
+    states the traced batch outright."""
+    from gen_worker.api.decorators import Compile
+    from gen_worker.api.export_contract import Dim, Fork, GraphClass
 
-    unet = LiftedModule()
-    cfg_spec = aot_mint.ExportSpec(
-        family="sdxl", target="unet", shapes=((1024, 1024),),
-        guidance_scales=(6.0,))
-    assert aot_inputs._sdxl_cfg_batched(cfg_spec) is True
+    decl = Compile(
+        family="g2fam", targets=("unet",), text_len=77,
+        dims=(Dim("B", carried_by=(("x", 0),)),),
+        forks=(Fork("cfg", served=(True, False)),),
+        classes=(
+            GraphClass(dims={"B": 2}, fork={"cfg": True}),
+            GraphClass(dims={"B": 1}, fork={"cfg": False}),
+        ),
+        shape_strategy="static-rows", warm_changes_key=False,
+    )
+    from gen_worker import aot_declaration
 
-    # An explicit declaration overrides the SDXL heuristic entirely.
-    pinned = aot_mint.ExportSpec(
-        family="sdxl", target="unet", shapes=((1024, 1024),),
-        guidance_scales=(6.0,), batch=1)
-    args, _ = aot_inputs.sdxl_unet_inputs(unet, pinned)
-    assert args[0].shape[0] == 1, "declared batch must win over the heuristic"
-    args2, _ = aot_inputs.sdxl_unet_inputs(unet, cfg_spec)
-    assert args2[0].shape[0] == 2
+    batched = aot_declaration.select_plan(decl, "unet", fork={"cfg": True})
+    pinned = aot_declaration.select_plan(decl, "unet", fork={"cfg": False})
+    assert batched.seed.dim_map["B"] == 2
+    assert pinned.seed.dim_map["B"] == 1
 
 
 def test_G3_genuine_dependence_is_REFUSED() -> None:
