@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.75.1 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
+
+A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.
+The job finished quantizing and rendering, then its in-flight media upload hit ngrok while the
+backend was briefly gone, received ngrok's HTML 404 page, and
+`presigned_upload.py` classified **every** 404 as `retryable=False` — so the worker reported
+`JOB_STATUS_FATAL` and two hours of GPU work was thrown away with no recourse.
+
+The gRPC worker stream reconnects across a hub restart. **In-flight HTTP calls did not**, and
+that asymmetry is why "hub-only restarts are safe" held for serving and quietly did not hold
+for long conversion producers.
+
+**`gen_worker/http_origin.py`** (new) separates the two cases, on measured evidence rather
+than assumption — the hub answers `application/json` carrying its `{"error": {...}}` envelope,
+ngrok's offline page answers `text/html`:
+
+- `response_is_from_hub(resp)` — parses the body, not just the Content-Type, since a proxy may
+  mislabel HTML as JSON but will not synthesise our error envelope.
+- `is_proxy_outage(resp)` — the inverse, used at the call sites.
+
+Deliberately **biased toward retrying**: an unrecognised body counts as proxy-origin. Retrying
+a genuinely missing route costs a bounded backoff and then fails anyway; treating an outage as
+fatal destroys hours of work. The asymmetry of those two mistakes is not close.
+
+Applied at every site that conflated the two **for hub calls** — the point was to fix the
+class, not the one instance that bit us:
+
+- `presigned_upload.py` — the P0. Proxy 404 during upload create is now `retryable=True`.
+- `models/hub_client.py` — a proxy 404 was reported as `HubRepoNotFoundError`, sending the
+  reader to hunt a catalog problem that does not exist. Now `HubResolveError` (transient).
+- `callout.py::checkpoint_get` — **the worst of the three**, because it did not crash: it
+  returned `(None, False)`, i.e. "no saved progress", so an outage made a resumable job
+  silently restart from scratch. Now raises instead.
+
+**Deliberately NOT changed:** `models/download.py`'s civitai 404s. Civitai is a third-party
+host with no proxy of ours in the path, so there a 404 really does mean not-found. Widening
+the helper to non-hub hosts would trade a real bug for a fake one.
+
+Still open: `request_context/__init__.py:1494` carries the same pattern, but that file holds
+another agent's uncommitted work in the shared chaos worktree, so it is left alone rather than
+entangled. Recorded in pgw#715 for its owner.
+
+
 ## 0.75.0 (2026-07-26) — pgw#660: the hard GPU-architecture floor has a declared carrier again
 
 `Resources(compute_capability=8.9)` is restored. The v2 API freeze (pgw#647) deleted it on
