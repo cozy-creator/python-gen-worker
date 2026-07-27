@@ -1160,6 +1160,91 @@ def _ptx_jit_gaps(
     return gaps
 
 
+def _inductor_cache_config() -> Dict[str, Any]:
+    """The inductor cache flags that decide whether a compile could have
+    written a reusable entry AT ALL. Read live, never assumed: on 2.13
+    ``bundle_triton_into_fx_graph_cache`` defaults True, which moves triton
+    artifacts INSIDE the fx entry and therefore changes what lands on disk."""
+    facts: Dict[str, Any] = {}
+    # Never trigger a FRESH heavy import from a diagnostic: importing
+    # torch._inductor runs cache_dir(), which mkdirs TORCHINDUCTOR_CACHE_DIR
+    # and raises on an unwritable one — leaving a half-initialized module that
+    # poisons every later import (measured: the mega-cache artifact factory
+    # double-registers). By pack time inductor is always imported anyway; if it
+    # is not, its config was never consulted and has nothing to explain.
+    if "torch._inductor.config" not in sys.modules:
+        return facts
+    try:
+        from torch._inductor import config as inductor_config
+
+        for name in ("fx_graph_cache", "force_disable_caches",
+                     "bundle_triton_into_fx_graph_cache", "freezing"):
+            facts[name] = getattr(inductor_config, name, "?")
+    except Exception:  # noqa: BLE001 — a diagnostic must never raise
+        logger.debug("compile-cache: inductor config unreadable", exc_info=True)
+    return facts
+
+
+def _capture_forensics(capture: Path, pipe: Any = None) -> str:
+    """Why a pack refusal happened, IN the refusal itself.
+
+    First-real-pod audit: the first real-GPU mint ran its whole plan and was
+    refused at pack for both functions, and the verbatim reason was LOST (the
+    hub persists no typed worker events) — one pod run per refusal. Every pack
+    refusal now carries the facts that discriminate its candidate causes, so
+    ONE run settles which gate fired and why:
+
+    * ``latched`` — did the compile write HERE, or is inductor pointed
+      somewhere else (gw#608's class);
+    * ``tree`` — what DID land, per subdir, with counts;
+    * ``inductor`` — was caching disabled, bypassed or bundled;
+    * ``proof``/``process`` — did this process compile at all, or reuse
+      in-process compiled code and write nothing (pgw#604's class).
+
+    Never raises: a diagnostic that can fail is a second lost refusal.
+    """
+    parts: List[str] = [f"capture={capture}"]
+    try:
+        want = {str(Path(capture) / sub) for sub in ("inductor", "triton")}
+        live = {
+            env: os.environ.get(env, "")
+            for env in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR")
+        }
+        parts.append(
+            "latched=" + ("yes" if set(live.values()) == want else "NO")
+            + " " + " ".join(f"{k}={v or '-'}" for k, v in sorted(live.items()))
+        )
+        tree: List[str] = []
+        for sub in ("inductor", "triton"):
+            base = Path(capture) / sub
+            if not base.is_dir():
+                tree.append(f"{sub}:absent")
+                continue
+            children = sorted(p for p in base.iterdir())
+            if not children:
+                tree.append(f"{sub}:empty")
+            for child in children:
+                count = sum(1 for p in child.rglob("*") if p.is_file()) \
+                    if child.is_dir() else 1
+                tree.append(f"{sub}/{child.name}:{count}")
+        parts.append("tree=[" + ", ".join(tree) + "]")
+        config_facts = _inductor_cache_config()
+        if config_facts:
+            parts.append("inductor=" + " ".join(
+                f"{k}={v}" for k, v in sorted(config_facts.items())))
+        if pipe is not None:
+            parts.append(
+                f"proof=hits:{cache_hit_count(pipe)} "
+                f"misses:{cache_miss_count(pipe)}")
+        counters = inductor_counters()
+        if counters:
+            parts.append("process=" + " ".join(
+                f"{k}:{v}" for k, v in sorted(counters.items())))
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("compile-cache: capture forensics failed", exc_info=True)
+    return " | ".join(parts)
+
+
 def pack(cache_root: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
     """Deterministic artifact from a capture root holding ``inductor/`` and
     ``triton/``: sorted entries, zeroed times/owners, gzip mtime 0 — identical
@@ -1180,9 +1265,18 @@ def pack(cache_root: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
     if gaps:
         shown = "; ".join(gaps[:10])
         more = f" (+{len(gaps) - 10} more)" if len(gaps) > 10 else ""
+        # The gate's own census rides the refusal: a real PTX exposure and a
+        # false gap (e.g. cubins bundled into the fx entry rather than written
+        # beside the ptx) look identical without these counts.
+        ptx = sum(1 for p in files if p.suffix == ".ptx")
+        cubin = sum(1 for p in files if p.suffix == ".cubin")
+        config_facts = _inductor_cache_config()
         raise RuntimeError(
             f"cubin-completeness gate (pgw#698): {len(gaps)} kernel(s) "
-            f"would rely on driver PTX JIT — {shown}{more}")
+            f"would rely on driver PTX JIT — {shown}{more} "
+            f"[census: {ptx} ptx, {cubin} cubin, {len(files)} files, "
+            f"sm={metadata.get('sm') or '-'}, bundle_triton="
+            f"{config_facts.get('bundle_triton_into_fx_graph_cache', '?')}]")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as raw:
@@ -3817,8 +3911,8 @@ def finish_fleet_mint(
     if not captured:
         raise RuntimeError(
             "self-mint proof passed but captured nothing under "
-            "TORCHINDUCTOR_CACHE_DIR — was inductor already latched to "
-            "another dir in this process?"
+            "TORCHINDUCTOR_CACHE_DIR — the compile did not write here. "
+            + _capture_forensics(capture, pipe)
         )
     # gw#608 hardening: a minting boot proves its EXECUTION; this asserts
     # its ARTIFACT. The pack must contain the FX-graph entries the proof's
@@ -3833,14 +3927,17 @@ def finish_fleet_mint(
     if fx_entries <= 0:
         raise RuntimeError(
             "self-mint capture contains NO FX-graph cache entries — the "
-            "compile output landed outside the capture dir; refusing to "
-            "publish an unservable cell"
+            f"compile wrote {len(captured)} other file(s) here but no fx "
+            "entry, so either the fx cache was bypassed/disabled or nothing "
+            "re-compiled in this process; refusing to publish an unservable "
+            "cell. " + _capture_forensics(capture, pipe)
         )
     if expected_graphs > 0 and fx_entries < expected_graphs:
         raise RuntimeError(
             f"self-mint capture holds {fx_entries} FX-graph entrie(s) but "
             f"the warmup proof compiled {expected_graphs} graph(s) — "
-            "partial capture, refusing to publish"
+            "partial capture, refusing to publish. "
+            + _capture_forensics(capture, pipe)
         )
 
     # pgw#681: the guard-closure gate. The proof confirmed the graphs SERVE;
