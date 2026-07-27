@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 import msgspec
 
 from . import activity as activity_mod
+from . import mint_budget
 from . import progress as progress_mod
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
@@ -2239,6 +2240,21 @@ class _ClassRecord:
 
 class _MintAbandoned(Exception):
     """The background mint was asked to stop (adoption/vacate/shutdown)."""
+
+
+class _MintDeclined(Exception):
+    """pgw#737: the mint refused itself — it cannot capture on this card
+    without taking the tenant down with it. NOT a failure: serving is eager,
+    the cell stays absent, and a roomier config mints it later."""
+
+    def __init__(
+        self, reason: str, budget: "mint_budget.MintBudget",
+        detail: str = "",
+    ) -> None:
+        self.reason = reason
+        self.budget = budget
+        line = budget.line("mint_skipped", reason)
+        super().__init__(f"{line}; {detail}" if detail else line)
 
 
 class _SeedPreempted(Exception):
@@ -5545,6 +5561,17 @@ class Executor:
             # selection, no proof loop, targets registered active-less
             # (advertising the requested cell key for peer adoption).
             eager_first = self._eager_first_eligible(spec, inj)
+            if eager_first and not self._mint_budget_ok(spec, inj):
+                # pgw#737: THE gate. It sits here and not only in the driver
+                # because arming + enabling the routers is already the first
+                # allocation of the capture — the boot warm's own forwards
+                # enqueue background compiles the instant the routers go
+                # concurrent. A card that cannot hold the capture never gets
+                # one armed: the targets go back to true eager, the cell
+                # stays absent, and the boot follows the plain-eager shape
+                # (never the foreground compile-then-serve mint, which is
+                # strictly worse for the tenant).
+                eager_first = False
             if eager_first:
                 from . import hot_swap
 
@@ -7565,6 +7592,57 @@ class Executor:
             saw_router = True
         return saw_router
 
+    def _mint_budget_ok(
+        self, spec: EndpointSpec, inj: "_InjectionResult",
+    ) -> bool:
+        """pgw#737: does this card have room to CAPTURE, on top of serving?
+
+        False = decline: every pending self-mint is discarded, its target
+        unwrapped to true eager and its branch lane dropped, so the boot
+        continues as a plain eager boot with the cell absent. Loud (one
+        structured ``mint_skipped`` line, logged and on the wire) and
+        automatic — a roomier config, or a smaller-resident flavor, mints
+        the same cell later."""
+        from . import compile_cache
+        from . import fleet_cells as fleet_cells_mod
+
+        pipes = [
+            candidate.pipeline for candidate in inj.compile_objects
+            if id(candidate.pipeline) in inj.pending_self_mints
+        ]
+        device = next(
+            (dev for pipe in pipes
+             if (dev := mint_budget.device_of(pipe)) is not None),
+            None,
+        )
+        budget = mint_budget.probe(device)
+        if budget.fits:
+            return True
+        line = budget.line("mint_skipped", "insufficient_vram")
+        logger.warning("self-mint declined at boot for %s: %s", spec.name, line)
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"{line}; {spec.name} boots eager with no cell — the capture "
+            "does not fit beside this model's own serving working set",
+            phase="insufficient_vram",
+        )
+        for pipe in pipes:
+            pending = inj.pending_self_mints.pop(id(pipe), None)
+            inj.active_compile_artifacts.pop(id(pipe), None)
+            if pending is not None:
+                try:
+                    fleet_cells_mod.abandon_self_mint(pending)
+                except Exception:
+                    logger.exception("declined mint capture cleanup failed")
+            try:
+                compile_cache.unwrap(pipe)
+                if spec.lora_bucket:
+                    compile_cache.drop_lora_lane(pipe)
+            except Exception:
+                logger.exception("declined mint target unwrap failed")
+        flush_memory()
+        return False
+
     def serving_tiers(self) -> Dict[str, str]:
         """Per-function serving tier for the capability projection (th#1187
         wire contract): ``"compiled"`` when a READY record's compile target
@@ -7586,7 +7664,7 @@ class Executor:
         }
 
     async def abandon_background_mint(
-        self, rec: _ClassRecord, *, reason: str,
+        self, rec: _ClassRecord, *, reason: str, free_targets: bool = False,
     ) -> None:
         """Cleanly stop an in-flight background mint (adopt-on-arm, vacate,
         shutdown): signal, let the driver finish its current unit, then
@@ -7615,12 +7693,20 @@ class Executor:
         # signal; this covers a driver that never started or already died.
         if rec.background_mint is bg:
             self._abandon_mint_state(rec, bg)
+        if free_targets:
+            self._free_mint_targets(bg)
 
-    def _abandon_mint_state(self, rec: _ClassRecord, bg: "_BackgroundMint") -> None:
+    def _abandon_mint_state(
+        self, rec: _ClassRecord, bg: "_BackgroundMint",
+        *, free_targets: bool = False,
+    ) -> None:
         """Discard-wholesale cleanup: suspend routing concurrency (novel
         signatures return to sequential compile-then-serve) and abandon
         every unfinalized capture. Serving is untouched — the record keeps
-        serving eager on the live instance."""
+        serving eager on the live instance.
+
+        ``free_targets`` (pgw#737): this process will not mint at all, so
+        also give the card back — see :meth:`_free_mint_targets`."""
         from . import fleet_cells as fleet_cells_mod
         from . import hot_swap
 
@@ -7635,6 +7721,35 @@ class Executor:
                 logger.exception("background mint capture cleanup failed")
         if rec.background_mint is bg:
             rec.background_mint = None
+        if free_targets:
+            self._free_mint_targets(bg)
+
+    def _free_mint_targets(self, bg: "_BackgroundMint") -> None:
+        """pgw#737: give the card back after a mint that will not happen.
+
+        A suspended router still leaves the guarded wrappers installed, the
+        LoRA branch containers allocated and the allocator holding whatever
+        the abandoned capture touched — the tenant's next peak has to fit
+        around all of it, and on wan-2.2 it did not. Unwrap to true eager
+        (the same end state as the Phase-3 unproven-object branch), drop the
+        branch lane, then empty the cache."""
+        from . import compile_cache
+        from . import hot_swap
+
+        for pipe in bg.pipes.values():
+            try:
+                router = hot_swap.router_of(pipe)
+                if router is not None:
+                    # CLOSE, not suspend: a queued warm job would otherwise
+                    # still take its turn and compile onto the card we just
+                    # decided we cannot capture on.
+                    router.close()
+                compile_cache.unwrap(pipe)
+                if bg.spec.lora_bucket:
+                    compile_cache.drop_lora_lane(pipe)
+            except Exception:
+                logger.exception("mint target unwrap failed")
+        flush_memory()
 
     async def _background_mint(
         self, rec: _ClassRecord, bg: "_BackgroundMint",
@@ -7651,6 +7766,18 @@ class Executor:
         try:
             with activity_mod.watchdog(act):
                 await self._background_mint_run(rec, bg, act)
+        except _MintDeclined as declined:
+            # pgw#737: a declined mint is an OUTCOME, not a failure — the
+            # activity terminates COMPLETED and the tier stays eager, so
+            # nothing downstream classifies this worker as broken or
+            # re-dispatches against it. The cell stays absent: a roomier
+            # config (or a smaller-resident flavor) mints it later.
+            self._abandon_mint_state(rec, bg, free_targets=True)
+            logger.warning(
+                "self-mint declined for %s: %s", bg.spec.name, declined)
+            activity_mod.emit_event(
+                "self_mint_skipped", str(declined), phase=declined.reason)
+            act.completed()
         except (_MintAbandoned, asyncio.CancelledError):
             self._abandon_mint_state(rec, bg)
             logger.info(
@@ -7665,7 +7792,10 @@ class Executor:
             )
             act.completed()
         except Exception as exc:
-            self._abandon_mint_state(rec, bg)
+            # pgw#737: free_targets — a failed mint that leaves its wrappers
+            # and branch buffers installed keeps charging the tenant for a
+            # capture that will never finalize.
+            self._abandon_mint_state(rec, bg, free_targets=True)
             logger.warning(
                 "background mint for %s failed (%s: %s); serving stays eager "
                 "for this process", bg.spec.name, type(exc).__name__, exc)
@@ -7694,6 +7824,20 @@ class Executor:
         from . import warmup as warmup_mod
 
         spec = bg.spec
+        # pgw#737: the capture's VRAM pre-budget, BEFORE any seed touches
+        # the card. The boot warm has already run one real eager forward on
+        # these shapes, so the peak high-water is a measured anchor, not a
+        # guess. Not fitting is not an error — decline, serve eager, leave
+        # the cell absent (never attempt-and-OOM: that is what took the
+        # wan-2.2 tenant request down with 26 banked denoise steps).
+        mint_device = next(
+            (dev for pipe in bg.pipes.values()
+             if (dev := mint_budget.device_of(pipe)) is not None),
+            None,
+        )
+        budget = mint_budget.probe(mint_device)
+        if not budget.fits:
+            raise _MintDeclined("insufficient_vram", budget)
         jobs, _skips = self._warmup_plan(spec, rec)
         jobs, _mode = warmup_mod.select_runs(jobs, tracing=True)
         if not jobs:
@@ -7879,14 +8023,23 @@ class Executor:
                 # pgw#677 reopen: an OOM-truncated pass is NEVER
                 # convergence — stats can be stable precisely because the
                 # remaining units never ran. Retry (bounded by the pass
-                # cap); a persistent OOM aborts the mint loudly instead of
+                # cap); a persistent OOM ends the mint instead of
                 # finalizing a partial capture.
                 oom_passes += 1
+                # pgw#737: re-budget on the allocator state the OOM just
+                # measured (the pass emptied the cache on its way out). A
+                # card that no longer has capture headroom must DECLINE
+                # here — retrying the pass is how three more OOMs landed on
+                # a live tenant request.
+                budget = mint_budget.probe(mint_device)
+                if not budget.fits:
+                    raise _MintDeclined("insufficient_vram_after_oom", budget)
                 if oom_passes >= _MINT_OOM_MAX_PASSES:
-                    raise RuntimeError(
-                        f"mint aborted: the warm plan OOMed on "
-                        f"{oom_passes} consecutive passes; refusing to "
-                        "finalize a partial capture")
+                    raise _MintDeclined(
+                        f"oom_x{oom_passes}", budget,
+                        "the warm plan OOMed on consecutive passes; "
+                        "refusing to finalize a partial capture — this "
+                        "process serves eager")
                 continue
             oom_passes = 0
             after = _stats()
@@ -9760,12 +9913,32 @@ class Executor:
                                     job, spec, instance, ctx, payload, kwargs,
                                     timeout_ms=timeout_ms, gpu_index=gpu_index)
                         except BaseException as exc:
-                            # A mid-inference CUDA OOM learns a per-ref floor,
-                            # but the live object is quarantined. The hub
-                            # retries only after ensure_setup reloads it
-                            # cleanly at that rung.
-                            await self._quarantine_for_oom(spec, ctx, exc)
-                            raise
+                            # pgw#737: a tenant OOM while this worker was
+                            # minting is the mint's fault, and it is fixable
+                            # HERE — evict the capture, free the card, and
+                            # re-run on a clean allocator. The request then
+                            # SUCCEEDS instead of returning RETRYABLE for the
+                            # hub to re-dispatch onto an identically loaded
+                            # worker (th#1228: 5 attempts and a second H100
+                            # bought for one deterministic OOM).
+                            if await self._evict_mint_for_oom(spec, ctx, exc):
+                                try:
+                                    with compile_cache_mod.tenant_serve_window():
+                                        output = await self._execute(
+                                            job, spec, instance, ctx, payload,
+                                            kwargs, timeout_ms=timeout_ms,
+                                            gpu_index=gpu_index)
+                                except BaseException as retry_exc:
+                                    await self._quarantine_for_oom(
+                                        spec, ctx, retry_exc)
+                                    raise
+                            else:
+                                # A mid-inference CUDA OOM learns a per-ref
+                                # floor, but the live object is quarantined.
+                                # The hub retries only after ensure_setup
+                                # reloads it cleanly at that rung.
+                                await self._quarantine_for_oom(spec, ctx, exc)
+                                raise
                         finally:
                             # Python-visible exits are not native crashes —
                             # only a signal death leaves the marker behind.
@@ -10059,6 +10232,57 @@ class Executor:
                 "lora overlays require a pipeline-injected setup slot"
             )
         return pipe
+
+    async def _evict_mint_for_oom(
+        self, spec: EndpointSpec, ctx: RequestContext, exc: BaseException,
+    ) -> bool:
+        """pgw#737: the survivable abort, from the tenant's side.
+
+        A background self-mint is the ONE co-resident consumer this worker
+        put on the card itself, and it is evictable. When a tenant request
+        OOMs with a mint in flight, the honest recovery is not "tell the hub
+        to try another worker" (identical load, deterministic OOM, one more
+        pod bought) — it is: stop the mint, unwrap its targets, drop its
+        branch buffers, empty the allocator, and re-run this request on the
+        clean card. True = evicted, the caller re-runs; the mint stays gone
+        for this process (its pre-budget declines the same card anyway).
+
+        Deliberately narrow: only a CUDA OOM, only inference, only while
+        nothing has been emitted or deferred — a replay must not duplicate
+        output. Everything else keeps the quarantine + RETRYABLE path.
+        """
+        if not is_cuda_oom(exc) or getattr(ctx, "cancelled", False):
+            return False
+        if spec.kind != "inference" or spec.output_mode == "stream":
+            return False
+        if ctx._deferred.pending():
+            return False
+        rec = self._classes.get(spec.instance_key)
+        if rec is None or rec.background_mint is None:
+            return False
+        logger.warning(
+            "tenant request OOMed with a self-mint in flight for %s; "
+            "evicting the mint and re-running on a clean allocator "
+            "(pgw#737)", spec.name)
+        await self.abandon_background_mint(
+            rec, reason="tenant OOM — the mint loses, the request wins",
+            free_targets=True)
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"self-mint for {spec.name} evicted mid-flight: a tenant request "
+            f"OOMed against its capture ({type(exc).__name__}); the mint is "
+            "abandoned, the card freed and the request re-run eager on this "
+            "same worker",
+            phase="tenant_oom",
+        )
+        ctx.log(
+            "DEGRADED_MODE=engaged fn=" + spec.name + ": a background "
+            "compile capture was evicted after a CUDA OOM; this request is "
+            "being re-run eager on the freed card.",
+            level="warning",
+        )
+        self._on_state_change()
+        return True
 
     async def _quarantine_for_oom(
         self, spec: EndpointSpec, ctx: RequestContext, exc: BaseException,
