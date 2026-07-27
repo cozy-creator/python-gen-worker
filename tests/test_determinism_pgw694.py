@@ -385,3 +385,167 @@ def test_inductor_only_capture_still_packs(tmp_path: Path) -> None:
     out = tmp_path / "cell.tar.gz"
     cc.pack(root, out, {"sm": "sm_89"})
     assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# cache-design review fixes (ML-systems + build-systems reviews)
+# ---------------------------------------------------------------------------
+
+
+def test_fx_system_shim_normalizes_device_name(monkeypatch: Any) -> None:
+    """P0 (review 6.1, VERIFIED on a real B200 cell: system_info[device] =
+    {'name': 'NVIDIA B200'}): the inner FX key hashes the GPU MARKETING
+    name, so cross-SKU same-sm adoption missed 100% inside torch's own
+    lookup. The shim rewrites the name to the sm token with the hash
+    recomputed via torch's own strategy — two SKUs of one arch become one
+    inner key."""
+    from torch._inductor.codecache import SYSTEM_CACHE_KEY_STRATEGY
+
+    a40 = {"device": {"name": "NVIDIA A40"},
+           "version": {"triton": "tk", "cuda": "13.0"}, "hash": "orig"}
+    rtx = {"device": {"name": "NVIDIA GeForce RTX 3090"},
+           "version": {"triton": "tk", "cuda": "13.0"}, "hash": "orig"}
+    na = cc._normalize_system_info(dict(a40), "sm_86")
+    nb = cc._normalize_system_info(dict(rtx), "sm_86")
+    assert na == nb  # THE portability claim: one arch, one inner key
+    assert na["device"]["name"] == "sm_86"
+    assert na["hash"] != "orig"
+    assert na["hash"] == SYSTEM_CACHE_KEY_STRATEGY.key_from_json(
+        {"device": na["device"], "version": na["version"]})
+    # CPU / cuda-less shape passes through untouched.
+    cpu = {"hash": "bare"}
+    assert cc._normalize_system_info(dict(cpu), "sm_86") == cpu
+    # No sm token (non-CUDA runtime): no rewrite.
+    assert cc._normalize_system_info(dict(a40), "") == a40
+
+
+def test_fx_system_shim_installs_idempotently(monkeypatch: Any) -> None:
+    from torch._inductor import codecache
+
+    fake = {"device": {"name": "NVIDIA A40"},
+            "version": {"triton": "tk", "cuda": "13.0"}, "hash": "orig"}
+    monkeypatch.setattr(
+        codecache.CacheBase, "get_system", staticmethod(lambda: dict(fake)))
+    monkeypatch.setattr(cc, "runtime_key", lambda: {
+        "sku": "a40", "sm": "sm_86", "cuda": "13.0", "cuda_driver": "",
+        "torch": "t", "triton": "3", "image_digest": "",
+    })
+    cc._install_fx_system_shim()
+    try:
+        got = codecache.CacheBase.get_system()
+        assert got["device"]["name"] == "sm_86"
+        marked = codecache.CacheBase.get_system
+        cc._install_fx_system_shim()  # second install is a no-op
+        assert codecache.CacheBase.get_system is marked
+    finally:
+        # monkeypatch restores the fake; the shim wrapped the fake only.
+        pass
+
+
+def test_upstream_get_system_shape_is_pinned() -> None:
+    """Version-pin (pgw#705 doctrine): the shim rewrites a structure torch
+    does not contract. If a torch bump changes get_system's shape, this
+    fails LOUDLY before the shim ships against it."""
+    from pathlib import Path as _P
+
+    from torch._inductor import codecache
+
+    source = _P(codecache.__file__).read_text()
+    assert "def get_system()" in source
+    assert "get_device_properties" in source
+    assert "device_properties.name" in source  # the SKU-name pin we rewrite
+    assert "SYSTEM_CACHE_KEY_STRATEGY" in source
+    # The upstream precedent the shim cites: AOTI keys on capability.
+    assert "AOTI_COMPUTE_CAPABILITY" in source
+
+
+def test_semantic_cache_tag_binds_semantic_axes_only() -> None:
+    """Review 6.3: the tag digests format|kind|family|lane|mode|contract —
+    a foreign semantic identity can never consume delivered entries; the
+    environment axes stay OUT so pgw#700 equivalence adoption survives."""
+    import torch.compiler.config as compiler_config
+
+    pipe_a, pipe_b = _Pipe(), _Pipe()
+    tag_same = cc._semantic_cache_tag(pipe_a, _cfg())
+    assert tag_same == cc._semantic_cache_tag(pipe_b, _cfg())
+    assert tag_same != cc._semantic_cache_tag(pipe_a, _cfg(family="other"))
+    assert tag_same != cc._semantic_cache_tag(
+        pipe_a, _cfg(shapes=((32, 32),)))  # contract rides the tag
+    before = compiler_config.cache_key_tag
+    try:
+        cc._set_semantic_cache_tag(pipe_a, _cfg())
+        assert compiler_config.cache_key_tag == tag_same
+    finally:
+        compiler_config.cache_key_tag = before
+
+
+def test_verify_refuses_silent_axes_named(monkeypatch: Any) -> None:
+    """P1 (review 6.9 — the JAX #27814 wrong-hit shape): a cell SILENT on
+    sm/cuda/image_digest/libs was accepted by `if want and ...`. Strict
+    now: absent axis = named refusal."""
+    monkeypatch.setattr(cc, "runtime_key", lambda: {
+        "sku": "l4", "sm": "sm_89", "cuda": "13.0", "cuda_driver": "",
+        "torch": "2.13.0+cu130", "triton": "3.7.1",
+        "image_digest": "sha256:live",
+    })
+    monkeypatch.setattr(cc, "gen_worker_version", lambda: "0.74.0")
+    monkeypatch.setattr(cc, "_lib_versions", lambda: {"diffusers": "0.39.0"})
+    complete = {
+        "format": cc.ARTIFACT_FORMAT, "torch": "2.13.0+cu130",
+        "triton": "3.7.1", "sm": "sm_89", "cuda": "13.0",
+        "image_digest": "sha256:live", "gen_worker": "0.74.0",
+        "libs": {"diffusers": "0.39.0"},
+    }
+    assert cc.verify(dict(complete)) == ""
+    for axis in ("sm", "cuda", "image_digest"):
+        silent = {k: v for k, v in complete.items() if k != axis}
+        assert axis in cc.verify(silent), axis
+    silent_libs = dict(complete, libs={})
+    assert "diffusers" in cc.verify(silent_libs)
+
+
+def test_pytorch_and_triton_env_are_gated(monkeypatch: Any) -> None:
+    """R7 (live defect): the gate matched startswith('TORCH') only, so
+    every PYTORCH_* var evaded it — including the LIVE allocator var
+    PYTORCH_CUDA_ALLOC_CONF — while the allowlist carried the legacy
+    TORCH_CUDA_ALLOC_CONF spelling. TRITON_PTXAS_PATH (silently different
+    cubins) is the TRITON* poster child."""
+    seal = _env_seal()
+    with pytest.raises(seal.EnvSealError, match="PYTORCH_FOO_TOGGLE"):
+        seal.check_torch_env({"PYTORCH_FOO_TOGGLE": "1"})
+    with pytest.raises(seal.EnvSealError, match="TRITON_PTXAS_PATH"):
+        seal.check_torch_env({"TRITON_PTXAS_PATH": "/opt/ptxas"})
+    # The live allocator spellings and the SDK's own redirects are allowed.
+    seal.check_torch_env({
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "TORCH_CUDA_ALLOC_CONF": "legacy",
+        "TRITON_CACHE_DIR": "/cap/triton",
+        "TORCHINDUCTOR_CACHE_DIR": "/cap/inductor",
+    })
+    seal.check_torch_env()  # the real process env stays clean
+
+
+def test_epoch_salt_disowns_a_generation(monkeypatch: Any) -> None:
+    """R2 (Bazel Action.salt / ccache HASH_PREFIX): bumping COZY_CELL_EPOCH
+    changes every env_seal digest — one config change disowns a poisoned
+    mint generation, no scheme bump."""
+    seal = _env_seal()
+    monkeypatch.delenv(seal.EPOCH_ENV, raising=False)
+    base = seal.effective_seal()
+    assert base["seal_v"] == 2 and base["epoch"] == "0"
+    baseline = seal.seal_digest(base)
+    monkeypatch.setenv(seal.EPOCH_ENV, "1")
+    assert seal.seal_digest(seal.effective_seal()) != baseline
+
+
+def test_content_keys_recorded_in_metadata() -> None:
+    """Review 6.5: torch/triton CONTENT digests ride metadata as the
+    pgw#700 equivalence precondition (a patched wheel under an unchanged
+    version string becomes visible)."""
+    keys = dict(cc.content_keys())
+    assert set(keys) == {"torch", "triton"}
+    assert all(len(v) == 16 for v in keys.values() if v)
+    assert keys["torch"], "torch_key must be computable on this wheel"
+    meta = cc.artifact_metadata(
+        family="toyfam", shapes=((64, 64),), targets=("transformer",))
+    assert meta["content_keys"] == keys

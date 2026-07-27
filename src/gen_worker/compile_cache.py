@@ -755,6 +755,33 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     }
 
 
+@functools.lru_cache(None)
+def content_keys() -> Tuple[Tuple[str, str], ...]:
+    """torch/triton CONTENT identity (cache-design review §6.5): version
+    strings cannot detect a patched wheel — upstream hashes source bytes
+    (``torch_key``: the whole torch package; ``triton_key``: per-file shas +
+    the libtriton binary). Recorded in metadata, NOT the key: for the fleet
+    ``image_digest`` already pins userspace by content, but local self-mints
+    (gw#555) have no image identity, and pgw#700 equivalence adoption makes
+    byte-match of these a PRECONDITION before ``image_digest`` may be
+    relaxed (see also pgw#711/R3 toolchain_digest)."""
+    out: Dict[str, str] = {"torch": "", "triton": ""}
+    try:
+        from torch._inductor.codecache import torch_key
+
+        out["torch"] = hashlib.sha256(torch_key()).hexdigest()[:16]
+    except Exception:
+        logger.debug("content_keys: torch_key unavailable", exc_info=True)
+    try:
+        from triton.runtime.cache import triton_key
+
+        out["triton"] = hashlib.sha256(
+            str(triton_key()).encode()).hexdigest()[:16]
+    except Exception:
+        logger.debug("content_keys: triton_key unavailable", exc_info=True)
+    return tuple(sorted(out.items()))
+
+
 def artifact_metadata(
     *,
     family: str,
@@ -811,6 +838,9 @@ def artifact_metadata(
         # pgw#696: the execution-environment seal rides verbatim — the ck4
         # env_seal axis is recomputed FROM it, never trusted as a stamp.
         env_seal.SEAL_KEY: env_seal.effective_seal(),
+        # review §6.5: content identity of the compile stack (equivalence
+        # precondition, pgw#700) — metadata only, never a key axis.
+        "content_keys": dict(content_keys()),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
@@ -824,8 +854,15 @@ def artifact_metadata(
 def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     """'' when the artifact matches this runtime, else the mismatch reason.
 
-    Family is the graph-identity half of the key: checked when both sides
-    declare one (fine-tunes of the same family share caches by design)."""
+    STRICT on every axis (cache-design review §6.9): a cell that is SILENT
+    on an axis is refused, named — never accepted. The old
+    ``if want and want != have`` conditionals were the exact shape of JAX
+    PR #27814's one documented wrong-cache-hit (a version axis "only
+    sometimes incorporated"). Pre-launch, no external consumers, so the
+    legacy silent-axis compatibility path is retired outright.
+
+    Family is the graph-identity half of the key: fine-tunes of one family
+    share caches by design."""
     if int(meta.get("format") or 0) != ARTIFACT_FORMAT:
         return f"format {meta.get('format')!r} != {ARTIFACT_FORMAT}"
     here = runtime_key()
@@ -833,34 +870,26 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     # torch + triton pin every hardware fact the compiled artifacts carry,
     # and a same-sm cell minted on a different SKU must arm, not refuse.
     # It stays recorded in metadata for observability and selection only.
-    for field in ("torch", "triton"):
+    # cuda_driver is deliberately NOT here either (gw#577): triton's disk
+    # cache keys on the wheel's ptxas + SM arch; the host libcuda build
+    # never enters any compiled-artifact key. Recorded for observability.
+    for field in ("torch", "triton", "sm", "cuda", "image_digest"):
         want, have = str(meta.get(field) or ""), here[field]
         if want != have:
-            return f"{field} {want!r} != runtime {have!r}"
-    # Extended runtime axes are exact when a cell records them. Old proven
-    # non-W8A8 format-2 cells remain usable; W8A8 requires every field in
-    # contract_drift below and therefore never gets this compatibility path.
-    # cuda_driver is deliberately NOT here (gw#577): inductor/triton artifacts
-    # are keyed by torch/triton/cuda-runtime/SM-arch — triton's disk cache key
-    # is (source, ptxas_version-from-the-wheel, sm arch, options); the host
-    # libcuda build never enters any compiled-artifact key. Pinning it made
-    # cell delivery a host lottery across same-image same-SKU pods. The driver
-    # stays recorded in metadata for observability only.
-    for field in ("sm", "cuda", "image_digest"):
-        want, have = str(meta.get(field) or ""), here[field]
-        if want and want != have:
             return f"{field} {want!r} != runtime {have!r}"
     want_gw, have_gw = str(meta.get("gen_worker") or ""), gen_worker_version()
     if want_gw != have_gw:
         # gw#391: the producer's gen-worker shapes the traced graph; a version
         # drift means the FX-graph cache keys may no longer match.
         return f"gen_worker {want_gw!r} != runtime {have_gw!r}"
-    for lib, have in _lib_versions().items():
-        want = str((meta.get("libs") or {}).get(lib) or "")
-        if want and want != have:
+    libs = meta.get("libs") or {}
+    here_libs = _lib_versions()
+    for lib in sorted(set(libs) | set(here_libs)):
+        want, have = str(libs.get(lib) or ""), str(here_libs.get(lib) or "")
+        if want != have:
             return f"{lib} {want!r} != runtime {have!r}"
     want_fam = str(meta.get("family") or "")
-    if family and want_fam and want_fam != family:
+    if family and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
     return ""
 
@@ -1021,6 +1050,92 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Capture (producer) / seed (consumer)
 # ---------------------------------------------------------------------------
+
+
+def _normalize_system_info(info: Dict[str, Any], sm: str) -> Dict[str, Any]:
+    """The pure half of the fx system-key shim: replace the GPU marketing
+    name with the sm token and recompute the embedded hash exactly the way
+    ``CacheBase.get_system`` does."""
+    device = info.get("device")
+    if not sm or not isinstance(device, dict) or not device.get("name"):
+        return info
+    from torch._inductor.codecache import SYSTEM_CACHE_KEY_STRATEGY
+
+    normalized = json.loads(json.dumps(info))
+    normalized["device"]["name"] = sm
+    normalized["hash"] = SYSTEM_CACHE_KEY_STRATEGY.key_from_json(
+        {"device": normalized["device"], "version": normalized.get("version")})
+    return normalized
+
+
+def _install_fx_system_shim() -> None:
+    """P0 (cache-design review §6.1, VERIFIED on a real B200 cell): inductor
+    hashes ``torch.cuda.get_device_properties().name`` — the GPU MARKETING
+    string — into every FX graph key via ``CacheBase.get_system()``
+    (torch 2.13 codecache.py:287-311, consumed :1503). A cell minted on an
+    a40 therefore never HITS on an rtx-3090 despite the identical sm_86 ck
+    key: the pgw#691 sku collapse delivers zero cross-SKU hits until the
+    inner key is normalized. This shim rewrites the device name to our
+    ``sm_XX`` token (hash recomputed with torch's own strategy), installed
+    identically on mint and consumer (both arm through ``apply``).
+
+    Upstream precedent in the SAME file: AOTInductor already keys on
+    ``AOTI_COMPUTE_CAPABILITY`` (``get_compute_capability()``,
+    codecache.py:260) — capability, not name. Upstream ask (capability-based
+    ``get_system``) is tracked on the pgw#708 upstream-watch issue.
+
+    Version-pinned: test_determinism_pgw694 asserts the upstream source
+    shape and fails loudly on a torch bump that changes it (pgw#705 gate).
+    """
+    try:
+        from torch._inductor.codecache import CacheBase
+    except Exception:
+        logger.debug("fx system shim: inductor unavailable", exc_info=True)
+        return
+    if getattr(CacheBase.get_system, "_cozy_sm_normalized", False):
+        return
+    original = CacheBase.get_system
+
+    @functools.lru_cache(None)
+    def _normalized_get_system() -> Dict[str, Any]:
+        return _normalize_system_info(dict(original()), runtime_key()["sm"])
+
+    _normalized_get_system._cozy_sm_normalized = True  # type: ignore[attr-defined]
+    CacheBase.get_system = staticmethod(_normalized_get_system)  # type: ignore[assignment,method-assign]
+
+
+def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
+    """Digest of the axes we will NEVER relax (format|kind|family|lane|mode|
+    contract) — bound into every inner torch.compile key via
+    ``cache_key_tag`` (review §6.3), so a delivered cell's entries are
+    mechanically unconsumable by a process whose declared semantic identity
+    differs. Environment axes (sm/cuda/torch/triton/gen_worker/image_digest/
+    env_seal) are deliberately EXCLUDED or pgw#700 equivalence adoption
+    across conservative axes becomes impossible."""
+    lane = cell_key._canonical_lane(
+        pipeline_weight_lane(pipeline),
+        int(getattr(cfg, "lora_bucket", 0) or 0))
+    payload = "|".join((
+        str(ARTIFACT_FORMAT), "inductor",
+        str(getattr(cfg, "family", "") or ""), lane,
+        "regional" if bool(getattr(cfg, "regional", False)) else "whole",
+        cell_key.contract_digest(declared_contract_facts(cfg)),
+    ))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _set_semantic_cache_tag(pipeline: Any, cfg: Any) -> None:
+    """Install the semantic tag for THIS arm's compiles. Process-global
+    (torch.compiler.config), set at every arm before its warm compiles; a
+    later cross-family arm in the same process retags before its own
+    compiles — a mid-serve heal recompile under the newer tag can only
+    MISS, never cross-consume."""
+    try:
+        import torch.compiler.config as compiler_config
+
+        compiler_config.cache_key_tag = _semantic_cache_tag(pipeline, cfg)
+    except Exception:
+        logger.debug("semantic cache tag: unavailable", exc_info=True)
 
 
 def capture_env(root: Path) -> Path:
@@ -2474,6 +2589,10 @@ def apply(
     # gw#608: cross-pod cell portability requires the (portable) FX graph
     # cache to be the lookup surface — see _disable_aot_autograd_cache.
     _disable_aot_autograd_cache()
+    # The two inner-key alignments (both symmetric mint/consumer by
+    # construction: every compile path arms through apply()):
+    _install_fx_system_shim()          # SKU name -> sm token (P0, review §6.1)
+    _set_semantic_cache_tag(pipeline, cfg)  # semantic identity tag (§6.3)
     if not torch.cuda.is_available():
         logger.info("compile-cache: no CUDA; staying eager")
         return False
