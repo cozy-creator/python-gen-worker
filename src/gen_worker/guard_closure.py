@@ -72,8 +72,9 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2  # v2 (pgw#695): + "posture" process-seal block
 MANIFEST_KEY = "guard_manifest"
+POSTURE_KEY = "posture"
 
 # Verdicts. LEAK is the only failing one.
 LEAK = "LEAK"
@@ -157,6 +158,13 @@ class GuardBoundaryError(RuntimeError):
     boundary (dtype drift). Named — never a silent recompile. Consumer
     guards catch it into the pgw#672 explicit-eager degrade; mint arms
     (``guard=False``) let it fail the mint red."""
+
+
+class PostureError(GuardClosureError):
+    """The process posture differs from the canonical serving posture or
+    from a cell's sealed posture (pgw#695). Named per fact — a posture
+    drift refuses the mint/arm loudly instead of surfacing later as an
+    undiagnosable ambient guard miss."""
 
 
 @dataclass(frozen=True)
@@ -608,6 +616,83 @@ def _classify_row(
 
 
 # ---------------------------------------------------------------------------
+# Process-posture seal (pgw#695)
+# ---------------------------------------------------------------------------
+
+# The ONE canonical serving posture. Every fact is ambient process state a
+# dynamo guard observes (GLOBAL_STATE, TORCH_FUNCTION_MODE_STACK,
+# DEFAULT_DEVICE): mint and consumer must present the SAME posture or the
+# minted guards can never HIT — and a drift must refuse the arm with a
+# named reason, never surface as a downstream guard miss. String-valued
+# for JSON determinism.
+CANONICAL_POSTURE: Dict[str, str] = {
+    "grad_enabled": "True",
+    "inference_mode": "False",
+    "autocast_cpu": "False",
+    "autocast_cuda": "False",
+    "torch_function_stack": "0",
+    "default_device": "cpu",
+    "deterministic_algorithms": "False",
+    "deterministic_warn_only": "False",
+}
+
+
+def posture_snapshot() -> Dict[str, str]:
+    """The live process posture in canonical string form."""
+    import torch
+
+    return {
+        "grad_enabled": str(torch.is_grad_enabled()),
+        "inference_mode": str(torch.is_inference_mode_enabled()),
+        "autocast_cpu": str(torch.is_autocast_enabled("cpu")),
+        "autocast_cuda": str(torch.is_autocast_enabled("cuda")),
+        "torch_function_stack": str(torch._C._len_torch_function_stack()),
+        "default_device": str(torch.get_default_device()),
+        "deterministic_algorithms": str(
+            torch.are_deterministic_algorithms_enabled()),
+        "deterministic_warn_only": str(
+            torch.is_deterministic_algorithms_warn_only_enabled()),
+    }
+
+
+def _posture_diff(sealed: Mapping[str, Any], live: Mapping[str, str]) -> List[str]:
+    out: List[str] = []
+    for fact in sorted(set(sealed) | set(live)):
+        want = str(sealed.get(fact, "<absent>"))
+        have = str(live.get(fact, "<absent>"))
+        if want != have:
+            out.append(f"{fact}: sealed {want!r} != process {have!r}")
+    return out
+
+
+def establish_posture() -> Dict[str, str]:
+    """Set the canonical posture explicitly (boot entry). Settable facts are
+    SET (grad mode, deterministic algos); ambient contexts that library code
+    must not pop from under the embedding process (an active autocast, a
+    foreign torch-function mode, a moved default device) REFUSE with a named
+    :class:`PostureError` instead."""
+    import torch
+
+    torch.set_grad_enabled(True)
+    torch.use_deterministic_algorithms(False)
+    diffs = _posture_diff(CANONICAL_POSTURE, posture_snapshot())
+    if diffs:
+        raise PostureError(
+            "process posture is not canonical at establish: "
+            + "; ".join(diffs))
+    return dict(CANONICAL_POSTURE)
+
+
+def assert_posture(sealed: Mapping[str, Any], label: str = "") -> None:
+    """The live process must present exactly ``sealed`` (a cell's recorded
+    posture) — every differing fact is named in the raise."""
+    diffs = _posture_diff(sealed, posture_snapshot())
+    if diffs:
+        raise PostureError(
+            f"process posture drift ({label or 'arm'}): " + "; ".join(diffs))
+
+
+# ---------------------------------------------------------------------------
 # The mint gate + armed-cell audit
 # ---------------------------------------------------------------------------
 
@@ -636,10 +721,20 @@ def assert_closure(pipeline: Any, cfg: Any, label: str = "") -> Dict[str, Any]:
             f"guard-closure gate ({name}): {len(report.leaks)} out-of-"
             f"contract guard(s) — the mint depends on variables the "
             f"contract does not pin:\n  {leak_lines}")
+    # pgw#695: a mint in a non-canonical posture would arm nowhere (every
+    # canonical consumer refuses its seal) — fail THIS mint red instead.
+    posture = posture_snapshot()
+    canonical_diffs = _posture_diff(CANONICAL_POSTURE, posture)
+    if canonical_diffs:
+        raise PostureError(
+            f"guard-closure gate ({name}): minted in a non-canonical "
+            "process posture: " + "; ".join(canonical_diffs))
     logger.info(
         "guard-closure gate (%s): CLOSED — %d graph(s), verdicts=%s",
         name, len(report.graphs), report.verdict_counts())
-    return report.manifest()
+    manifest = report.manifest()
+    manifest[POSTURE_KEY] = posture
+    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +860,7 @@ def consolidate(manifests: Mapping[str, Mapping[str, Any]]) -> FleetAudit:
     determinism (every guard row present in every manifest)."""
     leaks: List[str] = []
     per_name: Dict[str, set] = {}
+    postures: Dict[str, Dict[str, str]] = {}
     total = 0
     for name, manifest in sorted(manifests.items()):
         keys: set = set()
@@ -776,7 +872,24 @@ def consolidate(manifests: Mapping[str, Mapping[str, Any]]) -> FleetAudit:
                 total += 1
                 keys.add(_comparison_key(target, guard))
         per_name[name] = keys
+        sealed = manifest.get(POSTURE_KEY)
+        if isinstance(sealed, dict) and sealed:
+            postures[name] = {k: str(v) for k, v in sealed.items()}
     divergence: List[str] = []
+    # pgw#695: the sealed posture must be identical across every pod's
+    # mint of one release — a divergent posture is a divergent guard
+    # environment even when the guard rows happen to agree.
+    if postures and len(postures) < len(per_name):
+        missing_seal = sorted(set(per_name) - set(postures))
+        divergence.append(f"posture seal absent from {missing_seal}")
+    if len(postures) > 1:
+        facts: set = set()
+        for sealed in postures.values():
+            facts.update(sealed)
+        for fact in sorted(facts):
+            values = {n: p.get(fact, "<absent>") for n, p in postures.items()}
+            if len(set(values.values())) > 1:
+                divergence.append(f"posture/{fact} differs: {values}")
     if len(per_name) > 1:
         union: set = set().union(*per_name.values())
         for key in sorted(union):
@@ -845,6 +958,7 @@ if __name__ == "__main__":  # pragma: no cover
 
 __all__ = [
     "CANONICALIZED",
+    "CANONICAL_POSTURE",
     "CODE_CONSTANT",
     "CODE_IDENTITY",
     "CONTRACT_SCALAR",
@@ -860,17 +974,22 @@ __all__ = [
     "MANIFEST_KEY",
     "MANIFEST_VERSION",
     "MODULE_STRUCTURE",
+    "POSTURE_KEY",
+    "PostureError",
     "RUNTIME_STATE",
     "STRUCTURAL",
     "assert_closure",
+    "assert_posture",
     "audit_armed",
     "canonical_ingress",
     "canonical_strides",
     "classify",
     "consolidate",
     "contract_pins",
+    "establish_posture",
     "extract",
     "extract_target_guards",
     "load_manifest",
     "main",
+    "posture_snapshot",
 ]

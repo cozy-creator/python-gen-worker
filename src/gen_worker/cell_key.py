@@ -25,6 +25,11 @@ facts that actually change compiled-kernel identity:
                   wheel's ptxas + SM arch — the host driver deliberately
                   never enters the key, gw#577)
     gen_worker    exact gen-worker version (graph-shaping code)
+    env_seal      digest of the execution-environment seal (pgw#696):
+                  process posture + frozen config flags + portable inductor
+                  config. The seal dict is internally versioned (seal_v),
+                  so future sealed facts change digest VALUES, never the
+                  axis set — ck4 is the final planned scheme bump.
     contract      digest of the DECLARED shape contract (SDK v2, pgw#647):
                   shapes, targets, text_len, dynamic dims, regional mode,
                   lora bucket, warm guidance classes. A contract change
@@ -61,9 +66,10 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
-# ck2 -> ck3 (pgw#691): sku left the identity axes; the scheme bump makes
-# every pre-collapse key a clean MISS instead of a half-match.
-KEY_SCHEME = "ck3"
+# ck2 -> ck3 (pgw#691): sku left the identity axes. ck3 -> ck4 (pgw#696):
+# env_seal joined them. Each bump makes every older key a clean MISS
+# instead of a half-match.
+KEY_SCHEME = "ck4"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
 # (th#597 C5: [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64
@@ -73,7 +79,7 @@ _DIGEST_HEX = 56
 # Axes that must be non-empty for a computable key: a runtime that cannot
 # state them has no cell identity (CPU-only build, failed CUDA probe).
 _REQUIRED = ("format", "kind", "family", "sm", "cuda", "torch",
-             "triton", "gen_worker", "contract")
+             "triton", "gen_worker", "env_seal", "contract")
 # Axes that may be legitimately absent ("" => omitted from canonical form):
 # image_digest is absent on local runtimes; libs may not be installed; lane
 # "" is the plain-resident graph family; mode "" is whole-graph compilation
@@ -182,6 +188,7 @@ def compute(
     non-CUDA runtimes simply have no key.
     """
     from . import compile_cache as cc  # cycle: compile_cache imports cell_key
+    from . import env_seal
 
     rt = cc.runtime_key()
     if image_digest is None:
@@ -198,6 +205,7 @@ def compute(
         "torch": rt["torch"],
         "triton": rt["triton"],
         "gen_worker": cc.gen_worker_version(),
+        "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
         "contract": str(contract or ""),
         "diffusers": libs.get("diffusers", ""),
         "transformers": libs.get("transformers", ""),
@@ -216,6 +224,8 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     kind = str(meta.get("kind") or "")
     if kind != "torch-inductor-cache":
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
+    from . import env_seal
+
     libs = meta.get("libs") or {}
     mode = str(meta.get("compile_mode") or "whole")
     contract_facts = meta.get("shape_contract")
@@ -223,6 +233,12 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         raise CellKeyError(
             "artifact records no shape_contract block (pre-cell-key cell); "
             "no key identity — a newer-contract worker must not consume it"
+        )
+    seal = meta.get(env_seal.SEAL_KEY)
+    if not isinstance(seal, dict) or not seal:
+        raise CellKeyError(
+            "artifact records no env_seal block (pre-ck4 cell); no key "
+            "identity — its execution environment is unproven"
         )
     return from_axes({
         "format": str(meta.get("format") or ""),
@@ -238,6 +254,7 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         "torch": str(meta.get("torch") or ""),
         "triton": str(meta.get("triton") or ""),
         "gen_worker": str(meta.get("gen_worker") or ""),
+        "env_seal": env_seal.seal_digest(seal),
         "contract": contract_digest(contract_facts),
         "diffusers": str(libs.get("diffusers") or ""),
         "transformers": str(libs.get("transformers") or ""),
