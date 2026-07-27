@@ -157,6 +157,12 @@ class ExportSpec:
     text_lens: Tuple[int, ...] = ()
     guidance_scales: Tuple[float, ...] = ()
     dynamic: Tuple[DynamicDim, ...] = ()
+    #: pgw#739 declaration coordinate: the fork arm values and (for a
+    #: static-rows family) the class row this artifact is minted at. Both
+    #: KEY (a fork is a distinct graph class in #716's hash) — see
+    #: :func:`cell_identity`. Sorted (name, value) pairs.
+    fork: Tuple[Tuple[str, Any], ...] = ()
+    class_dims: Tuple[Tuple[str, int], ...] = ()
     specialization: Dict[str, Any] = field(default_factory=dict)
     lora_fqns: Tuple[str, ...] = ()
     lifted_inputs: Tuple[str, ...] = ()
@@ -348,6 +354,35 @@ def declared_range_gaps(
         syms = _free_symbols(dim)
         declared_symbols.extend(syms)
         covered = False
+        # The SOLVED range of the axis's full expression, when the program
+        # records one. This is what makes a UNIFIED relational axis (#739 /
+        # ie#566 §5) gate-able: wan ti2v's per-token dim solves to
+        # ``31*s25*s56`` with its own composite range entry, while the
+        # per-symbol path below would compare a governing symbol's [20, 40]
+        # against the declared [12400, 49600] and refuse a sound artifact.
+        # Composite entries are in the axis's OWN units, so the declared
+        # bounds compare directly, with no multiple-of scaling.
+        expr = getattr(getattr(dim, "node", None), "expr", None)
+        interval = ranges.get(expr) if expr is not None else None
+        if interval is not None:
+            try:
+                lo, hi = int(interval.lower), int(interval.upper)
+            except (TypeError, ValueError, OverflowError):
+                lo = hi = -1
+            if lo >= 0:
+                if lo == hi:
+                    gaps.append(
+                        f"{d.input_name}[{d.axis}] ({expr}) solved to the "
+                        f"single value {lo} — the declared range "
+                        f"[{d.min}, {d.max}] is advertised but the artifact "
+                        f"admits ONE shape")
+                elif lo > d.min or hi < d.max:
+                    gaps.append(
+                        f"{d.input_name}[{d.axis}] ({expr}) solved to "
+                        f"[{lo}, {hi}] which does not cover the declared "
+                        f"[{d.min}, {d.max}] — the artifact admits less "
+                        f"traffic than it advertises")
+                continue
         for sym in syms:
             interval = ranges.get(sym)
             if interval is None:
@@ -758,7 +793,7 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         raise MintRefused(
             "the envelope recorded no range_digest; an exported cell must not "
             "be keyed without its admissible-shape range (#723 S3)")
-    contract = cell_key.contract_digest({
+    contract_facts: Dict[str, Any] = {
         "v": 1,
         "shapes": sorted([int(v) for v in row] for row in spec.shapes),
         "targets": [spec.target],
@@ -768,7 +803,17 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         "range_digest": range_digest,
         "graph": dict(meta.get("graph") or {}),
         "strict": bool(spec.strict),
-    })
+    }
+    # pgw#739: a fork is a DISTINCT graph class in #716's hash, and a
+    # static-rows artifact's identity is its class row. Present only when the
+    # spec carries a declaration coordinate, so pre-declaration cells keep
+    # their digests.
+    if spec.fork:
+        contract_facts["fork"] = [[str(n), v] for n, v in sorted(spec.fork)]
+    if spec.class_dims:
+        contract_facts["class_dims"] = [
+            [str(n), int(v)] for n, v in sorted(spec.class_dims)]
+    contract = cell_key.contract_digest(contract_facts)
     return cell_key.from_axes({
         "format": str(meta.get("format") or ""),
         "kind": aot_serve.ARTIFACT_KIND,
@@ -912,6 +957,22 @@ def mint_target(
             f"pipeline {type(pipeline).__name__} has no compile target "
             f"{spec.target!r}")
     owner, attr, _fn = resolved
+    # pgw#739 fork gate: every declared fork with a (pipeline|module, field)
+    # source is read off the COMPOSED objects and must agree with the minted
+    # arm — a graph exported under the wrong arm is the wrong class wearing
+    # the declared class's key (wan's expand_timesteps is a PIPELINE field a
+    # module-config reader never sees; ie#566 G6).
+    from .api.export_contract import export_declaration
+
+    decl = export_declaration(spec.family)
+    if decl is not None and decl.forks:
+        from . import aot_declaration
+
+        gaps = aot_declaration.fork_gaps(
+            decl, dict(spec.fork), target=spec.target,
+            pipeline=pipeline, module=owner)
+        if gaps:
+            raise MintRefused("fork gate (pgw#739): " + "; ".join(gaps))
     module = owner if attr == "forward" else _CallableTarget(owner, attr)
     return mint(
         module, spec, out_dir,
@@ -1044,6 +1105,11 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         source_ref=str(body.get("source_ref") or ""),
         source_digest=str(body.get("source_digest") or ""),
         closure_roots=tuple(str(v) for v in body.get("closure_roots") or ()),
+        fork=tuple(sorted(
+            (str(k), v) for k, v in dict(body.get("fork") or {}).items())),
+        class_dims=tuple(sorted(
+            (str(k), int(v))
+            for k, v in dict(body.get("class_dims") or {}).items())),
     )
     if not spec.family or not spec.target:
         raise MintRefused(
@@ -1084,6 +1150,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:
         print(f"BAD REQUEST {args.request}: {exc}", file=sys.stderr)
         return 3
+    try:
+        # pgw#739: load the endpoint's declaration module (registers the
+        # family's export contract), then resolve the request against it —
+        # deriving the dynamic contract from the declared class rows. A
+        # family with no registration passes through untouched.
+        from . import aot_declaration
+
+        aot_declaration.load_declaration(body, request_path=args.request)
+        spec = aot_declaration.apply_declaration(spec)
+    except MintRefused as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     if args.require_toolchain and not toolchain_present():
         print(
             "REFUSED: no C toolchain (cc/gcc) — an AOTI mint needs the "
