@@ -1,4 +1,4 @@
-"""Every pack refusal must be self-diagnosing (pgw#732).
+"""Every pack refusal must be self-diagnosing (pgw#733).
 
 The first real-GPU mint ran its whole plan and was refused AT PACK for both
 functions, and the verbatim reason was LOST — the hub persists no typed worker
