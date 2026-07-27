@@ -31,8 +31,18 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from . import guard_closure
 
-SEAL_VERSION = 1
+# v2 (build-systems review R2/R7): + operator `epoch` salt (Bazel
+# Action.salt / ccache HASH_PREFIX precedent — disowning a poisoned
+# generation is one config change, never a scheme bump) and the widened
+# recorded-env set. Adding sealed facts bumps THIS version only.
+SEAL_VERSION = 2
 SEAL_KEY = "env_seal"
+
+# R2: the operator-settable generation salt. Bumping it disowns every cell
+# minted under the previous epoch (their env_seal digests stop matching) —
+# the recall lever for "a subtly broken image published cells" without a
+# KEY_SCHEME bump. Set in the fleet env; default generation is "0".
+EPOCH_ENV = "COZY_CELL_EPOCH"
 
 # Behavior-affecting global flags: ONE canonical value each, set explicitly
 # by establish_config() and read back effective. String-valued for JSON
@@ -44,12 +54,30 @@ CANONICAL_CONFIG: Dict[str, str] = {
     "cudnn_benchmark": "False",
 }
 
-# CUBLAS workspace config alters cublas kernel splits: recorded into the
-# seal (value participates in identity) but not canonicalized — bitwise
-# numerical determinism is an explicit pgw#694 non-goal.
-_RECORDED_ENV = ("CUBLAS_WORKSPACE_CONFIG",)
+# Value-semantic env recorded into the seal WITHOUT canonicalization (the
+# pattern the build-systems review endorses — extend it, don't allowlist
+# it): CUBLAS workspace alters cublas kernel splits; launch blocking and
+# module loading change CUDA behavior; NVIDIA_TF32_OVERRIDE flips numerics
+# under every torch flag; PYTHONHASHSEED can perturb codegen ordering.
+# Path-shaped and host-shaped vars (LD_LIBRARY_PATH, OMP_NUM_THREADS, cache
+# dirs) deliberately do NOT ride the seal — JAX's learned lesson: its own
+# auto-set cache path was poisoning its own keys (PR notes in the review).
+_RECORDED_ENV = (
+    "CUBLAS_WORKSPACE_CONFIG",
+    "CUDA_LAUNCH_BLOCKING",
+    "CUDA_MODULE_LOADING",
+    "NVIDIA_TF32_OVERRIDE",
+    "PYTHONHASHSEED",
+)
 
-# TORCH* env vars that may be present without compromising mint/serve
+# Gated prefixes (R7): the behavior-affecting namespaces. The original
+# gate matched only TORCH* — every PYTORCH_* var (including the LIVE
+# allocator spelling PYTORCH_CUDA_ALLOC_CONF) evaded it, while the
+# allowlist carried only the legacy TORCH_CUDA_ALLOC_CONF. TRITON_* is
+# gated too: TRITON_PTXAS_PATH silently changes emitted cubins.
+_GATED_PREFIXES = ("TORCH", "PYTORCH", "TRITON")
+
+# Gated-namespace vars that may be present without compromising mint/serve
 # determinism: storage locations, observability, and the SDK's own capture
 # machinery. Everything else refuses boot, naming the variable.
 ENV_ALLOWLIST = frozenset({
@@ -60,30 +88,35 @@ ENV_ALLOWLIST = frozenset({
     "TORCH_TRACE",
     "TORCH_EXTENSIONS_DIR",
     "TORCH_CUDA_ARCH_LIST",
-    "TORCH_CUDA_ALLOC_CONF",     # allocator sizing — never enters a graph
-    "TORCHINDUCTOR_CACHE_DIR",   # the SDK's own mint-capture redirect
+    "TORCH_CUDA_ALLOC_CONF",       # allocator sizing (legacy spelling)
+    "PYTORCH_CUDA_ALLOC_CONF",     # allocator sizing (live spelling)
+    "PYTORCH_ALLOC_CONF",          # allocator sizing (2.13 preferred)
+    "PYTORCH_NVML_BASED_CUDA_CHECK",  # probe-only: how availability is checked
+    "TORCHINDUCTOR_CACHE_DIR",     # the SDK's own mint-capture redirect
     "TORCHINDUCTOR_AUTOGRAD_CACHE",  # set by the SDK's capture machinery
+    "TRITON_CACHE_DIR",            # the SDK's own mint-capture redirect
 })
 
 
 class EnvSealError(RuntimeError):
-    """The process environment cannot be sealed: an unknown ``TORCH*``
+    """The process environment cannot be sealed: an unknown gated-namespace
     variable is present, or a canonical flag did not take effect."""
 
 
 def check_torch_env(environ: Optional[Mapping[str, str]] = None) -> None:
-    """Refuse unknown ``TORCH*`` env vars, naming each one (pgw#696)."""
+    """Refuse unknown ``TORCH*``/``PYTORCH*``/``TRITON*`` env vars, naming
+    each one (pgw#696, widened by the build-systems review R7)."""
     env = os.environ if environ is None else environ
     unknown = sorted(
         name for name in env
-        if name.startswith("TORCH") and name not in ENV_ALLOWLIST
+        if name.startswith(_GATED_PREFIXES) and name not in ENV_ALLOWLIST
     )
     if unknown:
         raise EnvSealError(
-            f"unknown TORCH* environment variable(s) {unknown!r}: not in "
+            f"unknown gated environment variable(s) {unknown!r}: not in "
             "the pgw#696 allowlist (env_seal.ENV_ALLOWLIST) — a stray "
-            "inductor/dynamo toggle silently changes minted kernels; unset "
-            "it or add it to the canonical table")
+            "inductor/dynamo/triton toggle silently changes minted "
+            "kernels; unset it or add it to the canonical table")
 
 
 def effective_config() -> Dict[str, str]:
@@ -143,6 +176,7 @@ def effective_seal() -> Dict[str, Any]:
     """The live seal dict — recorded verbatim in cell metadata."""
     return {
         "seal_v": SEAL_VERSION,
+        "epoch": os.environ.get(EPOCH_ENV, "0"),
         "posture": guard_closure.posture_snapshot(),
         "config": effective_config(),
         "inductor": inductor_config_digest(),
@@ -169,6 +203,7 @@ def establish() -> Dict[str, Any]:
 __all__ = [
     "CANONICAL_CONFIG",
     "ENV_ALLOWLIST",
+    "EPOCH_ENV",
     "EnvSealError",
     "SEAL_KEY",
     "SEAL_VERSION",

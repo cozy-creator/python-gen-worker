@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased (cache-design review fixes) — inner FX key portability + strict verify
+
+From the ML-systems + build-systems cache reviews (tracker, both in
+python-gen-worker/progress.md). All red-verified (7/8 new tests fail pre-fix).
+
+- **P0 — inner FX key hashed the GPU marketing name** (VERIFIED on a real B200 cell:
+  `system_info[device] = {'name': 'NVIDIA B200'}`): inductor's `CacheBase.get_system()`
+  files every fxgraph entry under the minting pod's SKU string, so the ck3/ck4 sku
+  collapse delivered ZERO cross-SKU hits — same-sm adoption passed every gate then
+  missed inside torch's own lookup. New version-pinned shim
+  (`compile_cache._install_fx_system_shim`, installed symmetrically via `apply()`)
+  normalizes the device name to the `sm_XX` token with the hash recomputed by torch's
+  own strategy (upstream precedent: `AOTI_COMPUTE_CAPABILITY`, codecache.py:260;
+  upstream ask tracked on pgw#708). A source-shape pin test fails loudly on a torch
+  bump (pgw#705 doctrine).
+- **P1 — `verify()` fail-open retired** (the JAX PR #27814 wrong-hit shape): silent
+  axes (`sm`/`cuda`/`image_digest`/libs/family) were accepted via `if want and ...`;
+  now absent axis = named refusal, no legacy path (pre-launch, per the no-legacy
+  doctrine).
+- `cache_key_tag` bound to the semantic cell identity (format|kind|family|lane|mode|
+  contract, environment axes deliberately excluded) — a foreign semantic identity can
+  never consume delivered inner entries; equivalence adoption (pgw#700) survives.
+- `content_keys` (torch_key/triton_key digests) recorded in metadata as the pgw#700
+  equivalence precondition (a patched wheel under an unchanged version string is now
+  visible; full toolchain closure is pgw#710).
+- **env_seal v2**: R7 defect fixed — the env gate matched `TORCH*` only, so every
+  `PYTORCH_*` var (incl. the live `PYTORCH_CUDA_ALLOC_CONF`) evaded it; gate now
+  covers `TORCH*`/`PYTORCH*`/`TRITON*` with both allocator spellings + the SDK's
+  `TRITON_CACHE_DIR` allowlisted, and `TRITON_PTXAS_PATH`-class toggles refused.
+  Recorded-env set extended (CUDA_LAUNCH_BLOCKING, CUDA_MODULE_LOADING,
+  NVIDIA_TF32_OVERRIDE, PYTHONHASHSEED). R2: operator `epoch` salt (`COZY_CELL_EPOCH`)
+  sealed as a fact — disowning a poisoned mint generation is one config change, never
+  a scheme bump (Bazel Action.salt / ccache HASH_PREFIX precedent).
+
 ## Unreleased (pgw#694: #695-#698) — execution-environment determinism hardening
 
 Four of the pgw#694 umbrella's five measures (the fifth, pgw#699, is a tracker-side
