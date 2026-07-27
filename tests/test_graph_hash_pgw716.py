@@ -231,3 +231,64 @@ def test_combined_graph_hash_is_order_independent():
 def test_combined_graph_hash_needs_a_class():
     with pytest.raises(ValueError):
         gh.combined_graph_hash([])
+
+
+# --------------------------------------------------------------------------
+# Second soundness vector (#728 survey): python-int-carried SHAPES.
+# Two qwen-image exports at 1328² and 1024² share the node-only digest
+# b8b3995d34f42719 and separate only once tensor shapes from meta['val'] are
+# folded in. The vector is only meaningful if the op/connectivity projection
+# really is identical — otherwise the test proves nothing about shapes.
+# --------------------------------------------------------------------------
+
+def _shapeless_lines(lines):
+    """The projection the survey called 'node-only': ops and connectivity,
+    with every tensor-meta fact removed."""
+    out = []
+    for line in lines:
+        if not line.startswith(gh.NODE_PREFIX):
+            continue
+        out.append(line.split(" val=")[0])
+    return tuple(out)
+
+
+def _export_static(module, batch=4, width=8):
+    """No dynamic dims — the qwen case: the shape is a concrete python int
+    carried in tensor meta, not a declared symbolic range."""
+    example = torch.randn(batch, width, dtype=next(module.parameters()).dtype)
+    return torch.export.export(module, (example,), strict=False)
+
+
+def test_shape_only_difference_must_not_collide_pgw728():
+    small = _export_static(_Tiny(width=8), batch=4)
+    large = _export_static(_Tiny(width=8), batch=16)
+
+    # The premise: ops and connectivity are IDENTICAL — a digest over those
+    # alone gives one value for two artifacts serving different shapes.
+    assert _shapeless_lines(gh.canonical_lines(small)) == _shapeless_lines(
+        gh.canonical_lines(large))
+    assert gh.digest_lines(_shapeless_lines(gh.canonical_lines(small))) == \
+        gh.digest_lines(_shapeless_lines(gh.canonical_lines(large)))
+
+    # The fix: tensor meta is part of identity, so the two keys differ.
+    assert gh.graph_hash(small) != gh.graph_hash(large), (
+        "two exports differing only in a shape share a graph hash — the "
+        "'shapes' term of ck6's graph_hashes is load-bearing (pgw#728: two "
+        "qwen rows collided on node-only digest b8b3995d34f42719)")
+
+    # Positive control, and the reason the DECLARED-dynamic case must not be
+    # confused with this one: when the dim is declared symbolic, both sizes
+    # ARE one artifact and MUST share the key (pgw#704's headline — a
+    # 1024x1024 export served 1152x896).
+    assert gh.graph_hash(_export(_Tiny(width=8), batch=4)) == gh.graph_hash(
+        _export(_Tiny(width=8), batch=16))
+
+
+def test_dynamo_graphs_also_carry_shapes():
+    """Dynamo keeps tensor meta under example_value, not val — reading only
+    'val' silently drops every shape from the dynamo IR's identity."""
+    small = _capture_dynamo(_Tiny(), torch.randn(4, 8))
+    large = _capture_dynamo(_Tiny(), torch.randn(16, 8))
+    assert _shapeless_lines(gh.canonical_lines(small)) == _shapeless_lines(
+        gh.canonical_lines(large))
+    assert gh.graph_hash(small) != gh.graph_hash(large)
