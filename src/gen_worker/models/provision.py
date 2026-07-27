@@ -213,7 +213,7 @@ def enable_compiled(
     adopt. Staying eager rolls the branches back — canonical zeroed slots
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
-    from .. import compile_cache, trt_engine  # lazy: keeps `import gen_worker` off the compile/pb stack
+    from .. import aot_serve, compile_cache, trt_engine  # lazy: keeps `import gen_worker` off the compile/pb stack
     from .. import receipts
 
     # pgw#709: hub-delivered artifacts must carry a verifiable hub-signed
@@ -235,14 +235,26 @@ def enable_compiled(
         bucket = 0
     if bucket:
         compile_cache.apply_lora_lane(pipe, bucket)
-    if artifact is not None and not bucket:
-        # TRT engines expose only their plain contract — a lora_bucket
-        # declaration always rides the inductor lane.
+    if artifact is not None:
+        # ONE kind sniff for every non-inductor backend. `metadata.json` is
+        # the shared envelope member across all artifact kinds (the pgw#709
+        # receipts gate above reads it from the same place), so `kind` is the
+        # dispatch key: absent/unknown falls through to the inductor lane.
         try:
             meta = trt_engine.unpack_metadata(Path(artifact))
         except Exception:
             meta = None
-        if meta is not None and str(meta.get("kind") or "") == "trt-engine":
+        kind = str((meta or {}).get("kind") or "")
+        if kind == aot_serve.ARTIFACT_KIND:
+            # pgw#721: an exported `.pt2` cell. Unlike a TRT engine this
+            # rides the branch-bearing lane too — LoRA adapters are lifted
+            # to graph INPUTS, so one artifact serves the whole bucket.
+            if aot_serve.enable(pipe, cfg, cache_dir, artifact):
+                return True
+            artifact = None  # unusable artifact: fall through to eager policy
+        elif kind == "trt-engine" and not bucket:
+            # TRT engines expose only their plain contract — a lora_bucket
+            # declaration always rides the inductor lane.
             if trt_engine.enable(pipe, cfg, cache_dir, artifact):
                 return True
             artifact = None  # unusable engine: fall through to eager policy
