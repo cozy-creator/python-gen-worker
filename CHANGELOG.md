@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.75.0 (2026-07-26) — pgw#660: the hard GPU-architecture floor has a declared carrier again
+
+`Resources(compute_capability=8.9)` is restored. The v2 API freeze (pgw#647) deleted it on
+the reasoning that "precision-per-card is the fit ladder's call, never a placement gate".
+That is right about precision SELECTION and wrong about INCAPABILITY: a producer whose
+kernel is `torch._scaled_mm` cannot run below sm_89 at any precision, on any rung, ever.
+
+Tensorhub's builder never stopped reading the key, so a v2 endpoint emitted no floor,
+`endpoint_function_schemas.compute_capability_min` went NULL, and the scheduler placed the
+fp8 modelopt producer on **sm_80 A100s** — th#1155 six times in ten minutes, and again in
+te#125 on 2026-07-26, where conversion 0.6.1's in-pod envelope guard refused in 4 ms after
+the pod was already rented. Design 1 of the three in pgw#660, ruled by Paul.
+
+- **Not a hint.** `vram_gb_hint` / `ram_gb_hint` are allocation-time asks the platform may
+  miss; this one is filtered on. It carries no `_hint` suffix and has no second spelling.
+- **Dual-form input, one canonical value.** `8.9`, `"8.9"`, and `"sm_89"` all normalize to
+  `8.9`. A bare SM code (`89`) is REFUSED with the two correct spellings named — 89 and 8.9
+  are a silent factor of ten apart.
+- **Implies `gpu=True`**, like `vram_gb_hint`.
+- **Wire name is `compute_capability`** — already what `internal/builder/
+  function_requirements.go` parses into `FunctionRequirements.ComputeCapabilityMin`. Note
+  v1's author-facing `min_compute_capability` stays typed-REJECTED by the builder
+  (th#1015 `ErrMinComputeCapabilityRemoved`) and must never reach the wire.
+- **Undeclared is unchanged**: no key, no column value, no gate. Declare it only for a
+  genuine incapability, never because a function merely runs better on newer silicon.
+
 ## 0.74.2 (2026-07-26) — pgw#714: background-compile crashes tell the truth and degrade to eager
 
 From the th#1226 post-mortem (qwen-image v0.2.1 pinned pre-pgw#677 0.67.1: the
@@ -238,18 +264,6 @@ see the named gap below.
   `loading.py` routing and the `ladder.py` svdq placement are UNCHANGED:
   widening admission before a real artifact can fully load would strand
   requests.
-
-## 0.70.4 (2026-07-26) — pgw#696 P0 hotfix: the env gate killed every fleet pod
-
-0.70.3's `PYTORCH*` prefix widening + the boot-wired seal composed into a
-fleet-killer: the official `pytorch/pytorch` serving base stamps
-`PYTORCH_VERSION=2.13.0`, the gate refused it, and every pod exited
-pre-hello as a silent provider `pod_exited` (sdxl 0.2.12 was rolled back
-on prod). Build-info constants (`PYTORCH_VERSION`, `PYTORCH_BUILD_VERSION`,
-`PYTORCH_BUILD_NUMBER`) are allowlisted, and the seal now runs AFTER
-settings so a genuine refusal dials the hub as the typed `worker_fatal
-phase=env_seal` instead of dying dark. (Allowlist additions do not touch
-the seal digest — only present gated vars enter identity.)
 
 ## 0.70.3 (2026-07-26) — pgw#694 determinism hardening + cache-review fixes (ck4 keys, env-seal boot wiring, inner-FX sm shim)
 
