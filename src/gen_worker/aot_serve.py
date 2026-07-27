@@ -618,6 +618,17 @@ def marshal_positional(
     the exact order export recorded, or it feeds the right tensor to the
     wrong graph input.
 
+    THE COMPLEMENT, measured on the pgw#723 residuals pod (2.13.0+cu130):
+    the package's call convention mirrors the traced EXAMPLE's args/kwargs
+    split. An input fed as a KWARG at export bakes a kwarg-demanding
+    ``in_spec`` — the package then refuses a positional call with the same
+    error in reverse (``Got [] but expected ['lora_a', 'lora_b']``), the
+    wrap treats it as an artifact failure, and the lane silently revokes to
+    eager on the FIRST call. So "positional inputs only" is a MINT
+    obligation, not a torch invariant: example inputs must be fed
+    all-positionally (lifted adapter pair included) so this positional
+    marshal matches the package.
+
     ``position`` in the declared contract is that order. Every declared
     input must be present — a package has a FIXED flat arity, so a missing
     one cannot be skipped without silently shifting every later argument
