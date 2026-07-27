@@ -2144,6 +2144,13 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     import torch
     from torch._dynamo import eval_frame
 
+    from gen_worker import env_seal
+
+    # Production boot order (pgw#719): the canonical config is imposed
+    # BEFORE any mint/artifact exists, so the cell's recorded seal and the
+    # post-bootstrap arm state agree (the executor's pgw#654 TF32 bootstrap
+    # is a no-op re-assertion of the same canonical values).
+    env_seal.establish_config()
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "family-checkpoints"
     model_dir.mkdir()

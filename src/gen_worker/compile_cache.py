@@ -1033,6 +1033,9 @@ def artifact_metadata(
         "content_keys": dict(content_keys()),
         "toolchain": dict(toolchain_digest()),
         "code_closure": dict(static_code_closure()),
+        # pgw#719: the per-library list behind the seal's combined
+        # loaded_libs digest — a mismatch names the library.
+        "loaded_libs": dict(env_seal.frozen_library_digests()),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
@@ -3130,6 +3133,29 @@ def artifact_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
             guard_closure.assert_posture(sealed, label="arm")
         except guard_closure.PostureError as exc:
             return str(exc)
+    # pgw#719 (config half): the cell's recorded env seal must be the LIVE
+    # effective environment at arm time — posture is named above; every
+    # other seal fact (config flags, inductor digest, epoch, loaded libs)
+    # is named here. In practice the ck key already pins this (env_seal is
+    # an axis); the named drift makes a hand-delivered/foreign cell
+    # diagnosable instead of a silent inner-key miss.
+    sealed_env = meta.get(env_seal.SEAL_KEY)
+    if isinstance(sealed_env, dict) and sealed_env:
+        live_env = env_seal.effective_seal()
+        for fact in sorted(set(sealed_env) | set(live_env)):
+            if fact == "posture":
+                continue  # named by the manifest posture check above
+            cell_v, live_v = sealed_env.get(fact), live_env.get(fact)
+            if isinstance(cell_v, dict) and isinstance(live_v, dict):
+                for sub in sorted(set(cell_v) | set(live_v)):
+                    if cell_v.get(sub) != live_v.get(sub):
+                        return (
+                            f"env seal drift at arm: {fact}/{sub}: cell "
+                            f"{cell_v.get(sub)!r} != process {live_v.get(sub)!r}")
+            elif cell_v != live_v:
+                return (
+                    f"env seal drift at arm: {fact}: cell {cell_v!r} != "
+                    f"process {live_v!r}")
     return ""
 
 
@@ -3557,6 +3583,10 @@ def build(
 
     # pgw#681: guard-closure gate — the platform build fails red on any
     # guard the declared contract does not pin, naming the variable.
+    # pgw#719: the environment this capture traced under must still be the
+    # BOOT environment — drift (endpoint code mutating config/env behind
+    # our back) fails the mint red, naming the fact.
+    env_seal.assert_seal_unchanged("mint")
     guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
 
     graph_signature, weight_contract = execution_contract(pipe, cfg)
@@ -3674,6 +3704,10 @@ def mint_artifact(
 
     # pgw#681: guard-closure gate — a leak fails the mint red, naming the
     # variable; the manifest rides the cell as its dependency dump.
+    # pgw#719: the environment this capture traced under must still be the
+    # BOOT environment — drift (endpoint code mutating config/env behind
+    # our back) fails the mint red, naming the fact.
+    env_seal.assert_seal_unchanged("mint")
     guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
 
     # gw#564: record the execution contract exactly like the production
@@ -3810,6 +3844,10 @@ def finish_fleet_mint(
     # this confirms they depend on NOTHING the contract does not pin — an
     # out-of-contract guard fails the mint red, naming the variable. The
     # returned manifest rides the cell as its dependency dump.
+    # pgw#719: the environment this capture traced under must still be the
+    # BOOT environment — drift (endpoint code mutating config/env behind
+    # our back) fails the mint red, naming the fact.
+    env_seal.assert_seal_unchanged("mint")
     guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
 
     # gw#564: record the execution contract exactly like the production

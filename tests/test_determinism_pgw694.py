@@ -37,6 +37,22 @@ def _fresh_dynamo() -> Iterator[None]:
     torch._dynamo.reset()
 
 
+@pytest.fixture(autouse=True)
+def _restore_global_matmul_flags() -> Iterator[None]:
+    """The canonical imposition is deliberately process-global; the SUITE
+    must not leak it across files (entries compiled under one TF32 state
+    GlobalStateGuard-miss under another — the flux hit-counter tests)."""
+    precision = torch.get_float32_matmul_precision()
+    matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    benchmark = torch.backends.cudnn.benchmark
+    yield
+    torch.set_float32_matmul_precision(precision)
+    torch.backends.cuda.matmul.allow_tf32 = matmul_tf32
+    torch.backends.cudnn.allow_tf32 = cudnn_tf32
+    torch.backends.cudnn.benchmark = benchmark
+
+
 def _cfg(**overrides: Any) -> CompileCell:
     base: Dict[str, Any] = dict(
         shapes=((64, 64),), targets=("transformer",), family="toyfam",
@@ -161,30 +177,31 @@ def test_consolidate_flags_posture_divergence() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_torch_env_refuses_naming_the_var() -> None:
-    env = {"TORCHINDUCTOR_MAX_AUTOTUNE": "1", "TORCH_HOME": "/x",
-           "TORCHINDUCTOR_CACHE_DIR": "/y", "PATH": "/bin"}
-    with pytest.raises(_env_seal().EnvSealError) as excinfo:
-        _env_seal().check_torch_env(env)
-    message = str(excinfo.value)
-    assert "TORCHINDUCTOR_MAX_AUTOTUNE" in message
-    assert "TORCH_HOME" not in message  # allowlisted names are not named
-    # Allowlisted-only environments pass (incl. this process's real env,
-    # which carries the SDK's own TORCHINDUCTOR_CACHE_DIR redirect).
-    _env_seal().check_torch_env({k: v for k, v in env.items()
-                              if k != "TORCHINDUCTOR_MAX_AUTOTUNE"})
-    _env_seal().check_torch_env()
+def test_hostile_torch_env_is_erased_not_fatal(monkeypatch: Any) -> None:
+    """pgw#718 erase-and-impose (supersedes the #696 allowlist gate): an
+    unknown toggle in a behavior namespace is DELETED — never a refusal,
+    never a silently different kernel. Plumbing survives."""
+    monkeypatch.setenv("TORCHINDUCTOR_MAX_AUTOTUNE", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    erased = _env_seal().scrub_env()
+    assert "TORCHINDUCTOR_MAX_AUTOTUNE" in erased
+    import os
+
+    assert "TORCHINDUCTOR_MAX_AUTOTUNE" not in os.environ
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") == "0"  # plumbing kept
 
 
-def test_establish_config_pins_the_true_default() -> None:
-    """cudnn.allow_tf32 defaults TRUE on torch 2.13 — the freeze must pin
-    it False explicitly and verify the read-back."""
+def test_establish_config_imposes_the_serving_posture() -> None:
+    """The canonical table IS the pgw#654 serving posture (TF32 on):
+    establish must impose it from ANY prior state and verify the read-back
+    — code decides the flags, never a library default or an env var."""
     before = torch.backends.cudnn.allow_tf32
     try:
-        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = False  # non-canonical prior state
         effective = _env_seal().establish_config()
-        assert effective["cudnn_allow_tf32"] == "False"
-        assert torch.backends.cudnn.allow_tf32 is False
+        assert effective["cudnn_allow_tf32"] == "True"
+        assert torch.backends.cudnn.allow_tf32 is True
+        assert effective["float32_matmul_precision"] == "high"
         assert _env_seal().effective_config() == effective
     finally:
         torch.backends.cudnn.allow_tf32 = before
@@ -504,25 +521,22 @@ def test_verify_refuses_silent_axes_named(monkeypatch: Any) -> None:
     assert "diffusers" in cc.verify(silent_libs)
 
 
-def test_pytorch_and_triton_env_are_gated(monkeypatch: Any) -> None:
-    """R7 (live defect): the gate matched startswith('TORCH') only, so
-    every PYTORCH_* var evaded it — including the LIVE allocator var
-    PYTORCH_CUDA_ALLOC_CONF — while the allowlist carried the legacy
-    TORCH_CUDA_ALLOC_CONF spelling. TRITON_PTXAS_PATH (silently different
-    cubins) is the TRITON* poster child."""
+def test_pytorch_and_triton_namespaces_are_scrubbed(monkeypatch: Any) -> None:
+    """pgw#718: every behavior namespace is erased wholesale — PYTORCH_*
+    (which the original TORCH*-only gate missed) and TRITON_*
+    (TRITON_PTXAS_PATH = silently different cubins) included. The 0.70.3
+    fleet-killer class (informational PYTORCH_VERSION refused at boot) is
+    impossible by construction: erased, never fatal."""
     seal = _env_seal()
-    with pytest.raises(seal.EnvSealError, match="PYTORCH_FOO_TOGGLE"):
-        seal.check_torch_env({"PYTORCH_FOO_TOGGLE": "1"})
-    with pytest.raises(seal.EnvSealError, match="TRITON_PTXAS_PATH"):
-        seal.check_torch_env({"TRITON_PTXAS_PATH": "/opt/ptxas"})
-    # The live allocator spellings and the SDK's own redirects are allowed.
-    seal.check_torch_env({
-        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-        "TORCH_CUDA_ALLOC_CONF": "legacy",
-        "TRITON_CACHE_DIR": "/cap/triton",
-        "TORCHINDUCTOR_CACHE_DIR": "/cap/inductor",
-    })
-    seal.check_torch_env()  # the real process env stays clean
+    for name in ("PYTORCH_FOO_TOGGLE", "TRITON_PTXAS_PATH",
+                 "PYTORCH_VERSION", "CUBLAS_WORKSPACE_CONFIG"):
+        monkeypatch.setenv(name, "x")
+    erased = seal.scrub_env()
+    import os
+
+    for name in ("PYTORCH_FOO_TOGGLE", "TRITON_PTXAS_PATH",
+                 "PYTORCH_VERSION", "CUBLAS_WORKSPACE_CONFIG"):
+        assert name in erased and name not in os.environ
 
 
 def test_epoch_salt_disowns_a_generation(monkeypatch: Any) -> None:
@@ -532,7 +546,7 @@ def test_epoch_salt_disowns_a_generation(monkeypatch: Any) -> None:
     seal = _env_seal()
     monkeypatch.delenv(seal.EPOCH_ENV, raising=False)
     base = seal.effective_seal()
-    assert base["seal_v"] == 2 and base["epoch"] == "0"
+    assert base["seal_v"] == 3 and base["epoch"] == "0"
     baseline = seal.seal_digest(base)
     monkeypatch.setenv(seal.EPOCH_ENV, "1")
     assert seal.seal_digest(seal.effective_seal()) != baseline
