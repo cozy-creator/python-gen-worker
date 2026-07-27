@@ -17,28 +17,52 @@ import pytest
 
 from gen_worker import entrypoint, env_seal
 
+import torch
+from typing import Iterator
 
-def test_entrypoint_refuses_unknown_torch_env(
+
+@pytest.fixture(autouse=True)
+def _restore_global_matmul_flags() -> Iterator[None]:
+    """The canonical imposition is deliberately process-global; the SUITE
+    must not leak it across files (entries compiled under one TF32 state
+    GlobalStateGuard-miss under another — the flux hit-counter tests)."""
+    precision = torch.get_float32_matmul_precision()
+    matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    benchmark = torch.backends.cudnn.benchmark
+    yield
+    torch.set_float32_matmul_precision(precision)
+    torch.backends.cuda.matmul.allow_tf32 = matmul_tf32
+    torch.backends.cudnn.allow_tf32 = cudnn_tf32
+    torch.backends.cudnn.benchmark = benchmark
+
+
+
+def test_entrypoint_scrubs_hostile_torch_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """pgw#718 erase-and-impose: a hostile toggle is ERASED, never fatal —
+    boot proceeds and the var cannot reach torch."""
     monkeypatch.setenv("TORCHDYNAMO_SUPPRESS_ERRORS", "1")
-    with pytest.raises(env_seal.EnvSealError) as exc:
-        entrypoint._establish_env_seal()
-    assert "TORCHDYNAMO_SUPPRESS_ERRORS" in str(exc.value)
+    entrypoint._establish_env_seal()  # must NOT raise
+    import os
+
+    assert "TORCHDYNAMO_SUPPRESS_ERRORS" not in os.environ
 
 
 def test_entrypoint_establishes_effective_seal() -> None:
     import torch
 
     seal = entrypoint._establish_env_seal()
-    # The canonical surface is EFFECTIVE, not merely recorded.
-    assert torch.backends.cudnn.allow_tf32 is False
-    assert torch.backends.cuda.matmul.allow_tf32 is False
-    assert torch.get_float32_matmul_precision() == "highest"
+    # The canonical surface is EFFECTIVE, not merely recorded — and it IS
+    # the pgw#654 serving posture (TF32 on), so mint==serve.
+    assert torch.backends.cudnn.allow_tf32 is True
+    assert torch.backends.cuda.matmul.allow_tf32 is True
+    assert torch.get_float32_matmul_precision() == "high"
     # Every canonical entry is effective in the seal (the seal also records
-    # non-canonicalized facts like CUBLAS_WORKSPACE_CONFIG).
+    # interpreter facts like the hash-seed pair, pgw#719).
     assert env_seal.CANONICAL_CONFIG.items() <= seal["config"].items()
-    # The digest is the ck4 env_seal axis and is deterministic.
+    # The digest is the env_seal key axis and is deterministic.
     assert env_seal.seal_digest(seal) == env_seal.seal_digest(
         entrypoint._establish_env_seal())
 
@@ -58,15 +82,18 @@ def test_run_main_seals_before_cuda_probe_and_worker() -> None:
                                       src.index("should_probe_cuda")]
 
 
-def test_base_image_build_constants_are_allowlisted(
+def test_base_image_build_constants_never_kill_a_boot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The fleet's pytorch/pytorch base image stamps PYTORCH_VERSION (and
-    siblings). RED on 0.70.3: the R7 prefix widening refused them and every
-    pod on the fleet base image died at boot before hello (the sdxl 0.2.12
-    rollback)."""
+    siblings). RED on 0.70.3: the allowlist gate refused them and every pod
+    on the fleet base image died at boot before hello (the sdxl 0.2.12
+    rollback). pgw#718 erase-and-impose makes the class impossible: the
+    vars are ERASED and boot proceeds."""
     monkeypatch.setenv("PYTORCH_VERSION", "2.13.0")
     monkeypatch.setenv("PYTORCH_BUILD_VERSION", "2.13.0")
     monkeypatch.setenv("PYTORCH_BUILD_NUMBER", "1")
-    env_seal.check_torch_env()  # must not raise
-    entrypoint._establish_env_seal()
+    entrypoint._establish_env_seal()  # must not raise
+    import os
+
+    assert "PYTORCH_VERSION" not in os.environ

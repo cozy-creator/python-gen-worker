@@ -97,37 +97,52 @@ def test_w4a4_contract_artifact_detects_and_round_trips(tiny_ddpm: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# gw#389/th#546: fp8 storage layerwise casting targets the denoiser
-# specifically (not the whole pipeline) and defaults bf16 compute.
+# gw#389/th#546: fp8 storage targets the denoiser specifically (not the whole
+# pipeline) and defaults bf16 compute. pgw#727 made the mechanism module
+# STRUCTURE instead of diffusers cast hooks, so this asserts the RESULT on a
+# real tiny denoiser (fp8-resident leaves, bf16 upcast, VAE untouched) rather
+# than that a cast method was called. Mechanism detail lives in
+# tests/test_fp8_storage_pgw727.py.
 # ---------------------------------------------------------------------------
 
 
-class _FakeDenoiser:
-    def __init__(self) -> None:
-        self.casting_calls: list = []
+def _tiny_denoiser() -> Any:
+    from diffusers import UNet2DModel
 
-    def parameters(self):
-        return iter(())
-
-    def enable_layerwise_casting(self, *, storage_dtype: Any, compute_dtype: Any) -> None:
-        self.casting_calls.append((storage_dtype, compute_dtype))
+    return UNet2DModel(
+        sample_size=8, in_channels=3, out_channels=3,
+        block_out_channels=(32, 32), layers_per_block=1,
+        down_block_types=("DownBlock2D", "AttnDownBlock2D"),
+        up_block_types=("AttnUpBlock2D", "UpBlock2D"), norm_num_groups=8,
+    ).to(torch.bfloat16).eval()
 
 
 class _FakeDiffusionPipeline:
-    transformer: _FakeDenoiser
-
     def __init__(self) -> None:
-        self.transformer = _FakeDenoiser()
+        self.unet = _tiny_denoiser()
+        self.vae = _tiny_denoiser()  # a non-denoiser component: never cast
 
 
 def test_fp8_storage_targets_denoiser_defaults_bf16_compute() -> None:
-    from gen_worker.models.loading import apply_fp8_storage
+    from gen_worker.models.fp8_storage import fp8_storage_leaves
+    from gen_worker.models.loading import apply_fp8_storage, pipeline_weight_lane
 
     pipe = _FakeDiffusionPipeline()
-    assert apply_fp8_storage(pipe, compute_dtype=torch.bfloat16) is True
-    ((storage, compute),) = pipe.transformer.casting_calls
-    assert storage is torch.float8_e4m3fn
-    assert compute is torch.bfloat16
+    assert apply_fp8_storage(pipe) is True  # compute_dtype defaults to bf16
+    assert pipeline_weight_lane(pipe) == "fp8-hooks"
+
+    leaves = fp8_storage_leaves(pipe.unet)
+    assert leaves, "the denoiser's cast-eligible leaves must be restructured"
+    for leaf in leaves.values():
+        assert leaf.weight.dtype is torch.float8_e4m3fn
+        assert leaf.compute_dtype is torch.bfloat16
+    assert not fp8_storage_leaves(pipe.vae)
+    assert all(p.dtype is torch.bfloat16 for p in pipe.vae.parameters())
+
+    with torch.no_grad():  # the restructured denoiser still runs
+        out = pipe.unet(torch.randn(1, 3, 8, 8, dtype=torch.bfloat16),
+                        torch.tensor([1])).sample
+    assert out.dtype is torch.bfloat16
 
 
 # ---------------------------------------------------------------------------

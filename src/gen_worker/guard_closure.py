@@ -69,7 +69,8 @@ import re
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
+                    Sequence, Tuple)
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,15 @@ _ID_SCRUB_RE = re.compile(r"(___check_(?:obj|type)_id\(.*?,\s*)\d+(\))")
 _COMMENT_RE = re.compile(r"\s{2,}#.*$", re.DOTALL)
 _TENSOR_MATCH_RE = re.compile(r"size=\[([^\]]*)\], stride=\[([^\]]*)\]")
 _SOURCE_LOCAL_RE = re.compile(r"^L\['([^']+)'\]")
+# pgw#733: torch 2.13 emits DERIVED guard sources that CONTAIN a local root
+# without starting with it — `dict(type(L['self']).__mro__[1].__dict__)` for a
+# base-class @property (diffusers ConfigMixin.config, read in every model's
+# forward) and `type(L['self']._modules['x']).__dict__['forward'].__defaults__`
+# for a submodule forward with a default argument. Prefix-matching alone sent
+# both to the "other" root, which LEAKS before the type dispatch that already
+# covers them — refusing every self-mint fleet-wide.
+_SOURCE_EMBEDDED_RE = re.compile(r"L\['([^']+)'\]")
+_SOURCE_EMBEDDED_GLOBAL_RE = re.compile(r"\bG[\['.]")
 
 
 class GuardClosureError(RuntimeError):
@@ -264,9 +274,15 @@ class ContractPins:
     ints: frozenset
     floats: frozenset
     has_dynamic: bool
+    # Names the traced callable CLOSES OVER. A freevar renders exactly like a
+    # call input in a guard source (pgw#733), so the classifier needs the
+    # callable's own vocabulary to tell them apart.
+    freevars: frozenset = frozenset()
 
 
-def contract_pins(cfg: Any) -> ContractPins:
+def contract_pins(
+    cfg: Any, freevars: Iterable = (),
+) -> ContractPins:
     ints = {0, 1}
     for row in tuple(getattr(cfg, "shapes", ()) or ()):
         ints.update(int(v) for v in row)
@@ -285,7 +301,7 @@ def contract_pins(cfg: Any) -> ContractPins:
     floats.update(float(v) for v in tuple(getattr(cfg, "guidance_scales", ()) or ()))
     return ContractPins(
         ints=frozenset(ints), floats=frozenset(floats),
-        has_dynamic=bool(dynamic))
+        has_dynamic=bool(dynamic), freevars=frozenset(freevars))
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +391,7 @@ def extract_target_guards(
         return []
     from torch._dynamo.eval_frame import _debug_get_cache_entry_list
 
-    pins = contract_pins(cfg)
+    pins = contract_pins(cfg, getattr(code, "co_freevars", ()) or ())
     graphs: List[GraphGuards] = []
     for index, entry in enumerate(_debug_get_cache_entry_list(code)):
         records = sorted(
@@ -433,7 +449,17 @@ def extract(pipeline: Any, cfg: Any) -> ClosureReport:
 # ---------------------------------------------------------------------------
 
 
-def _source_root(source: str) -> str:
+def _source_root(source: str, freevars: frozenset = frozenset()) -> str:
+    """The ROOT a guard source is rooted at: self / input / freevar / global /
+    ambient, or "other" when nothing recognizable is embedded.
+
+    pgw#733: resolves the root EMBEDDED anywhere in a derived source, not just
+    a prefix. torch 2.13 wraps class/code-structure facts in expressions like
+    ``dict(type(L['self']).__mro__[1].__dict__)`` — semantically self-rooted,
+    and covered by the type dispatch — but a prefix match sees "other" and
+    LEAKS. The closed world is unchanged: a source with no recognizable root is
+    still "other", still a leak.
+    """
     s = str(source or "").strip()
     if not s:
         return "ambient"
@@ -441,8 +467,26 @@ def _source_root(source: str) -> str:
         return "global"
     m = _SOURCE_LOCAL_RE.match(s)
     if m is None:
+        # Derived source: find the root it is DERIVED FROM. `self` wins when
+        # present — a fact about self's class/code structure stays a
+        # module-structure fact however it is spelled.
+        names = _SOURCE_EMBEDDED_RE.findall(s)
+        if "self" in names:
+            return "self"
+        if names:
+            return "freevar" if names[0] in freevars else "input"
+        if _SOURCE_EMBEDDED_GLOBAL_RE.search(s):
+            return "global"
         return "other"
-    return "self" if m.group(1) == "self" else "input"
+    name = m.group(1)
+    if name == "self":
+        return "self"
+    # pgw#733 (second bug, latent today): a closure FREEVAR renders exactly
+    # like a call input, so `L['outer_scale'] == 0.3` was judged an input and
+    # leaked with the wrong name. Production roots are bound `forward` methods
+    # with no freevars; naming it correctly keeps the check and fixes the
+    # diagnosis.
+    return "freevar" if name in freevars else "input"
 
 
 def _contiguous_strides(shape: Sequence) -> Tuple[int, ...]:
@@ -572,7 +616,7 @@ def classify(
         if pins.has_dynamic:
             return CONTRACT_SHAPE, "declared dynamic-dim range"
         return LEAK, "shape-env relation without declared dynamic dims"
-    root = _source_root(source)
+    root = _source_root(source, pins.freevars)
     if root == "self":
         return MODULE_STRUCTURE, "family + graph_signature + weight_contract"
     if root == "global":
@@ -591,7 +635,23 @@ def classify(
         return LEAK, f"unclassified ambient guard {guard_type}"
     if root == "other":
         return LEAK, f"unrecognized guard source {source!r}"
-    # input-rooted
+    # input- and freevar-rooted share ONE dispatch (pgw#733): a wrapper's
+    # captured code object is code (its identity/structure is pinned by
+    # code_closure + toolchain), while a captured runtime SCALAR is not — and
+    # _scalar_verdict already draws exactly that line. What the freevar root
+    # adds is the DIAGNOSIS: a leaking freevar must not be reported as a call
+    # input, because the fix is a declaration, not a different request.
+    verdict, axis = _classify_input_rooted(guard_type, expr, pins)
+    if verdict == LEAK and root == "freevar":
+        return LEAK, (
+            f"{axis} — closure freevar {source!r}, captured by the traced "
+            "code rather than passed by the caller")
+    return verdict, axis
+
+
+def _classify_input_rooted(
+    guard_type: str, expr: str, pins: ContractPins,
+) -> Tuple[str, str]:
     if guard_type == "TENSOR_MATCH":
         return _classify_tensor_match(expr)
     if guard_type in _STRUCTURAL_TYPES:
@@ -903,9 +963,9 @@ def consolidate(manifests: Mapping[str, Mapping[str, Any]]) -> FleetAudit:
 
 
 def manifest_digest(manifest: Mapping[str, Any]) -> str:
-    """Canonical digest of one guard manifest — the comparison unit for
-    pgw#700 equivalence adoption (identical manifests) and the pgw#711
-    confirmation gate (second publish must match the first)."""
+    """Canonical digest of one guard manifest — the comparison unit for the
+    pgw#711 confirmation gate (a key is confirmed when a second independent
+    publish carries the same artifact + manifest digests)."""
     encoded = json.dumps(
         dict(manifest), sort_keys=True, separators=(",", ":"),
         ensure_ascii=True,

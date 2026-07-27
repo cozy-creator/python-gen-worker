@@ -11,8 +11,12 @@ and every consumer of cell identity uses the same code:
 * cozy-local's self-mint (gw#555) looks up / saves its store by the same
   key.
 
-The key is a deterministic digest over the post-gw#577 HONEST axes — the
-facts that actually change compiled-kernel identity:
+The key is the RECIPE DIGEST (ck5, Paul's exact-identity ruling): "look at
+our code and say 'this is the graph we need' — that is our unique
+identifier. If the recipe changes it gets a new identifier, stranding the
+old ones, which is fine." No version comparison, no relaxable axes, no
+cross-key candidates — a key either matches exactly or the cell does not
+exist for this runtime.
 
     format        artifact format version (compile_cache.ARTIFACT_FORMAT)
     kind          "inductor" (TRT engines keep their own legacy identity)
@@ -20,36 +24,33 @@ facts that actually change compiled-kernel identity:
     lane          canonical traced weight lane token ("", w8a16, w8a8,
                   [-loraN]) — lane graphs differ (gw#534/gw#561)
     sm            compute capability (sm_100, ...)
-    cuda          CUDA runtime the torch wheel was built for
-    torch/triton  exact wheel versions (triton's disk cache keys on the
-                  wheel's ptxas + SM arch — the host driver deliberately
-                  never enters the key, gw#577)
-    gen_worker    exact gen-worker version (graph-shaping code)
-    env_seal      digest of the execution-environment seal (pgw#696):
-                  process posture + frozen config flags + portable inductor
-                  config. The seal dict is internally versioned (seal_v),
-                  so future sealed facts change digest VALUES, never the
-                  axis set — ck4 is the final planned scheme bump.
     contract      digest of the DECLARED shape contract (SDK v2, pgw#647):
                   shapes, targets, text_len, dynamic dims, regional mode,
-                  lora bucket, warm guidance classes. A contract change
-                  (bucket added, axis made dynamic, text pin moved) makes
-                  the artifacts genuinely different, so a worker on a newer
-                  contract can never consume an older cell — pre-fix and
-                  post-fix cells were indistinguishable by key before this
-                  axis existed.
-    diffusers/transformers  exact lib versions when installed
-    image_digest  the SERVING image OCI digest (absent for local runtimes)
+                  lora bucket, warm guidance classes
+    env_seal      digest of the execution-environment seal (pgw#696):
+                  process posture + frozen config flags + portable inductor
+                  config (+ operator epoch). Internally versioned (seal_v)
+    toolchain     CONTENT digest of the compile stack (pgw#710): dist-info
+                  RECORDs of torch/triton/nvidia-*/diffusers/transformers
+                  + the bundled ptxas/nvdisasm binaries. Replaces the old
+                  torch/triton/cuda/diffusers/transformers VERSION axes —
+                  content, never version strings
+    code_closure  CONTENT digest of the STATIC import-graph closure of the
+                  compile/composition code (compile_cache.
+                  static_code_closure): the source files that shape the
+                  traced graphs, found by pure static analysis from the
+                  compile entrypoints. Sound because of the root-imports
+                  convention (no runtime imports); the mint-time
+                  completeness gate makes that convention a hard check.
+                  Replaces the old gen_worker version axis
 
-The GPU SKU is deliberately NOT a key axis (pgw#691, ck3): no dynamo guard
-observes a SKU — the only hardware facts the guard set carries are already
-pinned by sm + cuda + torch + triton (the same argument that keeps the host
-driver out of the key, gw#577). Keying on it was proven to mint byte-
-identical cells twice (a40 vs rtx-3090 on sm_86; l4 vs rtx-4090 on sm_89 —
-19% redundant mints in the audited corpus). ``sku`` stays in cell METADATA;
-preferring a same-sku cell among same-key candidates (autotune quality) is
-a hub-side SELECTION concern, not identity — the worker lookup is
-pull-by-exact-key and has no multi-candidate point.
+Axes deliberately NOT in the key, recorded in metadata for observability
+and runtime compat checks (``compile_cache.verify``) only: ``sku`` (pgw#691
+— no guard or artifact fact observes it), ``cuda_driver`` (gw#577),
+``torch``/``triton``/``cuda``/``gen_worker``/``diffusers``/``transformers``
+version strings and ``image_digest`` (ck5 — their CONTENT rides the
+toolchain and code_closure axes; version strings and image identity are
+observability, not identity).
 
 A wrong key can only produce a MISS (eager + demand + forge), never a
 refusal: verify-on-receipt of a self-requested cell degenerates to a digest
@@ -62,14 +63,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Tuple
 
-# ck2 -> ck3 (pgw#691): sku left the identity axes. ck3 -> ck4 (pgw#696):
-# env_seal joined them. Each bump makes every older key a clean MISS
-# instead of a half-match.
-KEY_SCHEME = "ck4"
+# ck2 -> ck3 (pgw#691): sku left. ck3 -> ck4 (pgw#696): env_seal joined.
+# ck4 -> ck5 (Paul's exact-identity ruling): the key became the RECIPE
+# digest — toolchain + code_closure content joined; every version axis
+# left. ck5 is FINAL: new identity facts ride the content digests (seal_v /
+# closure/toolchain values), never new axes.
+KEY_SCHEME = "ck5"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
 # (th#597 C5: [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64
@@ -78,13 +80,12 @@ _DIGEST_HEX = 56
 
 # Axes that must be non-empty for a computable key: a runtime that cannot
 # state them has no cell identity (CPU-only build, failed CUDA probe).
-_REQUIRED = ("format", "kind", "family", "sm", "cuda", "torch",
-             "triton", "gen_worker", "env_seal", "contract")
+_REQUIRED = ("format", "kind", "family", "sm", "contract", "env_seal",
+             "toolchain", "code_closure")
 # Axes that may be legitimately absent ("" => omitted from canonical form):
-# image_digest is absent on local runtimes; libs may not be installed; lane
-# "" is the plain-resident graph family; mode "" is whole-graph compilation
-# ("regional" per-block cells are different artifacts, ie#381).
-_OPTIONAL = ("lane", "mode", "image_digest", "diffusers", "transformers")
+# lane "" is the plain-resident graph family; mode "" is whole-graph
+# compilation ("regional" per-block cells are different artifacts, ie#381).
+_OPTIONAL = ("lane", "mode")
 
 
 class CellKeyError(ValueError):
@@ -154,6 +155,17 @@ def _canonical_lane(weight_lane: str, lora_bucket: int = 0) -> str:
     return token
 
 
+def facts_digest(facts: Mapping[str, Any]) -> str:
+    """16-hex canonical digest of one recorded fact block (toolchain /
+    code_closure axes) — computed identically from live probes (compute)
+    and recorded metadata (from_artifact_metadata), so a stamp can never
+    disagree with the facts it summarizes."""
+    encoded = json.dumps(
+        dict(facts), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
 def contract_digest(facts: Mapping[str, Any]) -> str:
     """Digest of the DECLARED shape-contract facts (SDK v2 axis). Both
     sides state the same canonical dict — the worker from its EndpointSpec
@@ -173,27 +185,20 @@ def compute(
     *,
     contract: str,
     regional: bool = False,
-    image_digest: Optional[str] = None,
+    closure_roots: Tuple[str, ...] = (),
 ) -> CellKey:
-    """The key THIS runtime wants for ``family`` on ``weight_lane``.
-
-    Probes the live process (the same probes ``compile_cache.verify`` trusts).
-    ``contract`` is the declared shape-contract digest
-    (:func:`contract_digest` over ``compile_cache.declared_contract_facts``)
-    — REQUIRED: a keyless contract would let a newer-contract worker consume
-    an older cell. ``image_digest=None`` uses this process's
-    ``WORKER_IMAGE_DIGEST``; pass an explicit value (the SERVING image
-    digest at mint time, or ``""`` for a local runtime) to override. Raises
-    :class:`CellKeyError` when a required axis is unavailable — callers on
-    non-CUDA runtimes simply have no key.
-    """
+    """The key THIS runtime wants for ``family`` on ``weight_lane`` —
+    computed purely statically (no trace, no execution): live probes for
+    sm/posture/config, dist-info + binary content for the toolchain, and
+    the static import-graph closure for the code identity.
+    ``closure_roots`` names the ENDPOINT modules whose source also shapes
+    the graphs (e.g. ``("sdxl.main",)``) — the executor passes its worker
+    function's module. Raises :class:`CellKeyError` when a required axis is
+    unavailable — callers on non-CUDA runtimes simply have no key."""
     from . import compile_cache as cc  # cycle: compile_cache imports cell_key
     from . import env_seal
 
     rt = cc.runtime_key()
-    if image_digest is None:
-        image_digest = os.environ.get("WORKER_IMAGE_DIGEST", "")
-    libs = cc._lib_versions()
     return from_axes({
         "format": str(cc.ARTIFACT_FORMAT),
         "kind": "inductor",
@@ -201,15 +206,11 @@ def compute(
         "lane": _canonical_lane(weight_lane, lora_bucket),
         "mode": "regional" if regional else "",
         "sm": rt["sm"],
-        "cuda": rt["cuda"],
-        "torch": rt["torch"],
-        "triton": rt["triton"],
-        "gen_worker": cc.gen_worker_version(),
-        "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
         "contract": str(contract or ""),
-        "diffusers": libs.get("diffusers", ""),
-        "transformers": libs.get("transformers", ""),
-        "image_digest": str(image_digest or ""),
+        "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
+        "toolchain": facts_digest(dict(cc.toolchain_digest())),
+        "code_closure": facts_digest(
+            dict(cc.static_code_closure(tuple(closure_roots)))),
     })
 
 
@@ -220,13 +221,24 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     a stamp can never disagree with the axes it summarizes. Raises
     :class:`CellKeyError` for artifacts that don't record every required axis
     (pre-gw#581 cells have no key and stay on the legacy verify path).
+
+    EXPORTED (``aot-inductor``) cells are refused here BY NAME (pgw#735): they
+    ride the same ck5 key space — the axis names are what :func:`from_axes`
+    validates, and the kind is an envelope value, so no scheme bump was needed —
+    but their axes are not an inductor cache's, and their key is STAMPED at mint.
+    Read ``meta["cell_key"]``; do not recompute an exported cell's identity from
+    these fields.
     """
     kind = str(meta.get("kind") or "")
+    if kind == "aot-inductor":
+        raise CellKeyError(
+            "artifact kind 'aot-inductor' (exported .pt2) has a STAMPED key — "
+            "read meta['cell_key'] instead of recomputing from inductor-cache "
+            f"axes (stamped={str(meta.get('cell_key') or '') or 'MISSING'})")
     if kind != "torch-inductor-cache":
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
     from . import env_seal
 
-    libs = meta.get("libs") or {}
     mode = str(meta.get("compile_mode") or "whole")
     contract_facts = meta.get("shape_contract")
     if not isinstance(contract_facts, dict) or not contract_facts:
@@ -237,8 +249,16 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     seal = meta.get(env_seal.SEAL_KEY)
     if not isinstance(seal, dict) or not seal:
         raise CellKeyError(
-            "artifact records no env_seal block (pre-ck4 cell); no key "
-            "identity — its execution environment is unproven"
+            "artifact records no env_seal block; no key identity — its "
+            "execution environment is unproven"
+        )
+    toolchain = meta.get("toolchain")
+    closure = meta.get("code_closure")
+    if not isinstance(toolchain, dict) or not toolchain \
+            or not isinstance(closure, dict) or not closure:
+        raise CellKeyError(
+            "artifact records no toolchain/code_closure blocks (pre-ck5 "
+            "cell); no recipe identity"
         )
     return from_axes({
         "format": str(meta.get("format") or ""),
@@ -250,15 +270,10 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         ),
         "mode": "" if mode == "whole" else mode,
         "sm": str(meta.get("sm") or ""),
-        "cuda": str(meta.get("cuda") or ""),
-        "torch": str(meta.get("torch") or ""),
-        "triton": str(meta.get("triton") or ""),
-        "gen_worker": str(meta.get("gen_worker") or ""),
-        "env_seal": env_seal.seal_digest(seal),
         "contract": contract_digest(contract_facts),
-        "diffusers": str(libs.get("diffusers") or ""),
-        "transformers": str(libs.get("transformers") or ""),
-        "image_digest": str(meta.get("image_digest") or ""),
+        "env_seal": env_seal.seal_digest(seal),
+        "toolchain": facts_digest(toolchain),
+        "code_closure": facts_digest(closure),
     })
 
 
@@ -306,6 +321,7 @@ __all__ = [
     "CellKeyError",
     "compute",
     "contract_digest",
+    "facts_digest",
     "from_artifact_metadata",
     "from_axes",
     "is_key",

@@ -41,11 +41,13 @@ compiled from — informational, never part of the match.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import contextvars
 import ctypes
 import filecmp
 import functools
+import importlib.util
 import gzip
 import hashlib
 import io
@@ -62,7 +64,7 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import inspect
 import pickle
@@ -755,46 +757,149 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     }
 
 
-# The packages whose LOADED source files form a cell's code closure: the
-# graph-shaping code (gen_worker) and the model libraries whose python is
-# traced into the graphs. Version axes stay in the key for exact lookup;
-# the closure is the CHANGE-DETECTION identity (Paul's ruling, th#1229).
-_CLOSURE_PACKAGES = ("gen_worker", "diffusers", "transformers")
+# --- static code closure (ck5 recipe identity, Paul's exact-identity
+# ruling) -------------------------------------------------------------------
+#
+# "Look at our code and say 'this is the graph we need', ideally with pure
+# static analysis, and that is our unique identifier." The closure is the
+# import graph reachable from the compile/composition entrypoints, resolved
+# by AST inspection only (no execution): every reached source file is
+# content-digested, and the sorted (module-path, digest) list digests into
+# the ck5 ``code_closure`` axis. Paul's root-imports convention (top-of-file
+# imports, no runtime imports) is exactly what makes this static graph
+# SOUND — and the mint-time completeness gate below turns that convention
+# into a hard check where the key's honesty depends on it.
+
+_CLOSURE_ENTRYPOINTS = (
+    "gen_worker.compile_cache",
+    "gen_worker.guard_closure",
+    "gen_worker.cell_key",
+    "gen_worker.env_seal",
+    "gen_worker.models.loading",
+    "gen_worker.models.provision",
+    "gen_worker.models.memory",
+)
 
 
 @functools.lru_cache(maxsize=8192)
 def _closure_file_digest(path: str, mtime_ns: int, size: int) -> str:
     """Content digest of one closure file; keyed on (path, mtime, size) so
-    repeated metadata calls never re-read unchanged files."""
+    repeated key computations never re-read unchanged files."""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def code_closure() -> Tuple[Tuple[str, str], ...]:
-    """pgw#700 FAST tier: the source files ACTUALLY LOADED from the
-    trace-relevant packages, each content-digested — recorded dependencies,
-    never declared versions (guard-closure philosophy applied to code
-    identity). Recorded at mint into metadata; a consumer digests ITS
-    copies of the recorded file set (:func:`gen_worker.equivalence.
-    closure_delta`) and adopts on all-identical with no probe mint and no
-    manifest comparison. Paths are module-derived (``pkg/mod.py``), never
-    absolute — venv layout must not enter the identity."""
+def _module_source(name: str) -> Optional[Path]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return None
+    if spec is None or not spec.origin or not spec.origin.endswith(".py"):
+        return None
+    return Path(spec.origin)
+
+
+def _static_imports(path: Path, module_name: str) -> set[str]:
+    """Absolute module names imported by ``path``, by AST inspection."""
+    try:
+        tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError):
+        return set()
+    package = module_name if path.name == "__init__.py" \
+        else module_name.rsplit(".", 1)[0] if "." in module_name else ""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                parts = package.split(".") if package else []
+                if node.level > 1:
+                    parts = parts[: len(parts) - (node.level - 1)]
+                base = ".".join(parts)
+            else:
+                base = node.module or ""
+            if node.level and node.module:
+                base = f"{base}.{node.module}" if base else node.module
+            if base:
+                out.add(base)
+                # `from pkg import mod` — mod may itself be a module.
+                out.update(f"{base}.{alias.name}" for alias in node.names)
+    return out
+
+
+@functools.lru_cache(maxsize=32)
+def static_code_closure(roots: Tuple[str, ...] = ()) -> Tuple[Tuple[str, str], ...]:
+    """The recipe's code identity: sorted (module path, content digest) of
+    every source file statically reachable from the compile entrypoints
+    (plus ``roots`` — the ENDPOINT modules, whose source shapes the traced
+    graphs too). Restricted to the gen_worker package and the root
+    packages; torch/diffusers/transformers content rides the ``toolchain``
+    axis at package granularity instead. Deterministic: module-derived
+    relative paths, sorted, content digests — never absolute paths, never
+    bytecode."""
+    packages = {"gen_worker"} | {r.split(".", 1)[0] for r in roots if r}
+    queue: List[str] = list(_CLOSURE_ENTRYPOINTS) + [r for r in roots if r]
+    seen: set[str] = set()
     out: Dict[str, str] = {}
-    for name, module in sorted(sys.modules.items()):
-        root = name.split(".", 1)[0]
-        if root not in _CLOSURE_PACKAGES or module is None:
+    while queue:
+        name = queue.pop()
+        if name in seen or name.split(".", 1)[0] not in packages:
             continue
-        file = getattr(module, "__file__", None)
-        if not file or not str(file).endswith(".py"):
+        seen.add(name)
+        # Parent packages execute on import: they are part of the closure.
+        if "." in name:
+            queue.append(name.rsplit(".", 1)[0])
+        path = _module_source(name)
+        if path is None:
             continue
-        path = Path(file)
         rel = name.replace(".", "/") + (
             "/__init__.py" if path.name == "__init__.py" else ".py")
         try:
             st = path.stat()
-            out[rel] = _closure_file_digest(str(path), st.st_mtime_ns, st.st_size)
         except OSError:
             continue
+        out[rel] = _closure_file_digest(str(path), st.st_mtime_ns, st.st_size)
+        queue.extend(_static_imports(path, name))
     return tuple(sorted(out.items()))
+
+
+def closure_completeness_gap(roots: Tuple[str, ...] = ()) -> List[str]:
+    """Loaded modules inside the composition namespaces that the static
+    import walk cannot see. NOT a mint gate (Paul's ck6 ruling demoted the
+    closure to a possible future memo — this check's only job was memo
+    honesty, so it rides the deferred memo issue): kept as diagnostics for
+    that issue. Note the live finding it produced: executor-side models/*
+    modules (disk_gc, lane_gate, ...) load outside the composition walk,
+    so any future memo scope must be the walk's namespaces, not the
+    package prefix."""
+    static = {rel for rel, _digest in static_code_closure(tuple(roots))}
+    scope_prefixes = ("gen_worker.models",) + _CLOSURE_ENTRYPOINTS + tuple(
+        r for r in roots if r)
+    gaps: List[str] = []
+    for name, module in sorted(sys.modules.items()):
+        if module is None:
+            continue
+        if not any(name == p or name.startswith(p + ".")
+                   for p in scope_prefixes):
+            continue
+        file = getattr(module, "__file__", None)
+        if not file or not str(file).endswith(".py"):
+            continue
+        rel = name.replace(".", "/") + (
+            "/__init__.py" if Path(str(file)).name == "__init__.py" else ".py")
+        if rel not in static:
+            gaps.append(name)
+    return gaps
+
+
+def assert_closure_complete(roots: Tuple[str, ...] = ()) -> None:
+    gaps = closure_completeness_gap(roots)
+    if gaps:
+        raise RuntimeError(
+            f"code-closure completeness gate (ck5): {len(gaps)} loaded "
+            f"module(s) outside the static import closure — a dynamic "
+            f"import is hiding trace-relevant code from the recipe key: "
+            f"{gaps[:10]!r}")
 
 
 @functools.lru_cache(None)
@@ -816,9 +921,12 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     try:
         import importlib.metadata
 
+        # ck5: diffusers/transformers/peft ride here at package granularity
+        # (their VERSION axes left the key; content replaces them).
+        wanted = ("torch", "triton", "diffusers", "transformers", "peft")
         for dist in importlib.metadata.distributions():
             name = str(dist.metadata.get("Name") or "").lower()
-            if name in ("torch", "triton") or name.startswith("nvidia-"):
+            if name in wanted or name.startswith("nvidia-"):
                 record = dist.read_text("RECORD") or ""
                 out[name] = hashlib.sha256(record.encode()).hexdigest()[:16]
     except Exception:
@@ -839,14 +947,12 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
 
 @functools.lru_cache(None)
 def content_keys() -> Tuple[Tuple[str, str], ...]:
-    """torch/triton CONTENT identity (cache-design review §6.5): version
-    strings cannot detect a patched wheel — upstream hashes source bytes
-    (``torch_key``: the whole torch package; ``triton_key``: per-file shas +
-    the libtriton binary). Recorded in metadata, NOT the key: for the fleet
-    ``image_digest`` already pins userspace by content, but local self-mints
-    (gw#555) have no image identity, and pgw#700 equivalence adoption makes
-    byte-match of these a PRECONDITION before ``image_digest`` may be
-    relaxed (see also pgw#711/R3 toolchain_digest)."""
+    """torch/triton CONTENT identity as upstream computes it (cache-design
+    review §6.5: ``torch_key`` hashes the whole torch package's bytes;
+    ``triton_key`` per-file shas + the libtriton binary). Recorded in
+    metadata for observability/forensics — the ck5 key's content identity
+    for the same stack rides the ``toolchain`` axis (dist-info RECORDs +
+    tool binaries), which is cheaper and covers the cuda runtime too."""
     out: Dict[str, str] = {"torch": "", "triton": ""}
     try:
         from torch._inductor.codecache import torch_key
@@ -891,7 +997,8 @@ def artifact_metadata(
     storage the binding REQUESTED — informational only. ``weight_lane`` is the
     lane the built pipeline ACTUALLY traced under (gw#534:
     ``loading.pipeline_weight_lane`` — "" plain-resident, "fp8-hooks"
-    layerwise-cast; the hooks are traced INTO the graphs, ie#381) and is
+    fp8-resident weights with a per-layer upcast, traced INTO the graphs
+    (ie#381; pgw#727 made that structure instead of hooks) and is
     parity-checked at :func:`enable` like ``low_vram_mode``. Shape rows are
     (w, h) or (w, h, frames); ``guidance_scales`` records the image CFG /
     no-CFG graph classes captured for every 2-D row — see ``Compile``."""
@@ -920,12 +1027,16 @@ def artifact_metadata(
         # pgw#696: the execution-environment seal rides verbatim — the ck4
         # env_seal axis is recomputed FROM it, never trusted as a stamp.
         env_seal.SEAL_KEY: env_seal.effective_seal(),
-        # review §6.5 / pgw#710 / pgw#700 fast tier: content identity of the
-        # compile stack + the loaded code closure (equivalence adoption
-        # evidence) — metadata only, never key axes.
+        # ck5 recipe facts: toolchain + static code closure feed the key
+        # axes (recomputed from these blocks, never trusted as stamps);
+        # content_keys stay observability (review §6.5). Endpoint closure
+        # roots ride in when the executor passes them (train-lane wiring).
         "content_keys": dict(content_keys()),
         "toolchain": dict(toolchain_digest()),
-        "code_closure": dict(code_closure()),
+        "code_closure": dict(static_code_closure()),
+        # pgw#719: the per-library list behind the seal's combined
+        # loaded_libs digest — a mismatch names the library.
+        "loaded_libs": dict(env_seal.frozen_library_digests()),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
@@ -1049,6 +1160,91 @@ def _ptx_jit_gaps(
     return gaps
 
 
+def _inductor_cache_config() -> Dict[str, Any]:
+    """The inductor cache flags that decide whether a compile could have
+    written a reusable entry AT ALL. Read live, never assumed: on 2.13
+    ``bundle_triton_into_fx_graph_cache`` defaults True, which moves triton
+    artifacts INSIDE the fx entry and therefore changes what lands on disk."""
+    facts: Dict[str, Any] = {}
+    # Never trigger a FRESH heavy import from a diagnostic: importing
+    # torch._inductor runs cache_dir(), which mkdirs TORCHINDUCTOR_CACHE_DIR
+    # and raises on an unwritable one — leaving a half-initialized module that
+    # poisons every later import (measured: the mega-cache artifact factory
+    # double-registers). By pack time inductor is always imported anyway; if it
+    # is not, its config was never consulted and has nothing to explain.
+    if "torch._inductor.config" not in sys.modules:
+        return facts
+    try:
+        from torch._inductor import config as inductor_config
+
+        for name in ("fx_graph_cache", "force_disable_caches",
+                     "bundle_triton_into_fx_graph_cache", "freezing"):
+            facts[name] = getattr(inductor_config, name, "?")
+    except Exception:  # noqa: BLE001 — a diagnostic must never raise
+        logger.debug("compile-cache: inductor config unreadable", exc_info=True)
+    return facts
+
+
+def _capture_forensics(capture: Path, pipe: Any = None) -> str:
+    """Why a pack refusal happened, IN the refusal itself.
+
+    First-real-pod audit: the first real-GPU mint ran its whole plan and was
+    refused at pack for both functions, and the verbatim reason was LOST (the
+    hub persists no typed worker events) — one pod run per refusal. Every pack
+    refusal now carries the facts that discriminate its candidate causes, so
+    ONE run settles which gate fired and why:
+
+    * ``latched`` — did the compile write HERE, or is inductor pointed
+      somewhere else (gw#608's class);
+    * ``tree`` — what DID land, per subdir, with counts;
+    * ``inductor`` — was caching disabled, bypassed or bundled;
+    * ``proof``/``process`` — did this process compile at all, or reuse
+      in-process compiled code and write nothing (pgw#604's class).
+
+    Never raises: a diagnostic that can fail is a second lost refusal.
+    """
+    parts: List[str] = [f"capture={capture}"]
+    try:
+        want = {str(Path(capture) / sub) for sub in ("inductor", "triton")}
+        live = {
+            env: os.environ.get(env, "")
+            for env in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR")
+        }
+        parts.append(
+            "latched=" + ("yes" if set(live.values()) == want else "NO")
+            + " " + " ".join(f"{k}={v or '-'}" for k, v in sorted(live.items()))
+        )
+        tree: List[str] = []
+        for sub in ("inductor", "triton"):
+            base = Path(capture) / sub
+            if not base.is_dir():
+                tree.append(f"{sub}:absent")
+                continue
+            children = sorted(p for p in base.iterdir())
+            if not children:
+                tree.append(f"{sub}:empty")
+            for child in children:
+                count = sum(1 for p in child.rglob("*") if p.is_file()) \
+                    if child.is_dir() else 1
+                tree.append(f"{sub}/{child.name}:{count}")
+        parts.append("tree=[" + ", ".join(tree) + "]")
+        config_facts = _inductor_cache_config()
+        if config_facts:
+            parts.append("inductor=" + " ".join(
+                f"{k}={v}" for k, v in sorted(config_facts.items())))
+        if pipe is not None:
+            parts.append(
+                f"proof=hits:{cache_hit_count(pipe)} "
+                f"misses:{cache_miss_count(pipe)}")
+        counters = inductor_counters()
+        if counters:
+            parts.append("process=" + " ".join(
+                f"{k}:{v}" for k, v in sorted(counters.items())))
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("compile-cache: capture forensics failed", exc_info=True)
+    return " | ".join(parts)
+
+
 def pack(cache_root: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
     """Deterministic artifact from a capture root holding ``inductor/`` and
     ``triton/``: sorted entries, zeroed times/owners, gzip mtime 0 — identical
@@ -1069,9 +1265,18 @@ def pack(cache_root: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
     if gaps:
         shown = "; ".join(gaps[:10])
         more = f" (+{len(gaps) - 10} more)" if len(gaps) > 10 else ""
+        # The gate's own census rides the refusal: a real PTX exposure and a
+        # false gap (e.g. cubins bundled into the fx entry rather than written
+        # beside the ptx) look identical without these counts.
+        ptx = sum(1 for p in files if p.suffix == ".ptx")
+        cubin = sum(1 for p in files if p.suffix == ".cubin")
+        config_facts = _inductor_cache_config()
         raise RuntimeError(
             f"cubin-completeness gate (pgw#698): {len(gaps)} kernel(s) "
-            f"would rely on driver PTX JIT — {shown}{more}")
+            f"would rely on driver PTX JIT — {shown}{more} "
+            f"[census: {ptx} ptx, {cubin} cubin, {len(files)} files, "
+            f"sm={metadata.get('sm') or '-'}, bundle_triton="
+            f"{config_facts.get('bundle_triton_into_fx_graph_cache', '?')}]")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as raw:
@@ -1190,13 +1395,14 @@ def _install_fx_system_shim() -> None:
 
 
 def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
-    """Digest of the axes we will NEVER relax (format|kind|family|lane|mode|
+    """Digest of the SEMANTIC identity (format|kind|family|lane|mode|
     contract) — bound into every inner torch.compile key via
     ``cache_key_tag`` (review §6.3), so a delivered cell's entries are
     mechanically unconsumable by a process whose declared semantic identity
-    differs. Environment axes (sm/cuda/torch/triton/gen_worker/image_digest/
-    env_seal) are deliberately EXCLUDED or pgw#700 equivalence adoption
-    across conservative axes becomes impossible."""
+    differs. Environment facts are deliberately excluded: the inner FX key
+    already hashes them natively (system info, config, dtypes) and the ck5
+    outer key pins them via env_seal/toolchain/code_closure — the tag's job
+    is semantics only."""
     lane = cell_key._canonical_lane(
         pipeline_weight_lane(pipeline),
         int(getattr(cfg, "lora_bucket", 0) or 0))
@@ -1955,7 +2161,8 @@ def _direct_tensor_schema(module: Any) -> list[list[Any]]:
 
 def _module_hooks(module: Any) -> Dict[str, int]:
     """Hook PRESENCE per module (pgw#697): installed hooks are traced into
-    the compiled graphs (fp8 layerwise-cast is hook-driven, ie#381), so a
+    the compiled graphs (the offload rung's windows, and — until pgw#727
+    restructured it into module types — the fp8 cast, ie#381), so a
     hook-count drift is a composition drift. Counts only — never hook
     identities or closures."""
     out: Dict[str, int] = {}
@@ -3022,6 +3229,29 @@ def artifact_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
             guard_closure.assert_posture(sealed, label="arm")
         except guard_closure.PostureError as exc:
             return str(exc)
+    # pgw#719 (config half): the cell's recorded env seal must be the LIVE
+    # effective environment at arm time — posture is named above; every
+    # other seal fact (config flags, inductor digest, epoch, loaded libs)
+    # is named here. In practice the ck key already pins this (env_seal is
+    # an axis); the named drift makes a hand-delivered/foreign cell
+    # diagnosable instead of a silent inner-key miss.
+    sealed_env = meta.get(env_seal.SEAL_KEY)
+    if isinstance(sealed_env, dict) and sealed_env:
+        live_env = env_seal.effective_seal()
+        for fact in sorted(set(sealed_env) | set(live_env)):
+            if fact == "posture":
+                continue  # named by the manifest posture check above
+            cell_v, live_v = sealed_env.get(fact), live_env.get(fact)
+            if isinstance(cell_v, dict) and isinstance(live_v, dict):
+                for sub in sorted(set(cell_v) | set(live_v)):
+                    if cell_v.get(sub) != live_v.get(sub):
+                        return (
+                            f"env seal drift at arm: {fact}/{sub}: cell "
+                            f"{cell_v.get(sub)!r} != process {live_v.get(sub)!r}")
+            elif cell_v != live_v:
+                return (
+                    f"env seal drift at arm: {fact}: cell {cell_v!r} != "
+                    f"process {live_v!r}")
     return ""
 
 
@@ -3324,9 +3554,10 @@ def build(
     inductor+triton caches as a per-SKU artifact.
 
     ``storage_dtype`` mirrors the serving binding's weight-storage lane
-    (gw#389 fp8 layerwise casting): the cast hooks are traced INTO the FX
-    graphs, so a cell for an fp8-served model must be built from an
-    fp8-loaded pipeline or every request misses the cache (ie#381).
+    (gw#389 fp8 storage): the per-layer upcast is traced INTO the FX graphs
+    (as module types since pgw#727), so a cell for an fp8-served model must be
+    built from an fp8-loaded pipeline or every request misses the cache
+    (ie#381).
 
     ``pipeline_class`` (gw#586) names the diffusers pipeline class the
     SERVING endpoint declares (e.g. ``"LTX2ConditionPipeline"``). The traced
@@ -3449,6 +3680,10 @@ def build(
 
     # pgw#681: guard-closure gate — the platform build fails red on any
     # guard the declared contract does not pin, naming the variable.
+    # pgw#719: the environment this capture traced under must still be the
+    # BOOT environment — drift (endpoint code mutating config/env behind
+    # our back) fails the mint red, naming the fact.
+    env_seal.assert_seal_unchanged("mint")
     guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
 
     graph_signature, weight_contract = execution_contract(pipe, cfg)
@@ -3566,6 +3801,10 @@ def mint_artifact(
 
     # pgw#681: guard-closure gate — a leak fails the mint red, naming the
     # variable; the manifest rides the cell as its dependency dump.
+    # pgw#719: the environment this capture traced under must still be the
+    # BOOT environment — drift (endpoint code mutating config/env behind
+    # our back) fails the mint red, naming the fact.
+    env_seal.assert_seal_unchanged("mint")
     guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
 
     # gw#564: record the execution contract exactly like the production
@@ -3672,8 +3911,8 @@ def finish_fleet_mint(
     if not captured:
         raise RuntimeError(
             "self-mint proof passed but captured nothing under "
-            "TORCHINDUCTOR_CACHE_DIR — was inductor already latched to "
-            "another dir in this process?"
+            "TORCHINDUCTOR_CACHE_DIR — the compile did not write here. "
+            + _capture_forensics(capture, pipe)
         )
     # gw#608 hardening: a minting boot proves its EXECUTION; this asserts
     # its ARTIFACT. The pack must contain the FX-graph entries the proof's
@@ -3688,20 +3927,27 @@ def finish_fleet_mint(
     if fx_entries <= 0:
         raise RuntimeError(
             "self-mint capture contains NO FX-graph cache entries — the "
-            "compile output landed outside the capture dir; refusing to "
-            "publish an unservable cell"
+            f"compile wrote {len(captured)} other file(s) here but no fx "
+            "entry, so either the fx cache was bypassed/disabled or nothing "
+            "re-compiled in this process; refusing to publish an unservable "
+            "cell. " + _capture_forensics(capture, pipe)
         )
     if expected_graphs > 0 and fx_entries < expected_graphs:
         raise RuntimeError(
             f"self-mint capture holds {fx_entries} FX-graph entrie(s) but "
             f"the warmup proof compiled {expected_graphs} graph(s) — "
-            "partial capture, refusing to publish"
+            "partial capture, refusing to publish. "
+            + _capture_forensics(capture, pipe)
         )
 
     # pgw#681: the guard-closure gate. The proof confirmed the graphs SERVE;
     # this confirms they depend on NOTHING the contract does not pin — an
     # out-of-contract guard fails the mint red, naming the variable. The
     # returned manifest rides the cell as its dependency dump.
+    # pgw#719: the environment this capture traced under must still be the
+    # BOOT environment — drift (endpoint code mutating config/env behind
+    # our back) fails the mint red, naming the fact.
+    env_seal.assert_seal_unchanged("mint")
     guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
 
     # gw#564: record the execution contract exactly like the production

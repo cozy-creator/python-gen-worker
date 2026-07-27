@@ -80,3 +80,38 @@ def _fresh_cell_ledgers():
     _clear()
 
 
+
+
+@pytest.fixture(autouse=True)
+def _fresh_boot_seal():
+    """pgw#719 boot seal is process-lifetime in production (one boot, one
+    environment); tests legitimately vary global torch state per test, so
+    each test gets a fresh lazy boot — a mint in one test must never drift
+    against a boot seal adopted under another test's transient flags."""
+    from gen_worker import env_seal as _es
+
+    _es._BOOT_SEAL = None
+    yield
+    _es._BOOT_SEAL = None
+
+
+@pytest.fixture(autouse=True)
+def _fresh_receipt_gate():
+    """pgw#709's receipt gate is armed once at HelloAck and stays configured
+    for the process — correct in production, poison in a suite: any test that
+    walks a HelloAck path leaves the gate armed, and from then on EVERY later
+    test's delivered artifact is refused (no receipt on a unit fixture) and
+    silently dropped to ``artifact=None``.
+
+    That is the whole mechanism behind the long-standing order-dependent
+    flux/trt cluster: `provision.enable_compiled` drops the refused artifact
+    and falls through to the inductor lane, so `test_trt_engine`'s dispatch
+    assertion sees ``{'cc': None}`` instead of the TRT engine, and the
+    executor-adopt hit-counter tests lose their delivered cell. Those tests
+    passed in isolation and failed only after an earlier file armed the gate.
+    """
+    from gen_worker import receipts as _receipts
+
+    _receipts.reset()
+    yield
+    _receipts.reset()

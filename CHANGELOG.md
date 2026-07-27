@@ -1,5 +1,254 @@
 # Changelog
 
+## 0.76.0 (2026-07-27) — P0: every self-mint fleet-wide was refused at pack; plus the ck5->ck6 identity arc, the AOT lanes (dark), and the fp8 restructure
+
+### P0 (pgw#733): guard sources resolve their EMBEDDED root — no cell could be published, on any family
+
+The headline, and the reason this train exists. `guard_closure._source_root`
+prefix-matched `^L['name']`, but torch 2.13 emits class/code-structure guards whose
+sources CONTAIN a root without starting with it:
+`dict(type(L['self']).__mro__[1].__dict__)` for a base-class `@property` (diffusers
+`ConfigMixin.config`, read in every model's forward) and
+`type(L['self']._modules['x']).__dict__['forward'].__defaults__` for a submodule
+forward with a default argument. Both fell through to the `"other"` root, which LEAKS
+**before** the type dispatch that already covers them — so `assert_closure` raised
+inside every mint's pack window and every self-mint on every family was refused
+(`self_mint_abort phase=pack_failed`), independent of sm, dtype, lane and function.
+Every family inherits `ModelMixin`+`ConfigMixin` and calls default-arg submodules, so
+nothing escaped it; the 26 existing tapes stayed green because their fixtures are plain
+modules with plain attributes and no default args.
+
+- `_source_root` now resolves the root embedded anywhere in a derived source, `self`
+  winning when present. The closed world is unchanged: a source with no recognizable
+  root is still `"other"`, still a leak.
+- Freevar-rooted guards share the input dispatch; only the LEAK REASON gains the freevar
+  naming. Production DOES trace a wrapper closing over `forward_fn`/`kwargs_name` —
+  classifying those as leaks would have refused every real mint a second way. A captured
+  code object is code (pinned by `code_closure`+`toolchain`); a captured runtime scalar
+  still leaks, now named as a freevar.
+- Verified on a real diffusers `UNet2DConditionModel`: 9-11 LEAK rows +
+  `GuardClosureError` -> CLOSED, `assert_closure` PASSES. A new CPU tape compiles a real
+  hierarchy carrying both triggers — the net the toy tapes never provided.
+
+### Pack refusals diagnose themselves (pgw#733)
+
+A refusal that exists only while the pod lives is a silent failure to the OPERATOR: the
+first real-GPU mint's reason died with the pod and cost a full run. Every pack refusal
+now carries `latched=yes/NO` with the live cache dirs (answering gw#608's question with
+evidence instead of asking it rhetorically), the capture `tree=[...]` per subdir with
+counts, inductor's cache flags (`fx_graph_cache`, `force_disable_caches`,
+`bundle_triton_into_fx_graph_cache` — True by default on 2.13, which moves triton
+artifacts INSIDE the fx entry), and the pipeline's own FX hit/miss proof counts. The
+pgw#698 cubin gate carries its census (ptx/cubin counts, sm, bundle flag) so a real PTX
+exposure and a bundling artifact are distinguishable. Reading inductor's config never
+triggers a fresh import — that mkdirs `TORCHINDUCTOR_CACHE_DIR` and can leave a
+half-initialized module behind (measured: the mega-cache artifact factory
+double-registers).
+
+### Three genericity defects (pgw#740)
+
+- `convert/repackage.detect_diffusers_family` routed the SDXL two-text-encoder signature
+  to the **SD1.5 converter**, silently, while `convert/layout.py` returned `"sdxl"` for
+  the identical signal. Detection fixed, plus an independent `ConverterSignatureError`
+  guard naming both sides, so a caller passing the wrong family cannot get the wrong
+  converter either.
+- `utils/lora._denoiser_fingerprint` digested UNet-only config fields, so **every DiT
+  fingerprinted to `"|||"`** — a normalized-split cache collision between structurally
+  different transformers. It now covers both shapes, with a structural fallback (a
+  fingerprint that resolves to nothing is a collision, not a key).
+- `models/memory`'s group-offload loop iterated a fixed component list, so Wan's
+  `transformer_2` and LTX's `connectors` were **never offloaded** while the caller was
+  told they were. Components are discovered now, and anything left resident is named in
+  a WARNING.
+
+### AOT lanes — new modules, INERT until invoked (pgw#721/#723/#725/#734/#735)
+
+`aot_serve.py` (consume a `.pt2`: B1 constants-bound gate + B2 ingress range assertion),
+`aot_mint.py`/`aot_package.py`/`aot_inputs.py` (export -> code-only `.pt2` -> gates ->
+keyed cell) and `models/lora_lifted.py` (rank-bucket adapters as call INPUTS). Nothing
+dispatches to them unless an `aot-inductor` cell arrives, so this ships dark. Two
+executor seams had to change for that path to be reachable at all: hot adoption
+dispatches on artifact KIND (an exported cell used to be handed to the dynamo stager),
+and the adoption proof is kind-aware — an exported artifact performs no FX lookup, so
+the `cache_hit_count > 0` gate could never pass for it. `aot_serve.proven_since` is the
+exported proof (executed since the sample AND still armed); no counter is ever
+synthesized, and dynamo keeps the FX-hit requirement verbatim.
+
+### (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
+
+Paul's exact-identity ruling chain (design of record: tracker pgw#716). This ships
+the ck5 INTERIM scheme; ck6 (graph-hash identity) follows per pgw#716-#720.
+
+- **KEY_SCHEME ck5**: the key is a recipe digest — format/kind/family/lane/mode/sm/
+  contract/env_seal/**toolchain**/**code_closure**. Every VERSION axis left the key
+  (torch/triton/cuda/gen_worker/diffusers/transformers/image_digest -> metadata
+  observability; content rides `toolchain` — dist-info RECORDs incl. diffusers/
+  transformers/peft + bundled ptxas/nvdisasm binary hashes — and
+  `code_closure` — the static import-graph closure from the compile entrypoints,
+  AST-resolved, sound under the root-imports convention). ck2/ck3/ck4 keys are dead.
+- **Equivalence adoption DELETED** (`gen_worker/equivalence.py`, its tests, the
+  designated-axes machinery): exact identity needs none of it. Kept as TRUST:
+  pgw#711 publish-complete digests (blake3 artifact + sha256 manifest), pgw#712
+  no-republish fence (`fleet_cells.ADOPTION_MARK`, defense-in-depth), toolchain
+  digests, `guard_closure.manifest_digest`.
+- `static_code_closure()` + `closure_completeness_gap()` retarget as the pgw#717
+  tier-2 recipe HANDLE and pgw#720 deferred-memo diagnostics (the completeness gate
+  was briefly a mint gate; removed — it false-fired on executor-side models/*
+  modules, recorded on pgw#720).
+- `cell_key.compute` drops `image_digest`, gains `closure_roots` (endpoint modules;
+  executor wiring rides the train lane).
+
+### Erase-and-impose env contract + seal v3 (pgw#718/#719)
+
+The worker OWNS its process environment. We no longer audit the world's env vars and
+refuse on surprises (the superseded pgw#696 allowlist — it bit a 0.70.3 boot on an
+informational base-image var); we ERASE and IMPOSE.
+
+- **`env_seal.scrub_env()`** — unconditionally deletes every var in the behavior
+  namespaces (`TORCH*`/`PYTORCH*`/`TRITON*`/`CUBLAS*`/`CUDNN*`/`NVIDIA_TF32*`/`OMP_*`/
+  `MKL_*`), known or unknown, BEFORE torch imports; logs the erased names; never fails.
+  Plumbing (CUDA_VISIBLE_DEVICES, paths, credentials) untouched.
+- **Typed knobs only** — `establish_config(overrides=...)`; a scrubbed var that turns
+  out to be needed becomes a knob, never an unscrub.
+- **CANONICAL_CONFIG is now the pgw#654 SERVING posture (TF32 on / precision "high")**.
+  This fixed a REAL latent bug the drift check surfaced: mints sealed TF32-OFF while
+  serving ran TF32-ON, diverging the inner FX key — **every sealed cell was unhittable
+  in serving**.
+- **Seal v3** — loaded-library manifest (`/proc/self/maps` -> the native `.so` set,
+  content-digested; closes the LD_PRELOAD/LD_LIBRARY_PATH hole), FROZEN AT BOOT so lazy
+  `dlopen` growth cannot re-key mints while substitution is still caught at point-of-use;
+  hash-seed facts recorded.
+- **Boot-vs-point-of-use** — `assert_seal_unchanged()` before every mint (all three mint
+  paths) and the config half of the arm-time `artifact_drift` check: endpoint code
+  mutating config behind our back is a NAMED refusal, never a silently different graph.
+
+### ck6 canonical graph identity — the hashing half (pgw#716)
+
+- **`gen_worker/graph_hash.py`** (new): one canonicalizer, two ingest paths — dynamo
+  `fx.GraphModule`s and `torch.export.ExportedProgram`s. Scrubs node/arg names, all
+  provenance meta, symbol names and device index; hashes ops, connectivity, literal
+  args, tensor meta, the export signature and pytree specs. **Weight VALUES never
+  key** (a fine-tune must share the graph).
+- **Symbolic-dim RANGES are in the hash** — the pgw#704 S8 soundness fix: three sdxl
+  exports differing only in declared range produced ONE node-only digest
+  (`9dd33abbc7617d98`), which would let a worker adopt a cell that refuses the traffic
+  its key promised. Covers the dynamo path (`ShapeEnv.var_to_range`) as well, since the
+  defect is identical for declared dynamic dims (pgw#702).
+- `combined_graph_hash()` — first 16 hex of sha256 over the newline-joined SORTED
+  per-class hashes; order-independent by construction.
+
+### fp8 storage is module STRUCTURE, not a cast hook (pgw#727, + pgw#726 slots)
+
+The w8a16 lane's weights still RESIDE in fp8 and still compute in bf16 — but the
+upcast now happens at the use site inside `forward` instead of by mutating
+`Parameter.data` at the forward boundary. Measured (pgw#704 S12-c, L4, real SDXL
+UNet): the hook form is compile-hostile (dynamo 386.5 vs eager 385.9 ms — a 0.2%
+regression for a 38.9s mint), the structural form is **14.8% faster under dynamo**
+and `torch.export` accepts it. This lands independent of the AOT migration.
+
+- New `models/fp8_storage.py`. `apply_fp8_storage` no longer calls diffusers'
+  `enable_layerwise_casting` for denoisers; it restructures the cast-eligible
+  leaves (class pun: `nn.Linear` -> `Fp8StorageLinear(nn.Linear)`, same object,
+  same FQNs, same state_dict keys, `isinstance` intact). Transformers text
+  encoders KEEP the `_Fp8WeightWindow` block hooks — they read weight dtype
+  outside the owning leaf (gw#460) and are not on any compiled path.
+- **Coverage is upstream's rule, mirrored and asserted** — same leaf set as
+  `_apply_layerwise_casting` (supported layers, default + model-declared skip
+  patterns, peft adapter names), with a set-equality tape against the installed
+  diffusers so upstream drift fails in CI, and a by-name refusal for any leaf
+  kind we cannot restructure. Narrower coverage would be a silent VRAM AND
+  numerics change.
+- **The `fp8-hooks` lane VALUE is unchanged** (wire-compatible; tensorhub maps it
+  to `w8a16`). The traced graph DOES change, and it shows up where it should:
+  module types and hook counts in `execution_contract` — new cell keys, no
+  cross-lane adoption in either direction.
+- fp8 weights are BUFFERS now, not parameters — diffusers resolves
+  `ModelMixin.dtype` from the first floating-point parameter and special-cases an
+  armed cast hook; drop the hook with fp8 parameters left behind and `model.dtype`
+  answers fp8, which breaks every denoiser that casts to `self.dtype` in forward
+  (`UNet2DModel.get_time_embed`, measured). Buffers restore the correct answer
+  with no hook and no property override.
+- Measured on CPU against the hook lane, real tiny UNets: identical coverage set,
+  **bitwise-equal outputs**, coverage parity on resident bytes. pgw#704's "+11.6%
+  VRAM" is not usable either way — that prototype swapped `nn.Linear` only,
+  leaving convs bf16-resident.
+- **The pun must rebind the outgoing Parameter, or VRAM goes UP ~50%.** A class
+  pun replaces the weight tensor OBJECT, so anything still holding the original
+  `Parameter` — accelerate device hooks, `low_cpu_mem_usage` bookkeeping, any
+  earlier `list(model.parameters())` — keeps the bf16 storage alive next to the
+  fp8 copy. An L4 measured fp8-storage 7.35 GB vs plain bf16 4.89 GB (**+50.3%**,
+  both copies resident); reproduced on CPU at +49.9%. `_to_storage_buffer` now
+  rebinds the outgoing Parameter onto the fp8 storage, restoring the hook lane's
+  property that every holder follows the cast. A module-only residency walk
+  cannot see this failure — the tape now holds the parameters the way a pod does.
+- `restructure_fp8_storage` releases the freed bf16 blocks to the driver
+  (`empty_cache`, never initializing CUDA): the fit ladder reads driver-level
+  free VRAM, so ~half a denoiser sitting in torch's caching allocator would make
+  the rung decision moments later see free VRAM as taken.
+- Latent bug fixed on the way: `apply_block_window_offload` re-moved just-parked
+  weights back onto the device whenever they were buffers (i.e. the w8a8 lane
+  today), so the degraded rung silently saved nothing.
+- **pgw#726**: `_Fp8ScaledLinear.lora_a`/`lora_b` are DECLARED `None` buffer slots
+  instead of plain attributes — `register_buffer` no longer has to pop `__dict__`
+  to get its tensors in, the FQNs are structural from construction, and a
+  branch-disable cycle keeps the slots declared.
+
+## 0.75.2 (2026-07-27) — pgw#737: the self-mint never takes the tenant request down again
+
+The ie#535 wan-2.2 1.3.1 go-live spent $2.61 and rendered zero frames. On both tiers and both
+80 GiB H100s the gw#587 fleet self-mint ran `inductor_compile` against a **~54.2 GiB resident
+bf16 MoE** (two 14B experts plus LoRA branch containers), OOMed its warm plan three times,
+and the **tenant request died with it** — 78.07 GiB peak, 26 of 40 denoise steps banked and
+lost, `JOB_STATUS_RETRYABLE`. The hub then re-dispatched that deterministic failure 5 times
+and bought a second H100 for it (th#1228 class, now priced).
+
+gw#587's premise — the serving worker's boot warmup IS a perfect mint by construction — holds
+only while the capture FITS. Nothing checked. Three fixes:
+
+- **A VRAM pre-budget, before anything is armed** (`gen_worker/mint_budget.py`). The gate sits
+  at the eager-first arm decision, not just in the background driver: enabling the routers is
+  already the first allocation of a capture (the boot warm's own forwards enqueue background
+  compiles). It is a MEASUREMENT, not a model of the graph — the CUDA peak high-water minus
+  the resident set is the largest transient the process has actually sustained (this family's
+  activation working set at serving shapes, once a forward has run; the driver re-checks after
+  the boot warm), floored by a quarter of the resident set. A mint needs two of those working
+  sets — its own seed forwards, plus what the capture retains for the tenant's next peak to
+  fit around — on top of a flat inductor working-set floor. Not fitting is not an error:
+  the targets go back to true eager, the branch lane is dropped, the allocator is emptied, the
+  cell stays ABSENT, and one structured line —
+  `mint_skipped reason=insufficient_vram headroom=24.99GiB needed~=31.10GiB resident=54.20GiB
+  activation=13.55GiB(measured)` — is logged and put on the wire as a typed
+  `self_mint_skipped` event. No env knob: a roomier config, or a smaller-resident flavor,
+  mints the same cell later.
+- **A survivable abort.** The mint is architecturally OFF the request (pgw#671 background
+  driver), so nothing banked is lost by an abort — what killed the tenant was the capture's
+  RESIDENT cost. Every mint terminal (declined, failed, OOM-aborted) now unwraps its targets,
+  closes their routers so no queued warm job can still compile onto the card, drops the branch
+  buffers and empties the allocator. An OOM'd seed pass re-budgets on the allocator state the
+  OOM just measured and declines instead of retrying into the tenant three more times. And
+  from the tenant's side (`_evict_mint_for_oom`): a request that OOMs with a mint in flight
+  EVICTS the mint — the one co-resident consumer this worker put on the card itself — and
+  re-runs on the clean allocator.
+- **Eager serving is a SUCCESS path.** The re-run request returns `JOB_STATUS_OK`, so there is
+  nothing for the hub's ladder to re-dispatch or buy a pod for, and a declined mint terminates
+  its `self_mint_compile` activity COMPLETED (a mint we declined is an outcome, not a worker
+  failure).
+
+Fence: `tests/test_mint_vram_budget_pgw737.py` — the wan-2.2 card declines and an sdxl-class
+residency on the same rig still mints; stubbing either fix turns the tapes red with the exact
+live symptoms (a capture attempted anyway / `JOB_STATUS_RETRYABLE: out of memory`).
+
+Proven on a real card (one L4, 22 GiB, `cozy-creator-tracker/scripts/pgw737/`, $0.27): with
+14.49 GiB resident the gate declines — `mint_skipped reason=insufficient_vram headroom=7.28GiB
+needed~=11.24GiB resident=14.49GiB activation=3.62GiB(estimated)` — zero captures are
+attempted, capture residue is 0.01 GiB and the request completes in 7.9s at an 18.5 GiB peak
+(the pre-forward estimate, 3.62 GiB, called the measured tenant activation of 4.0 GiB within
+10%). The same arm with the gate stubbed out mints, charges the tenant 1.01 GiB of retained
+capture and takes 17.3s; one rung tighter (16.04 GiB resident, 5.80 GiB free) the stubbed arm's
+request DIES `JOB_STATUS_RETRYABLE: out of memory` — the live wan-2.2 symptom — while the gated
+arm declines cleanly. A roomier card (8.5-11.6 GiB resident) mints in every arm: no false
+declines.
+
 ## 0.75.1 (2026-07-27) — the 0.71-0.75 promotion train stamp; pgw#700 arc + pgw#684 restore
 
 The batch train that publishes chaos 0.71.0 through 0.75.1 (PR #414). The pgw#715
@@ -338,18 +587,6 @@ entangled. Recorded in pgw#715 for its owner.
 
 
 ## 0.70.4 (2026-07-26) — pgw#696 P0 hotfix: the env gate killed every fleet pod
-
-0.70.3's `PYTORCH*` prefix widening + the boot-wired seal composed into a
-fleet-killer: the official `pytorch/pytorch` serving base stamps
-`PYTORCH_VERSION=2.13.0`, the gate refused it, and every pod exited
-pre-hello as a silent provider `pod_exited` (sdxl 0.2.12 was rolled back
-on prod). Build-info constants (`PYTORCH_VERSION`, `PYTORCH_BUILD_VERSION`,
-`PYTORCH_BUILD_NUMBER`) are allowlisted, and the seal now runs AFTER
-settings so a genuine refusal dials the hub as the typed `worker_fatal
-phase=env_seal` instead of dying dark. (Allowlist additions do not touch
-the seal digest — only present gated vars enter identity.)
-
-
 ## 0.70.3 (2026-07-26) — pgw#694 determinism hardening + cache-review fixes (ck4 keys, env-seal boot wiring, inner-FX sm shim)
 
 One train: the pgw#694 hardening set (chaos a73e6c8), its executor-side boot wiring (`entrypoint._establish_env_seal`), and the ML-cache-review fixes (chaos 23a34bd — the P0 inner-inductor-cache portability shim, B200-verified). ck3 -> ck4 is the second and final planned key-scheme bump; expect one `cell_exchange_key_split` alarm per (endpoint, family) and a one-time re-mint wave.

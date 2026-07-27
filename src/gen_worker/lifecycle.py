@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
+from . import receipts
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
@@ -367,6 +368,14 @@ class Lifecycle:
                 return
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
+        # pgw#709: arm the cell-receipt gate the moment the hub wiring
+        # exists — every delivered compile cell is signature-verified
+        # before it may arm. Same wiring moment as the CellPublisher's.
+        if self.executor.file_base_url:
+            receipts.configure(
+                base_url=self.executor.file_base_url,
+                worker_jwt=self.executor.worker_jwt_provider,
+            )
         # th#1087: the desired state advertises (release_id, config_gen).
         # Observe it (memory + snapshot file rewrite); parameter VALUES ride
         # RunJob stamps (class 1), bindings ride the desired-residency

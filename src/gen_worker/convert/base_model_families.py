@@ -1,72 +1,78 @@
-"""Civitai `baseModel` -> canonical family mapping.
+"""Foreign-catalog enum adapters — injected, never shipped.
 
-Used by the civitai ingest path (`convert/ingest.py`) to stamp
-`base_model_family` on the destination LoRA/checkpoint from the Civitai API's
-`baseModel` enum value.
+Civitai's ``baseModel`` enum is a *foreign catalog's* vocabulary: 46 keys
+mapping onto 35 canonical slugs, changing whenever civitai adds a base model.
+It has nothing to do with what a worker can execute, so pgw#740 (B13) moved the
+table out of the SDK: the ingest endpoint (or the hub catalog) injects it with
+:func:`declare_foreign_family_map` and the SDK only performs the lookup.
+
+An unmapped value returns ``None`` — the caller stamps nothing rather than
+guessing a family from a string it does not recognize.
 """
 
 from __future__ import annotations
 
+from threading import RLock
 from typing import Mapping, Optional
 
+_lock = RLock()
+_maps: dict[str, dict[str, str]] = {}
 
-_CIVITAI_TO_FAMILY: Mapping[str, str] = {
-    "SD 1.4": "sd14",
-    "SD 1.5": "sd15",
-    "SD 2.0": "sd2",
-    "SD 2.1": "sd2",
-    "SDXL 0.9": "sdxl",
-    "SDXL 1.0": "sdxl",
-    "SDXL Distilled": "sdxl-distilled",
-    "SDXL Turbo": "sdxl-turbo",
-    "SDXL Lightning": "sdxl-lightning",
-    "SDXL Hyper": "sdxl-hyper",
-    "Pony": "sdxl-pony",
-    "Illustrious": "sdxl-illustrious",
-    "Stable Cascade": "stable-cascade",
-    "SVD": "svd",
-    "SVD XT": "svd-xt",
-    "Playground v2": "playground-v2",
-    "PixArt a": "pixart-alpha",
-    "PixArt α": "pixart-alpha",
-    "PixArt Σ": "pixart-sigma",
-    "PixArt sigma": "pixart-sigma",
-    "Hunyuan 1": "hunyuan-1",
-    "Lumina": "lumina",
-    "Kolors": "kolors",
-    "AuraFlow": "auraflow",
-    "Flux.1 D": "flux1-dev",
-    "Flux.1 S": "flux1-schnell",
-    "Flux.2": "flux.2-klein-4b",
-    "SD 3": "sd3-medium",
-    "SD 3.5": "sd35-medium",
-    "SD 3.5 Medium": "sd35-medium",
-    "SD 3.5 Large": "sd35-large",
-    "SD 3.5 Large Turbo": "sd35-large-turbo",
-    "Flux.2 Klein 9B": "flux.2-klein-9b",
-    "Flux.2 Klein 9B-base": "flux.2-klein-9b",
-    "ZImageTurbo": "z-image-turbo",
-    "ZImageBase": "z-image",
-    "Qwen": "qwen-image",
-    "Ernie": "ernie",
-    "Anima": "anima",
-    "NoobAI": "sdxl-illustrious",
-    "SD 1.5 LCM": "sd15",
-    "SDXL 1.0 LCM": "sdxl",
-    "Wan Video 2.2 I2V-A14B": "wan22",
-    "Wan Video 2.2 T2V-A14B": "wan22",
-    "Wan Video 2.2 TI2V-5B": "wan22",
-    "Other": "other",
-}
+CIVITAI = "civitai"
+
+
+def declare_foreign_family_map(
+    source: str, mapping: Mapping[str, str], *, replace: bool = False
+) -> None:
+    """Inject one foreign catalog's ``enum value -> canonical family`` table.
+
+    Keys are matched case-sensitively after stripping, exactly as the upstream
+    API emits them.
+    """
+    name = str(source or "").strip().lower()
+    if not name:
+        raise ValueError("foreign family map needs a source name")
+    table = {str(k).strip(): str(v).strip() for k, v in mapping.items() if str(k).strip()}
+    with _lock:
+        if name in _maps and not replace:
+            _maps[name].update(table)
+        else:
+            _maps[name] = table
+
+
+def foreign_to_family(source: str, value: str) -> Optional[str]:
+    """Map a foreign catalog's enum value onto the canonical family, or None."""
+    name = str(source or "").strip().lower()
+    key = str(value or "").strip()
+    if not key:
+        return None
+    with _lock:
+        return _maps.get(name, {}).get(key)
 
 
 def civitai_to_family(value: str) -> Optional[str]:
-    """Map a Civitai `baseModel` enum value to the canonical family.
-    Returns None for unrecognized inputs."""
-    s = str(value or "").strip()
-    if not s:
-        return None
-    return _CIVITAI_TO_FAMILY.get(s)
+    """Map a Civitai ``baseModel`` enum value to the canonical family.
+    Returns None for unrecognized inputs, and for every input until the ingest
+    endpoint has injected the table."""
+    return foreign_to_family(CIVITAI, value)
 
 
-__all__ = ["civitai_to_family"]
+def registered_foreign_sources() -> tuple[str, ...]:
+    with _lock:
+        return tuple(sorted(_maps))
+
+
+def reset_foreign_family_maps() -> None:
+    """Tests only."""
+    with _lock:
+        _maps.clear()
+
+
+__all__ = [
+    "CIVITAI",
+    "civitai_to_family",
+    "declare_foreign_family_map",
+    "foreign_to_family",
+    "registered_foreign_sources",
+    "reset_foreign_family_maps",
+]

@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 import msgspec
 
 from . import activity as activity_mod
+from . import mint_budget
 from . import progress as progress_mod
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
@@ -2239,6 +2240,21 @@ class _ClassRecord:
 
 class _MintAbandoned(Exception):
     """The background mint was asked to stop (adoption/vacate/shutdown)."""
+
+
+class _MintDeclined(Exception):
+    """pgw#737: the mint refused itself — it cannot capture on this card
+    without taking the tenant down with it. NOT a failure: serving is eager,
+    the cell stays absent, and a roomier config mints it later."""
+
+    def __init__(
+        self, reason: str, budget: "mint_budget.MintBudget",
+        detail: str = "",
+    ) -> None:
+        self.reason = reason
+        self.budget = budget
+        line = budget.line("mint_skipped", reason)
+        super().__init__(f"{line}; {detail}" if detail else line)
 
 
 class _SeedPreempted(Exception):
@@ -4948,7 +4964,7 @@ class Executor:
         proven). The hot-adopt path never passes it: a NEW cell on a live
         instance requires its own full proof.
         """
-        from . import compile_cache, trt_engine
+        from . import aot_serve, compile_cache, trt_engine
         from . import warmup as warmup_mod
 
         jobs, skips = self._warmup_plan(spec, rec)
@@ -4985,10 +5001,17 @@ class Executor:
                 "(contract-keyed warm memory holds %d graph keys)",
                 spec.name, warm_mode, len(run_jobs), len(jobs), len(memory))
         evidence = _WarmupEvidence()
+        # pgw#735: three compiled backends, three proofs. Dynamo proves by FX
+        # cache hits, TRT by engine executions, an EXPORTED artifact by its own
+        # invocations — an exported cell performs no FX lookup at all, so a
+        # cache-hit requirement would score every honest .pt2 adoption as a
+        # failure. Never synthesize a hit counter for it: this is the one path
+        # whose whole job is to detect a lie about serving compiled.
         start_counts = {
             id(obj): (
                 compile_cache.execution_count(obj),
                 trt_engine.execution_count(obj),
+                aot_serve.execution_count(obj),
             )
             for obj in objects
         }
@@ -5002,6 +5025,7 @@ class Executor:
                 id(obj): (
                     compile_cache.execution_count(obj),
                     trt_engine.execution_count(obj),
+                    aot_serve.execution_count(obj),
                 )
                 for obj in objects
             }
@@ -5072,7 +5096,7 @@ class Executor:
                     return False
             evidence.count += 1
             for obj in objects:
-                calls_before, trt_before = before[id(obj)]
+                calls_before, trt_before, aot_before = before[id(obj)]
                 inductor_proven = (
                     compile_cache.execution_count(obj) > calls_before
                     and (
@@ -5081,7 +5105,11 @@ class Executor:
                     )
                 )
                 trt_proven = trt_engine.execution_count(obj) > trt_before
-                if inductor_proven or trt_proven:
+                # pgw#735: an exported artifact proves itself by executing —
+                # and by still being armed, so a call that ended in a revoked
+                # (failed) artifact cannot count as proof.
+                aot_proven = aot_serve.proven_since(obj, aot_before)
+                if inductor_proven or trt_proven or aot_proven:
                     proven_keys.setdefault(id(obj), set()).add(wj.graph_key)
             logger.info(
                 "boot warmup %s (%s): %.1fs",
@@ -5108,6 +5136,7 @@ class Executor:
                 obj for obj in objects
                 if compile_cache.execution_count(obj) == start_counts[id(obj)][0]
                 and trt_engine.execution_count(obj) == start_counts[id(obj)][1]
+                and aot_serve.execution_count(obj) == start_counts[id(obj)][2]
             ]
 
         # gw#614 coverage pass: an input-routed sibling lane the planned
@@ -5457,7 +5486,7 @@ class Executor:
             )
             setup = getattr(instance, "setup", None)
             inj = _InjectionResult(kwargs={}, loaded={})
-            from . import compile_cache, trt_engine
+            from . import aot_serve, compile_cache, trt_engine
 
             vram_before = self._vram_allocated()
             if spec.runtime:
@@ -5532,6 +5561,17 @@ class Executor:
             # selection, no proof loop, targets registered active-less
             # (advertising the requested cell key for peer adoption).
             eager_first = self._eager_first_eligible(spec, inj)
+            if eager_first and not self._mint_budget_ok(spec, inj):
+                # pgw#737: THE gate. It sits here and not only in the driver
+                # because arming + enabling the routers is already the first
+                # allocation of the capture — the boot warm's own forwards
+                # enqueue background compiles the instant the routers go
+                # concurrent. A card that cannot hold the capture never gets
+                # one armed: the targets go back to true eager, the cell
+                # stays absent, and the boot follows the plain-eager shape
+                # (never the foreground compile-then-serve mint, which is
+                # strictly worse for the tenant).
+                eager_first = False
             if eager_first:
                 from . import hot_swap
 
@@ -5569,19 +5609,37 @@ class Executor:
             # artifact SOURCE differs; a self-mint that does not actually
             # serve its own warmup graphs must fail closed below exactly
             # like a delivered cell that doesn't (never silent eager).
+            # pgw#735: TRT engines and EXPORTED artifacts both prove
+            # themselves by executing, not by an FX cache hit — only the
+            # dynamo lane is scored by hits below.
+            def _proves_by_fx(ref: str) -> bool:
+                return not trt_engine.is_engine_ref(ref) and not \
+                    aot_serve.is_aot_ref(ref)
+
             proves_inductor = any(
-                not trt_engine.is_engine_ref(sel.ref)
+                _proves_by_fx(sel.ref)
                 for sel in inj.active_compile_artifacts.values()
             )
             proof_before = {
                 id(candidate.pipeline): (
                     compile_cache.execution_count(candidate.pipeline),
                     compile_cache.cache_miss_count(candidate.pipeline),
+                    aot_serve.execution_count(candidate.pipeline),
                 )
                 for candidate in inj.compile_objects
                 if proves_inductor
                 and id(candidate.pipeline) in inj.active_compile_artifacts
-                and not trt_engine.is_engine_ref(
+                and _proves_by_fx(
+                    inj.active_compile_artifacts[id(candidate.pipeline)].ref)
+            }
+            # Exported arms are proven separately: same fail-closed rule, its
+            # own counter.
+            aot_proof_before = {
+                id(candidate.pipeline): aot_serve.execution_count(
+                    candidate.pipeline)
+                for candidate in inj.compile_objects
+                if id(candidate.pipeline) in inj.active_compile_artifacts
+                and aot_serve.is_aot_ref(
                     inj.active_compile_artifacts[id(candidate.pipeline)].ref)
             }
             warmup = getattr(instance, "warmup", None)
@@ -5698,6 +5756,28 @@ class Executor:
                 proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
+                    aot_before = aot_proof_before.get(id(pipe))
+                    if aot_before is not None:
+                        # pgw#735: the EXPORTED lane's proof — its own
+                        # invocations, still armed. An exported artifact
+                        # performs no FX lookup, so scoring it by cache hits
+                        # would disprove every honest .pt2 adoption. Fail
+                        # closed exactly like the dynamo lane: no execution or
+                        # a revoked artifact means unexercised, never a
+                        # synthesized hit.
+                        aot_calls = aot_serve.execution_count(pipe) - aot_before
+                        calls_by_obj[id(pipe)] = aot_calls
+                        proof_by_obj[id(pipe)] = (aot_calls, 0, 0)
+                        if warmed and aot_serve.proven_since(pipe, aot_before):
+                            proven += 1
+                            if callable(warmup):
+                                function_proofs[id(pipe)] = {spec.name}
+                            proved_sel = inj.active_compile_artifacts.get(id(pipe))
+                            if proved_sel is not None:
+                                compile_cache.record_cell_proven(proved_sel.ref)
+                        else:
+                            unexercised.append(candidate)
+                        continue
                     before = proof_before.get(id(pipe))
                     if before is None:
                         continue
@@ -7512,6 +7592,57 @@ class Executor:
             saw_router = True
         return saw_router
 
+    def _mint_budget_ok(
+        self, spec: EndpointSpec, inj: "_InjectionResult",
+    ) -> bool:
+        """pgw#737: does this card have room to CAPTURE, on top of serving?
+
+        False = decline: every pending self-mint is discarded, its target
+        unwrapped to true eager and its branch lane dropped, so the boot
+        continues as a plain eager boot with the cell absent. Loud (one
+        structured ``mint_skipped`` line, logged and on the wire) and
+        automatic — a roomier config, or a smaller-resident flavor, mints
+        the same cell later."""
+        from . import compile_cache
+        from . import fleet_cells as fleet_cells_mod
+
+        pipes = [
+            candidate.pipeline for candidate in inj.compile_objects
+            if id(candidate.pipeline) in inj.pending_self_mints
+        ]
+        device = next(
+            (dev for pipe in pipes
+             if (dev := mint_budget.device_of(pipe)) is not None),
+            None,
+        )
+        budget = mint_budget.probe(device)
+        if budget.fits:
+            return True
+        line = budget.line("mint_skipped", "insufficient_vram")
+        logger.warning("self-mint declined at boot for %s: %s", spec.name, line)
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"{line}; {spec.name} boots eager with no cell — the capture "
+            "does not fit beside this model's own serving working set",
+            phase="insufficient_vram",
+        )
+        for pipe in pipes:
+            pending = inj.pending_self_mints.pop(id(pipe), None)
+            inj.active_compile_artifacts.pop(id(pipe), None)
+            if pending is not None:
+                try:
+                    fleet_cells_mod.abandon_self_mint(pending)
+                except Exception:
+                    logger.exception("declined mint capture cleanup failed")
+            try:
+                compile_cache.unwrap(pipe)
+                if spec.lora_bucket:
+                    compile_cache.drop_lora_lane(pipe)
+            except Exception:
+                logger.exception("declined mint target unwrap failed")
+        flush_memory()
+        return False
+
     def serving_tiers(self) -> Dict[str, str]:
         """Per-function serving tier for the capability projection (th#1187
         wire contract): ``"compiled"`` when a READY record's compile target
@@ -7533,7 +7664,7 @@ class Executor:
         }
 
     async def abandon_background_mint(
-        self, rec: _ClassRecord, *, reason: str,
+        self, rec: _ClassRecord, *, reason: str, free_targets: bool = False,
     ) -> None:
         """Cleanly stop an in-flight background mint (adopt-on-arm, vacate,
         shutdown): signal, let the driver finish its current unit, then
@@ -7562,12 +7693,20 @@ class Executor:
         # signal; this covers a driver that never started or already died.
         if rec.background_mint is bg:
             self._abandon_mint_state(rec, bg)
+        if free_targets:
+            self._free_mint_targets(bg)
 
-    def _abandon_mint_state(self, rec: _ClassRecord, bg: "_BackgroundMint") -> None:
+    def _abandon_mint_state(
+        self, rec: _ClassRecord, bg: "_BackgroundMint",
+        *, free_targets: bool = False,
+    ) -> None:
         """Discard-wholesale cleanup: suspend routing concurrency (novel
         signatures return to sequential compile-then-serve) and abandon
         every unfinalized capture. Serving is untouched — the record keeps
-        serving eager on the live instance."""
+        serving eager on the live instance.
+
+        ``free_targets`` (pgw#737): this process will not mint at all, so
+        also give the card back — see :meth:`_free_mint_targets`."""
         from . import fleet_cells as fleet_cells_mod
         from . import hot_swap
 
@@ -7582,6 +7721,35 @@ class Executor:
                 logger.exception("background mint capture cleanup failed")
         if rec.background_mint is bg:
             rec.background_mint = None
+        if free_targets:
+            self._free_mint_targets(bg)
+
+    def _free_mint_targets(self, bg: "_BackgroundMint") -> None:
+        """pgw#737: give the card back after a mint that will not happen.
+
+        A suspended router still leaves the guarded wrappers installed, the
+        LoRA branch containers allocated and the allocator holding whatever
+        the abandoned capture touched — the tenant's next peak has to fit
+        around all of it, and on wan-2.2 it did not. Unwrap to true eager
+        (the same end state as the Phase-3 unproven-object branch), drop the
+        branch lane, then empty the cache."""
+        from . import compile_cache
+        from . import hot_swap
+
+        for pipe in bg.pipes.values():
+            try:
+                router = hot_swap.router_of(pipe)
+                if router is not None:
+                    # CLOSE, not suspend: a queued warm job would otherwise
+                    # still take its turn and compile onto the card we just
+                    # decided we cannot capture on.
+                    router.close()
+                compile_cache.unwrap(pipe)
+                if bg.spec.lora_bucket:
+                    compile_cache.drop_lora_lane(pipe)
+            except Exception:
+                logger.exception("mint target unwrap failed")
+        flush_memory()
 
     async def _background_mint(
         self, rec: _ClassRecord, bg: "_BackgroundMint",
@@ -7598,6 +7766,18 @@ class Executor:
         try:
             with activity_mod.watchdog(act):
                 await self._background_mint_run(rec, bg, act)
+        except _MintDeclined as declined:
+            # pgw#737: a declined mint is an OUTCOME, not a failure — the
+            # activity terminates COMPLETED and the tier stays eager, so
+            # nothing downstream classifies this worker as broken or
+            # re-dispatches against it. The cell stays absent: a roomier
+            # config (or a smaller-resident flavor) mints it later.
+            self._abandon_mint_state(rec, bg, free_targets=True)
+            logger.warning(
+                "self-mint declined for %s: %s", bg.spec.name, declined)
+            activity_mod.emit_event(
+                "self_mint_skipped", str(declined), phase=declined.reason)
+            act.completed()
         except (_MintAbandoned, asyncio.CancelledError):
             self._abandon_mint_state(rec, bg)
             logger.info(
@@ -7612,7 +7792,10 @@ class Executor:
             )
             act.completed()
         except Exception as exc:
-            self._abandon_mint_state(rec, bg)
+            # pgw#737: free_targets — a failed mint that leaves its wrappers
+            # and branch buffers installed keeps charging the tenant for a
+            # capture that will never finalize.
+            self._abandon_mint_state(rec, bg, free_targets=True)
             logger.warning(
                 "background mint for %s failed (%s: %s); serving stays eager "
                 "for this process", bg.spec.name, type(exc).__name__, exc)
@@ -7641,6 +7824,20 @@ class Executor:
         from . import warmup as warmup_mod
 
         spec = bg.spec
+        # pgw#737: the capture's VRAM pre-budget, BEFORE any seed touches
+        # the card. The boot warm has already run one real eager forward on
+        # these shapes, so the peak high-water is a measured anchor, not a
+        # guess. Not fitting is not an error — decline, serve eager, leave
+        # the cell absent (never attempt-and-OOM: that is what took the
+        # wan-2.2 tenant request down with 26 banked denoise steps).
+        mint_device = next(
+            (dev for pipe in bg.pipes.values()
+             if (dev := mint_budget.device_of(pipe)) is not None),
+            None,
+        )
+        budget = mint_budget.probe(mint_device)
+        if not budget.fits:
+            raise _MintDeclined("insufficient_vram", budget)
         jobs, _skips = self._warmup_plan(spec, rec)
         jobs, _mode = warmup_mod.select_runs(jobs, tracing=True)
         if not jobs:
@@ -7826,14 +8023,23 @@ class Executor:
                 # pgw#677 reopen: an OOM-truncated pass is NEVER
                 # convergence — stats can be stable precisely because the
                 # remaining units never ran. Retry (bounded by the pass
-                # cap); a persistent OOM aborts the mint loudly instead of
+                # cap); a persistent OOM ends the mint instead of
                 # finalizing a partial capture.
                 oom_passes += 1
+                # pgw#737: re-budget on the allocator state the OOM just
+                # measured (the pass emptied the cache on its way out). A
+                # card that no longer has capture headroom must DECLINE
+                # here — retrying the pass is how three more OOMs landed on
+                # a live tenant request.
+                budget = mint_budget.probe(mint_device)
+                if not budget.fits:
+                    raise _MintDeclined("insufficient_vram_after_oom", budget)
                 if oom_passes >= _MINT_OOM_MAX_PASSES:
-                    raise RuntimeError(
-                        f"mint aborted: the warm plan OOMed on "
-                        f"{oom_passes} consecutive passes; refusing to "
-                        "finalize a partial capture")
+                    raise _MintDeclined(
+                        f"oom_x{oom_passes}", budget,
+                        "the warm plan OOMed on consecutive passes; "
+                        "refusing to finalize a partial capture — this "
+                        "process serves eager")
                 continue
             oom_passes = 0
             after = _stats()
@@ -8243,8 +8449,13 @@ class Executor:
         inductor cache (#384: seed dirs + torch.compile) and a TRT engine
         (#390: deserialize + refit with the resident weights + module swap).
         ANY failure => stay eager and report ``adopt_failed:<reason>``;
-        adoption must never degrade service."""
-        from . import compile_cache, trt_engine
+        adoption must never degrade service.
+
+        pgw#735: THREE cell kinds ride these rails now — the exported
+        (``aot-inductor``) lane joins inductor and TRT, and proves adoption by
+        its own artifact invocations rather than by an FX cache hit it can
+        never produce."""
+        from . import aot_serve, compile_cache, trt_engine
         from . import hot_swap as hot_swap_mod
 
         t0 = time.monotonic()
@@ -8302,7 +8513,12 @@ class Executor:
 
         family = compile_cache.family_from_ref(ref)
         is_trt = trt_engine.is_engine_ref(ref)
-        if not family or not (is_trt or compile_cache.is_cache_ref(ref)):
+        # pgw#735: an EXPORTED cell is a third artifact kind, proven its own
+        # way below. Without this it fails `bad_ref` before it is ever armed.
+        is_aot = aot_serve.is_aot_ref(ref)
+        if not family or not (
+            is_trt or is_aot or compile_cache.is_cache_ref(ref)
+        ):
             return await fail("bad_ref")
         found = self._compile_target(target_incarnation_id)
         if found is None:
@@ -8392,7 +8608,7 @@ class Executor:
         artifact = compile_cache.find_artifact(local)
         if artifact is None:
             return await fail("artifact_missing")
-        if not is_trt:
+        if not is_trt and not is_aot:
             try:
                 # Expensive extraction and runtime-key verification happen in
                 # an isolated tree before taking model/GPU locks. Activation
@@ -8459,14 +8675,17 @@ class Executor:
                 wrapped = False
                 lane_applied = False
                 trt_before = trt_engine.execution_count(obj) if is_trt else 0
+                aot_before = aot_serve.execution_count(obj) if is_aot else 0
                 inductor_before = (0, 0, 0)
 
                 async def rollback() -> None:
                     """Return a first-time failed adoption to honest eager."""
                     if is_trt and wrapped:
                         trt_engine.unwrap(obj)
+                    if is_aot and wrapped:
+                        aot_serve.unwrap(obj)
                     if wrapped:
-                        if not is_trt:
+                        if not is_trt and not is_aot:
                             compile_cache.unwrap(obj)
                     if lane_applied:
                         compile_cache.drop_lora_lane(obj)
@@ -8476,7 +8695,7 @@ class Executor:
                         self._on_state_change()
 
                 bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-                if bucket and not is_trt:
+                if bucket and not is_trt and not is_aot:
                     try:
                         compile_cache.apply_lora_lane(obj, bucket)
                         lane_applied = True
@@ -8488,6 +8707,25 @@ class Executor:
                     try:
                         await asyncio.to_thread(
                             trt_engine.load_and_wrap, obj, cfg,
+                            artifact, self.store._cache_dir,
+                        )
+                        wrapped = True
+                    except compile_cache.AdoptError as exc:
+                        await rollback()
+                        return await fail(exc.reason, str(exc))
+                    except Exception as exc:
+                        await rollback()
+                        return await fail("artifact_invalid", str(exc))
+                elif is_aot:
+                    # pgw#734: HOT adoption of an exported cell. Boot arming
+                    # already dispatches by kind in provision.enable_compiled;
+                    # this path did not, so a .pt2 delivered to a RUNNING
+                    # worker was handed to the dynamo stager and unpacked as an
+                    # inductor cache tree. Same rails, same fail-closed
+                    # classification — its own backend.
+                    try:
+                        await asyncio.to_thread(
+                            aot_serve.load_and_wrap, obj, cfg,
                             artifact, self.store._cache_dir,
                         )
                         wrapped = True
@@ -8517,7 +8755,7 @@ class Executor:
                         return await fail("artifact_invalid", str(exc))
                     wrapped = True
 
-                if not is_trt:
+                if not is_trt and not is_aot:
                     inductor_before = (
                         compile_cache.execution_count(obj),
                         compile_cache.cache_hit_count(obj),
@@ -8554,7 +8792,7 @@ class Executor:
                 hits = 0
                 misses = 0
 
-                if not is_trt:
+                if not is_trt and not is_aot:
                     calls = compile_cache.execution_count(obj) - inductor_before[0]
                     hits = compile_cache.cache_hit_count(obj) - inductor_before[1]
                     misses = compile_cache.cache_miss_count(obj) - inductor_before[2]
@@ -8580,11 +8818,25 @@ class Executor:
                             f"compiled graph (calls={calls}, hits={hits}, "
                             f"misses={misses}, warmup={warmup_s}s) — cell useless "
                             f"on this runtime, serving eager"))
-                elif trt_engine.execution_count(obj) <= trt_before:
+                elif is_trt and trt_engine.execution_count(obj) <= trt_before:
                     await rollback()
                     return await fail(
                         "engine_not_executed",
                         "warmup did not execute the attached TRT engine",
+                    )
+                elif is_aot and not aot_serve.proven_since(obj, aot_before):
+                    # pgw#735: the exported lane's own proof. An artifact that
+                    # never ran, or that ran and then revoked (B1/B2 refusal),
+                    # is NOT adopted — same fail-closed posture as a dynamo
+                    # cell with zero cache hits, never a synthesized hit.
+                    await rollback()
+                    return await fail(
+                        "artifact_not_executed", (
+                            "warmup did not execute the attached exported "
+                            f"artifact (calls={aot_serve.execution_count(obj) - aot_before}, "
+                            f"armed={aot_serve.is_armed(obj)}, "
+                            f"ingress_refusals={aot_serve.ingress_refusals(obj)})"
+                        ),
                     )
                 if callable(warmup):
                     # A custom object warmup has no sibling-handler identity.
@@ -9661,12 +9913,32 @@ class Executor:
                                     job, spec, instance, ctx, payload, kwargs,
                                     timeout_ms=timeout_ms, gpu_index=gpu_index)
                         except BaseException as exc:
-                            # A mid-inference CUDA OOM learns a per-ref floor,
-                            # but the live object is quarantined. The hub
-                            # retries only after ensure_setup reloads it
-                            # cleanly at that rung.
-                            await self._quarantine_for_oom(spec, ctx, exc)
-                            raise
+                            # pgw#737: a tenant OOM while this worker was
+                            # minting is the mint's fault, and it is fixable
+                            # HERE — evict the capture, free the card, and
+                            # re-run on a clean allocator. The request then
+                            # SUCCEEDS instead of returning RETRYABLE for the
+                            # hub to re-dispatch onto an identically loaded
+                            # worker (th#1228: 5 attempts and a second H100
+                            # bought for one deterministic OOM).
+                            if await self._evict_mint_for_oom(spec, ctx, exc):
+                                try:
+                                    with compile_cache_mod.tenant_serve_window():
+                                        output = await self._execute(
+                                            job, spec, instance, ctx, payload,
+                                            kwargs, timeout_ms=timeout_ms,
+                                            gpu_index=gpu_index)
+                                except BaseException as retry_exc:
+                                    await self._quarantine_for_oom(
+                                        spec, ctx, retry_exc)
+                                    raise
+                            else:
+                                # A mid-inference CUDA OOM learns a per-ref
+                                # floor, but the live object is quarantined.
+                                # The hub retries only after ensure_setup
+                                # reloads it cleanly at that rung.
+                                await self._quarantine_for_oom(spec, ctx, exc)
+                                raise
                         finally:
                             # Python-visible exits are not native crashes —
                             # only a signal death leaves the marker behind.
@@ -9960,6 +10232,57 @@ class Executor:
                 "lora overlays require a pipeline-injected setup slot"
             )
         return pipe
+
+    async def _evict_mint_for_oom(
+        self, spec: EndpointSpec, ctx: RequestContext, exc: BaseException,
+    ) -> bool:
+        """pgw#737: the survivable abort, from the tenant's side.
+
+        A background self-mint is the ONE co-resident consumer this worker
+        put on the card itself, and it is evictable. When a tenant request
+        OOMs with a mint in flight, the honest recovery is not "tell the hub
+        to try another worker" (identical load, deterministic OOM, one more
+        pod bought) — it is: stop the mint, unwrap its targets, drop its
+        branch buffers, empty the allocator, and re-run this request on the
+        clean card. True = evicted, the caller re-runs; the mint stays gone
+        for this process (its pre-budget declines the same card anyway).
+
+        Deliberately narrow: only a CUDA OOM, only inference, only while
+        nothing has been emitted or deferred — a replay must not duplicate
+        output. Everything else keeps the quarantine + RETRYABLE path.
+        """
+        if not is_cuda_oom(exc) or getattr(ctx, "cancelled", False):
+            return False
+        if spec.kind != "inference" or spec.output_mode == "stream":
+            return False
+        if ctx._deferred.pending():
+            return False
+        rec = self._classes.get(spec.instance_key)
+        if rec is None or rec.background_mint is None:
+            return False
+        logger.warning(
+            "tenant request OOMed with a self-mint in flight for %s; "
+            "evicting the mint and re-running on a clean allocator "
+            "(pgw#737)", spec.name)
+        await self.abandon_background_mint(
+            rec, reason="tenant OOM — the mint loses, the request wins",
+            free_targets=True)
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"self-mint for {spec.name} evicted mid-flight: a tenant request "
+            f"OOMed against its capture ({type(exc).__name__}); the mint is "
+            "abandoned, the card freed and the request re-run eager on this "
+            "same worker",
+            phase="tenant_oom",
+        )
+        ctx.log(
+            "DEGRADED_MODE=engaged fn=" + spec.name + ": a background "
+            "compile capture was evicted after a CUDA OOM; this request is "
+            "being re-run eager on the freed card.",
+            level="warning",
+        )
+        self._on_state_change()
+        return True
 
     async def _quarantine_for_oom(
         self, spec: EndpointSpec, ctx: RequestContext, exc: BaseException,

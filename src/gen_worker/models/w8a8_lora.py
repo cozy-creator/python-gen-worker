@@ -54,6 +54,7 @@ import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..api.errors import RefCompatibilitySurprise, ValidationError
+from .fp8_storage import structural_base
 from .w8a8 import fp8_scaled_linear_class
 import inspect
 
@@ -230,13 +231,17 @@ def branch_modules(model: Any) -> Dict[str, Any]:
     adapters carry conv pairs; convs are never quantized, so their branch
     is always the eager instance-forward wrap). Other module kinds are not
     branch targets — adapters that name them fail loud in
-    :func:`map_adapter`."""
+    :func:`map_adapter`. Selection is by EXACT class over
+    :func:`fp8_storage.structural_base`, so a pgw#727 fp8-storage leaf is
+    targeted as the plain class it was restructured from (its branch reads
+    the compute-dtype activation and adds onto the compute-dtype output —
+    the fp8 storage is never touched, exactly as under the hook lane)."""
     import torch.nn as nn
 
     fp8_cls = fp8_scaled_linear_class()
     return {
         n: m for n, m in model.named_modules()
-        if isinstance(m, fp8_cls) or type(m) in (nn.Linear, nn.Conv2d)
+        if isinstance(m, fp8_cls) or structural_base(m) in (nn.Linear, nn.Conv2d)
     }
 
 
@@ -513,6 +518,25 @@ def _install_branch_forward(mod: Any) -> None:
     setattr(mod, _WRAP_ATTR, True)
 
 
+def _clear_branch_slots(mod: Any) -> None:
+    """Drop one module's branch tensors.
+
+    ``Fp8ScaledLinear`` keeps its slots DECLARED as ``None`` buffers
+    (pgw#726) — popping them would leave plain attributes behind, which is
+    both the shape ``register_buffer`` refuses and the shape export cannot
+    see. Plain Linear/Conv keep the ``__dict__`` form their forward wrap
+    reads."""
+    if _is_scaled_linear(mod):
+        mod._buffers["lora_a"] = None
+        mod._buffers["lora_b"] = None
+        return
+    for name in ("lora_a", "lora_b"):
+        mod._buffers.pop(name, None)
+        mod.__dict__.pop(name, None)
+    mod.lora_a = None
+    mod.lora_b = None
+
+
 def alloc_branch_buffers(mod: Any, bucket: int) -> None:
     """Zeroed A/B branch tensors on one branch-capable module.
 
@@ -529,16 +553,16 @@ def alloc_branch_buffers(mod: Any, bucket: int) -> None:
     dev = mod.weight.device
     # Branch tensors compute in the module's COMPUTE dtype — never its
     # storage dtype (on the fp8-storage lane weight AND bias rest in fp8).
+    # A pgw#727 fp8-storage leaf declares its compute dtype, so ask it first.
     _compute = (torch.float16, torch.bfloat16, torch.float32)
     dtype = torch.bfloat16
-    for cand in (mod.weight.dtype if not _is_scaled_linear(mod) else None,
+    for cand in (getattr(mod, "compute_dtype", None),
+                 mod.weight.dtype if not _is_scaled_linear(mod) else None,
                  mod.bias.dtype if mod.bias is not None else None):
         if cand in _compute:
             dtype = cand
             break
-    for name in ("lora_a", "lora_b"):
-        mod._buffers.pop(name, None)
-        mod.__dict__.pop(name, None)
+    _clear_branch_slots(mod)
     if isinstance(mod, nn.Conv2d):
         a = torch.zeros(bucket, mod.in_channels, *mod.kernel_size,
                         dtype=dtype, device=dev)
@@ -579,11 +603,7 @@ def disable_lora_branches(model: Any) -> None:
     """Drop the branch buffers entirely (back to the branchless graph
     family). Used on demote/teardown, never between requests."""
     for mod in branch_modules(model).values():
-        for name in ("lora_a", "lora_b"):
-            mod._buffers.pop(name, None)
-            mod.__dict__.pop(name, None)
-        mod.lora_a = None
-        mod.lora_b = None
+        _clear_branch_slots(mod)
     if hasattr(model, _BUCKET_ATTR):
         delattr(model, _BUCKET_ATTR)
     setattr(model, _SPARSE_ATTR, False)
@@ -729,11 +749,7 @@ def _place_adapters(
                         or int(mod.lora_a.shape[0]) != bucket):
                     alloc_branch_buffers(mod, bucket)
             elif getattr(mod, "lora_a", None) is not None:
-                for name in ("lora_a", "lora_b"):
-                    mod._buffers.pop(name, None)
-                    mod.__dict__.pop(name, None)
-                mod.lora_a = None
-                mod.lora_b = None
+                _clear_branch_slots(mod)
         setattr(model, _BUCKET_ATTR, int(bucket))
         setattr(model, _SPARSE_ATTR, True)
 

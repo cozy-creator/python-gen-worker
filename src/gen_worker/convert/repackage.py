@@ -1,12 +1,34 @@
+"""Layout repackaging — the generic engine that executes declared maps.
+
+singlefile <-> diffusers. This module owns the *mechanics*: locating weight
+files under diffusers' several naming conventions, applying an ordered set of
+key-rewrite rules, casting dtypes, driving the single-file pipeline loader, and
+refusing a converter whose family disagrees with the tree on disk.
+
+It owns **no family knowledge**. Every rename table, component signature,
+pipeline class and config donor arrives as a :class:`~.repack_spec.RepackageFamily`
+declaration registered by the endpoint that owns the family (pgw#740 C3/B15).
+Before that split this file carried ~430 lines of hand-ported per-family tensor
+surgery and two copies of the SDXL signature that disagreed — the SDXL tree was
+handed to the SD1.5 converter with no exception raised.
+"""
+
 from __future__ import annotations
 
+import importlib
 import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from .registry import (
+    normalize_family,
+    registered_repackage_families,
+    repackage_family,
+    require_repackage_family,
+)
+from .repack_spec import ComponentRepack, DtypePolicy, RepackageFamily
 from .writer import ConversionImplementationError
-import importlib
 
 if TYPE_CHECKING:
     import torch
@@ -16,32 +38,12 @@ class NotImplementedFamilyError(ConversionImplementationError):
     pass
 
 
-_SINGLEFILE_PIPELINE_CONFIGS: dict[str, tuple[str, ...]] = {
-    "StableDiffusionPipeline": ("stable-diffusion-v1-5/stable-diffusion-v1-5",),
-    "StableDiffusionXLPipeline": ("stabilityai/stable-diffusion-xl-base-1.0",),
-    "FluxPipeline": ("black-forest-labs/FLUX.1-dev", "black-forest-labs/FLUX.1-schnell"),
-    "Flux2Pipeline": ("black-forest-labs/FLUX.2-klein-4B", "black-forest-labs/FLUX.2-klein-9B"),
-    "ZImagePipeline": ("Tongyi-MAI/Z-Image-Turbo", "Tongyi-MAI/Z-Image"),
-}
+class ConverterSignatureError(ValueError):
+    """The chosen converter does not match the tree's component signature."""
 
 
-def _normalize_family(family: str | None) -> str:
-    """Collapse canonical family slugs — including fine-tune lineages like
-    sdxl-illustrious / sdxl-pony / flux1-dev — onto the repackage family."""
-    raw = str(family or "").strip().lower()
-    if raw in {"sd1", "sd15_sd2", "stable-diffusion", "sd"} or raw.startswith(("sd1", "sd2")):
-        return "sd15_sd2"
-    if raw == "sdxl" or raw.startswith("sdxl"):
-        return "sdxl"
-    if raw in {"flux", "flex2"} or raw.startswith(("flux1", "flux2", "flux.")):
-        return "flux"
-    if raw.startswith(("z-image", "zimage")):
-        return "zimage"
-    if raw in {"auraflow"}:
-        return "auraflow"
-    if raw in {"wan"} or raw.startswith(("wan2", "wan-2")):
-        return "wan"
-    return "unknown"
+class AmbiguousFamilyError(ValueError):
+    """More than one registered family claims this tree."""
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -83,7 +85,7 @@ def _load_sharded_safetensors(index_json: Path) -> dict[str, torch.Tensor]:
 def _load_component_state_dict(
     component_dir: Path,
     *,
-    safetensors_bases: list[str],
+    safetensors_bases: list[str] | tuple[str, ...],
     bin_base: str | None = None,
 ) -> dict[str, torch.Tensor]:
     """
@@ -101,8 +103,8 @@ def _load_component_state_dict(
     Optional legacy fallback (unsafe for untrusted repos):
     - <bin_base>.bin
     """
-    for base in safetensors_bases:
-        base = str(base or "").strip()
+    for raw_base in safetensors_bases:
+        base = str(raw_base or "").strip()
         if not base:
             continue
         st_path = component_dir / f"{base}.safetensors"
@@ -148,96 +150,120 @@ def _cast_state_dict(sd: dict[str, torch.Tensor], out_dtype: torch.dtype) -> dic
     return {k: _maybe_cast_tensor(v, out_dtype) for k, v in sd.items()}
 
 
+_DTYPE_ALIASES: dict[str, str] = {
+    "fp16": "fp16", "f16": "fp16", "float16": "fp16", "half": "fp16",
+    "bf16": "bf16", "bfloat16": "bf16",
+    "fp32": "fp32", "f32": "fp32", "float32": "fp32", "full": "fp32",
+}
+
+
+def _canonical_dtype(name: str | None) -> str:
+    return _DTYPE_ALIASES.get(str(name or "").strip().lower(), "")
+
+
+def _torch_dtype(canonical: str) -> Any:
+    torch_mod = _torch()
+    return {"fp16": torch_mod.float16, "bf16": torch_mod.bfloat16, "fp32": torch_mod.float32}[canonical]
+
+
+def _repackage_torch_dtype(dtype: str | None, policy: DtypePolicy | None = None) -> Any:
+    """Map a requested output dtype onto the torch dtype the single-file pipeline
+    is materialized in. Dtypes the policy marks ``preserve`` are loaded as-is —
+    an fp16 source loaded bf16 rounds a 10-bit mantissa to 7 bits and the later
+    fp16 cast cannot recover it. Everything else (quant targets) loads at the
+    policy default."""
+    pol = policy or DtypePolicy()
+    canonical = _canonical_dtype(dtype)
+    if canonical and canonical in pol.preserve:
+        return _torch_dtype(canonical)
+    return _torch_dtype(pol.load_default)
+
+
+def present_components(model_dir: Path) -> frozenset[str]:
+    """Top-level component directories present in a diffusers tree."""
+    if not model_dir.is_dir():
+        return frozenset()
+    return frozenset(p.name for p in model_dir.iterdir() if p.is_dir())
+
+
 def detect_diffusers_family(model_dir: Path) -> str:
+    """Detect the family of a diffusers tree from the *declared* signatures.
+
+    There is exactly ONE copy of each family's signature — the one in its
+    declaration, which is also what the converter guard checks. That is what
+    makes the pgw#740 wrong-converter divergence structurally impossible rather
+    than merely fixed: detection and the guard cannot disagree, because they
+    read the same field.
+
+    Two families claiming one tree is a declaration bug and is refused by name,
+    never resolved by pick-the-first.
     """
-    Detect a model family from a diffusers layout.
-    v1 only needs to distinguish sd1/2 vs sdxl vs unsupported.
+    present = present_components(model_dir)
+    claims: list[str] = []
+    for name in registered_repackage_families():
+        spec = repackage_family(name)
+        if spec is None:
+            continue
+        sig = spec.signature
+        if not (sig.requires_all or sig.requires_any or sig.forbids):
+            continue
+        if not sig.violations(present):
+            claims.append(spec.family)
+    if len(claims) > 1:
+        raise AmbiguousFamilyError(
+            f"{model_dir}: component set {sorted(present)!r} satisfies the signature of "
+            f"MORE THAN ONE registered family ({sorted(claims)!r}) — refusing to guess. "
+            "Tighten the declarations (a family that must not carry a component declares "
+            "it in `forbids`)."
+        )
+    if claims:
+        return claims[0]
+    return _family_from_pipeline_class(model_dir)
+
+
+def _family_from_pipeline_class(model_dir: Path) -> str:
+    """Fallback: ``model_index.json``'s ``_class_name`` against declared targets.
+
+    Still declaration-driven — a family is claimed only if it declares that
+    pipeline class in ``to_diffusers``.
     """
     model_index = model_dir / "model_index.json"
-    cls = ""
-    if model_index.exists():
-        try:
-            mi = _read_json(model_index)
-            cls = str(mi.get("_class_name") or "").strip()
-        except Exception:
-            cls = ""
-
-    # Prefer component-set detection (more robust than class_name).
-    if (model_dir / "text_encoder_2").exists() or (model_dir / "tokenizer_2").exists():
-        return "sd15_sd2"
-    if (model_dir / "transformer").exists():
-        # Transformer-first pipelines (Flux/SD3/etc.) are not supported for checkpoint exports (v1).
-        return "flux"
-    if (model_dir / "unet").exists() and (model_dir / "vae").exists() and (model_dir / "text_encoder").exists():
-        # Stable Diffusion 1.x/2.x family (includes many fine-tunes).
-        return "sd15_sd2"
-
-    # Class-name fallback.
-    if "StableDiffusionXL" in cls:
-        return "sdxl"
-    if "Flux" in cls:
-        return "flux"
-    if "StableDiffusion" in cls:
-        return "sd15_sd2"
+    if not model_index.exists():
+        return "unknown"
+    try:
+        cls = str(_read_json(model_index).get("_class_name") or "").strip()
+    except Exception:
+        return "unknown"
+    if not cls:
+        return "unknown"
+    for name in registered_repackage_families():
+        spec = repackage_family(name)
+        if spec is None:
+            continue
+        for target in spec.to_diffusers:
+            if target.pipeline_class == cls:
+                return spec.family
     return "unknown"
+
+
+def assert_converter_matches_signature(model_dir: Path, spec: RepackageFamily) -> None:
+    """Refuse to run a converter whose declared signature disagrees with disk.
+
+    The permanent guard (pgw#740). Whichever way the family arrives — detected
+    here or passed in by a caller — the component set on disk is ground truth,
+    and a mismatch is a named refusal rather than a wrong output file.
+    """
+    violations = spec.signature.violations(present_components(model_dir))
+    if violations:
+        raise ConverterSignatureError(
+            f"converter/signature mismatch: family={spec.family!r} but the tree at "
+            f"{model_dir} " + "; ".join(violations) + " — refusing to run this family's "
+            "converter against a tree it does not describe"
+        )
 
 
 def _ensure_parent(p: Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _singlefile_attempts_for_family(model_family: str) -> list[tuple[str, str | None]]:
-    family = _normalize_family(model_family)
-    attempts: list[tuple[str, str | None]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def add(pipeline_class: str, config: str | None = None) -> None:
-        cls = str(pipeline_class or "").strip()
-        cfg = str(config or "").strip()
-        if cls == "":
-            return
-        key = (cls, cfg)
-        if key in seen:
-            return
-        seen.add(key)
-        attempts.append((cls, cfg or None))
-
-    if family == "sd15_sd2":
-        add("StableDiffusionPipeline")
-        for cfg in _SINGLEFILE_PIPELINE_CONFIGS.get("StableDiffusionPipeline", ()):
-            add("StableDiffusionPipeline", cfg)
-        return attempts
-    if family == "sdxl":
-        add("StableDiffusionXLPipeline")
-        for cfg in _SINGLEFILE_PIPELINE_CONFIGS.get("StableDiffusionXLPipeline", ()):
-            add("StableDiffusionXLPipeline", cfg)
-        return attempts
-    if family == "flux":
-        for cls in ("Flux2Pipeline", "FluxPipeline"):
-            add(cls)
-            for cfg in _SINGLEFILE_PIPELINE_CONFIGS.get(cls, ()):
-                add(cls, cfg)
-        return attempts
-    if family == "zimage":
-        add("ZImagePipeline")
-        for cfg in _SINGLEFILE_PIPELINE_CONFIGS.get("ZImagePipeline", ()):
-            add("ZImagePipeline", cfg)
-        return attempts
-    return attempts
-
-
-def _repackage_torch_dtype(dtype: str | None) -> Any:
-    """Map a requested output dtype onto the torch dtype the single-file
-    pipeline is materialized in. fp16 sources must stay fp16 — loading them
-    bf16 rounds the 10-bit mantissa to 7 bits and the later fp16 cast can't
-    recover it. Non-cast dtypes (quant targets) load bf16."""
-    name = str(dtype or "").strip().lower()
-    torch_mod = _torch()
-    if name in {"fp16", "f16", "float16"}:
-        return torch_mod.float16
-    if name in {"fp32", "f32", "float32"}:
-        return torch_mod.float32
-    return torch_mod.bfloat16
 
 
 # diffusers wraps SingleFileComponentError with a remedy snippet naming both
@@ -249,9 +275,9 @@ def _load_component_from_config_repo(
     config: str, name: str, class_name: str, torch_dtype: Any
 ) -> Any:
     """Load a pipeline component the checkpoint doesn't carry from the family's
-    config repo. DiT-only fine-tunes (common on civitai for z-image) ship no
-    text-encoder/VAE weights — sourcing them from the base repo is exactly the
-    CAS dedup story: the fine-tune tree stores only its denoiser."""
+    declared config repo. DiT-only fine-tunes (common on civitai) ship no
+    text-encoder/VAE weights — sourcing them from the declared donor is exactly
+    the CAS dedup story: the fine-tune tree stores only its denoiser."""
 
     comp_cls = None
     for lib in ("transformers", "diffusers"):
@@ -312,14 +338,28 @@ def _load_singlefile_pipeline(
     )
 
 
+def _singlefile_attempts(spec: RepackageFamily) -> list[tuple[str, str | None]]:
+    """Declared pipeline classes: each tried bare first, then with each donor config."""
+    attempts: list[tuple[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for target in spec.to_diffusers:
+        for cfg in (None, *target.config_repos):
+            key = (target.pipeline_class, cfg or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            attempts.append((target.pipeline_class, cfg))
+    return attempts
+
+
 def singlefile_to_diffusers(
     input_path: Path, output_dir: Path, *, model_family: str, output_dtype: str | None = None,
 ) -> dict[str, str]:
-    family = _normalize_family(model_family)
-    attempts = _singlefile_attempts_for_family(family)
+    spec = require_repackage_family(model_family)
+    attempts = _singlefile_attempts(spec)
     if not attempts:
         raise ConversionImplementationError(
-            f"unsupported_family_for_layout_conversion:{family}:singlefile_to_diffusers"
+            f"unsupported_family_for_layout_conversion:{spec.family}:singlefile_to_diffusers"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -330,7 +370,7 @@ def singlefile_to_diffusers(
                 input_path=input_path,
                 pipeline_class=pipeline_class,
                 config=config,
-                torch_dtype=_repackage_torch_dtype(output_dtype),
+                torch_dtype=_repackage_torch_dtype(output_dtype, spec.dtypes),
             )
             pipe.save_pretrained(str(output_dir), safe_serialization=True)
             return {
@@ -351,6 +391,37 @@ def singlefile_to_diffusers(
     )
 
 
+def _repack_component(model_dir: Path, comp: ComponentRepack) -> dict[str, torch.Tensor]:
+    """Load ONE component and rewrite its keys per the matching declared variant."""
+    component_dir = model_dir / comp.name
+    if not component_dir.is_dir():
+        if comp.required:
+            raise ConverterSignatureError(
+                f"required component {comp.name!r} is absent from {model_dir}"
+            )
+        return {}
+
+    state_dict = _load_component_state_dict(
+        component_dir,
+        safetensors_bases=comp.safetensors_bases,
+        bin_base=comp.bin_base,
+    )
+    variant = comp.variant_for(frozenset(state_dict))
+
+    out: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        new_key = key
+        for rule in variant.rules:
+            new_key = rule.apply(new_key)
+        out[variant.out_prefix + new_key] = value
+
+    for key in variant.transpose_keys:
+        full = variant.out_prefix + key
+        if full in out:
+            out[full] = out[full].t().contiguous()
+    return out
+
+
 def convert_diffusers_to_singlefile(
     model_dir: Path,
     output_path: Path,
@@ -358,466 +429,45 @@ def convert_diffusers_to_singlefile(
     family: str | None = None,
     output_dtype: str = "fp16",
 ) -> None:
-    fam = _normalize_family(family)
-    if fam == "unknown":
-        fam = detect_diffusers_family(model_dir)
-    if fam not in {"sd15_sd2", "sdxl"}:
-        raise NotImplementedFamilyError(f"diffusers_to_singlefile not implemented for family={fam}")
-
-    dtype_name = str(output_dtype or "").strip().lower()
-    if dtype_name in {"fp16", "f16", "float16"}:
-        out_dtype = _torch().float16
-    elif dtype_name in {"bf16", "bfloat16"}:
-        out_dtype = _torch().bfloat16
-    elif dtype_name in {"fp32", "f32", "float32"}:
-        out_dtype = _torch().float32
+    """Drive loop: resolve the declaration, guard it, execute it, cast, save."""
+    requested = str(family or "").strip().lower()
+    if requested and requested != "unknown":
+        # A caller that NAMES a family is refused by name when nothing declares
+        # it — never quietly re-detected into some other family's converter.
+        spec = require_repackage_family(requested)
     else:
+        detected = detect_diffusers_family(model_dir)
+        if detected == "unknown":
+            raise NotImplementedFamilyError(
+                f"cannot identify a registered family for {model_dir}; registered: "
+                f"{', '.join(registered_repackage_families()) or '<none>'}"
+            )
+        spec = require_repackage_family(detected)
+    if not spec.supports_diffusers_to_singlefile:
+        raise NotImplementedFamilyError(
+            f"diffusers_to_singlefile not implemented for family={spec.family} "
+            "(its declaration carries no `to_singlefile` components)"
+        )
+
+    canonical = _canonical_dtype(output_dtype)
+    if not canonical or canonical not in spec.dtypes.allowed_output:
         raise ValueError("invalid_output_dtype")
 
-    if fam == "sdxl":
-        state_dict = _convert_sdxl(model_dir)
-    else:
-        state_dict = _convert_sd15_sd2(model_dir)
+    # The guard, kept independent of detection: a converter must never run
+    # against a component set its declaration does not describe.
+    assert_converter_matches_signature(model_dir, spec)
 
-    state_dict = _cast_state_dict(state_dict, out_dtype)
+    state_dict: dict[str, torch.Tensor] = {}
+    for comp in spec.to_singlefile:
+        state_dict.update(_repack_component(model_dir, comp))
+    if not state_dict:
+        raise ConversionImplementationError(
+            f"repackage produced an EMPTY state dict for family={spec.family}"
+        )
+
+    state_dict = _cast_state_dict(state_dict, _torch_dtype(canonical))
     _ensure_parent(output_path)
     _st_save(cast(dict[str, Any], state_dict), output_path)
-
-
-# ---- SD 1.x / 2.x (based on diffusers' conversion script) ----
-
-def _convert_sd15_sd2(model_path: Path) -> dict[str, torch.Tensor]:
-    unet_path = model_path / "unet"
-    vae_path = model_path / "vae"
-    text_enc_path = model_path / "text_encoder"
-
-    unet_state_dict = _load_component_state_dict(
-        unet_path,
-        safetensors_bases=["diffusion_pytorch_model"],
-        bin_base="diffusion_pytorch_model",
-    )
-    vae_state_dict = _load_component_state_dict(
-        vae_path,
-        safetensors_bases=["diffusion_pytorch_model"],
-        bin_base="diffusion_pytorch_model",
-    )
-    text_enc_dict = _load_component_state_dict(
-        text_enc_path,
-        safetensors_bases=["model", "pytorch_model"],
-        bin_base="pytorch_model",
-    )
-
-    # Convert.
-    unet_state_dict = _convert_sd_unet_state_dict(unet_state_dict)
-    vae_state_dict = _convert_sd_vae_state_dict(vae_state_dict)
-
-    is_v20_model = "text_model.embeddings.position_ids" in text_enc_dict
-    if is_v20_model:
-        text_enc_dict = _convert_sd_text_enc_state_dict_v20(text_enc_dict)
-        text_enc_dict = {"cond_stage_model.model." + k: v for k, v in text_enc_dict.items()}
-    else:
-        # v1 already matches expected keyspace.
-        text_enc_dict = {"cond_stage_model.transformer." + k: v for k, v in text_enc_dict.items()}
-
-    # Final keyspace prefixes.
-    unet_state_dict = {"model.diffusion_model." + k: v for k, v in unet_state_dict.items()}
-    vae_state_dict = {"first_stage_model." + k: v for k, v in vae_state_dict.items()}
-
-    out: dict[str, torch.Tensor] = {}
-    out.update(text_enc_dict)
-    out.update(unet_state_dict)
-    out.update(vae_state_dict)
-    return out
-
-
-def _convert_sd_unet_state_dict(unet_state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """
-    Ported from diffusers' convert_diffusers_to_original_stable_diffusion.py (sd 1/2).
-    """
-    unet_conversion_map = [
-        ("time_embed.0.weight", "time_embed.0.weight"),
-        ("time_embed.0.bias", "time_embed.0.bias"),
-        ("time_embed.2.weight", "time_embed.2.weight"),
-        ("time_embed.2.bias", "time_embed.2.bias"),
-        ("conv_in.weight", "input_blocks.0.0.weight"),
-        ("conv_in.bias", "input_blocks.0.0.bias"),
-        ("conv_norm_out.weight", "out.0.weight"),
-        ("conv_norm_out.bias", "out.0.bias"),
-        ("conv_out.weight", "out.2.weight"),
-        ("conv_out.bias", "out.2.bias"),
-    ]
-    unet_conversion_map_resnet = [
-        ("norm1", "in_layers.0"),
-        ("conv1", "in_layers.2"),
-        ("norm2", "out_layers.0"),
-        ("conv2", "out_layers.3"),
-        ("time_emb_proj", "emb_layers.1"),
-        ("conv_shortcut", "skip_connection"),
-    ]
-
-    # Build layer maps (matches upstream script structure).
-    for i in range(4):
-        for j in range(2):
-            hf_down_res_prefix = f"down_blocks.{i}.resnets.{j}."
-            sd_down_res_prefix = f"input_blocks.{3*i + j + 1}.0."
-            unet_conversion_map += [
-                (hf_down_res_prefix, sd_down_res_prefix),
-            ]
-            if i < 3:
-                hf_down_atn_prefix = f"down_blocks.{i}.attentions.{j}."
-                sd_down_atn_prefix = f"input_blocks.{3*i + j + 1}.1."
-                unet_conversion_map += [
-                    (hf_down_atn_prefix, sd_down_atn_prefix),
-                ]
-
-        hf_downsample_prefix = f"down_blocks.{i}.downsamplers.0.conv."
-        sd_downsample_prefix = f"input_blocks.{3*(i+1)}.0.op."
-        unet_conversion_map += [(hf_downsample_prefix, sd_downsample_prefix)]
-
-    hf_mid_res_prefix = "mid_block.resnets.0."
-    sd_mid_res_prefix = "middle_block.0."
-    unet_conversion_map += [(hf_mid_res_prefix, sd_mid_res_prefix)]
-    hf_mid_atn_prefix = "mid_block.attentions.0."
-    sd_mid_atn_prefix = "middle_block.1."
-    unet_conversion_map += [(hf_mid_atn_prefix, sd_mid_atn_prefix)]
-    hf_mid_res_prefix = "mid_block.resnets.1."
-    sd_mid_res_prefix = "middle_block.2."
-    unet_conversion_map += [(hf_mid_res_prefix, sd_mid_res_prefix)]
-
-    for i in range(4):
-        for j in range(3):
-            hf_up_res_prefix = f"up_blocks.{i}.resnets.{j}."
-            sd_up_res_prefix = f"output_blocks.{3*i + j}.0."
-            unet_conversion_map += [(hf_up_res_prefix, sd_up_res_prefix)]
-            if i > 0:
-                hf_up_atn_prefix = f"up_blocks.{i}.attentions.{j}."
-                sd_up_atn_prefix = f"output_blocks.{3*i + j}.1."
-                unet_conversion_map += [(hf_up_atn_prefix, sd_up_atn_prefix)]
-
-        if i < 3:
-            hf_upsample_prefix = f"up_blocks.{i}.upsamplers.0."
-            sd_upsample_prefix = f"output_blocks.{3*i + 2}.1."
-            unet_conversion_map += [(hf_upsample_prefix, sd_upsample_prefix)]
-
-    sd_state_dict: dict[str, torch.Tensor] = {}
-    for k, v in unet_state_dict.items():
-        new_key = k
-        for hf_prefix, sd_prefix in unet_conversion_map:
-            if new_key.startswith(hf_prefix):
-                new_key = new_key.replace(hf_prefix, sd_prefix)
-
-        # Resnet key shims.
-        for hf_part, sd_part in unet_conversion_map_resnet:
-            new_key = new_key.replace(hf_part, sd_part)
-
-        sd_state_dict[new_key] = v
-    return sd_state_dict
-
-
-def _convert_sd_vae_state_dict(vae_state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    vae_conversion_map = [
-        ("nin_shortcut", "conv_shortcut"),
-        ("norm_out", "conv_norm_out"),
-        ("mid_block.attentions.0.", "mid.attn_1."),
-    ]
-    for i in range(4):
-        for j in range(2):
-            hf_down_prefix = f"down_blocks.{i}.resnets.{j}."
-            sd_down_prefix = f"encoder.down.{i}.block.{j}."
-            vae_conversion_map += [(hf_down_prefix, sd_down_prefix)]
-
-        if i < 3:
-            hf_downsample_prefix = f"down_blocks.{i}.downsamplers.0."
-            sd_downsample_prefix = f"down.{i}.downsample."
-            vae_conversion_map += [(hf_downsample_prefix, sd_downsample_prefix)]
-
-            hf_upsample_prefix = f"up_blocks.{i}.upsamplers.0."
-            sd_upsample_prefix = f"up.{3-i}.upsample."
-            vae_conversion_map += [(hf_upsample_prefix, sd_upsample_prefix)]
-
-        for j in range(3):
-            hf_up_prefix = f"up_blocks.{i}.resnets.{j}."
-            sd_up_prefix = f"decoder.up.{3-i}.block.{j}."
-            vae_conversion_map += [(hf_up_prefix, sd_up_prefix)]
-
-    for j in range(2):
-        hf_mid_res_prefix = f"mid_block.resnets.{j}."
-        sd_mid_res_prefix = f"mid.block_{j+1}."
-        vae_conversion_map += [(hf_mid_res_prefix, sd_mid_res_prefix)]
-
-    vae_conversion_map_attn = [
-        ("to_q", "q"),
-        ("to_k", "k"),
-        ("to_v", "v"),
-        ("to_out.0", "proj_out"),
-    ]
-
-    sd_state_dict: dict[str, torch.Tensor] = {}
-    for k, v in vae_state_dict.items():
-        new_key = k
-        for hf_prefix, sd_prefix in vae_conversion_map:
-            if new_key.startswith(hf_prefix):
-                new_key = new_key.replace(hf_prefix, sd_prefix)
-        for hf_part, sd_part in vae_conversion_map_attn:
-            new_key = new_key.replace(hf_part, sd_part)
-        sd_state_dict[new_key] = v
-    return sd_state_dict
-
-
-def _convert_sd_text_enc_state_dict_v20(text_enc_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    # Ported from upstream script; minimal regex mapping.
-    textenc_conversion_lst = [
-        ("text_model.encoder.layers.", "resblocks."),
-        ("self_attn.q_proj.", "attn.in_proj_"),
-        ("self_attn.k_proj.", "attn.in_proj_"),
-        ("self_attn.v_proj.", "attn.in_proj_"),
-        ("self_attn.out_proj.", "attn.out_proj."),
-        ("layer_norm1.", "ln_1."),
-        ("layer_norm2.", "ln_2."),
-        ("mlp.fc1.", "mlp.c_fc."),
-        ("mlp.fc2.", "mlp.c_proj."),
-        ("final_layer_norm.", "ln_final."),
-        ("text_model.embeddings.position_embedding.weight", "positional_embedding"),
-        ("text_model.embeddings.token_embedding.weight", "token_embedding.weight"),
-        ("text_model.embeddings.", ""),
-        ("text_model.final_layer_norm.", "ln_final."),
-        ("text_model.encoder.", ""),
-        ("text_projection.weight", "text_projection"),
-    ]
-
-    protected = {re.escape(src): dst for src, dst in textenc_conversion_lst}
-    pattern = re.compile("|".join(protected.keys()))
-
-    def _repl(m: re.Match[str]) -> str:
-        return protected[re.escape(m.group(0))]
-
-    out: dict[str, torch.Tensor] = {}
-    for k, v in text_enc_dict.items():
-        k2 = pattern.sub(_repl, k)
-        out[k2] = v
-    return out
-
-
-# ---- SDXL (based on diffusers' conversion script) ----
-
-
-def _convert_sdxl(model_path: Path) -> dict[str, torch.Tensor]:
-    unet_path = model_path / "unet"
-    vae_path = model_path / "vae"
-    text_enc_path = model_path / "text_encoder"
-    text_enc2_path = model_path / "text_encoder_2"
-
-    unet_state_dict = _load_component_state_dict(
-        unet_path,
-        safetensors_bases=["diffusion_pytorch_model"],
-        bin_base="diffusion_pytorch_model",
-    )
-    vae_state_dict = _load_component_state_dict(
-        vae_path,
-        safetensors_bases=["diffusion_pytorch_model"],
-        bin_base="diffusion_pytorch_model",
-    )
-    text_enc_dict = _load_component_state_dict(
-        text_enc_path,
-        safetensors_bases=["model", "pytorch_model"],
-        bin_base="pytorch_model",
-    )
-    text_enc2_dict = _load_component_state_dict(
-        text_enc2_path,
-        safetensors_bases=["model", "pytorch_model"],
-        bin_base="pytorch_model",
-    )
-
-    unet_state_dict = _convert_sdxl_unet_state_dict(unet_state_dict)
-    vae_state_dict = _convert_sdxl_vae_state_dict(vae_state_dict)
-
-    # The SDXL script treats text_encoder (OpenAI CLIP) as already in expected keyspace.
-    text_enc_dict = {"conditioner.embedders.0.transformer." + k: v for k, v in text_enc_dict.items()}
-    text_enc2_dict = _convert_sdxl_text_enc_state_dict(text_enc2_dict)
-    text_enc2_dict = {"conditioner.embedders.1.model." + k: v for k, v in text_enc2_dict.items()}
-
-    # SDXL uses a transposed text projection.
-    if "conditioner.embedders.1.model.text_projection" in text_enc2_dict:
-        text_enc2_dict["conditioner.embedders.1.model.text_projection"] = text_enc2_dict[
-            "conditioner.embedders.1.model.text_projection"
-        ].t().contiguous()
-
-    unet_state_dict = {"model.diffusion_model." + k: v for k, v in unet_state_dict.items()}
-    vae_state_dict = {"first_stage_model." + k: v for k, v in vae_state_dict.items()}
-
-    out: dict[str, torch.Tensor] = {}
-    out.update(text_enc_dict)
-    out.update(text_enc2_dict)
-    out.update(unet_state_dict)
-    out.update(vae_state_dict)
-    return out
-
-
-def _convert_sdxl_unet_state_dict(unet_state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    unet_conversion_map = [
-        ("time_embedding.linear_1.weight", "time_embed.0.weight"),
-        ("time_embedding.linear_1.bias", "time_embed.0.bias"),
-        ("time_embedding.linear_2.weight", "time_embed.2.weight"),
-        ("time_embedding.linear_2.bias", "time_embed.2.bias"),
-        ("conv_in.weight", "input_blocks.0.0.weight"),
-        ("conv_in.bias", "input_blocks.0.0.bias"),
-        ("conv_norm_out.weight", "out.0.weight"),
-        ("conv_norm_out.bias", "out.0.bias"),
-        ("conv_out.weight", "out.2.weight"),
-        ("conv_out.bias", "out.2.bias"),
-        ("add_embedding.linear_1.weight", "label_emb.0.0.weight"),
-        ("add_embedding.linear_1.bias", "label_emb.0.0.bias"),
-        ("add_embedding.linear_2.weight", "label_emb.0.2.weight"),
-        ("add_embedding.linear_2.bias", "label_emb.0.2.bias"),
-    ]
-
-    unet_conversion_map_resnet = [
-        ("norm1", "in_layers.0"),
-        ("conv1", "in_layers.2"),
-        ("norm2", "out_layers.0"),
-        ("conv2", "out_layers.3"),
-        ("time_emb_proj", "emb_layers.1"),
-        ("conv_shortcut", "skip_connection"),
-    ]
-
-    unet_conversion_map_layer = [
-        ("proj_in", "proj_in"),
-        ("proj_out", "proj_out"),
-        ("transformer_blocks.0.attn1.to_q", "transformer_blocks.0.attn1.to_q"),
-        ("transformer_blocks.0.attn1.to_k", "transformer_blocks.0.attn1.to_k"),
-        ("transformer_blocks.0.attn1.to_v", "transformer_blocks.0.attn1.to_v"),
-        ("transformer_blocks.0.attn1.to_out.0", "transformer_blocks.0.attn1.to_out.0"),
-        ("transformer_blocks.0.attn2.to_q", "transformer_blocks.0.attn2.to_q"),
-        ("transformer_blocks.0.attn2.to_k", "transformer_blocks.0.attn2.to_k"),
-        ("transformer_blocks.0.attn2.to_v", "transformer_blocks.0.attn2.to_v"),
-        ("transformer_blocks.0.attn2.to_out.0", "transformer_blocks.0.attn2.to_out.0"),
-        ("transformer_blocks.0.ff.net.0.proj", "transformer_blocks.0.ff.net.0.proj"),
-        ("transformer_blocks.0.ff.net.2", "transformer_blocks.0.ff.net.2"),
-        ("transformer_blocks.0.norm1", "transformer_blocks.0.norm1"),
-        ("transformer_blocks.0.norm2", "transformer_blocks.0.norm2"),
-        ("transformer_blocks.0.norm3", "transformer_blocks.0.norm3"),
-    ]
-
-    for i in range(3):
-        for j in range(2):
-            hf_down_res_prefix = f"down_blocks.{i}.resnets.{j}."
-            sd_down_res_prefix = f"input_blocks.{3*i + j + 1}.0."
-            unet_conversion_map += [(hf_down_res_prefix, sd_down_res_prefix)]
-            if i < 3:
-                hf_down_atn_prefix = f"down_blocks.{i}.attentions.{j}."
-                sd_down_atn_prefix = f"input_blocks.{3*i + j + 1}.1."
-                unet_conversion_map += [(hf_down_atn_prefix, sd_down_atn_prefix)]
-
-        hf_downsample_prefix = f"down_blocks.{i}.downsamplers.0.conv."
-        sd_downsample_prefix = f"input_blocks.{3*(i+1)}.0.op."
-        unet_conversion_map += [(hf_downsample_prefix, sd_downsample_prefix)]
-
-    for j in range(2):
-        hf_down_res_prefix = f"down_blocks.3.resnets.{j}."
-        sd_down_res_prefix = f"input_blocks.{3*3 + j + 1}.0."
-        unet_conversion_map += [(hf_down_res_prefix, sd_down_res_prefix)]
-
-    hf_mid_res_prefix = "mid_block.resnets.0."
-    sd_mid_res_prefix = "middle_block.0."
-    unet_conversion_map += [(hf_mid_res_prefix, sd_mid_res_prefix)]
-    hf_mid_atn_prefix = "mid_block.attentions.0."
-    sd_mid_atn_prefix = "middle_block.1."
-    unet_conversion_map += [(hf_mid_atn_prefix, sd_mid_atn_prefix)]
-    hf_mid_res_prefix = "mid_block.resnets.1."
-    sd_mid_res_prefix = "middle_block.2."
-    unet_conversion_map += [(hf_mid_res_prefix, sd_mid_res_prefix)]
-
-    for i in range(4):
-        for j in range(3):
-            hf_up_res_prefix = f"up_blocks.{i}.resnets.{j}."
-            sd_up_res_prefix = f"output_blocks.{3*i + j}.0."
-            unet_conversion_map += [(hf_up_res_prefix, sd_up_res_prefix)]
-            if i > 0:
-                hf_up_atn_prefix = f"up_blocks.{i}.attentions.{j}."
-                sd_up_atn_prefix = f"output_blocks.{3*i + j}.1."
-                unet_conversion_map += [(hf_up_atn_prefix, sd_up_atn_prefix)]
-        if i < 3:
-            hf_upsample_prefix = f"up_blocks.{i}.upsamplers.0."
-            sd_upsample_prefix = f"output_blocks.{3*i + 2}.1."
-            unet_conversion_map += [(hf_upsample_prefix, sd_upsample_prefix)]
-
-    sd_state_dict: dict[str, torch.Tensor] = {}
-    for k, v in unet_state_dict.items():
-        new_key = k
-        for hf_prefix, sd_prefix in unet_conversion_map:
-            if new_key.startswith(hf_prefix):
-                new_key = new_key.replace(hf_prefix, sd_prefix)
-        for hf_part, sd_part in unet_conversion_map_resnet:
-            new_key = new_key.replace(hf_part, sd_part)
-        for hf_part, sd_part in unet_conversion_map_layer:
-            new_key = new_key.replace(hf_part, sd_part)
-        sd_state_dict[new_key] = v
-    return sd_state_dict
-
-
-def _convert_sdxl_vae_state_dict(vae_state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    vae_conversion_map = [
-        ("nin_shortcut", "conv_shortcut"),
-        ("norm_out", "conv_norm_out"),
-        ("mid_block.attentions.0.", "mid.attn_1."),
-    ]
-    for i in range(4):
-        for j in range(2):
-            hf_down_prefix = f"down_blocks.{i}.resnets.{j}."
-            sd_down_prefix = f"encoder.down.{i}.block.{j}."
-            vae_conversion_map += [(hf_down_prefix, sd_down_prefix)]
-        if i < 3:
-            hf_downsample_prefix = f"down_blocks.{i}.downsamplers.0."
-            sd_downsample_prefix = f"down.{i}.downsample."
-            vae_conversion_map += [(hf_downsample_prefix, sd_downsample_prefix)]
-            hf_upsample_prefix = f"up_blocks.{i}.upsamplers.0."
-            sd_upsample_prefix = f"up.{3-i}.upsample."
-            vae_conversion_map += [(hf_upsample_prefix, sd_upsample_prefix)]
-        for j in range(3):
-            hf_up_prefix = f"up_blocks.{i}.resnets.{j}."
-            sd_up_prefix = f"decoder.up.{3-i}.block.{j}."
-            vae_conversion_map += [(hf_up_prefix, sd_up_prefix)]
-    for j in range(2):
-        hf_mid_res_prefix = f"mid_block.resnets.{j}."
-        sd_mid_res_prefix = f"mid.block_{j+1}."
-        vae_conversion_map += [(hf_mid_res_prefix, sd_mid_res_prefix)]
-
-    sd_state_dict: dict[str, torch.Tensor] = {}
-    for k, v in vae_state_dict.items():
-        new_key = k
-        for hf_prefix, sd_prefix in vae_conversion_map:
-            if new_key.startswith(hf_prefix):
-                new_key = new_key.replace(hf_prefix, sd_prefix)
-        sd_state_dict[new_key] = v
-    return sd_state_dict
-
-
-def _convert_sdxl_text_enc_state_dict(text_enc_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    # Ported from upstream SDXL script; regex based mapping.
-    textenc_conversion_lst = [
-        ("transformer.resblocks.", "resblocks."),
-        ("ln_1", "ln_1"),
-        ("ln_2", "ln_2"),
-        (".c_fc.", ".mlp.c_fc."),
-        (".c_proj.", ".mlp.c_proj."),
-        (".attn", ".attn"),
-        ("ln_final.", "ln_final."),
-        ("token_embedding.weight", "token_embedding.weight"),
-        ("positional_embedding", "positional_embedding"),
-        ("text_projection", "text_projection"),
-    ]
-
-    protected = {re.escape(src): dst for src, dst in textenc_conversion_lst}
-    pattern = re.compile("|".join(protected.keys()))
-
-    def _repl(m: re.Match[str]) -> str:
-        return protected[re.escape(m.group(0))]
-
-    out: dict[str, torch.Tensor] = {}
-    for k, v in text_enc_dict.items():
-        k2 = pattern.sub(_repl, k)
-        out[k2] = v
-    return out
 
 
 def diffusers_to_singlefile(input_dir: Path, output_path: Path, *, model_family: str) -> dict[str, str]:
@@ -828,14 +478,19 @@ def diffusers_to_singlefile(input_dir: Path, output_path: Path, *, model_family:
         output_dtype="bf16",
     )
     return {
-        "model_family": _normalize_family(model_family),
+        "model_family": normalize_family(model_family),
         "output_path": str(output_path),
     }
 
 
 __all__ = [
-    "singlefile_to_diffusers",
-    "diffusers_to_singlefile",
-    "detect_diffusers_family",
+    "AmbiguousFamilyError",
+    "ConverterSignatureError",
+    "NotImplementedFamilyError",
+    "assert_converter_matches_signature",
     "convert_diffusers_to_singlefile",
+    "detect_diffusers_family",
+    "diffusers_to_singlefile",
+    "present_components",
+    "singlefile_to_diffusers",
 ]
