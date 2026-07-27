@@ -758,6 +758,12 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # (from_pretrained's torch_dtype already does it — we simply skip the fp8
 # storage lane that would re-cast down). fp8 storage remains only when bf16
 # does not fit.
+# STALE PREMISE, do not re-litigate from this number alone: the +44%/+73% tax
+# was measured on the HOOK form of this lane, which pgw#727 replaced with
+# module structure (14.8% faster under dynamo on an L4; the hook form was
+# compile-hostile). The preference above is unchanged and still correct on the
+# VRAM argument, but the tax figure no longer describes the lane and must be
+# re-measured on a pod before it is quoted at a rung decision (pgw#727).
 BF16_RESIDENT_MARGIN_GB = 4.0  # activations + allocator headroom
 
 # The pipeline's weight lane, part of the compile-cache graph key (gw#534):
