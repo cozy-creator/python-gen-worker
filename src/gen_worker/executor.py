@@ -4948,7 +4948,7 @@ class Executor:
         proven). The hot-adopt path never passes it: a NEW cell on a live
         instance requires its own full proof.
         """
-        from . import compile_cache, trt_engine
+        from . import aot_serve, compile_cache, trt_engine
         from . import warmup as warmup_mod
 
         jobs, skips = self._warmup_plan(spec, rec)
@@ -4985,10 +4985,17 @@ class Executor:
                 "(contract-keyed warm memory holds %d graph keys)",
                 spec.name, warm_mode, len(run_jobs), len(jobs), len(memory))
         evidence = _WarmupEvidence()
+        # pgw#735: three compiled backends, three proofs. Dynamo proves by FX
+        # cache hits, TRT by engine executions, an EXPORTED artifact by its own
+        # invocations — an exported cell performs no FX lookup at all, so a
+        # cache-hit requirement would score every honest .pt2 adoption as a
+        # failure. Never synthesize a hit counter for it: this is the one path
+        # whose whole job is to detect a lie about serving compiled.
         start_counts = {
             id(obj): (
                 compile_cache.execution_count(obj),
                 trt_engine.execution_count(obj),
+                aot_serve.execution_count(obj),
             )
             for obj in objects
         }
@@ -5002,6 +5009,7 @@ class Executor:
                 id(obj): (
                     compile_cache.execution_count(obj),
                     trt_engine.execution_count(obj),
+                    aot_serve.execution_count(obj),
                 )
                 for obj in objects
             }
@@ -5072,7 +5080,7 @@ class Executor:
                     return False
             evidence.count += 1
             for obj in objects:
-                calls_before, trt_before = before[id(obj)]
+                calls_before, trt_before, aot_before = before[id(obj)]
                 inductor_proven = (
                     compile_cache.execution_count(obj) > calls_before
                     and (
@@ -5081,7 +5089,11 @@ class Executor:
                     )
                 )
                 trt_proven = trt_engine.execution_count(obj) > trt_before
-                if inductor_proven or trt_proven:
+                # pgw#735: an exported artifact proves itself by executing —
+                # and by still being armed, so a call that ended in a revoked
+                # (failed) artifact cannot count as proof.
+                aot_proven = aot_serve.proven_since(obj, aot_before)
+                if inductor_proven or trt_proven or aot_proven:
                     proven_keys.setdefault(id(obj), set()).add(wj.graph_key)
             logger.info(
                 "boot warmup %s (%s): %.1fs",
@@ -5108,6 +5120,7 @@ class Executor:
                 obj for obj in objects
                 if compile_cache.execution_count(obj) == start_counts[id(obj)][0]
                 and trt_engine.execution_count(obj) == start_counts[id(obj)][1]
+                and aot_serve.execution_count(obj) == start_counts[id(obj)][2]
             ]
 
         # gw#614 coverage pass: an input-routed sibling lane the planned
@@ -5457,7 +5470,7 @@ class Executor:
             )
             setup = getattr(instance, "setup", None)
             inj = _InjectionResult(kwargs={}, loaded={})
-            from . import compile_cache, trt_engine
+            from . import aot_serve, compile_cache, trt_engine
 
             vram_before = self._vram_allocated()
             if spec.runtime:
@@ -5569,19 +5582,37 @@ class Executor:
             # artifact SOURCE differs; a self-mint that does not actually
             # serve its own warmup graphs must fail closed below exactly
             # like a delivered cell that doesn't (never silent eager).
+            # pgw#735: TRT engines and EXPORTED artifacts both prove
+            # themselves by executing, not by an FX cache hit — only the
+            # dynamo lane is scored by hits below.
+            def _proves_by_fx(ref: str) -> bool:
+                return not trt_engine.is_engine_ref(ref) and not \
+                    aot_serve.is_aot_ref(ref)
+
             proves_inductor = any(
-                not trt_engine.is_engine_ref(sel.ref)
+                _proves_by_fx(sel.ref)
                 for sel in inj.active_compile_artifacts.values()
             )
             proof_before = {
                 id(candidate.pipeline): (
                     compile_cache.execution_count(candidate.pipeline),
                     compile_cache.cache_miss_count(candidate.pipeline),
+                    aot_serve.execution_count(candidate.pipeline),
                 )
                 for candidate in inj.compile_objects
                 if proves_inductor
                 and id(candidate.pipeline) in inj.active_compile_artifacts
-                and not trt_engine.is_engine_ref(
+                and _proves_by_fx(
+                    inj.active_compile_artifacts[id(candidate.pipeline)].ref)
+            }
+            # Exported arms are proven separately: same fail-closed rule, its
+            # own counter.
+            aot_proof_before = {
+                id(candidate.pipeline): aot_serve.execution_count(
+                    candidate.pipeline)
+                for candidate in inj.compile_objects
+                if id(candidate.pipeline) in inj.active_compile_artifacts
+                and aot_serve.is_aot_ref(
                     inj.active_compile_artifacts[id(candidate.pipeline)].ref)
             }
             warmup = getattr(instance, "warmup", None)
@@ -5698,6 +5729,28 @@ class Executor:
                 proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
+                    aot_before = aot_proof_before.get(id(pipe))
+                    if aot_before is not None:
+                        # pgw#735: the EXPORTED lane's proof — its own
+                        # invocations, still armed. An exported artifact
+                        # performs no FX lookup, so scoring it by cache hits
+                        # would disprove every honest .pt2 adoption. Fail
+                        # closed exactly like the dynamo lane: no execution or
+                        # a revoked artifact means unexercised, never a
+                        # synthesized hit.
+                        aot_calls = aot_serve.execution_count(pipe) - aot_before
+                        calls_by_obj[id(pipe)] = aot_calls
+                        proof_by_obj[id(pipe)] = (aot_calls, 0, 0)
+                        if warmed and aot_serve.proven_since(pipe, aot_before):
+                            proven += 1
+                            if callable(warmup):
+                                function_proofs[id(pipe)] = {spec.name}
+                            proved_sel = inj.active_compile_artifacts.get(id(pipe))
+                            if proved_sel is not None:
+                                compile_cache.record_cell_proven(proved_sel.ref)
+                        else:
+                            unexercised.append(candidate)
+                        continue
                     before = proof_before.get(id(pipe))
                     if before is None:
                         continue
@@ -8243,8 +8296,13 @@ class Executor:
         inductor cache (#384: seed dirs + torch.compile) and a TRT engine
         (#390: deserialize + refit with the resident weights + module swap).
         ANY failure => stay eager and report ``adopt_failed:<reason>``;
-        adoption must never degrade service."""
-        from . import compile_cache, trt_engine
+        adoption must never degrade service.
+
+        pgw#735: THREE cell kinds ride these rails now — the exported
+        (``aot-inductor``) lane joins inductor and TRT, and proves adoption by
+        its own artifact invocations rather than by an FX cache hit it can
+        never produce."""
+        from . import aot_serve, compile_cache, trt_engine
         from . import hot_swap as hot_swap_mod
 
         t0 = time.monotonic()
@@ -8302,7 +8360,12 @@ class Executor:
 
         family = compile_cache.family_from_ref(ref)
         is_trt = trt_engine.is_engine_ref(ref)
-        if not family or not (is_trt or compile_cache.is_cache_ref(ref)):
+        # pgw#735: an EXPORTED cell is a third artifact kind, proven its own
+        # way below. Without this it fails `bad_ref` before it is ever armed.
+        is_aot = aot_serve.is_aot_ref(ref)
+        if not family or not (
+            is_trt or is_aot or compile_cache.is_cache_ref(ref)
+        ):
             return await fail("bad_ref")
         found = self._compile_target(target_incarnation_id)
         if found is None:
@@ -8459,6 +8522,7 @@ class Executor:
                 wrapped = False
                 lane_applied = False
                 trt_before = trt_engine.execution_count(obj) if is_trt else 0
+                aot_before = aot_serve.execution_count(obj) if is_aot else 0
                 inductor_before = (0, 0, 0)
 
                 async def rollback() -> None:
@@ -8554,7 +8618,7 @@ class Executor:
                 hits = 0
                 misses = 0
 
-                if not is_trt:
+                if not is_trt and not is_aot:
                     calls = compile_cache.execution_count(obj) - inductor_before[0]
                     hits = compile_cache.cache_hit_count(obj) - inductor_before[1]
                     misses = compile_cache.cache_miss_count(obj) - inductor_before[2]
@@ -8580,11 +8644,25 @@ class Executor:
                             f"compiled graph (calls={calls}, hits={hits}, "
                             f"misses={misses}, warmup={warmup_s}s) — cell useless "
                             f"on this runtime, serving eager"))
-                elif trt_engine.execution_count(obj) <= trt_before:
+                elif is_trt and trt_engine.execution_count(obj) <= trt_before:
                     await rollback()
                     return await fail(
                         "engine_not_executed",
                         "warmup did not execute the attached TRT engine",
+                    )
+                elif is_aot and not aot_serve.proven_since(obj, aot_before):
+                    # pgw#735: the exported lane's own proof. An artifact that
+                    # never ran, or that ran and then revoked (B1/B2 refusal),
+                    # is NOT adopted — same fail-closed posture as a dynamo
+                    # cell with zero cache hits, never a synthesized hit.
+                    await rollback()
+                    return await fail(
+                        "artifact_not_executed", (
+                            "warmup did not execute the attached exported "
+                            f"artifact (calls={aot_serve.execution_count(obj) - aot_before}, "
+                            f"armed={aot_serve.is_armed(obj)}, "
+                            f"ingress_refusals={aot_serve.ingress_refusals(obj)})"
+                        ),
                     )
                 if callable(warmup):
                     # A custom object warmup has no sibling-handler identity.

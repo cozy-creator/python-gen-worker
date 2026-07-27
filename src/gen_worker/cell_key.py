@@ -221,8 +221,20 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     a stamp can never disagree with the axes it summarizes. Raises
     :class:`CellKeyError` for artifacts that don't record every required axis
     (pre-gw#581 cells have no key and stay on the legacy verify path).
+
+    EXPORTED (``aot-inductor``) cells are refused here BY NAME (pgw#735): they
+    ride the same ck5 key space — the axis names are what :func:`from_axes`
+    validates, and the kind is an envelope value, so no scheme bump was needed —
+    but their axes are not an inductor cache's, and their key is STAMPED at mint.
+    Read ``meta["cell_key"]``; do not recompute an exported cell's identity from
+    these fields.
     """
     kind = str(meta.get("kind") or "")
+    if kind == "aot-inductor":
+        raise CellKeyError(
+            "artifact kind 'aot-inductor' (exported .pt2) has a STAMPED key — "
+            "read meta['cell_key'] instead of recomputing from inductor-cache "
+            f"axes (stamped={str(meta.get('cell_key') or '') or 'MISSING'})")
     if kind != "torch-inductor-cache":
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
     from . import env_seal

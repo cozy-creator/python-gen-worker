@@ -1101,6 +1101,20 @@ def ingress_refusals(pipeline: Any) -> int:
     return int((marker.get("state") or {}).get("ingress_refusals", 0))
 
 
+def proven_since(pipeline: Any, before: int) -> bool:
+    """The exported lane's ADOPTION PROOF (pgw#735).
+
+    An exported artifact performs no FX cache lookup, so the dynamo lane's
+    ``cache_hit_count > 0`` proof can never pass for it — scoring a ``.pt2``
+    that way disproves every honest adoption. Its own evidence is: it EXECUTED
+    since ``before``, and it is STILL armed (an artifact that ran and then
+    revoked on a B1/B2 refusal has not proven anything). Both halves are
+    load-bearing, and neither is a synthesized counter: this is the one path
+    whose entire job is to detect a lie about serving compiled.
+    """
+    return execution_count(pipeline) > int(before) and is_armed(pipeline)
+
+
 def is_armed(pipeline: Any) -> bool:
     """Whether an AOTI artifact is currently serving this pipeline."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
@@ -1159,6 +1173,7 @@ __all__ = [
     "contract_from_meta",
     "enable",
     "execution_count",
+    "proven_since",
     "find_artifact",
     "flavor_label",
     "ingress_refusals",
