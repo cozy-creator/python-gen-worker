@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from gen_worker import aot_serve
 from gen_worker import compile_cache as cc
