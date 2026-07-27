@@ -876,3 +876,218 @@ def test_input_lifted_adapters_are_ordinary_declared_inputs():
         aot.assert_ingress(contract, bad, {})
     assert excinfo.value.reason == "static_dim_mismatch"
     assert "lora_a" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# pgw#725 LoRA seam — lifted adapters ride as MANDATORY call kwargs
+# ---------------------------------------------------------------------------
+
+
+def _binding(a_numel=64 * 2048, b_numel=2048 * 64):
+    """A real LiftedLoraBinding carrying just the flat pair.
+
+    Built with ``__new__`` to skip the torch allocation: ``call_kwargs()``
+    reads only the two slots, and using the REAL class means the production
+    ``lifted_binding()`` isinstance check is what the tests exercise.
+    """
+    from gen_worker.models.lora_lifted import LiftedLoraBinding
+
+    binding = object.__new__(LiftedLoraBinding)
+    binding._a = FakeTensor([a_numel])
+    binding._b = FakeTensor([b_numel])
+    return binding
+
+
+def _lift(module, binding=None):
+    """Install a lifted binding the way the LoRA lane's installer does."""
+    binding = binding or _binding()
+    setattr(module, "_cozy_lora_lifted", binding)
+    return binding
+
+
+LIFTED_INPUTS = INPUTS + [
+    # The lifted pair is FLAT rank-1 — one window per layer inside one tensor.
+    {"name": "lora_a", "position": 3, "dtype": "bfloat16", "shape": [64 * 2048]},
+    {"name": "lora_b", "position": 4, "dtype": "bfloat16", "shape": [2048 * 64]},
+]
+
+
+def test_lifted_call_kwargs_absent_without_a_binding():
+    """bucket=0 is its own branchless class: no binding, no kwargs."""
+    assert aot.lifted_call_kwargs(FakeModule()) == {}
+
+
+def test_lifted_call_kwargs_are_the_binding_tensors_by_reference():
+    module = FakeModule()
+    binding = _lift(module)
+    kwargs = aot.lifted_call_kwargs(module)
+    assert set(kwargs) == {"lora_a", "lora_b"}
+    # by REFERENCE, never copied — pointer stability is what cudagraph wants
+    assert kwargs["lora_a"] is binding.tensors[0]
+    assert kwargs["lora_b"] is binding.tensors[1]
+    # and stable across calls
+    assert aot.lifted_call_kwargs(module)["lora_a"] is kwargs["lora_a"]
+
+
+def test_wrapper_splats_the_lifted_pair_into_the_artifact_call():
+    meta = _meta(inputs=LIFTED_INPUTS)
+    package = FakePackage()
+    module = FakeModule()
+    binding = _lift(module)
+    runner = _runner(package, meta)
+    runner.bind(module.state_dict(), {})
+    aot.wrap_module(module, runner, meta)
+
+    # the pipeline calls the denoiser WITHOUT the adapter kwargs
+    assert module.forward(*_in_range_call()[0]) == "ARTIFACT_OUTPUT"
+    args, kwargs = package.invocations[0]
+    assert kwargs["lora_a"] is binding.tensors[0]
+    assert kwargs["lora_b"] is binding.tensors[1]
+
+
+def test_wrapper_splats_the_lifted_pair_into_the_EAGER_fallback_too():
+    """bind_views refuses a None half by name, so the eager path needs the
+    kwargs exactly as much as the artifact does. An out-of-contract request
+    falling to eager must not explode on a missing mandatory adapter."""
+    meta = _meta(inputs=LIFTED_INPUTS)
+    module = FakeModule()
+    binding = _lift(module)
+    seen: list = []
+
+    def _eager(*args, **kwargs):
+        seen.append(kwargs)
+        return "EAGER_OUTPUT"
+
+    module.forward = _eager
+    runner = _runner(FakePackage(), meta)
+    runner.bind(module.state_dict(), {})
+    aot.wrap_module(module, runner, meta)
+
+    # out of range -> B2 refusal -> eager, WITH the mandatory pair present
+    assert module.forward(
+        FakeTensor([2, 4, 256, 256]), FakeTensor([], "torch.int64"),
+        FakeTensor([2, 77, 2048])) == "EAGER_OUTPUT"
+    assert seen[0]["lora_a"] is binding.tensors[0]
+    assert seen[0]["lora_b"] is binding.tensors[1]
+
+
+def test_adapter_swap_needs_no_artifact_interaction():
+    """The adapter machinery mutates the owned pair in place through views, so
+    a swap touches neither the runner nor the constant table — the pointers
+    the graph captured stay valid."""
+    meta = _meta(inputs=LIFTED_INPUTS)
+    package = FakePackage()
+    module = FakeModule()
+    binding = _lift(module)
+    runner = _runner(package, meta)
+    runner.bind(module.state_dict(), {})
+    bound_before = dict(package.loaded or {})
+    aot.wrap_module(module, runner, meta)
+
+    module.forward(*_in_range_call()[0])
+    first = package.invocations[0][1]["lora_a"]
+
+    # a swap writes THROUGH the same tensor object (in place); nothing rebinds
+    module.forward(*_in_range_call()[0])
+    second = package.invocations[1][1]["lora_a"]
+    assert first is second is binding.tensors[0]
+    assert package.loaded == bound_before   # constant table untouched
+    assert package.full_update_asked is True
+
+
+def test_lifted_pair_is_resolved_per_call_not_captured():
+    """The LoRA lane may re-install or drop lifting independently of arming,
+    so a stale capture would feed the graph a dead pointer."""
+    meta = _meta(inputs=LIFTED_INPUTS)
+    package = FakePackage()
+    module = FakeModule()
+    first = _lift(module)
+    runner = _runner(package, meta)
+    runner.bind(module.state_dict(), {})
+    aot.wrap_module(module, runner, meta)
+
+    module.forward(*_in_range_call()[0])
+    assert package.invocations[0][1]["lora_a"] is first.tensors[0]
+
+    # a re-install swaps the binding OBJECT: the next call must follow it
+    second = _lift(module, _binding())
+    assert second is not first
+    module.forward(*_in_range_call()[0])
+    assert package.invocations[1][1]["lora_a"] is second.tensors[0]
+
+    # dropping lifting entirely leaves a MANDATORY declared input absent —
+    # B2 refuses by name and serves eager rather than reusing a dead pointer
+    delattr(module, "_cozy_lora_lifted")
+    assert module.forward(*_in_range_call()[0]) == "EAGER_OUTPUT"
+    assert len(package.invocations) == 2
+    assert aot.ingress_refusals(module) == 1
+    assert "lora_a" in getattr(module, "_cozy_aot")["state"]["last_refusal"]
+
+
+def test_lifted_pair_is_asserted_at_ingress_like_any_input():
+    """A wrong-layout flat pair is refused by name, not silently broadcast."""
+    contract = _contract(_meta(inputs=LIFTED_INPUTS))
+    good = (*_in_range_call()[0],
+            FakeTensor([64 * 2048]), FakeTensor([2048 * 64]))
+    assert aot.assert_ingress(contract, good, {}) == {"h": 128, "w": 128}
+
+    bad = (*_in_range_call()[0],
+           FakeTensor([32 * 2048]), FakeTensor([2048 * 64]))
+    with pytest.raises(aot.IngressContractError) as excinfo:
+        aot.assert_ingress(contract, bad, {})
+    assert excinfo.value.reason == "static_dim_mismatch"
+    assert "lora_a" in str(excinfo.value)
+
+
+def test_assert_lifted_contract_agrees_both_ways():
+    lifted_contract = _contract(_meta(inputs=LIFTED_INPUTS))
+    plain_contract = _contract()
+
+    plain_module = FakeModule()
+    lifted_module = FakeModule()
+    _lift(lifted_module)
+
+    # matching pairs are fine
+    aot.assert_lifted_contract(plain_module, plain_contract)
+    aot.assert_lifted_contract(lifted_module, lifted_contract)
+
+    # lifted module, artifact that never declared the adapter => the branch
+    # was traced away and every request would serve the base model
+    from gen_worker.compile_cache import AdoptError
+    with pytest.raises(AdoptError) as excinfo:
+        aot.assert_lifted_contract(lifted_module, plain_contract)
+    assert excinfo.value.reason == "lifted_inputs_undeclared"
+
+    # artifact wants the adapter, module cannot supply it
+    with pytest.raises(AdoptError) as excinfo:
+        aot.assert_lifted_contract(plain_module, lifted_contract)
+    assert excinfo.value.reason == "lifted_inputs_unbindable"
+
+
+def test_enable_refuses_a_lifted_module_against_a_branchless_cell(
+        tmp_path, monkeypatch, stub_runtime):
+    """The mismatch is caught at ARM time, by name, not at first call."""
+    monkeypatch.setattr(aot, "_load_package", lambda p: FakePackage())
+    module = FakeModule()
+    _lift(module)
+    pipeline = FakePipeline(module)
+    original = module.forward
+
+    assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)) is False
+    assert aot.is_armed(pipeline) is False
+    assert module.forward == original
+
+
+def test_enable_arms_a_lifted_module_against_a_lifted_cell(
+        tmp_path, monkeypatch, stub_runtime):
+    package = FakePackage()
+    monkeypatch.setattr(aot, "_load_package", lambda p: package)
+    module = FakeModule()
+    binding = _lift(module)
+    pipeline = FakePipeline(module)
+    art = _tar(tmp_path, _meta(inputs=LIFTED_INPUTS), name="lifted.tar.gz")
+
+    assert aot.enable(pipeline, Cfg(), tmp_path / "c", art) is True
+    assert module.forward(*_in_range_call()[0]) == "ARTIFACT_OUTPUT"
+    assert package.invocations[0][1]["lora_a"] is binding.tensors[0]
+    assert aot.execution_count(pipeline) == 1

@@ -72,6 +72,7 @@ from .compile_cache import (
     parse_cell_ref,
     sku_slug,
 )
+from .models import lora_lifted
 
 logger = logging.getLogger(__name__)
 
@@ -817,6 +818,56 @@ class ArtifactRunner:
 # ---------------------------------------------------------------------------
 
 
+def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
+    """The lifted-adapter call kwargs for one denoiser, or ``{}`` (pgw#725).
+
+    Under input-lifting the rank bucket arrives as two flat tensors in the
+    CALL rather than as module state, so nothing can be baked and the
+    no-baked-adapter gate degenerates to a signature check. Both kwargs are
+    MANDATORY when a binding exists: ``bind_views`` refuses a ``None`` half
+    by name, so the EAGER fallback needs them exactly as much as the
+    artifact does — which is why the wrapper merges them once, up front, for
+    both paths.
+
+    The tensors are returned by reference and never copied. The adapter
+    machinery mutates them IN PLACE through views, so a swap needs no
+    artifact interaction at all and the call arguments stay pointer-stable
+    (what cudagraph static inputs require).
+
+    ``bucket=0`` is its own branchless graph class with no lifted signature,
+    so it has no binding and gets no kwargs.
+    """
+    binding = lora_lifted.lifted_binding(module)
+    return binding.call_kwargs() if binding is not None else {}
+
+
+def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
+    """The module's lifted state and the artifact's signature must AGREE.
+
+    Either mismatch is the pgw#704 S9 defect in one direction or the other:
+    an artifact that declares the adapter inputs but a module with no
+    binding has no way to supply a mandatory input, while a lifted module
+    served by an artifact that does NOT declare them means the branch was
+    traced away — every request silently gets the base model. Caught at arm
+    time, by name, instead of at the first call.
+    """
+    declared = {spec.name for spec in contract.inputs}
+    wanted = set(lora_lifted.LIFTED_INPUT_NAMES)
+    lifted = lora_lifted.lifted_binding(module) is not None
+    if lifted and not wanted <= declared:
+        raise AdoptError(
+            "lifted_inputs_undeclared",
+            f"module carries a lifted LoRA adapter but the artifact declares "
+            f"no {sorted(wanted - declared)!r} input(s); the branch was traced "
+            "away, so every request would silently serve the base model")
+    if not lifted and wanted & declared:
+        raise AdoptError(
+            "lifted_inputs_unbindable",
+            f"artifact declares lifted adapter input(s) "
+            f"{sorted(wanted & declared)!r} but the module has no lifted "
+            "binding to supply them (bucket=0 is a different graph class)")
+
+
 def wrap_module(
     module: Any,
     runner: ArtifactRunner,
@@ -835,6 +886,10 @@ def wrap_module(
     counted, per-request contract refusal — the request serves eagerly and
     the artifact stays armed for in-contract traffic, because one
     out-of-range request says nothing about the artifact's health.
+
+    pgw#725 LoRA seam: when the denoiser carries a lifted adapter, both
+    ``lora_a``/``lora_b`` are MANDATORY call kwargs and this wrapper is the
+    call site that supplies them — see :func:`lifted_call_kwargs`.
     """
     original = eager_forward or module.forward
     state: Dict[str, Any] = {
@@ -851,6 +906,11 @@ def wrap_module(
     def aot_forward(*args: Any, **kwargs: Any) -> Any:
         if state["revocation_error"]:
             raise CompiledLaneUnavailableError(state["revocation_error"])
+        # The lifted pair is resolved PER CALL, not captured at wrap time:
+        # the LoRA lane may install/remove lifting independently of arming,
+        # and a stale capture would either starve the graph of a mandatory
+        # input or feed one to a forward that no longer takes it.
+        kwargs = {**kwargs, **lifted_call_kwargs(module)}
         if state["failed"]:
             return original(*args, **kwargs)
         try:
@@ -957,6 +1017,9 @@ def load_and_wrap(
         try:
             contract = contract_from_meta(meta)
             constants = constants_from_meta(meta)
+            # pgw#725: the lifted-adapter signature must match the module's
+            # actual lifted state before anything is armed.
+            assert_lifted_contract(module, contract)
         except ValueError as exc:
             raise AdoptError("contract_invalid", str(exc)) from exc
 
@@ -1089,6 +1152,7 @@ __all__ = [
     "SOURCE_STATE_DICT",
     "artifact_metadata",
     "assert_bindable",
+    "assert_lifted_contract",
     "assert_ingress",
     "bind_call_inputs",
     "constants_from_meta",
@@ -1101,6 +1165,7 @@ __all__ = [
     "is_aot_artifact",
     "is_aot_ref",
     "is_armed",
+    "lifted_call_kwargs",
     "load_and_wrap",
     "pack",
     "range_digest",
