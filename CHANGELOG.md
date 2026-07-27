@@ -1,6 +1,80 @@
 # Changelog
 
-## Unreleased (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
+## 0.76.0 (2026-07-27) — P0: every self-mint fleet-wide was refused at pack; plus the ck5->ck6 identity arc, the AOT lanes (dark), and the fp8 restructure
+
+### P0 (pgw#733): guard sources resolve their EMBEDDED root — no cell could be published, on any family
+
+The headline, and the reason this train exists. `guard_closure._source_root`
+prefix-matched `^L['name']`, but torch 2.13 emits class/code-structure guards whose
+sources CONTAIN a root without starting with it:
+`dict(type(L['self']).__mro__[1].__dict__)` for a base-class `@property` (diffusers
+`ConfigMixin.config`, read in every model's forward) and
+`type(L['self']._modules['x']).__dict__['forward'].__defaults__` for a submodule
+forward with a default argument. Both fell through to the `"other"` root, which LEAKS
+**before** the type dispatch that already covers them — so `assert_closure` raised
+inside every mint's pack window and every self-mint on every family was refused
+(`self_mint_abort phase=pack_failed`), independent of sm, dtype, lane and function.
+Every family inherits `ModelMixin`+`ConfigMixin` and calls default-arg submodules, so
+nothing escaped it; the 26 existing tapes stayed green because their fixtures are plain
+modules with plain attributes and no default args.
+
+- `_source_root` now resolves the root embedded anywhere in a derived source, `self`
+  winning when present. The closed world is unchanged: a source with no recognizable
+  root is still `"other"`, still a leak.
+- Freevar-rooted guards share the input dispatch; only the LEAK REASON gains the freevar
+  naming. Production DOES trace a wrapper closing over `forward_fn`/`kwargs_name` —
+  classifying those as leaks would have refused every real mint a second way. A captured
+  code object is code (pinned by `code_closure`+`toolchain`); a captured runtime scalar
+  still leaks, now named as a freevar.
+- Verified on a real diffusers `UNet2DConditionModel`: 9-11 LEAK rows +
+  `GuardClosureError` -> CLOSED, `assert_closure` PASSES. A new CPU tape compiles a real
+  hierarchy carrying both triggers — the net the toy tapes never provided.
+
+### Pack refusals diagnose themselves (pgw#733)
+
+A refusal that exists only while the pod lives is a silent failure to the OPERATOR: the
+first real-GPU mint's reason died with the pod and cost a full run. Every pack refusal
+now carries `latched=yes/NO` with the live cache dirs (answering gw#608's question with
+evidence instead of asking it rhetorically), the capture `tree=[...]` per subdir with
+counts, inductor's cache flags (`fx_graph_cache`, `force_disable_caches`,
+`bundle_triton_into_fx_graph_cache` — True by default on 2.13, which moves triton
+artifacts INSIDE the fx entry), and the pipeline's own FX hit/miss proof counts. The
+pgw#698 cubin gate carries its census (ptx/cubin counts, sm, bundle flag) so a real PTX
+exposure and a bundling artifact are distinguishable. Reading inductor's config never
+triggers a fresh import — that mkdirs `TORCHINDUCTOR_CACHE_DIR` and can leave a
+half-initialized module behind (measured: the mega-cache artifact factory
+double-registers).
+
+### Three genericity defects (pgw#740)
+
+- `convert/repackage.detect_diffusers_family` routed the SDXL two-text-encoder signature
+  to the **SD1.5 converter**, silently, while `convert/layout.py` returned `"sdxl"` for
+  the identical signal. Detection fixed, plus an independent `ConverterSignatureError`
+  guard naming both sides, so a caller passing the wrong family cannot get the wrong
+  converter either.
+- `utils/lora._denoiser_fingerprint` digested UNet-only config fields, so **every DiT
+  fingerprinted to `"|||"`** — a normalized-split cache collision between structurally
+  different transformers. It now covers both shapes, with a structural fallback (a
+  fingerprint that resolves to nothing is a collision, not a key).
+- `models/memory`'s group-offload loop iterated a fixed component list, so Wan's
+  `transformer_2` and LTX's `connectors` were **never offloaded** while the caller was
+  told they were. Components are discovered now, and anything left resident is named in
+  a WARNING.
+
+### AOT lanes — new modules, INERT until invoked (pgw#721/#723/#725/#734/#735)
+
+`aot_serve.py` (consume a `.pt2`: B1 constants-bound gate + B2 ingress range assertion),
+`aot_mint.py`/`aot_package.py`/`aot_inputs.py` (export -> code-only `.pt2` -> gates ->
+keyed cell) and `models/lora_lifted.py` (rank-bucket adapters as call INPUTS). Nothing
+dispatches to them unless an `aot-inductor` cell arrives, so this ships dark. Two
+executor seams had to change for that path to be reachable at all: hot adoption
+dispatches on artifact KIND (an exported cell used to be handed to the dynamo stager),
+and the adoption proof is kind-aware — an exported artifact performs no FX lookup, so
+the `cache_hit_count > 0` gate could never pass for it. `aot_serve.proven_since` is the
+exported proof (executed since the sample AND still armed); no counter is ever
+synthesized, and dynamo keeps the FX-hit requirement verbatim.
+
+### (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
 
 Paul's exact-identity ruling chain (design of record: tracker pgw#716). This ships
 the ck5 INTERIM scheme; ck6 (graph-hash identity) follows per pgw#716-#720.
