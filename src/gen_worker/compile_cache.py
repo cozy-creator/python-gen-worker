@@ -41,11 +41,13 @@ compiled from — informational, never part of the match.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import contextvars
 import ctypes
 import filecmp
 import functools
+import importlib.util
 import gzip
 import hashlib
 import io
@@ -62,7 +64,7 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import inspect
 import pickle
@@ -755,46 +757,149 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     }
 
 
-# The packages whose LOADED source files form a cell's code closure: the
-# graph-shaping code (gen_worker) and the model libraries whose python is
-# traced into the graphs. Version axes stay in the key for exact lookup;
-# the closure is the CHANGE-DETECTION identity (Paul's ruling, th#1229).
-_CLOSURE_PACKAGES = ("gen_worker", "diffusers", "transformers")
+# --- static code closure (ck5 recipe identity, Paul's exact-identity
+# ruling) -------------------------------------------------------------------
+#
+# "Look at our code and say 'this is the graph we need', ideally with pure
+# static analysis, and that is our unique identifier." The closure is the
+# import graph reachable from the compile/composition entrypoints, resolved
+# by AST inspection only (no execution): every reached source file is
+# content-digested, and the sorted (module-path, digest) list digests into
+# the ck5 ``code_closure`` axis. Paul's root-imports convention (top-of-file
+# imports, no runtime imports) is exactly what makes this static graph
+# SOUND — and the mint-time completeness gate below turns that convention
+# into a hard check where the key's honesty depends on it.
+
+_CLOSURE_ENTRYPOINTS = (
+    "gen_worker.compile_cache",
+    "gen_worker.guard_closure",
+    "gen_worker.cell_key",
+    "gen_worker.env_seal",
+    "gen_worker.models.loading",
+    "gen_worker.models.provision",
+    "gen_worker.models.memory",
+)
 
 
 @functools.lru_cache(maxsize=8192)
 def _closure_file_digest(path: str, mtime_ns: int, size: int) -> str:
     """Content digest of one closure file; keyed on (path, mtime, size) so
-    repeated metadata calls never re-read unchanged files."""
+    repeated key computations never re-read unchanged files."""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def code_closure() -> Tuple[Tuple[str, str], ...]:
-    """pgw#700 FAST tier: the source files ACTUALLY LOADED from the
-    trace-relevant packages, each content-digested — recorded dependencies,
-    never declared versions (guard-closure philosophy applied to code
-    identity). Recorded at mint into metadata; a consumer digests ITS
-    copies of the recorded file set (:func:`gen_worker.equivalence.
-    closure_delta`) and adopts on all-identical with no probe mint and no
-    manifest comparison. Paths are module-derived (``pkg/mod.py``), never
-    absolute — venv layout must not enter the identity."""
+def _module_source(name: str) -> Optional[Path]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return None
+    if spec is None or not spec.origin or not spec.origin.endswith(".py"):
+        return None
+    return Path(spec.origin)
+
+
+def _static_imports(path: Path, module_name: str) -> set[str]:
+    """Absolute module names imported by ``path``, by AST inspection."""
+    try:
+        tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError):
+        return set()
+    package = module_name if path.name == "__init__.py" \
+        else module_name.rsplit(".", 1)[0] if "." in module_name else ""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                parts = package.split(".") if package else []
+                if node.level > 1:
+                    parts = parts[: len(parts) - (node.level - 1)]
+                base = ".".join(parts)
+            else:
+                base = node.module or ""
+            if node.level and node.module:
+                base = f"{base}.{node.module}" if base else node.module
+            if base:
+                out.add(base)
+                # `from pkg import mod` — mod may itself be a module.
+                out.update(f"{base}.{alias.name}" for alias in node.names)
+    return out
+
+
+@functools.lru_cache(maxsize=32)
+def static_code_closure(roots: Tuple[str, ...] = ()) -> Tuple[Tuple[str, str], ...]:
+    """The recipe's code identity: sorted (module path, content digest) of
+    every source file statically reachable from the compile entrypoints
+    (plus ``roots`` — the ENDPOINT modules, whose source shapes the traced
+    graphs too). Restricted to the gen_worker package and the root
+    packages; torch/diffusers/transformers content rides the ``toolchain``
+    axis at package granularity instead. Deterministic: module-derived
+    relative paths, sorted, content digests — never absolute paths, never
+    bytecode."""
+    packages = {"gen_worker"} | {r.split(".", 1)[0] for r in roots if r}
+    queue: List[str] = list(_CLOSURE_ENTRYPOINTS) + [r for r in roots if r]
+    seen: set[str] = set()
     out: Dict[str, str] = {}
-    for name, module in sorted(sys.modules.items()):
-        root = name.split(".", 1)[0]
-        if root not in _CLOSURE_PACKAGES or module is None:
+    while queue:
+        name = queue.pop()
+        if name in seen or name.split(".", 1)[0] not in packages:
             continue
-        file = getattr(module, "__file__", None)
-        if not file or not str(file).endswith(".py"):
+        seen.add(name)
+        # Parent packages execute on import: they are part of the closure.
+        if "." in name:
+            queue.append(name.rsplit(".", 1)[0])
+        path = _module_source(name)
+        if path is None:
             continue
-        path = Path(file)
         rel = name.replace(".", "/") + (
             "/__init__.py" if path.name == "__init__.py" else ".py")
         try:
             st = path.stat()
-            out[rel] = _closure_file_digest(str(path), st.st_mtime_ns, st.st_size)
         except OSError:
             continue
+        out[rel] = _closure_file_digest(str(path), st.st_mtime_ns, st.st_size)
+        queue.extend(_static_imports(path, name))
     return tuple(sorted(out.items()))
+
+
+def closure_completeness_gap(roots: Tuple[str, ...] = ()) -> List[str]:
+    """Loaded modules inside the composition namespaces that the static
+    import walk cannot see. NOT a mint gate (Paul's ck6 ruling demoted the
+    closure to a possible future memo — this check's only job was memo
+    honesty, so it rides the deferred memo issue): kept as diagnostics for
+    that issue. Note the live finding it produced: executor-side models/*
+    modules (disk_gc, lane_gate, ...) load outside the composition walk,
+    so any future memo scope must be the walk's namespaces, not the
+    package prefix."""
+    static = {rel for rel, _digest in static_code_closure(tuple(roots))}
+    scope_prefixes = ("gen_worker.models",) + _CLOSURE_ENTRYPOINTS + tuple(
+        r for r in roots if r)
+    gaps: List[str] = []
+    for name, module in sorted(sys.modules.items()):
+        if module is None:
+            continue
+        if not any(name == p or name.startswith(p + ".")
+                   for p in scope_prefixes):
+            continue
+        file = getattr(module, "__file__", None)
+        if not file or not str(file).endswith(".py"):
+            continue
+        rel = name.replace(".", "/") + (
+            "/__init__.py" if Path(str(file)).name == "__init__.py" else ".py")
+        if rel not in static:
+            gaps.append(name)
+    return gaps
+
+
+def assert_closure_complete(roots: Tuple[str, ...] = ()) -> None:
+    gaps = closure_completeness_gap(roots)
+    if gaps:
+        raise RuntimeError(
+            f"code-closure completeness gate (ck5): {len(gaps)} loaded "
+            f"module(s) outside the static import closure — a dynamic "
+            f"import is hiding trace-relevant code from the recipe key: "
+            f"{gaps[:10]!r}")
 
 
 @functools.lru_cache(None)
@@ -816,9 +921,12 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     try:
         import importlib.metadata
 
+        # ck5: diffusers/transformers/peft ride here at package granularity
+        # (their VERSION axes left the key; content replaces them).
+        wanted = ("torch", "triton", "diffusers", "transformers", "peft")
         for dist in importlib.metadata.distributions():
             name = str(dist.metadata.get("Name") or "").lower()
-            if name in ("torch", "triton") or name.startswith("nvidia-"):
+            if name in wanted or name.startswith("nvidia-"):
                 record = dist.read_text("RECORD") or ""
                 out[name] = hashlib.sha256(record.encode()).hexdigest()[:16]
     except Exception:
@@ -839,14 +947,12 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
 
 @functools.lru_cache(None)
 def content_keys() -> Tuple[Tuple[str, str], ...]:
-    """torch/triton CONTENT identity (cache-design review §6.5): version
-    strings cannot detect a patched wheel — upstream hashes source bytes
-    (``torch_key``: the whole torch package; ``triton_key``: per-file shas +
-    the libtriton binary). Recorded in metadata, NOT the key: for the fleet
-    ``image_digest`` already pins userspace by content, but local self-mints
-    (gw#555) have no image identity, and pgw#700 equivalence adoption makes
-    byte-match of these a PRECONDITION before ``image_digest`` may be
-    relaxed (see also pgw#711/R3 toolchain_digest)."""
+    """torch/triton CONTENT identity as upstream computes it (cache-design
+    review §6.5: ``torch_key`` hashes the whole torch package's bytes;
+    ``triton_key`` per-file shas + the libtriton binary). Recorded in
+    metadata for observability/forensics — the ck5 key's content identity
+    for the same stack rides the ``toolchain`` axis (dist-info RECORDs +
+    tool binaries), which is cheaper and covers the cuda runtime too."""
     out: Dict[str, str] = {"torch": "", "triton": ""}
     try:
         from torch._inductor.codecache import torch_key
@@ -920,12 +1026,13 @@ def artifact_metadata(
         # pgw#696: the execution-environment seal rides verbatim — the ck4
         # env_seal axis is recomputed FROM it, never trusted as a stamp.
         env_seal.SEAL_KEY: env_seal.effective_seal(),
-        # review §6.5 / pgw#710 / pgw#700 fast tier: content identity of the
-        # compile stack + the loaded code closure (equivalence adoption
-        # evidence) — metadata only, never key axes.
+        # ck5 recipe facts: toolchain + static code closure feed the key
+        # axes (recomputed from these blocks, never trusted as stamps);
+        # content_keys stay observability (review §6.5). Endpoint closure
+        # roots ride in when the executor passes them (train-lane wiring).
         "content_keys": dict(content_keys()),
         "toolchain": dict(toolchain_digest()),
-        "code_closure": dict(code_closure()),
+        "code_closure": dict(static_code_closure()),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
@@ -1190,13 +1297,14 @@ def _install_fx_system_shim() -> None:
 
 
 def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
-    """Digest of the axes we will NEVER relax (format|kind|family|lane|mode|
+    """Digest of the SEMANTIC identity (format|kind|family|lane|mode|
     contract) — bound into every inner torch.compile key via
     ``cache_key_tag`` (review §6.3), so a delivered cell's entries are
     mechanically unconsumable by a process whose declared semantic identity
-    differs. Environment axes (sm/cuda/torch/triton/gen_worker/image_digest/
-    env_seal) are deliberately EXCLUDED or pgw#700 equivalence adoption
-    across conservative axes becomes impossible."""
+    differs. Environment facts are deliberately excluded: the inner FX key
+    already hashes them natively (system info, config, dtypes) and the ck5
+    outer key pins them via env_seal/toolchain/code_closure — the tag's job
+    is semantics only."""
     lane = cell_key._canonical_lane(
         pipeline_weight_lane(pipeline),
         int(getattr(cfg, "lora_bucket", 0) or 0))

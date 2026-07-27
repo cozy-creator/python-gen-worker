@@ -204,7 +204,7 @@ def test_seal_digest_tracks_config_flags() -> None:
     assert _env_seal().seal_digest(_env_seal().effective_seal()) == baseline
 
 
-def test_ck4_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
+def test_ck5_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
     monkeypatch.setattr(cc, "runtime_key", lambda: {
         "sku": "l4", "sm": "sm_89", "cuda": "13.0", "cuda_driver": "13000",
         "torch": "2.13.0+cu130", "triton": "3.7.1", "image_digest": "",
@@ -215,7 +215,7 @@ def test_ck4_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
 
     facts = cc.declared_contract_facts(_cfg())
     want = ck.compute("toyfam", contract=ck.contract_digest(facts))
-    assert want.digest.startswith("ck4-")
+    assert want.digest.startswith("ck5-")
     assert not ck.is_key("ck3-" + "a" * 56)  # older schemes are dead
 
     meta = cc.artifact_metadata(

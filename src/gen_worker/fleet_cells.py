@@ -64,7 +64,6 @@ import requests
 from . import activity as activity_mod
 from . import cell_key
 from . import compile_cache as cc
-from . import equivalence
 from . import guard_closure
 from .convert.hub import blake3_file
 # module import (not `from .loading import pipeline_weight_lane`): tests
@@ -182,6 +181,11 @@ def finalized_in_process(key: str) -> Optional["SelfMint"]:
         return _FINALIZED.get(str(key or "").strip())
 
 
+# pgw#712 fence marker (see publish()): presence in metadata refuses
+# republication. Nothing in-tree stamps it post-ck5.
+ADOPTION_MARK = "equivalence_adopted"
+
+
 class CellPublishRefused(Exception):
     """Typed hub refusal (attestation / trust tier / quota). Terminal for
     this publish attempt — never retried, never fatal to serving."""
@@ -247,14 +251,17 @@ class CellPublisher:
         treats every raise as non-fatal to serving.
         """
 
-        # pgw#712: a cell adopted by EQUIVALENCE must never republish —
-        # under this worker's key the relaxation would launder into an
-        # exact-key mint and compound transitively across SDK versions.
-        mark = meta.get(equivalence.ADOPTION_MARK)
+        # pgw#712 (kept under the ck5 exact-identity ruling as
+        # defense-in-depth): a cell whose metadata carries a foreign
+        # adoption provenance must never republish under this worker's
+        # key. Nothing in-tree stamps the mark anymore (equivalence
+        # adoption was deleted with ck5); a marked cell can only be a
+        # foreign/hand-copied artifact — refuse it.
+        mark = meta.get(ADOPTION_MARK)
         if mark:
             raise CellPublishRefused(
-                f"cell was adopted by equivalence (bridged axes {mark!r}); "
-                "republishing it is fenced (pgw#712)")
+                f"cell carries adoption provenance {mark!r}; republishing "
+                "it is fenced (pgw#712)")
         key = str(meta.get("cell_key") or "").strip()
         if not key:
             key = cell_key.from_artifact_metadata(meta).digest

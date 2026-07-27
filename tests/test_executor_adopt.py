@@ -1180,7 +1180,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     model_dir.mkdir()
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck4-" + "d" * 56
+    mint_key = "ck5-" + "d" * 56
     mint_ref = f"root/family-{FAMILY}#{mint_key}"
     mint_digest = "blake3:" + "e" * 64
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
@@ -1258,7 +1258,7 @@ def test_hub_redelivery_of_own_minted_key_is_a_noop_rearm(
     model_dir.mkdir()
     spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck4-" + "a1" * 28
+    mint_key = "ck5-" + "a1" * 28
     mint_ref = f"root/family-{FAMILY}#{mint_key}"
     mint_digest = "blake3:" + "e" * 64
     store_digest = "blake3:" + "f" * 64  # the store's snapshot-manifest form
@@ -1325,7 +1325,7 @@ def test_hub_redelivery_of_own_minted_key_is_a_noop_rearm(
         "advertised digest must align to the store's form")
 
     # A genuinely DIFFERENT key still vacates (identity actually moved).
-    other_key = "ck4-" + "b2" * 28
+    other_key = "ck5-" + "b2" * 28
     other_ref = f"root/family-{FAMILY}#{other_key}"
 
     class _OtherKey:
@@ -1370,7 +1370,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck4-" + "f" * 56
+    mint_key = "ck5-" + "f" * 56
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
     mint_artifact.parent.mkdir()
     mint_artifact.write_bytes(b"cell-bytes")
@@ -1441,7 +1441,7 @@ def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
 
     class _Key:
-        digest = "ck4-" + "9" * 56
+        digest = "ck5-" + "9" * 56
 
     monkeypatch.setattr(cell_key_mod, "compute", lambda *a, **k: _Key())
     captured: dict = {}
@@ -3798,7 +3798,7 @@ def test_fresh_boot_advertises_candidate_cell_lookups(monkeypatch):
     computed: list = []
 
     class _Key:
-        digest = "ck4-" + "5" * 56
+        digest = "ck5-" + "5" * 56
 
     def _compute(family, lane="", bucket=0, **kw):
         computed.append((family, lane))

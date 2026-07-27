@@ -67,16 +67,19 @@ _BURST_META: Dict[str, Any] = {
     "image_digest": _IMAGE_DIGEST,
     "libs": {"diffusers": "0.39.0", "transformers": "5.13.1"},
     "shape_contract": _SHAPE_CONTRACT,
-    # pgw#696 reconstruction: the ck2-era burst pre-dates env sealing; a
-    # fixed representative seal keeps the lane-only-divergence relations
-    # provable under ck4 (burst_runtime pins effective_seal to THIS dict,
-    # exactly as it pins every other runtime probe).
+    # Reconstruction: the ck2-era burst pre-dates env sealing and recipe
+    # identity; fixed representative blocks keep the lane-only-divergence
+    # relations provable under ck5 (burst_runtime pins effective_seal /
+    # toolchain_digest / static_code_closure to THESE dicts, exactly as it
+    # pins every other runtime probe).
     "env_seal": {
         "seal_v": 1,
         "posture": {"grad_enabled": "True"},
         "config": {"cudnn_benchmark": "False"},
         "inductor": "0" * 16,
     },
+    "toolchain": {"torch": "1" * 16, "triton": "2" * 16},
+    "code_closure": {"gen_worker/compile_cache.py": "3" * 16},
 }
 
 # What the hub saw, verbatim — ck2-era historical evidence. The pgw#691 sku
@@ -108,6 +111,12 @@ def burst_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         env_seal, "effective_seal",
         lambda: dict(_BURST_META["env_seal"]))
+    monkeypatch.setattr(
+        cc, "toolchain_digest",
+        lambda: tuple(sorted(_BURST_META["toolchain"].items())))
+    monkeypatch.setattr(
+        cc, "static_code_closure",
+        lambda roots=(): tuple(sorted(_BURST_META["code_closure"].items())))
     monkeypatch.setenv("WORKER_IMAGE_DIGEST", _IMAGE_DIGEST)
 
 

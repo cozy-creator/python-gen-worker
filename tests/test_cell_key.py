@@ -34,13 +34,13 @@ class _ContractCfg:
 _FACTS = cc.declared_contract_facts(_ContractCfg())
 _CONTRACT = ck.contract_digest(_FACTS)
 
+# ck5 recipe axes: version strings and image identity live in METADATA
+# only (observability); content digests carry the identity.
 _AXES = {
     "format": "2", "kind": "inductor", "family": "ltx-2.3", "lane": "w8a8",
-    "sm": "sm_100", "cuda": "13.0", "torch": "2.13.0+cu130",
-    "triton": "3.7.1", "gen_worker": "0.36.10",
-    "env_seal": "aa00bb11cc22dd33", "contract": _CONTRACT,
-    "diffusers": "0.39.0", "transformers": "5.13.1",
-    "image_digest": "sha256:abc",
+    "sm": "sm_100", "contract": _CONTRACT,
+    "env_seal": "aa00bb11cc22dd33", "toolchain": "bb11cc22dd33ee44",
+    "code_closure": "cc22dd33ee44ff55",
 }
 
 _RT = {
@@ -65,16 +65,15 @@ def test_key_deterministic_and_axis_sensitive():
     a = ck.from_axes(_AXES)
     assert a.digest == ck.from_axes(dict(_AXES)).digest
     assert ck.is_key(a.digest)
-    for axis in ("family", "lane", "sm", "torch", "gen_worker",
-                 "contract", "image_digest"):
+    for axis in ("family", "lane", "sm", "contract", "env_seal",
+                 "toolchain", "code_closure"):
         bumped = dict(_AXES, **{axis: _AXES[axis] + "x"})
         assert ck.from_axes(bumped).digest != a.digest, axis
 
 
 def test_empty_optional_axis_equals_absent():
-    absent = {k: v for k, v in _AXES.items()
-              if k not in ("image_digest", "lane")}
-    empty = dict(absent, image_digest="", lane="")
+    absent = {k: v for k, v in _AXES.items() if k not in ("lane", "mode")}
+    empty = dict(absent, lane="", mode="")
     assert ck.from_axes(absent).digest == ck.from_axes(empty).digest
 
 
@@ -84,7 +83,9 @@ def test_unknown_and_missing_axes_refuse():
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(_AXES, sku="b200"))  # demoted to metadata (pgw#691)
     with pytest.raises(ck.CellKeyError):
-        ck.from_axes({k: v for k, v in _AXES.items() if k != "torch"})
+        ck.from_axes(dict(_AXES, torch="2.13.0"))  # version axes left in ck5
+    with pytest.raises(ck.CellKeyError):
+        ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
 
 def test_sku_is_not_identity(fixed_runtime):
@@ -111,13 +112,13 @@ def test_sku_is_not_identity(fixed_runtime):
     assert _meta("a40", sm="sm_89")["cell_key"] != a40["cell_key"]
 
 
-def test_key_scheme_ck4_old_keys_never_half_match():
+def test_key_scheme_ck5_old_keys_never_half_match():
     """Each axis-set change bumps the scheme (sku collapse -> ck3, env_seal
-    -> ck4): an older digest is no longer a key at all — a clean MISS,
-    never a half-match."""
+    -> ck4, recipe identity -> ck5): an older digest is no longer a key at
+    all — a clean MISS, never a half-match."""
     key = ck.from_axes(_AXES).digest
-    assert key.startswith("ck4-")
-    for dead in ("ck2-", "ck3-"):
+    assert key.startswith("ck5-")
+    for dead in ("ck2-", "ck3-", "ck4-"):
         assert not ck.is_key(dead + "a" * 56)
         assert "not a cell key" in ck.mismatch({}, dead + "a" * 56)
 

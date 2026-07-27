@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
+
+Paul's exact-identity ruling chain (design of record: tracker pgw#716). This ships
+the ck5 INTERIM scheme; ck6 (graph-hash identity) follows per pgw#716-#720.
+
+- **KEY_SCHEME ck5**: the key is a recipe digest — format/kind/family/lane/mode/sm/
+  contract/env_seal/**toolchain**/**code_closure**. Every VERSION axis left the key
+  (torch/triton/cuda/gen_worker/diffusers/transformers/image_digest -> metadata
+  observability; content rides `toolchain` — dist-info RECORDs incl. diffusers/
+  transformers/peft + bundled ptxas/nvdisasm binary hashes — and
+  `code_closure` — the static import-graph closure from the compile entrypoints,
+  AST-resolved, sound under the root-imports convention). ck2/ck3/ck4 keys are dead.
+- **Equivalence adoption DELETED** (`gen_worker/equivalence.py`, its tests, the
+  designated-axes machinery): exact identity needs none of it. Kept as TRUST:
+  pgw#711 publish-complete digests (blake3 artifact + sha256 manifest), pgw#712
+  no-republish fence (`fleet_cells.ADOPTION_MARK`, defense-in-depth), toolchain
+  digests, `guard_closure.manifest_digest`.
+- `static_code_closure()` + `closure_completeness_gap()` retarget as the pgw#717
+  tier-2 recipe HANDLE and pgw#720 deferred-memo diagnostics (the completeness gate
+  was briefly a mint gate; removed — it false-fired on executor-side models/*
+  modules, recorded on pgw#720).
+- `cell_key.compute` drops `image_digest`, gains `closure_roots` (endpoint modules;
+  executor wiring rides the train lane).
+
 ## 0.75.1 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
 
 A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.

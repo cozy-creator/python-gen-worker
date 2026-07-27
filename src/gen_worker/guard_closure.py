@@ -903,9 +903,9 @@ def consolidate(manifests: Mapping[str, Mapping[str, Any]]) -> FleetAudit:
 
 
 def manifest_digest(manifest: Mapping[str, Any]) -> str:
-    """Canonical digest of one guard manifest — the comparison unit for
-    pgw#700 equivalence adoption (identical manifests) and the pgw#711
-    confirmation gate (second publish must match the first)."""
+    """Canonical digest of one guard manifest — the comparison unit for the
+    pgw#711 confirmation gate (a key is confirmed when a second independent
+    publish carries the same artifact + manifest digests)."""
     encoded = json.dumps(
         dict(manifest), sort_keys=True, separators=(",", ":"),
         ensure_ascii=True,
