@@ -755,6 +755,88 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     }
 
 
+# The packages whose LOADED source files form a cell's code closure: the
+# graph-shaping code (gen_worker) and the model libraries whose python is
+# traced into the graphs. Version axes stay in the key for exact lookup;
+# the closure is the CHANGE-DETECTION identity (Paul's ruling, th#1229).
+_CLOSURE_PACKAGES = ("gen_worker", "diffusers", "transformers")
+
+
+@functools.lru_cache(maxsize=8192)
+def _closure_file_digest(path: str, mtime_ns: int, size: int) -> str:
+    """Content digest of one closure file; keyed on (path, mtime, size) so
+    repeated metadata calls never re-read unchanged files."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+def code_closure() -> Tuple[Tuple[str, str], ...]:
+    """pgw#700 FAST tier: the source files ACTUALLY LOADED from the
+    trace-relevant packages, each content-digested — recorded dependencies,
+    never declared versions (guard-closure philosophy applied to code
+    identity). Recorded at mint into metadata; a consumer digests ITS
+    copies of the recorded file set (:func:`gen_worker.equivalence.
+    closure_delta`) and adopts on all-identical with no probe mint and no
+    manifest comparison. Paths are module-derived (``pkg/mod.py``), never
+    absolute — venv layout must not enter the identity."""
+    out: Dict[str, str] = {}
+    for name, module in sorted(sys.modules.items()):
+        root = name.split(".", 1)[0]
+        if root not in _CLOSURE_PACKAGES or module is None:
+            continue
+        file = getattr(module, "__file__", None)
+        if not file or not str(file).endswith(".py"):
+            continue
+        path = Path(file)
+        rel = name.replace(".", "/") + (
+            "/__init__.py" if path.name == "__init__.py" else ".py")
+        try:
+            st = path.stat()
+            out[rel] = _closure_file_digest(str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            continue
+    return tuple(sorted(out.items()))
+
+
+@functools.lru_cache(None)
+def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
+    """pgw#710: CONTENT identity of the compile toolchain, per component —
+    the equivalence precondition that lets ``image_digest`` be relaxed
+    (pgw#700) without degrading the compile stack's identity to version
+    strings (the ccache ``compiler_check=mtime`` failure class; sccache's
+    answer — hash the compiler binary and its runtime libs — is the
+    precedent).
+
+    Components: the dist-info ``RECORD`` of torch/triton and every
+    ``nvidia-*`` runtime wheel (RECORD already carries per-file sha256s, so
+    hashing it is whole-package content identity with no multi-GB re-walk)
+    plus the bundled CUDA tool BINARIES (ptxas/nvdisasm ride triton's
+    wheel; a swapped ptxas silently changes emitted cubins). Recorded in
+    metadata, never a key axis."""
+    out: Dict[str, str] = {}
+    try:
+        import importlib.metadata
+
+        for dist in importlib.metadata.distributions():
+            name = str(dist.metadata.get("Name") or "").lower()
+            if name in ("torch", "triton") or name.startswith("nvidia-"):
+                record = dist.read_text("RECORD") or ""
+                out[name] = hashlib.sha256(record.encode()).hexdigest()[:16]
+    except Exception:
+        logger.debug("toolchain_digest: dist-info walk failed", exc_info=True)
+    try:
+        import triton
+
+        bin_dir = Path(triton.__file__).parent / "backends" / "nvidia" / "bin"
+        if bin_dir.is_dir():
+            for tool in sorted(bin_dir.iterdir()):
+                if tool.is_file():
+                    out[f"bin:{tool.name}"] = hashlib.sha256(
+                        tool.read_bytes()).hexdigest()[:16]
+    except Exception:
+        logger.debug("toolchain_digest: cuda tool hash failed", exc_info=True)
+    return tuple(sorted(out.items()))
+
+
 @functools.lru_cache(None)
 def content_keys() -> Tuple[Tuple[str, str], ...]:
     """torch/triton CONTENT identity (cache-design review §6.5): version
@@ -838,9 +920,12 @@ def artifact_metadata(
         # pgw#696: the execution-environment seal rides verbatim — the ck4
         # env_seal axis is recomputed FROM it, never trusted as a stamp.
         env_seal.SEAL_KEY: env_seal.effective_seal(),
-        # review §6.5: content identity of the compile stack (equivalence
-        # precondition, pgw#700) — metadata only, never a key axis.
+        # review §6.5 / pgw#710 / pgw#700 fast tier: content identity of the
+        # compile stack + the loaded code closure (equivalence adoption
+        # evidence) — metadata only, never key axes.
         "content_keys": dict(content_keys()),
+        "toolchain": dict(toolchain_digest()),
+        "code_closure": dict(code_closure()),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
