@@ -326,6 +326,88 @@ def test_unbindable_constants_passes_a_complete_state_dict(
 
 
 # ---------------------------------------------------------------------------
+# pgw#728 — strict is doctrine, and the manifest must prove it describes
+# the package it ships with
+# ---------------------------------------------------------------------------
+
+
+def test_program_and_package_constant_sets_agree_for_a_real_mint(
+    packages: Dict[str, Path],
+) -> None:
+    """The matched pair: two independent derivations of the same fact."""
+    assert aot_package.program_package_drift(
+        _export_lifted(), packages["code_only"]) == []
+
+
+def test_constant_set_drift_is_refused_and_names_the_fqns(
+    packages: Dict[str, Path],
+) -> None:
+    """The mechanism that catches a strict/non-strict mix.
+
+    pgw#728 measured strict and non-strict export lifting DIFFERENT constant
+    sets (2960 vs 4208 placeholders on the surveyed family), so a mint whose
+    manifest came from one trace mode and whose package came from the other
+    ships a manifest describing bytes the artifact does not want. The tiny
+    modules here are too simple for the two modes to diverge, so the drift is
+    induced directly — what is pinned is that a manifest/package mismatch is
+    REFUSED and NAMED, whatever produced it.
+    """
+    reasons = aot_package.program_package_drift(
+        _export_module(BakedBufferModule().eval()), packages["code_only"])
+    assert reasons
+    joined = " ".join(reasons)
+    assert "different" in joined
+    assert "lora_a" in joined or "scale_table" in joined
+    assert "pgw#728" in joined
+
+
+def test_mint_refuses_a_package_whose_constants_are_not_the_programs(
+    tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wired into the mint, not merely available."""
+    monkeypatch.setattr(
+        aot_package, "program_constant_fqns",
+        lambda _p: ("a.totally.different.tensor",))
+    with pytest.raises(aot_mint.MintRefused, match="constant-set drift"):
+        aot_mint.mint(
+            LiftedModule().eval(), _spec(), tmp_path,
+            example_inputs=_example_inputs)
+    assert not list(tmp_path.glob("*.tar.gz"))
+
+
+def test_strict_mode_drift_is_refused_by_name() -> None:
+    """Drift the env seal cannot see: both trace modes run identically sealed,
+    with the identical toolchain, so nothing else in the key would notice."""
+    assert aot_package.strict_mode_drift({"strict_export": True}, True) == []
+    reasons = aot_package.strict_mode_drift({"strict_export": False}, True)
+    assert reasons
+    assert "strict=False" in reasons[0] and "strict=True" in reasons[0]
+    assert "pgw#728" in reasons[0]
+
+
+def test_an_artifact_silent_on_its_trace_mode_is_refused() -> None:
+    """Silence is not "probably strict" — the constant set it declares cannot be
+    trusted without knowing which trace produced it."""
+    reasons = aot_package.strict_mode_drift({}, True)
+    assert reasons
+    assert "unprovable" in reasons[0]
+
+
+def test_minted_metadata_pins_the_trace_mode(
+    tmp_path: Path, _gpu_runtime: None,
+) -> None:
+    """Recorded on the artifact so a consumer can refuse a mode mismatch rather
+    than discover it as a constant-set surprise."""
+    result = aot_mint.mint(
+        LiftedModule().eval(), _spec(), tmp_path,
+        example_inputs=_example_inputs)
+    meta = aot_serve.unpack_metadata(result.artifact)
+    assert meta["strict_export"] is True
+    assert aot_package.strict_mode_drift(meta, True) == []
+    assert aot_package.strict_mode_drift(meta, False)
+
+
+# ---------------------------------------------------------------------------
 # The no-baked-adapter gate belongs on the ExportedProgram
 # ---------------------------------------------------------------------------
 

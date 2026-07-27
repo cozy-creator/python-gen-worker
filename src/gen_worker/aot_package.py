@@ -337,6 +337,74 @@ def code_only_violations(package: Path) -> List[str]:
     return reasons
 
 
+def program_constant_fqns(program: Any) -> Tuple[str, ...]:
+    """The constant FQNs an ``ExportedProgram`` lifts: parameters, buffers, and
+    lifted tensor constants."""
+    signature = getattr(program, "graph_signature", None)
+    names: set[str] = set()
+    for attr in ("parameters", "buffers", "lifted_tensor_constants"):
+        names.update(str(n) for n in getattr(signature, attr, ()) or ())
+    names.update(str(k) for k in getattr(program, "constants", {}) or {})
+    return tuple(sorted(names))
+
+
+def program_package_drift(program: Any, package: Path) -> List[str]:
+    """Named reasons the package's constant table is not the program's.
+
+    The two are derived independently — one from the ``ExportedProgram``, one
+    from the compiled artifact's own generated wrapper — so requiring them to
+    agree is a genuine cross-check rather than a restatement.
+
+    It exists because of a measured pgw#728 finding: **strict and non-strict
+    export produce DIFFERENT constant sets** (2960 vs 4208 placeholders on the
+    surveyed family). We ship strict as doctrine, so a mint whose recorded
+    manifest came from one trace mode while its package came from the other
+    would ship a manifest describing bytes the artifact does not want — and the
+    consumer's bound gate would then refuse every declared-but-unwanted FQN, or
+    worse leave an unwanted-but-undeclared one UNBOUND, which is the segfault
+    precondition. This is drift the env seal cannot see: both traces run in the
+    identical environment with the identical toolchain.
+    """
+    want = set(program_constant_fqns(program))
+    have = {c.fqn for c in declared_constants(Path(package))}
+    if want == have:
+        return []
+    only_program = sorted(want - have)
+    only_package = sorted(have - want)
+    return [
+        f"the exported program and the compiled package declare different "
+        f"constant sets (program {len(want)}, package {len(have)}); "
+        f"program-only={only_program[:6]!r} package-only={only_package[:6]!r} "
+        f"— the manifest would not describe the artifact it ships with "
+        f"(pgw#728: strict and non-strict traces differ here)"
+    ]
+
+
+def strict_mode_drift(meta: Any, strict: bool) -> List[str]:
+    """Named reasons a recorded artifact's trace mode is not ``strict``.
+
+    Pins the doctrine at the artifact boundary. A silent mode difference is
+    exactly the drift the seal cannot observe, and its consequence — a constant
+    set that does not match the manifest — is not something a consumer can
+    diagnose from the bytes.
+    """
+    recorded = meta.get("strict_export")
+    if recorded is None:
+        return [
+            "artifact records no strict_export flag; its trace mode is "
+            "unprovable and the declared constant set cannot be trusted "
+            "(pgw#728)"
+        ]
+    if bool(recorded) != bool(strict):
+        return [
+            f"artifact was traced with strict={bool(recorded)} but this mint "
+            f"declares strict={bool(strict)}; the two modes lift different "
+            f"constant sets, so the manifest and the package would disagree "
+            f"(pgw#728)"
+        ]
+    return []
+
+
 def unbindable_constants(
     package: Path, state_dict_keys: Iterable[str],
 ) -> List[str]:
@@ -476,6 +544,9 @@ __all__ = [
     "elf_section_sizes",
     "input_contract",
     "literal_constants",
+    "program_constant_fqns",
+    "program_package_drift",
+    "strict_mode_drift",
     "packaged_so",
     "unbindable_constants",
 ]

@@ -415,6 +415,13 @@ def mint(
         package, _state_dict_keys(module))
     if unbindable:
         raise MintRefused("bindability gate: " + "; ".join(unbindable))
+    # pgw#728: strict and non-strict traces lift DIFFERENT constant sets, so the
+    # manifest must be proven to describe the package that ships beside it. Two
+    # independent derivations (program vs generated wrapper) required to agree —
+    # drift the env seal cannot see, because both modes run identically sealed.
+    drift = aot_package.program_package_drift(program, package)
+    if drift:
+        raise MintRefused("constant-set drift: " + "; ".join(drift))
 
     t0 = time.monotonic()
     try:
@@ -443,6 +450,9 @@ def mint(
         raise MintRefused(
             f"envelope refused the declared contract: {exc}") from exc
     meta.update(identity)
+    mode_drift = aot_package.strict_mode_drift(meta, spec.strict)
+    if mode_drift:
+        raise MintRefused("trace-mode drift: " + "; ".join(mode_drift))
     meta["cell_key"] = key = cell_identity(meta, spec).digest
 
     artifact = aot_serve.pack(work, out_dir / f"{key}.tar.gz", meta)
