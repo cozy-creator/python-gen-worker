@@ -2521,6 +2521,60 @@ EXECUTION_LANE_ATTR = "_cozy_execution_lane"
 _SETUP_EXEC_LANE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "gw_setup_execution_lane", default="")
 
+#: pgw#714: pin provenance of the stamped execution lane. True only when the
+#: hub resolved this lane from an OPERATOR pin (`ModelResolution.lane_pinned`),
+#: which makes an `+eager` execution axis a real kill switch: :func:`apply`
+#: refuses to arm at all (no router, no background mint, no foreground
+#: compile) instead of treating the pin as merely "serve eager while minting".
+EXECUTION_LANE_PINNED_ATTR = "_cozy_execution_lane_pinned"
+_SETUP_EXEC_LANE_PINNED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gw_setup_execution_lane_pinned", default=False)
+
+#: pgw#714: process-wide compile kill switch. Set once (with a reason) when
+#: the crash registry shows a previous PROCESS DEATH attributed to a
+#: background compile on this pod: the honest degrade is to stop compiling
+#: and serve eager, not to re-run the native crash into a pod recycle loop.
+_PROCESS_COMPILES_DISABLED = ""
+
+
+def disable_process_compiles(reason: str) -> None:
+    global _PROCESS_COMPILES_DISABLED
+    if not _PROCESS_COMPILES_DISABLED:
+        _PROCESS_COMPILES_DISABLED = str(reason or "disabled")
+        logger.error(
+            "compile-cache: COMPILES DISABLED for this process — %s "
+            "(pgw#714 degrade-never-die: serving stays eager)",
+            _PROCESS_COMPILES_DISABLED)
+
+
+def process_compiles_disabled() -> str:
+    return _PROCESS_COMPILES_DISABLED
+
+
+def operator_eager_pin(pipeline: Any) -> bool:
+    """True when the hub-resolved execution lane stamped on ``pipeline`` was
+    OPERATOR-PINNED to the eager execution axis (pgw#714 kill switch)."""
+    pinned = bool(getattr(pipeline, EXECUTION_LANE_PINNED_ATTR, False))
+    lane_str = str(getattr(pipeline, EXECUTION_LANE_ATTR, "") or "").strip()
+    if not lane_str:
+        lane_str = _SETUP_EXEC_LANE.get().strip()
+        pinned = _SETUP_EXEC_LANE_PINNED.get()
+        if lane_str:
+            try:
+                setattr(pipeline, EXECUTION_LANE_ATTR, lane_str)
+                setattr(pipeline, EXECUTION_LANE_PINNED_ATTR, pinned)
+            except Exception:
+                pass
+    if not (lane_str and pinned):
+        return False
+    from .models import lanes as lanespec
+
+    try:
+        lane = lanespec.parse_lane(lane_str)
+    except ValueError:
+        return False
+    return lane.execution == lanespec.EXEC_EAGER
+
 
 def mandatory_serving(pipeline: Any) -> bool:
     """ONE brain for "may this pipeline serve eager?" (pgw#677 reopen).
@@ -2582,6 +2636,16 @@ def apply(
     """
     if getattr(pipeline, _MARKER_ATTR, None) is not None:
         return True
+    if _PROCESS_COMPILES_DISABLED:
+        logger.error(
+            "compile-cache: not arming (process compiles disabled: %s); "
+            "staying eager", _PROCESS_COMPILES_DISABLED)
+        return False
+    if operator_eager_pin(pipeline):
+        logger.info(
+            "compile-cache: operator-pinned +eager execution lane — compile "
+            "arming suppressed (pgw#714 kill switch); staying eager")
+        return False
     try:
         import torch
     except Exception:

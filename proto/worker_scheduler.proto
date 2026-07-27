@@ -543,6 +543,12 @@ message ModelResolution {
   // "fp8-w8a8-dynamic+compiled"). "" = unspecified (worker's own policy,
   // pre-lane behavior). Additive: old workers ignore it.
   string lane         = 4;
+  // pgw#714/th#1236: true when `lane` came from an OPERATOR endpoint-pin
+  // (precision resolver source=endpoint-pin). A pinned `+eager` execution
+  // axis is a compile kill switch: the worker suppresses compile arming
+  // (no router, no background/foreground self-mint) instead of treating
+  // eager as merely the serving tier while a mint runs. Additive.
+  bool lane_pinned    = 5;
 }
 
 // Worker -> orchestrator dynamic state. FULL-REPLACE snapshot of every field.

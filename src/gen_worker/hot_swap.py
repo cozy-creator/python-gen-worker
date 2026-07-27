@@ -592,6 +592,22 @@ def _run_warm(job: _WarmJob) -> None:
 
 
 def _run_warm_gated(job: _WarmJob) -> None:
+    # pgw#714: name the background compile before it touches the GPU. A
+    # signal death mid-compile then attributes to THIS compile marker, not
+    # to whatever tenant request was in flight — the misattribution that
+    # refused fn=generate and condemned (release, SKU) pairs for a software
+    # race (th#1226/th#1236).
+    from . import postmortem
+
+    token = postmortem.note_inflight(
+        postmortem.COMPILE_KIND, postmortem.compile_marker(job.label))
+    try:
+        _run_warm_compile(job)
+    finally:
+        postmortem.clear_inflight(token)
+
+
+def _run_warm_compile(job: _WarmJob) -> None:
     router = job.router
     t0 = time.monotonic()
     try:

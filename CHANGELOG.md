@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.74.2 (2026-07-26) — pgw#714: background-compile crashes tell the truth and degrade to eager
+
+From the th#1226 post-mortem (qwen-image v0.2.1 pinned pre-pgw#677 0.67.1: the
+ungated background compile SIGSEGV'd live serving, and the death was recorded
+against `fn=generate`, condemning H200 + B200 in the hub's SKU-compat table
+for a software race):
+
+- The hot-swap warm thread stamps a `compile` inflight marker
+  (`compile:<label>`) around every background compile; a signal death with a
+  compile marker present records the streak against the COMPILE, never the
+  tenant request that happened to be in flight.
+- Boot gate: crash-registry rows of compile kind disable process compiles
+  (`compile_cache.disable_process_compiles`) — the pod reboots into
+  eager-only serving instead of re-running the native crash, and the serving
+  function is NOT refused (degrade-never-die at process-death scope).
+- `native_crash_streak` refusal axes carry `last_kind` so the hub can spare
+  the SKU table for non-serving deaths (hub half: th#1236).
+- **Operator kill switch:** `ModelResolution.lane_pinned` (proto, additive) —
+  when the hub marks the resolved lane as an endpoint-pin and its execution
+  axis is `+eager`, `compile_cache.apply()` refuses to arm at all: no router,
+  no background/foreground self-mint, pure eager serving. Auto-resolved
+  `+eager` lanes keep today's eager-first + background-mint behavior.
+
 ## 0.74.1 (2026-07-26) — pgw#692: `WanDefaults` carries the hub's recipe wire name
 
 **P0, every wan-2.2 request of every tier.** th#1174's migration

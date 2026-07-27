@@ -1008,7 +1008,7 @@ class IntentRegistry:
         self,
         executor: Any,
         desired: Optional["pb.DesiredResidency"],
-        resolutions: dict[str, tuple[str, str, str]],
+        resolutions: dict[str, tuple[Any, ...]],
     ) -> None:
         """Project exact capabilities and proven parameter snapshot state."""
         parameter_generation = int(

@@ -2614,9 +2614,9 @@ class Executor:
         # a doomed fully-resident attempt is never paid twice (ie#369).
         self.degraded_floor: Dict[str, str] = {}
         # th#913/gw#596: last-applied hub resolutions, keyed by declared wire
-        # ref -> (resolved_ref, cast, lane). Per-request lane instructions
-        # expand family forms through these picks.
-        self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
+        # ref -> (resolved_ref, cast, lane[, lane_pinned]). Per-request lane
+        # instructions expand family forms through these picks.
+        self._model_resolutions: Dict[str, Tuple[Any, ...]] = {}
 
     def bind_intent_registry(self, registry: IntentRegistry) -> None:
         self.intent_registry = registry
@@ -2796,12 +2796,17 @@ class Executor:
 
     # ---- precision resolutions (th#697) -----------------------------------
 
-    def apply_model_resolutions(self, resolutions: Dict[str, Tuple[str, str, str]]) -> None:
+    def apply_model_resolutions(
+        self, resolutions: Dict[str, Tuple[Any, ...]],
+    ) -> None:
         """Rebind model slots to the hub's precision-ladder picks.
 
         ``resolutions`` maps a DECLARED wire ref to ``(resolved_ref, cast,
-        lane)`` — lane is the th#913 concrete execution-lane descriptor
-        ("" = unspecified, pre-lane hub)
+        lane[, lane_pinned])`` — lane is the th#913 concrete execution-lane
+        descriptor ("" = unspecified, pre-lane hub); ``lane_pinned``
+        (pgw#714, optional for pre-pin hubs) is True when the lane came from
+        an operator endpoint-pin, which makes an ``+eager`` execution axis a
+        compile kill switch
         (HelloAck full-replace semantics: refs absent from the map revert to
         their authored bindings). Rebinding folds the resolved flavor into
         the binding via :func:`rebind_pick` (THE single fold, shared with the
@@ -3005,6 +3010,23 @@ class Executor:
         from . import postmortem
 
         crash_streaks = postmortem.native_crash_streaks()
+        # pgw#714: a previous PROCESS DEATH attributed to a background
+        # compile disables COMPILING on this pod, not serving — the pod
+        # reboots into eager-only instead of re-running the native crash
+        # (and instead of refusing the serving function / condemning the
+        # SKU for a software bug, th#1226/th#1236).
+        compile_rows = postmortem.compile_crash_rows()
+        if compile_rows:
+            worst = max(
+                compile_rows.items(),
+                key=lambda kv: int((kv[1] or {}).get("count") or 0))
+            from . import compile_cache as _cc_gate
+
+            _cc_gate.disable_process_compiles(
+                f"{int((worst[1] or {}).get('count') or 0)} process signal "
+                f"death(s) during background compile on this pod "
+                f"(last={worst[0]}, "
+                f"signal={(worst[1] or {}).get('last_signal') or 'unknown'})")
         for name, spec in self.specs.items():
             r = spec.resources
             streak_row = crash_streaks.get(name)
@@ -3024,7 +3046,12 @@ class Executor:
                     "native_crash_streak", detail,
                     {"streak": str(streak),
                      "last_signal": str(
-                         (streak_row or {}).get("last_signal") or "")})
+                         (streak_row or {}).get("last_signal") or ""),
+                     # pgw#714/th#1236: crash phase, so the hub can spare
+                     # the SKU table when the death was not a serving
+                     # forward.
+                     "last_kind": str(
+                         (streak_row or {}).get("last_kind") or "")})
                 self._gate_owned.add(name)
                 continue
             # SDK v2 (pgw#647): NO compute-capability gate — precision per
@@ -3842,13 +3869,19 @@ class Executor:
     def _execution_lane_for_ref(self, ref: str) -> str:
         """The hub-resolved th#913 execution-lane descriptor for ``ref``
         (declared or resolved form), "" when the hub sent no lane."""
+        return self._execution_lane_pick_for_ref(ref)[0]
+
+    def _execution_lane_pick_for_ref(self, ref: str) -> Tuple[str, bool]:
+        """(lane, pinned) for ``ref`` — ``pinned`` True when the hub marked
+        the lane as an operator endpoint-pin (pgw#714 kill switch)."""
         ref = (ref or "").strip()
         for declared, pick in (self._model_resolutions or {}).items():
             resolved_ref = (pick[0] or declared).strip()
             lane_str = (pick[2] or "").strip()
             if lane_str and ref in (declared.strip(), resolved_ref):
-                return lane_str
-        return ""
+                pinned = bool(pick[3]) if len(pick) > 3 else False
+                return lane_str, pinned
+        return "", False
 
     def _validate_required_compile(
         self, spec: EndpointSpec, run: pb.RunJob,
@@ -4159,7 +4192,7 @@ class Executor:
             raise lanespec.LaneUnavailableError(
                 raw, "fp8-w8a8 serves compiled-only on this fleet")
 
-        def pick_lane_of(pick: "Optional[Tuple[str, str, str]]") -> "Optional[Any]":
+        def pick_lane_of(pick: "Optional[Tuple[Any, ...]]") -> "Optional[Any]":
             if pick is None or not pick[2]:
                 return None
             try:
@@ -5294,18 +5327,21 @@ class Executor:
         # its arms inherit the window.
         from . import compile_cache as _cc_lane
 
-        _setup_exec_lane = ""
+        _setup_exec_lane, _setup_lane_pinned = "", False
         for _slot in setup_slots:
-            _setup_exec_lane = self._execution_lane_for_ref(
-                wire_ref(spec.models[_slot]))
+            _setup_exec_lane, _setup_lane_pinned = (
+                self._execution_lane_pick_for_ref(
+                    wire_ref(spec.models[_slot])))
             if _setup_exec_lane:
                 break
         _lane_token = _cc_lane._SETUP_EXEC_LANE.set(_setup_exec_lane)
+        _pin_token = _cc_lane._SETUP_EXEC_LANE_PINNED.set(_setup_lane_pinned)
         try:
             return await self._setup_locked_inner(
                 spec, rec, snapshots, intent_id=intent_id,
                 setup_slots=setup_slots)
         finally:
+            _cc_lane._SETUP_EXEC_LANE_PINNED.reset(_pin_token)
             _cc_lane._SETUP_EXEC_LANE.reset(_lane_token)
 
     async def _setup_locked_inner(
@@ -7187,7 +7223,8 @@ class Executor:
                         # read the ONE serveability brain
                         # (compile_cache.mandatory_serving) instead of the
                         # weight-lane prefix. Never overwritten once set.
-                        exec_lane = self._execution_lane_for_ref(ref)
+                        exec_lane, lane_pinned = (
+                            self._execution_lane_pick_for_ref(ref))
                         if exec_lane and not getattr(
                                 pipe, compile_cache.EXECUTION_LANE_ATTR,
                                 None):
@@ -7196,6 +7233,10 @@ class Executor:
                                     pipe,
                                     compile_cache.EXECUTION_LANE_ATTR,
                                     exec_lane)
+                                setattr(
+                                    pipe,
+                                    compile_cache.EXECUTION_LANE_PINNED_ATTR,
+                                    lane_pinned)
                             except Exception:
                                 pass
 
