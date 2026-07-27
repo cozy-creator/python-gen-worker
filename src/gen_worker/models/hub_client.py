@@ -105,6 +105,17 @@ def resolve_repo(
         raise HubResolveError(f"tensorhub resolve failed for {ref.canonical()}: {e}") from e
 
     if resp.status_code == 404:
+        # te#125/th#1238: only the HUB's own 404 means "no such repo". A proxy
+        # answering 404 means the hub is unreachable (restarting), and calling
+        # that "repo not found" sends the operator hunting a catalog problem
+        # that does not exist.
+        from ..http_origin import is_proxy_outage
+
+        if is_proxy_outage(resp):
+            raise HubResolveError(
+                f"tensorhub unreachable resolving {ref.canonical()} — a proxy "
+                "answered 404 (backend offline, e.g. hub restarting); retry shortly"
+            )
         raise HubRepoNotFoundError(
             f"tensorhub repo {ref.canonical()} not found (unknown repo/tag/"
             "flavor, or a private repo — set TENSORHUB_TOKEN for private pulls)"
