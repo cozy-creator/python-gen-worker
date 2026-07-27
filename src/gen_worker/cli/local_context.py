@@ -202,9 +202,9 @@ def build_local_context(
     """Factory: build the right context subclass for ``kind``.
 
     ``kind`` is the endpoint's declared kind string from discover_manifest
-    (``inference`` / ``conversion`` / ``dataset`` / ``training``). Unknown
-    kinds fall back to ``RequestContext`` because the SDK guarantees the
-    base methods on every variant.
+    (``inference`` / ``conversion`` / ``dataset`` / ``training`` / ``eval``).
+    Unknown kinds fall back to ``RequestContext`` because the SDK guarantees
+    the base methods on every variant.
     """
     rid = request_id or _local_request_id()
     em = emitter if emitter is not None else _stderr_emitter
@@ -219,7 +219,7 @@ def build_local_context(
     }
 
     k = (kind or "").strip().lower()
-    if k == "conversion":
+    if k in ("conversion", "eval"):
         return LocalConversionContext(allow_publish=allow_publish, **common)
     if k == "dataset":
         return LocalDatasetContext(allow_publish=allow_publish, **common)

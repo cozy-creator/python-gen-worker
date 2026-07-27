@@ -19,6 +19,11 @@
   ``gen_worker.convert.publish_flavors(ctx, flavors)`` (one Tensorhub commit per
   ``ProducedFlavor``), and return a result struct. Generator handlers are
   rejected for producer kinds: nothing is ever published by yielding.
+* ``kind="eval"`` MEASURES a candidate against a reference (th#1255). It reads
+  reserved refs like every non-inference kind and writes request output assets,
+  but publishes no catalog repo — the hub refuses repo writes for eval tokens
+  and never asks an eval where its output repo goes. Its input struct declares
+  no destination, and that is the point.
 * An async-generator handler streams (inference only); there is no separate
   streaming decorator.
 * ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
@@ -48,7 +53,7 @@ from .tree import is_introspectable
 T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
 
-KINDS = ("inference", "training", "dataset", "conversion")
+KINDS = ("inference", "training", "dataset", "conversion", "eval")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
