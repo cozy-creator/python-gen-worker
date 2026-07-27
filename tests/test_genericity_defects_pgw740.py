@@ -5,6 +5,10 @@ None of these is a migration — they are bugs that per-family hardcoding caused
 1. `repackage.detect_diffusers_family` routed the SDXL two-text-encoder
    signature to the SD1.5 converter, silently. Held shut only by an unrelated
    allowlist in `clone.py`, while the function is publicly exported.
+   The #740 migration then made it structurally impossible: detection and the
+   guard both read the ONE signature in the family's declaration, so the two
+   cannot disagree. Section 1 below now registers those declarations the way an
+   endpoint does — the SDK itself no longer knows what "sdxl" is.
 2. `utils/lora._denoiser_fingerprint` digested UNet-only config fields, so every
    DiT fingerprinted to `"|||"` — a normalized-split cache COLLISION between
    structurally different transformers.
@@ -21,7 +25,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker.convert import repackage  # noqa: E402
+from gen_worker.convert import registry, repackage  # noqa: E402
+from gen_worker.convert.repack_spec import (  # noqa: E402
+    ComponentRepack,
+    LayoutSignature,
+    RepackVariant,
+    RepackageFamily,
+)
 from gen_worker.models import memory  # noqa: E402
 from gen_worker.utils import lora as lora_util  # noqa: E402
 
@@ -29,6 +39,37 @@ from gen_worker.utils import lora as lora_util  # noqa: E402
 # --------------------------------------------------------------------------
 # 1. converter/signature divergence
 # --------------------------------------------------------------------------
+
+_DENOISER = ComponentRepack(name="unet", variants=(RepackVariant(out_prefix="model.diffusion_model."),))
+
+# The declarations an endpoint owns. They live here, in the test, for exactly
+# the same reason they live in the endpoint repo: the SDK must not carry them.
+SD15_SD2 = RepackageFamily(
+    family="sd15_sd2",
+    signature=LayoutSignature(
+        requires_all=("unet", "vae", "text_encoder"),
+        forbids=("text_encoder_2", "tokenizer_2"),
+    ),
+    to_singlefile=(_DENOISER,),
+)
+SDXL = RepackageFamily(
+    family="sdxl",
+    signature=LayoutSignature(
+        requires_all=("unet", "vae", "text_encoder"),
+        requires_any=(("text_encoder_2", "tokenizer_2"),),
+    ),
+    to_singlefile=(_DENOISER,),
+)
+
+
+@pytest.fixture(autouse=True)
+def _declared_families():
+    registry.reset_registries()
+    registry.register_repackage_family(SD15_SD2)
+    registry.register_repackage_family(SDXL)
+    yield
+    registry.reset_registries()
+
 
 def _sdxl_tree(tmp_path):
     for part in ("unet", "vae", "text_encoder", "text_encoder_2", "tokenizer_2"):
@@ -60,13 +101,13 @@ def test_converter_refuses_a_signature_it_does_not_match(tmp_path):
         repackage.convert_diffusers_to_singlefile(
             sdxl, tmp_path / "out.safetensors", family="sd15_sd2")
     message = str(exc.value)
-    assert "sd15_sd2" in message and "SDXL signature" in message
+    assert "sd15_sd2" in message and "text_encoder_2" in message
 
     sd15 = _sd15_tree(tmp_path / "sd15")
     with pytest.raises(repackage.ConverterSignatureError) as exc:
         repackage.convert_diffusers_to_singlefile(
             sd15, tmp_path / "out2.safetensors", family="sdxl")
-    assert "NO second text encoder" in str(exc.value)
+    assert "text_encoder_2" in str(exc.value)
 
 
 # --------------------------------------------------------------------------

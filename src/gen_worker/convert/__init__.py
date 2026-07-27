@@ -15,6 +15,11 @@ them; ``import gen_worker.convert`` stays cheap.
 
 from __future__ import annotations
 
+from .base_model_families import (
+    civitai_to_family,
+    declare_foreign_family_map,
+    foreign_to_family,
+)
 from .calibration import CalibrationAction, CalibrationPolicy, resolve_calibration_action
 from .classifier import (
     RepoClassification,
@@ -35,8 +40,30 @@ from .component import Component
 from .dataset import Dataset, write_jsonl_shard
 from .hub import CommitFile, CommitResult, HubClient, HubPublishError
 from .ingest import IngestedSource, ingest_civitai, ingest_huggingface
+from .layout_spec import DirMatch, HintMatch, LayoutDeclaration
 from .loaded_component import LoadedComponent
 from .produced import ProducedFlavor
+from .registry import (
+    UnknownFamilyError,
+    load_declaration_module,
+    normalize_family,
+    register_layout,
+    register_repackage_family,
+    registered_layouts,
+    registered_repackage_families,
+    repackage_family,
+    require_repackage_family,
+)
+from .repack_spec import (
+    ComponentRepack,
+    DeclarationError,
+    DtypePolicy,
+    LayoutSignature,
+    RenameRule,
+    RepackVariant,
+    RepackageFamily,
+    SinglefileTarget,
+)
 from .publish import publish_flavors
 from .source import FileLayout, Source
 from .svdq import build_svdq_flavor_tree, fetch_svdq_checkpoint, svdq_flavor_label
@@ -103,4 +130,28 @@ __all__ = [
     "HubPublishError",
     "CommitFile",
     "CommitResult",
+    # Family declarations (pgw#740): the endpoint declares, the SDK executes.
+    "ComponentRepack",
+    "DeclarationError",
+    "DirMatch",
+    "DtypePolicy",
+    "HintMatch",
+    "LayoutDeclaration",
+    "LayoutSignature",
+    "RenameRule",
+    "RepackVariant",
+    "RepackageFamily",
+    "SinglefileTarget",
+    "UnknownFamilyError",
+    "civitai_to_family",
+    "declare_foreign_family_map",
+    "foreign_to_family",
+    "load_declaration_module",
+    "normalize_family",
+    "register_layout",
+    "register_repackage_family",
+    "registered_layouts",
+    "registered_repackage_families",
+    "repackage_family",
+    "require_repackage_family",
 ]

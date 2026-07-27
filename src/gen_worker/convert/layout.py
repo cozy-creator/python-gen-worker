@@ -1,138 +1,72 @@
-"""Model-family / variant detection from a HuggingFace repo's file listing.
+"""Source-layout / family detection — the generic engine over declared matchers.
 
-File-selection logic lives in :mod:`gen_worker.convert.classifier`.
-This module only contains downstream metadata inference: given a repo_dir +
-file list, what model family / variant is this? The output feeds destination
-checkpoint tags so inference workers can pick the right pipeline class.
+File-selection logic lives in :mod:`gen_worker.convert.classifier`. This module
+answers the downstream metadata question: given a repo_dir + file list, which
+model family / variant is this? The output feeds destination checkpoint tags.
 
-The legacy ``select_huggingface_source_files`` / ``HFSourceFileSelection``
-that lived here were replaced by the classifier's classify_repo
-+ per-strategy selectors.
+pgw#740 (B14): the four hand-written family ladders that used to live here —
+and the LTX-2 root sentinel that was *duplicated into the te#70 trainer repo
+and hand-synced* — are now :class:`~.layout_spec.LayoutDeclaration` records
+registered by the endpoint that owns the family. This file evaluates them; it
+names no family. The four detection channels run in a fixed order:
+
+1. ``model_index.json``'s ``_name_or_path`` as a free-text hint
+2. ``model_index.json``'s ``_class_name``
+3. the top-level component directory set
+4. per-file hints, then root-file sentinels, then the whole listing as one hint
+
+Ordering within a channel is the declaration's ``order`` field, which is how a
+more specific variant (``flux2``) stays ahead of a broader one (``flux1``).
 """
 
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .layout_spec import LayoutSignals, normalize_letters_digits
+from .registry import registered_layouts
 
-_DIFFUSERS_COMPONENT_DIRS = {
-    "unet",
-    "vae",
-    "text_encoder",
-    "text_encoder_2",
-    "tokenizer",
-    "tokenizer_2",
-    "scheduler",
-    "transformer",
-}
-_SD15_SD2_HINTS = (
-    "stable-diffusion-v1",
-    "stable-diffusion-v2",
-    "sd-v1",
-    "sd-v2",
-    "v1-inference.yaml",
-    "v2-inference.yaml",
-)
-_SD15_SD2_PATTERN = re.compile(r"(?:^|[^a-z0-9])(?:sd|stable[-_]?diffusion)[-_ ]?v?[12](?:[^0-9]|$)")
-_SD15_SD2_CHECKPOINT_PATTERN = re.compile(r"(?:^|[^a-z0-9])v(?:1|2)[-_](?:[0-9])")
-_SD15_VARIANT_HINTS = (
-    "stable-diffusion-v1-5",
-    "stable-diffusion-1-5",
-    "sd-v1-5",
-    "sd15",
-)
-_SD15_VARIANT_PATTERN = re.compile(r"(?:^|[^a-z0-9])(?:sd|stable[-_ ]?diffusion)[-_ ]?(?:v)?1(?:[-_. ]?5)?(?:[^0-9]|$)")
-
-
-def _normalize_letters_digits(raw: str) -> str:
-    chars: list[str] = []
-    for ch in str(raw or "").strip().lower():
-        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
-            chars.append(ch)
-    return "".join(chars)
+_DEFAULT_SIGNALS = LayoutSignals()
 
 
 def canonical_model_family_from_variant(variant: str) -> str:
+    """Roll a fine-grained variant slug up to its declared canonical family."""
     raw = str(variant or "").strip().lower()
-    if raw == "z_image":
-        return "z-image"
-    if raw == "qwen_image":
-        return "qwen-image"
-    if raw in {"flux1", "flux2", "flex2"}:
-        return "flux"
-    if raw in {"wan21", "wan22", "wan"}:
-        return "wan"
-    if raw in {"auraflow"}:
-        return "auraflow"
-    if raw == "hidream_o1":
-        return "hidream-o1"
-    if raw == "ltx2":
-        return "ltx2"
-    if raw == "sdxl":
-        return "sdxl"
-    if raw == "sd15":
-        return "sd15_sd2"
+    if raw == "":
+        return "unknown"
+    for decl in registered_layouts():
+        if decl.variant and decl.variant.lower() == raw:
+            return decl.family
+    for decl in registered_layouts():
+        if decl.family.lower() == raw:
+            return decl.family
     return "unknown"
 
 
 def infer_model_family_variant_from_hint(value: str | None) -> str:
+    """First declared variant whose hint matchers accept this free text."""
     hint = str(value or "").strip().lower()
-    normalized = _normalize_letters_digits(hint)
     if hint == "":
         return "unknown"
-    if "auraflow" in normalized:
-        return "auraflow"
-    if "flex2" in normalized or ("ostris" in normalized and "flex" in normalized):
-        return "flex2"
-    if "wan22" in normalized:
-        return "wan22"
-    if "wan21" in normalized:
-        return "wan21"
-    if "wan" in normalized and any(tok in normalized for tok in ("video", "i2v", "t2v", "vace")):
-        return "wan22"
-    if "hidreamo1" in normalized:
-        return "hidream_o1"
-    if "ltx2" in normalized:
-        # gw#592: "ltx-2", "ltx2", "ltx-2.3" all normalize to a string
-        # containing "ltx2" once punctuation is stripped. Deliberately
-        # narrower than "ltx" alone — LTX-Video (v1) is a distinct diffusers
-        # family and must not be misdetected here.
-        return "ltx2"
-    if "qwenimage" in normalized:
-        return "qwen_image"
-    if "zimage" in normalized:
-        return "z_image"
-    if "flux2" in normalized or ("flux" in normalized and "klein" in normalized):
-        return "flux2"
-    if "flux1" in normalized:
-        return "flux1"
-    if "flux" in normalized:
-        return "flux1"
-    if "sdxl" in normalized or "stablediffusionxl" in normalized:
-        return "sdxl"
-    if any(token in hint for token in _SD15_VARIANT_HINTS):
-        return "sd15"
-    if _SD15_VARIANT_PATTERN.search(hint) is not None:
-        return "sd15"
+    for decl in registered_layouts():
+        if decl.variant and decl.matches_hint(hint):
+            return decl.variant
     return "unknown"
 
 
 def infer_model_family_from_hint(value: str | None) -> str:
+    """Family-level hint resolution: variant matchers first, then family-only ones."""
     hint = str(value or "").strip().lower()
-    variant = infer_model_family_variant_from_hint(value)
+    if hint == "":
+        return "unknown"
+    variant = infer_model_family_variant_from_hint(hint)
     if variant != "unknown":
         return canonical_model_family_from_variant(variant)
-    if any(token in hint for token in _SD15_SD2_HINTS):
-        return "sd15_sd2"
-    if _SD15_SD2_PATTERN.search(hint) is not None:
-        return "sd15_sd2"
-    if _SD15_SD2_CHECKPOINT_PATTERN.search(hint) is not None and (
-        "pruned" in hint or "emaonly" in hint or "ckpt" in hint or "safetensors" in hint
-    ):
-        return "sd15_sd2"
+    for decl in registered_layouts():
+        if decl.matches_hint(hint):
+            return decl.family
     return "unknown"
 
 
@@ -160,70 +94,49 @@ def _normalize_paths(files: list[str]) -> list[str]:
     return out
 
 
-def _has_diffusers_layout_signals(paths: list[str]) -> bool:
-    if "model_index.json" in paths:
+def _top_dirs(paths: list[str]) -> frozenset[str]:
+    return frozenset(p.split("/", 1)[0] for p in paths if "/" in p)
+
+
+def _root_files(paths: list[str]) -> frozenset[str]:
+    return frozenset(p.lower() for p in paths if "/" not in p)
+
+
+def _has_diffusers_layout_signals(paths: list[str], signals: LayoutSignals) -> bool:
+    if signals.index_file in paths:
         return True
-    top_dirs = {p.split("/", 1)[0] for p in paths if "/" in p}
-    return bool(_DIFFUSERS_COMPONENT_DIRS.intersection(top_dirs))
+    return bool(signals.component_dirs & _top_dirs(paths))
 
 
-def _detect_family_variant_from_model_index(repo_dir: Path) -> str:
-    model_index_path = repo_dir / "model_index.json"
+def _detect_variant_from_model_index(repo_dir: Path) -> str:
+    model_index_path = repo_dir / _DEFAULT_SIGNALS.index_file
     if not model_index_path.exists():
         return "unknown"
     try:
         payload = json.loads(model_index_path.read_text("utf-8"))
     except Exception:
         return "unknown"
-    name_or_path = str(payload.get("_name_or_path") or "").strip()
-    detected_from_name = infer_model_family_variant_from_hint(name_or_path)
-    if detected_from_name != "unknown":
-        return detected_from_name
-    cls = str(payload.get("_class_name") or "").strip().lower()
-    if "auraflow" in cls:
-        return "auraflow"
-    if cls.startswith("wan") or "wanpipeline" in cls:
-        return "wan22"
-    if "qwenimage" in cls:
-        return "qwen_image"
-    if "zimage" in cls:
-        return "z_image"
-    if "flux2" in cls:
-        return "flux2"
-    if "flux" in cls:
-        return "flux1"
-    if "stablediffusionxl" in cls:
-        return "sdxl"
-    if "stablediffusion" in cls:
-        return "sd15"
+    detected = infer_model_family_variant_from_hint(str(payload.get("_name_or_path") or "").strip())
+    if detected != "unknown":
+        return detected
+    cls = str(payload.get("_class_name") or "").strip()
+    if cls == "":
+        return "unknown"
+    for decl in registered_layouts():
+        if decl.variant and decl.matches_class(cls):
+            return decl.variant
     return "unknown"
 
 
-def _detect_family_variant_from_components(paths: list[str]) -> str:
-    top_dirs = {p.split("/", 1)[0] for p in paths if "/" in p}
-    if "transformer_2" in top_dirs and "text_encoder" in top_dirs and "vae" in top_dirs and "unet" not in top_dirs:
-        return "wan22"
-    if (
-        "image_encoder" in top_dirs
-        and "transformer" in top_dirs
-        and "text_encoder" in top_dirs
-        and "unet" not in top_dirs
-        and "text_encoder_2" not in top_dirs
-    ):
-        return "wan22"
-    if "transformer" in top_dirs:
-        # FLUX.1 generally carries a second text encoder; FLUX.2-like layouts usually do not.
-        if "text_encoder_2" in top_dirs:
-            return "flux1"
-        return "flux2"
-    if "text_encoder_2" in top_dirs:
-        return "sdxl"
-    if "unet" in top_dirs and "vae" in top_dirs and "text_encoder" in top_dirs:
-        return "sd15"
+def _detect_variant_from_components(paths: list[str]) -> str:
+    dirs = _top_dirs(paths)
+    for decl in registered_layouts():
+        if decl.variant and decl.dirs and decl.matches_dirs(dirs):
+            return decl.variant
     return "unknown"
 
 
-def _detect_family_variant_from_singlefile_paths(paths: list[str]) -> str:
+def _detect_variant_from_paths(paths: list[str]) -> str:
     for path in paths:
         detected = infer_model_family_variant_from_hint(path)
         if detected != "unknown":
@@ -231,21 +144,18 @@ def _detect_family_variant_from_singlefile_paths(paths: list[str]) -> str:
     return "unknown"
 
 
-# gw#592: DiffSynth-Studio/LTX-2.3-Repackage per-submodule root layout has no
-# "ltx" token in any single filename (transformer.safetensors,
-# video_vae_encoder.safetensors, ...), so the per-path hint scan above misses
-# it. Mirrors the te#70 trainer's own sentinel check
-# (image_lora_finetuner.families.ltx2.snapshot_model_paths /
-# families.__init__._is_ltx2_snapshot) so both sides agree on what counts as
-# an LTX-2 snapshot.
-_LTX2_REPACKAGE_SENTINEL_FILES = frozenset({
-    "video_vae_encoder.safetensors", "text_encoder_post_modules.safetensors",
-})
+def _detect_variant_from_sentinels(paths: list[str]) -> str:
+    """Root-file sentinels: a repackage layout whose filenames carry no family token.
 
-
-def _is_ltx2_repackage_layout(paths: list[str]) -> bool:
-    root_lower = {p.lower() for p in paths if "/" not in p}
-    return _LTX2_REPACKAGE_SENTINEL_FILES.issubset(root_lower)
+    The LTX-2 case (``video_vae_encoder.safetensors`` + friends) used to live
+    here as a private frozenset AND as a hand-synced copy in the te#70 trainer.
+    It is now one declaration both sides read.
+    """
+    root = _root_files(paths)
+    for decl in registered_layouts():
+        if decl.variant and decl.matches_sentinels(root):
+            return decl.variant
+    return "unknown"
 
 
 def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> SourceLayoutInfo:
@@ -255,32 +165,34 @@ def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> Sou
     in the destination checkpoint metadata. Not a load-bearing decision —
     the file-selection strategy is determined upstream by the classifier.
     """
+    signals = _DEFAULT_SIGNALS
     normalized = _normalize_paths(files)
-    if _has_diffusers_layout_signals(normalized):
+    if _has_diffusers_layout_signals(normalized, signals):
         source_layout = "diffusers"
         reason = "diffusers_layout_signals_present"
-    elif any(p.lower().endswith((".safetensors", ".gguf")) for p in normalized):
+    elif any(p.lower().endswith(signals.weight_suffixes) for p in normalized):
         source_layout = "singlefile"
         reason = "single_file_weight_signals_present"
     else:
         source_layout = "unknown"
         reason = "layout_signals_missing"
 
-    model_family_variant = _detect_family_variant_from_model_index(repo_dir)
-    if model_family_variant == "unknown":
-        model_family_variant = _detect_family_variant_from_components(normalized)
-    if model_family_variant == "unknown" and source_layout == "singlefile":
-        model_family_variant = _detect_family_variant_from_singlefile_paths(normalized)
-    if model_family_variant == "unknown" and _is_ltx2_repackage_layout(normalized):
-        model_family_variant = "ltx2"
-    model_family = canonical_model_family_from_variant(model_family_variant)
+    variant = _detect_variant_from_model_index(repo_dir)
+    if variant == "unknown":
+        variant = _detect_variant_from_components(normalized)
+    if variant == "unknown" and source_layout == "singlefile":
+        variant = _detect_variant_from_paths(normalized)
+    if variant == "unknown":
+        variant = _detect_variant_from_sentinels(normalized)
+
+    model_family = canonical_model_family_from_variant(variant)
     if model_family == "unknown":
         model_family = infer_model_family_from_hint(" ".join(normalized[:64]))
 
     return SourceLayoutInfo(
         source_layout=source_layout,
         model_family=model_family,
-        model_family_variant=model_family_variant,
+        model_family_variant=variant,
         detection_reason=reason,
     )
 
@@ -289,6 +201,7 @@ __all__ = [
     "SourceLayoutInfo",
     "canonical_model_family_from_variant",
     "detect_huggingface_source_layout",
-    "infer_model_family_variant_from_hint",
     "infer_model_family_from_hint",
+    "infer_model_family_variant_from_hint",
+    "normalize_letters_digits",
 ]

@@ -48,7 +48,8 @@ from .writer import (
     snapshot_weight_groups,
 )
 from .convert import run_inline_conversion
-from .layout import infer_model_family_variant_from_hint
+from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
+from .registry import repackage_family
 from ..api.slot import OBJECTIVES
 from gen_worker.models.refs import flavor_token
 
@@ -69,11 +70,6 @@ _KNOWN_DTYPES = {
 }
 _KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile"}
 _KNOWN_FILE_TYPES = {"safetensors", "gguf"}
-
-# Families whose singlefile<->diffusers repackage is implemented, in the
-# repackage module's normalized vocabulary (fine-tune lineages like
-# sdxl-illustrious / flux1-dev / z-image-turbo normalize onto these).
-_REPACKAGE_NORMALIZED_FAMILIES = {"sd15_sd2", "sdxl", "flux", "zimage"}
 
 _DEFAULT_QUANT_COMPONENTS = ("transformer", "unet", "text_encoder", "text_encoder_2",
                              "text_encoder_3", "image_encoder", "prior", "controlnet")
@@ -367,10 +363,18 @@ def build_flavor_tree(
     work_root = source_dir
     work_layout = source_layout
     if spec.file_layout != source_layout:
-        from .repackage import _normalize_family, diffusers_to_singlefile, singlefile_to_diffusers
+        from .repackage import diffusers_to_singlefile, singlefile_to_diffusers
 
         family = str(source.model_family or "").strip().lower()
-        if _normalize_family(family) not in _REPACKAGE_NORMALIZED_FAMILIES:
+        # pgw#740 (B16): capability is registry membership, not a hand-synced
+        # allowlist. The declaration also states the DIRECTION it supports, so
+        # a family that can only go singlefile->diffusers is refused for the
+        # reverse instead of failing deep inside the converter.
+        declared = repackage_family(family)
+        if declared is None or not (
+            declared.supports_singlefile_to_diffusers if source_layout == "singlefile"
+            else declared.supports_diffusers_to_singlefile
+        ):
             raise ValueError(
                 f"layout repackage {source_layout}->{spec.file_layout} unsupported "
                 f"for model_family={family!r}")
@@ -641,18 +645,25 @@ _DTYPE_STORAGE_BITS = {
 }
 
 
-def _hf_plan_looks_like_ltx2(plan: Any) -> bool:
-    """Pre-download family hint mirroring run_clone's post-download
-    ``ltx2_native`` check (gw#592), using ONLY the file-listing paths
-    ``plan_huggingface`` already has (no bytes fetched yet). LTX-2 root
-    checkpoint filenames (``ltx-2.3-22b-dev.safetensors``) carry the "ltx2"
-    token themselves, so :func:`layout.infer_model_family_variant_from_hint`
-    resolves it from paths alone — the same signal
-    ``detect_huggingface_source_layout`` uses post-download."""
+def _plan_has_no_repackager(plan: Any) -> bool:
+    """Pre-download capability probe, mirroring run_clone's post-download check.
+
+    Uses ONLY the file-listing paths ``plan_huggingface`` already has (no bytes
+    fetched yet): a checkpoint filename carrying a family token resolves the
+    family through the same declared hint matchers ``detect_huggingface_source_layout``
+    uses post-download.
+
+    pgw#740 (B16): this used to be spelled ``_hf_plan_looks_like_ltx2`` — one
+    family named twice in this file to route AROUND the repackager. A source
+    whose family declares no singlefile->diffusers converter simply has no
+    repackager, LTX-2 or otherwise, and publishes as-is."""
 
     for p in getattr(plan, "paths", None) or ():
-        if infer_model_family_variant_from_hint(str(p)) == "ltx2":
-            return True
+        variant = infer_model_family_variant_from_hint(str(p))
+        if variant == "unknown":
+            continue
+        declared = repackage_family(canonical_model_family_from_variant(variant))
+        return declared is None or not declared.supports_singlefile_to_diffusers
     return False
 
 
@@ -684,26 +695,25 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             attrs = {"file_layout": "singlefile", "file_type": source_type}
             if source_type == "gguf":
                 strategy = "gguf"
-        # gw#592/gw#593: run_clone routes strategy="aio_singlefile" LTX-2
-        # sources through publish_as_is (no diffusers pipeline exists for the
-        # family; the te#70 trainer resolves the native singlefile snapshot
-        # directly) regardless of the requested output layout — but this
+        # gw#592/gw#593: run_clone routes a strategy="aio_singlefile" source
+        # whose family declares no singlefile->diffusers converter through
+        # publish_as_is regardless of the requested output layout — but this
         # preflight only sees the pre-download classification, which has no
-        # ltx2_native concept, so it was estimating a full layout-repack +
+        # no-repackager concept, so it was estimating a full layout-repack +
         # materialized-dtype-tree budget (388GB for a 43GB source) for a
         # clone that actually only ever needs the source bytes + margin.
         # Found live: e2e#185 ltx-firstlight run 7, CloneDiskSpaceError on a
         # 200GB pod for a 43GB LTX-2.3 dev-checkpoint clone.
-        ltx2_native = (
+        no_repackager = (
             strategy == "aio_singlefile" and provider == "huggingface"
-            and _hf_plan_looks_like_ltx2(plan)
+            and _plan_has_no_repackager(plan)
         )
     except Exception:  # noqa: BLE001 — preflight is best-effort on odd plans
         return
     if source_bytes <= 0:
         return
 
-    if strategy in _PUBLISH_AS_IS_STRATEGIES or ltx2_native:
+    if strategy in _PUBLISH_AS_IS_STRATEGIES or no_repackager:
         required = source_bytes + _DISK_MARGIN_BYTES
         operation = f"{strategy} publishes the source tree directly"
     else:
@@ -1002,17 +1012,17 @@ def run_clone(
         # Non-diffusers-class sources publish as-is; extra output specs that
         # would need conversion are refused per-flavor, not per-job.
         strategy = source.classification.strategy if source.classification is not None else ""
-        # gw#592: LTX-2 (monolith or DiffSynth-Studio repackage layout) has
-        # no diffusers pipeline to repackage into — the te#70 trainer resolves
-        # the native singlefile snapshot directly — so route it through
-        # publish-as-is instead of build_flavor_tree's singlefile->diffusers
-        # repackager (which has no rule for this family and never should:
-        # nobody consumes an "ltx2 diffusers layout"). classify_repo has no
-        # dedicated LTX-2 strategy (it lands in the generic aio_singlefile
-        # bucket alongside any other bare single/multi-root safetensors repo),
-        # so this is gated on the detected family, not the strategy alone.
-        ltx2_native = strategy == "aio_singlefile" and source.model_family == "ltx2"
-        publish_as_is = strategy in _PUBLISH_AS_IS_STRATEGIES or ltx2_native
+        # gw#592/pgw#740 (B16): a bare single/multi-root safetensors repo whose
+        # family declares no singlefile->diffusers converter has nothing to
+        # repackage INTO, so it publishes as-is rather than being handed to a
+        # repackager with no rule for it. LTX-2 is the motivating case (the
+        # te#70 trainer resolves its native singlefile snapshot directly, and
+        # nobody consumes an "ltx2 diffusers layout") but the family name no
+        # longer appears here — capability is registry membership.
+        declared = repackage_family(source.model_family)
+        no_repackager = strategy == "aio_singlefile" and (
+            declared is None or not declared.supports_singlefile_to_diffusers)
+        publish_as_is = strategy in _PUBLISH_AS_IS_STRATEGIES or no_repackager
 
         for i, spec in enumerate(specs):
             flavor_label = spec.dtype
@@ -1055,7 +1065,7 @@ def run_clone(
                             tree = reshard_dir
                     elif i == 0 and spec.file_type == "safetensors" \
                             and (strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
-                                 or ltx2_native):
+                                 or no_repackager):
                         # th#901: an EXPLICITLY mismatched requested dtype is
                         # real, in-line-castable work for these strategies
                         # (ordinary dense safetensors trees) —
