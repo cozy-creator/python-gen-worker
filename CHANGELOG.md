@@ -24,6 +24,45 @@ the ck5 INTERIM scheme; ck6 (graph-hash identity) follows per pgw#716-#720.
 - `cell_key.compute` drops `image_digest`, gains `closure_roots` (endpoint modules;
   executor wiring rides the train lane).
 
+### Erase-and-impose env contract + seal v3 (pgw#718/#719)
+
+The worker OWNS its process environment. We no longer audit the world's env vars and
+refuse on surprises (the superseded pgw#696 allowlist — it bit a 0.70.3 boot on an
+informational base-image var); we ERASE and IMPOSE.
+
+- **`env_seal.scrub_env()`** — unconditionally deletes every var in the behavior
+  namespaces (`TORCH*`/`PYTORCH*`/`TRITON*`/`CUBLAS*`/`CUDNN*`/`NVIDIA_TF32*`/`OMP_*`/
+  `MKL_*`), known or unknown, BEFORE torch imports; logs the erased names; never fails.
+  Plumbing (CUDA_VISIBLE_DEVICES, paths, credentials) untouched.
+- **Typed knobs only** — `establish_config(overrides=...)`; a scrubbed var that turns
+  out to be needed becomes a knob, never an unscrub.
+- **CANONICAL_CONFIG is now the pgw#654 SERVING posture (TF32 on / precision "high")**.
+  This fixed a REAL latent bug the drift check surfaced: mints sealed TF32-OFF while
+  serving ran TF32-ON, diverging the inner FX key — **every sealed cell was unhittable
+  in serving**.
+- **Seal v3** — loaded-library manifest (`/proc/self/maps` -> the native `.so` set,
+  content-digested; closes the LD_PRELOAD/LD_LIBRARY_PATH hole), FROZEN AT BOOT so lazy
+  `dlopen` growth cannot re-key mints while substitution is still caught at point-of-use;
+  hash-seed facts recorded.
+- **Boot-vs-point-of-use** — `assert_seal_unchanged()` before every mint (all three mint
+  paths) and the config half of the arm-time `artifact_drift` check: endpoint code
+  mutating config behind our back is a NAMED refusal, never a silently different graph.
+
+### ck6 canonical graph identity — the hashing half (pgw#716)
+
+- **`gen_worker/graph_hash.py`** (new): one canonicalizer, two ingest paths — dynamo
+  `fx.GraphModule`s and `torch.export.ExportedProgram`s. Scrubs node/arg names, all
+  provenance meta, symbol names and device index; hashes ops, connectivity, literal
+  args, tensor meta, the export signature and pytree specs. **Weight VALUES never
+  key** (a fine-tune must share the graph).
+- **Symbolic-dim RANGES are in the hash** — the pgw#704 S8 soundness fix: three sdxl
+  exports differing only in declared range produced ONE node-only digest
+  (`9dd33abbc7617d98`), which would let a worker adopt a cell that refuses the traffic
+  its key promised. Covers the dynamo path (`ShapeEnv.var_to_range`) as well, since the
+  defect is identical for declared dynamic dims (pgw#702).
+- `combined_graph_hash()` — first 16 hex of sha256 over the newline-joined SORTED
+  per-class hashes; order-independent by construction.
+
 ## 0.75.1 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
 
 A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.
