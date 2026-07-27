@@ -8455,7 +8455,7 @@ class Executor:
         artifact = compile_cache.find_artifact(local)
         if artifact is None:
             return await fail("artifact_missing")
-        if not is_trt:
+        if not is_trt and not is_aot:
             try:
                 # Expensive extraction and runtime-key verification happen in
                 # an isolated tree before taking model/GPU locks. Activation
@@ -8529,8 +8529,10 @@ class Executor:
                     """Return a first-time failed adoption to honest eager."""
                     if is_trt and wrapped:
                         trt_engine.unwrap(obj)
+                    if is_aot and wrapped:
+                        aot_serve.unwrap(obj)
                     if wrapped:
-                        if not is_trt:
+                        if not is_trt and not is_aot:
                             compile_cache.unwrap(obj)
                     if lane_applied:
                         compile_cache.drop_lora_lane(obj)
@@ -8540,7 +8542,7 @@ class Executor:
                         self._on_state_change()
 
                 bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-                if bucket and not is_trt:
+                if bucket and not is_trt and not is_aot:
                     try:
                         compile_cache.apply_lora_lane(obj, bucket)
                         lane_applied = True
@@ -8552,6 +8554,25 @@ class Executor:
                     try:
                         await asyncio.to_thread(
                             trt_engine.load_and_wrap, obj, cfg,
+                            artifact, self.store._cache_dir,
+                        )
+                        wrapped = True
+                    except compile_cache.AdoptError as exc:
+                        await rollback()
+                        return await fail(exc.reason, str(exc))
+                    except Exception as exc:
+                        await rollback()
+                        return await fail("artifact_invalid", str(exc))
+                elif is_aot:
+                    # pgw#734: HOT adoption of an exported cell. Boot arming
+                    # already dispatches by kind in provision.enable_compiled;
+                    # this path did not, so a .pt2 delivered to a RUNNING
+                    # worker was handed to the dynamo stager and unpacked as an
+                    # inductor cache tree. Same rails, same fail-closed
+                    # classification — its own backend.
+                    try:
+                        await asyncio.to_thread(
+                            aot_serve.load_and_wrap, obj, cfg,
                             artifact, self.store._cache_dir,
                         )
                         wrapped = True
@@ -8581,7 +8602,7 @@ class Executor:
                         return await fail("artifact_invalid", str(exc))
                     wrapped = True
 
-                if not is_trt:
+                if not is_trt and not is_aot:
                     inductor_before = (
                         compile_cache.execution_count(obj),
                         compile_cache.cache_hit_count(obj),
