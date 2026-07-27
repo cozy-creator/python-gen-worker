@@ -285,6 +285,23 @@ def _presigned_upload_file_scoped(
     if code in (401, 403):
         raise AuthError(f"file save unauthorized ({code})")
     if code == 404:
+        # te#125/th#1238: a 404 here has two very different causes. The HUB
+        # saying 404 means the route does not exist -> fatal. A PROXY saying
+        # 404 (ngrok with no healthy backend, i.e. the hub is restarting)
+        # means "try again shortly" -> retryable. Treating the second as the
+        # first destroyed a 116-minute H100 producer run at its last step,
+        # because the hub blipped for seconds while this upload was in flight.
+        from .http_origin import is_proxy_outage
+
+        if is_proxy_outage(resp):
+            raise ArtifactTransferError(
+                "tensorhub unreachable during upload create — a proxy answered "
+                "404 (backend offline, e.g. hub restarting), not the hub itself",
+                provider="tensorhub",
+                phase="create",
+                retryable=True,
+                status_code=code,
+            )
         raise ArtifactTransferError(
             "tensorhub upload endpoint is not supported",
             provider="tensorhub",

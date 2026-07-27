@@ -221,6 +221,16 @@ class CalloutClient:
             self._checkpoint_url(key), headers=self._headers(), timeout=_HTTP_TIMEOUT_S
         )
         if resp.status_code == 404:
+            # te#125/th#1238: "the hub has no checkpoint under this key" and
+            # "a proxy answered because the hub is restarting" are both 404,
+            # and this is the worse of the two conflations — reporting
+            # (None, False) for an outage is a SILENT WRONG ANSWER that reads
+            # as "no saved progress", so a resumable job quietly restarts from
+            # scratch instead of erroring and retrying.
+            from .http_origin import is_proxy_outage
+
+            if is_proxy_outage(resp):
+                self._raise_for_error(resp.status_code, resp.text)
             return None, False
         if resp.status_code >= 300:
             self._raise_for_error(resp.status_code, resp.text)
