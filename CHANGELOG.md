@@ -42,6 +42,14 @@ Still open: `request_context/__init__.py:1494` carries the same pattern, but tha
 another agent's uncommitted work in the shared chaos worktree, so it is left alone rather than
 entangled. Recorded in pgw#715 for its owner.
 
+Also riding in 0.75.1 (landed after the 0.75.0 stamp, folded here by the train): the
+**pgw#700 arc** — equivalence adoption SDK half (`gen_worker/equivalence.py`: code-closure
+fast tier + manifest/fingerprint slow tier per the th#1229 ruling), pgw#710 toolchain
+digests in cell metadata, pgw#711 publish digests (`artifact_digest`/`manifest_digest` on
+publish-complete), pgw#712 no-republish fencing + unicity refusal. All behind
+`GEN_WORKER_EQUIVALENCE_ADOPTION`, **default OFF** — the flag flip is gated on th#1229/
+th#1239 hub halves. No behavior change with the flag unset.
+
 
 ## 0.75.0 (2026-07-26) — pgw#660: the hard GPU-architecture floor has a declared carrier again
 
