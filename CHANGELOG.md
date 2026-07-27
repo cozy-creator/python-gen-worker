@@ -1,46 +1,17 @@
 # Changelog
 
-## 0.75.1 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
+## 0.75.1 (2026-07-27) — the 0.71-0.75 promotion train stamp; pgw#700 arc + pgw#684 restore
 
-A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.
-The job finished quantizing and rendering, then its in-flight media upload hit ngrok while the
-backend was briefly gone, received ngrok's HTML 404 page, and
-`presigned_upload.py` classified **every** 404 as `retryable=False` — so the worker reported
-`JOB_STATUS_FATAL` and two hours of GPU work was thrown away with no recourse.
+The batch train that publishes chaos 0.71.0 through 0.75.1 (PR #414). The pgw#715
+proxy-404 classifier that originally headlined this section released EARLY as the solo
+hotfix **0.70.5** (PR #413, coordinator's option-1 ruling) — its full write-up lives in
+the 0.70.5 section below; the train carries the identical code by ancestry.
 
-The gRPC worker stream reconnects across a hub restart. **In-flight HTTP calls did not**, and
-that asymmetry is why "hub-only restarts are safe" held for serving and quietly did not hold
-for long conversion producers.
-
-**`gen_worker/http_origin.py`** (new) separates the two cases, on measured evidence rather
-than assumption — the hub answers `application/json` carrying its `{"error": {...}}` envelope,
-ngrok's offline page answers `text/html`:
-
-- `response_is_from_hub(resp)` — parses the body, not just the Content-Type, since a proxy may
-  mislabel HTML as JSON but will not synthesise our error envelope.
-- `is_proxy_outage(resp)` — the inverse, used at the call sites.
-
-Deliberately **biased toward retrying**: an unrecognised body counts as proxy-origin. Retrying
-a genuinely missing route costs a bounded backoff and then fails anyway; treating an outage as
-fatal destroys hours of work. The asymmetry of those two mistakes is not close.
-
-Applied at every site that conflated the two **for hub calls** — the point was to fix the
-class, not the one instance that bit us:
-
-- `presigned_upload.py` — the P0. Proxy 404 during upload create is now `retryable=True`.
-- `models/hub_client.py` — a proxy 404 was reported as `HubRepoNotFoundError`, sending the
-  reader to hunt a catalog problem that does not exist. Now `HubResolveError` (transient).
-- `callout.py::checkpoint_get` — **the worst of the three**, because it did not crash: it
-  returned `(None, False)`, i.e. "no saved progress", so an outage made a resumable job
-  silently restart from scratch. Now raises instead.
-
-**Deliberately NOT changed:** `models/download.py`'s civitai 404s. Civitai is a third-party
-host with no proxy of ours in the path, so there a 404 really does mean not-found. Widening
-the helper to non-hub hosts would trade a real bug for a fake one.
-
-Still open: `request_context/__init__.py:1494` carries the same pattern, but that file holds
-another agent's uncommitted work in the shared chaos worktree, so it is left alone rather than
-entangled. Recorded in pgw#715 for its owner.
+`1f55c19` (pgw#677 REOPEN, committed 7 minutes after pgw#684) clobbered `executor.py`
+from a stale base and silently reverted pgw#684's executor wiring — `candidate_info`
+extraction, the ctx kwarg, and the materialize block. Restored verbatim from `2f452a3`;
+`test_reserved_candidate_pgw684` 10/10 green again (5 of the 10 failed on the committed
+tree before the restore, not only in the dirty shared worktree as previously recorded).
 
 Also riding in 0.75.1 (landed after the 0.75.0 stamp, folded here by the train): the
 **pgw#700 arc** — equivalence adoption SDK half (`gen_worker/equivalence.py`: code-closure
@@ -315,6 +286,69 @@ see the named gap below.
   `loading.py` routing and the `ladder.py` svdq placement are UNCHANGED:
   widening admission before a real artifact can fully load would strand
   requests.
+
+## 0.70.5 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
+
+**Released off the 0.70.4 published base, not off chaos.** The chaos branch carries
+0.71-0.75 (MoE LoRA branch routing, the env seal + its P0 hotfix, compile-degrade, the
+arch-floor carrier). That work is **unpublished BY CHOICE** and rides the next proper
+chaos -> master train as a batch — nothing here skips it. Shipping this classifier as a
+0.70.x patch keeps the published line linear and the blast radius equal to the 30 lines the
+fleet actually needs.
+
+A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.
+The job finished quantizing and rendering, then its in-flight media upload hit ngrok while the
+backend was briefly gone, received ngrok's HTML 404 page, and
+`presigned_upload.py` classified **every** 404 as `retryable=False` — so the worker reported
+`JOB_STATUS_FATAL` and two hours of GPU work was thrown away with no recourse.
+
+The gRPC worker stream reconnects across a hub restart. **In-flight HTTP calls did not**, and
+that asymmetry is why "hub-only restarts are safe" held for serving and quietly did not hold
+for long conversion producers.
+
+**`gen_worker/http_origin.py`** (new) separates the two cases, on measured evidence rather
+than assumption — the hub answers `application/json` carrying its `{"error": {...}}` envelope,
+ngrok's offline page answers `text/html`:
+
+- `response_is_from_hub(resp)` — parses the body, not just the Content-Type, since a proxy may
+  mislabel HTML as JSON but will not synthesise our error envelope.
+- `is_proxy_outage(resp)` — the inverse, used at the call sites.
+
+Deliberately **biased toward retrying**: an unrecognised body counts as proxy-origin. Retrying
+a genuinely missing route costs a bounded backoff and then fails anyway; treating an outage as
+fatal destroys hours of work. The asymmetry of those two mistakes is not close.
+
+Applied at every site that conflated the two **for hub calls** — the point was to fix the
+class, not the one instance that bit us:
+
+- `presigned_upload.py` — the P0. Proxy 404 during upload create is now `retryable=True`.
+- `models/hub_client.py` — a proxy 404 was reported as `HubRepoNotFoundError`, sending the
+  reader to hunt a catalog problem that does not exist. Now `HubResolveError` (transient).
+- `callout.py::checkpoint_get` — **the worst of the three**, because it did not crash: it
+  returned `(None, False)`, i.e. "no saved progress", so an outage made a resumable job
+  silently restart from scratch. Now raises instead.
+
+**Deliberately NOT changed:** `models/download.py`'s civitai 404s. Civitai is a third-party
+host with no proxy of ours in the path, so there a 404 really does mean not-found. Widening
+the helper to non-hub hosts would trade a real bug for a fake one.
+
+Still open: `request_context/__init__.py:1494` carries the same pattern, but that file holds
+another agent's uncommitted work in the shared chaos worktree, so it is left alone rather than
+entangled. Recorded in pgw#715 for its owner.
+
+
+## 0.70.4 (2026-07-26) — pgw#696 P0 hotfix: the env gate killed every fleet pod
+
+0.70.3's `PYTORCH*` prefix widening + the boot-wired seal composed into a
+fleet-killer: the official `pytorch/pytorch` serving base stamps
+`PYTORCH_VERSION=2.13.0`, the gate refused it, and every pod exited
+pre-hello as a silent provider `pod_exited` (sdxl 0.2.12 was rolled back
+on prod). Build-info constants (`PYTORCH_VERSION`, `PYTORCH_BUILD_VERSION`,
+`PYTORCH_BUILD_NUMBER`) are allowlisted, and the seal now runs AFTER
+settings so a genuine refusal dials the hub as the typed `worker_fatal
+phase=env_seal` instead of dying dark. (Allowlist additions do not touch
+the seal digest — only present gated vars enter identity.)
+
 
 ## 0.70.3 (2026-07-26) — pgw#694 determinism hardening + cache-review fixes (ck4 keys, env-seal boot wiring, inner-FX sm shim)
 
