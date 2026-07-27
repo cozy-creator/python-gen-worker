@@ -311,18 +311,16 @@ def declared_range_gaps(
        must COVER the declared ``[min, max]``. A collapsed (``lower == upper``)
        or narrowed range is a pin, and the artifact admits less traffic than it
        advertises;
-    3. **cross-input collapse** — a STATIC dim on ANOTHER input whose value is a
-       multiple of the product of the declared dims' trace-time values. Such a
-       dim is an algebraic function of the "dynamic" extents, so it silently
-       fixes them even though each symbol still reports a healthy range. This is
-       the check the presence-only gate lacked.
+    3. **pinning guards** — an equality guard in the shape env mentioning a
+       declared symbol. A dim that is genuinely a function of the declared
+       extents forces the tracer to record ``Eq(h*w, N)``; a dim that merely
+       shares a factor records nothing. This is the check the presence-only gate
+       lacked, and it is evidence-based rather than arithmetic — see
+       :func:`_pinning_guards` for why the arithmetic version was wrong.
     """
     gaps: List[str] = []
     shapes = _placeholder_shapes(program)
     ranges = getattr(program, "range_constraints", {}) or {}
-    env = _shape_env(program)
-    hints = dict(getattr(env, "var_to_val", {}) or {}) if env is not None else {}
-
     declared_symbols: List[Any] = []
     for d in dims:
         if d.min == d.max:
@@ -383,60 +381,84 @@ def declared_range_gaps(
                 f"{d.input_name}[{d.axis}] is symbolic ({text}) but carries no "
                 f"resolvable symbol; its admissible range is unprovable")
 
-    gaps.extend(_cross_input_collapse(shapes, dims, declared_symbols, hints))
+    gaps.extend(_pinning_guards(program, declared_symbols))
     return gaps
 
 
-def _cross_input_collapse(
-    shapes: Mapping[str, Tuple[Any, ...]],
-    dims: Sequence[DynamicDim],
-    declared_symbols: Sequence[Any],
-    hints: Mapping[Any, Any],
-) -> List[str]:
-    """Static dims on OTHER inputs that pin the declared dynamic extents.
+def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
+    """Equality guards that pin a declared-dynamic symbol (ie#566 G3).
 
-    ie#566 G3, measured on wan ti2v-5b: H and W were declared symbolic and each
-    kept a healthy solved range, but a per-token input of static length 27,280
-    is an algebraic function of H*W — so the graph serves exactly the traced
-    shape regardless. Every per-symbol check passes; only comparing the static
-    dims against the PRODUCT of the trace-time extents finds it.
+    A dim that is GENUINELY a function of the declared extents forces the tracer
+    to record an equality guard; a dim that merely happens to share a factor
+    records nothing. Measured on this toolchain::
 
-    Fail-closed by design: the remedy is to declare that input's dim dynamic too
-    (or make it independent of H*W), and B2 doctrine forbids shipping the silent
-    version while we decide.
+        genuine  x.reshape(b, c, h*w) + tokens   ->  guards ['Eq(s37*s46, 384)']
+        coincidence  x.flatten(2).sum(-1) + tokens.sum()  ->  guards []
+
+    In BOTH cases ``range_constraints`` still reports the full declared range,
+    which is exactly why a presence check — and even a solved-range check —
+    passes the pinned artifact. The guard is the only place the truth appears.
+
+    This replaces an earlier divisibility heuristic that asked whether a static
+    dim was a multiple of the product of the declared extents. That test could
+    not distinguish the two cases above, and it FALSE-POSITIVED on sdxl, whose
+    cross-attention width 2048 and pooled width 1280 are multiples of the
+    declared extents' product by pure architectural coincidence — refusing every
+    symbolic sdxl mint, including the one reproducing pgw#704's headline. The
+    lesson is recorded here because the coincidence is easy to re-introduce:
+    integer arithmetic on shapes is NOT evidence of dependence; a solved
+    relation is.
+
+    A truly free symbol carries no equality guard, so any ``Eq`` mentioning a
+    declared symbol means that symbol is not free.
     """
-    values: List[int] = []
-    for sym in declared_symbols:
-        try:
-            values.append(int(hints[sym]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    if len(values) < 2:
+    declared = {str(sym) for sym in declared_symbols}
+    if not declared:
         return []
-    product = 1
-    for v in values:
-        product *= v
-    if product <= 1:
+    env = _shape_env(program)
+    if env is None:
         return []
-    declared_inputs = {d.input_name for d in dims}
     out: List[str] = []
-    for name, shape in sorted(shapes.items()):
-        if name in declared_inputs:
-            continue
-        for axis, dim in enumerate(shape):
-            text = str(dim)
-            if not text.lstrip("-").isdigit():
+    seen: set = set()
+    for source in ("guards", "axioms"):
+        entries = getattr(env, source, None) or ()
+        if isinstance(entries, dict):
+            entries = list(entries)
+        for entry in entries:
+            expr = getattr(entry, "expr", entry)
+            if expr is None:
                 continue
-            n = int(text)
-            if n >= product and n % product == 0:
-                out.append(
-                    f"{name}[{axis}] is STATIC {n}, a multiple of {product} — "
-                    f"the product of the declared dynamic extents "
-                    f"{values!r}. That dim is an algebraic function of the "
-                    f"'dynamic' axes, so the graph is pinned to the traced "
-                    f"shape even though each symbol reports a range "
-                    f"(ie#566 G3). Declare {name}[{axis}] dynamic too, or make "
-                    f"it independent of the latent extent")
+            if getattr(expr, "func", None) is None or \
+                    type(expr).__name__ not in ("Eq", "Equality"):
+                continue
+            names = {str(sym) for sym in
+                     (getattr(expr, "free_symbols", ()) or ())}
+            hit = sorted(names & declared)
+            if not hit:
+                continue
+            # A pin has a CONSTANT on one side (``Eq(s37*s46, 384)``). An
+            # equality between two symbolic sides (``Eq(s37, 8*s95)``) is the
+            # DEFINITIONAL relation our own multiple-of factor introduces —
+            # ``8 * Dim(...)`` — and refusing it would block every mint that
+            # declares a divisibility, which is all of the image families.
+            sides = list(getattr(expr, "args", ()) or ())
+            if len(sides) != 2 or not any(
+                not (getattr(side, "free_symbols", None) or set())
+                for side in sides
+            ):
+                continue
+            text = str(expr)
+            if text in seen:
+                continue
+            seen.add(text)
+            out.append(
+                f"the exported program carries the equality guard {text}, "
+                f"which PINS the declared dynamic symbol(s) {hit!r} — some "
+                f"other input's static shape is an algebraic function of the "
+                f"declared extents, so the artifact serves exactly the traced "
+                f"shape even though its declared range says otherwise "
+                f"(ie#566 G3). Declare that input dynamic too, or make it "
+                f"independent of the latent extent")
     return out
 
 

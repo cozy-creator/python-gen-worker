@@ -1155,31 +1155,94 @@ def test_G2_batch_is_declared_not_inferred_from_guidance() -> None:
     assert args2[0].shape[0] == 2
 
 
-def test_G3_cross_input_collapse_is_DETECTED() -> None:
-    """The measured FALSE PASS: each symbol keeps a healthy range, yet a static
-    per-token dim that is a function of H*W pins the graph to one shape."""
-    class Tokened(torch.nn.Module):
+def test_G3_genuine_dependence_is_REFUSED() -> None:
+    """The ti2v-5b true positive: a static dim that GENUINELY constrains H*W.
+
+    ``reshape(b, c, h*w)`` against a static-length input forces the tracer to
+    record ``Eq(h*w, N)``. That guard is the evidence — see the coincidence test
+    below for why arithmetic on the numbers is not.
+    """
+    class GenuineDep(torch.nn.Module):
+        def forward(self, x: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+            b, c, h, w = x.shape
+            return x.reshape(b, c, h * w) + tokens.reshape(1, 1, -1)
+
+    h, w = 16, 24
+    program = torch.export.export(
+        GenuineDep().eval(), (torch.randn(2, 4, h, w), torch.randn(h * w)), {},
+        dynamic_shapes={
+            "x": {2: torch.export.Dim("h", min=8, max=32),
+                  3: torch.export.Dim("w", min=8, max=32)},
+            "tokens": None},
+        strict=True)
+    dims = (aot_mint.DynamicDim("x", 2, 8, 32),
+            aot_mint.DynamicDim("x", 3, 8, 32))
+    gaps = aot_mint.declared_range_gaps(program, dims)
+    assert gaps, "an Eq guard pinning h*w must not pass the gate"
+    joined = " ".join(gaps)
+    assert "PINS" in joined and "ie#566 G3" in joined
+    # range_constraints still reports the FULL declared range here — which is
+    # exactly why a presence check (and a solved-range check) miss this.
+    assert all(int(v.lower) == 8 and int(v.upper) == 32
+               for v in program.range_constraints.values())
+
+
+def test_G3_numeric_coincidence_is_NOT_refused() -> None:
+    """The counterpart that killed the arithmetic version of this gate.
+
+    ``tokens`` is numerically h*w but nothing REQUIRES it to be, so no guard is
+    recorded and the dims stay genuinely free. A divisibility test cannot tell
+    this apart from the case above.
+    """
+    class Coincidence(torch.nn.Module):
         def forward(self, x: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
             return x.flatten(2).sum(-1) + tokens.sum()
 
     h, w = 16, 24
     program = torch.export.export(
-        Tokened().eval(),
-        (torch.randn(2, 4, h, w), torch.randn(h * w)),
+        Coincidence().eval(), (torch.randn(2, 4, h, w), torch.randn(h * w)), {},
         dynamic_shapes={
             "x": {2: torch.export.Dim("h", min=8, max=32),
                   3: torch.export.Dim("w", min=8, max=32)},
-            "tokens": None,
-        },
-        strict=True,
-    )
+            "tokens": None},
+        strict=True)
     dims = (aot_mint.DynamicDim("x", 2, 8, 32),
             aot_mint.DynamicDim("x", 3, 8, 32))
-    gaps = aot_mint.declared_range_gaps(program, dims)
-    assert gaps, "a static dim equal to H*W must not pass the gate"
-    joined = " ".join(gaps)
-    assert "tokens[0]" in joined and "STATIC 384" in joined
-    assert "ie#566 G3" in joined
+    assert aot_mint.declared_range_gaps(program, dims) == []
+
+
+def test_G3_does_not_refuse_the_real_sdxl_shape_contract() -> None:
+    """REGRESSION: the arithmetic gate refused EVERY symbolic sdxl mint.
+
+    SDXL's cross-attention width 2048 and pooled width 1280 are multiples of the
+    declared extents' product by architectural coincidence. The old gate read
+    that as dependence and blocked the artifact reproducing pgw#704's headline
+    (one export serving a second in-range shape). This test exists so that
+    cannot come back.
+    """
+    class Sdxlish(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = torch.nn.Linear(2048, 4)
+
+        def forward(self, sample: torch.Tensor, ehs: torch.Tensor,
+                    pooled: torch.Tensor) -> torch.Tensor:
+            return (sample.flatten(2).sum(-1)
+                    + self.lin(ehs).sum() + pooled.sum())
+
+    program = torch.export.export(
+        Sdxlish().eval(),
+        (torch.randn(2, 4, 16, 16), torch.randn(2, 77, 2048),
+         torch.randn(2, 1280)), {},
+        dynamic_shapes={
+            "sample": {2: torch.export.Dim("h", min=8, max=32),
+                       3: torch.export.Dim("w", min=8, max=32)},
+            "ehs": None, "pooled": None},
+        strict=True)
+    dims = (aot_mint.DynamicDim("sample", 2, 8, 32),
+            aot_mint.DynamicDim("sample", 3, 8, 32))
+    assert aot_mint.declared_range_gaps(program, dims) == [], (
+        "2048 and 1280 are architectural constants, not evidence of dependence")
 
 
 def test_G3_does_not_fire_on_an_honest_dynamic_export() -> None:
