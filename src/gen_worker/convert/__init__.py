@@ -16,6 +16,7 @@ them; ``import gen_worker.convert`` stays cheap.
 from __future__ import annotations
 
 from .base_model_families import (
+    CIVITAI,
     civitai_to_family,
     declare_foreign_family_map,
     foreign_to_family,
@@ -131,6 +132,7 @@ __all__ = [
     "CommitFile",
     "CommitResult",
     # Family declarations (pgw#740): the endpoint declares, the SDK executes.
+    "CIVITAI",
     "ComponentRepack",
     "DeclarationError",
     "DirMatch",

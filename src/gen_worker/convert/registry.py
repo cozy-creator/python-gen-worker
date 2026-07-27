@@ -48,8 +48,13 @@ def register_repackage_family(spec: RepackageFamily, *, replace: bool = False) -
 
 
 def register_layout(decl: LayoutDeclaration, *, replace: bool = False) -> LayoutDeclaration:
-    """Register one source-layout detection declaration."""
-    key = f"{decl.family}/{decl.variant}"
+    """Register one source-layout detection declaration.
+
+    Keyed by (family, variant, order): one variant legitimately needs more than
+    one rung — a broad rule that must sit BELOW a sibling variant's rule, which
+    is exactly what the hand-written ladder's line order used to express.
+    """
+    key = f"{decl.family}/{decl.variant}/{decl.order}"
     with _lock:
         existing = _layouts.get(key)
         if existing is not None and existing != decl and not replace:
