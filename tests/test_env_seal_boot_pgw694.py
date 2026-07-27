@@ -50,3 +50,23 @@ def test_run_main_seals_before_cuda_probe_and_worker() -> None:
         "the seal must be established before the CUDA probe")
     assert seal_at < src.index("Worker("), (
         "the seal must be established before the worker starts")
+    # 0.70.3 regression: sealed BEFORE settings, so a refusal could not
+    # dial the hub — every fleet pod died as a silent pod_exited.
+    assert src.index("get_settings") < seal_at, (
+        "the seal must run after settings so a refusal dials the hub typed")
+    assert "settings=settings" in src[src.index("_establish_env_seal"):
+                                      src.index("should_probe_cuda")]
+
+
+def test_base_image_build_constants_are_allowlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fleet's pytorch/pytorch base image stamps PYTORCH_VERSION (and
+    siblings). RED on 0.70.3: the R7 prefix widening refused them and every
+    pod on the fleet base image died at boot before hello (the sdxl 0.2.12
+    rollback)."""
+    monkeypatch.setenv("PYTORCH_VERSION", "2.13.0")
+    monkeypatch.setenv("PYTORCH_BUILD_VERSION", "2.13.0")
+    monkeypatch.setenv("PYTORCH_BUILD_NUMBER", "1")
+    env_seal.check_torch_env()  # must not raise
+    entrypoint._establish_env_seal()

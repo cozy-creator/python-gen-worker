@@ -92,6 +92,14 @@ ENV_ALLOWLIST = frozenset({
     "PYTORCH_CUDA_ALLOC_CONF",     # allocator sizing (live spelling)
     "PYTORCH_ALLOC_CONF",          # allocator sizing (2.13 preferred)
     "PYTORCH_NVML_BASED_CUDA_CHECK",  # probe-only: how availability is checked
+    # Build-info constants stamped by the official pytorch/pytorch base
+    # images (the fleet's serving base sets PYTORCH_VERSION=2.13.0). They
+    # are informational, not toggles — but the R7 prefix widening made the
+    # gate refuse them, which killed EVERY fleet pod at boot (silent
+    # pod_exited before hello; sdxl 0.2.12 rollback, 2026-07-26).
+    "PYTORCH_VERSION",
+    "PYTORCH_BUILD_VERSION",
+    "PYTORCH_BUILD_NUMBER",
     "TORCHINDUCTOR_CACHE_DIR",     # the SDK's own mint-capture redirect
     "TORCHINDUCTOR_AUTOGRAD_CACHE",  # set by the SDK's capture machinery
     "TRITON_CACHE_DIR",            # the SDK's own mint-capture redirect
