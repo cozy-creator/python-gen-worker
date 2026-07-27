@@ -388,17 +388,46 @@ def cuda_allocated_bytes(device_index: Optional[int] = None) -> int:
     return 0
 
 
+# pgw#740: a HINT order, never the whole world. Fixed component lists are how
+# Wan's `transformer_2` (the second MoE expert) and LTX's `connectors` came to
+# be silently skipped by the offload loops — a live memory bug for those
+# families. Enumeration is generic; this only decides who goes first.
+_COMPONENT_ORDER_HINT = (
+    "transformer", "transformer_2", "unet", "vae", "text_encoder",
+    "text_encoder_2", "text_encoder_3", "connectors",
+)
+
+
+def _module_attributes(pipeline: Any) -> List[tuple[str, Any]]:
+    """Every parameter-bearing module hanging off ``pipeline``, discovered
+    rather than listed (pgw#740). Deterministic order: the hint order first,
+    then everything else alphabetically."""
+    found: dict[str, Any] = {}
+    for name in dir(pipeline):
+        if name.startswith("_"):
+            continue
+        try:
+            value = getattr(pipeline, name)
+        except Exception:  # noqa: BLE001 — properties may raise on a half-built pipe
+            continue
+        if value is None or not hasattr(value, "parameters"):
+            continue
+        found[name] = value
+    ordered: List[tuple[str, Any]] = [
+        (name, found.pop(name)) for name in _COMPONENT_ORDER_HINT
+        if name in found
+    ]
+    ordered.extend(sorted(found.items()))
+    return ordered
+
+
 def _named_components(pipeline: Any) -> List[tuple[str, Any]]:
     out: List[tuple[str, Any]] = []
     raw = getattr(pipeline, "components", None)
     if isinstance(raw, dict):
         out.extend(raw.items())
     else:
-        for attr in ("unet", "transformer", "vae", "text_encoder",
-                     "text_encoder_2", "text_encoder_3"):
-            v = getattr(pipeline, attr, None)
-            if v is not None:
-                out.append((attr, v))
+        out.extend(_module_attributes(pipeline))
     if not out and hasattr(pipeline, "parameters"):
         out.append(("", pipeline))  # bare nn.Module
     return out
@@ -831,8 +860,11 @@ def _apply_group_offload(
     except Exception:
         apply_group_offloading = None
 
-    for attr in ("transformer", "unet", "vae", "text_encoder", "text_encoder_2"):
-        mod = getattr(pipeline, attr, None)
+    # pgw#740: enumerate what the pipeline ACTUALLY carries. The old fixed list
+    # skipped Wan's transformer_2 and LTX's connectors silently — they stayed
+    # fully resident while the caller believed group offload had been applied.
+    skipped: List[str] = []
+    for attr, mod in _module_attributes(pipeline):
         if mod is None:
             continue
         if attr == "vae" and fragile_vae is not None:
@@ -857,6 +889,18 @@ def _apply_group_offload(
                 any_applied = True
             except Exception as exc:
                 _LOG.debug("low_vram: apply_group_offloading(%s) failed: %s", attr, exc)
+                skipped.append(attr)
+        else:
+            skipped.append(attr)
+
+    # Fail-loud doctrine: a component that stays fully resident while the
+    # caller believes it was offloaded is exactly the silence this rule exists
+    # to remove. WARNING, naming every one of them.
+    if skipped:
+        _LOG.warning(
+            "low_vram: group offload did NOT cover %d component(s): %s — they "
+            "stay fully resident; VRAM planning for this pipeline is wrong by "
+            "their size", len(skipped), ", ".join(sorted(skipped)))
 
     if any_applied:
         _keep_vae_resident()

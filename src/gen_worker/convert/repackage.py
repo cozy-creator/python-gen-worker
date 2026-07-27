@@ -164,7 +164,14 @@ def detect_diffusers_family(model_dir: Path) -> str:
 
     # Prefer component-set detection (more robust than class_name).
     if (model_dir / "text_encoder_2").exists() or (model_dir / "tokenizer_2").exists():
-        return "sd15_sd2"
+        # pgw#740: a SECOND text encoder is the SDXL signature — `layout.py:219`
+        # has always returned "sdxl" for the identical signal. This branch said
+        # "sd15_sd2", and because it runs before the class-name fallback the
+        # `"StableDiffusionXL" in cls -> "sdxl"` line below was UNREACHABLE for
+        # any real SDXL tree: the result passed the family gate and was handed
+        # to the SD1.5 converter with no exception raised. Latent only because
+        # clone.py's unrelated allowlist keeps the auto-detect path shut.
+        return "sdxl"
     if (model_dir / "transformer").exists():
         # Transformer-first pipelines (Flux/SD3/etc.) are not supported for checkpoint exports (v1).
         return "flux"
@@ -180,6 +187,36 @@ def detect_diffusers_family(model_dir: Path) -> str:
     if "StableDiffusion" in cls:
         return "sd15_sd2"
     return "unknown"
+
+
+class ConverterSignatureError(ValueError):
+    """The chosen converter does not match the tree's component signature."""
+
+
+def _assert_converter_matches_signature(model_dir: Path, family: str) -> None:
+    """Refuse to run a converter whose family disagrees with what is on disk.
+
+    pgw#740: `detect_diffusers_family` and `convert/layout.py` are two copies of
+    one fact, and they disagreed — the SDXL two-text-encoder signature was
+    routed to the SD1.5 converter silently. Whichever way the family arrives
+    (auto-detected or passed by a CALLER), the component set is the ground
+    truth here, and a mismatch is a named refusal rather than a wrong file.
+    """
+    has_second_encoder = (
+        (model_dir / "text_encoder_2").exists()
+        or (model_dir / "tokenizer_2").exists()
+    )
+    if family == "sd15_sd2" and has_second_encoder:
+        raise ConverterSignatureError(
+            "converter/signature mismatch: family='sd15_sd2' but the tree "
+            f"carries a second text encoder ({model_dir}/text_encoder_2 or "
+            "tokenizer_2), which is the SDXL signature — refusing to run the "
+            "SD1.5/2.x converter on an SDXL tree")
+    if family == "sdxl" and not has_second_encoder:
+        raise ConverterSignatureError(
+            "converter/signature mismatch: family='sdxl' but the tree carries "
+            "NO second text encoder — refusing to run the SDXL converter on a "
+            "single-encoder tree")
 
 
 def _ensure_parent(p: Path) -> None:
@@ -373,6 +410,12 @@ def convert_diffusers_to_singlefile(
         out_dtype = _torch().float32
     else:
         raise ValueError("invalid_output_dtype")
+
+    # pgw#740: the guard that would have caught the misrouting above, kept
+    # independent of it. Two copies of one fact disagreed and only an unrelated
+    # allowlist held it shut; a converter must never run against a component
+    # set it does not recognize. Fails RED, by name, naming both sides.
+    _assert_converter_matches_signature(model_dir, fam)
 
     if fam == "sdxl":
         state_dict = _convert_sdxl(model_dir)

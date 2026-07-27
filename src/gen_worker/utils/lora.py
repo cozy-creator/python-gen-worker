@@ -116,18 +116,60 @@ _TE_PREFIX_TO_COMPONENT = (
 )
 
 
+# Config fields that DISCRIMINATE denoiser structure. The UNet set alone
+# (pgw#740) made every DiT fingerprint to "|||" — a transformer has none of
+# those fields — so two structurally different DiTs shared one normalized-split
+# cache entry. The fingerprint is generic: it takes whatever the module
+# actually declares, and says so when it declares nothing.
+_FINGERPRINT_FIELDS = (
+    # UNet-shaped
+    "down_block_types", "up_block_types", "block_out_channels",
+    "layers_per_block", "cross_attention_dim", "attention_head_dim",
+    "addition_embed_type", "transformer_layers_per_block",
+    # DiT-shaped
+    "num_layers", "num_attention_heads", "attention_head_dim",
+    "num_single_layers", "in_channels", "out_channels", "joint_attention_dim",
+    "pooled_projection_dim", "patch_size", "axes_dims_rope", "caption_channels",
+)
+
+
 def _denoiser_fingerprint(pipe: Any) -> str:
     """Kohya/SGM normalization consults the denoiser's config — two
     checkpoints sharing a pipeline class but differing in block layout must
-    not share a normalized-split cache entry."""
-    for name in ("unet", "transformer"):
-        cfg = getattr(getattr(pipe, name, None), "config", None)
-        if cfg is not None:
-            return "|".join(
-                str(getattr(cfg, k, ""))
-                for k in ("down_block_types", "block_out_channels",
-                          "layers_per_block", "num_layers"))
+    not share a normalized-split cache entry.
+
+    pgw#740: the field list must cover DiTs, not only UNets. A fingerprint that
+    resolves to nothing is NOT a cache key — it is a collision — so a module
+    whose config declares none of these fields falls back to its class name
+    plus its parameter shape signature rather than to an empty string.
+    """
+    for name in ("unet", "transformer", "transformer_2"):
+        module = getattr(pipe, name, None)
+        cfg = getattr(module, "config", None)
+        if cfg is None:
+            continue
+        present = [
+            f"{key}={getattr(cfg, key)!s}"
+            for key in dict.fromkeys(_FINGERPRINT_FIELDS)
+            if getattr(cfg, key, None) is not None
+        ]
+        if present:
+            return f"{type(module).__name__}|" + "|".join(present)
+        # Nothing recognized: never return a value that every module shares.
+        return f"{type(module).__name__}|{_shape_signature(module)}"
     return ""
+
+
+def _shape_signature(module: Any) -> str:
+    """A structural last resort: how many parameters, and their shapes.
+    Distinguishes two same-class denoisers whose configs are unreadable."""
+    try:
+        shapes = [tuple(p.shape) for _n, p in module.named_parameters()]
+    except Exception:  # noqa: BLE001 — a fingerprint must not raise
+        return "unfingerprintable"
+    if not shapes:
+        return "no-parameters"
+    return f"params={len(shapes)}|first={shapes[0]}|last={shapes[-1]}"
 
 
 def _split_adapters(
