@@ -239,6 +239,18 @@ see the named gap below.
   widening admission before a real artifact can fully load would strand
   requests.
 
+## 0.70.4 (2026-07-26) — pgw#696 P0 hotfix: the env gate killed every fleet pod
+
+0.70.3's `PYTORCH*` prefix widening + the boot-wired seal composed into a
+fleet-killer: the official `pytorch/pytorch` serving base stamps
+`PYTORCH_VERSION=2.13.0`, the gate refused it, and every pod exited
+pre-hello as a silent provider `pod_exited` (sdxl 0.2.12 was rolled back
+on prod). Build-info constants (`PYTORCH_VERSION`, `PYTORCH_BUILD_VERSION`,
+`PYTORCH_BUILD_NUMBER`) are allowlisted, and the seal now runs AFTER
+settings so a genuine refusal dials the hub as the typed `worker_fatal
+phase=env_seal` instead of dying dark. (Allowlist additions do not touch
+the seal digest — only present gated vars enter identity.)
+
 ## 0.70.3 (2026-07-26) — pgw#694 determinism hardening + cache-review fixes (ck4 keys, env-seal boot wiring, inner-FX sm shim)
 
 One train: the pgw#694 hardening set (chaos a73e6c8), its executor-side boot wiring (`entrypoint._establish_env_seal`), and the ML-cache-review fixes (chaos 23a34bd — the P0 inner-inductor-cache portability shim, B200-verified). ck3 -> ck4 is the second and final planned key-scheme bump; expect one `cell_exchange_key_split` alarm per (endpoint, family) and a one-time re-mint wave.
