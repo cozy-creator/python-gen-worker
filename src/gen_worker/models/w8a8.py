@@ -379,8 +379,16 @@ def _build_module_class() -> type:
                     out_features, dtype=compute_dtype, device=meta))
             else:
                 self.bias = None
-            self.lora_a = None
-            self.lora_b = None
+            # DECLARED slots, not plain attributes (pgw#726): the with-LoRA
+            # graph class must be a structural fact at trace time, and a
+            # plain `None` attribute makes `register_buffer` refuse the name
+            # outright ("attribute 'lora_a' already exists") — the LoRA path
+            # had to pop `__dict__` first to get its buffers in. A declared
+            # None slot accepts the tensor by assignment, keeps the FQN
+            # visible to AOT constant/input binding, and stays out of the
+            # state_dict until it holds something.
+            self.register_buffer("lora_a", None, persistent=False)
+            self.register_buffer("lora_b", None, persistent=False)
 
         def _lora_addend(self, x2: Any) -> Any:
             # Per-adapter scale is folded into lora_b at copy time.

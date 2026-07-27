@@ -19,6 +19,7 @@ import os
 import struct
 import sys
 
+from .fp8_storage import restructure_fp8_storage
 from .memory import get_available_vram_gb, meta_tensors
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
 from .w4a4 import (
@@ -364,9 +365,14 @@ def _fp8_block_windows_whole(mod: Any) -> List[tuple[str, Any, List[Any]]]:
 def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
                       text_encoders: bool = False,
                       components: Optional[tuple[str, ...]] = None) -> bool:
-    """fp8-E4M3 weight storage with per-layer upcast to ``compute_dtype``
-    (diffusers layerwise casting) on a pipeline's denoiser — or on ``obj``
-    itself when it is a bare module (th#546 two-format policy).
+    """fp8-E4M3 weight storage with per-layer upcast to ``compute_dtype`` on a
+    pipeline's denoiser — or on ``obj`` itself when it is a bare module
+    (th#546 two-format policy). Diffusers denoisers are RESTRUCTURED into fp8
+    storage modules (pgw#727, :mod:`gen_worker.models.fp8_storage`: upcast at
+    the use site inside forward); transformers text encoders keep the
+    :class:`_Fp8WeightWindow` block hooks — they read weight dtype OUTSIDE the
+    owning leaf's forward (gw#460), which resident fp8 would poison, and they
+    are not on any compiled path.
     ``text_encoders=True`` (the ``storage_dtype="fp8+te"`` rung) extends the
     cast to the pipeline's text encoders via the transformers-aware path.
     ``components`` overrides the target component names entirely (gw#557:
@@ -410,10 +416,17 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
             applied = True
             continue
         try:
-            fn = getattr(mod, "enable_layerwise_casting", None)
-            if callable(fn):
-                # diffusers ModelMixin — honors the model's own skip patterns.
-                fn(storage_dtype=storage, compute_dtype=compute_dtype)
+            if callable(getattr(mod, "enable_layerwise_casting", None)):
+                # diffusers ModelMixin. pgw#727: same semantics as
+                # ``enable_layerwise_casting`` (and the SAME coverage set —
+                # the model's own skip patterns included), expressed as module
+                # STRUCTURE instead of a forward-boundary mutation. The hook
+                # form is compile-hostile (0.2% dynamo regression for a 38.9s
+                # mint) and torch.export refuses it; the structural form is
+                # 14.8% faster under dynamo and exports clean.
+                if not restructure_fp8_storage(mod, storage_dtype=storage,
+                                               compute_dtype=compute_dtype):
+                    raise ValueError("no fp8-castable leaves found")
             else:
                 _apply_transformers_fp8(mod, storage, compute_dtype)
             mod._cozy_fp8_storage_applied = True
@@ -537,7 +550,12 @@ def apply_block_window_offload(
             if id(p) not in parked_ids and p.device != torch.device(device):
                 p.data = p.data.to(device)
         for b in mod.buffers():
-            if b.device != torch.device(device):
+            # `parked_ids` guards buffers too: the storage lanes hold their
+            # weights as BUFFERS (w8a8's scaled weights, and pgw#727's fp8
+            # storage leaves), so without this the just-parked block weights
+            # are pulled straight back onto the device and the rung silently
+            # saves nothing.
+            if id(b) not in parked_ids and b.device != torch.device(device):
                 b.data = b.data.to(device)
         mod._cozy_block_offload_applied = True
         applied = True
@@ -737,13 +755,20 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # storage lane (stored #fp8 flavor or resolved cast) is UPGRADED to plain
 # bf16-resident weights when the whole snapshot fits free VRAM with headroom:
 # the fp8 artifact stays the small download, the upcast happens ONCE at load
-# (from_pretrained's torch_dtype already does it — we simply skip the hooks
-# that would re-cast down). Hooks remain only when bf16 does not fit.
+# (from_pretrained's torch_dtype already does it — we simply skip the fp8
+# storage lane that would re-cast down). fp8 storage remains only when bf16
+# does not fit.
 BF16_RESIDENT_MARGIN_GB = 4.0  # activations + allocator headroom
 
 # The pipeline's weight lane, part of the compile-cache graph key (gw#534):
 # "" = plain resident weights (incl. the bf16-resident upcast), "fp8-hooks" =
-# layerwise-cast hooks armed (the hooks are traced into the FX graphs).
+# fp8 weights resident with a per-layer upcast (traced INTO the FX graphs).
+# The "fp8-hooks" spelling is the WIRE value — tensorhub maps it to `w8a16`
+# and cells key on it — and it is kept byte-identical across the pgw#727
+# restructure (hooks -> module structure) on purpose. The restructure DOES
+# change the traced graph, and that shows up where it should: the module
+# types and hook counts in `compile_cache.execution_contract`, i.e. new cell
+# keys, no cross-lane adoption.
 _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 
 

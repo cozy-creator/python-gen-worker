@@ -997,7 +997,8 @@ def artifact_metadata(
     storage the binding REQUESTED — informational only. ``weight_lane`` is the
     lane the built pipeline ACTUALLY traced under (gw#534:
     ``loading.pipeline_weight_lane`` — "" plain-resident, "fp8-hooks"
-    layerwise-cast; the hooks are traced INTO the graphs, ie#381) and is
+    fp8-resident weights with a per-layer upcast, traced INTO the graphs
+    (ie#381; pgw#727 made that structure instead of hooks) and is
     parity-checked at :func:`enable` like ``low_vram_mode``. Shape rows are
     (w, h) or (w, h, frames); ``guidance_scales`` records the image CFG /
     no-CFG graph classes captured for every 2-D row — see ``Compile``."""
@@ -2066,7 +2067,8 @@ def _direct_tensor_schema(module: Any) -> list[list[Any]]:
 
 def _module_hooks(module: Any) -> Dict[str, int]:
     """Hook PRESENCE per module (pgw#697): installed hooks are traced into
-    the compiled graphs (fp8 layerwise-cast is hook-driven, ie#381), so a
+    the compiled graphs (the offload rung's windows, and — until pgw#727
+    restructured it into module types — the fp8 cast, ie#381), so a
     hook-count drift is a composition drift. Counts only — never hook
     identities or closures."""
     out: Dict[str, int] = {}
@@ -3458,9 +3460,10 @@ def build(
     inductor+triton caches as a per-SKU artifact.
 
     ``storage_dtype`` mirrors the serving binding's weight-storage lane
-    (gw#389 fp8 layerwise casting): the cast hooks are traced INTO the FX
-    graphs, so a cell for an fp8-served model must be built from an
-    fp8-loaded pipeline or every request misses the cache (ie#381).
+    (gw#389 fp8 storage): the per-layer upcast is traced INTO the FX graphs
+    (as module types since pgw#727), so a cell for an fp8-served model must be
+    built from an fp8-loaded pipeline or every request misses the cache
+    (ie#381).
 
     ``pipeline_class`` (gw#586) names the diffusers pipeline class the
     SERVING endpoint declares (e.g. ``"LTX2ConditionPipeline"``). The traced

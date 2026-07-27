@@ -63,6 +63,49 @@ informational base-image var); we ERASE and IMPOSE.
 - `combined_graph_hash()` — first 16 hex of sha256 over the newline-joined SORTED
   per-class hashes; order-independent by construction.
 
+### fp8 storage is module STRUCTURE, not a cast hook (pgw#727, + pgw#726 slots)
+
+The w8a16 lane's weights still RESIDE in fp8 and still compute in bf16 — but the
+upcast now happens at the use site inside `forward` instead of by mutating
+`Parameter.data` at the forward boundary. Measured (pgw#704 S12-c, L4, real SDXL
+UNet): the hook form is compile-hostile (dynamo 386.5 vs eager 385.9 ms — a 0.2%
+regression for a 38.9s mint), the structural form is **14.8% faster under dynamo**
+and `torch.export` accepts it. This lands independent of the AOT migration.
+
+- New `models/fp8_storage.py`. `apply_fp8_storage` no longer calls diffusers'
+  `enable_layerwise_casting` for denoisers; it restructures the cast-eligible
+  leaves (class pun: `nn.Linear` -> `Fp8StorageLinear(nn.Linear)`, same object,
+  same FQNs, same state_dict keys, `isinstance` intact). Transformers text
+  encoders KEEP the `_Fp8WeightWindow` block hooks — they read weight dtype
+  outside the owning leaf (gw#460) and are not on any compiled path.
+- **Coverage is upstream's rule, mirrored and asserted** — same leaf set as
+  `_apply_layerwise_casting` (supported layers, default + model-declared skip
+  patterns, peft adapter names), with a set-equality tape against the installed
+  diffusers so upstream drift fails in CI, and a by-name refusal for any leaf
+  kind we cannot restructure. Narrower coverage would be a silent VRAM AND
+  numerics change.
+- **The `fp8-hooks` lane VALUE is unchanged** (wire-compatible; tensorhub maps it
+  to `w8a16`). The traced graph DOES change, and it shows up where it should:
+  module types and hook counts in `execution_contract` — new cell keys, no
+  cross-lane adoption in either direction.
+- fp8 weights are BUFFERS now, not parameters — diffusers resolves
+  `ModelMixin.dtype` from the first floating-point parameter and special-cases an
+  armed cast hook; drop the hook with fp8 parameters left behind and `model.dtype`
+  answers fp8, which breaks every denoiser that casts to `self.dtype` in forward
+  (`UNet2DModel.get_time_embed`, measured). Buffers restore the correct answer
+  with no hook and no property override.
+- Measured on CPU against the hook lane, real tiny UNets: identical coverage set,
+  **bitwise-equal outputs**, and **identical resident bytes per dtype** — pgw#704's
+  "+11.6% VRAM" was the prototype swapping `nn.Linear` only, leaving convs
+  bf16-resident. At upstream coverage that trade does not exist.
+- Latent bug fixed on the way: `apply_block_window_offload` re-moved just-parked
+  weights back onto the device whenever they were buffers (i.e. the w8a8 lane
+  today), so the degraded rung silently saved nothing.
+- **pgw#726**: `_Fp8ScaledLinear.lora_a`/`lora_b` are DECLARED `None` buffer slots
+  instead of plain attributes — `register_buffer` no longer has to pop `__dict__`
+  to get its tensors in, the FQNs are structural from construction, and a
+  branch-disable cycle keeps the slots declared.
+
 ## 0.75.1 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
 
 A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.
