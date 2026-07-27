@@ -339,40 +339,72 @@ def test_program_and_package_constant_sets_agree_for_a_real_mint(
         _export_lifted(), packages["code_only"]) == []
 
 
-def test_constant_set_drift_is_refused_and_names_the_fqns(
+def test_package_only_drift_is_refused_and_names_the_fqns(
     packages: Dict[str, Path],
 ) -> None:
-    """The mechanism that catches a strict/non-strict mix.
+    """The FATAL direction: the artifact wants a constant nothing declared.
 
-    pgw#728 measured strict and non-strict export lifting DIFFERENT constant
-    sets (2960 vs 4208 placeholders on the surveyed family), so a mint whose
-    manifest came from one trace mode and whose package came from the other
-    ships a manifest describing bytes the artifact does not want. The tiny
-    modules here are too simple for the two modes to diverge, so the drift is
-    induced directly — what is pinned is that a manifest/package mismatch is
-    REFUSED and NAMED, whatever produced it.
+    Nothing would bind it, and invoking a code-only package with an unbound
+    constant segfaults inside AOTICompiledModel.__call__. A strict/non-strict
+    trace mix (pgw#728) surfaces here too.
     """
-    reasons = aot_package.program_package_drift(
-        _export_module(BakedBufferModule().eval()), packages["code_only"])
+    class _Empty:
+        graph_signature = None
+        constants: Dict[str, Any] = {}
+
+    reasons = aot_package.program_package_drift(_Empty(), packages["code_only"])
     assert reasons
     joined = " ".join(reasons)
-    assert "different" in joined
-    assert "lora_a" in joined or "scale_table" in joined
-    assert "pgw#728" in joined
+    assert "never lifted" in joined and "segfault" in joined
+    assert "proj.weight" in joined or "scale_table" in joined
 
 
-def test_mint_refuses_a_package_whose_constants_are_not_the_programs(
+def test_program_only_drift_is_BENIGN(packages: Dict[str, Path]) -> None:
+    """The routine direction: the compiler fused a lifted constant away.
+
+    Measured on the first real SDXL w8a8 mint — program 2423 vs package 2422,
+    the difference being ``unet.conv_out.bias`` folded into the conv epilogue.
+    An equality-demanding gate refused EVERY real mint, so this test exists to
+    stop anyone restoring the symmetry.
+    """
+    real = set(aot_package.program_constant_fqns(_export_lifted()))
+    assert real
+
+    class _Extra:
+        graph_signature = None
+        constants = {name: None for name in real | {"fused.away.bias"}}
+
+    assert aot_package.program_package_drift(_Extra(), packages["code_only"]) == []
+    assert "fused.away.bias" in aot_package.eliminated_constants(
+        _Extra(), packages["code_only"])
+
+
+def test_mint_refuses_a_package_wanting_undeclared_constants(
     tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wired into the mint, not merely available."""
-    monkeypatch.setattr(
-        aot_package, "program_constant_fqns",
-        lambda _p: ("a.totally.different.tensor",))
+    monkeypatch.setattr(aot_package, "program_constant_fqns", lambda _p: ())
     with pytest.raises(aot_mint.MintRefused, match="constant-set drift"):
         aot_mint.mint(
             LiftedModule().eval(), _spec(), tmp_path,
             example_inputs=_example_inputs)
     assert not list(tmp_path.glob("*.tar.gz"))
+
+
+def test_mint_records_fused_constants_without_refusing(
+    tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiler fusion must be observable but never fatal."""
+    real = aot_package.program_constant_fqns
+
+    monkeypatch.setattr(
+        aot_package, "program_constant_fqns",
+        lambda p: tuple(real(p)) + ("definitely.fused.away",))
+    result = aot_mint.mint(
+        LiftedModule().eval(), _spec(), tmp_path,
+        example_inputs=_example_inputs)
+    meta = aot_serve.unpack_metadata(result.artifact)
+    assert "definitely.fused.away" in meta["graph"]["fused_constants"]
 
 
 def test_strict_mode_drift_is_refused_by_name() -> None:

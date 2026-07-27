@@ -422,6 +422,13 @@ def mint(
     drift = aot_package.program_package_drift(program, package)
     if drift:
         raise MintRefused("constant-set drift: " + "; ".join(drift))
+    fused = aot_package.eliminated_constants(program, package)
+    if fused:
+        # Routine compiler fusion (measured on real sdxl: conv_out.bias folded
+        # into the conv epilogue). Recorded, never fatal — but a surprising jump
+        # in the count should be visible rather than silently discarded.
+        logger.info("aot-mint: %d lifted constant(s) fused away by the compiler "
+                    "(e.g. %s)", len(fused), fused[:3])
 
     t0 = time.monotonic()
     try:
@@ -496,6 +503,8 @@ def identity_blocks(
         "graph": {
             "v": 1,
             "constant_fqns": sorted(aot_package.constant_names(package)),
+            "fused_constants": sorted(
+                aot_package.eliminated_constants(program, package)),
             "lifted_inputs": sorted(str(n) for n in spec.lifted_inputs),
             "pytree": _pytree_facts(program),
             "specialization": _specialization_facts(spec),
