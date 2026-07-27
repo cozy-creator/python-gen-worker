@@ -272,20 +272,22 @@ def _establish_env_seal() -> Dict[str, Any]:
 def _run_main() -> int:
     _log_startup_phase("boot", status="starting")
     _install_stack_dump_handler()
-    # pgw#696: seal the execution environment first — before settings can
-    # pull torch-adjacent config and before the CUDA probe touches the
-    # device. An unsealable process refuses to start, naming the variable.
-    try:
-        _establish_env_seal()
-    except Exception as e:
-        _log_worker_fatal("env_seal", e, exit_code=1)
-        logger.error(str(e))
-        return 1
     try:
         settings = get_settings()
     except Exception as e:
         logger.exception("Failed to load worker settings: %s", e)
         _log_worker_fatal("settings_load", e, exit_code=1)
+        return 1
+    # pgw#696: seal the execution environment before the CUDA probe touches
+    # the device and before any model/compile work. Ordered AFTER settings
+    # (which reads no torch config) so a refusal can DIAL THE HUB typed —
+    # the 0.70.3 pre-settings ordering made a seal refusal a silent
+    # pod_exited the fleet could not attribute.
+    try:
+        _establish_env_seal()
+    except Exception as e:
+        _log_worker_fatal("env_seal", e, exit_code=1, settings=settings)
+        logger.error(str(e))
         return 1
     manifest_path = Path(settings.endpoint_lock_path or MANIFEST_PATH)
     manifest = load_manifest(manifest_path)
