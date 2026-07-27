@@ -35,6 +35,11 @@ both take it as call data):
 Both kwargs are MANDATORY: tracing with them absent would trace the branchless
 graph and silently produce the constant-folded-away bug S9 names, so a missing
 half refuses typed.
+
+The single deferred ``import torch`` (in :meth:`LiftedLoraPlan.alloc`) is
+deliberate and matches ``w8a8``/``w8a8_lora``: ``compile_cache`` imports those at
+module level and the discovery path (``python -m gen_worker.discover``, run at
+image build time) has no torch. Keep it that way when wiring this in.
 """
 
 from __future__ import annotations
