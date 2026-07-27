@@ -95,9 +95,22 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   (`UNet2DModel.get_time_embed`, measured). Buffers restore the correct answer
   with no hook and no property override.
 - Measured on CPU against the hook lane, real tiny UNets: identical coverage set,
-  **bitwise-equal outputs**, and **identical resident bytes per dtype** — pgw#704's
-  "+11.6% VRAM" was the prototype swapping `nn.Linear` only, leaving convs
-  bf16-resident. At upstream coverage that trade does not exist.
+  **bitwise-equal outputs**, coverage parity on resident bytes. pgw#704's "+11.6%
+  VRAM" is not usable either way — that prototype swapped `nn.Linear` only,
+  leaving convs bf16-resident.
+- **The pun must rebind the outgoing Parameter, or VRAM goes UP ~50%.** A class
+  pun replaces the weight tensor OBJECT, so anything still holding the original
+  `Parameter` — accelerate device hooks, `low_cpu_mem_usage` bookkeeping, any
+  earlier `list(model.parameters())` — keeps the bf16 storage alive next to the
+  fp8 copy. An L4 measured fp8-storage 7.35 GB vs plain bf16 4.89 GB (**+50.3%**,
+  both copies resident); reproduced on CPU at +49.9%. `_to_storage_buffer` now
+  rebinds the outgoing Parameter onto the fp8 storage, restoring the hook lane's
+  property that every holder follows the cast. A module-only residency walk
+  cannot see this failure — the tape now holds the parameters the way a pod does.
+- `restructure_fp8_storage` releases the freed bf16 blocks to the driver
+  (`empty_cache`, never initializing CUDA): the fit ladder reads driver-level
+  free VRAM, so ~half a denoiser sitting in torch's caching allocator would make
+  the rung decision moments later see free VRAM as taken.
 - Latent bug fixed on the way: `apply_block_window_offload` re-moved just-parked
   weights back onto the device whenever they were buffers (i.e. the w8a8 lane
   today), so the degraded rung silently saved nothing.

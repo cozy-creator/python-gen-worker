@@ -35,12 +35,24 @@ coverage set would be a silent VRAM regression AND a silent numerics change.
 ``tests/test_fp8_storage_pgw727.py`` asserts set-equality against the
 installed diffusers, so upstream drift fails loud in CI rather than on a pod.
 
-**Residency, measured (CPU, real tiny UNet, 83 covered leaves):** resident
-bytes per dtype are IDENTICAL to the hook lane, and outputs are bitwise
-equal. pgw#704 S12-c's "+11.6% VRAM" was an artifact of the prototype
-harness swapping ``nn.Linear`` ONLY (convs stayed bf16-resident); at
-upstream coverage the trade does not exist. Peak transient is one leaf's
-upcast either way — diffusers hooks per LEAF, not per block.
+**Residency.** Two separate facts, both measured, and the first does not
+imply the second:
+
+1. *Coverage parity*: the same leaves hold the same bytes at the same
+   precision as the hook lane (module walk), and outputs are bitwise equal.
+   Peak transient is one leaf's upcast either way — diffusers hooks per
+   LEAF, not per block.
+2. *No orphaned originals*: a class pun replaces the weight tensor OBJECT,
+   so the bf16 original survives anywhere it is still held. On an L4 that
+   measured **+50.3%** (7.35 GB vs plain 4.89 GB — both copies resident);
+   reproduced on CPU at +49.9%. ``_to_storage_buffer`` rebinds the outgoing
+   Parameter onto the fp8 storage, which restores the hook lane's property
+   that every holder follows the cast. A module-only walk cannot see this
+   failure, which is why the first cut of this lane claimed "identical
+   residency" while a pod said otherwise.
+
+pgw#704 S12-c's "+11.6%" number is separately unusable: that prototype
+swapped ``nn.Linear`` ONLY, leaving convs bf16-resident.
 
 The restructure is a CLASS PUN: the leaf keeps its identity, parameters,
 FQNs and kernel attributes, and only its ``forward`` changes (``nn.Linear``
@@ -323,7 +335,28 @@ def restructure_fp8_storage(model: Any, *, storage_dtype: Any,
         covered.append(path)
     logger.info("fp8 storage restructured: %d leaves (compute %s, storage %s)",
                 len(covered), compute_dtype, storage_dtype)
+    if covered:
+        _release_freed_blocks()
     return sorted(covered)
+
+
+def _release_freed_blocks() -> None:
+    """Return the freed bf16 blocks to the driver, not just to torch's caching
+    allocator. This is a load-time fit-ladder correctness detail, not a
+    micro-optimization: the restructure frees roughly half the denoiser's
+    bytes, and the ladder reads DRIVER-level free VRAM
+    (``memory.get_available_vram_gb`` -> ``torch.cuda.mem_get_info``), which
+    still counts allocator-cached blocks as used. Without this the rung
+    decision made moments later sees VRAM that is actually free as taken.
+    Never initializes CUDA."""
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception:
+        logger.debug("fp8-storage: empty_cache after restructure failed",
+                     exc_info=True)
 
 
 def _to_storage_buffer(leaf: Any, name: str, storage_dtype: Any) -> None:
@@ -347,6 +380,21 @@ def _to_storage_buffer(leaf: Any, name: str, storage_dtype: Any) -> None:
     data = tensor.detach()
     if data.is_floating_point() and data.dtype != storage_dtype:
         data = data.to(storage_dtype)
+    param = leaf._parameters.get(name)
+    if param is not None and param.data.data_ptr() != data.data_ptr():
+        # REBIND the outgoing Parameter onto the fp8 storage before dropping
+        # it. Measured, and it is the whole ballgame for VRAM: replacing the
+        # tensor OBJECT lets anything still holding the old Parameter —
+        # accelerate's device hooks, `low_cpu_mem_usage` bookkeeping, any
+        # earlier `list(model.parameters())` — keep the bf16 storage alive
+        # forever, next to the fp8 copy. On an L4 that measured +50.3% (fp8
+        # storage 7.35 GB vs plain bf16 4.89 GB: BOTH copies resident), and
+        # +49.9% reproduced on CPU. The hook lane never had this failure mode
+        # because `module.to(dtype=)` swaps storage INSIDE the same Parameter,
+        # so every holder follows the cast. One assignment restores that
+        # property: holders now share the single fp8 storage, and the bf16
+        # storage drops at its last reference.
+        param.data = data
     leaf._parameters.pop(name, None)
     leaf._buffers.pop(name, None)
     leaf.register_buffer(name, data, persistent=True)
