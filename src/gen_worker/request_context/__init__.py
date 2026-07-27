@@ -1250,9 +1250,9 @@ class _PublisherMixin:
     ``_get_worker_capability_token``).
 
     Producer-only STATE lives here too (pgw#526): the reserved
-    ``source``/``destination``/``text_encoder`` payload structs, the hf
-    token, and their materialized paths initialize in this ``__init__`` — a
-    plain inference ``RequestContext`` never carries them.
+    ``source``/``destination``/``text_encoder``/``candidate`` payload structs,
+    the hf token, and their materialized paths initialize in this ``__init__``
+    — a plain inference ``RequestContext`` never carries them.
 
     Not a public surface: tenants should never import this directly.
     """
@@ -1263,6 +1263,7 @@ class _PublisherMixin:
         source_info: Optional[Dict[str, Any]] = None,
         destination_info: Optional[Dict[str, Any]] = None,
         text_encoder_info: Optional[Dict[str, Any]] = None,
+        candidate_info: Optional[Dict[str, Any]] = None,
         hf_token: str = "",
         **kwargs: Any,
     ) -> None:
@@ -1276,6 +1277,8 @@ class _PublisherMixin:
         self._source_path: Optional[str] = None
         self._text_encoder_info = dict(text_encoder_info or {})
         self._text_encoder_path: Optional[str] = None
+        self._candidate_info = dict(candidate_info or {})
+        self._candidate_path: Optional[str] = None
         self._hf_token = (hf_token or "").strip()
     if TYPE_CHECKING:
         # The host contract (gw#497): everything this mixin borrows from
@@ -1349,6 +1352,22 @@ class _PublisherMixin:
     def _set_text_encoder_path(self, path: str) -> None:
         """Library-internal: called after text_encoder materialization."""
         self._text_encoder_path = str(path) if path else None
+
+    # Fourth reserved-name model input (pgw#684, te#121): the arm a two-ref
+    # eval COMPARES against `source`, rather than a component it builds from.
+    # Same materialization path; absent for every existing producer payload —
+    # `candidate`/`candidate_path` stay empty/None and no behavior changes.
+    @property
+    def candidate(self) -> dict[str, Any]:
+        return dict(self._candidate_info)
+
+    @property
+    def candidate_path(self) -> Optional[str]:
+        return self._candidate_path
+
+    def _set_candidate_path(self, path: str) -> None:
+        """Library-internal: called after candidate materialization."""
+        self._candidate_path = str(path) if path else None
 
     def save_checkpoint(
         self,

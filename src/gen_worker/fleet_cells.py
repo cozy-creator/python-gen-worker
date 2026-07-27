@@ -64,6 +64,7 @@ import requests
 from . import activity as activity_mod
 from . import cell_key
 from . import compile_cache as cc
+from . import equivalence
 from . import guard_closure
 from .convert.hub import blake3_file
 # module import (not `from .loading import pipeline_weight_lane`): tests
@@ -246,6 +247,14 @@ class CellPublisher:
         treats every raise as non-fatal to serving.
         """
 
+        # pgw#712: a cell adopted by EQUIVALENCE must never republish —
+        # under this worker's key the relaxation would launder into an
+        # exact-key mint and compound transitively across SDK versions.
+        mark = meta.get(equivalence.ADOPTION_MARK)
+        if mark:
+            raise CellPublishRefused(
+                f"cell was adopted by equivalence (bridged axes {mark!r}); "
+                "republishing it is fenced (pgw#712)")
         key = str(meta.get("cell_key") or "").strip()
         if not key:
             key = cell_key.from_artifact_metadata(meta).digest
@@ -290,10 +299,21 @@ class CellPublisher:
                 logger.debug("publish-complete failure report failed", exc_info=True)
             raise
 
+        # pgw#711 (SDK half): the publish carries the artifact's byte digest
+        # and the manifest digest, so the hub can byte-compare a SECOND
+        # independent publish for the same key (unconfirmed -> confirmed;
+        # inequality = the live double-mint alarm) without fetching bytes.
+        complete: Dict[str, Any] = {
+            "family": family, "cell_key": key,
+            "checkpoint_id": checkpoint_id, "ok": True,
+            "artifact_digest": "blake3:" + blake3_file(artifact),
+        }
+        manifest = meta.get(guard_closure.MANIFEST_KEY)
+        if isinstance(manifest, dict) and manifest:
+            complete["manifest_digest"] = guard_closure.manifest_digest(manifest)
         self._post(
             "/v1/worker/cells/publish-complete",
-            {"family": family, "cell_key": key, "checkpoint_id": checkpoint_id,
-             "ok": True},
+            complete,
             timeout=_COMPLETE_TIMEOUT_S,
         )
         logger.info(

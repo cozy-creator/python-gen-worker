@@ -199,7 +199,7 @@ class Lifecycle:
         # convergence pass instead of cancelling an in-flight load.
         self._reconcile_active: Optional[tuple] = None
         self._residency_restart: Optional[asyncio.Event] = None
-        self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
+        self._model_resolutions: Dict[str, Tuple[Any, ...]] = {}
         self.executor.runtime_config.set_projection_callbacks(
             on_parameter_snapshot=self._config_snapshot_applied,
             on_snapshot_failure=self._config_snapshot_failed,
@@ -412,7 +412,10 @@ class Lifecycle:
                 return
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).
-        resolutions = {r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions}
+        resolutions = {
+            r.ref: (r.resolved_ref, r.cast, r.lane, bool(r.lane_pinned))
+            for r in ack.resolutions
+        }
         self.executor.apply_model_resolutions(resolutions)
         # gw#623: the reconcile's active-work context compares against the
         # resolutions actually applied to the executor.

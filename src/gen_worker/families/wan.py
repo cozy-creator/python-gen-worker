@@ -44,9 +44,16 @@ class WanDefaults(GenerationDefaults, frozen=True):
     repo's metadata) leaves the pipeline's own scheduler config untouched;
     only a repo that explicitly publishes a ``shift`` value gets one
     applied at the endpoint's resolution site.
+
+    ``num_inference_steps`` carries the WIRE name (pgw#692 / th#1174): the
+    hub's ``wan22.schema.json`` and every stored recipe row were renamed
+    from ``steps`` by migration 0046, and ``RuntimeFormula`` resolves its
+    terms by same-named lookup across payload and ``ctx.defaults``. This
+    struct forbids unknown fields, so the two spellings can never coexist —
+    keep it identical to the hub schema.
     """
 
-    steps: int = 40
+    num_inference_steps: int = 40
     guidance: float = 4.0
     guidance_2: float = 3.0
     max_guidance: Optional[float] = None

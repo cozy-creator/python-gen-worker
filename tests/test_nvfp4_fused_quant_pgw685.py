@@ -24,6 +24,7 @@ from gen_worker.models.nvfp4_quant import (  # noqa: E402
     nvfp4_quantizer_mode,
     quantize_activation,
     quantize_activation_torch,
+    reset_nvfp4_quantizer_arming,
     to_blocked_scales,
     unpack_e2m1,
 )
@@ -91,11 +92,11 @@ def test_low_nibble_holds_the_even_element() -> None:
 def test_quantizer_mode_is_torch_without_cuda(monkeypatch) -> None:
     """No CUDA (CI, CPU boxes) => the reference chain, never a hard failure."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    nvfp4_quantizer_mode.cache_clear()
+    reset_nvfp4_quantizer_arming()
     try:
         assert nvfp4_quantizer_mode() == "torch"
     finally:
-        nvfp4_quantizer_mode.cache_clear()
+        reset_nvfp4_quantizer_arming()
 
 
 def test_quantize_activation_dispatches_to_the_reference_chain_on_cpu(
@@ -103,7 +104,7 @@ def test_quantize_activation_dispatches_to_the_reference_chain_on_cpu(
 ) -> None:
     """The dispatcher's fallback is the reference chain BYTE for byte."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    nvfp4_quantizer_mode.cache_clear()
+    reset_nvfp4_quantizer_arming()
     try:
         torch.manual_seed(0)
         x = torch.randn(64, 512, dtype=torch.bfloat16)
@@ -113,7 +114,7 @@ def test_quantize_activation_dispatches_to_the_reference_chain_on_cpu(
         assert torch.equal(got_q, want_q)
         assert torch.equal(got_s.view(torch.uint8), want_s.view(torch.uint8))
     finally:
-        nvfp4_quantizer_mode.cache_clear()
+        reset_nvfp4_quantizer_arming()
 
 
 # --- the fused kernel (CUDA) ----------------------------------------------

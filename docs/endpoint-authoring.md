@@ -329,12 +329,34 @@ Resources(gpu=True, libraries=("nunchaku",))
 ```
 
 Fields: `gpu`, `gpu_count`, `libraries`, `strict_vram` (bindings that
-cannot tolerate CPU-resident weights), `vcpus`, and `vram_gb_hint` — an
-optional FIRST-BUILD placement hint used only before th#683 profiling
-measurements exist; never a gate, ceiling, or reservation.
-`vram_gb`/`ram_gb`/`compute_capability` were deleted in SDK v2: measured
-requirements belong to the profiler, host RAM is an opportunistic tier,
-and precision-per-card is the fit ladder's decision.
+cannot tolerate CPU-resident weights), `vcpus`, `compute_capability`, and
+the two hints `vram_gb_hint` / `ram_gb_hint`.
+
+**Hints vs. gates — the distinction is the whole contract.**
+
+`vram_gb_hint` is an optional FIRST-BUILD placement hint used only before
+th#683 profiling measurements exist; `ram_gb_hint` (pgw#670) is its
+host-side twin and does not imply `gpu=True`. Both are allocation-time
+asks the platform may miss: never a gate, ceiling, or reservation.
+
+`compute_capability` (pgw#660) is the opposite — a HARD GPU-architecture
+floor the scheduler filters offers on and refuses to rent below. Declare
+the dotted capability the way NVIDIA writes it (`8.9`, `"8.9"`, or
+`"sm_89"`, never the bare SM code `89`); it implies `gpu=True`.
+
+```python
+# scaled_mm is sm_89+ or nothing — an incapability, not a slow rung.
+Resources(gpu=True, compute_capability=8.9, libraries=("modelopt",))
+```
+
+Declare it ONLY for genuine incapability. A function that merely runs
+*better* on newer silicon declares nothing and lets the fit ladder choose;
+over-declaring shrinks the rentable pool for no reason. Omitting it is
+always safe — no key, no gate, today's behaviour.
+
+`vram_gb` and `ram_gb` remain deleted from SDK v2 (measured requirements
+belong to the profiler; host RAM is an opportunistic tier), as does v1's
+`min_compute_capability` spelling — the hub rejects that key outright.
 
 ## Kinds
 

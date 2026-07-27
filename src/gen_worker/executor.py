@@ -141,8 +141,25 @@ async def _to_thread_complete(func: Callable[..., Any], /, *args: Any, **kwargs:
 # them to /v1/requests/:id/events SSE as output.delta envelopes whose
 # payload.delta carries this JSON verbatim (th#640).
 EVENT_CONTENT_TYPE = "application/x-request-event+json"
-_CANCEL_GRACE_S = 5.0
 _STUCK_THREAD_RECYCLE_S = 30.0
+# pgw#687: a cancel that never unwinds. Cancellation of a SYNC handler is
+# cooperative — the thread cannot be killed — so a handler that never polls
+# ctx.cancelled (observed: a modelopt calibration loop) keeps the GPU permit
+# and its instance gate forever. The next assignment is then accepted and
+# parks pre-execution, emitting NOTHING: 46 minutes of silent absorption with
+# every hub-side signal reading healthy.
+#
+# The bound is on CANCEL -> TERMINAL latency, never on handler progress:
+# after a cancel there is no legitimate work left to protect, so this does
+# not re-introduce the wall-clock bound gw#666 / th#1157 / th#1160 forbid (a
+# 51-minute silent source download is untouched — it is not a cancelled job).
+_CANCEL_UNWIND_REASON = "cancel_unwind_stuck"
+#: Cancel -> terminal result. Past it the executor is presumed unable to
+#: return to idle: stop advertising and refuse work (REVERSIBLE).
+_CANCEL_UNWIND_GRACE_S = 45.0
+#: Further wait once quarantined. Past it the process is recycled so the pod
+#: is replaced — a wedged thread cannot be reclaimed any other way.
+_CANCEL_UNWIND_RECYCLE_S = 300.0
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
 # th#763: how long a cold tensorhub ref waits for the hub's re-minted
@@ -187,6 +204,18 @@ _REDACTIONS = (
 )
 
 
+def _unwrap_optional(ann: Any) -> Any:
+    """``X | None`` -> ``X``. An OPTIONAL slot is annotated ``Pipe | None =
+    None`` (that default is what declares it optional), but injection is
+    typed off the annotation — so the loader must see ``Pipe``, not the
+    union. Non-optional and non-union annotations pass through unchanged;
+    a union of 2+ real types is left alone (no basis to pick one)."""
+    args = [a for a in typing.get_args(ann) if a is not type(None)]
+    if len(args) == 1 and type(None) in typing.get_args(ann):
+        return args[0]
+    return ann
+
+
 def _sanitize(message: str) -> str:
     out = str(message or "").strip()
     for pat in _REDACTIONS:
@@ -196,8 +225,9 @@ def _sanitize(message: str) -> str:
 
 def _reserved_repo_info(payload: Any, field_name: str) -> Dict[str, Any]:
     """``payload.source`` / ``payload.destination`` / ``payload.text_encoder``
-    as a plain dict ({} when absent). Producer payloads carry these
-    reserved-name structs (#376, pgw#594)."""
+    / ``payload.candidate`` as a plain dict ({} when absent). Producer payloads
+    carry these reserved-name structs (#376, pgw#594, pgw#684). The set of
+    names is hardcoded here; pgw#690 tracks making it declarative."""
     obj = getattr(payload, field_name, None)
     if obj is None:
         return {}
@@ -2343,6 +2373,12 @@ class _Job:
     finished: bool = False
     superseded: bool = False
     cancel_requested: bool = False
+    # pgw#687: True once this job owns its GPU permit + instance gate and the
+    # handler is (about to be) running. A job that is NOT executing is parked
+    # pre-execution — safe to fail RETRYABLE so the hub replans it elsewhere.
+    executing: bool = False
+    # pgw#687: watches cancel -> terminal for THIS job.
+    unwind_watch: Optional[asyncio.Task] = None
     # gw#516: True while the job is past the decode->finalize handoff (GPU
     # slot terminally released, encode/upload tail running, result unshipped).
     finalizing: bool = False
@@ -2499,6 +2535,14 @@ class Executor:
         )
         self.draining = False
         self.jobs: Dict[Tuple[str, int], _Job] = {}
+        # pgw#687 cancel-unwind quarantine: (request_id, attempt) -> detail for
+        # every cancel that has not reached a terminal result within the grace,
+        # and the function names WE marked unavailable for them.
+        self._unwind_stuck: Dict[Tuple[str, int], str] = {}
+        self._unwind_quarantined: set = set()
+        # Process replacement seam, shared with the deadline reaper: tests
+        # substitute a recorder instead of really exiting.
+        self._process_exit: Callable[[int], None] = os._exit
         self._idle = asyncio.Event()
         self._idle.set()
         # pgw#677 background-turn gate state. Threading primitives on
@@ -2571,9 +2615,9 @@ class Executor:
         # a doomed fully-resident attempt is never paid twice (ie#369).
         self.degraded_floor: Dict[str, str] = {}
         # th#913/gw#596: last-applied hub resolutions, keyed by declared wire
-        # ref -> (resolved_ref, cast, lane). Per-request lane instructions
-        # expand family forms through these picks.
-        self._model_resolutions: Dict[str, Tuple[str, str, str]] = {}
+        # ref -> (resolved_ref, cast, lane[, lane_pinned]). Per-request lane
+        # instructions expand family forms through these picks.
+        self._model_resolutions: Dict[str, Tuple[Any, ...]] = {}
 
     def bind_intent_registry(self, registry: IntentRegistry) -> None:
         self.intent_registry = registry
@@ -2753,12 +2797,17 @@ class Executor:
 
     # ---- precision resolutions (th#697) -----------------------------------
 
-    def apply_model_resolutions(self, resolutions: Dict[str, Tuple[str, str, str]]) -> None:
+    def apply_model_resolutions(
+        self, resolutions: Dict[str, Tuple[Any, ...]],
+    ) -> None:
         """Rebind model slots to the hub's precision-ladder picks.
 
         ``resolutions`` maps a DECLARED wire ref to ``(resolved_ref, cast,
-        lane)`` — lane is the th#913 concrete execution-lane descriptor
-        ("" = unspecified, pre-lane hub)
+        lane[, lane_pinned])`` — lane is the th#913 concrete execution-lane
+        descriptor ("" = unspecified, pre-lane hub); ``lane_pinned``
+        (pgw#714, optional for pre-pin hubs) is True when the lane came from
+        an operator endpoint-pin, which makes an ``+eager`` execution axis a
+        compile kill switch
         (HelloAck full-replace semantics: refs absent from the map revert to
         their authored bindings). Rebinding folds the resolved flavor into
         the binding via :func:`rebind_pick` (THE single fold, shared with the
@@ -2962,6 +3011,23 @@ class Executor:
         from . import postmortem
 
         crash_streaks = postmortem.native_crash_streaks()
+        # pgw#714: a previous PROCESS DEATH attributed to a background
+        # compile disables COMPILING on this pod, not serving — the pod
+        # reboots into eager-only instead of re-running the native crash
+        # (and instead of refusing the serving function / condemning the
+        # SKU for a software bug, th#1226/th#1236).
+        compile_rows = postmortem.compile_crash_rows()
+        if compile_rows:
+            worst = max(
+                compile_rows.items(),
+                key=lambda kv: int((kv[1] or {}).get("count") or 0))
+            from . import compile_cache as _cc_gate
+
+            _cc_gate.disable_process_compiles(
+                f"{int((worst[1] or {}).get('count') or 0)} process signal "
+                f"death(s) during background compile on this pod "
+                f"(last={worst[0]}, "
+                f"signal={(worst[1] or {}).get('last_signal') or 'unknown'})")
         for name, spec in self.specs.items():
             r = spec.resources
             streak_row = crash_streaks.get(name)
@@ -2981,7 +3047,12 @@ class Executor:
                     "native_crash_streak", detail,
                     {"streak": str(streak),
                      "last_signal": str(
-                         (streak_row or {}).get("last_signal") or "")})
+                         (streak_row or {}).get("last_signal") or ""),
+                     # pgw#714/th#1236: crash phase, so the hub can spare
+                     # the SKU table when the death was not a serving
+                     # forward.
+                     "last_kind": str(
+                         (streak_row or {}).get("last_kind") or "")})
                 self._gate_owned.add(name)
                 continue
             # SDK v2 (pgw#647): NO compute-capability gate — precision per
@@ -3799,13 +3870,19 @@ class Executor:
     def _execution_lane_for_ref(self, ref: str) -> str:
         """The hub-resolved th#913 execution-lane descriptor for ``ref``
         (declared or resolved form), "" when the hub sent no lane."""
+        return self._execution_lane_pick_for_ref(ref)[0]
+
+    def _execution_lane_pick_for_ref(self, ref: str) -> Tuple[str, bool]:
+        """(lane, pinned) for ``ref`` — ``pinned`` True when the hub marked
+        the lane as an operator endpoint-pin (pgw#714 kill switch)."""
         ref = (ref or "").strip()
         for declared, pick in (self._model_resolutions or {}).items():
             resolved_ref = (pick[0] or declared).strip()
             lane_str = (pick[2] or "").strip()
             if lane_str and ref in (declared.strip(), resolved_ref):
-                return lane_str
-        return ""
+                pinned = bool(pick[3]) if len(pick) > 3 else False
+                return lane_str, pinned
+        return "", False
 
     def _validate_required_compile(
         self, spec: EndpointSpec, run: pb.RunJob,
@@ -4048,7 +4125,17 @@ class Executor:
                 continue
             run_comps[b.slot] = comps
         effective = dict(spec.models)
-        for slot in spec.slots:
+        for slot, decl in spec.slots.items():
+            if decl.optional and not run_refs.get(slot, ""):
+                # Unbound optional slot: the deploy chose not to serve this
+                # lane, and the deploy decides (th#980/ie#524) — a code
+                # default_checkpoint is a hub-less bootstrap, never a reason
+                # to resurrect a lane the hub did not bind. Dropping it from
+                # `effective` is what makes the rest fall out: `_setup_slots`
+                # skips it, nothing is materialized, and setup() runs with
+                # the parameter's own default.
+                effective.pop(slot, None)
+                continue
             binding = self._slot_dispatch_binding(
                 spec, slot, run_refs.get(slot, ""))
             slot_comps = run_comps.get(slot) or {}
@@ -4106,7 +4193,7 @@ class Executor:
             raise lanespec.LaneUnavailableError(
                 raw, "fp8-w8a8 serves compiled-only on this fleet")
 
-        def pick_lane_of(pick: "Optional[Tuple[str, str, str]]") -> "Optional[Any]":
+        def pick_lane_of(pick: "Optional[Tuple[Any, ...]]") -> "Optional[Any]":
             if pick is None or not pick[2]:
                 return None
             try:
@@ -4343,8 +4430,12 @@ class Executor:
         # fallback dispatch uses).
         declared = set(spec.models) | set(spec.slots)
         undeclared = sorted(set(bindings) - declared)
+        # An optional slot (setup param has a default) may be left unbound —
+        # a single-lane deploy of a multi-lane endpoint is legal config.
+        optional = {s for s, d in spec.slots.items() if d.optional}
         unbound = sorted(
-            s for s in declared if s not in bindings and s not in spec.models
+            s for s in declared
+            if s not in bindings and s not in spec.models and s not in optional
         )
         if len(bindings) != len(pairs) or undeclared or unbound:
             raise ValidationError(
@@ -5237,18 +5328,21 @@ class Executor:
         # its arms inherit the window.
         from . import compile_cache as _cc_lane
 
-        _setup_exec_lane = ""
+        _setup_exec_lane, _setup_lane_pinned = "", False
         for _slot in setup_slots:
-            _setup_exec_lane = self._execution_lane_for_ref(
-                wire_ref(spec.models[_slot]))
+            _setup_exec_lane, _setup_lane_pinned = (
+                self._execution_lane_pick_for_ref(
+                    wire_ref(spec.models[_slot])))
             if _setup_exec_lane:
                 break
         _lane_token = _cc_lane._SETUP_EXEC_LANE.set(_setup_exec_lane)
+        _pin_token = _cc_lane._SETUP_EXEC_LANE_PINNED.set(_setup_lane_pinned)
         try:
             return await self._setup_locked_inner(
                 spec, rec, snapshots, intent_id=intent_id,
                 setup_slots=setup_slots)
         finally:
+            _cc_lane._SETUP_EXEC_LANE_PINNED.reset(_pin_token)
             _cc_lane._SETUP_EXEC_LANE.reset(_lane_token)
 
     async def _setup_locked_inner(
@@ -6933,7 +7027,10 @@ class Executor:
         from .runtimes.server import ServerHandle
 
         try:
-            hints = typing.get_type_hints(setup)
+            hints = {
+                k: _unwrap_optional(v)
+                for k, v in typing.get_type_hints(setup).items()
+            }
         except Exception:
             hints = {}
         kwargs: Dict[str, Any] = {}
@@ -7127,7 +7224,8 @@ class Executor:
                         # read the ONE serveability brain
                         # (compile_cache.mandatory_serving) instead of the
                         # weight-lane prefix. Never overwritten once set.
-                        exec_lane = self._execution_lane_for_ref(ref)
+                        exec_lane, lane_pinned = (
+                            self._execution_lane_pick_for_ref(ref))
                         if exec_lane and not getattr(
                                 pipe, compile_cache.EXECUTION_LANE_ATTR,
                                 None):
@@ -7136,6 +7234,10 @@ class Executor:
                                     pipe,
                                     compile_cache.EXECUTION_LANE_ATTR,
                                     exec_lane)
+                                setattr(
+                                    pipe,
+                                    compile_cache.EXECUTION_LANE_PINNED_ATTR,
+                                    lane_pinned)
                             except Exception:
                                 pass
 
@@ -8702,6 +8804,7 @@ class Executor:
                     job.ctx._cancel()
                 if job.exec_task is not None:
                     job.exec_task.cancel()
+                self._arm_cancel_unwind_watch(job)
 
         intent_id = self._job_intent(run)
         if self.draining:
@@ -8780,6 +8883,121 @@ class Executor:
             job.ctx._cancel()  # cooperative: sync handlers poll ctx
         if job.exec_task is not None and job.spec is not None and job.spec.is_async:
             job.exec_task.cancel()  # async handlers are cancelled on the loop
+        self._arm_cancel_unwind_watch(job)
+
+    # ---- pgw#687 cancel unwind ---------------------------------------------
+
+    def _arm_cancel_unwind_watch(self, job: _Job) -> None:
+        """A cancel is only real once the job reaches a TERMINAL result.
+
+        Nothing else watches that edge: a sync handler that ignores
+        ``ctx.cancelled`` keeps its GPU permit and instance gate, and the next
+        assignment parks pre-execution forever with no event of any kind. So
+        watch cancel -> terminal, and if it never lands, refuse work loudly
+        (and ultimately replace the pod) instead of absorbing assignments.
+        """
+        if job.finished or job.unwind_watch is not None:
+            return
+
+        async def _watch() -> None:
+            try:
+                if await self._await_unwound(job, _CANCEL_UNWIND_GRACE_S):
+                    return
+                await self._enter_cancel_quarantine(job)
+                if await self._await_unwound(job, _CANCEL_UNWIND_RECYCLE_S):
+                    self._leave_cancel_quarantine(job)
+                    return
+                logger.critical(
+                    "handler for %s attempt=%d ignored cancel for %.0fs; "
+                    "recycling worker process so the pod is replaced",
+                    job.request_id, job.attempt,
+                    _CANCEL_UNWIND_GRACE_S + _CANCEL_UNWIND_RECYCLE_S,
+                )
+                self._process_exit(70)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("cancel-unwind watch failed for %s", job.request_id)
+
+        job.unwind_watch = asyncio.create_task(
+            _watch(), name=f"unwind-{job.request_id}")
+
+    @staticmethod
+    async def _await_unwound(job: _Job, timeout: float) -> bool:
+        """True iff the job reached a terminal result within ``timeout``."""
+        deadline = time.monotonic() + timeout
+        interval = min(0.25, max(timeout / 8.0, 0.01))
+        while True:
+            if job.finished:
+                return True
+            if time.monotonic() >= deadline:
+                return job.finished
+            await asyncio.sleep(interval)
+
+    async def _enter_cancel_quarantine(self, job: _Job) -> None:
+        """Fail closed: stop advertising, and refuse work already parked
+        behind the wedged job instead of letting it sit eventless."""
+        detail = (
+            f"cancel of request {job.request_id} attempt {job.attempt} has not "
+            f"unwound after {_CANCEL_UNWIND_GRACE_S:.0f}s; the handler still "
+            "holds the GPU permit / instance gate"
+        )
+        logger.critical("CANCEL_UNWIND_STUCK %s", detail)
+        self._unwind_stuck[(job.request_id, job.attempt)] = detail
+        for name in self.specs:
+            if name in self.unavailable:
+                continue  # never erase another owner's disable
+            self.unavailable[name] = (_CANCEL_UNWIND_REASON, _sanitize(detail), {})
+            self._unwind_quarantined.add(name)
+        for other in list(self.jobs.values()):
+            if other is job or other.finished or other.executing:
+                continue
+            logger.warning(
+                "refusing parked request %s attempt=%d: %s",
+                other.request_id, other.attempt, _CANCEL_UNWIND_REASON,
+            )
+            await self._finish(
+                other, pb.JOB_STATUS_RETRYABLE,
+                safe_message=f"worker unfit: {_CANCEL_UNWIND_REASON}",
+            )
+            if other.task is not None:
+                other.task.cancel()
+        self._on_state_change()
+
+    def _leave_cancel_quarantine(self, job: _Job) -> None:
+        """The unwind landed late — re-advertise what we (and only we) took."""
+        self._unwind_stuck.pop((job.request_id, job.attempt), None)
+        if self._unwind_stuck:
+            return  # another wedged cancel still open
+        for name in list(self._unwind_quarantined):
+            entry = self.unavailable.get(name)
+            if entry is not None and entry[0] == _CANCEL_UNWIND_REASON:
+                self.unavailable.pop(name, None)
+        restored = len(self._unwind_quarantined)
+        self._unwind_quarantined.clear()
+        logger.warning(
+            "cancel of %s attempt=%d unwound late; re-advertising %d function(s)",
+            job.request_id, job.attempt, restored,
+        )
+        self._on_state_change()
+
+    def _quarantine_after_cancel(self, spec: EndpointSpec, job: _Job) -> None:
+        """A PRODUCER handler cancelled mid-run leaves its own mutations on the
+        live instance (modelopt installs module-level quantizer hooks; a
+        trainer swaps in adapter/optimizer state), and the next ``setup()``
+        inherits them. Reload clean instead. Inference is excluded on purpose:
+        a cancelled forward mutates nothing, and discarding a warm serving
+        pipeline on every user cancel would be its own regression.
+        """
+        if spec.kind == "inference" or not job.executing:
+            return
+        rec = self._classes.get(spec.instance_key)
+        if rec is not None and rec.ready and not rec.stale:
+            rec.stale = True
+            logger.warning(
+                "%s cancelled mid-run for %s; marking the instance stale so the "
+                "next dispatch reloads it clean", spec.kind, spec.name,
+            )
 
     async def wait_idle(self, timeout: Optional[float] = None) -> bool:
         try:
@@ -9123,6 +9341,11 @@ class Executor:
         # (e.g. a text-encoder repo separate from the primary `source` DiT).
         # Absent on every existing payload struct — stays {} and is a no-op.
         text_encoder_info = _reserved_repo_info(payload, "text_encoder") if producer else {}
+        # pgw#684/te#121: a second repo to COMPARE against, not to build from —
+        # a two-ref quality gate loads its reference from `source` and the arm
+        # under test from `candidate`. Absent on every existing payload
+        # struct — stays {} and is a no-op.
+        candidate_info = _reserved_repo_info(payload, "candidate") if producer else {}
 
         # gw#453: arm repo-CAS checkpoint routing for producer jobs. Without
         # kind/destination_repo/job_id the ctx's _repo_job_upload_scope() is
@@ -9146,6 +9369,7 @@ class Executor:
                 source_info=source_info,
                 destination_info=destination_info,
                 text_encoder_info=text_encoder_info,
+                candidate_info=candidate_info,
                 hf_token=getattr(self._settings, "hf_token", "") or "",
             )
 
@@ -9224,6 +9448,11 @@ class Executor:
                 await self._materialize_source(
                     ctx, text_encoder_info, snapshots,
                     set_path=ctx._set_text_encoder_path, field_name="text_encoder",
+                )
+            if candidate_info:
+                await self._materialize_source(
+                    ctx, candidate_info, snapshots,
+                    set_path=ctx._set_candidate_path, field_name="candidate",
                 )
             if producer:
                 await self._materialize_datasets(ctx, payload)
@@ -9334,6 +9563,9 @@ class Executor:
             # run yet. The repeated check catches a replacement between
             # scheduler assignment/intake and this GPU turn.
             self._validate_required_compile(spec, run)
+            # pgw#687: past here this job owns the permit/gate — it is no
+            # longer refusable-in-place by the cancel-unwind quarantine.
+            job.executing = True
             self._intent_transition(
                 job.intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_RUNNING,
@@ -9556,6 +9788,8 @@ class Executor:
                 )
                 self._on_state_change()
             status, msg = _map_exception(exc)
+            if status == pb.JOB_STATUS_CANCELED:
+                self._quarantine_after_cancel(spec, job)
             if status == pb.JOB_STATUS_FATAL:
                 logger.exception("handler %s failed", spec.name)
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
@@ -9876,7 +10110,7 @@ class Executor:
                     "handler thread for %s ignored deadline+cancel for %.0fs; "
                     "recycling worker process", job.request_id, _STUCK_THREAD_RECYCLE_S,
                 )
-                os._exit(70)
+                self._process_exit(70)
             except BaseException:
                 pass  # thread finished (with error) — no recycle needed
 

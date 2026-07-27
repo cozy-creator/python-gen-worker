@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import hashlib
 import json
 import logging
 import re
@@ -901,6 +902,17 @@ def consolidate(manifests: Mapping[str, Mapping[str, Any]]) -> FleetAudit:
         divergence=tuple(divergence), guard_total=total)
 
 
+def manifest_digest(manifest: Mapping[str, Any]) -> str:
+    """Canonical digest of one guard manifest — the comparison unit for
+    pgw#700 equivalence adoption (identical manifests) and the pgw#711
+    confirmation gate (second publish must match the first)."""
+    encoded = json.dumps(
+        dict(manifest), sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def load_manifest(path: Path) -> Dict[str, Any]:
     """A guard manifest from a raw ``.json`` dump or a cell ``.tar.gz``
     (the ``guard_manifest`` block of its metadata.json)."""
@@ -991,5 +1003,6 @@ __all__ = [
     "extract_target_guards",
     "load_manifest",
     "main",
+    "manifest_digest",
     "posture_snapshot",
 ]

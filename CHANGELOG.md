@@ -1,5 +1,292 @@
 # Changelog
 
+## 0.75.1 (2026-07-27) — the 0.71-0.75 promotion train stamp; pgw#700 arc + pgw#684 restore
+
+The batch train that publishes chaos 0.71.0 through 0.75.1 (PR #414). The pgw#715
+proxy-404 classifier that originally headlined this section released EARLY as the solo
+hotfix **0.70.5** (PR #413, coordinator's option-1 ruling) — its full write-up lives in
+the 0.70.5 section below; the train carries the identical code by ancestry.
+
+`1f55c19` (pgw#677 REOPEN, committed 7 minutes after pgw#684) clobbered `executor.py`
+from a stale base and silently reverted pgw#684's executor wiring — `candidate_info`
+extraction, the ctx kwarg, and the materialize block. Restored verbatim from `2f452a3`;
+`test_reserved_candidate_pgw684` 10/10 green again (5 of the 10 failed on the committed
+tree before the restore, not only in the dirty shared worktree as previously recorded).
+
+Also riding in 0.75.1 (landed after the 0.75.0 stamp, folded here by the train): the
+**pgw#700 arc** — equivalence adoption SDK half (`gen_worker/equivalence.py`: code-closure
+fast tier + manifest/fingerprint slow tier per the th#1229 ruling), pgw#710 toolchain
+digests in cell metadata, pgw#711 publish digests (`artifact_digest`/`manifest_digest` on
+publish-complete), pgw#712 no-republish fencing + unicity refusal. All behind
+`GEN_WORKER_EQUIVALENCE_ADOPTION`, **default OFF** — the flag flip is gated on th#1229/
+th#1239 hub halves. No behavior change with the flag unset.
+
+
+## 0.75.0 (2026-07-26) — pgw#660: the hard GPU-architecture floor has a declared carrier again
+
+`Resources(compute_capability=8.9)` is restored. The v2 API freeze (pgw#647) deleted it on
+the reasoning that "precision-per-card is the fit ladder's call, never a placement gate".
+That is right about precision SELECTION and wrong about INCAPABILITY: a producer whose
+kernel is `torch._scaled_mm` cannot run below sm_89 at any precision, on any rung, ever.
+
+Tensorhub's builder never stopped reading the key, so a v2 endpoint emitted no floor,
+`endpoint_function_schemas.compute_capability_min` went NULL, and the scheduler placed the
+fp8 modelopt producer on **sm_80 A100s** — th#1155 six times in ten minutes, and again in
+te#125 on 2026-07-26, where conversion 0.6.1's in-pod envelope guard refused in 4 ms after
+the pod was already rented. Design 1 of the three in pgw#660, ruled by Paul.
+
+- **Not a hint.** `vram_gb_hint` / `ram_gb_hint` are allocation-time asks the platform may
+  miss; this one is filtered on. It carries no `_hint` suffix and has no second spelling.
+- **Dual-form input, one canonical value.** `8.9`, `"8.9"`, and `"sm_89"` all normalize to
+  `8.9`. A bare SM code (`89`) is REFUSED with the two correct spellings named — 89 and 8.9
+  are a silent factor of ten apart.
+- **Implies `gpu=True`**, like `vram_gb_hint`.
+- **Wire name is `compute_capability`** — already what `internal/builder/
+  function_requirements.go` parses into `FunctionRequirements.ComputeCapabilityMin`. Note
+  v1's author-facing `min_compute_capability` stays typed-REJECTED by the builder
+  (th#1015 `ErrMinComputeCapabilityRemoved`) and must never reach the wire.
+- **Undeclared is unchanged**: no key, no column value, no gate. Declare it only for a
+  genuine incapability, never because a function merely runs better on newer silicon.
+
+## 0.74.2 (2026-07-26) — pgw#714: background-compile crashes tell the truth and degrade to eager
+
+From the th#1226 post-mortem (qwen-image v0.2.1 pinned pre-pgw#677 0.67.1: the
+ungated background compile SIGSEGV'd live serving, and the death was recorded
+against `fn=generate`, condemning H200 + B200 in the hub's SKU-compat table
+for a software race):
+
+- The hot-swap warm thread stamps a `compile` inflight marker
+  (`compile:<label>`) around every background compile; a signal death with a
+  compile marker present records the streak against the COMPILE, never the
+  tenant request that happened to be in flight.
+- Boot gate: crash-registry rows of compile kind disable process compiles
+  (`compile_cache.disable_process_compiles`) — the pod reboots into
+  eager-only serving instead of re-running the native crash, and the serving
+  function is NOT refused (degrade-never-die at process-death scope).
+- `native_crash_streak` refusal axes carry `last_kind` so the hub can spare
+  the SKU table for non-serving deaths (hub half: th#1236).
+- **Operator kill switch:** `ModelResolution.lane_pinned` (proto, additive) —
+  when the hub marks the resolved lane as an endpoint-pin and its execution
+  axis is `+eager`, `compile_cache.apply()` refuses to arm at all: no router,
+  no background/foreground self-mint, pure eager serving. Auto-resolved
+  `+eager` lanes keep today's eager-first + background-mint behavior.
+
+## 0.74.1 (2026-07-26) — pgw#692: `WanDefaults` carries the hub's recipe wire name
+
+**P0, every wan-2.2 request of every tier.** th#1174's migration
+`0046_recipe_steps_rename_hidream_wan22` renamed the recipe field `steps` ->
+`num_inference_steps` in the hub's `wan22.schema.json` and in every stored
+`repo_inference_defaults` / `release_slot_recipe` row (chaos, 2026-07-26
+00:12:20Z) — but the SDK half never shipped, so the hub-stamped recipe hit
+`GenerationDefaults`' `forbid_unknown_fields` and every request died at slot
+resolution, before handler code:
+
+```
+ValueError: slot 'pipeline': catalog inference-defaults metadata failed
+WanDefaults validation: Object contains unknown field `num_inference_steps`
+```
+
+- `WanDefaults.steps` -> `WanDefaults.num_inference_steps`. The hub is the
+  half that is right: `RuntimeFormula` resolves its terms by same-named
+  lookup across payload and `ctx.defaults`, and the
+  `PUT .../metadata/inference-defaults` route refuses a `steps` spelling
+  outright (`additionalProperties: false`).
+- Full audit of the registered vocabularies against the hub's family schemas:
+  `SdxlDefaults` and `SdxlLoraDefaults` keep `steps` (0040/0046 deliberately
+  left sdxl and qwen-image alone) and match field-for-field; wan22 was the
+  only skew in this repo. `HiDreamO1Defaults` has the identical exposure but
+  lives in `inference-endpoints/hidream-o1-image` — cross-repo, tracked on
+  pgw#692.
+- Guard (`tests/test_family_wire_names_pgw692.py`): every registered family's
+  `__struct_fields__` is asserted against a recorded snapshot of its hub
+  schema `properties`, so a one-sided rename can never be silent again.
+
+## 0.74.0 (2026-07-26) — pgw#685 S2c: the native svdq engine actually serves
+
+Wires the native engine into the load path. `load_svdq_pipeline` now chooses an
+ENGINE (`select_svdq_engine`) instead of assuming nunchaku, so `loading.py` needs
+no change at all — the dispatch lives behind the entry point the loading layer
+already called.
+
+- **`load_svdq_native_denoiser`** materializes a nunchaku-format checkpoint as a
+  STOCK diffusers module: skeleton on meta, W4A4 linears swapped for
+  `SvdqLinear` (fused `to_qkv` / `add_qkv_proj` split across the diffusers
+  projections), AWQ modulation layers decoded to bf16 Linears, everything else
+  assigned verbatim, then a STRICT check that nothing is left on the meta device —
+  a checkpoint that does not cover the module fails loud instead of serving a
+  half-initialized denoiser.
+- **`adanorm_splits_for`** is a table keyed on (diffusers class, module suffix),
+  not an inference from `out_features // in_features`. An unknown modulation layer
+  REFUSES; the exporter's adaLN transform is unrecoverable from the tensors and a
+  wrong split count corrupts output silently.
+- **Verified against the REAL 13 GB `svdq-fp4_r128-qwen-image` artifact**, pod-side
+  (weights never touch the dev box). Every one of its 4573 tensors is accounted
+  for: 480 svdq W4A4 prefixes (360 direct + 120 fused-qkv splits), 120 AWQ
+  modulation layers, 247 plain — **zero unmapped in any category** against the
+  stock `QwenImageTransformer2DModel`. Both decoders produce finite,
+  structurally-correct values (rank 128 throughout; `per_channel` second-level
+  scale exactly on the two fused qkv layers and `per_tensor` elsewhere, as the
+  layout predicted). The assembled loader then ran end to end: 2-block truncation
+  in 7.0s / 3.65 GB RSS and the **full 60 blocks in 163s / 55.7 GB RSS**, nothing
+  left on meta, `to_q`/`to_k`/`to_v` present as three working 3072-wide Linears,
+  modulation decoded to `Linear`, and a live forward finite.
+- mypy: fixed 7 `Optional`-narrowing errors this lane introduced (5 in
+  `svdq_native.py`, 2 in `svdq_layout.py`) by narrowing through locals rather than
+  silencing them; `mypy src/gen_worker` is green across 155 files.
+
+Admission is still NOT widened: `ladder.py`'s svdq placement keeps
+`sm_allowed=(120,121)`, `engines=("nunchaku",)`. Native now SERVES where it is
+selected, but the hub does not yet schedule svdq-fp4 onto sm_100 — that flip wants
+the fp4 (`blockwise`) full-artifact load and a numerical A/B, neither of which is
+measured yet (the verified load ran in the `dense` fold, and no nunchaku wheel was
+present to difference against).
+
+## 0.73.1 (2026-07-26)
+
+- **pgw#684: a fourth reserved repo field, `candidate`, for producer payloads
+  (te#121 two-ref quality eval).** The executor's reserved repo names were
+  `source`/`destination`/`text_encoder`; a producer payload can now also declare
+  `candidate: SourceRepo | None = None` and get it materialized the same way as
+  `source` — into `ctx.candidate_path` (`ctx.candidate` for the raw dict), fully
+  independent of `ctx.source_path`. This is the arm a two-ref eval COMPARES
+  against `source` rather than a component it builds from, which is what lets a
+  quality gate point at one of OUR OWN hub artifacts (a mirror, or a flavor the
+  quant ladder just produced) instead of only a public HF/Civitai coordinate.
+  Generic mechanism: gen-worker has no eval awareness. Absent field (every
+  existing endpoint) is byte-for-byte unchanged — no extra `ensure_local` call,
+  `ctx.candidate_path` stays `None`. The reserved-name set is still a hardcoded
+  literal list; pgw#690 tracks making it declarative.
+- Also re-covers reserved-repo materialization in `tests/`, which had NO coverage
+  after th#960/pgw#609 Phase 3b (`0b437aa`) swept pgw#594's two test files.
+- Corrects a `uv.lock` drift: 0.73.0 bumped `pyproject.toml` but left the lock's
+  `gen-worker` entry at 0.72.0, so `uv lock --check` failed on that commit.
+
+## 0.73.0 (2026-07-26) — pgw#687: a cancel that never unwinds no longer absorbs the next job
+
+Cancelling a job mid-compute could wedge a worker permanently while every
+hub-side signal read healthy: connected, heartbeating, still advertising its
+functions. Live (th#1165): job A cancelled mid-modelopt-calibration, job B
+assigned to the same pod 61 s later, then ZERO events of any kind for 46
+minutes. The only symptom was absence.
+
+Mechanism: cancelling a SYNC handler is cooperative. `handle_cancel` sets
+`ctx.cancelled` and (for async handlers only) cancels the task; a thread
+running `asyncio.to_thread` cannot be cancelled at all. A handler that never
+polls the flag — a modelopt calibration loop — keeps running, so `_run_job`
+never returns, the GPU permit and the per-instance run gate are never
+released, and the next job parks in `_gpu_semaphore.acquire()`, a wait that
+emits nothing. Nothing watched the cancel -> terminal edge.
+
+- **The cancel -> terminal edge is now watched.** Past
+  `_CANCEL_UNWIND_GRACE_S` (45 s) the executor is presumed unable to return
+  to idle and FAILS CLOSED: every function goes `unavailable` with reason
+  `cancel_unwind_stuck` (a real `FnUnavailable` on the wire, not merely an
+  empty function set), and any job still parked pre-execution is failed
+  RETRYABLE so the hub replans it NOW instead of letting it sit eventless.
+  Reversible: a late unwind re-advertises exactly the functions we took.
+- **A thread that never honours the cancel replaces the pod** — process
+  recycle after a further `_CANCEL_UNWIND_RECYCLE_S` (300 s), the only way to
+  reclaim a wedged thread. Routed through the same injectable exit seam as
+  the deadline reaper.
+- The bound is on cancel -> terminal latency, never on handler progress, so
+  it does not re-introduce the wall-clock bound gw#666/th#1157/th#1160
+  forbid: a 51-minute silent source download is not a cancelled job and is
+  untouched.
+- A PRODUCER (conversion/training) handler cancelled mid-run now marks its
+  instance stale, so the next dispatch reloads clean — modelopt installs
+  module-level quantizer hooks that the next `setup()` would otherwise
+  inherit. Inference cancels are excluded on purpose: a cancelled forward
+  mutates nothing, and discarding a warm serving pipeline on every user
+  cancel would be its own regression.
+- `tests/test_cancel_unwind_pgw687.py` drives the real executor over the
+  hub-double with a handler that ignores cancellation. The red row
+  (`test_wedge_shape_without_the_guard_is_silent_absorption`) is kept
+  permanently: with the grace pushed out of reach it reproduces the pre-fix
+  silence, and the four fix rows fail without the watchdog.
+
+## 0.72.0 (2026-07-26) — pgw#685 S2b: the AWQ W4A16 modulation decoder
+
+An svdq artifact does not quantize everything the same way. Its DiT Linears are
+W4A4 nvfp4 with a low-rank branch; its adaLN MODULATION layers (`img_mod` /
+`txt_mod`, which consume the timestep embedding rather than the token stream) are
+AWQ **W4A16** — a completely different layout. `models/svdq_awq.py` decodes them,
+which was the one thing blocking a real artifact from loading natively.
+
+- The layout is the inverse of deepcompressor's
+  `convert_to_nunchaku_w4x16_linear_weight` -> `convert_to_tinychat_w4x16y16_linear_weight`
+  -> `pack_w4` chain, and the tests invert that UPSTREAM code bit-exactly rather
+  than a paraphrase of it: within each run of 32 input elements output nibble `j`
+  packs elements `{j, 8+j, 16+j, 24+j}`, then the int16 grid is shuffled
+  `[oc/4, 4, ic/64, 16] -> permute(0, 2, 1, 3)` and stored as int32 pairs.
+  Confirmed against the real artifact's geometry (`qweight I32 [4608, 1536]`,
+  `wscales`/`wzeros BF16 [48, 18432]`, group 64).
+- Dequant is an **ADD**, not a subtract — `W = codes * wscales + wzeros` — because
+  the exporter stores the zero point already scaled AND negated.
+- `ceil_num_groups` padding is handled: trailing all-zero scale rows are the pad,
+  not groups. Reading 16 stored rows as 16 groups where only 2 are live would
+  rescale every weight in the layer.
+- **The trap this decoder exists to get right (`adanorm_splits`):** for modulation
+  layers the exporter ALSO interleaves output channels (stored row `j*splits + s`
+  is original row `s*(oc/splits) + j`) and ADDS 1 to the bias of splits `1` and
+  `splits-2` — adaLN's `1 + scale` folded into the artifact. Both are undone. The
+  split count is a REQUIRED argument defaulting to 1, never inferred: a wrong
+  count still yields a full-rank, plausible-looking weight and silently wrong
+  images, which `test_decoding_with_the_wrong_split_count_is_visibly_wrong` pins
+  at >0.5 relative error against <0.15 for the correct count.
+
+Also recorded from the S1 card verification, because it will otherwise look like a
+bug in the fused quantizer: compiled-vs-eager output for a `W4A4Linear` is NOT
+bit-identical, and that is inductor reassociating the bf16 second-level epilogue,
+not the kernel. Measured on a 5090 with the fused kernel disabled, the PURE-TORCH
+chain drifts **7.4x MORE** (5.9e-3) than the fused path (7.9e-4); the custom op
+itself is bit-exact under `fullgraph=True`.
+
+## 0.71.0 (2026-07-26) — pgw#685: a NATIVE svdq engine — SVDQuant checkpoints without nunchaku
+
+The layout converter, the serving module, and engine selection for serving
+svdq-fp4 on **every** Blackwell part through stock `torch._scaled_mm` instead of
+nunchaku's `sm_120a`-only kernels. Not yet wired into the default load path —
+see the named gap below.
+
+- **`models/svdq_layout.py`** inverts nunchaku's v1 single-file layout: the
+  `qweight` `mma.sync m16n8k64` FRAGMENT interleave and the `wscales` transpose
+  + 8-lane/stride-4/4-pack swizzle, both by replaying the packer's permutes
+  backwards (guaranteed bijective) rather than re-deriving index math. Decoding
+  lands in a LOGICAL domain first, which is what makes nunchaku's fused
+  `to_qkv` splittable into diffusers' separate `to_q`/`to_k`/`to_v` — exact
+  along the output dim, partitioning `proj_up` while SHARING `proj_down`.
+- **`models/svdq_native.py`** — `SvdqLinear`: `W4A4Linear` plus the three things
+  an SVDQuant checkpoint needs. A per-OUTPUT-CHANNEL second-level weight scale
+  (`wcscales`) as well as the scalar `wtscale`; the low-rank branch
+  `y += (x @ proj_down) @ proj_up.T`, which is what makes 4-bit survive
+  qwen-class outliers (plain nvfp4 PTQ measured lpips 0.63-0.69 vs the official
+  svdq artifact's 0.105); and `smooth_factor`, which DIVIDES the activation
+  feeding the 4-bit branch **only** — the low-rank branch consumes RAW x,
+  because deepcompressor pre-divides `proj_down` at export. Activation scaling
+  is always DYNAMIC: an svdq checkpoint carries no `input_scale` at all.
+- **Degrade, never refuse**: `fold_to_dense` collapses the 4-bit weight, the
+  smoothing vector and the low-rank branch into ONE plain bf16 Linear
+  (`W_eff = W_q / smooth + proj_up @ proj_down.T`, exact in the dequant limit),
+  so an svdq artifact stays servable on hardware with no fp4 tensor cores.
+- **Engine selection** (`svdq.svdq_engine_candidates` / `select_svdq_engine`):
+  `"native"` is preferred for fp4 — no nunchaku wheel, no diffusers signature
+  window, no pin-matrix row, no torch downgrade (the gw#405 / th#1211 coupling
+  class), and it covers sm_100/103 which nunchaku never will. int4 stays
+  nunchaku-only (a different single-level group-64 scale path). An explicit
+  override (`GEN_WORKER_SVDQ_ENGINE`, or the `override=` argument) is honored
+  STRICTLY — the other engine is never silently substituted.
+- **The native SM window is Blackwell only** (sm_100/103/120/121). torch's own
+  nvfp4 gate is `major >= 9 || (8,9)`, which admits sm_89/sm_90, but neither Ada
+  nor Hopper has fp4 tensor cores; below Blackwell the honest degrade is fp8
+  rowwise, which we already ship. Nothing emulates fp4.
+- **Named gap — deliberately NOT the default load path yet.** A real qwen svdq
+  artifact also carries its modulation layers as AWQ W4A16 (`wzeros`, group 64,
+  int32-packed, ~33% of the parameters but negligible FLOPs). That decoder is not
+  written, and shipping it unverified would be worse than declaring it, so
+  `loading.py` routing and the `ladder.py` svdq placement are UNCHANGED:
+  widening admission before a real artifact can fully load would strand
+  requests.
+
 ## 0.70.5 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
 
 **Released off the 0.70.4 published base, not off chaos.** The chaos branch carries
@@ -50,7 +337,6 @@ another agent's uncommitted work in the shared chaos worktree, so it is left alo
 entangled. Recorded in pgw#715 for its owner.
 
 
-## 0.75.0 (2026-07-26) — pgw#660: the hard GPU-architecture floor has a declared carrier again
 ## 0.70.4 (2026-07-26) — pgw#696 P0 hotfix: the env gate killed every fleet pod
 
 0.70.3's `PYTORCH*` prefix widening + the boot-wired seal composed into a
@@ -62,6 +348,7 @@ on prod). Build-info constants (`PYTORCH_VERSION`, `PYTORCH_BUILD_VERSION`,
 settings so a genuine refusal dials the hub as the typed `worker_fatal
 phase=env_seal` instead of dying dark. (Allowlist additions do not touch
 the seal digest — only present gated vars enter identity.)
+
 
 ## 0.70.3 (2026-07-26) — pgw#694 determinism hardening + cache-review fixes (ck4 keys, env-seal boot wiring, inner-FX sm shim)
 
@@ -292,10 +579,6 @@ pgw#676 overlap red-verified impossible post-fix with the bounded wait
 attributed, mint completion under a sustained tenant stream, and the
 seed-window routing contract.
 
-Also in this train: **pgw#686** — cell adoption key parity (one base-lane
-brain for requested keys, mint stamps, lookups and the local store), the
-fix behind burst pods re-minting instead of adopting.
-
 ## 0.69.0 (2026-07-26) — pgw#685: one fused triton kernel for the nvfp4 activation quantizer
 
 The `#nvfp4-w4a4` lane's per-call activation quantization was ~8 pure-torch
@@ -327,49 +610,6 @@ whole reason the lane LOST to bf16. It is now ONE triton kernel.
 - **Compile-safe**: registered as a `torch.library.custom_op` with an explicit
   schema and a `register_fake`, so it is traced as an opaque call instead of
   graph-breaking. Registration happens at load, never mid-trace.
-
-## 0.68.1 (2026-07-26) — pgw#678 the lane handle is not the pipeline; pgw#683 shared-component identity carries the EFFECTIVE compute dtype
-
-Two P0s on the composition/residency path, both found live on the sdxl retag
-cycle (ie#546), both about ONE object being asked to be two things.
-
-- **pgw#678 — a `components.*` deploy override no longer makes a deploy-bound
-  LoRA unattachable.** `generate-turbo` was **0/6** WITH the fp16-fix VAE
-  override and **4/4** WITHOUT it on the same release, wheel and card, failing
-  `model slot does not support LoRA adapters`. `utils/lora.py` was byte-identical
-  across the two versions that bracketed it, because the defect was object
-  identity, not adapter code: an overridden component is popped out of the
-  content-keyed share plan, so the lane owns a non-empty EXCLUSIVE module set
-  and its residency entry is `nn.ModuleDict(exclusive)` — correct as the
-  MOVEMENT handle (LRU must move only lane-owned weights), fatal when read as
-  the pipeline. `branch_targets` finds no denoiser on a ModuleDict, the whole
-  adapter stays on the peft side, and the pipeline-capability check refuses.
-  The record now owns the pipeline identity (`_ClassRecord.slot_pipelines`);
-  residency keeps the movement handle. The adapter target, the explicit
-  deactivation sweep and the OOM offload rung all read the pipeline — the last
-  of those had been silently skipping every lane slot, since a ModuleDict
-  carries no `enable_*_offload`. A lane whose placement falls to an offload
-  rung now LEARNS that the ref is un-shareable on this host instead of
-  re-deriving the refused plan until `retry_exhausted`.
-- **pgw#683 — a composition can no longer be handed a foreign-precision
-  component, and a mixed one is refused at LOAD.** `RuntimeError: mat1 and mat2
-  must have the same dtype, but got BFloat16 and Half` killed
-  `self_mint_compile phase=warmup_forward` and cost `generate` on a live prod
-  release with NO component override on the wire, so pgw#675's lane-aware
-  default could not explain it. `LoadedComponentKey` keyed on the binding's
-  DECLARED dtype; hub bindings declare none, and a quantizer rewrites only the
-  DENOISER, so the VAE and text encoders of `X` and `X#fp8-w8a8` are
-  byte-identical — one cache entry across compositions that compute at
-  DIFFERENT dtypes (bf16 on a quant lane, fp16 for a plain fp16-stored
-  mirror). Identity now carries the EFFECTIVE compute dtype
-  (`composition_compute_dtype`), so components still alias by content but never
-  across a precision boundary. `apply_fp8_storage` gets the SCALAR compute
-  dtype (it could previously be handed pgw#667's per-component dtype MAP), and
-  the new `assert_uniform_compute_dtype` invariant runs on every worker-loaded
-  slot: a composition presenting two compute dtypes to its GEMMs fails at load
-  naming the component and the offending tensor, instead of torch naming
-  neither at warm unit 4/18. fp32 widening (pgw#667) and the fp8/fp4 storage
-  lanes stay legal, and introspection failures never fail a load.
 
 ## 0.68.0 (2026-07-26) — pgw#681 guard-closure gate + boundary canonicalization; gw#679 per-expert MoE LoRA branch routing
 

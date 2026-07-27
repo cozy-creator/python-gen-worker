@@ -425,6 +425,11 @@ def _slot_to_manifest(
     }
     if slot.selected_by:
         out["selected_by"] = slot.selected_by
+    if getattr(slot, "optional", False):
+        # The deploy may leave this slot unbound (its setup param has a
+        # default) — a release then serves only the lanes it bound.
+        # Absent field = required, so existing manifests are unchanged.
+        out["optional"] = True
     if slot.default_checkpoint is not None:
         out["default_checkpoint"] = _model_ref_to_manifest(slot.default_checkpoint)
     if family:

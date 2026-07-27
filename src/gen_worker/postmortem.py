@@ -646,6 +646,33 @@ def native_crash_streaks(
     }
 
 
+#: Inflight-marker kind for a background torch.compile (hot-swap warm thread,
+#: mint compile units). pgw#714: its presence at a signal death makes the
+#: COMPILE the prime suspect — dynamo/inductor run native codegen — so the
+#: streak is recorded against the compile marker, never the tenant request
+#: that happened to be in flight (the misattribution that condemned H200/B200
+#: for a software race, th#1226/th#1236).
+COMPILE_KIND = "compile"
+_COMPILE_FN_PREFIX = "compile:"
+
+
+def compile_marker(label: str) -> str:
+    """Registry/marker function name for a background compile of ``label``.
+    Namespaced so it can never collide with (or refuse) a serving function."""
+    return _COMPILE_FN_PREFIX + str(label or "unknown")
+
+
+def compile_crash_rows(
+    path: Optional[Path] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Crash-registry rows attributed to background compiles (pgw#714)."""
+    return {
+        fn: row for fn, row in native_crash_streaks(path).items()
+        if fn.startswith(_COMPILE_FN_PREFIX)
+        or str(row.get("last_kind") or "") == COMPILE_KIND
+    }
+
+
 def attribute_signal_death(
     *, signal_name: str,
     inflight_path: Optional[Path] = None,
@@ -654,13 +681,24 @@ def attribute_signal_death(
 ) -> Dict[str, Any]:
     """Everything the post-mortem reporter can attach to a signal death:
     the in-flight markers (consumed), the fault-dump tail, and — for each
-    marker naming a function — the recorded crash streak."""
+    marker naming a function — the recorded crash streak.
+
+    pgw#714: when a ``compile`` marker is in flight, the streak is recorded
+    ONLY against the compile marker(s) — a background dynamo/inductor
+    compile racing (or serialized next to) a tenant forward is the native
+    suspect, and charging the request's function refuses serving and
+    condemns the SKU for a software bug."""
     extra: Dict[str, Any] = {}
     inflight = take_inflight(inflight_path)
     if inflight:
         extra["inflight"] = inflight
+        compile_rows = [
+            row for row in inflight
+            if str(row.get("kind") or "") == COMPILE_KIND
+        ]
+        blamed = compile_rows or inflight
         streaks: Dict[str, int] = {}
-        for row in inflight:
+        for row in blamed:
             fn = str(row.get("function") or "")
             if fn:
                 streaks[fn] = record_native_crash(
@@ -679,8 +717,11 @@ __all__ = [
     "CRASH_REGISTRY_PATH",
     "FAULT_DUMP_PATH",
     "INFLIGHT_PATH",
+    "COMPILE_KIND",
     "NATIVE_CRASH_REFUSE_STREAK",
     "attribute_signal_death",
+    "compile_crash_rows",
+    "compile_marker",
     "boot_record_is_volatile",
     "clear_boot_record",
     "clear_fault_dump",

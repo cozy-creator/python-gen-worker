@@ -98,9 +98,18 @@ class Slot(Generic[D]):
     a slot literally named ``"pipeline"`` is the implicit root; any OTHER
     multi-slot shape must mark exactly one root — ambiguity is a
     decoration-time error, never a silent fallback.
+
+    ``optional`` is DERIVED, never passed: a slot is optional exactly when
+    its ``setup()`` parameter carries a default (``edit: Pipe | None =
+    None``). The signature is the single source of truth, so the two can
+    never disagree. An optional slot may be left unbound at deploy time —
+    the deploy chooses which lanes a release serves (th#980/ie#524) — and
+    ``setup()`` then runs with the parameter's own default.
     """
 
-    __slots__ = ("pipeline_cls", "selected_by", "default_checkpoint", "root")
+    __slots__ = (
+        "pipeline_cls", "selected_by", "default_checkpoint", "root", "optional",
+    )
 
     def __init__(
         self,
@@ -124,11 +133,13 @@ class Slot(Generic[D]):
         self.selected_by = str(selected_by or "").strip()
         self.default_checkpoint = default_checkpoint
         self.root = bool(root)
+        self.optional = False  # derived at decoration from setup()'s default
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
-            f"default_checkpoint={self.default_checkpoint!r}, root={self.root!r})"
+            f"default_checkpoint={self.default_checkpoint!r}, root={self.root!r}, "
+            f"optional={self.optional!r})"
         )
 
 

@@ -804,16 +804,18 @@ class DesiredInstance(_message.Message):
     def __init__(self, function_name: _Optional[str] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ...) -> None: ...
 
 class ModelResolution(_message.Message):
-    __slots__ = ("ref", "resolved_ref", "cast", "lane")
+    __slots__ = ("ref", "resolved_ref", "cast", "lane", "lane_pinned")
     REF_FIELD_NUMBER: _ClassVar[int]
     RESOLVED_REF_FIELD_NUMBER: _ClassVar[int]
     CAST_FIELD_NUMBER: _ClassVar[int]
     LANE_FIELD_NUMBER: _ClassVar[int]
+    LANE_PINNED_FIELD_NUMBER: _ClassVar[int]
     ref: str
     resolved_ref: str
     cast: str
     lane: str
-    def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ...) -> None: ...
+    lane_pinned: bool
+    def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ..., lane_pinned: _Optional[bool] = ...) -> None: ...
 
 class StateDelta(_message.Message):
     __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups", "disk_usage", "observed_config_generation")

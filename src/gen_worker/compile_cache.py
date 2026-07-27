@@ -755,6 +755,88 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     }
 
 
+# The packages whose LOADED source files form a cell's code closure: the
+# graph-shaping code (gen_worker) and the model libraries whose python is
+# traced into the graphs. Version axes stay in the key for exact lookup;
+# the closure is the CHANGE-DETECTION identity (Paul's ruling, th#1229).
+_CLOSURE_PACKAGES = ("gen_worker", "diffusers", "transformers")
+
+
+@functools.lru_cache(maxsize=8192)
+def _closure_file_digest(path: str, mtime_ns: int, size: int) -> str:
+    """Content digest of one closure file; keyed on (path, mtime, size) so
+    repeated metadata calls never re-read unchanged files."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+def code_closure() -> Tuple[Tuple[str, str], ...]:
+    """pgw#700 FAST tier: the source files ACTUALLY LOADED from the
+    trace-relevant packages, each content-digested — recorded dependencies,
+    never declared versions (guard-closure philosophy applied to code
+    identity). Recorded at mint into metadata; a consumer digests ITS
+    copies of the recorded file set (:func:`gen_worker.equivalence.
+    closure_delta`) and adopts on all-identical with no probe mint and no
+    manifest comparison. Paths are module-derived (``pkg/mod.py``), never
+    absolute — venv layout must not enter the identity."""
+    out: Dict[str, str] = {}
+    for name, module in sorted(sys.modules.items()):
+        root = name.split(".", 1)[0]
+        if root not in _CLOSURE_PACKAGES or module is None:
+            continue
+        file = getattr(module, "__file__", None)
+        if not file or not str(file).endswith(".py"):
+            continue
+        path = Path(file)
+        rel = name.replace(".", "/") + (
+            "/__init__.py" if path.name == "__init__.py" else ".py")
+        try:
+            st = path.stat()
+            out[rel] = _closure_file_digest(str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            continue
+    return tuple(sorted(out.items()))
+
+
+@functools.lru_cache(None)
+def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
+    """pgw#710: CONTENT identity of the compile toolchain, per component —
+    the equivalence precondition that lets ``image_digest`` be relaxed
+    (pgw#700) without degrading the compile stack's identity to version
+    strings (the ccache ``compiler_check=mtime`` failure class; sccache's
+    answer — hash the compiler binary and its runtime libs — is the
+    precedent).
+
+    Components: the dist-info ``RECORD`` of torch/triton and every
+    ``nvidia-*`` runtime wheel (RECORD already carries per-file sha256s, so
+    hashing it is whole-package content identity with no multi-GB re-walk)
+    plus the bundled CUDA tool BINARIES (ptxas/nvdisasm ride triton's
+    wheel; a swapped ptxas silently changes emitted cubins). Recorded in
+    metadata, never a key axis."""
+    out: Dict[str, str] = {}
+    try:
+        import importlib.metadata
+
+        for dist in importlib.metadata.distributions():
+            name = str(dist.metadata.get("Name") or "").lower()
+            if name in ("torch", "triton") or name.startswith("nvidia-"):
+                record = dist.read_text("RECORD") or ""
+                out[name] = hashlib.sha256(record.encode()).hexdigest()[:16]
+    except Exception:
+        logger.debug("toolchain_digest: dist-info walk failed", exc_info=True)
+    try:
+        import triton
+
+        bin_dir = Path(triton.__file__).parent / "backends" / "nvidia" / "bin"
+        if bin_dir.is_dir():
+            for tool in sorted(bin_dir.iterdir()):
+                if tool.is_file():
+                    out[f"bin:{tool.name}"] = hashlib.sha256(
+                        tool.read_bytes()).hexdigest()[:16]
+    except Exception:
+        logger.debug("toolchain_digest: cuda tool hash failed", exc_info=True)
+    return tuple(sorted(out.items()))
+
+
 @functools.lru_cache(None)
 def content_keys() -> Tuple[Tuple[str, str], ...]:
     """torch/triton CONTENT identity (cache-design review §6.5): version
@@ -838,9 +920,12 @@ def artifact_metadata(
         # pgw#696: the execution-environment seal rides verbatim — the ck4
         # env_seal axis is recomputed FROM it, never trusted as a stamp.
         env_seal.SEAL_KEY: env_seal.effective_seal(),
-        # review §6.5: content identity of the compile stack (equivalence
-        # precondition, pgw#700) — metadata only, never a key axis.
+        # review §6.5 / pgw#710 / pgw#700 fast tier: content identity of the
+        # compile stack + the loaded code closure (equivalence adoption
+        # evidence) — metadata only, never key axes.
         "content_keys": dict(content_keys()),
+        "toolchain": dict(toolchain_digest()),
+        "code_closure": dict(code_closure()),
         "libs": _lib_versions(),
     }
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
@@ -2521,6 +2606,60 @@ EXECUTION_LANE_ATTR = "_cozy_execution_lane"
 _SETUP_EXEC_LANE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "gw_setup_execution_lane", default="")
 
+#: pgw#714: pin provenance of the stamped execution lane. True only when the
+#: hub resolved this lane from an OPERATOR pin (`ModelResolution.lane_pinned`),
+#: which makes an `+eager` execution axis a real kill switch: :func:`apply`
+#: refuses to arm at all (no router, no background mint, no foreground
+#: compile) instead of treating the pin as merely "serve eager while minting".
+EXECUTION_LANE_PINNED_ATTR = "_cozy_execution_lane_pinned"
+_SETUP_EXEC_LANE_PINNED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gw_setup_execution_lane_pinned", default=False)
+
+#: pgw#714: process-wide compile kill switch. Set once (with a reason) when
+#: the crash registry shows a previous PROCESS DEATH attributed to a
+#: background compile on this pod: the honest degrade is to stop compiling
+#: and serve eager, not to re-run the native crash into a pod recycle loop.
+_PROCESS_COMPILES_DISABLED = ""
+
+
+def disable_process_compiles(reason: str) -> None:
+    global _PROCESS_COMPILES_DISABLED
+    if not _PROCESS_COMPILES_DISABLED:
+        _PROCESS_COMPILES_DISABLED = str(reason or "disabled")
+        logger.error(
+            "compile-cache: COMPILES DISABLED for this process — %s "
+            "(pgw#714 degrade-never-die: serving stays eager)",
+            _PROCESS_COMPILES_DISABLED)
+
+
+def process_compiles_disabled() -> str:
+    return _PROCESS_COMPILES_DISABLED
+
+
+def operator_eager_pin(pipeline: Any) -> bool:
+    """True when the hub-resolved execution lane stamped on ``pipeline`` was
+    OPERATOR-PINNED to the eager execution axis (pgw#714 kill switch)."""
+    pinned = bool(getattr(pipeline, EXECUTION_LANE_PINNED_ATTR, False))
+    lane_str = str(getattr(pipeline, EXECUTION_LANE_ATTR, "") or "").strip()
+    if not lane_str:
+        lane_str = _SETUP_EXEC_LANE.get().strip()
+        pinned = _SETUP_EXEC_LANE_PINNED.get()
+        if lane_str:
+            try:
+                setattr(pipeline, EXECUTION_LANE_ATTR, lane_str)
+                setattr(pipeline, EXECUTION_LANE_PINNED_ATTR, pinned)
+            except Exception:
+                pass
+    if not (lane_str and pinned):
+        return False
+    from .models import lanes as lanespec
+
+    try:
+        lane = lanespec.parse_lane(lane_str)
+    except ValueError:
+        return False
+    return lane.execution == lanespec.EXEC_EAGER
+
 
 def mandatory_serving(pipeline: Any) -> bool:
     """ONE brain for "may this pipeline serve eager?" (pgw#677 reopen).
@@ -2582,6 +2721,16 @@ def apply(
     """
     if getattr(pipeline, _MARKER_ATTR, None) is not None:
         return True
+    if _PROCESS_COMPILES_DISABLED:
+        logger.error(
+            "compile-cache: not arming (process compiles disabled: %s); "
+            "staying eager", _PROCESS_COMPILES_DISABLED)
+        return False
+    if operator_eager_pin(pipeline):
+        logger.info(
+            "compile-cache: operator-pinned +eager execution lane — compile "
+            "arming suppressed (pgw#714 kill switch); staying eager")
+        return False
     try:
         import torch
     except Exception:

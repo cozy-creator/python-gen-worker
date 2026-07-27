@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, overload
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, get_args, overload
 
 import msgspec
 
@@ -50,6 +50,49 @@ SlotLike = Union[Binding, Slot]
 
 KINDS = ("inference", "training", "dataset", "conversion")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
+
+
+# pgw#660: the dotted capability (8.9) is the author-facing unit — the way
+# NVIDIA writes it and the way v1's field did. `sm_89` is accepted because
+# that is how kernels and error messages spell it; the bare SM code is not,
+# because 89 and 8.9 are a silent factor-of-ten apart.
+_MAX_COMPUTE_CAPABILITY = 20.0
+
+
+def _normalize_compute_capability(raw: float | str) -> float:
+    if isinstance(raw, bool):
+        raise ValueError(f"compute_capability must be numeric, got {raw!r}")
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if not s:
+            raise ValueError("compute_capability is empty")
+        if s.startswith("sm"):
+            code = s[2:].lstrip("_").strip()
+            if not code.isdigit():
+                raise ValueError(
+                    f"compute_capability {raw!r} is not an SM code (e.g. 'sm_89')")
+            value = int(code) / 10.0
+        else:
+            try:
+                value = float(s)
+            except ValueError:
+                raise ValueError(
+                    f"compute_capability must be numeric, got {raw!r}") from None
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"compute_capability must be numeric, got {raw!r}") from None
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(f"compute_capability must be finite, got {raw!r}")
+    if value <= 0:
+        raise ValueError(f"compute_capability must be positive, got {raw!r}")
+    if value > _MAX_COMPUTE_CAPABILITY:
+        raise ValueError(
+            f"compute_capability {raw!r} looks like a bare SM code — declare the "
+            "dotted capability (8.9, 12.0) or the prefixed code ('sm_89')")
+    return round(value, 1)
 
 
 class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
@@ -86,6 +129,22 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     the very same encode tail, which is what made the RAM deletion read as
     accidental rather than principled.
 
+    ``compute_capability`` (pgw#660) is the HARD GPU-architecture floor,
+    restored after the v2 cut deleted it. The cut's reasoning — "precision
+    per card is the fit ladder's call, never a placement gate" — is right
+    about precision SELECTION and wrong about INCAPABILITY: a producer whose
+    kernel is ``torch._scaled_mm`` cannot run below sm_89 at any precision,
+    on any rung, ever. With no carrier the hub emitted no
+    ``compute_capability`` in ``requirement_payload_json`` and the scheduler
+    placed the fp8 producer on sm_80 A100s (th#1155 six times; te#125
+    again). Unlike ``vram_gb_hint`` this is NOT a hint and has no ``_hint``
+    suffix: the scheduler filters offers on it and refuses to rent below it.
+    Declare the DOTTED capability the way NVIDIA writes it — ``8.9``,
+    ``"8.9"``, or ``"sm_89"`` — never the bare SM code. Declaring it implies
+    ``gpu=True``. Declare it ONLY for a genuine incapability; a function that
+    merely runs BETTER on newer silicon declares nothing and lets the ladder
+    choose.
+
     ``strict_vram=True`` is a genuine incapability declaration for bindings
     that cannot tolerate CPU-resident weights (a compiled fixed-shape
     graph, a TensorRT engine): the worker refuses the CPU-touching fit
@@ -105,6 +164,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     vcpus: int | None = None
     vram_gb_hint: float | None = None
     ram_gb_hint: float | None = None
+    compute_capability: float | str | None = None
 
     def manifest_dict(self) -> dict:
         """The manifest ``resources{}`` projection (pgw#670).
@@ -115,6 +175,13 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         read-back-and-reject), so ``ram_gb_hint`` is projected under that
         name. One mapping, in one place, rather than a second spelling for
         endpoint authors to get wrong.
+
+        ``compute_capability`` needs no remap: it is already the key
+        ``internal/builder/function_requirements.go`` parses (scalar or
+        ``{"min": ...}``) into ``FunctionRequirements.ComputeCapabilityMin``.
+        Note ``min_compute_capability`` — v1's author-facing spelling — is
+        typed-REJECTED by the builder (th#1015 ``ErrMinComputeCapabilityRemoved``),
+        so it must never appear on the wire.
         """
         raw = msgspec.to_builtins(self)
         out: dict = dict(raw) if isinstance(raw, dict) else {}
@@ -138,7 +205,11 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             if v <= 0:
                 raise ValueError(f"vram_gb_hint must be positive, got {v}")
             force(self, "vram_gb_hint", v)
-        if n_gpu > 1 or self.vram_gb_hint is not None:
+        if self.compute_capability is not None:
+            force(self, "compute_capability",
+                  _normalize_compute_capability(self.compute_capability))
+        if (n_gpu > 1 or self.vram_gb_hint is not None
+                or self.compute_capability is not None):
             force(self, "gpu", True)
         if self.ram_gb_hint is not None:
             r = float(self.ram_gb_hint)
@@ -978,6 +1049,46 @@ def _validate_class_models(
                 f"match no setup() parameter (setup declares "
                 f"{sorted(setup_kwargs)})."
             )
+        _derive_optional_slots(cls, slots, setup_kwargs)
+
+
+def _derive_optional_slots(
+    cls: type, slots: Dict[str, Slot], setup_kwargs: dict[str, inspect.Parameter]
+) -> None:
+    """A slot is OPTIONAL exactly when its ``setup()`` parameter has a
+    default — the signature is the single declaration, so code and manifest
+    can never disagree. Optional slots may be left unbound at deploy time
+    (which lanes a release serves is deploy config, th#980/ie#524); setup
+    then runs with the parameter's own default.
+
+    A defaulted parameter whose annotation cannot hold that default is a
+    decoration-time error: injection is typed off the annotation, and an
+    endpoint that writes ``edit: Pipe = None`` would type-lie to every
+    reader and to ``typing.get_type_hints``."""
+    for name, slot in slots.items():
+        param = setup_kwargs.get(name)
+        if param is None or param.default is inspect.Parameter.empty:
+            slot.optional = False
+            continue
+        slot.optional = True
+        if param.default is None and not _annotation_admits_none(param.annotation):
+            raise ValueError(
+                f"@endpoint class {cls.__name__!r}: setup parameter {name!r} "
+                f"defaults to None but its annotation "
+                f"({param.annotation!r}) does not admit None — an optional "
+                f"slot must be annotated e.g. "
+                f"{name}: {getattr(slot.pipeline_cls, '__name__', 'X')} | None = None"
+            )
+
+
+def _annotation_admits_none(ann: Any) -> bool:
+    """True for ``X | None`` / ``Optional[X]`` / bare ``None``, including the
+    string form a ``from __future__ import annotations`` module produces."""
+    if ann is inspect.Parameter.empty or ann is None or ann is type(None):
+        return True
+    if isinstance(ann, str):
+        return "None" in ann or ann.startswith("Optional[")
+    return type(None) in get_args(ann)
 
 
 def _validate_root_slot(owner: str, slots: Dict[str, Slot]) -> None:

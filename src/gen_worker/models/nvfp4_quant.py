@@ -314,29 +314,54 @@ def _bit_identical(op: Any) -> bool:
     return True
 
 
-@functools.lru_cache(maxsize=1)
-def nvfp4_quantizer_mode() -> str:
-    """``"fused"`` | ``"torch"`` for THIS device, decided once per process.
-    Arms only when triton compiles the kernel AND it is bit-identical to the
-    reference chain on every probe shape."""
+# Arming result, resolved once per process. Deliberately PLAIN globals rather
+# than an lru_cache call: the hot path reads them under torch.compile, where a
+# global str/callable lookup constant-folds but a C-implemented lru_cache
+# wrapper can break the graph.
+_QUANT_MODE: Optional[str] = None
+_ARMED_OP: Any = None
+
+
+def _arm() -> str:
+    """Decide the quantizer for THIS device (idempotent). Fused arms only when
+    triton compiles the kernel AND it is bit-identical to the reference chain
+    on every probe shape."""
+    global _QUANT_MODE, _ARMED_OP
+
+    if _QUANT_MODE is not None:
+        return _QUANT_MODE
+    mode, op = "torch", None
     try:
         import torch
 
-        if not torch.cuda.is_available():
-            return "torch"
-        op = _build_fused_op()
-        if op is None:
-            return "torch"
-        if not _bit_identical(op):
-            return "torch"
+        if torch.cuda.is_available():
+            candidate = _build_fused_op()
+            if candidate is not None and _bit_identical(candidate):
+                mode, op = "fused", candidate
+                logger.info(
+                    "nvfp4: fused triton activation quantizer armed "
+                    "(%d blocks/program, %d warps)",
+                    _BLOCKS_PER_PROG, _quant_warps())
     except Exception as exc:  # noqa: BLE001 — any gap => reference chain
         logger.warning("nvfp4: fused quantizer probe failed (%s); torch chain",
                        exc)
-        return "torch"
-    logger.info("nvfp4: fused triton activation quantizer armed "
-                "(%d blocks/program, %d warps)",
-                _BLOCKS_PER_PROG, _quant_warps())
-    return "fused"
+        mode, op = "torch", None
+    _QUANT_MODE, _ARMED_OP = mode, op
+    return mode
+
+
+def nvfp4_quantizer_mode() -> str:
+    """``"fused"`` | ``"torch"`` for this device. Call at LOAD time — it
+    compiles the kernel and registers the custom op, which must not happen
+    mid-trace."""
+    return _arm()
+
+
+def reset_nvfp4_quantizer_arming() -> None:
+    """Forget the arming decision (tests only)."""
+    global _QUANT_MODE, _ARMED_OP
+
+    _QUANT_MODE, _ARMED_OP = None, None
 
 
 def quantize_activation(x2: Any, s2: Any) -> tuple[Any, Any]:
@@ -348,10 +373,11 @@ def quantize_activation(x2: Any, s2: Any) -> tuple[Any, Any]:
     ``s2`` is coerced to a 0-dim fp32 tensor — the kernel loads it as fp32, so
     a bf16 scalar would be read as garbage bits rather than upcast."""
     s2 = s2.reshape(()).float()
-    if nvfp4_quantizer_mode() == "fused":
-        op = _build_fused_op()
-        if op is not None:
-            return op(x2, s2)
+    if _QUANT_MODE is None:
+        _arm()
+    op = _ARMED_OP
+    if op is not None:
+        return op(x2, s2)
     return quantize_activation_torch(x2, s2)
 
 
@@ -366,6 +392,7 @@ __all__ = [
     "pack_e2m1",
     "quantize_activation",
     "quantize_activation_torch",
+    "reset_nvfp4_quantizer_arming",
     "to_blocked_scales",
     "unpack_e2m1",
 ]
