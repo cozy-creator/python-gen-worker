@@ -778,7 +778,7 @@ def test_dynamic_sdxl_pick_target_uses_derived_load_time_binding(tmp_path):
         models={"pipeline": Hub("tensorhub/sdxl-default", tag="prod")},
     )
     ex, _sent = _wire_executor(authored, tmp_path, ready=False, resident=False)
-    picked_ref = "tensorhub/cyberrealistic-pony:prod"
+    picked_ref = "tensorhub/cyberrealistic-pony"
     picked_digest = "blake3:" + "d" * 64
     derived = replace(
         authored,

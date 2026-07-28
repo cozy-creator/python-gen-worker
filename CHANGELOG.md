@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.78.0 (2026-07-28) — th#1276/pgw#753: the ref grammar's default tag is `prod`, not `latest`
+
+Paul's ruling. A bare `owner/repo` now means `owner/repo:prod`. `prod` is the STABLE
+SERVING pointer, which only moves on an explicit promote; `latest` is the MOVING PUBLISH
+pointer that the finalize path auto-binds on every publish, and it is now an ordinary tag
+that must always be written explicitly. The normal form elides `:prod` and stamps every
+other tag verbatim, `:latest` included. `latest` is not deprecated — it is de-defaulted.
+
+- **`gen_worker.models.refs.DEFAULT_REF_TAG`** is the one literal, the twin of tensorhub's
+  `refgrammar.DefaultTag`. Every grammar-coupled site references it — parse default,
+  `canonical()` elision, `ModelRef` coercion and `.label`, the `Hub()` `tag=` default,
+  `wire_ref`, discovery-manifest elision, the CAS ref-map path — so grammar sites stay
+  greppable and stay distinct from code that means the `latest` publish tag.
+- **The shared conformance fixture was decorative.** `tests/testdata/ref_grammar_vectors.json`
+  is vendored byte-identically in tensorhub and was referenced only in comments: no test in
+  either repo loaded it, so the th#597 C5 contract had been unenforced since it was written
+  and the two parsers could have drifted silently. `tests/test_ref_grammar_conformance_th1276.py`
+  (and its Go twin) now assert every vector's fields, canonical form, and that the canonical
+  form is a fixed point.
+- **Bug this surfaced**: `Hub("owner/repo", tag="latest")` was silently converted to the
+  default — `wire_ref` dropped the tag when it equalled the old default and `fold_ref`
+  re-applied the parser default, so an explicit `latest` pin never survived. It is now
+  stamped verbatim, with a round-trip test locking it in.
+
+**Rollout**: do NOT upgrade workers independently of the hub. Bare refs cross the wire and
+the receiver re-parses them with its own default, so a mixed-version fleet can disagree on
+what a bare ref means — silently (wrong checkpoint served) or loudly (snapshot-key miss).
+See th#1276 for the scenarios and the durable fix.
+
 ## 0.77.0 (2026-07-28) — th#1257: handlers declare the SERVING TASK they perform
 
 The hub's human quality sign-off for a quantization lane is no longer keyed by model family

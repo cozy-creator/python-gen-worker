@@ -377,7 +377,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     re-mint — never an upstream self-fetch). Raises ``ValueError`` when
     ``ref`` does not parse under that grammar (e.g. a raw upstream id the
     hub stamped for an unmirrored slot default)."""
-    from .models.refs import parse_model_ref
+    from .models.refs import DEFAULT_REF_TAG, parse_model_ref
 
     parsed = parse_model_ref(ref)
     th = parsed.tensorhub
@@ -386,7 +386,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     return ModelRef(
         source="tensorhub",
         path=f"{th.owner}/{th.repo}",
-        tag=th.tag or "latest",
+        tag=th.tag or DEFAULT_REF_TAG,
         flavor=th.flavor or "",
     )
 

@@ -174,7 +174,7 @@ def test_slot_boot_precedence_outranks_code_default(tmp_path) -> None:
 def test_fixed_slot_wrong_repo_dispatch_refuses(tmp_path) -> None:
     blobs = BlobHost(tmp_path)
     try:
-        wrong_repo = "harness/some-other-repo:prod"
+        wrong_repo = "harness/some-other-repo"
         snap = blobs.one_file_snapshot("snap-wrong", "wrong", b"irrelevant")
         with hub_double() as (scheduler, _harness):
             conn = scheduler.wait_connection(0)
@@ -197,7 +197,7 @@ def test_fixed_slot_wrong_repo_dispatch_refuses(tmp_path) -> None:
 def test_fixed_slot_same_repo_flavor_pick_serves(tmp_path) -> None:
     blobs = BlobHost(tmp_path)
     try:
-        same_repo_other_flavor = f"{DECLARED_PIPELINE.path}:prod#fp8"
+        same_repo_other_flavor = f"{DECLARED_PIPELINE.path}#fp8"
         payload = b"fp8-flavor-bytes"
         snap = blobs.one_file_snapshot("snap-fp8", "fp8", payload)
         with hub_double() as (scheduler, _harness):
@@ -212,6 +212,9 @@ def test_fixed_slot_same_repo_flavor_pick_serves(tmp_path) -> None:
             res = conn.wait_for(is_result_for("r-flavor")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message
             out = _decode(res.inline)
+            # The harness echo interpolates ref.tag UNCONDITIONALLY (it is not
+            # the normal form), so the resolved tag shows even though the
+            # normal form would elide it (th#1276).
             assert out.response == f"tensorhub:{DECLARED_PIPELINE.path}:prod#fp8"
     finally:
         blobs.shutdown()
@@ -220,7 +223,7 @@ def test_fixed_slot_same_repo_flavor_pick_serves(tmp_path) -> None:
 def test_catalog_slot_different_repo_pick_is_not_a_mismatch(tmp_path) -> None:
     blobs = BlobHost(tmp_path)
     try:
-        catalog_pick = "harness/slot-catalog-pick:prod"
+        catalog_pick = "harness/slot-catalog-pick"
         payload = b"catalog-pick-bytes"
         snap = blobs.one_file_snapshot("snap-catalog", "catalog", payload)
         with hub_double() as (scheduler, _harness):
@@ -244,8 +247,8 @@ def test_catalog_slot_different_repo_pick_is_not_a_mismatch(tmp_path) -> None:
 def test_undeclared_model_slot_warns_and_serves(tmp_path, caplog) -> None:
     blobs = BlobHost(tmp_path)
     try:
-        declared_ref = f"{DECLARED_PIPELINE.path}:prod"
-        lora_ref = "harness/some-lora:prod"
+        declared_ref = f"{DECLARED_PIPELINE.path}"
+        lora_ref = "harness/some-lora"
         snap = blobs.one_file_snapshot("snap-declared", "declared", b"declared-bytes")
         with hub_double() as (scheduler, _harness):
             conn = scheduler.wait_connection(0)

@@ -6,9 +6,11 @@ shared vectors ``tests/testdata/ref_grammar_vectors.json``):
     tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#flavor]
     hf:         owner/repo[@revision][#flavor]
 
-The tag is ELIDED when it equals ``latest`` (the grammar default) and stamped
-verbatim otherwise — including ``prod``, which is an ordinary tag with no
-special meaning. ``format(parse(s))`` is the normalization projection;
+The tag is ELIDED when it equals ``prod`` (the grammar default) and stamped
+verbatim otherwise — including ``latest``. th#1276: ``prod`` is the STABLE
+SERVING pointer and is the grammar default; ``latest`` is the MOVING PUBLISH
+pointer that the finalize path auto-binds, so it must always be written
+explicitly. ``format(parse(s))`` is the normalization projection;
 ``parse(format(v)) == v`` for every value. Every ref string the worker mints
 (wire, residency keys, cache keys, telemetry) MUST come from :func:`wire_ref`
 (bindings), :func:`fold_ref` (string + tag/flavor overlay), or
@@ -26,6 +28,15 @@ from typing import NewType, Optional
 # validation.IsValidFlavorToken).
 _TENSORHUB_FLAVOR_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
+# th#1276: the ref grammar's default tag — a bare ``owner/repo`` means
+# ``owner/repo:prod``. ``prod`` is the STABLE SERVING pointer; ``latest`` is
+# the MOVING PUBLISH pointer that finalize auto-binds and must always be
+# written explicitly. This is the Python twin of tensorhub's
+# ``release.DefaultRefTag``. Use it at every GRAMMAR-COUPLED site (parse
+# default, normal-form elision) so those sites stay greppable and distinct
+# from code that genuinely means the ``latest`` publish tag.
+DEFAULT_REF_TAG = "prod"
+
 # A ref string in NORMAL FORM (minted by this module). Annotate wire/residency
 # key surfaces with WireRef so mixing raw and normalized strings fails mypy.
 WireRef = NewType("WireRef", str)
@@ -35,7 +46,7 @@ WireRef = NewType("WireRef", str)
 class TensorhubRef:
     owner: str
     repo: str
-    tag: str = "latest"
+    tag: str = DEFAULT_REF_TAG
     digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
     flavor: Optional[str] = None
 
@@ -44,11 +55,11 @@ class TensorhubRef:
 
     def canonical(self) -> "WireRef":
         """Normal form: ``owner/repo[:tag][@digest][#flavor]``; the tag is
-        elided when it is ``latest`` (the grammar default). Tensorhub is the
-        default provider so no prefix is emitted; consumers track provider
-        separately."""
+        elided when it is ``prod`` (the grammar default) and stamped verbatim
+        otherwise, including ``latest``. Tensorhub is the default provider so
+        no prefix is emitted; consumers track provider separately."""
         out = self.repo_id()
-        if self.tag and self.tag != "latest":
+        if self.tag and self.tag != DEFAULT_REF_TAG:
             out = f"{out}:{self.tag}"
         if self.digest:
             out = f"{out}@{self.digest}"
@@ -188,7 +199,9 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
     if provider == "tensorhub":
         digest = None
         flavor = None
-        tag = "latest"
+        # th#1276: the grammar default is the STABLE SERVING pointer "prod";
+        # the moving publish pointer "latest" must be written explicitly.
+        tag = DEFAULT_REF_TAG
 
         if "#" in s:
             s, flavor_part = s.split("#", 1)
@@ -233,7 +246,7 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
         if ":" in s:
             repo_id, tag_part = s.rsplit(":", 1)
             repo_id = repo_id.strip()
-            tag = tag_part.strip() or "latest"
+            tag = tag_part.strip() or DEFAULT_REF_TAG
         else:
             repo_id = s
         if "/" not in repo_id:

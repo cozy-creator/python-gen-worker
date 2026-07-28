@@ -95,8 +95,8 @@ class _Out(msgspec.Struct):
 
 FAMILY = "gw584-fam"
 AUTHORED = Hub("acme/qwen-image", tag="prod")           # bare authored binding
-AUTHORED_REF = "acme/qwen-image:prod"
-RESOLVED_REF = "acme/qwen-image:prod#fp8-w8a8"          # HelloAck ladder pick
+AUTHORED_REF = "acme/qwen-image"
+RESOLVED_REF = "acme/qwen-image#fp8-w8a8"          # HelloAck ladder pick
 CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
 PLAIN_CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 

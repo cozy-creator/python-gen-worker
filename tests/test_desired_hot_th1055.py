@@ -46,9 +46,9 @@ from gen_worker.registry import EndpointSpec
 
 FAMILY = "th1055-fam"
 AUTHORED = Hub("acme/qwen-image", tag="prod")
-AUTHORED_REF = "acme/qwen-image:prod"
-RESOLVED_REF = "acme/qwen-image:prod#fp8-w8a8"
-ADAPTER_REF = "acme/qwen-lightning:prod"
+AUTHORED_REF = "acme/qwen-image"
+RESOLVED_REF = "acme/qwen-image#fp8-w8a8"
+ADAPTER_REF = "acme/qwen-lightning"
 CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
 
 

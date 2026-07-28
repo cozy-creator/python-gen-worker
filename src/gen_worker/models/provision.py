@@ -39,7 +39,7 @@ from .loading import (
     model_index_components,
 )
 from .memory import place_pipeline
-from .refs import parse_model_ref
+from .refs import DEFAULT_REF_TAG, parse_model_ref
 
 __all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
 
@@ -561,7 +561,7 @@ def _local_flavor_fold(binding: Any, slot: Any) -> Any:
 def _hub_ref_map_path(cache_dir: Path, thref: Any) -> Path:
     """CAS-local memory of tag->snapshot resolutions, so a previously-fetched
     tag ref keeps working offline: cas/refs/<owner>/<repo>/<tag>[#flavor]."""
-    name = str(thref.tag or "latest")
+    name = str(thref.tag or DEFAULT_REF_TAG)
     if thref.flavor:
         name += "#" + str(thref.flavor)
     safe = "".join(ch if (ch.isalnum() or ch in "._#-") else "_" for ch in name)

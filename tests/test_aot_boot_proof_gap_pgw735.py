@@ -33,6 +33,7 @@ from gen_worker import aot_cells, aot_serve, compile_cache, fleet_cells
 from gen_worker.api.decorators import Compile
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
 from gen_worker.executor import Executor
+from gen_worker.models.refs import normalize_model_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 
@@ -142,7 +143,10 @@ def _boot(ex: Executor, ref: str = "acme/sdxl-base:prod") -> None:
     run = pb.RunJob(function_name="generate",
                     models=[pb.ModelBinding(slot="pipeline", ref=ref)])
     eff = ex._effective_spec(spec, run)
-    snaps = {ref: pb.Snapshot(digest="d1" * 16, files=[pb.SnapshotFile(
+    # Key the snapshot map by the NORMAL FORM the worker will actually look
+    # up, not the raw string — th#1276 moved which tag the normal form elides
+    # (`:prod` now, `:latest` before), and a hand-spelled key silently misses.
+    snaps = {normalize_model_ref(ref): pb.Snapshot(digest="d1" * 16, files=[pb.SnapshotFile(
         path="model.safetensors", size_bytes=5, blake3="cd" * 32,
         url="http://r2.invalid/presigned")])}
     asyncio.run(ex.ensure_setup(eff, snaps))
