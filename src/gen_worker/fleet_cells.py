@@ -62,7 +62,7 @@ from typing import Any, Callable, Dict, Optional
 import requests
 
 from . import activity as activity_mod
-from . import cell_key
+from . import aot_cells, cell_key
 from . import compile_cache as cc
 from . import guard_closure
 from .convert.hub import blake3_file
@@ -213,6 +213,10 @@ class CellPublisher:
 
     def enabled(self) -> bool:
         return bool(self.base_url and (self._worker_jwt() or "").strip())
+
+    def worker_jwt(self) -> str:
+        """Current worker JWT (rotation-aware, #561)."""
+        return str(self._worker_jwt() or "")
 
     # -- wire ---------------------------------------------------------------
 
@@ -392,6 +396,53 @@ def enable_compiled(
     """
     family = str(getattr(cfg, "family", "") or "")
     selection_bug: Optional[cc.CellSelectionBugError] = None
+
+    # pgw#722 F1 (flag-gated, default OFF): PREFER a published aot-inductor
+    # cell over the delivered dynamo artifact. Discovery is fetch-and-filter
+    # (the worker cannot compute a stamped AOT key); the downloaded artifact
+    # rides the SAME choke point below, so the pgw#709 receipt gate and the
+    # aot_serve arm gates run unchanged. Any miss/failure falls through to
+    # today's policy with the originally delivered artifact.
+    if (
+        aot_cells.prefer_aot()
+        and family
+        and publisher is not None
+        and publisher.enabled()
+        and cc.has_compile_target(pipe, cfg)
+    ):
+        adopted = aot_cells.discover(
+            pipe, cfg,
+            base_url=publisher.base_url,
+            worker_jwt=publisher.worker_jwt,
+            cache_dir=cache_dir,
+        )
+        if adopted is not None:
+            aot_armed = False
+            try:
+                aot_armed = provision.enable_compiled(
+                    pipe, cfg, cache_dir, adopted.artifact)
+            except cc.CompiledLaneUnavailableError:
+                # The AOT arm refused and the mandatory-lane no-artifact
+                # fallthrough raised — the ordinary policy below (with the
+                # delivered artifact) is still to run, so this is not
+                # terminal here.
+                logger.warning(
+                    "fleet-cells: discovered AOT cell %s did not arm; "
+                    "falling through to the ordinary arming policy",
+                    adopted.ref)
+            from . import aot_serve
+            if aot_armed and aot_serve.is_armed(pipe):
+                logger.info(
+                    "fleet-cells: armed discovered AOT cell %s (pgw#722)",
+                    adopted.ref)
+                return ArmOutcome(armed=True, self_mint=adopted)
+            if aot_armed:
+                # Armed, but not through the exported artifact (e.g. a
+                # seeded dynamo cell picked up on the fallthrough): honest
+                # plain HIT — never advertise the AOT identity for bytes
+                # this pipe does not serve.
+                return ArmOutcome(armed=True)
+
     try:
         if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
             return ArmOutcome(armed=True)

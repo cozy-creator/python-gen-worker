@@ -611,10 +611,17 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             slot_family = es.slot_family.get(key, "") if es.slot_family else ""
             _stamp_family(block, compile_family or slot_family)
 
+        # pgw#747: `es.slot_family` is AUTHORITATIVE per slot — it already
+        # folds in Compile(family=...), and it deliberately holds "" for an
+        # auxiliary bare-typed slot that never opted into the family
+        # vocabulary. Re-defaulting to `compile_family` here would put the
+        # function's family back on exactly those slots, which is the bug:
+        # the hub's th#586 gate then demands a family-agnostic artifact
+        # classify as wan22 and fails the whole manifest closed.
         slots_block = [
             _slot_to_manifest(
                 name, slot,
-                family=es.slot_family.get(name, "") or compile_family,
+                family=es.slot_family.get(name, ""),
                 components=es.slot_components.get(name),
             )
             for name, slot in es.slots.items()

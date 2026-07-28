@@ -35,7 +35,6 @@ from gen_worker.models.refs import flavor_token as _token
 
 logger = logging.getLogger(__name__)
 
-_RETRY_ATTEMPTS = 5
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 
@@ -84,7 +83,17 @@ _COMPLETE_NETWORK_RETRY_DELAY_S = 15.0
 # severed connection or an edge-masked 5xx tells us nothing — so only those
 # accumulate the window below. It is derived from the call cadence: two full
 # verify-length attempts' worth of hearing nothing definite.
-_COMPLETE_SILENCE_WINDOW_S = 2.0 * _COMPLETE_TIMEOUT_S
+#
+# pgw#743 RESIZED it from 2 to 6 verify-lengths on measured evidence. Two
+# 58-minute clones died here: the chaos hub's container was being rebuilt, its
+# tunnel served an HTML 503 for LONGER THAN THE 20-MINUTE WINDOW, and the
+# publish was declared fatal with 53 GiB of already-paid download in hand. The
+# window is a statement about how long the channel may plausibly be gone, and
+# a container rebuild is tens of minutes, not two. The arithmetic also favours
+# waiting: an hour parked on the CPU rig that runs these jobs costs about what
+# re-downloading costs, and unlike the re-download it cannot fail again the
+# same way. Waiting stays observable — the loop beats liveness every pass.
+_COMPLETE_SILENCE_WINDOW_S = 6.0 * _COMPLETE_TIMEOUT_S
 
 _SESSION: Optional[requests.Session] = None
 
@@ -155,30 +164,76 @@ def _error_code_of(resp: requests.Response) -> str:
     return str(err.get("code") or "")
 
 
-def _send_with_retries(what: str, send: Callable[[], requests.Response]) -> requests.Response:
-    """Bounded retries on network errors, 429, and 5xx (honors Retry-After).
+# pgw#738/#743: how long _send_with_retries tolerates hearing nothing
+# DEFINITE from the hub (network errors, 5xx, 429, proxy-shaped 404s) before
+# giving up. A hub restart is seconds and a tunnel re-dial is minutes; the old
+# 5-attempt cap (~2 min) classified both FATAL and threw away paid GPU work
+# at the finish line (two 58-min clones, #743). Silence-bounded per gw#666.
+_SEND_SILENCE_WINDOW_S = 600.0
 
+
+def _send_with_retries(
+    what: str,
+    send: Callable[[], requests.Response],
+    *,
+    silence_window_s: Optional[float] = None,
+) -> requests.Response:
+    """Origin-discriminating, silence-bounded retry (pgw#715/#738/#743).
+
+    Only a DEFINITE hub answer ends the loop: 2xx/3xx, or a 4xx that is
+    really the hub speaking (not a proxy's offline page). Indefinite answers
+    — network errors, 429, 5xx, and ANY proxy-shaped status (ngrok with no
+    healthy backend while the hub restarts answers 404 AND 503 with the same
+    HTML page; pgw#743) — retry with backoff until nothing definite has been
+    heard for ``silence_window_s``, then surface the last state. Unknown
+    exception types never leak raw: they become a typed ``HubPublishError``.
     Returns the last response for non-retryable statuses — callers keep their
     own status handling.
     """
+    from .. import activity as _activity
+    from ..http_origin import is_definite_hub_answer
+
+    if silence_window_s is None:
+        silence_window_s = _SEND_SILENCE_WINDOW_S
+    contact = SilenceWindow(silence_window_s)
     delay = _RETRY_BASE_DELAY_S
-    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+    attempt = 0
+    last_resp: Optional[requests.Response] = None
+    last_exc: Optional[BaseException] = None
+    while True:
+        attempt += 1
         try:
             resp = send()
         except requests.RequestException as exc:
-            if attempt == _RETRY_ATTEMPTS:
-                raise HubPublishError(f"{what} failed (network): {exc}") from exc
+            last_resp, last_exc = None, exc
+        except Exception as exc:  # noqa: BLE001 - typed terminal, never a raw leak
+            raise HubPublishError(
+                f"{what} failed ({type(exc).__name__}): {exc}") from exc
         else:
             code = int(resp.status_code)
-            if code != 429 and code < 500:
-                return resp
-            if attempt == _RETRY_ATTEMPTS:
-                return resp
+            if code != 429 and is_definite_hub_answer(resp):
+                return resp  # definite hub answer
+            last_resp, last_exc = resp, None
             delay = _retry_after_s(resp) or delay
-        logger.warning("%s retrying (attempt %d/%d)", what, attempt, _RETRY_ATTEMPTS)
+        # pgw#743: this loop can now legitimately run for the better part of
+        # an hour riding out a hub rebuild, and a publisher that goes silent
+        # for an hour is exactly the dead-job signature the watchdogs kill on
+        # (pgw#738). Waiting IS work — say so on the liveness channel.
+        _activity.note_progress()
+        if contact.stalled():
+            if last_resp is not None:
+                return last_resp
+            raise HubPublishError(
+                f"{what} failed (network, no definite hub answer for "
+                f"{contact.silent_for():.0f}s): {last_exc}") from last_exc
+        logger.warning(
+            "%s retrying (attempt %d, %s; no definite answer for %.0fs of %.0fs)",
+            what, attempt,
+            (f"status={last_resp.status_code}" if last_resp is not None
+             else f"err={type(last_exc).__name__}"),
+            contact.silent_for(), contact.window_s)
         time.sleep(delay + random.uniform(0, delay * 0.1))
         delay = min(delay * 2, _RETRY_MAX_DELAY_S)
-    raise HubPublishError(f"{what} failed after {_RETRY_ATTEMPTS} attempts")
 
 
 def blake3_file(path: Path, *, chunk: int = 8 * 1024 * 1024) -> str:
@@ -398,11 +453,20 @@ class HubClient:
 
             grant = S3TransferGrant.from_mapping(grant_raw)
             size_bytes = int(entry.get("size_bytes") or local_path.stat().st_size)
+            # pgw#738: the SDK lane was upload-progress-BLIND — a multi-GB
+            # publish produced zero signals for its whole transfer, so a live
+            # publish was indistinguishable from a dead one (and got killed
+            # on the dead-signature). Forward boto3's byte callback.
+            sdk_progress = None
+            if part_progress is not None:
+                def sdk_progress(done_flag: int, _total: int, bytes_up: int) -> None:
+                    part_progress(int(done_flag), 1, int(bytes_up))
             result = upload_file_with_grant(
                 file_path=local_path,
                 grant=grant,
                 blake3_hex=str(entry.get("blake3") or ""),
                 size_bytes=size_bytes,
+                on_progress=sdk_progress,
             )
             resp = self._post_complete(complete_path, {"transfer": {
                 "mode": "s3_sdk",
@@ -445,7 +509,7 @@ class HubClient:
                 if resp.status_code < 200 or resp.status_code >= 300:
                     raise HubPublishError(
                         f"part PUT failed ({resp.status_code}) for {entry.get('path')!r} "
-                        f"part #{i + 1} after {_RETRY_ATTEMPTS} attempts")
+                        f"part #{i + 1} after retries")
                 etag = str(resp.headers.get("ETag") or "").strip().strip('"')
                 parts.append({"part_number": i + 1, "etag": etag})
                 bytes_up += len(buf)
@@ -473,7 +537,7 @@ class HubClient:
                 f"(410 upload_session_expired)")
         raise HubPublishError(
             f"upload complete failed ({resp.status_code}) for {path_label!r} "
-            f"after {_RETRY_ATTEMPTS} attempts: {resp.text[:500]}")
+            f"after retries: {resp.text[:500]}")
 
     def _finalize(self, repo_path: str, revision_id: str, *, poll_timeout_s: float = 1800.0) -> dict[str, Any]:
         path = f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}/finalize"

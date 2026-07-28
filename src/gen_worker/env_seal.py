@@ -59,9 +59,13 @@ logger = logging.getLogger(__name__)
 
 # v3 (pgw#718/#719 erase-and-impose): recorded-env facts left (scrubbed
 # vars are constants by construction); + hash-seed facts + loaded-library
-# digest. v2 added the operator `epoch` salt. Adding sealed facts bumps
-# THIS version only — never the key-axis set.
-SEAL_VERSION = 3
+# digest. v2 added the operator `epoch` salt. v4 (pgw#745): host driver
+# libs excluded from the loaded-lib manifest (gw#577: driver is never
+# identity). v5 (pgw#749): the identity manifest is the python env's
+# toolchain libs ON DISK — phase-independent — never the mapped set.
+# Adding/changing sealed facts bumps THIS version only — never the
+# key-axis set.
+SEAL_VERSION = 5
 SEAL_KEY = "env_seal"
 
 # R2: the operator-settable generation salt. Bumping it disowns every cell
@@ -212,6 +216,24 @@ _LIB_BASENAME_PREFIXES = (
     "libnvjitlink", "libtriton", "libnccl",
 )
 
+# Driver-side objects are NEVER identity (gw#577): the manifest enumerates
+# USERSPACE TOOLCHAIN libs only. The driver's userspace half (libcuda.so.*,
+# libnvidia-*, libcudadebugger) is mounted from the HOST at pod start —
+# it varies per machine and driver rollout, invisible to the image digest,
+# and sealing it fractures cell keys per driver cohort (pgw#745:
+# libcuda.so.580.126.16 vs .580.159.04 split an L4 fleet; every worker
+# kept self-minting). The driver stays a recorded-only metadata axis
+# (`cuda_driver`); compiled kernels are driver-portable within a major.
+# Note "libcuda" above still matches the image-shipped libcudart — the
+# exclusion is by exact driver basenames, checked FIRST.
+_DRIVER_LIB_BASENAME_PREFIXES = (
+    "libcuda.so", "libcudadebugger", "libnvidia-", "libnvcuvid", "libnvoptix",
+)
+
+
+# Seam for tests: the loader map surface this process enumerates.
+_MAPS_PATH = Path("/proc/self/maps")
+
 
 @functools.lru_cache(maxsize=256)
 def _lib_digest(path: str, mtime_ns: int, size: int) -> str:
@@ -227,7 +249,7 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
     LOADER actually mapped into this process (``/proc/self/maps``).
     Deterministic: resolved real paths, sorted basenames. Empty off-Linux
     (no maps surface — recorded as such)."""
-    maps = Path("/proc/self/maps")
+    maps = _MAPS_PATH
     if not maps.is_file():
         return ()
     paths: Dict[str, str] = {}
@@ -240,6 +262,8 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
             base = os.path.basename(file_path)
             if ".so" not in base or not base.startswith(_LIB_BASENAME_PREFIXES):
                 continue
+            if base.startswith(_DRIVER_LIB_BASENAME_PREFIXES):
+                continue  # host driver: recorded-only, never identity
             paths[base] = os.path.realpath(file_path)
     except OSError:
         return ()
@@ -253,20 +277,88 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
     return tuple(sorted(out.items()))
 
 
-# The lib snapshot is FROZEN at first computation (boot phase): torch
-# lazily dlopens cudnn/cublas at first use, so a LIVE probe would make a
-# post-compile mint seal differ from every boot-time consumer seal — the
-# key must digest the same phase on both sides. Substitution of a
-# boot-mapped lib is still caught at point-of-use (assert_seal_unchanged
-# re-digests the SNAPSHOT set live); post-boot additions join the identity
-# at the ck6 hashing slice (the graphs they alter hash differently).
+# pgw#749: the IDENTITY manifest is enumerated from the python env ON DISK
+# — never from /proc/self/maps. The mapped set is a function of LOAD PHASE
+# (torch preloads cublas/cudnn at import; libtriton maps at first dynamo
+# compile; libcuda at first CUDA call), so a "frozen at first computation"
+# mapped-set snapshot froze DIFFERENT sets in different consumers: cold
+# candidate computations sealed the import-time set while mints sealed the
+# compile-warm set, and cold-boot candidate keys could NEVER match any
+# published key (boot-attach adoption structurally dead — the th#1216
+# requested_unresolvable evidence). Disk enumeration is phase-independent
+# by construction, and host driver objects can never appear in it (the
+# driver is mounted from the host, not shipped in the python env —
+# gw#577/pgw#745 by construction). The maps-based probe above remains the
+# LIVE integrity surface: assert_seal_unchanged compares what is actually
+# mapped against this manifest and refuses, naming the library, when an
+# LD_PRELOAD-style substitution diverges from the sealed disk content.
+_TOOLCHAIN_LIB_PACKAGES = ("torch", "triton", "nvidia")
+
+# Test seam: when set, enumerate these directories instead of the resolved
+# package roots.
+_TOOLCHAIN_LIB_DIRS_OVERRIDE: Optional[Tuple[Path, ...]] = None
+
+
+def _toolchain_lib_dirs() -> Tuple[Path, ...]:
+    if _TOOLCHAIN_LIB_DIRS_OVERRIDE is not None:
+        return _TOOLCHAIN_LIB_DIRS_OVERRIDE
+    import importlib.util
+
+    dirs: List[Path] = []
+    for name in _TOOLCHAIN_LIB_PACKAGES:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError):
+            continue
+        if spec is None:
+            continue
+        roots = list(spec.submodule_search_locations or [])
+        if not roots and spec.origin:
+            roots = [os.path.dirname(spec.origin)]
+        dirs.extend(Path(r) for r in roots if r)
+    return tuple(dirs)
+
+
+def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
+    """(basename, content digest) of every userspace toolchain native lib
+    the python env SHIPS — deterministic in the installed content,
+    independent of what has been dlopened so far. Duplicate basenames
+    resolve by sorted path (deterministic); unreadable files record
+    ``<unreadable>``."""
+    paths: Dict[str, str] = {}
+    for root in _toolchain_lib_dirs():
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.so*")):
+            base = path.name
+            if ".so" not in base or not base.startswith(_LIB_BASENAME_PREFIXES):
+                continue
+            if base.startswith(_DRIVER_LIB_BASENAME_PREFIXES):
+                continue  # defense in depth; see pgw#745
+            if path.is_symlink() or not path.is_file():
+                continue  # digest real files once; alias links add nothing
+            paths.setdefault(base, str(path))
+    out: Dict[str, str] = {}
+    for base in sorted(paths):
+        try:
+            st = os.stat(paths[base])
+            out[base] = _lib_digest(paths[base], st.st_mtime_ns, st.st_size)
+        except OSError:
+            out[base] = "<unreadable>"
+    return tuple(sorted(out.items()))
+
+
+# The identity manifest is FROZEN at first computation: the disk content is
+# already phase-independent (pgw#749), so the freeze is purely an
+# amortization — one multi-GB hashing pass per process, never a semantic
+# phase pin.
 _LIB_SNAPSHOT: Optional[Tuple[Tuple[str, str], ...]] = None
 
 
 def frozen_library_digests() -> Tuple[Tuple[str, str], ...]:
     global _LIB_SNAPSHOT
     if _LIB_SNAPSHOT is None:
-        _LIB_SNAPSHOT = loaded_library_digests()
+        _LIB_SNAPSHOT = toolchain_library_digests()
     return _LIB_SNAPSHOT
 
 
