@@ -49,6 +49,39 @@ cannot be inferred from the model; the handler declares it.
 - **Omitting `tasks=` is meaningful, not neutral**: an undeclared handler resolves NO quant
   approval and serves at base precision. That is fail-closed by design — it degrades, it
   never strands — but every serving endpoint should declare.
+## 0.76.3 — the reuse wave: adopt-without-mint unblocked + AOT flip seams
+
+The four structural bugs that held cell adoption at zero in the sdxl 0.2.14
+four-leg proof (verdict: "airtight cells, proven; adoption economics: not
+yet"), plus the flip-critical AOT serve seams.
+
+- **pgw#745**: host driver libs (libcuda.so.*, libnvidia-*) excluded from the
+  env_seal lib manifest — cell keys stop fracturing per RunPod driver cohort
+  (gw#577: driver is never identity). seal_v4.
+- **pgw#749**: the identity lib manifest is the userspace toolchain ON DISK
+  (torch/triton/nvidia package roots, content-digested), never the
+  phase-dependent /proc/self/maps snapshot — cold-boot candidate keys now
+  equal published keys, so boot-attach adoption can fire. seal_v5. The maps
+  probe stays as the live substitution-refusal surface.
+- **pgw#751**: adoption keeps LOCAL bytes on same-key byte-divergent cache
+  members (bytes are not the identity — #699/#711 respec); warm pods can
+  install cells. Structural conflicts still refuse typed.
+- **pgw#750 (task 1)**: the off-vs-vae_only resident refinement keys on TOTAL
+  card capacity (per-SKU constant), never marginal live free VRAM — the mint's
+  traced graph class and object set are deterministic per SKU.
+- **pgw#722 pilot seams F1/F2/F3**: flag-gated AOT serve flip
+  (`GEN_WORKER_PREFER_AOT`, default OFF) — discovery/adopt of exported cells,
+  lifted-LoRA arm order, binding-routed adapter swaps. Seal-digest invariant.
+- **pgw#747**: a bare-typed auxiliary slot emits `family=""` — family-agnostic
+  artifacts (RIFE, upscalers) become bindable.
+- **pgw#743**: a proxy-shaped answer is not a hub verdict at ANY status
+  (+ convert keepalive). [Relabelled from 0.76.2 — it missed that wheel.]
+- `equivalence.py` deleted (deliberate re-land of the chaos deletion; Paul's
+  ck5/ck6 exact-identity ruling).
+- NOT aboard: pgw#752 (rides 0.76.4); pgw#735 boot-proof gap fix (flip-prep
+  lane; the flip smoke notes the gap until it ships).
+
+
 
 ## Unreleased (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
 
@@ -169,7 +202,7 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
 
-## 0.76.6 (2026-07-27) — pgw#722 finding 2: a pure-AOT arm proves itself at boot (the #735 gap)
+## 0.76.6 stamp — SHIPPED IN 0.76.3 (relabelled by the train; kept for the chaos record) — pgw#722 finding 2: a pure-AOT arm proves itself at boot (the #735 gap)
 
 The shipped #735 kind-aware boot proof ran only under `proves_inductor` — a worker whose
 ONLY arm is an adopted exported cell (the prod-flip shape: F1 adopts, the delivered dynamo
