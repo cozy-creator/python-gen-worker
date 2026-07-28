@@ -28,6 +28,7 @@ from gen_worker.api.errors import ValidationError
 
 from .bank import build_bank_payload, flavor_bank_key
 from .hub import CommitFile, HubClient, HubPublishError, files_from_tree
+from .keepalive import HubKeepalive
 from .ingest import (
     IngestedSource,
     _is_multi_weight_names,
@@ -912,6 +913,7 @@ def run_clone(
     _sweep_stale_workdirs(workdir.parent, keep=workdir)
     lock_fd = _acquire_workdir_lock(workdir)
     succeeded = False
+    keepalive: Optional[HubKeepalive] = None
     try:
         if provider not in {"huggingface", "civitai"}:
             raise ValueError(f"unsupported clone provider: {provider!r}")
@@ -980,6 +982,16 @@ def run_clone(
             dl_bytes["done"] = max(dl_bytes["done"], int(done or 0))
             if total:
                 _progress(0.05 + 0.45 * min(1.0, done / total), "clone.download")
+
+        # pgw#743: download and cast are the two phases that talk to the hub
+        # NOT AT ALL — an hour of them, and then the first upload discovers
+        # whatever happened to the path in the meantime. Both losses of a paid
+        # 53 GiB download landed exactly there. Keep the path warm and, either
+        # way, keep an actual record of when the hub was reachable.
+        keepalive = HubKeepalive(
+            hubclient, hubclient._repo_path(destination),
+            log=getattr(ctx, "log", None))
+        keepalive.start()
 
         if provider == "huggingface":
             source = ingest_huggingface(
@@ -1259,6 +1271,14 @@ def run_clone(
         succeeded = True
         return result
     finally:
+        if keepalive is not None:
+            keepalive.stop()
+            if keepalive.longest_outage_s or keepalive.reachable is False:
+                logger.warning(
+                    "clone hub keepalive: %d probes, longest observed outage "
+                    "%.0fs, reachable at exit=%s",
+                    keepalive.probes, keepalive.longest_outage_s,
+                    keepalive.reachable)
         # gw#462: a long-running worker must not leak scratch — the workdir
         # goes after EVERY job. Cross-run resume lives in the publish bank
         # (th#592) + CAS dedup, not in retained local bytes.

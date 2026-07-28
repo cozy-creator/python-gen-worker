@@ -119,6 +119,62 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
 
+## 0.76.2 (2026-07-27) — pgw#743: a proxy-shaped answer is not a verdict, at ANY status
+
+pgw#715 taught the publisher that "a 404 from a PROXY is not a 404 from the hub". It taught it
+about **404 only**. Two independent clones then downloaded 53 GiB over ~58 minutes each and died
+byte-identically at the **first upload**:
+
+```
+HubPublishError: upload complete failed (503) for
+'transformer_2/diffusion_pytorch_model-00001-of-00014.safetensors'
+after 5 attempts: <!DOCTYPE html>
+```
+
+Same proxy, same HTML page, different number — and the different number was enough to throw away
+a fully-paid download. `tensorhub/wan22-i2v-a14b` has been a half-present MoE ever since, and the
+`krea-2-{raw,turbo}` mirrors have zero checkpoints.
+
+**The question is never "was it a 404?"** — it is "did the hub ITSELF answer?".
+`http_origin.is_definite_hub_answer(resp)` now asks exactly that, status-agnostically: a 2xx/3xx
+(nothing fabricates a success for a route it cannot reach) or a 4xx carrying the hub's
+`{"error": {"code": ...}}` envelope is a VERDICT and ends a retry loop. Everything else — 5xx,
+and any status whose body is HTML/empty/enveloped-wrong — is the peer failing to answer, and is
+retried under a silence window. `convert/hub.py::_send_with_retries` is gated on that single
+predicate instead of `code == 404 and is_proxy_outage(...)`, so an ngrok 403 or 502 rides out
+exactly like the 503 did not.
+
+Hub-origin refusals are **unchanged and still terminal on the first attempt** — biasing toward
+retry must not convert real refusals into retry loops, and there is a test that counts the POSTs.
+
+**Sizing, on measured evidence.** `_COMPLETE_SILENCE_WINDOW_S` went from 2 to 6 verify-lengths
+(20 -> 60 min). The recorded outages OUTLIVED the 20-minute window: the chaos hub's container was
+being rebuilt under the running clones. A window is a claim about how long the channel may
+plausibly be gone, and a container rebuild is tens of minutes. The arithmetic agrees — an hour
+parked on the CPU rig these jobs run on costs about what re-downloading costs, and unlike the
+re-download it cannot fail the same way again. The retry loop beats `activity.note_progress()`
+every pass so an hour of legitimate waiting is not the dead-job signature (pgw#738).
+
+**`convert/keepalive.py` (new) — the hub-silent hour that set the trap.** A clone spends ~58
+minutes downloading from HuggingFace and makes not one hub request; both losses landed on the
+first request after such a gap. `HubKeepalive` probes one cheap repo GET every 120s for the whole
+of `run_clone` (download AND cast), so there is never an hour-old idle path for a multi-GB upload
+to discover, and — whatever the idle-tunnel hypothesis turns out to be worth — the log now DATES
+the outage instead of leaving its corpse. The probe is deliberately toothless: it never retries,
+never raises, never fails a job. Deciding what an outage means belongs to the retry loop that
+knows what work is at stake.
+
+Sub-chunking uploads to start them earlier was the alternative and does not fit clone: no output
+file exists until the whole snapshot has been downloaded and run through repackage/cast
+(`build_flavor_tree` reshards across the complete file set), so "upload sooner" means rebuilding
+the pipeline as a streaming one, not adding a call.
+
+Landed together with the `_send_with_retries` silence-window rewrite authored by the pgw#738 lane
+in the shared chaos worktree — pgw#743 IS that rewrite plus the generalisation above, and a
+second implementation would only have collided with it. pgw#738's other halves (executor lock
+order, publish observability) remain that lane's to land under its own version claim; this bump
+takes 0.76.2 and leaves 0.76.1 to it.
+
 ## 0.75.2 (2026-07-27) — pgw#737: the self-mint never takes the tenant request down again
 
 The ie#535 wan-2.2 1.3.1 go-live spent $2.61 and rendered zero frames. On both tiers and both
