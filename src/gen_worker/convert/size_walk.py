@@ -31,25 +31,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..component_vocab import weight_components
+
 # Weight file extensions counted toward a component's size. Restricted to
 # real weight containers — config.json, tokenizer.json, README, etc. are
 # excluded since they don't load into VRAM.
 _WEIGHT_EXTS: tuple[str, ...] = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf")
 
-# Component subdirs that are weight-bearing. Matches gen-worker's
-# conversion._DIFFUSERS_COMPONENT_DIRS roughly; kept local so we don't
-# import a heavy module.
-_DIFFUSERS_WEIGHT_COMPONENT_DIRS: frozenset[str] = frozenset({
-    "transformer",
-    "unet",
-    "vae",
-    "text_encoder",
-    "text_encoder_2",
-    "text_encoder_3",
-    "image_encoder",
-    "prior",
-    "controlnet",
-})
+# Component subdirs that are weight-bearing — read from the ONE vocabulary at
+# call time (pgw#740 B5), so a component an endpoint declares is sized too
+# rather than silently contributing zero bytes.
+def _diffusers_weight_component_dirs() -> frozenset[str]:
+    return frozenset(weight_components())
 
 
 def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
@@ -73,7 +66,7 @@ def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
     # Diffusers layout: per-component subdirs.
     diffusers_entries = [
         entry for entry in path.iterdir()
-        if entry.is_dir() and entry.name in _DIFFUSERS_WEIGHT_COMPONENT_DIRS
+        if entry.is_dir() and entry.name in _diffusers_weight_component_dirs()
     ]
     if diffusers_entries:
         for entry in sorted(diffusers_entries):

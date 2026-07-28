@@ -263,13 +263,16 @@ def _tensor_to_bytes(t: "torch.Tensor") -> Any:
 
 
 # ---------------------------------------------------------------------------
+from ..component_vocab import (
+    denoiser_components,
+    text_encoder_components,
+    weight_components,
+)
 # Tensor iteration (single / sharded / pickle inputs)
 # ---------------------------------------------------------------------------
 
-_WEIGHT_COMPONENT_DIRS: frozenset[str] = frozenset({
-    "unet", "transformer", "vae", "text_encoder", "text_encoder_2",
-    "text_encoder_3", "image_encoder", "prior", "controlnet",
-})
+def _weight_component_dirs() -> frozenset[str]:
+    return frozenset(weight_components())
 
 
 def materialize_pickle_to_safetensors(pickle_path: Path, work_dir: Path) -> Path:
@@ -346,7 +349,7 @@ def iter_source_tensors(
             yield "", name, tensor
         return
     for entry in sorted(root.iterdir()):
-        if not entry.is_dir() or entry.name not in _WEIGHT_COMPONENT_DIRS:
+        if not entry.is_dir() or entry.name not in _weight_component_dirs():
             continue
         if components_filter is not None and entry.name not in components_filter:
             continue
@@ -775,7 +778,9 @@ def streaming_w8a8_cast(
 # Components fp8 storage targets by default: the denoiser dominates VRAM and
 # is what apply_fp8_storage consumes (QUANTIZATION-POLICY.md order of
 # sacrifice; TEs join via gw#392's component-wise ladder, explicitly).
-FP8_DEFAULT_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
+def fp8_default_components() -> tuple[str, ...]:
+    """Components fp8 storage targets by default: the denoisers."""
+    return denoiser_components()
 
 
 def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Path]]:
@@ -915,13 +920,12 @@ def streaming_cast_snapshot(
             "components": sorted(done), "output_dir": out_dir}
 
 
-# Text-encoder components the ``fp8+te`` rung casts (must mirror
-# gen_worker.models.loading._FP8_TEXT_ENCODER_COMPONENTS — drift guard in
-# tests/test_fp8_te_writer.py; not imported here to keep this module's
-# import cheap).
-FP8_TE_COMPONENTS: tuple[str, ...] = (
-    "text_encoder", "text_encoder_2", "text_encoder_3",
-)
+# Text-encoder components the ``fp8+te`` rung casts. This USED to be a
+# hand-maintained mirror of loading's copy with a drift guard in
+# tests/test_fp8_te_writer.py; pgw#740 B5 removed the drift by removing the
+# copy (component_vocab is stdlib-only, so importing it stays cheap).
+def fp8_te_components() -> tuple[str, ...]:
+    return text_encoder_components()
 
 
 def _component_stored_tensor_names(component_dir: Path) -> frozenset[str]:
@@ -1071,7 +1075,7 @@ def streaming_fp8_snapshot(
     out_dir: Path,
     *,
     file_layout: str,
-    components: tuple[str, ...] = FP8_DEFAULT_COMPONENTS,
+    components: tuple[str, ...] | None = None,
     te_components: tuple[str, ...] = (),
     shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
 ) -> dict[str, Any]:
@@ -1079,7 +1083,7 @@ def streaming_fp8_snapshot(
 
     ``components`` (default: the denoiser) get the name-pattern fp8 cast;
     ``te_components`` (the ``fp8+te`` rung, gw#460 — pass
-    :data:`FP8_TE_COMPONENTS`) get the transformers block-window cast whose
+    :func:`fp8_te_components`) get the transformers block-window cast whose
     eligible set is derived from the loader itself. Every other component
     passes through untouched.
 
@@ -1088,6 +1092,10 @@ def streaming_fp8_snapshot(
     IS the denoiser, e.g. a UiT like HiDream-O1). That set gets the
     block-scoped fp8 cast; multi-set singlefile bundles still refuse
     (component identity is ambiguous there)."""
+    # Resolved at call time, never as a default argument: a default is
+    # evaluated at def time and would freeze the pre-declaration vocabulary.
+    if components is None:
+        components = fp8_default_components()
     source_dir, out_dir = Path(source_dir), Path(out_dir)
     if file_layout != "diffusers":
         root_groups = snapshot_weight_groups(source_dir, file_layout)
@@ -1177,7 +1185,7 @@ def streaming_w8a8_snapshot(
     out_dir: Path,
     *,
     file_layout: str,
-    components: tuple[str, ...] = FP8_DEFAULT_COMPONENTS,
+    components: tuple[str, ...] | None = None,
     te_components: tuple[str, ...] = (),
     weight_set_patterns: tuple[str, ...] = (),
     shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
@@ -1201,6 +1209,10 @@ def streaming_w8a8_snapshot(
     (their quantized keys could never resolve in the denoiser at swap
     time). No component config exists; the headers alone carry
     detection."""
+    # Resolved at call time, never as a default argument: a default is
+    # evaluated at def time and would freeze the pre-declaration vocabulary.
+    if components is None:
+        components = fp8_default_components()
 
     source_dir, out_dir = Path(source_dir), Path(out_dir)
     if file_layout != "diffusers":
@@ -1676,8 +1688,8 @@ __all__ = [
     "copy_non_weight_files",
     "fp8_cast_eligible",
     "FP8_SKIP_TENSOR_PATTERNS",
-    "FP8_DEFAULT_COMPONENTS",
-    "FP8_TE_COMPONENTS",
+    "fp8_default_components",
+    "fp8_te_components",
     "te_fp8_castable_keys",
     "streaming_fp8_te_cast",
     "shard_safetensors_by_offset",

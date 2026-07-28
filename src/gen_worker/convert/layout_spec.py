@@ -14,6 +14,7 @@ one :class:`LayoutDeclaration` in its endpoint repo.
 from __future__ import annotations
 
 import re
+from ..component_vocab import pipeline_component_dirs
 from dataclasses import dataclass, field
 
 from .repack_spec import DeclarationError
@@ -131,19 +132,10 @@ class LayoutDeclaration:
 class LayoutSignals:
     """Generic, family-free evidence that a directory is a diffusers tree at all."""
 
+    # default_factory (not a literal default) so the vocabulary is read when a
+    # LayoutSignals is constructed, after endpoint declarations (pgw#740 B5).
     component_dirs: frozenset[str] = field(
-        default_factory=lambda: frozenset(
-            {
-                "unet",
-                "vae",
-                "text_encoder",
-                "text_encoder_2",
-                "tokenizer",
-                "tokenizer_2",
-                "scheduler",
-                "transformer",
-            }
-        )
+        default_factory=lambda: frozenset(pipeline_component_dirs())
     )
     index_file: str = "model_index.json"
     weight_suffixes: tuple[str, ...] = (".safetensors", ".gguf")

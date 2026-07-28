@@ -45,6 +45,7 @@ import logging
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from ..component_vocab import denoiser_components
 from typing import Any, Dict, Optional
 import shutil
 
@@ -71,7 +72,6 @@ W4A4_MIN_SM = 100
 _K_ALIGN = 32
 _N_ALIGN = 16
 _MAX_HEADER_BYTES = 100 << 20
-_COMPONENT_DIRS = ("transformer", "unet")
 _AUX_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale",
                  ".pre_quant_scale")
 
@@ -149,7 +149,7 @@ def detect_w4a4_artifact(model_path: Path) -> Optional[W4a4Artifact]:
     if not root.is_dir():
         return None
     if (root / "model_index.json").exists():
-        for comp in _COMPONENT_DIRS:
+        for comp in denoiser_components():
             comp_dir = root / comp
             if not comp_dir.is_dir():
                 continue
@@ -732,7 +732,7 @@ def swap_w4a4_linears(
 def _root_denoiser(pipe: Any) -> Any:
     import torch.nn as nn
 
-    for name in ("transformer", "unet", "dit"):
+    for name in denoiser_components():
         mod = getattr(pipe, name, None)
         if isinstance(mod, nn.Module):
             return mod
@@ -793,7 +793,7 @@ def quantize_tree_w4a4(
     from safetensors.torch import load_file, save_file
 
     src_tree, out_tree = Path(src_tree), Path(out_tree)
-    comp = next((c for c in _COMPONENT_DIRS if (src_tree / c).is_dir()), None)
+    comp = next((c for c in denoiser_components() if (src_tree / c).is_dir()), None)
     if comp is None or not (src_tree / "model_index.json").exists():
         raise W4a4SnapshotError(f"{src_tree} is not a diffusers tree with a denoiser")
     if out_tree.exists():

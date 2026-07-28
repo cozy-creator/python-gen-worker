@@ -299,14 +299,10 @@ async def ensure_local(
 # Hugging Face: snapshot_download + small variant selector
 # ---------------------------------------------------------------------------
 
+from ..component_vocab import denoiser_components, pipeline_component_dirs
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".onnx", ".msgpack", ".h5")
 _VARIANT_TAGS = ("bf16", "fp16", "fp8", "int8", "int4")
-_COMPONENT_DIRS = (
-    "transformer", "transformer_2", "unet", "vae", "text_encoder",
-    "text_encoder_2", "text_encoder_3", "tokenizer", "tokenizer_2",
-    "tokenizer_3", "scheduler", "feature_extractor", "image_encoder",
-    "safety_checker", "prior", "decoder",
-)
+_component_dirs = pipeline_component_dirs
 
 
 def _variant_of(filename: str) -> str:
@@ -335,7 +331,7 @@ def select_hf_files(
     if not files:
         return None
     dirs = {f.split("/", 1)[0] for f in files if "/" in f}
-    diffusers_like = "model_index.json" in files or any(d in dirs for d in ("transformer", "unet"))
+    diffusers_like = "model_index.json" in files or any(d in dirs for d in denoiser_components())
 
     weights_by_dir: Dict[str, list[str]] = {}
     non_weights: set[str] = set()

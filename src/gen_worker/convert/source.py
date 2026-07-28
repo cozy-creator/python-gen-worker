@@ -32,21 +32,24 @@ FileLayout = Literal["singlefile", "diffusers"]
 # config / tokenizer / scheduler / non-quantizable bits that should travel
 # verbatim into the output snapshot. vae is here because most quant tenants
 # (bnb) leave the vae bf16; modelopt may override per spec.
-_DEFAULT_PASSTHROUGH_COMPONENTS: frozenset[str] = frozenset({
-    "vae", "scheduler",
-    "tokenizer", "tokenizer_2", "tokenizer_3",
-    "feature_extractor", "safety_checker",
-})
+def _default_passthrough_components() -> frozenset[str]:
+    """Everything a default quant pass leaves alone: the config-only extras
+    plus the VAEs (weight_components minus quant_candidate_components)."""
+    vocab = component_vocabulary()
+    return frozenset(vocab.vaes + vocab.extras)
 
+from ..component_vocab import (
+    component_vocabulary,
+    pipeline_component_dirs,
+    quant_candidate_components,
+    weight_components,
+)
 # Components that are candidates for quantization. text_encoder_3 is in here
 # because flux.2-klein-9b / SD3 use three text encoders; older tenants that
 # hardcoded ('transformer', 'unet', 'text_encoder', 'text_encoder_2', 'vae')
 # silently skipped text_encoder_3.
-_DEFAULT_QUANT_CANDIDATE_COMPONENTS: frozenset[str] = frozenset({
-    "transformer", "unet",
-    "text_encoder", "text_encoder_2", "text_encoder_3",
-    "image_encoder", "prior", "controlnet",
-})
+def _default_quant_candidate_components() -> frozenset[str]:
+    return frozenset(quant_candidate_components())
 
 # Top-level file basenames yielded by the synthetic '_root' LoadedComponent.
 # model_index.json is the diffusers pipeline manifest; everything else is
@@ -60,18 +63,12 @@ _ROOT_PASSTHROUGH_FILES: tuple[str, ...] = (
 )
 
 
-_DIFFUSERS_COMPONENT_DIRS: frozenset[str] = frozenset({
-    "unet", "transformer", "vae", "text_encoder", "text_encoder_2",
-    "text_encoder_3", "image_encoder", "prior", "controlnet", "scheduler",
-    "tokenizer", "tokenizer_2", "tokenizer_3", "feature_extractor",
-    "safety_checker",
-})
+def _diffusers_component_dirs() -> frozenset[str]:
+    return frozenset(pipeline_component_dirs())
 # Component dirs that carry model weights (as opposed to scheduler/tokenizer
 # configuration). iter_tensors skips the rest unless explicitly named.
-_WEIGHT_COMPONENT_DIRS: frozenset[str] = frozenset({
-    "unet", "transformer", "vae", "text_encoder", "text_encoder_2",
-    "text_encoder_3", "image_encoder", "prior", "controlnet",
-})
+def _weight_component_dirs() -> frozenset[str]:
+    return frozenset(weight_components())
 
 
 def _detect_file_layout(path: Path) -> FileLayout:
@@ -89,7 +86,7 @@ def _enumerate_components(path: Path) -> dict[str, Component]:
     for entry in sorted(path.iterdir()):
         if not entry.is_dir():
             continue
-        if entry.name in _DIFFUSERS_COMPONENT_DIRS:
+        if entry.name in _diffusers_component_dirs():
             result[entry.name] = Component(entry.name, entry)
     return result
 
@@ -291,7 +288,7 @@ class Source:
         weight_exts = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
         total = 0
         if self._file_layout == "diffusers":
-            for comp_name in _WEIGHT_COMPONENT_DIRS:
+            for comp_name in _weight_component_dirs():
                 comp_path = self._path / comp_name
                 if not comp_path.is_dir():
                     continue
@@ -383,12 +380,12 @@ class Source:
         quant_set = (
             frozenset(quant_only)
             if quant_only is not None
-            else _DEFAULT_QUANT_CANDIDATE_COMPONENTS
+            else _default_quant_candidate_components()
         )
         passthrough_set = (
             frozenset(passthrough_only)
             if passthrough_only is not None
-            else _DEFAULT_PASSTHROUGH_COMPONENTS
+            else _default_passthrough_components()
         )
         offload_path = Path(offload_folder) if offload_folder is not None else None
         if offload_path is not None:
@@ -433,7 +430,7 @@ def _iter_diffusers_components(
 
     seen: set[str] = set()
     for entry in sorted(snapshot_path.iterdir()):
-        if not entry.is_dir() or entry.name not in _DIFFUSERS_COMPONENT_DIRS:
+        if not entry.is_dir() or entry.name not in _diffusers_component_dirs():
             continue
         seen.add(entry.name)
         if entry.name in quant_set and quantization_config is not None:

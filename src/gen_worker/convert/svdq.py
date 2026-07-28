@@ -16,6 +16,8 @@ Two producers emit this shape:
 
 from __future__ import annotations
 
+from ..component_vocab import denoiser_components
+
 import logging
 import os
 from pathlib import Path
@@ -75,7 +77,7 @@ def build_svdq_flavor_tree(
         )
     if component is None:
         component = next(
-            (c for c in ("transformer", "unet") if (base_dir / c).is_dir()), "",
+            (c for c in denoiser_components() if (base_dir / c).is_dir()), "",
         )
     if not component:
         raise ValueError(

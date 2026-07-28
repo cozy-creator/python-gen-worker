@@ -69,7 +69,7 @@ from .publish import publish_flavors
 from .source import FileLayout, Source
 from .svdq import build_svdq_flavor_tree, fetch_svdq_checkpoint, svdq_flavor_label
 from .writer import (
-    FP8_TE_COMPONENTS,
+    fp8_te_components,
     streaming_cast_snapshot,
     streaming_dtype_cast,
     streaming_fp8_snapshot,
@@ -105,7 +105,7 @@ __all__ = [
     "streaming_w8a8_cast",
     "streaming_w8a8_snapshot",
     "verify_w8a8_snapshot",
-    "FP8_TE_COMPONENTS",
+    "fp8_te_components",
     "CalibrationAction",
     "CalibrationPolicy",
     "resolve_calibration_action",
