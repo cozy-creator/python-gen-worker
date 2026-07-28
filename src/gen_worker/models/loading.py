@@ -10,6 +10,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..component_vocab import (
+    denoiser_components,
+    text_encoder_components,
+    weight_components,
+)
 from ..families.facts import component_dtype_for_class
 from .ladder import EMERGENCY_NF4_VRAM_FACTOR, NF4_WEIGHT_BYTES_FACTOR
 import importlib
@@ -161,7 +166,7 @@ def read_on_disk_quant_config(model_path: Path) -> bool:
             p = model_path / rel
             if p.exists():
                 candidates.append(p)
-        for sub in ("transformer", "unet", "text_encoder", "text_encoder_2", "vae"):
+        for sub in weight_components():
             cfg = model_path / sub / "config.json"
             if cfg.exists():
                 candidates.append(cfg)
@@ -205,17 +210,17 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
     )
 
 
-#: Denoiser component directory names — the only components a quantized
-#: artifact lane (w8a8 / w4a4 / svdq / gguf) ever covers.
-DENOISER_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
 # Pipeline components fp8 storage applies to: the denoiser dominates VRAM and
 # tolerates fp8-E4M3 weight rounding; text encoders / VAE stay at compute
 # precision (quality-safe default, QUANTIZATION-POLICY.md component policy).
-_FP8_STORAGE_COMPONENTS: tuple[str, ...] = DENOISER_COMPONENTS
+#
+# These read the vocabulary at CALL time, never at import: an endpoint's
+# declare_components() runs at endpoint-module import, which may be after this
+# module is imported. A module-level tuple would freeze the pre-declaration
+# vocabulary and silently skip the declared components (pgw#740 B5).
+_fp8_storage_components = denoiser_components
 # The "+te" rung (component fit-ladder rung 2): the pipeline's text encoders.
-_FP8_TEXT_ENCODER_COMPONENTS: tuple[str, ...] = (
-    "text_encoder", "text_encoder_2", "text_encoder_3",
-)
+_fp8_text_encoder_components = text_encoder_components
 
 class _Fp8WeightWindow:
     """Weight-only fp8 storage for one transformer block: the block's
@@ -397,9 +402,9 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
         compute_dtype = torch.bfloat16
 
     if components is None:
-        components = _FP8_STORAGE_COMPONENTS
+        components = _fp8_storage_components()
         if text_encoders:
-            components += _FP8_TEXT_ENCODER_COMPONENTS
+            components += _fp8_text_encoder_components()
     targets: List[tuple[str, Any]] = []
     for name in components:
         mod = getattr(obj, name, None)
@@ -467,16 +472,10 @@ class _BlockOffloadWindow:
             p.data = h
 
 
-# Components block-window offload targets on a pipeline object (the VRAM
-# dominators); callers pass their own set for model-specific choices (e.g.
-# ltx adds "connectors" and "text_encoder").
-_BLOCK_OFFLOAD_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
-
-
 def apply_block_window_offload(
     obj: Any,
     *,
-    components: tuple[str, ...] = _BLOCK_OFFLOAD_COMPONENTS,
+    components: tuple[str, ...] | None = None,
     device: Any = None,
 ) -> bool:
     """Park a module's per-block weights in pinned host RAM and stream each
@@ -493,6 +492,11 @@ def apply_block_window_offload(
     stream over PCIe (half the traffic), upcast happens on-device.
 
     Returns True when any module was armed. Idempotent per module."""
+    # Default resolved at call time, not in the signature: a default argument
+    # is evaluated at def time, which would freeze the vocabulary before an
+    # endpoint's declare_components() ever runs (pgw#740 B5).
+    if components is None:
+        components = denoiser_components()
     try:
         import torch
     except ImportError:
@@ -575,7 +579,7 @@ def block_offload_active(obj: Any) -> bool:
         return True
     return any(
         getattr(getattr(obj, name, None), "_cozy_block_offload_applied", False)
-        for name in _BLOCK_OFFLOAD_COMPONENTS
+        for name in denoiser_components()
     )
 
 
@@ -618,7 +622,7 @@ def load_gguf_pipeline(
     component = next(
         (
             name
-            for name in _FP8_STORAGE_COMPONENTS
+            for name in _fp8_storage_components()
             if isinstance(index.get(name), list) and len(index[name]) == 2
         ),
         None,
@@ -639,7 +643,7 @@ def load_gguf_pipeline(
     kwargs = dict(components or {})
     kwargs[component] = denoiser
     pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
-    for name in _FP8_TEXT_ENCODER_COMPONENTS:
+    for name in _fp8_text_encoder_components():
         text_encoder = getattr(pipe, name, None)
         if text_encoder is not None and hasattr(text_encoder, "parameters"):
             apply_fp8_storage(text_encoder, compute_dtype=compute)
@@ -792,7 +796,7 @@ def pipeline_weight_lane(pipeline: Any) -> str:
         return ""  # traces identically to plain bf16
     if lane:
         return lane
-    for name in _FP8_STORAGE_COMPONENTS:
+    for name in _fp8_storage_components():
         if getattr(getattr(pipeline, name, None), "_cozy_fp8_storage_applied", False):
             return "fp8-hooks"
     if getattr(pipeline, "_cozy_fp8_storage_applied", False):
@@ -830,9 +834,9 @@ def bf16_resident_fits(
     total = sum(comp.values())
     if total <= 0:
         return False
-    targets = set(_FP8_STORAGE_COMPONENTS)
+    targets = set(_fp8_storage_components())
     if text_encoders:
-        targets |= set(_FP8_TEXT_ENCODER_COMPONENTS)
+        targets |= set(_fp8_text_encoder_components())
     # Per-TENSOR fp8 byte accounting (ie#381 fix 2): the majority-dtype
     # component gate returned "bf16" for produced fp8 flavors whose scale/
     # norm tensors outnumber the (much larger) fp8 weight tensors, counting
@@ -1303,7 +1307,7 @@ def load_component(
             f"svdq engine during the PIPELINE load, so there is no "
             f"component-level production loader to borrow"
         )
-    if component in DENOISER_COMPONENTS and detect_gguf_snapshot(root):
+    if component in denoiser_components() and detect_gguf_snapshot(root):
         raise ComponentLaneUnsupported(
             f"component {component!r} of {root} is a GGUF denoiser: it is "
             f"dequantized by the pipeline's own gguf loader, so there is no "
@@ -1451,7 +1455,7 @@ def emergency_quantization_config(
         "bnb_4bit_use_double_quant": True,
     }
     if isinstance(cls, type) and issubclass(cls, diffusers.DiffusionPipeline):
-        targets = list(_FP8_STORAGE_COMPONENTS) if components is None else list(components)
+        targets = list(_fp8_storage_components()) if components is None else list(components)
         if not targets:
             logger.warning(
                 "emergency nf4 skipped: no quantizable component in the "
@@ -1525,9 +1529,9 @@ def _adaptive_fit_rung(
     budget = max(0.0, free_gb - _EMERGENCY_MARGIN_GB) * float(1 << 30)
 
     named = model_index_components(path) or set(comp_bytes)
-    denoisers = [c for c in _FP8_STORAGE_COMPONENTS
+    denoisers = [c for c in _fp8_storage_components()
                  if c in named and comp_bytes.get(c, 0) > 0]
-    encoders = [c for c in _FP8_TEXT_ENCODER_COMPONENTS
+    encoders = [c for c in _fp8_text_encoder_components()
                 if c in named and comp_bytes.get(c, 0) > 0]
     denoiser_bytes = sum(comp_bytes[c] for c in denoisers)
 

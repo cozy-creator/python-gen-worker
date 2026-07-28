@@ -507,13 +507,11 @@ def _run_bnb_inline(
     )
 
 
+from ..component_vocab import quant_candidate_components
 # Components that hold quantizable weights (DiT, UNet, text encoders, etc.).
 # Everything not in this set passes through unchanged.
-_DIFFUSERS_QUANT_COMPONENTS: frozenset[str] = frozenset({
-    "transformer", "unet",
-    "text_encoder", "text_encoder_2", "text_encoder_3",
-    "image_encoder", "prior", "controlnet",
-})
+def _diffusers_quant_components() -> frozenset[str]:
+    return frozenset(quant_candidate_components())
 
 # Top-level files copied verbatim into the destination snapshot.
 _DIFFUSERS_ROOT_FILES: tuple[str, ...] = (
@@ -557,7 +555,7 @@ def _run_bnb_diffusers_inline(
         comp_name = entry.name
         comp_out = out_dir / comp_name
 
-        if comp_name in _DIFFUSERS_QUANT_COMPONENTS:
+        if comp_name in _diffusers_quant_components():
             cfg_path = entry / "config.json"
             if not cfg_path.is_file():
                 _shutil.copytree(entry, comp_out, dirs_exist_ok=True)
@@ -607,7 +605,7 @@ def _run_bnb_diffusers_inline(
             reason=(
                 f"diffusers source at {repo_dir} has no quantizable "
                 f"components for {dtype} (looked for: "
-                f"{sorted(_DIFFUSERS_QUANT_COMPONENTS)})"
+                f"{sorted(_diffusers_quant_components())})"
             ),
             target_dtype=dtype,
         )

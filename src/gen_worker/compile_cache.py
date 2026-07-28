@@ -2374,8 +2374,17 @@ def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callabl
         if not isinstance(t, torch.Tensor) or not t.is_floating_point():
             return
         for d in dynamic_dims:
-            dim = 0 if d.dim == "batch" else (1 if t.dim() >= 3 else -1)
-            if dim < 0 or t.dim() <= dim:
+            # Only the two logical dynamo axes are markable here. A named
+            # declared Dim (pgw#739) carries (input, axis) bindings and is
+            # the EXPORT lane's business — marking it at axis 1 by the old
+            # sequence heuristic would mark the wrong axis silently.
+            if d.dim == "batch":
+                dim = 0
+            elif d.dim == "sequence" and t.dim() >= 3:
+                dim = 1
+            else:
+                continue
+            if t.dim() <= dim:
                 continue
             if int(t.shape[dim]) < int(d.min):
                 continue  # 0/1 (and sub-min) sizes keep their free static graph

@@ -157,6 +157,12 @@ class ExportSpec:
     text_lens: Tuple[int, ...] = ()
     guidance_scales: Tuple[float, ...] = ()
     dynamic: Tuple[DynamicDim, ...] = ()
+    #: pgw#739 declaration coordinate: the fork arm values and (for a
+    #: static-rows family) the class row this artifact is minted at. Both
+    #: KEY (a fork is a distinct graph class in #716's hash) — see
+    #: :func:`cell_identity`. Sorted (name, value) pairs.
+    fork: Tuple[Tuple[str, Any], ...] = ()
+    class_dims: Tuple[Tuple[str, int], ...] = ()
     specialization: Dict[str, Any] = field(default_factory=dict)
     lora_fqns: Tuple[str, ...] = ()
     lifted_inputs: Tuple[str, ...] = ()
@@ -172,6 +178,41 @@ class ExportSpec:
         if bucket:
             return f"{token}-lora{bucket}" if token else f"lora{bucket}"
         return token
+
+
+#: The lifted-LoRA mint's torch floor (pgw#723 residuals, pod 8): torch 2.9
+#: strict export refuses ``bind_views``' in-trace ``mod.lora_a = ...`` setattr
+#: ("AssertionError: Mutating module attribute lora_a during export") that
+#: 2.13 traces fine. 2.9 is NOT a valid fallback for this lane.
+LIFTED_LORA_TORCH_FLOOR = (2, 13)
+
+
+def lifted_torch_gap(spec: ExportSpec) -> str:
+    """'' when torch meets the lifted-LoRA floor (or the spec has no lifted
+    fork declared), else the named refusal reason."""
+    if not (spec.lora_bucket or spec.lifted_inputs or spec.lora_fqns):
+        return ""
+    import torch
+
+    version = str(getattr(torch, "__version__", "") or "")
+    parts = version.split("+")[0].split(".")
+    try:
+        found = (int(parts[0]), int(parts[1]))
+    except (IndexError, ValueError):
+        return (
+            f"cannot parse torch version {version!r} to check the "
+            f"lifted-LoRA mint floor (torch >= "
+            f"{'.'.join(map(str, LIFTED_LORA_TORCH_FLOOR))})")
+    if found < LIFTED_LORA_TORCH_FLOOR:
+        floor = ".".join(map(str, LIFTED_LORA_TORCH_FLOOR))
+        return (
+            f"lifted-LoRA mint requires torch >= {floor}, got {version}: "
+            f"torch 2.9 strict export refuses bind_views' in-trace setattr "
+            f"('Mutating module attribute lora_a during export') that 2.13 "
+            f"traces fine — measured on pod 8 (pgw#723 residuals), so the "
+            f"2.13 prod floor is a mint PRECONDITION for this lane, not a "
+            f"preference")
+    return ""
 
 
 def lane_admitted(spec: ExportSpec, *, allow_regressed_lanes: bool) -> str:
@@ -311,18 +352,16 @@ def declared_range_gaps(
        must COVER the declared ``[min, max]``. A collapsed (``lower == upper``)
        or narrowed range is a pin, and the artifact admits less traffic than it
        advertises;
-    3. **cross-input collapse** — a STATIC dim on ANOTHER input whose value is a
-       multiple of the product of the declared dims' trace-time values. Such a
-       dim is an algebraic function of the "dynamic" extents, so it silently
-       fixes them even though each symbol still reports a healthy range. This is
-       the check the presence-only gate lacked.
+    3. **pinning guards** — an equality guard in the shape env mentioning a
+       declared symbol. A dim that is genuinely a function of the declared
+       extents forces the tracer to record ``Eq(h*w, N)``; a dim that merely
+       shares a factor records nothing. This is the check the presence-only gate
+       lacked, and it is evidence-based rather than arithmetic — see
+       :func:`_pinning_guards` for why the arithmetic version was wrong.
     """
     gaps: List[str] = []
     shapes = _placeholder_shapes(program)
     ranges = getattr(program, "range_constraints", {}) or {}
-    env = _shape_env(program)
-    hints = dict(getattr(env, "var_to_val", {}) or {}) if env is not None else {}
-
     declared_symbols: List[Any] = []
     for d in dims:
         if d.min == d.max:
@@ -350,6 +389,35 @@ def declared_range_gaps(
         syms = _free_symbols(dim)
         declared_symbols.extend(syms)
         covered = False
+        # The SOLVED range of the axis's full expression, when the program
+        # records one. This is what makes a UNIFIED relational axis (#739 /
+        # ie#566 §5) gate-able: wan ti2v's per-token dim solves to
+        # ``31*s25*s56`` with its own composite range entry, while the
+        # per-symbol path below would compare a governing symbol's [20, 40]
+        # against the declared [12400, 49600] and refuse a sound artifact.
+        # Composite entries are in the axis's OWN units, so the declared
+        # bounds compare directly, with no multiple-of scaling.
+        expr = getattr(getattr(dim, "node", None), "expr", None)
+        interval = ranges.get(expr) if expr is not None else None
+        if interval is not None:
+            try:
+                lo, hi = int(interval.lower), int(interval.upper)
+            except (TypeError, ValueError, OverflowError):
+                lo = hi = -1
+            if lo >= 0:
+                if lo == hi:
+                    gaps.append(
+                        f"{d.input_name}[{d.axis}] ({expr}) solved to the "
+                        f"single value {lo} — the declared range "
+                        f"[{d.min}, {d.max}] is advertised but the artifact "
+                        f"admits ONE shape")
+                elif lo > d.min or hi < d.max:
+                    gaps.append(
+                        f"{d.input_name}[{d.axis}] ({expr}) solved to "
+                        f"[{lo}, {hi}] which does not cover the declared "
+                        f"[{d.min}, {d.max}] — the artifact admits less "
+                        f"traffic than it advertises")
+                continue
         for sym in syms:
             interval = ranges.get(sym)
             if interval is None:
@@ -383,60 +451,84 @@ def declared_range_gaps(
                 f"{d.input_name}[{d.axis}] is symbolic ({text}) but carries no "
                 f"resolvable symbol; its admissible range is unprovable")
 
-    gaps.extend(_cross_input_collapse(shapes, dims, declared_symbols, hints))
+    gaps.extend(_pinning_guards(program, declared_symbols))
     return gaps
 
 
-def _cross_input_collapse(
-    shapes: Mapping[str, Tuple[Any, ...]],
-    dims: Sequence[DynamicDim],
-    declared_symbols: Sequence[Any],
-    hints: Mapping[Any, Any],
-) -> List[str]:
-    """Static dims on OTHER inputs that pin the declared dynamic extents.
+def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
+    """Equality guards that pin a declared-dynamic symbol (ie#566 G3).
 
-    ie#566 G3, measured on wan ti2v-5b: H and W were declared symbolic and each
-    kept a healthy solved range, but a per-token input of static length 27,280
-    is an algebraic function of H*W — so the graph serves exactly the traced
-    shape regardless. Every per-symbol check passes; only comparing the static
-    dims against the PRODUCT of the trace-time extents finds it.
+    A dim that is GENUINELY a function of the declared extents forces the tracer
+    to record an equality guard; a dim that merely happens to share a factor
+    records nothing. Measured on this toolchain::
 
-    Fail-closed by design: the remedy is to declare that input's dim dynamic too
-    (or make it independent of H*W), and B2 doctrine forbids shipping the silent
-    version while we decide.
+        genuine  x.reshape(b, c, h*w) + tokens   ->  guards ['Eq(s37*s46, 384)']
+        coincidence  x.flatten(2).sum(-1) + tokens.sum()  ->  guards []
+
+    In BOTH cases ``range_constraints`` still reports the full declared range,
+    which is exactly why a presence check — and even a solved-range check —
+    passes the pinned artifact. The guard is the only place the truth appears.
+
+    This replaces an earlier divisibility heuristic that asked whether a static
+    dim was a multiple of the product of the declared extents. That test could
+    not distinguish the two cases above, and it FALSE-POSITIVED on sdxl, whose
+    cross-attention width 2048 and pooled width 1280 are multiples of the
+    declared extents' product by pure architectural coincidence — refusing every
+    symbolic sdxl mint, including the one reproducing pgw#704's headline. The
+    lesson is recorded here because the coincidence is easy to re-introduce:
+    integer arithmetic on shapes is NOT evidence of dependence; a solved
+    relation is.
+
+    A truly free symbol carries no equality guard, so any ``Eq`` mentioning a
+    declared symbol means that symbol is not free.
     """
-    values: List[int] = []
-    for sym in declared_symbols:
-        try:
-            values.append(int(hints[sym]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    if len(values) < 2:
+    declared = {str(sym) for sym in declared_symbols}
+    if not declared:
         return []
-    product = 1
-    for v in values:
-        product *= v
-    if product <= 1:
+    env = _shape_env(program)
+    if env is None:
         return []
-    declared_inputs = {d.input_name for d in dims}
     out: List[str] = []
-    for name, shape in sorted(shapes.items()):
-        if name in declared_inputs:
-            continue
-        for axis, dim in enumerate(shape):
-            text = str(dim)
-            if not text.lstrip("-").isdigit():
+    seen: set = set()
+    for source in ("guards", "axioms"):
+        entries = getattr(env, source, None) or ()
+        if isinstance(entries, dict):
+            entries = list(entries)
+        for entry in entries:
+            expr = getattr(entry, "expr", entry)
+            if expr is None:
                 continue
-            n = int(text)
-            if n >= product and n % product == 0:
-                out.append(
-                    f"{name}[{axis}] is STATIC {n}, a multiple of {product} — "
-                    f"the product of the declared dynamic extents "
-                    f"{values!r}. That dim is an algebraic function of the "
-                    f"'dynamic' axes, so the graph is pinned to the traced "
-                    f"shape even though each symbol reports a range "
-                    f"(ie#566 G3). Declare {name}[{axis}] dynamic too, or make "
-                    f"it independent of the latent extent")
+            if getattr(expr, "func", None) is None or \
+                    type(expr).__name__ not in ("Eq", "Equality"):
+                continue
+            names = {str(sym) for sym in
+                     (getattr(expr, "free_symbols", ()) or ())}
+            hit = sorted(names & declared)
+            if not hit:
+                continue
+            # A pin has a CONSTANT on one side (``Eq(s37*s46, 384)``). An
+            # equality between two symbolic sides (``Eq(s37, 8*s95)``) is the
+            # DEFINITIONAL relation our own multiple-of factor introduces —
+            # ``8 * Dim(...)`` — and refusing it would block every mint that
+            # declares a divisibility, which is all of the image families.
+            sides = list(getattr(expr, "args", ()) or ())
+            if len(sides) != 2 or not any(
+                not (getattr(side, "free_symbols", None) or set())
+                for side in sides
+            ):
+                continue
+            text = str(expr)
+            if text in seen:
+                continue
+            seen.add(text)
+            out.append(
+                f"the exported program carries the equality guard {text}, "
+                f"which PINS the declared dynamic symbol(s) {hit!r} — some "
+                f"other input's static shape is an algebraic function of the "
+                f"declared extents, so the artifact serves exactly the traced "
+                f"shape even though its declared range says otherwise "
+                f"(ie#566 G3). Declare that input dynamic too, or make it "
+                f"independent of the latent extent")
     return out
 
 
@@ -515,6 +607,9 @@ def mint(
     refusal = lane_admitted(spec, allow_regressed_lanes=allow_regressed_lanes)
     if refusal:
         raise MintRefused(refusal)
+    refusal = lifted_torch_gap(spec)
+    if refusal:
+        raise MintRefused(refusal)
 
     out_dir = Path(out_dir)
     work = out_dir / "work"
@@ -522,6 +617,22 @@ def mint(
     timings: Dict[str, float] = {}
 
     args, kwargs = example_inputs()
+    if kwargs:
+        # All-positional example feeds are a MINT OBLIGATION (pgw#723
+        # residuals, pod 9): the AOTI package's call convention mirrors the
+        # traced args/kwargs split, and the serve marshal is POSITIONAL
+        # (aot_serve.marshal_positional) — a kwarg-traced package arms, then
+        # silently revokes to eager on its first call ("Ran into a kwarg
+        # keyword mismatch: Got [] but expected ['lora_a','lora_b']",
+        # measured). Refused HERE so the failure is a named mint refusal
+        # instead of a vacuous eager-serving artifact.
+        raise MintRefused(
+            f"example feed carries keyword argument(s) {sorted(kwargs)!r} — "
+            f"all-positional feeds are a mint obligation (pod 9, pgw#723 "
+            f"residuals): a kwarg-traced package is uncallable by the "
+            f"positional serve marshal and fails only at first serve, "
+            f"silently revoking to eager. Feed every input positionally "
+            f"(signature defaults fill the gaps)")
     input_names = _input_names(module, args, kwargs)
     dynamic = dynamic_shapes_spec(spec.dynamic, input_names) \
         if spec.dynamic else None
@@ -736,7 +847,7 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         raise MintRefused(
             "the envelope recorded no range_digest; an exported cell must not "
             "be keyed without its admissible-shape range (#723 S3)")
-    contract = cell_key.contract_digest({
+    contract_facts: Dict[str, Any] = {
         "v": 1,
         "shapes": sorted([int(v) for v in row] for row in spec.shapes),
         "targets": [spec.target],
@@ -746,7 +857,17 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         "range_digest": range_digest,
         "graph": dict(meta.get("graph") or {}),
         "strict": bool(spec.strict),
-    })
+    }
+    # pgw#739: a fork is a DISTINCT graph class in #716's hash, and a
+    # static-rows artifact's identity is its class row. Present only when the
+    # spec carries a declaration coordinate, so pre-declaration cells keep
+    # their digests.
+    if spec.fork:
+        contract_facts["fork"] = [[str(n), v] for n, v in sorted(spec.fork)]
+    if spec.class_dims:
+        contract_facts["class_dims"] = [
+            [str(n), int(v)] for n, v in sorted(spec.class_dims)]
+    contract = cell_key.contract_digest(contract_facts)
     return cell_key.from_axes({
         "format": str(meta.get("format") or ""),
         "kind": aot_serve.ARTIFACT_KIND,
@@ -890,6 +1011,22 @@ def mint_target(
             f"pipeline {type(pipeline).__name__} has no compile target "
             f"{spec.target!r}")
     owner, attr, _fn = resolved
+    # pgw#739 fork gate: every declared fork with a (pipeline|module, field)
+    # source is read off the COMPOSED objects and must agree with the minted
+    # arm — a graph exported under the wrong arm is the wrong class wearing
+    # the declared class's key (wan's expand_timesteps is a PIPELINE field a
+    # module-config reader never sees; ie#566 G6).
+    from .api.export_contract import export_declaration
+
+    decl = export_declaration(spec.family)
+    if decl is not None and decl.forks:
+        from . import aot_declaration
+
+        gaps = aot_declaration.fork_gaps(
+            decl, dict(spec.fork), target=spec.target,
+            pipeline=pipeline, module=owner)
+        if gaps:
+            raise MintRefused("fork gate (pgw#739): " + "; ".join(gaps))
     module = owner if attr == "forward" else _CallableTarget(owner, attr)
     return mint(
         module, spec, out_dir,
@@ -1022,6 +1159,11 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         source_ref=str(body.get("source_ref") or ""),
         source_digest=str(body.get("source_digest") or ""),
         closure_roots=tuple(str(v) for v in body.get("closure_roots") or ()),
+        fork=tuple(sorted(
+            (str(k), v) for k, v in dict(body.get("fork") or {}).items())),
+        class_dims=tuple(sorted(
+            (str(k), int(v))
+            for k, v in dict(body.get("class_dims") or {}).items())),
     )
     if not spec.family or not spec.target:
         raise MintRefused(
@@ -1062,6 +1204,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:
         print(f"BAD REQUEST {args.request}: {exc}", file=sys.stderr)
         return 3
+    try:
+        # pgw#739: load the endpoint's declaration module (registers the
+        # family's export contract), then resolve the request against it —
+        # deriving the dynamic contract from the declared class rows. A
+        # family with no registration passes through untouched.
+        from . import aot_declaration
+
+        aot_declaration.load_declaration(body, request_path=args.request)
+        spec = aot_declaration.apply_declaration(spec)
+    except MintRefused as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     if args.require_toolchain and not toolchain_present():
         print(
             "REFUSED: no C toolchain (cc/gcc) — an AOTI mint needs the "
@@ -1167,8 +1321,10 @@ __all__ = [
     "dynamic_shapes_spec",
     "export_program",
     "identity_blocks",
+    "LIFTED_LORA_TORCH_FLOOR",
     "lane_admitted",
     "lifted_input_gaps",
+    "lifted_torch_gap",
     "main",
     "mint",
     "mint_target",

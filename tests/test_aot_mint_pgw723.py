@@ -1015,7 +1015,8 @@ def test_cli_loads_a_full_request(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The SDXL input contract
+# The generic input machinery (the sdxl contract itself is a DECLARATION in
+# the sdxl endpoint since pgw#739 — see test_aot_declaration_pgw739.py)
 # ---------------------------------------------------------------------------
 
 
@@ -1053,13 +1054,13 @@ def test_sdxl_lora_bucket_zero_takes_no_adapter_arguments() -> None:
     from gen_worker import aot_inputs
 
     spec = aot_mint.ExportSpec(family="sdxl", target="unet", lora_bucket=0)
-    assert aot_inputs.lifted_lora_kwargs(LiftedModule(), spec) == {}
+    assert aot_inputs.lifted_lora_values(LiftedModule(), spec) == {}
 
 
 def test_unknown_family_has_no_input_contract() -> None:
     from gen_worker import aot_inputs
 
-    with pytest.raises(aot_inputs.InputContractError, match="no AOT export"):
+    with pytest.raises(aot_inputs.InputContractError, match="DECLARED"):
         aot_inputs.builder_for("madeup")
 
 
@@ -1071,12 +1072,20 @@ def test_unknown_family_has_no_input_contract() -> None:
 def test_G1_builders_are_keyed_by_family_AND_target() -> None:
     """A family's compile targets are unrelated modules with unrelated call
     contracts. Keying by family alone made ``vae.decode`` unmintable for EVERY
-    family, not just wan."""
+    family, not just wan. (sdxl's own contract is an endpoint DECLARATION now
+    — pgw#739 — so the keying property is proven on a hand registration.)"""
     from gen_worker import aot_inputs
 
-    assert aot_inputs.builder_for("sdxl", "unet") is aot_inputs.sdxl_unet_inputs
-    with pytest.raises(aot_inputs.InputContractError, match="vae.decode"):
-        aot_inputs.builder_for("sdxl", "vae.decode")
+    def _denoiser(module: Any, spec: Any) -> Any:  # pragma: no cover - key only
+        return (), {}
+
+    aot_inputs._BUILDERS[("keyfam", "unet")] = _denoiser
+    try:
+        assert aot_inputs.builder_for("keyfam", "unet") is _denoiser
+        with pytest.raises(aot_inputs.InputContractError, match="vae.decode"):
+            aot_inputs.builder_for("keyfam", "vae.decode")
+    finally:
+        aot_inputs._BUILDERS.pop(("keyfam", "unet"), None)
 
 
 def test_G1_family_wide_fallback_answers_any_target() -> None:
@@ -1134,52 +1143,120 @@ def test_G1b_signature_stamp_does_not_leak_between_targets() -> None:
 
 
 def test_G2_batch_is_declared_not_inferred_from_guidance() -> None:
-    """wan's CFG is two SEQUENTIAL batch-1 forwards, so guidance changes the call
-    COUNT, not the traced shape. Inferring batch from guidance family-agnostically
-    traced a graph the serving path never calls."""
-    from gen_worker import aot_inputs
+    """wan's CFG is two SEQUENTIAL batch-1 forwards, so guidance changes the
+    call COUNT, not the traced shape. The guidance heuristic that guessed
+    batch died with the sdxl SDK builder (pgw#739): batch is now a declared
+    coordinate — ``B`` is a Dim, the CFG regime is a Fork, and the class ROW
+    states the traced batch outright."""
+    from gen_worker.api.decorators import Compile
+    from gen_worker.api.export_contract import Dim, Fork, GraphClass
 
-    unet = LiftedModule()
-    cfg_spec = aot_mint.ExportSpec(
-        family="sdxl", target="unet", shapes=((1024, 1024),),
-        guidance_scales=(6.0,))
-    assert aot_inputs._sdxl_cfg_batched(cfg_spec) is True
+    decl = Compile(
+        family="g2fam", targets=("unet",), text_len=77,
+        dims=(Dim("B", carried_by=(("x", 0),)),),
+        forks=(Fork("cfg", served=(True, False)),),
+        classes=(
+            GraphClass(dims={"B": 2}, fork={"cfg": True}),
+            GraphClass(dims={"B": 1}, fork={"cfg": False}),
+        ),
+        shape_strategy="static-rows", warm_changes_key=False,
+    )
+    from gen_worker import aot_declaration
 
-    # An explicit declaration overrides the SDXL heuristic entirely.
-    pinned = aot_mint.ExportSpec(
-        family="sdxl", target="unet", shapes=((1024, 1024),),
-        guidance_scales=(6.0,), batch=1)
-    args, _ = aot_inputs.sdxl_unet_inputs(unet, pinned)
-    assert args[0].shape[0] == 1, "declared batch must win over the heuristic"
-    args2, _ = aot_inputs.sdxl_unet_inputs(unet, cfg_spec)
-    assert args2[0].shape[0] == 2
+    batched = aot_declaration.select_plan(decl, "unet", fork={"cfg": True})
+    pinned = aot_declaration.select_plan(decl, "unet", fork={"cfg": False})
+    assert batched.seed.dim_map["B"] == 2
+    assert pinned.seed.dim_map["B"] == 1
 
 
-def test_G3_cross_input_collapse_is_DETECTED() -> None:
-    """The measured FALSE PASS: each symbol keeps a healthy range, yet a static
-    per-token dim that is a function of H*W pins the graph to one shape."""
-    class Tokened(torch.nn.Module):
+def test_G3_genuine_dependence_is_REFUSED() -> None:
+    """The ti2v-5b true positive: a static dim that GENUINELY constrains H*W.
+
+    ``reshape(b, c, h*w)`` against a static-length input forces the tracer to
+    record ``Eq(h*w, N)``. That guard is the evidence — see the coincidence test
+    below for why arithmetic on the numbers is not.
+    """
+    class GenuineDep(torch.nn.Module):
+        def forward(self, x: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+            b, c, h, w = x.shape
+            return x.reshape(b, c, h * w) + tokens.reshape(1, 1, -1)
+
+    h, w = 16, 24
+    program = torch.export.export(
+        GenuineDep().eval(), (torch.randn(2, 4, h, w), torch.randn(h * w)), {},
+        dynamic_shapes={
+            "x": {2: torch.export.Dim("h", min=8, max=32),
+                  3: torch.export.Dim("w", min=8, max=32)},
+            "tokens": None},
+        strict=True)
+    dims = (aot_mint.DynamicDim("x", 2, 8, 32),
+            aot_mint.DynamicDim("x", 3, 8, 32))
+    gaps = aot_mint.declared_range_gaps(program, dims)
+    assert gaps, "an Eq guard pinning h*w must not pass the gate"
+    joined = " ".join(gaps)
+    assert "PINS" in joined and "ie#566 G3" in joined
+    # range_constraints still reports the FULL declared range here — which is
+    # exactly why a presence check (and a solved-range check) miss this.
+    assert all(int(v.lower) == 8 and int(v.upper) == 32
+               for v in program.range_constraints.values())
+
+
+def test_G3_numeric_coincidence_is_NOT_refused() -> None:
+    """The counterpart that killed the arithmetic version of this gate.
+
+    ``tokens`` is numerically h*w but nothing REQUIRES it to be, so no guard is
+    recorded and the dims stay genuinely free. A divisibility test cannot tell
+    this apart from the case above.
+    """
+    class Coincidence(torch.nn.Module):
         def forward(self, x: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
             return x.flatten(2).sum(-1) + tokens.sum()
 
     h, w = 16, 24
     program = torch.export.export(
-        Tokened().eval(),
-        (torch.randn(2, 4, h, w), torch.randn(h * w)),
+        Coincidence().eval(), (torch.randn(2, 4, h, w), torch.randn(h * w)), {},
         dynamic_shapes={
             "x": {2: torch.export.Dim("h", min=8, max=32),
                   3: torch.export.Dim("w", min=8, max=32)},
-            "tokens": None,
-        },
-        strict=True,
-    )
+            "tokens": None},
+        strict=True)
     dims = (aot_mint.DynamicDim("x", 2, 8, 32),
             aot_mint.DynamicDim("x", 3, 8, 32))
-    gaps = aot_mint.declared_range_gaps(program, dims)
-    assert gaps, "a static dim equal to H*W must not pass the gate"
-    joined = " ".join(gaps)
-    assert "tokens[0]" in joined and "STATIC 384" in joined
-    assert "ie#566 G3" in joined
+    assert aot_mint.declared_range_gaps(program, dims) == []
+
+
+def test_G3_does_not_refuse_the_real_sdxl_shape_contract() -> None:
+    """REGRESSION: the arithmetic gate refused EVERY symbolic sdxl mint.
+
+    SDXL's cross-attention width 2048 and pooled width 1280 are multiples of the
+    declared extents' product by architectural coincidence. The old gate read
+    that as dependence and blocked the artifact reproducing pgw#704's headline
+    (one export serving a second in-range shape). This test exists so that
+    cannot come back.
+    """
+    class Sdxlish(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = torch.nn.Linear(2048, 4)
+
+        def forward(self, sample: torch.Tensor, ehs: torch.Tensor,
+                    pooled: torch.Tensor) -> torch.Tensor:
+            return (sample.flatten(2).sum(-1)
+                    + self.lin(ehs).sum() + pooled.sum())
+
+    program = torch.export.export(
+        Sdxlish().eval(),
+        (torch.randn(2, 4, 16, 16), torch.randn(2, 77, 2048),
+         torch.randn(2, 1280)), {},
+        dynamic_shapes={
+            "sample": {2: torch.export.Dim("h", min=8, max=32),
+                       3: torch.export.Dim("w", min=8, max=32)},
+            "ehs": None, "pooled": None},
+        strict=True)
+    dims = (aot_mint.DynamicDim("sample", 2, 8, 32),
+            aot_mint.DynamicDim("sample", 3, 8, 32))
+    assert aot_mint.declared_range_gaps(program, dims) == [], (
+        "2048 and 1280 are architectural constants, not evidence of dependence")
 
 
 def test_G3_does_not_fire_on_an_honest_dynamic_export() -> None:

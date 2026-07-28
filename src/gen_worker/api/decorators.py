@@ -19,6 +19,11 @@
   ``gen_worker.convert.publish_flavors(ctx, flavors)`` (one Tensorhub commit per
   ``ProducedFlavor``), and return a result struct. Generator handlers are
   rejected for producer kinds: nothing is ever published by yielding.
+* ``kind="eval"`` MEASURES a candidate against a reference (th#1255). It reads
+  reserved refs like every non-inference kind and writes request output assets,
+  but publishes no catalog repo — the hub refuses repo writes for eval tokens
+  and never asks an eval where its output repo goes. Its input struct declares
+  no destination, and that is the point.
 * An async-generator handler streams (inference only); there is no separate
   streaming decorator.
 * ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
@@ -39,6 +44,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, Type
 import msgspec
 
 from .binding import BINDING_TYPES, Binding
+from .export_contract import Arg, Dim, Fork, GraphClass, Input, validate_contract
 from .formula import RuntimeFormula
 from .slot import OBJECTIVES, Slot
 from ..models import lanes as lanespec
@@ -48,7 +54,7 @@ from .tree import is_introspectable
 T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
 
-KINDS = ("inference", "training", "dataset", "conversion")
+KINDS = ("inference", "training", "dataset", "conversion", "eval")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
@@ -610,10 +616,20 @@ class DynamicDim(msgspec.Struct, frozen=True):
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
-        d = str(self.dim or "").strip().lower()
-        if d not in ("batch", "sequence"):
+        d = str(self.dim or "").strip()
+        # pgw#739: the old hard-validation to "batch"|"sequence" was the
+        # vocabulary wall wan's latent-spatial axis hit (ie#550/ie#566). Any
+        # declared Dim name is now admissible; Compile.__post_init__
+        # cross-validates the name against Compile.dims, so an unknown axis
+        # is still refused — by cross-reference, not by a two-literal list.
+        # The two logical dynamo axes stay case-normalized; declared Dim
+        # names match exactly.
+        if d.lower() in ("batch", "sequence"):
+            d = d.lower()
+        if not d.isidentifier():
             raise ValueError(
-                f'DynamicDim.dim must be "batch" or "sequence", got {self.dim!r}'
+                f"DynamicDim.dim must name a logical axis (\"batch\", "
+                f"\"sequence\", or a declared Compile.dims name), got {self.dim!r}"
             )
         force(self, "dim", d)
         lo, hi = int(self.min), int(self.max)
@@ -671,7 +687,7 @@ class Compile(msgspec.Struct, frozen=True):
     ``gen_worker.compile_cache``.
     """
 
-    shapes: tuple[tuple[int, ...], ...]
+    shapes: tuple[tuple[int, ...], ...] = ()
     targets: tuple[str, ...] = ("transformer", "vae.decode")
     family: str = ""
     # SDK v2 text-sequence axis (ie#544): None = undeclared (walk-time lint
@@ -689,18 +705,44 @@ class Compile(msgspec.Struct, frozen=True):
     # graph per shape, reused across blocks). Cells record the mode — a
     # mode drift consumer stays eager (cache would miss anyway).
     regional: bool = False
+    # ------------------------------------------------------------------
+    # pgw#739 export-declaration vocabulary. Per-family content is a
+    # DECLARATION here, never worker code: named dims with (input, axis)
+    # bindings, graph-class forks, and RESOLVED coordinate rows generated
+    # by the endpoint's own legality oracle. See api/export_contract.py.
+    # ------------------------------------------------------------------
+    dims: tuple[Dim, ...] = ()
+    forks: tuple[Fork, ...] = ()
+    classes: tuple[GraphClass, ...] = ()
+    inputs: tuple[Input, ...] = ()
+    args: tuple[Arg, ...] = ()
+    # #730 ratified: shape strategy is a per-family DECLARED choice —
+    # conv-bearing families "static-rows" (symbolic latent H/W turns off
+    # inductor's channels-last layout opt, +7.2% measured on sdxl), DiTs
+    # "dynamic-collapse". "" = undeclared; refused at mint-plan time, not
+    # defaulted.
+    shape_strategy: str = ""
+    # Mint-warm canon (#723/#728): whether pre-warming the module changes
+    # the exported graph. A declared per-family FACT, not a ritual — sdxl
+    # measured False, z-image measured True (rope tables: 4327 cold vs
+    # 4285 warmed). None = unmeasured; refused at mint time for declared
+    # families.
+    warm_changes_key: Optional[bool] = None
+    # Declared-eager lanes (LTX §2.3): recorded decision, not an omission.
+    eager: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
         shapes = tuple(tuple(int(v) for v in s) for s in self.shapes)
         if (
-            not shapes
+            (not shapes and not self.classes)
             or any(len(s) not in (2, 3) for s in shapes)
             or any(v <= 0 for s in shapes for v in s)
         ):
             raise ValueError(
                 "Compile.shapes must be positive (w, h) or (w, h, frames) "
-                f"rows, got {self.shapes!r}"
+                f"rows (omittable only when classes= carries the coordinate "
+                f"rows), got {self.shapes!r}"
             )
         force(self, "shapes", shapes)
         targets = tuple(str(t).strip() for t in self.targets if str(t).strip())
@@ -722,6 +764,42 @@ class Compile(msgspec.Struct, frozen=True):
         if len({d.dim for d in dyn}) != len(dyn):
             raise ValueError("Compile.dynamic repeats a dim")
         force(self, "dynamic", dyn)
+        if dyn and self.regional:
+            # OQ-7 (LTX-AOT-DESIGN.md): `_with_declared_marks` is applied only
+            # on the whole-graph branch. The regional branch calls
+            # compile_repeated_blocks(dynamic=None) and never marks, so this
+            # combination declares dynamism the trace never implements while
+            # the contract digest claims it — a key that asserts a contract the
+            # artifact does not honor, which is the exact failure class pgw#716
+            # exists to prevent.
+            #
+            # Refused by name rather than silently marked: regional is retiring
+            # (LTX §3.2 chose whole-transformer export), so teaching the
+            # regional branch to mark would be building on a lane that is going
+            # away. Refusal is the honest reading until it does.
+            raise ValueError(
+                "Compile(regional=True) cannot carry dynamic=(...): the "
+                "regional branch compiles repeated blocks and never applies "
+                "the declared marks, so the declaration would be silently "
+                "inert while the contract digest claimed the dynamism "
+                f"({', '.join(d.dim for d in dyn)}). Declare dynamic=() to "
+                "keep regional block compilation, or regional=False to get "
+                "the marks. Regional is retiring in favor of whole-graph "
+                "export (LTX-AOT-DESIGN.md §3.2)."
+            )
+        for name, typ in (("dims", Dim), ("forks", Fork),
+                          ("classes", GraphClass), ("inputs", Input),
+                          ("args", Arg)):
+            rows = tuple(getattr(self, name))
+            if any(not isinstance(r, typ) for r in rows):
+                raise TypeError(
+                    f"Compile.{name} must be a tuple of {typ.__name__} rows")
+            force(self, name, rows)
+        force(self, "shape_strategy", str(self.shape_strategy or "").strip())
+        if self.warm_changes_key is not None:
+            force(self, "warm_changes_key", bool(self.warm_changes_key))
+        force(self, "eager", tuple(str(e).strip() for e in self.eager))
+        validate_contract(self)
 
     @property
     def sequence_dynamic(self) -> Optional[DynamicDim]:
@@ -741,7 +819,7 @@ class Compile(msgspec.Struct, frozen=True):
         """The canonical shape-contract facts (feeds the cell key's
         contract digest — pgw#647: a worker on a newer contract must never
         consume an older cell)."""
-        return {
+        axes: Dict[str, Any] = {
             "shapes": [list(s) for s in self.shapes],
             "targets": list(self.targets),
             "text_len": self.text_len,
@@ -750,6 +828,25 @@ class Compile(msgspec.Struct, frozen=True):
             ],
             "regional": bool(self.regional),
         }
+        # pgw#739 declaration facts, present only when declared so a family
+        # that has not adopted the vocabulary keeps its existing digest.
+        if self.dims:
+            axes["dims"] = [d.as_row() for d in self.dims]
+        if self.forks:
+            axes["forks"] = [f.as_row() for f in self.forks]
+        if self.classes:
+            axes["classes"] = [c.as_row() for c in self.classes]
+        if self.inputs:
+            axes["inputs"] = [i.as_row() for i in self.inputs]
+        if self.args:
+            axes["args"] = [a.as_row() for a in self.args]
+        if self.shape_strategy:
+            axes["shape_strategy"] = self.shape_strategy
+        if self.warm_changes_key is not None:
+            axes["warm_changes_key"] = self.warm_changes_key
+        if self.eager:
+            axes["eager"] = list(self.eager)
+        return axes
 
 
 class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
@@ -1403,6 +1500,13 @@ def endpoint(
             "unconditioned model, or a dynamic range via "
             "Compile(dynamic=(DynamicDim('sequence', min=.., max=..),))."
         )
+    if compile is not None and compile.classes and compile.family:
+        # pgw#739: a class-bearing declaration is the family's export
+        # contract; registering at decoration is what lets the mint derive
+        # export inputs with zero per-family SDK code.
+        from .export_contract import register_export_declaration
+
+        register_export_declaration(compile)
     bucket = int(lora_bucket or 0)
     if bucket:
         from ..models.w8a8_lora import RANK_BUCKETS

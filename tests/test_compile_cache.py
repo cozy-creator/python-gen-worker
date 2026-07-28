@@ -916,8 +916,16 @@ def test_compile_struct_validation():
 def test_dynamic_dim_validation():
     d = DynamicDim(dim=" Batch ", min=2, max=8)
     assert (d.dim, d.min, d.max) == ("batch", 2, 8)
+    # pgw#739: the two-literal "batch"|"sequence" wall is REPLACED — wan's
+    # latent-spatial axis is the red case (ie#550/ie#566 hit it from both
+    # sides). A named axis constructs; validation moved to Compile, which
+    # cross-references the name against declared Compile.dims.
+    lat = DynamicDim(dim="latent_h", min=90, max=160)
+    assert lat.dim == "latent_h"
+    with pytest.raises(ValueError, match="latent_h"):
+        Compile(shapes=((768, 768),), dynamic=(lat,))  # no Dim declares it
     with pytest.raises(ValueError):
-        DynamicDim(dim="channels", min=2, max=8)
+        DynamicDim(dim="not an identifier", min=2, max=8)
     with pytest.raises(ValueError, match=">= 2"):
         DynamicDim(dim="batch", min=1, max=8)  # torch 0/1 specialization
     with pytest.raises(ValueError, match="exceed"):

@@ -34,6 +34,7 @@ The full design lives in ``progress.json`` issue #340.
 
 from __future__ import annotations
 
+from ..component_vocab import weight_components
 import argparse
 import json
 import os
@@ -623,11 +624,6 @@ def _build_residency(vram_budget_gb: float = 0.0) -> Optional[Residency]:
 
 # diffusers/transformers pipeline-ish duck type: has .to() AND at least one of
 # the common module slots / a components mapping.
-_PIPELINE_SLOTS = (
-    "unet", "transformer", "vae", "text_encoder", "text_encoder_2", "text_encoder_3",
-)
-
-
 def _looks_like_pipeline(obj: Any) -> bool:
     if obj is None:
         return False
@@ -636,7 +632,7 @@ def _looks_like_pipeline(obj: Any) -> bool:
     comps = getattr(obj, "components", None)
     if isinstance(comps, dict) and comps:
         return True
-    return any(getattr(obj, slot, None) is not None for slot in _PIPELINE_SLOTS)
+    return any(getattr(obj, slot, None) is not None for slot in weight_components())
 
 
 def _find_pipeline_object(instance: Any) -> Optional[Any]:

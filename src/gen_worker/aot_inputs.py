@@ -1,10 +1,16 @@
-"""Per-family export-input contracts for the AOT mint (#723).
+"""Generic export-input machinery for the AOT mint (#723, #739).
 
 ``torch.export`` needs example inputs with the exact structure the target's
-forward takes. That structure is FAMILY knowledge — SDXL's UNet wants
-``added_cond_kwargs={"text_embeds", "time_ids"}``, LTX2 drives per-token
-timesteps, z-image takes ragged lists of tensors (#729) — so it lives here,
-registered per family, rather than as an ``if`` ladder inside the mint driver.
+forward takes. That structure is FAMILY knowledge — and per Paul's SDK-generic
+rule (pgw#739) it is a DECLARATION in the endpoint spec, never worker code:
+the endpoint declares ``Compile(dims=..., forks=..., classes=..., inputs=...)``
+and :func:`gen_worker.aot_declaration.declared_inputs` derives the example
+inputs generically. This module carried the sdxl contract as per-family SDK
+code during bootstrap; that family knowledge is deleted (it lives in the sdxl
+endpoint's declaration now) and what remains is generic: composition, the
+lifted-LoRA kwargs, dtype/device introspection, and a registration hook for
+callers that need a hand-written builder while a family's declaration is
+still being written.
 
 Composition itself is NOT family-specific and mirrors the dynamo mint
 (``compile_cache.build``): ``load_from_pretrained`` -> ``place_pipeline``. That
@@ -35,31 +41,28 @@ if TYPE_CHECKING:  # pragma: no cover — typing only, no runtime import cycle
 
 logger = logging.getLogger(__name__)
 
-#: SDXL pooled-text-embedding width and micro-conditioning vector length. Both
-#: are architectural constants of the SDXL conditioning contract, not config
-#: fields — ``trt_engine._export_unet_onnx`` pins the same two.
-SDXL_POOLED_DIM = 1280
-SDXL_TIME_IDS = 6
-
 InputBuilder = Callable[[Any, "ExportSpec"], Tuple[Tuple[Any, ...], Dict[str, Any]]]
 
 #: Keyed by ``(family, target)`` — NOT by family (ie#566 G1). A family's compile
 #: targets are unrelated modules with unrelated call contracts: wan's span the
 #: denoiser AND the VAE, and a family-only key made ``vae.decode`` unmintable for
 #: EVERY family, not just wan. ``target=""`` registers a family-wide fallback.
+#: This registry is the ESCAPE HATCH while a family's declaration is being
+#: written; a registered export DECLARATION (pgw#739) always wins over it.
 _BUILDERS: Dict[Tuple[str, str], InputBuilder] = {}
 
 
 class InputContractError(RuntimeError):
-    """No export-input contract is registered for a family, or it cannot be
-    satisfied from the composed pipeline."""
+    """No export-input contract is declared or registered for a family, or it
+    cannot be satisfied from the composed pipeline."""
 
 
 def inputs_for(family: str, target: str = "") -> Callable[[InputBuilder], InputBuilder]:
-    """Register the example-input builder for one ``(family, target)``.
+    """Register a hand-written example-input builder for one ``(family,
+    target)``. ``target=""`` registers a family-wide fallback.
 
-    ``target=""`` registers a family-wide fallback for families whose every
-    compile target happens to share a call contract.
+    Prefer the declaration (``Compile(inputs=...)``): a registered export
+    declaration supersedes anything registered here.
     """
 
     def register(fn: InputBuilder) -> InputBuilder:
@@ -70,80 +73,44 @@ def inputs_for(family: str, target: str = "") -> Callable[[InputBuilder], InputB
 
 
 def builder_for(family: str, target: str = "") -> InputBuilder:
-    """The builder for ``(family, target)``, falling back to the family default.
+    """The builder for ``(family, target)``: the family's registered export
+    DECLARATION when it carries ``inputs=`` rows, else the hand-registered
+    builder, else a named refusal.
 
-    Exact ``(family, target)`` wins; a family-wide registration answers the rest.
-    A family with a registered denoiser but no VAE builder must FAIL for the VAE
-    rather than silently feed it denoiser inputs.
+    Exact ``(family, target)`` wins over a family-wide registration. A family
+    with a declared denoiser but no VAE contract must FAIL for the VAE rather
+    than silently feed it denoiser inputs.
     """
+    from .api.export_contract import export_declaration
+
     fam, tgt = str(family), str(target)
+    decl = export_declaration(fam)
+    if decl is not None and decl.inputs:
+        from . import aot_declaration
+
+        def declared(module: Any, spec: "ExportSpec") -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+            return aot_declaration.declared_inputs(module, spec, decl)
+
+        return declared
     for key in ((fam, tgt), (fam, "")):
         fn = _BUILDERS.get(key)
         if fn is not None:
             return fn
     known = sorted(f"{f}/{t or '*'}" for f, t in _BUILDERS)
     raise InputContractError(
-        f"no AOT export-input contract registered for {fam!r} target {tgt!r} "
-        f"(have: {known!r}) — a target's call contract is family knowledge and "
-        f"must be declared before it can be exported")
+        f"no export-input contract for {fam!r} target {tgt!r}: no registered "
+        f"export declaration (Compile(inputs=...), pgw#739) and no "
+        f"hand-registered builder (have: {known!r}) — a target's call "
+        f"contract is family knowledge and must be DECLARED by the endpoint "
+        f"before it can be exported")
 
 
-# ---------------------------------------------------------------------------
-# SDXL
-# ---------------------------------------------------------------------------
-
-
-@inputs_for("sdxl", "unet")
-def sdxl_unet_inputs(
-    module: Any, spec: "ExportSpec",
-) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-    """Example inputs for the SDXL ``UNet2DConditionModel`` forward.
-
-    Widths come from the module's own config (``in_channels``,
-    ``cross_attention_dim``) rather than from constants, so a family member
-    with a different conditioning width exports correctly instead of failing
-    deep inside the trace. Shapes come from the FIRST declared shape row: the
-    latent H/W axes are symbolic, so which row seeds the trace decides nothing
-    about what the artifact admits — the declared range does.
-
-    ``return_dict=False`` is passed because a dataclass output is not a valid
-    export output; the consumer re-wraps.
-    """
-    import torch
-
-    if not spec.shapes:
-        raise InputContractError(
-            "sdxl export needs at least one declared shape row (w, h) to seed "
-            "the trace")
-    width, height = int(spec.shapes[0][0]), int(spec.shapes[0][1])
-    scale = 8
-    latent_h, latent_w = height // scale, width // scale
-    batch = spec.batch or (2 if _sdxl_cfg_batched(spec) else 1)
-    text_len = int(spec.text_lens[0]) if spec.text_lens else 77
-    config = getattr(module, "config", None)
-    latent_channels = int(getattr(config, "in_channels", 4) or 4)
-    cross_dim = int(getattr(config, "cross_attention_dim", 2048) or 2048)
-    dtype, device = _module_dtype_device(module)
-    kw = {"dtype": dtype, "device": device}
-
-    args = (
-        torch.randn(batch, latent_channels, latent_h, latent_w, **kw),
-        torch.tensor(1.0, device=device),
-        torch.randn(batch, text_len, cross_dim, **kw),
-    )
-    kwargs: Dict[str, Any] = {
-        "added_cond_kwargs": {
-            "text_embeds": torch.randn(batch, SDXL_POOLED_DIM, **kw),
-            "time_ids": torch.randn(batch, SDXL_TIME_IDS, **kw),
-        },
-        "return_dict": False,
-    }
-    kwargs.update(lifted_lora_kwargs(module, spec))
-    return args, kwargs
-
-
-def lifted_lora_kwargs(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
-    """The mandatory ``lora_a``/``lora_b`` call kwargs for a LoRA-bucket mint.
+def lifted_lora_values(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
+    """The mandatory ``lora_a``/``lora_b`` call values for a LoRA-bucket mint,
+    keyed by parameter NAME — the builder binds them to their POSITIONAL
+    slots (all-positional example feeds are a mint obligation: pod 9's
+    kwarg-traced package armed and silently revoked to eager on first call,
+    pgw#723 residuals).
 
     #725 option 2: the adapter rides as a flat 1-D pair with static per-layer
     offsets, passed as CALL ARGUMENTS. The pair must be present at trace time —
@@ -162,30 +129,15 @@ def lifted_lora_kwargs(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
     from .models import lora_lifted
 
     plan = lora_lifted.build_plan(module, int(spec.lora_bucket))
-    lora_a, lora_b = plan.alloc(_module_dtype_device(module)[1])
+    lora_a, lora_b = plan.alloc(module_dtype_device(module)[1])
     return {
         "lora_a": torch.randn_like(lora_a),
         "lora_b": torch.randn_like(lora_b),
     }
 
 
-def _sdxl_cfg_batched(spec: "ExportSpec") -> bool:
-    """Whether THIS SDXL cell's graph class is CFG-batched (ie#345).
-
-    **Deliberately SDXL-specific, and not a general rule (ie#566 G2.)** SDXL runs
-    CFG as one batch-2 forward, so guidance changes the traced SHAPE. wan does
-    not: its CFG is two SEQUENTIAL batch-1 forwards (`pipeline_wan.py:596-615`),
-    so guidance changes the call COUNT and the traced shape is batch-1 either
-    way. Inferring batch from ``guidance_scales`` family-agnostically doubled
-    wan's batch and traced a graph the serving path never calls.
-
-    Any family whose batching differs sets ``ExportSpec.batch`` explicitly.
-    """
-    return any(float(g) > 1.0 for g in spec.guidance_scales) \
-        or not spec.guidance_scales
-
-
-def _module_dtype_device(module: Any) -> Tuple[Any, Any]:
+def module_dtype_device(module: Any) -> Tuple[Any, Any]:
+    """The resident dtype/device of a module, read off its own tensors."""
     import torch
 
     for source in (module.parameters, module.buffers):
@@ -206,16 +158,20 @@ def latent_dims(
 ) -> Tuple["DynamicDim", ...]:
     """Declared symbolic latent H/W dims spanning ``spec.shapes``.
 
-    Derived from the declared aspect set rather than hand-written bounds, so
-    "these are the aspect ratios we serve" is stated once and the admissible
-    range cannot drift from it. ``downsamples`` is the divisibility the UNet
-    itself requires (SDXL downsamples 3x => multiples of 8 latent units); a
-    range not expressible as that multiple is refused at
+    Generic derivation for REQUEST-level dynamic rows (a family without a
+    class declaration): bounds derive from the declared aspect set rather
+    than hand-written numbers, so "these are the aspect ratios we serve" is
+    stated once and the admissible range cannot drift from it.
+    ``downsamples`` is the divisibility the network itself requires; a range
+    not expressible as that multiple is refused at
     ``aot_mint.dynamic_shapes_spec`` rather than silently 0/1-specialized.
 
     Bounds are ROUNDED OUT to the multiple, never in: rounding in would
     exclude a declared aspect ratio from the artifact's own contract, and B2
     measured that nothing at runtime would tell us.
+
+    Families with a class declaration never call this — their bounds derive
+    from the class rows (``aot_declaration.derived_dynamic``).
     """
     from .aot_mint import DynamicDim
 
@@ -278,11 +234,10 @@ def compose(
 
 __all__ = [
     "InputContractError",
-    "SDXL_POOLED_DIM",
-    "SDXL_TIME_IDS",
     "builder_for",
     "compose",
     "inputs_for",
     "latent_dims",
-    "sdxl_unet_inputs",
+    "lifted_lora_values",
+    "module_dtype_device",
 ]

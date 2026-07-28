@@ -26,6 +26,14 @@ from .api.decorators import (
     variant_of,
     worker_function,
 )
+from .api.export_contract import (
+    Arg,
+    Dim,
+    Fork,
+    GraphClass,
+    Input,
+    register_export_declaration,
+)
 from .api.formula import RuntimeFormula
 from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot
 from .families import GenerationDefaults
@@ -85,6 +93,13 @@ __all__ = [
     "CompileAxis",
     "AxisClass",
     "DynamicDim",
+    # pgw#739 export-declaration vocabulary.
+    "Dim",
+    "Fork",
+    "GraphClass",
+    "Input",
+    "Arg",
+    "register_export_declaration",
     "ConfigParam",
     "NoWarmup",
     "arm_compile",

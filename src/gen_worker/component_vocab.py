@@ -32,11 +32,17 @@ class ComponentVocabulary:
     text_encoders: tuple[str, ...]
     vaes: tuple[str, ...]
     extras: tuple[str, ...]
+    #: Weight-bearing components that are not one of the three primary roles
+    #: (``controlnet``, ``prior``, ``decoder``, ``image_encoder``). They carry
+    #: tensors — so they are walked, sized and quantized — but no consumer ever
+    #: picks "the denoiser" or "the VAE" and means one of these.
+    auxiliaries: tuple[str, ...] = ()
 
     @property
     def all(self) -> tuple[str, ...]:
         seen: dict[str, None] = {}
-        for group in (self.denoisers, self.text_encoders, self.vaes, self.extras):
+        for group in (self.denoisers, self.text_encoders, self.vaes,
+                      self.auxiliaries, self.extras):
             for name in group:
                 seen.setdefault(name, None)
         return tuple(seen)
@@ -58,6 +64,8 @@ class ComponentVocabulary:
             return "text_encoder"
         if head in self.vaes:
             return "vae"
+        if head in self.auxiliaries:
+            return "auxiliary"
         if head in self.extras:
             return "extra"
         return "unknown"
@@ -79,7 +87,9 @@ _GENERIC = ComponentVocabulary(
     denoisers=("transformer", "unet", "transformer_2", "dit"),
     text_encoders=("text_encoder", "text_encoder_2", "text_encoder_3", "text_encoder_4"),
     vaes=("vae", "vae_encoder", "vae_decoder"),
-    extras=("image_encoder", "scheduler", "tokenizer", "tokenizer_2", "tokenizer_3"),
+    extras=("scheduler", "tokenizer", "tokenizer_2", "tokenizer_3",
+            "feature_extractor", "safety_checker"),
+    auxiliaries=("image_encoder", "controlnet", "prior", "decoder"),
 )
 
 _lock = RLock()
@@ -98,6 +108,7 @@ def declare_components(
     text_encoders: tuple[str, ...] = (),
     vaes: tuple[str, ...] = (),
     extras: tuple[str, ...] = (),
+    auxiliaries: tuple[str, ...] = (),
 ) -> ComponentVocabulary:
     """Extend the vocabulary from an endpoint declaration. Additive and idempotent.
 
@@ -112,6 +123,7 @@ def declare_components(
             text_encoders=_merge(_current.text_encoders, text_encoders),
             vaes=_merge(_current.vaes, vaes),
             extras=_merge(_current.extras, extras),
+            auxiliaries=_merge(_current.auxiliaries, auxiliaries),
         )
         return _current
 
@@ -136,14 +148,43 @@ def denoiser_components() -> tuple[str, ...]:
     return component_vocabulary().denoisers
 
 
+def text_encoder_components() -> tuple[str, ...]:
+    return component_vocabulary().text_encoders
+
+
 def weight_components() -> tuple[str, ...]:
-    """Components that carry weights worth quantizing/offloading/walking."""
+    """Components that carry weights worth quantizing/offloading/walking.
+
+    Everything except the config-only extras (scheduler, tokenizers,
+    feature_extractor, safety_checker).
+    """
     vocab = component_vocabulary()
-    return tuple(
-        name
-        for name in vocab.all
-        if name not in vocab.extras or name == "image_encoder"
-    )
+    return _concat(vocab.denoisers, vocab.text_encoders, vocab.vaes, vocab.auxiliaries)
+
+
+def quant_candidate_components() -> tuple[str, ...]:
+    """Weight-bearing components a quantization pass may target.
+
+    :func:`weight_components` minus the VAEs. A quantized VAE is the first
+    thing to show as visible artifacting, so QUANTIZATION-POLICY.md keeps it
+    at compute precision and no default pass proposes it. Callers that want a
+    VAE quantized must name it explicitly.
+    """
+    vocab = component_vocabulary()
+    return _concat(vocab.denoisers, vocab.text_encoders, vocab.auxiliaries)
+
+
+def pipeline_component_dirs() -> tuple[str, ...]:
+    """Every known component subdirectory name in a diffusers snapshot."""
+    return component_vocabulary().all
+
+
+def _concat(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    seen: dict[str, None] = {}
+    for group in groups:
+        for name in group:
+            seen.setdefault(name, None)
+    return tuple(seen)
 
 
 __all__ = [
@@ -151,6 +192,9 @@ __all__ = [
     "component_vocabulary",
     "declare_components",
     "denoiser_components",
+    "pipeline_component_dirs",
+    "quant_candidate_components",
     "reset_component_vocabulary",
+    "text_encoder_components",
     "weight_components",
 ]

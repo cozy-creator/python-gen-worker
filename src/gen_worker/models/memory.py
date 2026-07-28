@@ -28,6 +28,8 @@ from typing import Any, Dict, Iterable, List, Optional, TypeVar
 
 import msgspec
 
+from ..component_vocab import component_vocabulary
+
 _LOG = logging.getLogger(__name__)
 
 _GIB = 1024 ** 3
@@ -392,10 +394,19 @@ def cuda_allocated_bytes(device_index: Optional[int] = None) -> int:
 # Wan's `transformer_2` (the second MoE expert) and LTX's `connectors` came to
 # be silently skipped by the offload loops — a live memory bug for those
 # families. Enumeration is generic; this only decides who goes first.
-_COMPONENT_ORDER_HINT = (
-    "transformer", "transformer_2", "unet", "vae", "text_encoder",
-    "text_encoder_2", "text_encoder_3", "connectors",
-)
+#
+# B5: read from the ONE vocabulary at call time. Offload priority is
+# largest-first — denoisers, then VAEs, then text encoders — which is not
+# vocabulary declaration order, so the groups are concatenated explicitly.
+# `connectors` is no longer named here: an endpoint that carries it declares
+# it (declare_components) and lands in this hint; one that does not is still
+# enumerated generically and simply sorts alphabetically after the hint.
+def _component_order_hint() -> tuple[str, ...]:
+    vocab = component_vocabulary()
+    return tuple(dict.fromkeys(
+        vocab.denoisers + vocab.vaes + vocab.text_encoders
+        + vocab.auxiliaries + vocab.extras
+    ))
 
 
 def _module_attributes(pipeline: Any) -> List[tuple[str, Any]]:
@@ -414,7 +425,7 @@ def _module_attributes(pipeline: Any) -> List[tuple[str, Any]]:
             continue
         found[name] = value
     ordered: List[tuple[str, Any]] = [
-        (name, found.pop(name)) for name in _COMPONENT_ORDER_HINT
+        (name, found.pop(name)) for name in _component_order_hint()
         if name in found
     ]
     ordered.extend(sorted(found.items()))

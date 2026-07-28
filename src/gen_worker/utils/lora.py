@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, runtime_checkable
 
+from ..component_vocab import denoiser_components, text_encoder_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
 from dataclasses import replace
 from ..models import w8a8_lora
@@ -105,15 +106,23 @@ _SPLIT_CACHE_MAX = 8
 _SPLIT_CACHE_LOCK = threading.Lock()
 # Component prefix -> pipe attribute, for both normalized and kohya-flat key
 # grammars. Kohya te1/te2 numbering follows diffusers' convention.
-_TE_PREFIX_TO_COMPONENT = (
-    ("text_encoder_3", "text_encoder_3"),
-    ("text_encoder_2", "text_encoder_2"),
-    ("text_encoder", "text_encoder"),
+# The kohya-flat te aliases are sd-scripts' own grammar, not our vocabulary,
+# so they stay literal; they map ONTO vocabulary names.
+_KOHYA_TE_ALIASES = (
     ("lora_te3_", "text_encoder_3"),
     ("lora_te2_", "text_encoder_2"),
     ("lora_te1_", "text_encoder"),
     ("lora_te_", "text_encoder"),
 )
+
+
+def _te_prefix_to_component() -> tuple[tuple[str, str], ...]:
+    """Component prefix -> pipe attribute, longest first so ``text_encoder_2``
+    wins over ``text_encoder``. Read at call time (pgw#740 B5)."""
+    dotted = tuple(
+        (c, c) for c in sorted(text_encoder_components(), key=len, reverse=True)
+    )
+    return dotted + _KOHYA_TE_ALIASES
 
 
 # Config fields that DISCRIMINATE denoiser structure. The UNet set alone
@@ -143,7 +152,7 @@ def _denoiser_fingerprint(pipe: Any) -> str:
     whose config declares none of these fields falls back to its class name
     plus its parameter shape signature rather than to an empty string.
     """
-    for name in ("unet", "transformer", "transformer_2"):
+    for name in denoiser_components():
         module = getattr(pipe, name, None)
         cfg = getattr(module, "config", None)
         if cfg is None:
@@ -240,7 +249,7 @@ def _reject_te_keys_on_cast_te(
     the hooks. Keys targeting an UNCAST encoder in a mixed setup stay on
     the peft path."""
     def component_of(key: str) -> str:
-        for prefix, comp in _TE_PREFIX_TO_COMPONENT:
+        for prefix, comp in _te_prefix_to_component():
             if key.startswith(prefix):
                 return comp
         return ""

@@ -108,6 +108,13 @@ _CONTEXT_BY_KIND: Dict[str, type] = {
     "conversion": ConversionContext,
     "dataset": DatasetContext,
     "training": TrainingContext,
+    # th#1255: an eval materializes the same reserved refs a conversion does
+    # (its `source` IS the reference arm) and writes request output assets.
+    # It just publishes nothing, and there is no separate surface for that —
+    # publish authority is the hub's call, and the hub refuses repo writes
+    # for kind=eval. A distinct EvalContext would only restate that refusal
+    # somewhere it cannot be enforced.
+    "eval": ConversionContext,
 }
 
 logger = logging.getLogger(__name__)

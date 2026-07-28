@@ -618,6 +618,17 @@ def marshal_positional(
     the exact order export recorded, or it feeds the right tensor to the
     wrong graph input.
 
+    THE COMPLEMENT, measured on the pgw#723 residuals pod (2.13.0+cu130):
+    the package's call convention mirrors the traced EXAMPLE's args/kwargs
+    split. An input fed as a KWARG at export bakes a kwarg-demanding
+    ``in_spec`` — the package then refuses a positional call with the same
+    error in reverse (``Got [] but expected ['lora_a', 'lora_b']``), the
+    wrap treats it as an artifact failure, and the lane silently revokes to
+    eager on the FIRST call. So "positional inputs only" is a MINT
+    obligation, not a torch invariant: example inputs must be fed
+    all-positionally (lifted adapter pair included) so this positional
+    marshal matches the package.
+
     ``position`` in the declared contract is that order. Every declared
     input must be present — a package has a FIXED flat arity, so a missing
     one cannot be skipped without silently shifting every later argument
@@ -739,6 +750,16 @@ def resolve_constants(
     direct name lookup — no value-identity matching (``trt_engine`` needs
     that only because ONNX renames). An unresolvable FQN is a named refusal:
     binding a partial set is exactly the state that segfaults.
+
+    **MEASURED CONTRACT FACT (pgw#723 final pod, torch 2.13.0+cu130):**
+    ``load_constants`` keys by the ORIGINAL FQN (``lin.bias``), NOT the
+    mangled C++ identifier (``lin_bias``) that the package's own table
+    answers with. Keying a hand-rolled binder by ``DeclaredConstant.name``
+    fails with ``RuntimeError: Constant not found: lin_bias`` — and only at
+    bind time, on a pod. This function keys by ``spec.fqn`` (the
+    ``original_fqn`` the package records), which is the correct side of that
+    split; do not "simplify" it to the C++ name, and do not hand-roll a
+    binder that does.
     """
     out: Dict[str, Any] = {}
     missing: List[str] = []
@@ -826,12 +847,22 @@ class ArtifactRunner:
         # MEASURED (pgw#721 S8 first light, L4/torch 2.9.1+cu128): this HOLDS
         # on a real sdxl w8a8 cell — 2,422 constants, all state_dict-sourced,
         # declared and package sets identical, strict update accepted.
-        # CAVEAT, still open: that artifact folded NOTHING (zero literals,
-        # zero from_folded), so strictness is UNTESTED against a folding
-        # artifact. If a folding cell ever refuses here, the choice is to
-        # relax to check_full_update=False (keeping our own set-equality
-        # proof above as the real gate) or to have the mint ship the folded
-        # bytes — decide on evidence, not by loosening the gate first.
+        #
+        # FOLDING CAVEAT CLOSED (pgw#723 residuals, torch 2.13.0+cu130 — the
+        # prod floor): strictness also HOLDS against a genuinely FOLDING
+        # artifact. AOTInductor folds ONLY under
+        # ``aot_inductor.use_runtime_constant_folding=True`` (default never
+        # folds — measured on 3 constant-expression module shapes AND the
+        # real sdxl cell), and when it does, the ``_FOLDED_CONST_*`` entries
+        # (``from_folded=True``) are EXEMPT from the full-update check and
+        # RECOMPUTED from the freshly bound originals (mutate-arm proven:
+        # binding values 3x off compile time tracks eager bit-exactly). So
+        # strict is safe for both artifact classes. NOTE our own mint cannot
+        # ship a folding artifact today: folded entries classify as literals
+        # with no ``ep.constants`` value, so ``_write_literals`` refuses the
+        # mint by name — and if runtime folding is ever deliberately enabled,
+        # the change is to EXCLUDE from_folded constants from the manifest
+        # and binding (they are derived), not to loosen this gate.
         self.package.load_constants(values, check_full_update=True)
         self.bound_fqns = tuple(sorted(values))
         self.bound = True

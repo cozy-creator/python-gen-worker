@@ -34,7 +34,7 @@ class EndpointLockValidationResult:
     warnings: tuple[str, ...] = ()
 
 
-_KNOWN_KINDS = frozenset(("inference", "training", "dataset", "conversion"))
+_KNOWN_KINDS = frozenset(("inference", "training", "dataset", "conversion", "eval"))
 
 
 def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationResult:
@@ -47,7 +47,7 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
          from a ``@inference`` / ``@training`` / ``@dataset`` / ``@conversion``
          decorated class, not a bare ``@inference``.
       2. ``archetype`` is ``"SerialWorker"`` or ``"BatchedWorker"``.
-      3. ``kind`` is one of the four supported kinds.
+      3. ``kind`` is one of the supported kinds.
       4. No two ``@inference.function`` methods on the SAME class slugify
          to the same wire route — that would silently shadow one of them
          at dispatch time.

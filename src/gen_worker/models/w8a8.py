@@ -37,6 +37,7 @@ import logging
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from ..component_vocab import denoiser_components
 from typing import Any, Dict, Optional
 import shutil
 
@@ -51,7 +52,6 @@ W8A8_ROWWISE_MIN_SM = 90
 _FP8_MAX = 448.0
 _DIM_ALIGN = 16
 _MAX_HEADER_BYTES = 100 << 20
-_COMPONENT_DIRS = ("transformer", "unet")
 
 
 class W8a8Error(RuntimeError):
@@ -139,7 +139,7 @@ def detect_w8a8_artifact(model_path: Path) -> Optional[W8a8Artifact]:
     if not root.is_dir():
         return None
     if (root / "model_index.json").exists():
-        for comp in _COMPONENT_DIRS:
+        for comp in denoiser_components():
             comp_dir = root / comp
             if not comp_dir.is_dir():
                 continue
@@ -593,10 +593,11 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
     except Exception:
         pass
     if fp8_text_encoders:
-        from .loading import _FP8_TEXT_ENCODER_COMPONENTS, apply_fp8_storage
+        from ..component_vocab import text_encoder_components
+        from .loading import apply_fp8_storage
 
         targets = tuple(
-            n for n in _FP8_TEXT_ENCODER_COMPONENTS
+            n for n in text_encoder_components()
             if hasattr(getattr(pipe, n, None), "parameters"))
         if targets:
             apply_fp8_storage(pipe, compute_dtype=compute, components=targets)
@@ -738,7 +739,7 @@ def swap_w8a8_linears(
 def _root_denoiser(pipe: Any) -> Any:
     import torch.nn as nn
 
-    for name in ("transformer", "unet", "dit"):
+    for name in denoiser_components():
         mod = getattr(pipe, name, None)
         if isinstance(mod, nn.Module):
             return mod
@@ -808,7 +809,7 @@ def quantize_tree_w8a8(
     from safetensors.torch import load_file, save_file
 
     src_tree, out_tree = Path(src_tree), Path(out_tree)
-    comp = next((c for c in _COMPONENT_DIRS if (src_tree / c).is_dir()), None)
+    comp = next((c for c in denoiser_components() if (src_tree / c).is_dir()), None)
     if comp is None or not (src_tree / "model_index.json").exists():
         raise W8a8SnapshotError(f"{src_tree} is not a diffusers tree with a denoiser")
     if out_tree.exists():

@@ -53,6 +53,7 @@ import math
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from ..component_vocab import denoiser_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
 from .fp8_storage import structural_base
 from .w8a8 import fp8_scaled_linear_class
@@ -69,22 +70,29 @@ _ACTIVE_ATTR = "_cozy_lora_active"
 _SPARSE_ATTR = "_cozy_lora_sparse"
 _MAPCACHE_ATTR = "_cozy_lora_mapcache"
 _MAPCACHE_MAX = 8
-_DENOISER_PREFIXES = ("unet.", "transformer.", "transformer_2.",
-                      "lora_unet_", "lora_transformer_")
+# The kohya-flat prefixes are NOT component namespaces (see below) and are not
+# vocabulary — sd-scripts emits them verbatim, so they stay literal here.
+_KOHYA_FLAT_PREFIXES = ("lora_unet_", "lora_transformer_")
 # gw#679: the denoiser components a pipeline can carry, in stamp order. A
 # dual-expert MoE carries transformer (high noise) AND transformer_2 (low).
-_DENOISER_COMPONENTS = ("transformer", "transformer_2", "unet")
-# Key prefix -> the component it NAMES, longest first (``transformer_2.``
-# must win over ``transformer.``). DOTTED forms only: that prefix IS the
-# diffusers component namespace. The kohya-flat ``lora_unet_`` prefix is
-# NOT a declaration — sd-scripts emits it for transformer denoisers too
-# (flux/qwen adapters serve fine on the branch today) — so those keys name
-# no component and follow the unprefixed rules below.
-_COMPONENT_PREFIXES = (
-    ("transformer_2.", "transformer_2"),
-    ("transformer.", "transformer"),
-    ("unet.", "unet"),
-)
+_denoiser_components = denoiser_components
+
+
+def _denoiser_prefixes() -> tuple[str, ...]:
+    return tuple(f"{c}." for c in _denoiser_components()) + _KOHYA_FLAT_PREFIXES
+
+
+def _component_prefixes() -> tuple[tuple[str, str], ...]:
+    """Key prefix -> the component it NAMES, longest first (``transformer_2.``
+    must win over ``transformer.``). DOTTED forms only: that prefix IS the
+    diffusers component namespace. The kohya-flat ``lora_unet_`` prefix is
+    NOT a declaration — sd-scripts emits it for transformer denoisers too
+    (flux/qwen adapters serve fine on the branch today) — so those keys name
+    no component and follow the unprefixed rules below."""
+    return tuple(
+        (f"{c}.", c)
+        for c in sorted(_denoiser_components(), key=len, reverse=True)
+    )
 # (normalized suffix marker, is_down) — dotted forms after key normalization.
 _DOWN_SUFFIXES = (".lora_down.weight", ".lora.down.weight", ".lora_A.weight")
 _UP_SUFFIXES = (".lora_up.weight", ".lora.up.weight", ".lora_B.weight")
@@ -117,7 +125,7 @@ def branch_targets(pipe: Any) -> Dict[str, Any]:
     adapters that map onto no Linear fail typed in :func:`map_adapter` (with
     the plain-lane peft fallback in AdapterResidency.activate)."""
     out: Dict[str, Any] = {}
-    for name in _DENOISER_COMPONENTS:
+    for name in _denoiser_components():
         denoiser = getattr(pipe, name, None)
         if denoiser is not None and hasattr(denoiser, "named_modules"):
             out[name] = denoiser
@@ -127,7 +135,7 @@ def branch_targets(pipe: Any) -> Dict[str, Any]:
 def declared_component(key: str) -> str:
     """The pipeline component one adapter key NAMES, or ``""`` when the key
     carries no component prefix (bare/kohya-flat module paths)."""
-    for prefix, comp in _COMPONENT_PREFIXES:
+    for prefix, comp in _component_prefixes():
         if key.startswith(prefix):
             return comp
     return ""
@@ -265,7 +273,7 @@ def split_state_dict(sd: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
     den: Dict[str, Any] = {}
     rest: Dict[str, Any] = {}
     for k, v in sd.items():
-        (den if k.startswith(_DENOISER_PREFIXES) else rest)[k] = v
+        (den if k.startswith(_denoiser_prefixes()) else rest)[k] = v
     return den, rest
 
 

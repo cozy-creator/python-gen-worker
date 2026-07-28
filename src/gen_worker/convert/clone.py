@@ -38,7 +38,7 @@ from .ingest import (
 )
 from .writer import (
     CAST_NORMALIZE_DTYPES as _CAST_NORMALIZE_DTYPES,
-    FP8_DEFAULT_COMPONENTS,
+    fp8_default_components,
     MAX_SAFETENSORS_SHARD_BYTES,
     VARIANT_WEIGHT_NAME_RE as _VARIANT_WEIGHT_NAME_RE,
     apply_objective_scheduler_config,
@@ -68,11 +68,11 @@ _KNOWN_DTYPES = {
     "f16", "f32", "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q4_k_m", "q4_k_s",
     "q4_0", "q4_1", "q3_k_m", "q3_k_s", "q2_k",
 }
+from ..component_vocab import quant_candidate_components
 _KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile"}
 _KNOWN_FILE_TYPES = {"safetensors", "gguf"}
 
-_DEFAULT_QUANT_COMPONENTS = ("transformer", "unet", "text_encoder", "text_encoder_2",
-                             "text_encoder_3", "image_encoder", "prior", "controlnet")
+_default_quant_components = quant_candidate_components
 _MIN_CONVERT_BYTES = 100 * 1024 * 1024  # leave tiny weights (embeddings) untouched
 
 
@@ -424,9 +424,9 @@ def build_flavor_tree(
     elif is_fp8:
         # Denoiser-only by default: matches apply_fp8_storage's consumption
         # scope; TEs join explicitly via the component-wise ladder (gw#392).
-        target_names = set(FP8_DEFAULT_COMPONENTS)
+        target_names = set(fp8_default_components())
     else:
-        target_names = set(_DEFAULT_QUANT_COMPONENTS)
+        target_names = set(_default_quant_components())
     is_quant = spec.dtype not in {"bf16", "fp16", "fp32", "f16", "f32"}
     converted: set[str] = set()
     for comp, entry in groups:
