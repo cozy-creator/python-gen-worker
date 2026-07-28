@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, Optional
 
 from ..api.types import Asset
 from ..request_context import (
+    REF_ORIGIN_PAYLOAD,
     ConversionContext,
     DatasetContext,
     RequestContext,
@@ -143,9 +144,12 @@ class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
     implementation — useful for round-tripping against a dev tensorhub).
     """
 
-    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
+    def materialize_blob(
+        self, digest: str, dest: "str | os.PathLike[str]",
+        *, origin: str = REF_ORIGIN_PAYLOAD,
+    ) -> Path:
         if self._local_allow_publish:
-            return super().materialize_blob(digest, dest)
+            return super().materialize_blob(digest, dest, origin=origin)
         # Local stub: look in the tensorhub CAS for a matching snapshot. If
         # nothing's there we can't materialize — surface a typed error so
         # the tenant adjusts (run without --offline first, or seed the CAS).
@@ -169,8 +173,13 @@ class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
 class LocalDatasetContext(LocalRequestContextMixin, DatasetContext):
     """Dataset-kind local context."""
 
-    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
-        # Same fallback as ConversionContext.
+    def materialize_blob(
+        self, digest: str, dest: "str | os.PathLike[str]",
+        *, origin: str = REF_ORIGIN_PAYLOAD,
+    ) -> Path:
+        # Same fallback as ConversionContext (origin is a provenance tag for
+        # the th#1259 breaker classification; the local CAS stub has no
+        # breaker, so it is accepted and unused here).
         d = (digest or "").strip()
         if not d:
             raise ValueError("materialize_blob: empty digest")
