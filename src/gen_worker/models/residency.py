@@ -85,10 +85,17 @@ class HostRamHeadroom:
     available_bytes: int
     floor_bytes: int
     required_bytes: int
+    total_bytes: int = 0
 
     @property
     def sufficient(self) -> bool:
         return self.available_bytes >= self.required_bytes
+
+    @property
+    def structural(self) -> bool:
+        """The requirement exceeds the whole host — no eviction can help, and
+        no identically-sized pod ever will either (pgw#752)."""
+        return self.total_bytes > 0 and self.required_bytes > self.total_bytes
 
 
 @dataclass(frozen=True)
@@ -330,6 +337,7 @@ class Residency:
             available_bytes=int(get_available_ram_gb() * _GiB),
             floor_bytes=floor,
             required_bytes=max(0, int(needed_bytes)) + floor,
+            total_bytes=int(get_total_ram_gb() * _GiB),
         )
 
     # ---- queries ---------------------------------------------------------------

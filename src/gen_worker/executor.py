@@ -55,7 +55,9 @@ from .api.streaming import (
 )
 from .api.types import Asset
 from .capability import (
+    HOST_RAM_REFUSALS,
     HardwareUnmetError,
+    HostRamCapacityError,
     InsufficientDiskError,
     InsufficientHostRamError,
 )
@@ -4405,7 +4407,7 @@ class Executor:
             # Host-RAM admission already emitted the precise largest staged
             # ref(s) that caused the capacity failure. Do not overwrite that
             # signal by failing smaller shared refs such as an SDXL VAE.
-            if not isinstance(exc, InsufficientHostRamError):
+            if not isinstance(exc, HOST_RAM_REFUSALS):
                 error = _model_failure_vocab(exc)
                 for ref in instance_refs:
                     await self._send(pb.WorkerMessage(
@@ -6371,7 +6373,8 @@ class Executor:
         }
 
     async def _record_host_ram_failure(
-        self, refs: List[str], error: InsufficientHostRamError,
+        self, refs: List[str],
+        error: typing.Union[InsufficientHostRamError, HostRamCapacityError],
     ) -> None:
         """Publish and retain one typed capacity block per causal ref."""
         causal_refs = sorted(_canonical_host_ram_refs(refs))
@@ -6738,7 +6741,13 @@ class Executor:
                 advised, spec.name,
             )
 
-        error = InsufficientHostRamError(
+        # pgw#752: a shortfall the whole host cannot cover is not pressure —
+        # it is this pod SIZE's verdict, and re-dispatching buys an identical
+        # pod that refuses identically (th#1228). Report it as a hardware axis
+        # so the function self-disables here and the orchestrator learns the
+        # required-vs-total placement fact.
+        cls = HostRamCapacityError if after.structural else InsufficientHostRamError
+        error = cls(
             spec.name,
             incoming_bytes=incoming,
             floor_bytes=after.floor_bytes,
@@ -6746,6 +6755,7 @@ class Executor:
             available_before_bytes=before.available_bytes,
             available_after_bytes=after.available_bytes,
             evicted_refs=tuple(_canonical_host_ram_refs(evicted)),
+            total_bytes=after.total_bytes,
         )
         # th#807: model-failure state is the scheduler's typed capacity seam.
         # Only the largest sequentially staged ref(s) caused this admission

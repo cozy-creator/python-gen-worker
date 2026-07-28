@@ -105,6 +105,60 @@ class OutputTooLargeError(ValidationError):
         super().__init__(f"output file too large (size_bytes={self.size_bytes}, max_bytes={self.max_bytes})")
 
 
+class PayloadRefError(ValidationError):
+    """A ref the REQUEST PAYLOAD named could not be resolved (th#1259).
+
+    PROVENANCE decides the class, not the status code or the message: an
+    address the caller supplied is the caller's to get right, so this is a
+    request error (JOB_STATUS_INVALID, 4xx) and never model-health evidence.
+    The identical 404 on a ref the RELEASE declares stays fatal — that one
+    IS a statement about the release.
+
+    Raise it only at a resolve boundary that KNOWS the ref came from the
+    payload. ``code`` is the machine-readable class the hub surfaces to the
+    caller; ``str(exc)`` is ``"<code>: <detail>"`` so the code survives the
+    ``safe_message`` wire hop into the request's ``error.code``.
+    """
+
+    def __init__(self, detail: str, *, code: str, ref: str = "") -> None:
+        self.code = code
+        self.ref = ref
+        super().__init__(f"{code}: {detail}")
+
+
+class BlobNotFoundError(PayloadRefError):
+    """No CAS blob exists at a caller-supplied content digest."""
+
+    def __init__(self, digest: str) -> None:
+        super().__init__(
+            f"no blob exists at digest {digest} supplied by the request payload — "
+            "the address must be a CONTENT DIGEST, not an object-key stem",
+            code="blob_not_found", ref=digest,
+        )
+
+
+class BlobForbiddenError(PayloadRefError):
+    """A caller-supplied digest is not readable under this request's grant."""
+
+    def __init__(self, digest: str, status: int) -> None:
+        super().__init__(
+            f"digest {digest} supplied by the request payload is not readable "
+            f"by this request ({status})",
+            code="blob_forbidden", ref=digest,
+        )
+
+
+class DatasetNotFoundError(PayloadRefError):
+    """A caller-supplied dataset ref does not resolve to a dataset."""
+
+    def __init__(self, ref: str, detail: str = "") -> None:
+        super().__init__(
+            f"no dataset exists at ref {ref!r} supplied by the request payload"
+            + (f" ({detail})" if detail else ""),
+            code="dataset_not_found", ref=ref,
+        )
+
+
 class ModelSlotIdentityError(WorkerError):
     """Dispatched model slot's repo differs from the function's declared ref
     (gw#583, the ie#518 silence).
