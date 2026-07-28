@@ -742,12 +742,13 @@ def test_cache_collision_and_merge_failure_leave_live_tree_unchanged(
     meta = cc.artifact_metadata(
         family="sd15", shapes=[(768, 768)], targets=["transformer"])
 
+    # pgw#751: a byte-divergent same-key member is the SAME cache entry
+    # (bytes are not the identity) — adoption succeeds, LOCAL bytes win,
+    # the live tree is otherwise unchanged.
     collision_src = _capture_tree(tmp_path / "collision")
     (collision_src / "inductor" / "ab" / "graph.py").write_text("different")
     collision = cc.pack(collision_src, tmp_path / "collision.tar.gz", meta)
-    with pytest.raises(cc.AdoptError) as exc:
-        cc.seed_artifact(collision, "sd15", cache_dir)
-    assert exc.value.reason == "cache_collision"
+    cc.seed_artifact(collision, "sd15", cache_dir)
     assert _tree_snapshot(live) == before
 
     additive_src = tmp_path / "additive"
