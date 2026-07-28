@@ -169,6 +169,20 @@ def get_available_vram_gb(device_index: int = 0) -> float:
         return 0.0
 
 
+def get_total_vram_gb(device_index: int = 0) -> float:
+    """TOTAL VRAM of the selected CUDA device — a per-SKU constant
+    (pgw#750: deterministic placement inputs). 0.0 if no CUDA."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0.0
+        _free, total = torch.cuda.mem_get_info(device_index)
+        return float(total) / float(1024**3)
+    except Exception:
+        return 0.0
+
+
 def get_available_ram_gb() -> float:
     """Effective available host RAM: min(meminfo available, cgroup headroom)."""
     return probe_host_ram().available_gb
@@ -200,6 +214,8 @@ class HostRam(msgspec.Struct, frozen=True, kw_only=True):
     meminfo_available_gb: float
     cgroup_limit_gb: Optional[float]  # None = no cgroup cap
     source: str  # "cgroup" | "meminfo"
+    # Clean cgroup page cache credited back into available_gb (pgw#752).
+    reclaimable_file_gb: float = 0.0
 
 
 def _read_cgroup_int(path: Path) -> Optional[int]:
@@ -284,17 +300,44 @@ def _read_cgroup_stat(path: Path) -> Optional[Dict[str, int]]:
     return values
 
 
-def _cgroup_inactive_file_bytes(
+def _cgroup_reclaimable_file_bytes(
     root: Path = _CGROUP_ROOT,
     proc_self_cgroup: Path = _PROC_SELF_CGROUP,
 ) -> int:
-    """Kernel-reclaimable inactive-file bytes used by cgroup working set."""
+    """Clean page cache this cgroup can give back without an OOM kill.
+
+    pgw#752: BOTH file LRUs count. A page read or written seconds ago lands on
+    the ACTIVE file LRU; the kernel demotes active -> inactive and reclaims it
+    under pressure, so an admission decision that treats active_file as
+    consumed memory is not conservative, it is wrong — it charges the incoming
+    model's own freshly-downloaded snapshot pages against the room needed to
+    load that same snapshot (measured: a 251GB wan-2.2 pod reported 71.5GiB
+    available while ~180GiB of it was clean snapshot cache).
+
+    Excluded because the kernel cannot simply drop them: shmem/tmpfs (no
+    backing file) and pages still dirty or under writeback.
+    """
+    stats: Optional[Dict[str, int]] = None
     for node in reversed(_v2_cgroup_nodes(root, proc_self_cgroup)):
         stats = _read_cgroup_stat(node / "memory.stat")
         if stats is not None:
-            return stats.get("inactive_file", 0)
-    stats = _read_cgroup_stat(root / "memory" / "memory.stat") or {}
-    return stats.get("total_inactive_file", stats.get("inactive_file", 0))
+            break
+    if stats is None:
+        stats = _read_cgroup_stat(root / "memory" / "memory.stat") or {}
+
+    values: Dict[str, int] = stats
+
+    def stat(*names: str) -> int:
+        for name in names:
+            for key in (name, f"total_{name}"):
+                if key in values:
+                    return values[key]
+        return 0
+
+    cache = stat("inactive_file") + stat("active_file")
+    pinned = stat("shmem") + stat("file_dirty", "dirty") + stat(
+        "file_writeback", "writeback")
+    return max(0, cache - pinned)
 
 
 def probe_host_ram(
@@ -324,14 +367,14 @@ def probe_host_ram(
         )
     limit_gb = float(limit) / float(_GIB)
     current = cgroup_memory_current_bytes(root, proc_self_cgroup)
-    # #543: memory.current includes filesystem page cache. Repeated model
-    # downloads/loads can fill a pod's cgroup with inactive file page cache
-    # even after the corresponding pipeline objects are gone. The kernel
-    # reclaims pages on the inactive file LRU under pressure; count the same
-    # conservative working set used by production container schedulers instead
-    # of treating those pages as anonymous model memory.
-    inactive_file = _cgroup_inactive_file_bytes(root, proc_self_cgroup)
-    working_set = max(0, (current or 0) - inactive_file)
+    # #543: memory.current includes filesystem page cache. Model
+    # downloads/loads fill a pod's cgroup with clean file cache that outlives
+    # the pipeline objects. Only memory the kernel CANNOT hand back on demand
+    # constrains the next load, so the working set is current minus every
+    # reclaimable clean page (pgw#752 — crediting only the inactive LRU
+    # double-charged the incoming snapshot's own cache).
+    reclaimable = _cgroup_reclaimable_file_bytes(root, proc_self_cgroup)
+    working_set = max(0, (current or 0) - reclaimable)
     cg_avail_gb = max(0.0, float(limit - working_set) / float(_GIB))
     total = min(meminfo_total, limit_gb) if meminfo_total > 0 else limit_gb
     avail = min(meminfo_available, cg_avail_gb) if meminfo_available > 0 else cg_avail_gb
@@ -343,6 +386,7 @@ def probe_host_ram(
         meminfo_available_gb=meminfo_available,
         cgroup_limit_gb=limit_gb,
         source="cgroup" if constrained else "meminfo",
+        reclaimable_file_gb=float(reclaimable) / float(_GIB),
     )
 
 
@@ -663,12 +707,16 @@ def select_auto_mode(
     available_vram_gb: Optional[float] = None,
     model_size_gb: Optional[float] = None,
     peak_vram_gb: Optional[float] = None,
+    total_vram_gb: Optional[float] = None,
 ) -> str:
     """Pick the least-aggressive ladder step that keeps the pipeline in memory.
 
-    Decisions are made against FREE VRAM (what is actually available right
-    now), never the card's TOTAL capacity: a second model on an occupied card
-    must see the reduced free space.
+    FIT decisions (resident vs offload rungs) are made against FREE VRAM
+    (what is actually available right now) — a second model on an occupied
+    card must see the reduced free space. The resident REFINEMENT (off vs
+    vae_only) is made against TOTAL capacity, a per-SKU constant, so the
+    traced graph class and mint object set are deterministic per SKU
+    (pgw#750).
 
     ``peak_vram_gb`` is the endpoint's DECLARED per-request peak
     (``Resources.peak_vram_per_request_gb``, #339); when provided the fit
@@ -692,6 +740,25 @@ def select_auto_mode(
         # rung had just shrunk to fit, making the rung pointless on exactly
         # the cards it exists for.
         if requirement <= usable:
+            # pgw#750: BOTH branches are RESIDENT — this refinement only
+            # toggles VAE slicing, which changes the traced decode graph
+            # class and hence the compiled object set a mint proves. Key it
+            # on the card's TOTAL capacity (a per-SKU constant), never live
+            # free VRAM: the live margin hovered at this threshold and
+            # split one identical L4 fleet's mints 6/13 into off/vae_only
+            # cohorts (VRAM-posture-dependent proof_failed roulette). The
+            # FIT decisions above/below stay free-VRAM-based (safety); a
+            # card that later runs tight degrades reactively down
+            # OFFLOAD_LADDER instead of choosing a nondeterministic mint
+            # posture up front.
+            total = total_vram_gb if total_vram_gb is not None \
+                else get_total_vram_gb()
+            if total > 0.0:
+                sku_usable = max(
+                    0.0, total - GPU_VRAM_OVERHEAD_GB - margin)
+                if (sku_usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
+                    return "off"
+                return "vae_only"
             if (usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
                 return "off"
             return "vae_only"
