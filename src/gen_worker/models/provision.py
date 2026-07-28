@@ -265,8 +265,18 @@ def enable_compiled(
             if bucket and get_settings().compile_prefer_aot:
                 from . import lora_lifted
 
-                module_name = str((meta or {}).get("module") or "unet")
-                lifted_target = getattr(pipe, module_name, None)
+                # The target module comes from the ARTIFACT's own recorded
+                # facts ("module", else its first compile target) — never a
+                # hardcoded component name (pgw#740: the vocabulary is not
+                # repeated in live code; a guessed name on a non-UNet family
+                # would silently skip the install and waste the arm).
+                targets = [
+                    str(t) for t in ((meta or {}).get("targets") or ())]
+                module_name = str(
+                    (meta or {}).get("module")
+                    or (targets[0] if targets else ""))
+                lifted_target = (
+                    getattr(pipe, module_name, None) if module_name else None)
                 if (lifted_target is not None
                         and lora_lifted.lifted_binding(lifted_target) is None):
                     try:
