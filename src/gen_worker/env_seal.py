@@ -53,7 +53,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from . import guard_closure
+from . import guard_closure, host_isa
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +64,10 @@ logger = logging.getLogger(__name__)
 # identity). v5 (pgw#749): the identity manifest is the python env's
 # toolchain libs ON DISK — phase-independent — never the mapped set.
 # Adding/changing sealed facts bumps THIS version only — never the
-# key-axis set.
-SEAL_VERSION = 5
+# key-axis set. v6 (pgw#754): host-ISA codegen clamp facts (cpp_march /
+# cpp_simdlen) — deliberately retires every pre-clamp cell: they were
+# compiled -march=native for their mint host's CPU and are not portable.
+SEAL_VERSION = 6
 SEAL_KEY = "env_seal"
 
 # R2: the operator-settable generation salt. Bumping it disowns every cell
@@ -155,6 +157,10 @@ def effective_config() -> Dict[str, str]:
         "cudnn_benchmark": str(torch.backends.cudnn.benchmark),
         "python_hash_seed": os.environ.get("PYTHONHASHSEED", ""),
         "hash_randomization": str(sys.flags.hash_randomization),
+        # pgw#754: the host codegen target. Named here (beyond the opaque
+        # inductor digest, which also covers cpp.march/cpp.simdlen) so a
+        # cohort split is legible in the seal itself.
+        **host_isa.effective(),
     }
 
 
@@ -446,6 +452,10 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     global _BOOT_SEAL
     scrub_env()
     establish_config(overrides)
+    try:
+        host_isa.impose()
+    except host_isa.HostIsaError as exc:
+        raise EnvSealError(str(exc)) from exc
     guard_closure.establish_posture()
     _BOOT_SEAL = effective_seal()
     return dict(_BOOT_SEAL)
