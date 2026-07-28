@@ -48,8 +48,23 @@ class LoraOverlay(TypedDict):
 LogLevel = Literal["debug", "info", "warning", "error"]
 """Severity for :meth:`RequestContext.log` (pgw#508's operator stream)."""
 
-from ..api.errors import AuthError
+from ..api.errors import (
+    AuthError,
+    BlobForbiddenError,
+    BlobNotFoundError,
+    DatasetNotFoundError,
+)
 from ..api.slot import ResolvedSlot
+
+# th#1259 ref provenance. A resolve boundary must say WHERE the address came
+# from; that — not the HTTP status, not the message text — is what decides
+# whether a terminal miss is the CALLER's error (typed 4xx request failure,
+# no health signal) or the RELEASE's (fatal, model-health evidence).
+REF_ORIGIN_PAYLOAD = "payload"
+"""The address came from this request's payload. The caller owns it."""
+REF_ORIGIN_PLATFORM = "platform"
+"""The address was produced by the platform (hub manifest, release
+declaration). A miss is the platform's fault and stays fatal."""
 from ..families.base import GenerationDefaults
 from ..deferred_outputs import (
     DeferredImageAsset,
@@ -1491,7 +1506,9 @@ class _PublisherMixin:
             epoch_number=epoch_number,
         )
 
-    def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
+    def _download_blob_by_digest(
+        self, digest: str, dest: Path, *, origin: str = REF_ORIGIN_PAYLOAD,
+    ) -> None:
         """Fetch a blob by ``<algo>:<hex>`` digest to ``dest``.
 
         Uses the repo-CAS by-digest read endpoint — works for any blob
@@ -1499,6 +1516,10 @@ class _PublisherMixin:
         checkpoint file or a dataset file. The server indexes all CAS
         content by blake3 digest; callers that know the digest can fetch
         without needing to know which subsystem the blob belongs to.
+
+        ``origin`` is the th#1259 provenance of the ADDRESS, and it is the
+        only thing that decides how a terminal miss classifies. See
+        :data:`REF_ORIGIN_PAYLOAD`.
         """
         import requests
         base = (self._file_api_base_url or "").strip().rstrip("/")
@@ -1507,10 +1528,15 @@ class _PublisherMixin:
         digest_norm = digest if ":" in digest else f"blake3:{digest}"
         url = f"{base}/api/v1/blobs/{urllib.parse.quote(digest_norm, safe=':')}/content"
         headers = {"Authorization": f"Bearer {token}"}
+        caller_supplied = origin == REF_ORIGIN_PAYLOAD
         with requests.get(url, headers=headers, stream=True, timeout=300) as resp:
             if resp.status_code in (401, 403):
+                if caller_supplied:
+                    raise BlobForbiddenError(digest, resp.status_code)
                 raise AuthError(f"blob fetch unauthorized ({resp.status_code}) digest={digest}")
             if resp.status_code == 404:
+                if caller_supplied:
+                    raise BlobNotFoundError(digest)
                 raise RuntimeError(f"blob fetch 404 for digest={digest}")
             if resp.status_code < 200 or resp.status_code >= 300:
                 raise RuntimeError(f"blob fetch failed ({resp.status_code}) digest={digest}: {resp.text[:256]}")
@@ -1519,18 +1545,31 @@ class _PublisherMixin:
                     if chunk:
                         f.write(chunk)
 
+    def _fetch_platform_blob(self, digest: str, dest: Path) -> None:
+        """`_download_blob_by_digest` bound to PLATFORM provenance — for
+        addresses the hub itself produced (dataset manifests). A miss there
+        is a platform fault, not the caller's."""
+        self._download_blob_by_digest(digest, dest, origin=REF_ORIGIN_PLATFORM)
 
-    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
+    def materialize_blob(
+        self, digest: str, dest: "str | os.PathLike[str]",
+        *, origin: str = REF_ORIGIN_PAYLOAD,
+    ) -> Path:
         """Fetch a blob by ``<algo>:<hex>`` content-addressed digest.
 
         Returns the ``Path`` the blob was written to. Replacement for the
         private ``_download_blob_by_digest`` — exposed publicly so tenants
         that handle a digest directly (e.g. consuming a snapshot manifest
         emitted by an earlier conversion) can pull the bytes themselves.
+
+        ``origin`` defaults to :data:`REF_ORIGIN_PAYLOAD` because that is
+        the untrusted case and the safe default (th#1259): a bad address
+        fails the REQUEST typed rather than indicting the release. Pass
+        :data:`REF_ORIGIN_PLATFORM` for a digest the platform produced.
         """
         dest_path = Path(os.fspath(dest))
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        self._download_blob_by_digest(digest, dest_path)
+        self._download_blob_by_digest(digest, dest_path, origin=origin)
         return dest_path
 
     def checkpoint_dir(self, *, key: str) -> Path:
@@ -1594,10 +1633,14 @@ class _PublisherMixin:
            bounded retries. Entries lacking a presigned URL fall back to the
            repo-CAS by-digest reader.
 
-        Raises ``RuntimeError`` when the dataset isn't found, the manifest is
-        empty, the hub goes silent, or any download exhausts its retries.
+        The REF is caller-supplied, so a ref that resolves to nothing raises
+        ``DatasetNotFoundError`` — a typed request error (th#1259), never
+        release-health evidence. Everything downstream of a resolved ref (an
+        empty manifest, a silent hub, an exhausted download) is the
+        platform's and still raises ``RuntimeError``.
         """
         from ._datasets import (
+            DatasetRefNotFound,
             download_entries,
             fetch_materialize_manifest,
             lookup_dataset_id,
@@ -1611,28 +1654,37 @@ class _PublisherMixin:
             raise RuntimeError(f"resolve_dataset({ref!r}): no file_api_base_url")
         token = self._get_worker_capability_token()
 
-        if "/" in ref:
-            owner, name = _parse_owner_repo(ref)
-            dataset_id = lookup_dataset_id(base, token, owner, name)
-            cache_key = (owner, name)
-        else:
-            dataset_id = ref.strip()
-            if not dataset_id:
-                raise RuntimeError("resolve_dataset: empty ref")
-            cache_key = ("by-id", dataset_id)
         fetch_kwargs: Dict[str, Any] = {"cancelled": lambda: self.cancelled}
         if hub_silence_window_s is not None:
             fetch_kwargs["hub_silence_window_s"] = hub_silence_window_s
-        snapshot_id, entries = fetch_materialize_manifest(
-            base, token, dataset_id, **fetch_kwargs,
-        )
+        # th#1259: `ref` came from the caller, so THIS is the boundary that
+        # knows the provenance — the lookup helpers only see an opaque id.
+        # A ref that resolves to nothing is a payload verdict; everything
+        # after resolution keeps its platform-fault classification.
+        try:
+            if "/" in ref:
+                owner, name = _parse_owner_repo(ref)
+                dataset_id = lookup_dataset_id(base, token, owner, name)
+                cache_key = (owner, name)
+            else:
+                dataset_id = ref.strip()
+                if not dataset_id:
+                    raise DatasetRefNotFound("empty ref")
+                cache_key = ("by-id", dataset_id)
+            snapshot_id, entries = fetch_materialize_manifest(
+                base, token, dataset_id, **fetch_kwargs,
+            )
+        except DatasetRefNotFound as exc:
+            raise DatasetNotFoundError(ref, str(exc)) from exc
 
         cache_root = Path(tempfile.gettempdir()) / "gen_worker_datasets"
         target_root = cache_root.joinpath(*cache_key) / (snapshot_id or dataset_id)
         target_root.mkdir(parents=True, exist_ok=True)
         download_entries(
             entries, target_root,
-            fetch_blob=self._download_blob_by_digest,
+            # th#1259: these digests come from the HUB's own manifest, not
+            # from the payload — a miss is a platform fault, not the caller's.
+            fetch_blob=self._fetch_platform_blob,
             cancelled=lambda: self.cancelled,
         )
         self.dataset_paths[ref] = str(target_root)

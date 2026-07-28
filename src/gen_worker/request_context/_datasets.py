@@ -22,6 +22,16 @@ import blake3
 
 logger = logging.getLogger(__name__)
 
+
+class DatasetRefNotFound(RuntimeError):
+    """No dataset exists at the requested address (th#1259).
+
+    Internal marker only: these helpers see an opaque id and cannot know
+    whether the caller or the platform chose it. ``resolve_dataset`` — the
+    boundary that DOES know — converts this into the typed request error.
+    """
+
+
 _DOWNLOAD_RETRIES = 3
 _DOWNLOAD_BACKOFF_S = 1.0
 _CHUNK_BYTES = 1024 * 1024
@@ -59,6 +69,8 @@ def lookup_dataset_id(base: str, token: str, tenant: str, name: str) -> str:
     resp = requests.get(url, headers=headers, timeout=30)
     if resp.status_code in (401, 403):
         raise AuthError(f"dataset lookup unauthorized ({resp.status_code})")
+    if resp.status_code == 404:
+        raise DatasetRefNotFound(f"no such tenant dataset list: tenant={tenant}")
     if resp.status_code < 200 or resp.status_code >= 300:
         raise RuntimeError(f"dataset lookup failed ({resp.status_code}): {resp.text[:256]}")
     items = resp.json().get("items") or []
@@ -67,7 +79,7 @@ def lookup_dataset_id(base: str, token: str, tenant: str, name: str) -> str:
             dataset_id = str(it.get("dataset_id") or "")
             if dataset_id:
                 return dataset_id
-    raise RuntimeError(f"dataset not found for tenant={tenant} name={name}")
+    raise DatasetRefNotFound(f"dataset not found for tenant={tenant} name={name}")
 
 
 def _check_cancelled(cancelled: Optional[Callable[[], bool]]) -> None:
@@ -217,6 +229,10 @@ def fetch_materialize_manifest(
                 _wait_or_hub_silent(backoff, f"http {resp.status_code}")
                 backoff = min(backoff * 2.0, _POLL_BACKOFF_CAP_S)
                 continue
+            if resp.status_code == 404:
+                raise DatasetRefNotFound(
+                    f"dataset_id={dataset_id} does not exist"
+                )
             raise RuntimeError(
                 f"dataset materialize failed ({resp.status_code}): {resp.text[:256]}"
             )
