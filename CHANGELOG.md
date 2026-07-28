@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.76.2 (2026-07-27) — the export-input contract becomes a DECLARATION; the component vocabulary stops being copy-pasted
+
+Version note: **0.76.1 was claimed by pgw#738 and is not published** — that lane's work
+is still uncommitted, so the line goes 0.76.0 -> 0.76.2 and the claim stays reserved.
+
+This train also carries two commits that were STRANDED — complete on chaos, recorded in
+the tracker as shipped, but absent from the published 0.76.0 wheel because the 0.76.0
+release branch was cut without them (pgw#744 and the ie#566 G3 correction, below).
+
+### pgw#744: `kind="eval"` — a measure-only function kind (th#1255)
+
+**Stranded from 0.76.0.** pgw#744 claimed 0.76.0 and stamped it on chaos, but the
+published wheel has only four legal kinds. `KINDS` now carries the fifth. An eval
+function MEASURES a candidate against a reference: it reads inputs and emits metrics but
+publishes no catalog repo — the hub refuses repo writes for eval tokens and never asks
+an eval where its output repo goes.
+
+### ie#566 G3 correction: pin detection is guard evidence, not integer arithmetic
+
+**Also stranded from 0.76.0.** The published wheel refuses a pinned relational axis by
+testing whether the static dim is an integer multiple of the product of the declared
+dynamic extents — which false-passes. The correction reads the exported program's actual
+guards instead. Without it pgw#739's `test_pinned_relational_axis_is_still_refused` fails
+against its own gate, which is how the gap surfaced.
+
+### pgw#739: the export-input contract is a DECLARATION
+
+The SDK shipped sdxl's export inputs as worker code (`aot_inputs.sdxl_unet_inputs`,
+`_sdxl_cfg_batched`, `SDXL_POOLED_DIM`, `SDXL_TIME_IDS`). All of it is deleted. `Compile`
+gains the pgw#739 vocabulary — named `dims` with `(input, axis)` bindings, graph-class
+`forks` bound to a `(source, field)`, resolved coordinate `classes`, `inputs`/`args`,
+`shape_strategy`, `warm_changes_key`, `eager` — and `aot_declaration` derives export
+inputs generically from it. No formula DSL: rows are resolved by the endpoint's own
+legality oracle and declared. sdxl and wan-2.2 are the first two real declarations.
+
+### pgw#723 residuals: three mint obligations banked as gates, not lore
+
+- An AOTI package takes **positional** inputs only. A kwarg-traced package refuses a
+  positional call and the lane silently revokes to eager, so all-positional example
+  feeds are now a MINT obligation rather than a convention.
+- `load_constants` is **FQN-keyed**; the constant-set drift gate is asymmetric.
+- The lifted-LoRA path takes a torch 2.13 floor.
+- Serve docs close the folding caveat: strict holds vs folding artifacts, folds
+  recompute from fresh binds, and the default config never folds.
+
+### pgw#740 B5/B6: ONE component vocabulary, actually used
+
+The vocabulary module landed in 0.76.0; the 20+ copies of `("transformer","unet",…)`
+did not go away. All 18 files are repointed — and the repoint is not a rename. Every
+copy was a **module-level tuple**, evaluated at import, while an endpoint's
+`declare_components()` runs at endpoint-module import, which is later. A module-level
+snapshot therefore froze the pre-declaration vocabulary and dropped exactly the
+components the declaration exists to add. Consumers now read through a call, and
+`apply_block_window_offload` plus two `convert/writer.py` entrypoints lose their default
+**arguments** for the same reason (a default is evaluated at def time).
+
+Three distinct sets were being copied, so the vocabulary grows the selectors that tell
+them apart: `weight_components` (walk/size/offload — includes VAEs),
+`quant_candidate_components` (excludes VAEs; QUANTIZATION-POLICY.md keeps them at
+compute precision), and `pipeline_component_dirs`. A fifth `auxiliaries` group holds the
+weight-bearing non-roles the convert copies carried (`controlnet`, `prior`, `decoder`,
+`image_encoder`) and retires `weight_components`' `or name == "image_encoder"` special
+case.
+
+The live correctness gap this closes: Wan MoE's `transformer_2` and a declared LTX
+`connectors` now reach every consumer, including the size walk the orchestrator gates
+VRAM placement on — an undeclared component previously contributed zero bytes.
+
+`convert/writer.py:FP8_TE_COMPONENTS` is **deleted**: its comment promised a drift guard
+in `tests/test_fp8_te_writer.py`, a file that does not exist. The drift is removed by
+removing the copy.
+
+### pgw#746 (OQ-7): `Compile(regional=True, dynamic=(...))` is refused by name
+
+`_with_declared_marks` runs only on the whole-graph branch; the regional branch calls
+`compile_repeated_blocks(dynamic=None)` and returns before the marks are reached — while
+`declared_contract_facts` folds the same `dynamic=` row into the contract digest. The key
+asserted a contract the artifact did not honor, the failure class pgw#716 exists to
+prevent. Refused at declaration time rather than marked: regional is retiring in favor of
+whole-graph export (LTX-AOT-DESIGN.md §3.2), so teaching a departing lane to mark would
+build on sand. No endpoint declares the combination today.
+
+
 ## 0.76.0 (2026-07-27) — P0: every self-mint fleet-wide was refused at pack; plus the ck5->ck6 identity arc, the AOT lanes (dark), and the fp8 restructure
 
 ### P0 (pgw#733): guard sources resolve their EMBEDDED root — no cell could be published, on any family
