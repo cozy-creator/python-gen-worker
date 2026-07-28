@@ -383,6 +383,50 @@ def _validate_compile_arms(
     )
 
 
+def _slot_is_family_agnostic(
+    name: str, slot: Slot, slots: Dict[str, Slot],
+) -> bool:
+    """pgw#747: has this slot opted into the family vocabulary at all?
+
+    An AUXILIARY slot declared as a bare type — ``Slot(RifeInterpolatorPipeline)``
+    with no ``Hub(...)``, no ref — says nothing about architecture. A frame
+    interpolator and an upscaler consume decoded RGB frames and know nothing
+    about the model that produced them; ONE mirror is meant to serve every
+    consumer. Stamping such a slot with the FUNCTION's family (which is what
+    happened, unconditionally, to every slot) makes an assertion the endpoint
+    never made — and the hub's th#586 gate then fails closed against it,
+    because a family-agnostic artifact classifies as nothing:
+
+        binding_incompatible: image-to-video/interpolator: slot declares family
+        "wan-2.2-i2v-a14b" but the artifact's family is undeterminable
+
+    That blocked every wan-2.2 and ltx-video-2.3 release carrying the `fps` or
+    `resolution` preset — manifest-wide, so it also blocked the functions that
+    do not use them. No catalog-side stamp fixes it honestly: `Compatible`
+    compares architecture ROOTS, so stamping `rife-4.25` as `wan22` would be
+    FALSE and would break the moment ltx shares the same mirror, which is the
+    design. The gate already no-ops on an empty slot family, so emitting "" is
+    the whole fix.
+
+    TWO conditions, not one. "No ref" alone would also empty the family of a
+    deliberately DEFAULTLESS root slot — a real model slot bound at deploy time
+    through `?bindings=` (krea-2 ships exactly that shape) — silently dropping
+    the LoRA-overlay policing pgw#523 added it for. The root slot is the
+    function's own model and keeps the function's family whether or not it
+    names a ref; only a non-root, ref-less slot is family-agnostic.
+    """
+    if slot.default_checkpoint is not None:
+        return False
+    if getattr(slot, "root", False):
+        return False
+    if len(slots) == 1:
+        return False  # a single slot IS the root (executor._spec_root_slot)
+    if name == "pipeline" and not any(
+            getattr(s, "root", False) for s in slots.values()):
+        return False  # the implicit root
+    return True
+
+
 def _spec_for_handler(
     *,
     fn_name: str,
@@ -426,8 +470,11 @@ def _spec_for_handler(
     # Compile(family=...) is the explicit, functionally-load-bearing
     # declaration (compile-cache keying) — it wins over the derived config
     # schema's own @family registration when both are present.
+    function_family = compile_family or defaults_family
     slot_family = {
-        name: (compile_family or defaults_family) for name in slots
+        name: ("" if _slot_is_family_agnostic(name, slot, slots)
+               else function_family)
+        for name, slot in slots.items()
     }
     # SDK v2: derive each introspectable pipeline slot's component tree.
     slot_components = {

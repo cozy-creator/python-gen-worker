@@ -1,0 +1,285 @@
+"""AOT cell discovery — the pgw#722 pilot's F1 seam (flag-gated, default OFF).
+
+A serving pod cannot COMPUTE an exported cell's key: an ``aot-inductor``
+cell is STAMPED at mint with axes only the mint holds (its traced-graph
+contract), so the runtime's ``cell_key.compute`` (kind="inductor") can
+never name it and the hub's worker-owned pull-by-key delivery (th#883)
+never lights it up. Published AOT cells are therefore provably dark.
+
+This module is the minimal pilot delivery: **fetch-and-filter**. At arm
+time (``fleet_cells.enable_compiled``, behind ``Settings.
+compile_prefer_aot``) the worker lists the family cell repo's checkpoints
+through the hub's existing catalog read API, filters for a cell THIS
+runtime can serve, downloads the artifact, and feeds it into the existing
+``provision.enable_compiled`` HIT path — where the pgw#709 receipt gate
+and the aot_serve arm gates (B1/B2, lifted contract) run unchanged.
+
+Deliberately NOT the advertised-key route (extending ``cell_lookups`` /
+``requested_cell_key``): two resolving keys (inductor + aot) for one
+function make the hub's ``requestedKeyCellLocked`` ambiguous and
+fail-close mandatory-lane dispatch. That route is #724's design work and
+needs a hub tie-break first; the runbook records the hazard.
+
+Filter (SDXL-AOT-PILOT-RUNBOOK.md §3 F1):
+
+* ``kind == aot-inductor`` with a stamped ck5 ``cell_key``;
+* runtime-key + contract check via ``aot_serve.verify`` (sku, torch,
+  cuda, family, code-only flag, contract/constants parse);
+* canonical lane/bucket match against THIS pipeline's traced lane;
+* newest wins (checkpoint ``updated_at``; key digest tie-break).
+
+Receipt verification is NOT duplicated here — the downloaded artifact
+flows through ``receipts.gate_delivered_artifact`` at the one arming
+choke point exactly like a hub-attached cell.
+
+Every miss is fail-soft: discovery returning ``None`` leaves the boot on
+today's path (delivered dynamo cell / self-mint), and the reason rides a
+typed ``aot_cell_discovery`` activity event, never only pod logs.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import requests
+
+from . import activity as activity_mod
+from . import aot_serve, cell_key
+from . import compile_cache as cc
+from .config import get_settings
+from .convert.hub import blake3_file
+
+logger = logging.getLogger(__name__)
+
+_HTTP_TIMEOUT_S = 30
+_DOWNLOAD_TIMEOUT_S = 120
+_LIST_LIMIT = 200
+
+EVENT = "aot_cell_discovery"
+
+
+def prefer_aot() -> bool:
+    """The pilot flip switch (typed pod-launch knob, default OFF)."""
+    return bool(get_settings().compile_prefer_aot)
+
+
+@dataclass(frozen=True)
+class AdoptedAotCell:
+    """Identity of one discovered, downloaded, runtime-matched AOT cell.
+
+    Duck-compatible with ``fleet_cells.SelfMint`` where the executor reads
+    it (``_selection_for``): ``ref``/``snapshot_digest``/``artifact``. The
+    advertised digest is the artifact tar's blake3 — the worker's own view
+    of the exact bytes it armed, receipt-verified downstream — so the
+    advertisement never names bytes this pipe does not serve.
+    """
+
+    family: str
+    cell_key: str
+    ref: str  # "root/family-<f>#<stamped ck5 key>"
+    snapshot_digest: str  # "blake3:<hex>" of the artifact tarball
+    artifact: Path
+
+
+def _emit(phase: str, detail: str) -> None:
+    activity_mod.emit_event(EVENT, detail, phase=phase)
+
+
+def _get(
+    url: str,
+    bearer: str,
+    *,
+    params: Optional[Dict[str, str]] = None,
+    timeout: float = _HTTP_TIMEOUT_S,
+    stream: bool = False,
+) -> requests.Response:
+    """GET with the worker bearer; one anonymous retry on 401/403 (public
+    family repos resolve anonymously — the #459 read posture)."""
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+    resp = requests.get(
+        url, params=params, headers=headers, timeout=timeout, stream=stream)
+    if resp.status_code in (401, 403) and bearer:
+        resp = requests.get(url, params=params, timeout=timeout, stream=stream)
+    return resp
+
+
+def _lane_of_meta(meta: Dict[str, Any]) -> str:
+    return cell_key._canonical_lane(
+        str(meta.get("weight_lane") or ""), int(meta.get("lora_bucket") or 0))
+
+
+def _candidates(
+    items: List[Dict[str, Any]], family: str, want_lane: str,
+) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """(updated_at, checkpoint_id, metadata) rows that pass the filter,
+    newest first."""
+    out: List[Tuple[str, str, Dict[str, Any]]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("metadata")
+        if not isinstance(meta, dict):
+            continue
+        if str(meta.get("kind") or "") != aot_serve.ARTIFACT_KIND:
+            continue
+        key = str(meta.get("cell_key") or "").strip()
+        if not cell_key.is_key(key):
+            continue
+        reason = aot_serve.verify(meta, family=family)
+        if reason:
+            logger.debug("aot-cells: %s filtered: %s", key, reason)
+            continue
+        if _lane_of_meta(meta) != want_lane:
+            continue
+        out.append((
+            str(item.get("updated_at") or ""),
+            str(item.get("checkpoint_id") or "").strip(),
+            meta,
+        ))
+    # Newest wins; the key digest breaks updated_at ties deterministically.
+    out.sort(key=lambda row: (row[0], str(row[2].get("cell_key"))),
+             reverse=True)
+    return out
+
+
+def _download_artifact(
+    base_url: str,
+    bearer: str,
+    family: str,
+    checkpoint_id: str,
+    key: str,
+    cache_dir: Optional[Path],
+) -> Optional[Path]:
+    """Resolve the checkpoint's manifest and fetch its artifact tarball,
+    blake3-verified against the manifest entry. Cached by cell key."""
+    repo = cc.system_repo(family)
+    dest_dir = (
+        Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
+    ) / "aot-cells"
+    dest = dest_dir / f"{key}.tar.gz"
+
+    resp = _get(
+        f"{base_url}/api/v1/repos/{repo}/resolve",
+        bearer, params={"digest": checkpoint_id})
+    if resp.status_code != 200:
+        _emit("resolve_failed",
+              f"family={family} key={key}: resolve -> {resp.status_code}")
+        return None
+    body = resp.json() if resp.text else {}
+    entry = next(
+        (f for f in (body.get("files") or [])
+         if isinstance(f, dict) and str(f.get("path") or "").endswith(".tar.gz")),
+        None)
+    if entry is None:
+        _emit("resolve_failed",
+              f"family={family} key={key}: manifest has no artifact tarball")
+        return None
+    want_b3 = str(entry.get("blake3") or "").strip().lower()
+    if want_b3.startswith("blake3:"):
+        want_b3 = want_b3[7:]
+    if dest.is_file() and want_b3 and blake3_file(dest) == want_b3:
+        return dest
+
+    url = str(entry.get("url") or "")
+    if not url:
+        _emit("resolve_failed",
+              f"family={family} key={key}: manifest entry has no URL")
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".part")
+    with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
+        dl.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in dl.iter_content(1 << 20):
+                f.write(chunk)
+    if want_b3 and blake3_file(tmp) != want_b3:
+        tmp.unlink(missing_ok=True)
+        _emit("digest_mismatch",
+              f"family={family} key={key}: downloaded bytes != manifest blake3")
+        return None
+    tmp.replace(dest)
+    return dest
+
+
+def discover(
+    pipe: Any,
+    cfg: Any,
+    *,
+    base_url: str,
+    worker_jwt: Callable[[], str],
+    cache_dir: Optional[Path] = None,
+) -> Optional[AdoptedAotCell]:
+    """Fetch-and-filter one servable AOT cell for this pipeline, or None.
+
+    Never raises: every failure is a MISS with a typed event — a broken
+    discovery must cost the pilot lane, never the boot.
+    """
+    family = str(getattr(cfg, "family", "") or "")
+    if not family:
+        return None
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return None
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    try:
+        want_lane = cell_key._canonical_lane(cc.cell_base_lane(pipe), bucket)
+        repo = cc.system_repo(family)
+        bearer = str(worker_jwt() or "").strip()
+        resp = _get(
+            f"{base}/api/v1/repos/{repo}/checkpoints",
+            bearer, params={"limit": str(_LIST_LIMIT)})
+        if resp.status_code != 200:
+            _emit("list_failed",
+                  f"family={family}: checkpoint listing -> {resp.status_code}")
+            return None
+        items = (resp.json() or {}).get("items") or []
+        rows = _candidates(items, family, want_lane)
+        if not rows:
+            _emit("miss",
+                  f"family={family} lane={want_lane or 'plain'}: no matching "
+                  f"aot-inductor cell among {len(items)} checkpoint(s)")
+            return None
+        _updated, checkpoint_id, meta = rows[0]
+        key = str(meta.get("cell_key") or "")
+        if not checkpoint_id:
+            _emit("resolve_failed",
+                  f"family={family} key={key}: listing row has no checkpoint id")
+            return None
+        artifact = _download_artifact(
+            base, bearer, family, checkpoint_id, key, cache_dir)
+        if artifact is None:
+            return None
+        # From this moment the executor's kind dispatch (#734/#735) must
+        # recognize the ck5-flavored ref as an exported cell.
+        aot_serve.note_aot_key(key)
+        adopted = AdoptedAotCell(
+            family=family,
+            cell_key=key,
+            ref=f"{cc.system_repo(family)}#{key}",
+            snapshot_digest="blake3:" + blake3_file(artifact),
+            artifact=artifact,
+        )
+        _emit("hit",
+              f"family={family} key={key} checkpoint={checkpoint_id[:16]} "
+              f"lane={want_lane or 'plain'}")
+        logger.info(
+            "aot-cells: discovered %s (checkpoint %s, %.1f MB)",
+            adopted.ref, checkpoint_id[:16],
+            artifact.stat().st_size / 1e6)
+        return adopted
+    except Exception as exc:  # noqa: BLE001 — discovery is never fatal
+        logger.warning("aot-cells: discovery failed (%s); staying on the "
+                       "ordinary arming policy", exc)
+        _emit("error", f"family={family}: {type(exc).__name__}: {exc}")
+        return None
+
+
+__all__ = [
+    "AdoptedAotCell",
+    "EVENT",
+    "discover",
+    "prefer_aot",
+]

@@ -5649,6 +5649,13 @@ class Executor:
                 and aot_serve.is_aot_ref(
                     inj.active_compile_artifacts[id(candidate.pipeline)].ref)
             }
+            # pgw#722 finding 2 (the #735 boot-proof gap): the proof loop
+            # below used to run only under `proves_inductor`, so a worker
+            # whose ONLY arm is an exported cell (the F1 adopt shape — the
+            # dynamo artifact is skipped) stayed armed UNPROVEN through
+            # boot. An exported arm demands the same fail-closed boot proof
+            # as a dynamo arm; only the per-object scoring differs.
+            proves_exported = bool(aot_proof_before)
             warmup = getattr(instance, "warmup", None)
 
             async def run_warmup() -> Tuple[int, Dict[int, set[str]], str]:
@@ -5737,7 +5744,7 @@ class Executor:
             compile_seconds = (
                 compile_cache.compile_wall_seconds() - compile_seconds_before
                 if proves_inductor else 0.0)
-            if proves_inductor:
+            if proves_inductor or proves_exported:
                 # gw#595 per-object provability: the proof scopes to objects
                 # the warmup actually EXERCISED (calls>0). An exercised object
                 # must serve its own cache hit or it disproves the cell. An
@@ -5895,6 +5902,16 @@ class Executor:
                     for candidate in unproven:
                         pipe = candidate.pipeline
                         function_proofs[id(pipe)] = set()
+                        # pgw#722 finding 2: an exported arm disarms through
+                        # its own lane — aot_serve.unwrap restores the
+                        # forward it captured (under the F2 flip that is the
+                        # lifted LoRA forward), then the lifted lanes come
+                        # off so the pod lands back on the exact pre-flip
+                        # eager shape. Order is load-bearing.
+                        if aot_serve.unwrap(pipe):
+                            from .models import lora_lifted
+
+                            lora_lifted.remove_lifted_lora_lanes(pipe)
                         compile_cache.unwrap(pipe)
                         if spec.lora_bucket:
                             compile_cache.drop_lora_lane(pipe)
@@ -5944,7 +5961,10 @@ class Executor:
                     # guards/extern-libs diff and load probes naming the
                     # failing step. Store-served boots only (a minting boot
                     # has no seeded cell to diverge from).
-                    if compile_selection is not None and not (
+                    # pgw#722 finding 2: FX forensics describe the dynamo
+                    # lane only — a pure-exported disproof would report the
+                    # SKIPPED delivered artifact's cache state, pure noise.
+                    if proves_inductor and compile_selection is not None and not (
                         trt_engine.is_engine_ref(compile_selection.ref)
                     ):
                         try:
@@ -6056,6 +6076,12 @@ class Executor:
                         "modality, calls=0); serving eager",
                         sorted(candidate.slots))
                     function_proofs[id(pipe)] = set()
+                    # pgw#722 finding 2: same exported-lane disarm as the
+                    # unproven loop above.
+                    if aot_serve.unwrap(pipe):
+                        from .models import lora_lifted
+
+                        lora_lifted.remove_lifted_lora_lanes(pipe)
                     compile_cache.unwrap(pipe)
                     if spec.lora_bucket:
                         compile_cache.drop_lora_lane(pipe)

@@ -1883,13 +1883,24 @@ def find_artifact(root: Path) -> Optional[Path]:
 def _merge_staged_cache(staged: Path, live: Path) -> None:
     """Safely add one already-verified staging tree to ``live``.
 
-    Inductor/Triton paths are content-addressed: an existing path must be
-    byte-identical, never overwritten. New files become visible one at a time
-    via ``os.replace`` (there is no portable whole-directory union swap), but
-    the process lock prevents normal arming consumers from observing that
-    interval. An in-process failure removes every newly added file. A process
-    crash can leave only complete, verified new files; replay treats those as
-    identical and finishes the additive merge.
+    Inductor/Triton paths are cache-KEY-addressed, not content-addressed
+    across machines (pgw#699/#711 respec, pgw#751): same-key members are
+    byte-divergent between producers (embedded paths, codegen
+    nondeterminism), so an existing path with different bytes is the SAME
+    cache entry, not a conflict — the LOCAL copy wins (it may already be
+    mmapped/served by this process, and torch's own consumption is keyed,
+    so serving semantics are identical) and the merge stays additive. The
+    live 7-of-13 ``adopt_failed:cache_collision`` epidemic was exactly
+    this: any pod that had compiled anything before delivery could never
+    install a cell. A structural conflict (a directory where a file is
+    expected) still refuses typed.
+
+    New files become visible one at a time via ``os.replace`` (there is no
+    portable whole-directory union swap), but the process lock prevents
+    normal arming consumers from observing that interval. An in-process
+    failure removes every newly added file. A process crash can leave only
+    complete, verified new files; replay treats those as identical and
+    finishes the additive merge.
     """
     files = sorted(
         path
@@ -1898,17 +1909,25 @@ def _merge_staged_cache(staged: Path, live: Path) -> None:
         if path.is_file()
     )
     additions: list[tuple[Path, Path]] = []
+    local_wins: list[str] = []
     for source in files:
         target = live / source.relative_to(staged)
         if target.exists():
-            if not target.is_file() or not filecmp.cmp(source, target, shallow=False):
+            if not target.is_file():
                 raise AdoptError(
                     "cache_collision",
                     f"verified cache path {source.relative_to(staged)!s} "
-                    "already exists with different bytes",
+                    "exists locally as a non-file — structural conflict",
                 )
+            if not filecmp.cmp(source, target, shallow=False):
+                local_wins.append(str(source.relative_to(staged)))
             continue
         additions.append((source, target))
+    if local_wins:
+        logger.info(
+            "cell merge: %d same-key byte-divergent member(s) kept LOCAL "
+            "(pgw#751 — bytes are not the identity; first: %s)",
+            len(local_wins), ", ".join(local_wins[:3]))
 
     live.mkdir(parents=True, exist_ok=True)
     added: list[Path] = []

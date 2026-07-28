@@ -29,8 +29,37 @@ class _FakeHub(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_proxy_page(self, code: int) -> None:
+        """Answer as a PROXY would (ngrok offline page): text/html, no hub
+        error envelope. pgw#738/#743: origin discrimination must classify
+        this as an outage, never as the hub speaking."""
+        body = (b"<!DOCTYPE html><html><body>"
+                b"ngrok: the endpoint is offline</body></html>")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        """Read surface. pgw#743's keepalive probes a repo GET, and the real
+        hub answers 200 JSON (or its 404 envelope) — either way, definitely
+        itself."""
+        st = _FakeHub.state
+        if st.get("proxy_gets", 0) > 0:
+            st["proxy_gets"] -= 1
+            self._send_proxy_page(int(st.get("proxy_status", 503)))
+            return
+        self._send(200, {"repo": {"path": self.path}})
+
     def do_POST(self) -> None:  # noqa: N802
         st = _FakeHub.state
+        if st.get("proxy_posts", 0) > 0:
+            # The whole hub is behind a dead tunnel: every POST answers the
+            # proxy's offline page with the given status.
+            st["proxy_posts"] -= 1
+            self._send_proxy_page(int(st.get("proxy_status", 404)))
+            return
         if self.path.endswith("/clone-manifests/lookup"):
             # th#592 download-skip bank lookup. `ready` mirrors tensorhub:
             # every manifest blob must still be in CAS.
@@ -207,12 +236,24 @@ class _FakeHub(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True,
                                  "checkpoint": {"checkpoint_id": "blake3:abc"}})
             return
-        self._send(404, {"error": "not_found"})
+        # Real hub envelope shape (docs/api-conventions.md) — a string
+        # `error` was fake-hub drift and reads as PROXY-origin under
+        # pgw#738's discrimination.
+        self._send(404, {"error": {"code": "not_found", "message": "no route"}})
 
     def do_PUT(self) -> None:  # noqa: N802
+        st = _FakeHub.state
+        if st.get("reset_puts", 0) > 0:
+            # Sever the connection mid-request (no HTTP answer at all):
+            # the client sees a connection reset / aborted response.
+            st["reset_puts"] -= 1
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
         n = int(self.headers.get("Content-Length") or 0)
         data = self.rfile.read(n) if n else b""
-        st = _FakeHub.state
         counts = st.setdefault("put_counts", {})
         counts[self.path] = counts.get(self.path, 0) + 1
         fail_paths = st.get("fail_put_paths") or {}

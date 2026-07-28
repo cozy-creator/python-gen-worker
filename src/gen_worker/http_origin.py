@@ -1,10 +1,18 @@
 """Who actually answered — the hub, or a proxy standing in front of it?
 
-te#125/th#1238: a 404 is not one condition. It is two, with opposite handling:
+te#125/th#1238: a status code is not one condition. It is two, with opposite
+handling:
 
   * The HUB answering 404 means "this route/resource does not exist". Fatal.
   * A PROXY answering 404 (ngrok, an ingress, a load balancer with no healthy
     backend) means "the hub is not reachable right now". Transient.
+
+pgw#743 generalises this from 404 to EVERY status. Two 58-minute clones died
+byte-identically on `upload complete failed (503) ... <!DOCTYPE html>` — the
+same proxy, the same HTML page, a different number. The question a caller
+actually needs answered is never "was it a 404?" but "did the hub ITSELF
+answer?", so that is the question this module exposes
+(:func:`is_definite_hub_answer`).
 
 Conflating them cost a 116-minute H100 producer run: the hub restarted for a
 few seconds mid-job, the in-flight upload got ngrok's 404 page, and the worker
@@ -33,7 +41,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["response_is_from_hub", "is_proxy_outage"]
+__all__ = ["response_is_from_hub", "is_proxy_outage", "is_definite_hub_answer"]
 
 
 def _content_type(resp: Any) -> str:
@@ -70,3 +78,34 @@ def is_proxy_outage(resp: Any) -> bool:
     route is missing).
     """
     return not response_is_from_hub(resp)
+
+
+def is_definite_hub_answer(resp: Any) -> bool:
+    """True when this response is the hub's own verdict and may end a loop.
+
+    pgw#743. A retry loop needs exactly one bit: did we HEAR from the hub? Two
+    answers are definite:
+
+      * 2xx/3xx — nothing in front of us fabricates a success for a route it
+        cannot reach, so the body does not need inspecting.
+      * a 4xx carrying the hub's error envelope — the hub refusing.
+
+    Everything else is the peer failing to answer, whatever number rode on
+    it: 5xx (an upstream with no healthy backend, an edge timing out over a
+    synchronous verify), and any status whose body is proxy-shaped — HTML,
+    empty, or JSON without our envelope. Those are NOT verdicts and must
+    never be terminal; the caller retries them under a silence window.
+
+    The asymmetry that justifies the conservative default (an unrecognised
+    body counts as proxy-shaped): mis-retrying a real refusal costs a bounded
+    backoff and then fails anyway, while mis-terminating an outage throws
+    away work that has already been paid for — two 58-minute clones, in the
+    case that motivated this.
+    """
+    try:
+        code = int(getattr(resp, "status_code", 0))
+    except Exception:  # noqa: BLE001 - an unreadable status is not a verdict
+        return False
+    if 200 <= code < 400:
+        return True
+    return response_is_from_hub(resp)

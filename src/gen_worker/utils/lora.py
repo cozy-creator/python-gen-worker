@@ -30,7 +30,7 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set,
 from ..component_vocab import denoiser_components, text_encoder_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
 from dataclasses import replace
-from ..models import w8a8_lora
+from ..models import lora_lifted, w8a8_lora
 
 logger = logging.getLogger(__name__)
 
@@ -544,7 +544,25 @@ class AdapterResidency:
         with self._lock:
             st = self._state(ref, pipe)
             try:
-                if targets and branch_set:
+                # pgw#722 F3: a lifted binding exists only when the AOT arm
+                # installed it (flag-gated F2) — its presence IS the routing
+                # fact. An armed exported artifact reads the adapter from the
+                # lifted flat pair (call inputs); a buffer copy would be
+                # invisible to it, so every attach/clear on a lifted denoiser
+                # writes through the binding views instead. No binding =>
+                # byte-identical to today's paths.
+                lifted = any(
+                    lora_lifted.lifted_binding(m) is not None
+                    for m in targets.values()) if targets else False
+                if targets and branch_set and lifted:
+                    # Same apply/scale-fold/refusal code as the buffer path
+                    # (it IS that path, through views), canonical placement,
+                    # no resize — the traced bucket is the floor, and a set
+                    # that needs more refuses instead of recompiling.
+                    lora_lifted.swap_lifted_lane_set(
+                        pipe, branch_set, request_id=request_id)
+                    w8a8_lora.stamp_lane(pipe, targets)
+                elif targets and branch_set:
                     # Compiled pipelines keep canonical placement and ONE
                     # traced bucket (a resize would mean a recompile at swap
                     # time — never allowed in prod); eager pipelines use
@@ -576,8 +594,18 @@ class AdapterResidency:
                         w8a8_lora.stamp_lane(pipe, targets)
                 elif targets:
                     # Adapter set has no denoiser half: make sure a previous
-                    # request's branches are off.
-                    w8a8_lora.clear_branch_lanes(pipe)
+                    # request's branches are off. Lifted denoisers clear
+                    # through their binding (zero-B lands in the flat pair
+                    # the artifact reads — pgw#722 F3).
+                    if lifted:
+                        for model in targets.values():
+                            binding = lora_lifted.lifted_binding(model)
+                            if binding is not None:
+                                binding.clear()
+                            else:
+                                w8a8_lora.clear_branch_adapters(model)
+                    else:
+                        w8a8_lora.clear_branch_lanes(pipe)
                     w8a8_lora.stamp_lane(pipe, targets)
                 if targets and not adapters:
                     # No peft half — make sure a previous request's peft
@@ -651,11 +679,17 @@ class AdapterResidency:
                 return
             t0 = time.monotonic()
             try:
-                from ..models import w8a8_lora
-
                 targets = w8a8_lora.branch_targets(pipe)
                 if targets:
-                    w8a8_lora.clear_branch_lanes(pipe)
+                    # pgw#722 F3: a lifted denoiser deactivates through its
+                    # binding — zero-B must land in the flat pair the armed
+                    # artifact reads, not in the orphaned canonical buffers.
+                    for model in targets.values():
+                        binding = lora_lifted.lifted_binding(model)
+                        if binding is not None:
+                            binding.clear()
+                        else:
+                            w8a8_lora.clear_branch_adapters(model)
                     w8a8_lora.stamp_lane(pipe, targets)
             except Exception:
                 logger.warning(

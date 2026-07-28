@@ -133,7 +133,15 @@ def test_loaded_libraries_come_from_the_real_loader_map() -> None:
     assert len(seal["loaded_libs"]) == 16  # combined digest is a seal fact
     meta = cc.artifact_metadata(
         family="toyfam", shapes=((64, 64),), targets=("transformer",))
-    assert meta["loaded_libs"] == libs  # per-lib list rides metadata
+    # pgw#749: metadata records the DISK identity manifest (phase-
+    # independent), of which the mapped set is a content-consistent subset
+    # — a mapped toolchain lib whose digest diverges from the manifest is a
+    # substitution assert_seal_unchanged refuses by name.
+    manifest = dict(env_seal.frozen_library_digests())
+    assert meta["loaded_libs"] == manifest
+    for base, digest in libs.items():
+        if base in manifest and digest != "<unreadable>":
+            assert manifest[base] == digest, base
 
 
 # ---------------------------------------------------------------------------

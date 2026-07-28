@@ -1,163 +1,38 @@
 # Changelog
 
-## 0.76.2 (2026-07-27) — the export-input contract becomes a DECLARATION; the component vocabulary stops being copy-pasted
+## 0.76.3 — the reuse wave: adopt-without-mint unblocked + AOT flip seams
 
-Version note: **0.76.1 was claimed by pgw#738 and is not published** — that lane's work
-is still uncommitted, so the line goes 0.76.0 -> 0.76.2 and the claim stays reserved.
+The four structural bugs that held cell adoption at zero in the sdxl 0.2.14
+four-leg proof (verdict: "airtight cells, proven; adoption economics: not
+yet"), plus the flip-critical AOT serve seams.
 
-This train also carries two commits that were STRANDED — complete on chaos, recorded in
-the tracker as shipped, but absent from the published 0.76.0 wheel because the 0.76.0
-release branch was cut without them (pgw#744 and the ie#566 G3 correction, below).
+- **pgw#745**: host driver libs (libcuda.so.*, libnvidia-*) excluded from the
+  env_seal lib manifest — cell keys stop fracturing per RunPod driver cohort
+  (gw#577: driver is never identity). seal_v4.
+- **pgw#749**: the identity lib manifest is the userspace toolchain ON DISK
+  (torch/triton/nvidia package roots, content-digested), never the
+  phase-dependent /proc/self/maps snapshot — cold-boot candidate keys now
+  equal published keys, so boot-attach adoption can fire. seal_v5. The maps
+  probe stays as the live substitution-refusal surface.
+- **pgw#751**: adoption keeps LOCAL bytes on same-key byte-divergent cache
+  members (bytes are not the identity — #699/#711 respec); warm pods can
+  install cells. Structural conflicts still refuse typed.
+- **pgw#750 (task 1)**: the off-vs-vae_only resident refinement keys on TOTAL
+  card capacity (per-SKU constant), never marginal live free VRAM — the mint's
+  traced graph class and object set are deterministic per SKU.
+- **pgw#722 pilot seams F1/F2/F3**: flag-gated AOT serve flip
+  (`GEN_WORKER_PREFER_AOT`, default OFF) — discovery/adopt of exported cells,
+  lifted-LoRA arm order, binding-routed adapter swaps. Seal-digest invariant.
+- **pgw#747**: a bare-typed auxiliary slot emits `family=""` — family-agnostic
+  artifacts (RIFE, upscalers) become bindable.
+- **pgw#743**: a proxy-shaped answer is not a hub verdict at ANY status
+  (+ convert keepalive). [Relabelled from 0.76.2 — it missed that wheel.]
+- `equivalence.py` deleted (deliberate re-land of the chaos deletion; Paul's
+  ck5/ck6 exact-identity ruling).
+- NOT aboard: pgw#752 (rides 0.76.4); pgw#735 boot-proof gap fix (flip-prep
+  lane; the flip smoke notes the gap until it ships).
 
-### pgw#744: `kind="eval"` — a measure-only function kind (th#1255)
-
-**Stranded from 0.76.0.** pgw#744 claimed 0.76.0 and stamped it on chaos, but the
-published wheel has only four legal kinds. `KINDS` now carries the fifth. An eval
-function MEASURES a candidate against a reference: it reads inputs and emits metrics but
-publishes no catalog repo — the hub refuses repo writes for eval tokens and never asks
-an eval where its output repo goes.
-
-### ie#566 G3 correction: pin detection is guard evidence, not integer arithmetic
-
-**Also stranded from 0.76.0.** The published wheel refuses a pinned relational axis by
-testing whether the static dim is an integer multiple of the product of the declared
-dynamic extents — which false-passes. The correction reads the exported program's actual
-guards instead. Without it pgw#739's `test_pinned_relational_axis_is_still_refused` fails
-against its own gate, which is how the gap surfaced.
-
-### pgw#739: the export-input contract is a DECLARATION
-
-The SDK shipped sdxl's export inputs as worker code (`aot_inputs.sdxl_unet_inputs`,
-`_sdxl_cfg_batched`, `SDXL_POOLED_DIM`, `SDXL_TIME_IDS`). All of it is deleted. `Compile`
-gains the pgw#739 vocabulary — named `dims` with `(input, axis)` bindings, graph-class
-`forks` bound to a `(source, field)`, resolved coordinate `classes`, `inputs`/`args`,
-`shape_strategy`, `warm_changes_key`, `eager` — and `aot_declaration` derives export
-inputs generically from it. No formula DSL: rows are resolved by the endpoint's own
-legality oracle and declared. sdxl and wan-2.2 are the first two real declarations.
-
-### pgw#723 residuals: three mint obligations banked as gates, not lore
-
-- An AOTI package takes **positional** inputs only. A kwarg-traced package refuses a
-  positional call and the lane silently revokes to eager, so all-positional example
-  feeds are now a MINT obligation rather than a convention.
-- `load_constants` is **FQN-keyed**; the constant-set drift gate is asymmetric.
-- The lifted-LoRA path takes a torch 2.13 floor.
-- Serve docs close the folding caveat: strict holds vs folding artifacts, folds
-  recompute from fresh binds, and the default config never folds.
-
-### pgw#740 B5/B6: ONE component vocabulary, actually used
-
-The vocabulary module landed in 0.76.0; the 20+ copies of `("transformer","unet",…)`
-did not go away. All 18 files are repointed — and the repoint is not a rename. Every
-copy was a **module-level tuple**, evaluated at import, while an endpoint's
-`declare_components()` runs at endpoint-module import, which is later. A module-level
-snapshot therefore froze the pre-declaration vocabulary and dropped exactly the
-components the declaration exists to add. Consumers now read through a call, and
-`apply_block_window_offload` plus two `convert/writer.py` entrypoints lose their default
-**arguments** for the same reason (a default is evaluated at def time).
-
-Three distinct sets were being copied, so the vocabulary grows the selectors that tell
-them apart: `weight_components` (walk/size/offload — includes VAEs),
-`quant_candidate_components` (excludes VAEs; QUANTIZATION-POLICY.md keeps them at
-compute precision), and `pipeline_component_dirs`. A fifth `auxiliaries` group holds the
-weight-bearing non-roles the convert copies carried (`controlnet`, `prior`, `decoder`,
-`image_encoder`) and retires `weight_components`' `or name == "image_encoder"` special
-case.
-
-The live correctness gap this closes: Wan MoE's `transformer_2` and a declared LTX
-`connectors` now reach every consumer, including the size walk the orchestrator gates
-VRAM placement on — an undeclared component previously contributed zero bytes.
-
-`convert/writer.py:FP8_TE_COMPONENTS` is **deleted**: its comment promised a drift guard
-in `tests/test_fp8_te_writer.py`, a file that does not exist. The drift is removed by
-removing the copy.
-
-### pgw#746 (OQ-7): `Compile(regional=True, dynamic=(...))` is refused by name
-
-`_with_declared_marks` runs only on the whole-graph branch; the regional branch calls
-`compile_repeated_blocks(dynamic=None)` and returns before the marks are reached — while
-`declared_contract_facts` folds the same `dynamic=` row into the contract digest. The key
-asserted a contract the artifact did not honor, the failure class pgw#716 exists to
-prevent. Refused at declaration time rather than marked: regional is retiring in favor of
-whole-graph export (LTX-AOT-DESIGN.md §3.2), so teaching a departing lane to mark would
-build on sand. No endpoint declares the combination today.
-
-
-## 0.76.0 (2026-07-27) — P0: every self-mint fleet-wide was refused at pack; plus the ck5->ck6 identity arc, the AOT lanes (dark), and the fp8 restructure
-
-### P0 (pgw#733): guard sources resolve their EMBEDDED root — no cell could be published, on any family
-
-The headline, and the reason this train exists. `guard_closure._source_root`
-prefix-matched `^L['name']`, but torch 2.13 emits class/code-structure guards whose
-sources CONTAIN a root without starting with it:
-`dict(type(L['self']).__mro__[1].__dict__)` for a base-class `@property` (diffusers
-`ConfigMixin.config`, read in every model's forward) and
-`type(L['self']._modules['x']).__dict__['forward'].__defaults__` for a submodule
-forward with a default argument. Both fell through to the `"other"` root, which LEAKS
-**before** the type dispatch that already covers them — so `assert_closure` raised
-inside every mint's pack window and every self-mint on every family was refused
-(`self_mint_abort phase=pack_failed`), independent of sm, dtype, lane and function.
-Every family inherits `ModelMixin`+`ConfigMixin` and calls default-arg submodules, so
-nothing escaped it; the 26 existing tapes stayed green because their fixtures are plain
-modules with plain attributes and no default args.
-
-- `_source_root` now resolves the root embedded anywhere in a derived source, `self`
-  winning when present. The closed world is unchanged: a source with no recognizable
-  root is still `"other"`, still a leak.
-- Freevar-rooted guards share the input dispatch; only the LEAK REASON gains the freevar
-  naming. Production DOES trace a wrapper closing over `forward_fn`/`kwargs_name` —
-  classifying those as leaks would have refused every real mint a second way. A captured
-  code object is code (pinned by `code_closure`+`toolchain`); a captured runtime scalar
-  still leaks, now named as a freevar.
-- Verified on a real diffusers `UNet2DConditionModel`: 9-11 LEAK rows +
-  `GuardClosureError` -> CLOSED, `assert_closure` PASSES. A new CPU tape compiles a real
-  hierarchy carrying both triggers — the net the toy tapes never provided.
-
-### Pack refusals diagnose themselves (pgw#733)
-
-A refusal that exists only while the pod lives is a silent failure to the OPERATOR: the
-first real-GPU mint's reason died with the pod and cost a full run. Every pack refusal
-now carries `latched=yes/NO` with the live cache dirs (answering gw#608's question with
-evidence instead of asking it rhetorically), the capture `tree=[...]` per subdir with
-counts, inductor's cache flags (`fx_graph_cache`, `force_disable_caches`,
-`bundle_triton_into_fx_graph_cache` — True by default on 2.13, which moves triton
-artifacts INSIDE the fx entry), and the pipeline's own FX hit/miss proof counts. The
-pgw#698 cubin gate carries its census (ptx/cubin counts, sm, bundle flag) so a real PTX
-exposure and a bundling artifact are distinguishable. Reading inductor's config never
-triggers a fresh import — that mkdirs `TORCHINDUCTOR_CACHE_DIR` and can leave a
-half-initialized module behind (measured: the mega-cache artifact factory
-double-registers).
-
-### Three genericity defects (pgw#740)
-
-- `convert/repackage.detect_diffusers_family` routed the SDXL two-text-encoder signature
-  to the **SD1.5 converter**, silently, while `convert/layout.py` returned `"sdxl"` for
-  the identical signal. Detection fixed, plus an independent `ConverterSignatureError`
-  guard naming both sides, so a caller passing the wrong family cannot get the wrong
-  converter either.
-- `utils/lora._denoiser_fingerprint` digested UNet-only config fields, so **every DiT
-  fingerprinted to `"|||"`** — a normalized-split cache collision between structurally
-  different transformers. It now covers both shapes, with a structural fallback (a
-  fingerprint that resolves to nothing is a collision, not a key).
-- `models/memory`'s group-offload loop iterated a fixed component list, so Wan's
-  `transformer_2` and LTX's `connectors` were **never offloaded** while the caller was
-  told they were. Components are discovered now, and anything left resident is named in
-  a WARNING.
-
-### AOT lanes — new modules, INERT until invoked (pgw#721/#723/#725/#734/#735)
-
-`aot_serve.py` (consume a `.pt2`: B1 constants-bound gate + B2 ingress range assertion),
-`aot_mint.py`/`aot_package.py`/`aot_inputs.py` (export -> code-only `.pt2` -> gates ->
-keyed cell) and `models/lora_lifted.py` (rank-bucket adapters as call INPUTS). Nothing
-dispatches to them unless an `aot-inductor` cell arrives, so this ships dark. Two
-executor seams had to change for that path to be reachable at all: hot adoption
-dispatches on artifact KIND (an exported cell used to be handed to the dynamo stager),
-and the adoption proof is kind-aware — an exported artifact performs no FX lookup, so
-the `cache_hit_count > 0` gate could never pass for it. `aot_serve.proven_since` is the
-exported proof (executed since the sample AND still armed); no counter is ever
-synthesized, and dynamo keeps the FX-hit requirement verbatim.
-
-### (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
+## Unreleased (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
 
 Paul's exact-identity ruling chain (design of record: tracker pgw#716). This ships
 the ck5 INTERIM scheme; ck6 (graph-hash identity) follows per pgw#716-#720.
@@ -276,6 +151,96 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
 
+## 0.76.3 (2026-07-27) — pgw#747: an auxiliary slot stops claiming the function's family
+
+Discovery stamped **every** slot of a function with that function's architecture family —
+including a slot the endpoint declared as a bare type with no ref. A frame interpolator and an
+upscaler are family-agnostic by construction (they consume decoded RGB frames and know nothing
+about the model that produced them, which is why ONE mirror is meant to serve every consumer),
+so the hub's th#586 gate read `family = "wan-2.2-i2v-a14b"` off the slot, could not classify the
+artifact as anything, and failed closed:
+
+```
+binding_incompatible: image-to-video/interpolator (tensorhub "tensorhub/rife-4.25"):
+  slot declares family "wan-2.2-i2v-a14b" but the artifact's family is undeterminable
+```
+
+The gate is **manifest-wide**, so this blocked every wan-2.2 and ltx-video-2.3 release carrying
+the `fps` or `resolution` preset — including the functions that do not use them. Both features
+were written, tested and merged, and neither had ever been deployable.
+
+No catalog-side stamp fixes it honestly: `Compatible` compares architecture ROOTS, so stamping
+`rife-4.25` as `wan22` would be FALSE and would break the moment ltx-video-2.3 shares the same
+mirror, which is the design. The gate already no-ops on an empty slot family, so emitting `""` is
+the whole fix and nothing is needed hub-side.
+
+The fix lands in `registry.py`, where `slot_family` is derived, so discovery, the executor,
+`cozy run` and provisioning all see one answer; `discovery/discover.py` stops re-defaulting the
+slot family back to `Compile(family=...)` after the fact, which would have put the bug straight
+back on exactly the emptied slots.
+
+**Two conditions, not one.** "No ref ⇒ no family" alone would also empty a deliberately
+DEFAULTLESS **root** slot — a real model slot bound at deploy time through `?bindings=`, which is
+the shape `krea-2` ships — silently dropping the LoRA-overlay policing pgw#523 added it for. Only
+a **non-root, ref-less** slot is family-agnostic. Tests cover all three shapes; red-verified
+against the pre-fix registry, where the auxiliary slot comes out carrying the function's family.
+
+## 0.76.2 (2026-07-27) — pgw#743: a proxy-shaped answer is not a verdict, at ANY status
+
+pgw#715 taught the publisher that "a 404 from a PROXY is not a 404 from the hub". It taught it
+about **404 only**. Two independent clones then downloaded 53 GiB over ~58 minutes each and died
+byte-identically at the **first upload**:
+
+```
+HubPublishError: upload complete failed (503) for
+'transformer_2/diffusion_pytorch_model-00001-of-00014.safetensors'
+after 5 attempts: <!DOCTYPE html>
+```
+
+Same proxy, same HTML page, different number — and the different number was enough to throw away
+a fully-paid download. `tensorhub/wan22-i2v-a14b` has been a half-present MoE ever since, and the
+`krea-2-{raw,turbo}` mirrors have zero checkpoints.
+
+**The question is never "was it a 404?"** — it is "did the hub ITSELF answer?".
+`http_origin.is_definite_hub_answer(resp)` now asks exactly that, status-agnostically: a 2xx/3xx
+(nothing fabricates a success for a route it cannot reach) or a 4xx carrying the hub's
+`{"error": {"code": ...}}` envelope is a VERDICT and ends a retry loop. Everything else — 5xx,
+and any status whose body is HTML/empty/enveloped-wrong — is the peer failing to answer, and is
+retried under a silence window. `convert/hub.py::_send_with_retries` is gated on that single
+predicate instead of `code == 404 and is_proxy_outage(...)`, so an ngrok 403 or 502 rides out
+exactly like the 503 did not.
+
+Hub-origin refusals are **unchanged and still terminal on the first attempt** — biasing toward
+retry must not convert real refusals into retry loops, and there is a test that counts the POSTs.
+
+**Sizing, on measured evidence.** `_COMPLETE_SILENCE_WINDOW_S` went from 2 to 6 verify-lengths
+(20 -> 60 min). The recorded outages OUTLIVED the 20-minute window: the chaos hub's container was
+being rebuilt under the running clones. A window is a claim about how long the channel may
+plausibly be gone, and a container rebuild is tens of minutes. The arithmetic agrees — an hour
+parked on the CPU rig these jobs run on costs about what re-downloading costs, and unlike the
+re-download it cannot fail the same way again. The retry loop beats `activity.note_progress()`
+every pass so an hour of legitimate waiting is not the dead-job signature (pgw#738).
+
+**`convert/keepalive.py` (new) — the hub-silent hour that set the trap.** A clone spends ~58
+minutes downloading from HuggingFace and makes not one hub request; both losses landed on the
+first request after such a gap. `HubKeepalive` probes one cheap repo GET every 120s for the whole
+of `run_clone` (download AND cast), so there is never an hour-old idle path for a multi-GB upload
+to discover, and — whatever the idle-tunnel hypothesis turns out to be worth — the log now DATES
+the outage instead of leaving its corpse. The probe is deliberately toothless: it never retries,
+never raises, never fails a job. Deciding what an outage means belongs to the retry loop that
+knows what work is at stake.
+
+Sub-chunking uploads to start them earlier was the alternative and does not fit clone: no output
+file exists until the whole snapshot has been downloaded and run through repackage/cast
+(`build_flavor_tree` reshards across the complete file set), so "upload sooner" means rebuilding
+the pipeline as a streaming one, not adding a call.
+
+Landed together with the `_send_with_retries` silence-window rewrite authored by the pgw#738 lane
+in the shared chaos worktree — pgw#743 IS that rewrite plus the generalisation above, and a
+second implementation would only have collided with it. pgw#738's other halves (executor lock
+order, publish observability) remain that lane's to land under its own version claim; this bump
+takes 0.76.2 and leaves 0.76.1 to it.
+
 ## 0.75.2 (2026-07-27) — pgw#737: the self-mint never takes the tenant request down again
 
 The ie#535 wan-2.2 1.3.1 go-live spent $2.61 and rendered zero frames. On both tiers and both
@@ -332,18 +297,47 @@ request DIES `JOB_STATUS_RETRYABLE: out of memory` — the live wan-2.2 symptom 
 arm declines cleanly. A roomier card (8.5-11.6 GiB resident) mints in every arm: no false
 declines.
 
-## 0.75.1 (2026-07-27) — the 0.71-0.75 promotion train stamp; pgw#700 arc + pgw#684 restore
+## 0.75.1 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
 
-The batch train that publishes chaos 0.71.0 through 0.75.1 (PR #414). The pgw#715
-proxy-404 classifier that originally headlined this section released EARLY as the solo
-hotfix **0.70.5** (PR #413, coordinator's option-1 ruling) — its full write-up lives in
-the 0.70.5 section below; the train carries the identical code by ancestry.
+A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.
+The job finished quantizing and rendering, then its in-flight media upload hit ngrok while the
+backend was briefly gone, received ngrok's HTML 404 page, and
+`presigned_upload.py` classified **every** 404 as `retryable=False` — so the worker reported
+`JOB_STATUS_FATAL` and two hours of GPU work was thrown away with no recourse.
 
-`1f55c19` (pgw#677 REOPEN, committed 7 minutes after pgw#684) clobbered `executor.py`
-from a stale base and silently reverted pgw#684's executor wiring — `candidate_info`
-extraction, the ctx kwarg, and the materialize block. Restored verbatim from `2f452a3`;
-`test_reserved_candidate_pgw684` 10/10 green again (5 of the 10 failed on the committed
-tree before the restore, not only in the dirty shared worktree as previously recorded).
+The gRPC worker stream reconnects across a hub restart. **In-flight HTTP calls did not**, and
+that asymmetry is why "hub-only restarts are safe" held for serving and quietly did not hold
+for long conversion producers.
+
+**`gen_worker/http_origin.py`** (new) separates the two cases, on measured evidence rather
+than assumption — the hub answers `application/json` carrying its `{"error": {...}}` envelope,
+ngrok's offline page answers `text/html`:
+
+- `response_is_from_hub(resp)` — parses the body, not just the Content-Type, since a proxy may
+  mislabel HTML as JSON but will not synthesise our error envelope.
+- `is_proxy_outage(resp)` — the inverse, used at the call sites.
+
+Deliberately **biased toward retrying**: an unrecognised body counts as proxy-origin. Retrying
+a genuinely missing route costs a bounded backoff and then fails anyway; treating an outage as
+fatal destroys hours of work. The asymmetry of those two mistakes is not close.
+
+Applied at every site that conflated the two **for hub calls** — the point was to fix the
+class, not the one instance that bit us:
+
+- `presigned_upload.py` — the P0. Proxy 404 during upload create is now `retryable=True`.
+- `models/hub_client.py` — a proxy 404 was reported as `HubRepoNotFoundError`, sending the
+  reader to hunt a catalog problem that does not exist. Now `HubResolveError` (transient).
+- `callout.py::checkpoint_get` — **the worst of the three**, because it did not crash: it
+  returned `(None, False)`, i.e. "no saved progress", so an outage made a resumable job
+  silently restart from scratch. Now raises instead.
+
+**Deliberately NOT changed:** `models/download.py`'s civitai 404s. Civitai is a third-party
+host with no proxy of ours in the path, so there a 404 really does mean not-found. Widening
+the helper to non-hub hosts would trade a real bug for a fake one.
+
+Still open: `request_context/__init__.py:1494` carries the same pattern, but that file holds
+another agent's uncommitted work in the shared chaos worktree, so it is left alone rather than
+entangled. Recorded in pgw#715 for its owner.
 
 Also riding in 0.75.1 (landed after the 0.75.0 stamp, folded here by the train): the
 **pgw#700 arc** — equivalence adoption SDK half (`gen_worker/equivalence.py`: code-closure
@@ -619,57 +613,6 @@ see the named gap below.
   widening admission before a real artifact can fully load would strand
   requests.
 
-## 0.70.5 (2026-07-27) — pgw#715: a 404 from a PROXY is not a 404 from the hub (te#125/th#1238)
-
-**Released off the 0.70.4 published base, not off chaos.** The chaos branch carries
-0.71-0.75 (MoE LoRA branch routing, the env seal + its P0 hotfix, compile-degrade, the
-arch-floor carrier). That work is **unpublished BY CHOICE** and rides the next proper
-chaos -> master train as a batch — nothing here skips it. Shipping this classifier as a
-0.70.x patch keeps the published line linear and the blast radius equal to the 30 lines the
-fleet actually needs.
-
-A hub restart lasting seconds destroyed a **116-minute H100 producer run** at its last step.
-The job finished quantizing and rendering, then its in-flight media upload hit ngrok while the
-backend was briefly gone, received ngrok's HTML 404 page, and
-`presigned_upload.py` classified **every** 404 as `retryable=False` — so the worker reported
-`JOB_STATUS_FATAL` and two hours of GPU work was thrown away with no recourse.
-
-The gRPC worker stream reconnects across a hub restart. **In-flight HTTP calls did not**, and
-that asymmetry is why "hub-only restarts are safe" held for serving and quietly did not hold
-for long conversion producers.
-
-**`gen_worker/http_origin.py`** (new) separates the two cases, on measured evidence rather
-than assumption — the hub answers `application/json` carrying its `{"error": {...}}` envelope,
-ngrok's offline page answers `text/html`:
-
-- `response_is_from_hub(resp)` — parses the body, not just the Content-Type, since a proxy may
-  mislabel HTML as JSON but will not synthesise our error envelope.
-- `is_proxy_outage(resp)` — the inverse, used at the call sites.
-
-Deliberately **biased toward retrying**: an unrecognised body counts as proxy-origin. Retrying
-a genuinely missing route costs a bounded backoff and then fails anyway; treating an outage as
-fatal destroys hours of work. The asymmetry of those two mistakes is not close.
-
-Applied at every site that conflated the two **for hub calls** — the point was to fix the
-class, not the one instance that bit us:
-
-- `presigned_upload.py` — the P0. Proxy 404 during upload create is now `retryable=True`.
-- `models/hub_client.py` — a proxy 404 was reported as `HubRepoNotFoundError`, sending the
-  reader to hunt a catalog problem that does not exist. Now `HubResolveError` (transient).
-- `callout.py::checkpoint_get` — **the worst of the three**, because it did not crash: it
-  returned `(None, False)`, i.e. "no saved progress", so an outage made a resumable job
-  silently restart from scratch. Now raises instead.
-
-**Deliberately NOT changed:** `models/download.py`'s civitai 404s. Civitai is a third-party
-host with no proxy of ours in the path, so there a 404 really does mean not-found. Widening
-the helper to non-hub hosts would trade a real bug for a fake one.
-
-Still open: `request_context/__init__.py:1494` carries the same pattern, but that file holds
-another agent's uncommitted work in the shared chaos worktree, so it is left alone rather than
-entangled. Recorded in pgw#715 for its owner.
-
-
-## 0.70.4 (2026-07-26) — pgw#696 P0 hotfix: the env gate killed every fleet pod
 ## 0.70.3 (2026-07-26) — pgw#694 determinism hardening + cache-review fixes (ck4 keys, env-seal boot wiring, inner-FX sm shim)
 
 One train: the pgw#694 hardening set (chaos a73e6c8), its executor-side boot wiring (`entrypoint._establish_env_seal`), and the ML-cache-review fixes (chaos 23a34bd — the P0 inner-inductor-cache portability shim, B200-verified). ck3 -> ck4 is the second and final planned key-scheme bump; expect one `cell_exchange_key_split` alarm per (endpoint, family) and a one-time re-mint wave.
