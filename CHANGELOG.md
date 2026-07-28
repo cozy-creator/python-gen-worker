@@ -119,6 +119,40 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
 
+## 0.76.3 (2026-07-27) — pgw#747: an auxiliary slot stops claiming the function's family
+
+Discovery stamped **every** slot of a function with that function's architecture family —
+including a slot the endpoint declared as a bare type with no ref. A frame interpolator and an
+upscaler are family-agnostic by construction (they consume decoded RGB frames and know nothing
+about the model that produced them, which is why ONE mirror is meant to serve every consumer),
+so the hub's th#586 gate read `family = "wan-2.2-i2v-a14b"` off the slot, could not classify the
+artifact as anything, and failed closed:
+
+```
+binding_incompatible: image-to-video/interpolator (tensorhub "tensorhub/rife-4.25"):
+  slot declares family "wan-2.2-i2v-a14b" but the artifact's family is undeterminable
+```
+
+The gate is **manifest-wide**, so this blocked every wan-2.2 and ltx-video-2.3 release carrying
+the `fps` or `resolution` preset — including the functions that do not use them. Both features
+were written, tested and merged, and neither had ever been deployable.
+
+No catalog-side stamp fixes it honestly: `Compatible` compares architecture ROOTS, so stamping
+`rife-4.25` as `wan22` would be FALSE and would break the moment ltx-video-2.3 shares the same
+mirror, which is the design. The gate already no-ops on an empty slot family, so emitting `""` is
+the whole fix and nothing is needed hub-side.
+
+The fix lands in `registry.py`, where `slot_family` is derived, so discovery, the executor,
+`cozy run` and provisioning all see one answer; `discovery/discover.py` stops re-defaulting the
+slot family back to `Compile(family=...)` after the fact, which would have put the bug straight
+back on exactly the emptied slots.
+
+**Two conditions, not one.** "No ref ⇒ no family" alone would also empty a deliberately
+DEFAULTLESS **root** slot — a real model slot bound at deploy time through `?bindings=`, which is
+the shape `krea-2` ships — silently dropping the LoRA-overlay policing pgw#523 added it for. Only
+a **non-root, ref-less** slot is family-agnostic. Tests cover all three shapes; red-verified
+against the pre-fix registry, where the auxiliary slot comes out carrying the function's family.
+
 ## 0.76.2 (2026-07-27) — pgw#743: a proxy-shaped answer is not a verdict, at ANY status
 
 pgw#715 taught the publisher that "a 404 from a PROXY is not a 404 from the hub". It taught it
