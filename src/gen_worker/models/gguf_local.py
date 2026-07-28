@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from ..component_vocab import denoiser_components, text_encoder_components
 from .hub_client import WorkerResolvedRepo
 from .refs import TensorhubRef
 from .loading import FP8_STORAGE_FIT_FACTOR
@@ -76,12 +77,12 @@ def gguf_qtype(flavor: str) -> str:
 def is_denoiser_weight_path(path: str) -> bool:
     p = str(path or "").strip().lstrip("/")
     head, _, rest = p.partition("/")
-    return head in ("transformer", "unet") and bool(rest) and rest != "config.json"
+    return head in denoiser_components() and bool(rest) and rest != "config.json"
 
 
 def _is_text_encoder_weight(path: str) -> bool:
     head, _, rest = str(path or "").strip().lstrip("/").partition("/")
-    return head.startswith("text_encoder") and bool(rest)
+    return head in text_encoder_components() and bool(rest)
 
 
 def select_gguf(

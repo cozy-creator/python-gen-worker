@@ -24,6 +24,7 @@ import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from ..component_vocab import denoiser_components
 from typing import Any, Optional
 import importlib.metadata as md
 
@@ -327,9 +328,6 @@ def _svdq_from_file(component: str, path: Path) -> Optional[SvdqArtifact]:
     )
 
 
-_SVDQ_COMPONENT_DIRS = ("transformer", "unet")
-
-
 def detect_svdq_artifact(model_path: Path) -> Optional[SvdqArtifact]:
     """Find the nunchaku single-file checkpoint inside a snapshot: the
     denoiser dir's (or, for a bare artifact, the root's) sole svdq-tagged
@@ -339,7 +337,7 @@ def detect_svdq_artifact(model_path: Path) -> Optional[SvdqArtifact]:
         return _svdq_from_file("", root) if root.suffix == ".safetensors" else None
     if not root.is_dir():
         return None
-    for comp in _SVDQ_COMPONENT_DIRS:
+    for comp in denoiser_components():
         comp_dir = root / comp
         if not comp_dir.is_dir():
             continue

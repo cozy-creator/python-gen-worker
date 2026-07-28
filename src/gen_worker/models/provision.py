@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
+from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
 from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
@@ -135,7 +136,7 @@ def load_slot(
     # backstop).
     if storage_dtype in ("fp8", "fp8+te"):
         comps = model_index_components(path)
-        if comps and not ({"transformer", "unet"} & comps):
+        if comps and not (set(denoiser_components()) & comps):
             out.pre_drop_wanted = storage_dtype
             out.pre_drop_detail = (
                 f"cast {storage_dtype!r} dropped for slot {slot!r}: pipeline "
