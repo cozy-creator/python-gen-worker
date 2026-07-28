@@ -265,22 +265,28 @@ class GraphClass(msgspec.Struct, frozen=True):
 class Input(msgspec.Struct, frozen=True):
     """One example-input template of the export call contract.
 
-    ``name`` may be dotted for nested container kwargs (sdxl's
-    ``added_cond_kwargs.text_embeds``). ``shape`` entries are
-    :data:`AxisSpec`; a rank-0 tensor is ``shape=()`` with ``value``
-    (sdxl's scalar timestep). ``dtype`` "" means the resolved module's own
-    dtype (the resident-precision truth); anything else names an explicit
-    torch dtype (wan's int64 scalar timestep, ti2v's float32 per-token one).
-    ``positional`` inputs are emitted as args in declaration order — call
-    convention is part of the contract, because the serve side replays the
-    recorded pytree spec. ``targets`` scopes the row; empty = every target.
+    ``name`` may be dotted for nested container arguments (sdxl's
+    ``added_cond_kwargs.text_embeds`` — the container dict is built and fed
+    as ONE argument). ``shape`` entries are :data:`AxisSpec`; a rank-0
+    tensor is ``shape=()`` with ``value`` (sdxl's scalar timestep).
+    ``dtype`` "" means the resolved module's own dtype (the
+    resident-precision truth); anything else names an explicit torch dtype
+    (wan's int64 scalar timestep, ti2v's float32 per-token one).
+
+    There is NO args/kwargs choice to declare: all-positional example feeds
+    are a MINT OBLIGATION (pod 9, pgw#723 residuals — an AOTI package's call
+    convention mirrors the traced args/kwargs split, and the serve marshal
+    is positional, so a kwarg-traced package silently revokes to eager on
+    first call). The SDK binds each named row to its slot in the traced
+    signature and feeds everything positionally; declaring a name the
+    target takes only keyword-only is refused at mint time by name.
+    ``targets`` scopes the row; empty = every target.
     """
 
     name: str
     shape: Tuple[AxisSpec, ...]
     dtype: str = ""
     value: Optional[float] = None
-    positional: bool = False
     targets: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -307,9 +313,6 @@ class Input(msgspec.Struct, frozen=True):
                 shape.append(("config", str(ref[1]).strip()))
         force(self, "shape", tuple(shape))
         force(self, "dtype", str(self.dtype or "").strip())
-        if self.positional and "." in self.name:
-            raise DeclarationError(
-                f"Input {self.name!r} is dotted (nested) and cannot be positional")
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
 
     @property
@@ -322,7 +325,6 @@ class Input(msgspec.Struct, frozen=True):
             "shape": [list(e) if isinstance(e, tuple) else e for e in self.shape],
             "dtype": self.dtype,
             "value": self.value,
-            "positional": self.positional,
             "targets": list(self.targets),
         }
 

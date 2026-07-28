@@ -105,8 +105,12 @@ def builder_for(family: str, target: str = "") -> InputBuilder:
         f"before it can be exported")
 
 
-def lifted_lora_kwargs(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
-    """The mandatory ``lora_a``/``lora_b`` call kwargs for a LoRA-bucket mint.
+def lifted_lora_values(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
+    """The mandatory ``lora_a``/``lora_b`` call values for a LoRA-bucket mint,
+    keyed by parameter NAME — the builder binds them to their POSITIONAL
+    slots (all-positional example feeds are a mint obligation: pod 9's
+    kwarg-traced package armed and silently revoked to eager on first call,
+    pgw#723 residuals).
 
     #725 option 2: the adapter rides as a flat 1-D pair with static per-layer
     offsets, passed as CALL ARGUMENTS. The pair must be present at trace time —
@@ -234,6 +238,6 @@ __all__ = [
     "compose",
     "inputs_for",
     "latent_dims",
-    "lifted_lora_kwargs",
+    "lifted_lora_values",
     "module_dtype_device",
 ]

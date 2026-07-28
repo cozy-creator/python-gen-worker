@@ -1054,7 +1054,7 @@ def test_sdxl_lora_bucket_zero_takes_no_adapter_arguments() -> None:
     from gen_worker import aot_inputs
 
     spec = aot_mint.ExportSpec(family="sdxl", target="unet", lora_bucket=0)
-    assert aot_inputs.lifted_lora_kwargs(LiftedModule(), spec) == {}
+    assert aot_inputs.lifted_lora_values(LiftedModule(), spec) == {}
 
 
 def test_unknown_family_has_no_input_contract() -> None:

@@ -361,10 +361,19 @@ def declared_inputs(
     Widths come from the module's own config where the declaration says so;
     sizes come from the SELECTED CLASS ROW (which row seeds the trace
     decides nothing for a collapsed artifact — the derived range does).
+
+    The returned kwargs dict is ALWAYS empty: all-positional example feeds
+    are a mint obligation (pod 9, pgw#723 residuals — the AOTI package call
+    convention mirrors the traced args/kwargs split and the serve marshal
+    is positional), so every declared row — including nested containers and
+    the lifted-LoRA pair — is bound to its slot in the traced signature and
+    fed positionally, with signature defaults filling undeclared slots in
+    between. A declared name the target only takes keyword-only is refused
+    by name: such a target cannot meet the fleet call convention.
     """
     import torch
 
-    from .aot_inputs import lifted_lora_kwargs, module_dtype_device
+    from .aot_inputs import lifted_lora_values, module_dtype_device
 
     rows = target_inputs(decl, spec.target)
     if not rows:
@@ -380,8 +389,7 @@ def declared_inputs(
     config = getattr(module, "config", None)
     mod_dtype, device = module_dtype_device(module)
 
-    args: List[Any] = []
-    kwargs: Dict[str, Any] = {}
+    values: Dict[str, Any] = {}
     for row in rows:
         if row.dtype:
             name = _DTYPES.get(row.dtype)
@@ -406,14 +414,76 @@ def declared_inputs(
             tensor = torch.randn(shape, dtype=dtype, device=device)
         else:
             tensor = torch.ones(shape, dtype=dtype, device=device)
-        if row.positional:
-            args.append(tensor)
-        else:
-            _nest(kwargs, row.name, tensor)
+        _nest(values, row.name, tensor)
     for arg in target_args(decl, spec.target):
-        _nest(kwargs, arg.name, arg.value)
-    kwargs.update(lifted_lora_kwargs(module, spec))
-    return tuple(args), kwargs
+        _nest(values, arg.name, arg.value)
+    values.update(lifted_lora_values(module, spec))
+    return _positionalize(module, spec.target, decl.family, values), {}
+
+
+def _positionalize(
+    module: Any, target: str, family: str, values: Dict[str, Any],
+) -> Tuple[Any, ...]:
+    """Bind named values to their slots in the traced signature, all-positional.
+
+    Undeclared slots BETWEEN declared ones are filled with their signature
+    defaults; trailing undeclared slots are omitted. Refusals by name: a
+    declared name that is not a parameter (declaration/module drift), a
+    keyword-only declared name (cannot meet the positional serve marshal),
+    and a required in-between parameter with no default and no declaration.
+    """
+    import inspect
+
+    attr = target.rsplit(".", 1)[1] if "." in target else "forward"
+    fn = getattr(module, attr, None)
+    if fn is None:
+        raise MintRefused(
+            f"family {family!r}: resolved module {type(module).__name__} has "
+            f"no callable {attr!r} to read a signature from")
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError) as exc:
+        raise MintRefused(
+            f"family {family!r}: cannot read the signature of {attr!r} on "
+            f"{type(module).__name__} ({exc}); without it the declared "
+            f"inputs cannot be bound to positional slots") from exc
+    positional = [
+        p for p in params
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        and p.name != "self"
+    ]
+    keyword_only = {p.name for p in params if p.kind == p.KEYWORD_ONLY}
+
+    hit = sorted(keyword_only & set(values))
+    if hit:
+        raise MintRefused(
+            f"family {family!r}: declared input(s) {hit!r} are KEYWORD-ONLY "
+            f"parameters of {attr!r} — all-positional example feeds are a "
+            f"mint obligation (the AOTI package call convention mirrors the "
+            f"traced args/kwargs split and the serve marshal is positional; "
+            f"pod 9, pgw#723 residuals), so this target cannot be exported "
+            f"as declared")
+    names = [p.name for p in positional]
+    unknown = sorted(set(values) - set(names))
+    if unknown:
+        raise MintRefused(
+            f"family {family!r}: declared input(s) {unknown!r} are not "
+            f"parameters of {attr!r} on {type(module).__name__} "
+            f"(parameters: {names!r}) — the declaration does not fit this "
+            f"module")
+    last = max(names.index(n) for n in values)
+    args: List[Any] = []
+    for p in positional[: last + 1]:
+        if p.name in values:
+            args.append(values[p.name])
+        elif p.default is not inspect.Parameter.empty:
+            args.append(p.default)
+        else:
+            raise MintRefused(
+                f"family {family!r}: parameter {p.name!r} of {attr!r} sits "
+                f"before declared inputs, is not declared, and has no "
+                f"default — the positional feed cannot skip it")
+    return tuple(args)
 
 
 def _nest(kwargs: Dict[str, Any], dotted: str, value: Any) -> None:

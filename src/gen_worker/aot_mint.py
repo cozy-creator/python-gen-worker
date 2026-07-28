@@ -180,6 +180,41 @@ class ExportSpec:
         return token
 
 
+#: The lifted-LoRA mint's torch floor (pgw#723 residuals, pod 8): torch 2.9
+#: strict export refuses ``bind_views``' in-trace ``mod.lora_a = ...`` setattr
+#: ("AssertionError: Mutating module attribute lora_a during export") that
+#: 2.13 traces fine. 2.9 is NOT a valid fallback for this lane.
+LIFTED_LORA_TORCH_FLOOR = (2, 13)
+
+
+def lifted_torch_gap(spec: ExportSpec) -> str:
+    """'' when torch meets the lifted-LoRA floor (or the spec has no lifted
+    fork declared), else the named refusal reason."""
+    if not (spec.lora_bucket or spec.lifted_inputs or spec.lora_fqns):
+        return ""
+    import torch
+
+    version = str(getattr(torch, "__version__", "") or "")
+    parts = version.split("+")[0].split(".")
+    try:
+        found = (int(parts[0]), int(parts[1]))
+    except (IndexError, ValueError):
+        return (
+            f"cannot parse torch version {version!r} to check the "
+            f"lifted-LoRA mint floor (torch >= "
+            f"{'.'.join(map(str, LIFTED_LORA_TORCH_FLOOR))})")
+    if found < LIFTED_LORA_TORCH_FLOOR:
+        floor = ".".join(map(str, LIFTED_LORA_TORCH_FLOOR))
+        return (
+            f"lifted-LoRA mint requires torch >= {floor}, got {version}: "
+            f"torch 2.9 strict export refuses bind_views' in-trace setattr "
+            f"('Mutating module attribute lora_a during export') that 2.13 "
+            f"traces fine — measured on pod 8 (pgw#723 residuals), so the "
+            f"2.13 prod floor is a mint PRECONDITION for this lane, not a "
+            f"preference")
+    return ""
+
+
 def lane_admitted(spec: ExportSpec, *, allow_regressed_lanes: bool) -> str:
     """'' when this lane may be minted, else the named refusal reason."""
     base, _bucket = lane_bucket(spec.weight_lane)
@@ -572,6 +607,9 @@ def mint(
     refusal = lane_admitted(spec, allow_regressed_lanes=allow_regressed_lanes)
     if refusal:
         raise MintRefused(refusal)
+    refusal = lifted_torch_gap(spec)
+    if refusal:
+        raise MintRefused(refusal)
 
     out_dir = Path(out_dir)
     work = out_dir / "work"
@@ -579,6 +617,22 @@ def mint(
     timings: Dict[str, float] = {}
 
     args, kwargs = example_inputs()
+    if kwargs:
+        # All-positional example feeds are a MINT OBLIGATION (pgw#723
+        # residuals, pod 9): the AOTI package's call convention mirrors the
+        # traced args/kwargs split, and the serve marshal is POSITIONAL
+        # (aot_serve.marshal_positional) — a kwarg-traced package arms, then
+        # silently revokes to eager on its first call ("Ran into a kwarg
+        # keyword mismatch: Got [] but expected ['lora_a','lora_b']",
+        # measured). Refused HERE so the failure is a named mint refusal
+        # instead of a vacuous eager-serving artifact.
+        raise MintRefused(
+            f"example feed carries keyword argument(s) {sorted(kwargs)!r} — "
+            f"all-positional feeds are a mint obligation (pod 9, pgw#723 "
+            f"residuals): a kwarg-traced package is uncallable by the "
+            f"positional serve marshal and fails only at first serve, "
+            f"silently revoking to eager. Feed every input positionally "
+            f"(signature defaults fill the gaps)")
     input_names = _input_names(module, args, kwargs)
     dynamic = dynamic_shapes_spec(spec.dynamic, input_names) \
         if spec.dynamic else None
@@ -1267,8 +1321,10 @@ __all__ = [
     "dynamic_shapes_spec",
     "export_program",
     "identity_blocks",
+    "LIFTED_LORA_TORCH_FLOOR",
     "lane_admitted",
     "lifted_input_gaps",
+    "lifted_torch_gap",
     "main",
     "mint",
     "mint_target",
