@@ -702,6 +702,11 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["objectives"] = list(es.objectives)
         if es.distilled is not None:
             fn["distilled"] = bool(es.distilled)
+        # th#1257: declared serving tasks — the axis the hub's lane-verdict
+        # store keys on. Omitted = undeclared, and every quant lane then
+        # resolves unmeasured (serves at base precision).
+        if es.tasks is not None:
+            fn["tasks"] = list(es.tasks)
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)

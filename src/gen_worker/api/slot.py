@@ -61,6 +61,24 @@ D = TypeVar("D", bound=GenerationDefaults)
 # LoRA onto already-distilled weights).
 OBJECTIVES = ("epsilon", "v_prediction", "flow")
 
+# th#1257 SERVING TASKS — what a handler asks the model to DO, as opposed to
+# what the model IS. Orthogonal to both facts above: qwen-image-edit and
+# qwen-image share one objective (flow) and one architecture, but an edit path
+# must PRESERVE an input image while a text-to-image path has nothing to
+# preserve. Quantization damage differs accordingly, so the hub's human
+# quality sign-off is scoped per task and a handler must say which it serves.
+# Mirrors tensorhub's internal/modeltask vocabulary exactly.
+TASKS = (
+    "text_to_image",
+    "image_edit",
+    "image_upscale",
+    "text_to_video",
+    "image_to_video",
+    "video_edit",
+    "text_to_audio",
+    "text_generation",
+)
+
 
 class ObjectiveMismatchError(ValueError):
     """A resolved checkpoint's stamped objective/distilled facts are outside

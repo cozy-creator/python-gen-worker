@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.77.0 (2026-07-28) — th#1257: handlers declare the SERVING TASK they perform
+
+The hub's human quality sign-off for a quantization lane is no longer keyed by model family
+alone — it is keyed `(family, task, variant, lane, quant_method)`. A fp8 approval earned on
+text-to-image says nothing about image-edit on the SAME weights: an edit path must preserve
+an input image, and flux.2-klein-9b serves both from one checkpoint. The task therefore
+cannot be inferred from the model; the handler declares it.
+
+- **`@worker_function(tasks=(...))`** beside the existing `objectives=` / `distilled=`,
+  riding the same path into the requirement payload (`fn["tasks"]`). Vocabulary in
+  `gen_worker.api.slot.TASKS`, mirroring tensorhub's `internal/modeltask` exactly.
+- Several tasks means one handler INPUT-ROUTES them (a merged `generate()` that does
+  text-to-image with no image and image-edit with one). The hub requires every declared
+  task to be approved before the lane is auto-eligible.
+- Declaration is strict — canonical spellings only, separators folded (`image-edit` ->
+  `image_edit`), unknown/empty/duplicate rejected at decoration time. The hub still folds
+  legacy aliases on read; authors write the canonical token.
+- **Omitting `tasks=` is meaningful, not neutral**: an undeclared handler resolves NO quant
+  approval and serves at base precision. That is fail-closed by design — it degrades, it
+  never strands — but every serving endpoint should declare.
+
 ## Unreleased (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
 
 Paul's exact-identity ruling chain (design of record: tracker pgw#716). This ships
