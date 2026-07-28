@@ -764,6 +764,29 @@ class Compile(msgspec.Struct, frozen=True):
         if len({d.dim for d in dyn}) != len(dyn):
             raise ValueError("Compile.dynamic repeats a dim")
         force(self, "dynamic", dyn)
+        if dyn and self.regional:
+            # OQ-7 (LTX-AOT-DESIGN.md): `_with_declared_marks` is applied only
+            # on the whole-graph branch. The regional branch calls
+            # compile_repeated_blocks(dynamic=None) and never marks, so this
+            # combination declares dynamism the trace never implements while
+            # the contract digest claims it — a key that asserts a contract the
+            # artifact does not honor, which is the exact failure class pgw#716
+            # exists to prevent.
+            #
+            # Refused by name rather than silently marked: regional is retiring
+            # (LTX §3.2 chose whole-transformer export), so teaching the
+            # regional branch to mark would be building on a lane that is going
+            # away. Refusal is the honest reading until it does.
+            raise ValueError(
+                "Compile(regional=True) cannot carry dynamic=(...): the "
+                "regional branch compiles repeated blocks and never applies "
+                "the declared marks, so the declaration would be silently "
+                "inert while the contract digest claimed the dynamism "
+                f"({', '.join(d.dim for d in dyn)}). Declare dynamic=() to "
+                "keep regional block compilation, or regional=False to get "
+                "the marks. Regional is retiring in favor of whole-graph "
+                "export (LTX-AOT-DESIGN.md §3.2)."
+            )
         for name, typ in (("dims", Dim), ("forks", Fork),
                           ("classes", GraphClass), ("inputs", Input),
                           ("args", Arg)):
