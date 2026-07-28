@@ -250,8 +250,40 @@ def enable_compiled(
             # pgw#721: an exported `.pt2` cell. Unlike a TRT engine this
             # rides the branch-bearing lane too — LoRA adapters are lifted
             # to graph INPUTS, so one artifact serves the whole bucket.
+            #
+            # pgw#722 F2 (flag-gated, default OFF): a lifted cell refuses an
+            # unlifted module (`lifted_inputs_unbindable`), and nothing in
+            # the 0.76.x boot path installs lifting. For a bucket-bearing
+            # endpoint arming an AOT cell, install the lifted binding on the
+            # artifact's target module NOW — after apply_lora_lane allocated
+            # the canonical branch containers, BEFORE aot_serve.enable runs
+            # assert_lifted_contract (the exact C2 pod-10 proven order).
+            # Rolled back on a failed arm so the dynamo fallthrough never
+            # traces a lifted forward it did not ask for.
+            lifted_target: Any = None
+            lifted_installed = False
+            if bucket and get_settings().compile_prefer_aot:
+                from . import lora_lifted
+
+                module_name = str((meta or {}).get("module") or "unet")
+                lifted_target = getattr(pipe, module_name, None)
+                if (lifted_target is not None
+                        and lora_lifted.lifted_binding(lifted_target) is None):
+                    try:
+                        lora_lifted.install_lifted_lora_forward(
+                            lifted_target, bucket)
+                        lifted_installed = True
+                    except Exception as exc:  # noqa: BLE001 — arm decides
+                        logger.warning(
+                            "aot arm: lifted-binding install failed on %r "
+                            "(%s); a lifted artifact will refuse at "
+                            "assert_lifted_contract", module_name, exc)
             if aot_serve.enable(pipe, cfg, cache_dir, artifact):
                 return True
+            if lifted_installed:
+                from . import lora_lifted
+
+                lora_lifted.remove_lifted_lora_forward(lifted_target)
             artifact = None  # unusable artifact: fall through to eager policy
         elif kind == "trt-engine" and not bucket:
             # TRT engines expose only their plain contract — a lora_bucket

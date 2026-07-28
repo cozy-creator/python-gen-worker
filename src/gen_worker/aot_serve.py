@@ -59,6 +59,7 @@ import json
 import logging
 import tarfile
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -175,12 +176,39 @@ def flavor_label(sku: str, version: str, precision: str) -> str:
     return f"aot-{sku}-torch{mm}-{precision}"
 
 
+# Stamped ck5 cell keys this process LEARNED name aot-inductor artifacts
+# (pgw#722 F1 discovery). Published AOT cells ride the ck5 key space as
+# their store flavor — indistinguishable from a dynamo cell's flavor by
+# string shape alone — so discovery registers each learned key here and
+# :func:`is_aot_ref` consults the set. Without this the executor's kind
+# dispatch (#734/#735) would score an armed ``.pt2`` by FX cache hits and
+# disprove every honest adoption.
+_KNOWN_AOT_KEYS: set[str] = set()
+_KNOWN_AOT_KEYS_LOCK = threading.Lock()
+
+
+def note_aot_key(cell_key: str) -> None:
+    """Record that ``cell_key`` (a stamped ck5 digest) is an AOT cell."""
+    key = str(cell_key or "").strip()
+    if not key:
+        return
+    with _KNOWN_AOT_KEYS_LOCK:
+        _KNOWN_AOT_KEYS.add(key)
+
+
 def is_aot_ref(ref: str, family: str = "") -> bool:
-    """True when ``ref`` names an AOTI cell (optionally of one family)."""
+    """True when ``ref`` names an AOTI cell (optionally of one family).
+
+    Recognizes both the label form (``#aot-<sku>-...``) and any stamped
+    ck5 key this process learned via :func:`note_aot_key`.
+    """
     fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
         return False
-    return flavor.startswith("aot-")
+    if flavor.startswith("aot-"):
+        return True
+    with _KNOWN_AOT_KEYS_LOCK:
+        return flavor in _KNOWN_AOT_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -1260,6 +1288,7 @@ __all__ = [
     "lifted_call_kwargs",
     "load_and_wrap",
     "marshal_positional",
+    "note_aot_key",
     "pack",
     "range_digest",
     "resolve_constants",
