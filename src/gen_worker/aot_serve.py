@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
+from . import host_isa
 from .compile_cache import (
     AdoptError,
     CompiledLaneUnavailableError,
@@ -413,6 +414,11 @@ def artifact_metadata(
         "package_constants_in_so": False,
         "source_ref": str(source_ref or ""),
         "source_digest": str(source_digest or ""),
+        # pgw#754: the host-CPU execution requirement of the packaged host
+        # code (wrapper .so + cpu kernels). Consumers refuse by name when
+        # this host cannot execute it — the .so must never be dlopen'd
+        # first and SIGILL second.
+        "host_isa": host_isa.stamp(),
     }
     contract_from_meta(meta)
     constants_from_meta(meta)
@@ -445,6 +451,9 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
         want, have = str(meta.get(field_name) or ""), here[field_name]
         if want != have:
             return f"{field_name} {want!r} != runtime {have!r}"
+    isa_reason = host_isa_reason(meta)
+    if isa_reason:
+        return isa_reason
     want_fam = str(meta.get("family") or "")
     if family and want_fam and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
@@ -456,6 +465,64 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     stamped = str(meta.get("range_digest") or "")
     if stamped and stamped != range_digest(meta):
         return "range_digest does not match the declared contract"
+    return ""
+
+
+def host_isa_reason(meta: Mapping[str, Any]) -> str:
+    """'' when this host's CPU can execute the artifact's packaged host
+    code, else the refusal reason (pgw#754).
+
+    Reads the mint's ``host_isa`` requirement stamp — metadata-only, so
+    discovery (``aot_cells._candidates``) filters unexecutable cells BEFORE
+    downloading them. Artifacts minted before the stamp existed return ''
+    here; :func:`verify_package_host_isa` covers them once bytes are staged.
+    """
+    block = meta.get("host_isa")
+    if not isinstance(block, Mapping):
+        return ""
+    level, machine = host_isa.requirement_of_meta(block)
+    return host_isa.unsupported_reason(level, machine)
+
+
+def verify_package_host_isa(meta: Mapping[str, Any], package: Path) -> str:
+    """The staged-bytes host-ISA gate: stamped requirement when present,
+    else torch's own ``AOTI_CPU_ISA``/``AOTI_MACHINE`` stamps inside the
+    ``.pt2`` (present since torch 2.x package format; the mint host's picked
+    vector ISA, which a ``-march=native`` build tracks). '' = executable.
+
+    This is what turns the live SIGILL class (exit 132 inside
+    ``aoti_load_package`` on a host lacking the mint host's AVX-512) into a
+    named ``adopt_failed:host_isa_unsupported`` refusal for every artifact,
+    including legacy cells minted before the metadata stamp existed.
+    """
+    reason = host_isa_reason(meta)
+    if reason:
+        return reason
+    if isinstance(meta.get("host_isa"), Mapping):
+        return ""  # stamped and satisfied; no legacy sniff needed
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(package) as zf:
+            names = [
+                n for n in zf.namelist() if n.endswith("_metadata.json")]
+            for name in names:
+                try:
+                    row = json.loads(zf.read(name).decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                level = host_isa.vec_isa_level(
+                    str(row.get("AOTI_CPU_ISA") or ""))
+                machine = str(row.get("AOTI_MACHINE") or "")
+                reason = host_isa.unsupported_reason(level, machine)
+                if reason:
+                    return reason + " (torch package stamp, pre-pgw#754 cell)"
+    except (OSError, zipfile.BadZipFile) as exc:
+        # An unreadable package fails later, loudly, in the load path with
+        # its own named error; the ISA gate only rules on what it can read.
+        logger.debug("aot-serve: host-isa package sniff failed: %s", exc)
     return ""
 
 
@@ -575,6 +642,12 @@ def stage_artifact(
     root = Path(temporary.name)
     try:
         meta = unpack(Path(artifact), root)
+        # pgw#754: rule on host-CPU executability FIRST and by name — the
+        # one failure mode that must never reach dlopen. Covers stamped
+        # requirements and (via the .pt2's own torch stamps) legacy cells.
+        isa_reason = verify_package_host_isa(meta, root / PACKAGE_NAME)
+        if isa_reason:
+            raise AdoptError("host_isa_unsupported", isa_reason)
         reason = verify(meta, family=family)
         if reason:
             raise AdoptError("key_mismatch", reason)
@@ -1281,6 +1354,7 @@ __all__ = [
     "proven_since",
     "find_artifact",
     "flavor_label",
+    "host_isa_reason",
     "ingress_refusals",
     "is_aot_artifact",
     "is_aot_ref",
@@ -1300,5 +1374,6 @@ __all__ = [
     "unpack_metadata",
     "unwrap",
     "verify",
+    "verify_package_host_isa",
     "wrap_module",
 ]
