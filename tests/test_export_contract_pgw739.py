@@ -243,15 +243,17 @@ def test_shapes_omittable_only_with_classes() -> None:
 
 def test_input_axis_specs() -> None:
     i = Input("hidden_states",
-              shape=("B", ("config", "in_channels"), "H", "W"),
-              positional=True)
+              shape=("B", ("config", "in_channels"), "H", "W"))
     assert i.shape[1] == ("config", "in_channels")
     with pytest.raises(DeclarationError, match="axis spec"):
         Input("x", shape=(("cfg", "in_channels"),))
     with pytest.raises(DeclarationError, match="positive"):
         Input("x", shape=(0,))
-    with pytest.raises(DeclarationError, match="cannot be positional"):
-        Input("added_cond_kwargs.time_ids", shape=("B", 6), positional=True)
+    # No args/kwargs choice exists to declare: all-positional example feeds
+    # are a mint obligation (pod 9, pgw#723 residuals), so the vocabulary
+    # carries no `positional` knob at all.
+    with pytest.raises(TypeError):
+        Input("x", shape=("B",), positional=True)  # type: ignore[call-arg]
     assert Arg("return_dict", False).value is False
 
 

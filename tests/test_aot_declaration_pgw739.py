@@ -95,7 +95,7 @@ def _wan_a14b_decl() -> Compile:
                   shape=("B", "T_txt", ("config", "text_dim")),
                   targets=("transformer", "transformer_2")),
             Input("z", shape=("B", ("config", "z_dim"), "F_lat", "H_lat", "W_lat"),
-                  positional=True, targets=("vae.decode",)),
+                  targets=("vae.decode",)),
         ),
         args=(Arg("return_dict", False),),
         shape_strategy="dynamic-collapse",
@@ -190,8 +190,8 @@ def _relational_decl() -> Compile:
             GraphClass(dims={"B": 2, "H": 8, "W": 8, "N": 64}, fork=fork),
         ),
         inputs=(
-            Input("x", shape=("B", 3, "H", "W"), positional=True),
-            Input("t", shape=("B", "N"), positional=True),
+            Input("x", shape=("B", 3, "H", "W")),
+            Input("t", shape=("B", "N")),
         ),
         shape_strategy="dynamic-collapse",
         warm_changes_key=False,
@@ -260,21 +260,33 @@ def test_pinned_relational_axis_is_still_refused() -> None:
 
 
 class FakeUnet(torch.nn.Module):
-    """sdxl-shaped: nested added_cond_kwargs, positional trio, config widths."""
+    """sdxl-shaped: nested added_cond_kwargs container, config widths. The
+    signature mirrors UNet2DConditionModel's positional order — the builder
+    binds declared names to these slots and feeds ALL-POSITIONAL."""
 
     def __init__(self) -> None:
         super().__init__()
         self.proj = torch.nn.Linear(4, 4)
         self.config = SimpleNamespace(in_channels=4, cross_attention_dim=2048)
 
+    def forward(self, sample, timestep, encoder_hidden_states,
+                added_cond_kwargs=None, return_dict=True):  # type: ignore[no-untyped-def]
+        return sample
+
 
 class FakeWanDit(torch.nn.Module):
-    """wan-ti2v-shaped: kwargs call, per-token float32 timestep, config widths."""
+    """wan-ti2v-shaped: per-token float32 timestep, config widths, and an
+    undeclared in-between parameter (encoder_hidden_states_image) whose
+    signature default must fill its positional slot."""
 
     def __init__(self) -> None:
         super().__init__()
         self.proj = torch.nn.Linear(8, 8)
         self.config = SimpleNamespace(in_channels=48, text_dim=4096)
+
+    def forward(self, hidden_states, timestep, encoder_hidden_states,
+                encoder_hidden_states_image=None, return_dict=True):  # type: ignore[no-untyped-def]
+        return hidden_states
 
 
 def _sdxl_shaped_decl() -> Compile:
@@ -298,11 +310,10 @@ def _sdxl_shaped_decl() -> Compile:
         ),
         inputs=(
             Input("sample", shape=("B", ("config", "in_channels"),
-                                   "H_lat", "W_lat"), positional=True),
-            Input("timestep", shape=(), value=1.0, positional=True),
+                                   "H_lat", "W_lat")),
+            Input("timestep", shape=(), value=1.0),
             Input("encoder_hidden_states",
-                  shape=("B", "T_txt", ("config", "cross_attention_dim")),
-                  positional=True),
+                  shape=("B", "T_txt", ("config", "cross_attention_dim"))),
             Input("added_cond_kwargs.text_embeds", shape=("B", 1280)),
             Input("added_cond_kwargs.time_ids", shape=("B", 6)),
         ),
@@ -347,31 +358,36 @@ def _ti2v_shaped_decl() -> Compile:
 
 def test_two_families_one_code_path() -> None:
     """The #739 red test: different declarations, correct example inputs,
-    ONE generic function — zero per-family SDK code."""
+    ONE generic function — zero per-family SDK code. Both feeds come out
+    ALL-POSITIONAL (the pod-9 mint obligation): named rows bind to their
+    signature slots, containers ride as one argument, and undeclared
+    in-between parameters get their signature defaults."""
     sdxl_spec = ExportSpec(
         family="sdxl-shaped", target="unet",
         fork=(("cfg", True),),
         class_dims=(("B", 2), ("H_lat", 128), ("W_lat", 128), ("T_txt", 77)))
     args, kwargs = aot_declaration.declared_inputs(
         FakeUnet(), sdxl_spec, _sdxl_shaped_decl())
+    assert kwargs == {}
     assert args[0].shape == (2, 4, 128, 128)
     assert args[1].ndim == 0 and float(args[1]) == 1.0
     assert args[2].shape == (2, 77, 2048)
-    assert kwargs["added_cond_kwargs"]["text_embeds"].shape == (2, 1280)
-    assert kwargs["added_cond_kwargs"]["time_ids"].shape == (2, 6)
-    assert kwargs["return_dict"] is False
+    assert args[3]["text_embeds"].shape == (2, 1280)
+    assert args[3]["time_ids"].shape == (2, 6)
+    assert args[4] is False  # return_dict, positionally
 
     wan_spec = ExportSpec(
         family="wan-ti2v-shaped", target="transformer",
         fork=(("expand_timesteps", True),))
     args2, kwargs2 = aot_declaration.declared_inputs(
         FakeWanDit(), wan_spec, _ti2v_shaped_decl())
-    assert args2 == ()
-    assert kwargs2["hidden_states"].shape == (1, 48, 31, 44, 80)
-    assert kwargs2["timestep"].shape == (1, 27280)
-    assert kwargs2["timestep"].dtype == torch.float32
-    assert kwargs2["encoder_hidden_states"].shape == (1, 512, 4096)
-    assert kwargs2["return_dict"] is False
+    assert kwargs2 == {}
+    assert args2[0].shape == (1, 48, 31, 44, 80)
+    assert args2[1].shape == (1, 27280)
+    assert args2[1].dtype == torch.float32
+    assert args2[2].shape == (1, 512, 4096)
+    assert args2[3] is None   # encoder_hidden_states_image: default fills the slot
+    assert args2[4] is False  # return_dict, positionally
 
 
 def test_declared_inputs_refuse_missing_config_fields_by_name() -> None:
@@ -396,8 +412,9 @@ def test_builder_for_prefers_the_registered_declaration() -> None:
         family="sdxl-shaped", target="unet", fork=(("cfg", False),),
         class_dims=(("B", 1), ("H_lat", 128), ("W_lat", 128), ("T_txt", 77)))
     args, kwargs = builder(FakeUnet(), spec)
+    assert kwargs == {}
     assert args[0].shape == (1, 4, 128, 128)
-    assert kwargs["return_dict"] is False
+    assert args[-1] is False  # return_dict rides positionally
 
 
 def test_declared_inputs_actually_export() -> None:
@@ -424,9 +441,77 @@ def test_declared_inputs_actually_export() -> None:
         class_dims=(("B", 2), ("H_lat", 128), ("W_lat", 128), ("T_txt", 77)))
     args, kwargs = aot_declaration.declared_inputs(
         TinyUnet(), spec, _sdxl_shaped_decl())
+    assert kwargs == {}  # the pod-9 obligation: the trace is all-positional
     program = aot_mint.export_program(TinyUnet().eval(), args, kwargs,
                                       strict=True)
     assert program.graph_module is not None
+
+
+# ---------------------------------------------------------------------------
+# The two pgw#723-residuals mint gates (pods 8/9)
+# ---------------------------------------------------------------------------
+
+
+def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
+    """The pod-9 shape, refused at the mint instead of discovered at first
+    serve: the flat forward traced the lifted pair as kwargs, the package
+    demanded kwargs, the positional serve marshal fed none — 'Ran into a
+    kwarg keyword mismatch' swallowed on first call, every "armed" call
+    silently eager (splat_served=false, B_vs_eagerB_maxdiff=0.0)."""
+
+    class Tiny(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(4, 4)
+
+        def forward(self, x, lora_a=None, lora_b=None):  # type: ignore[no-untyped-def]
+            return self.proj(x)
+
+    spec = ExportSpec(family="f", target="t", weight_lane="w8a8")
+    with pytest.raises(MintRefused, match="kwarg"):
+        aot_mint.mint(
+            Tiny().eval(), spec, tmp_path,
+            example_inputs=lambda: (
+                (torch.randn(2, 4),),
+                {"lora_a": torch.randn(2, 4), "lora_b": torch.randn(4, 2)}))
+
+
+def test_positionalize_refuses_keyword_only_declared_inputs() -> None:
+    class KwOnly(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.p = torch.nn.Linear(2, 2)
+            self.config = SimpleNamespace(in_channels=48, text_dim=4096)
+
+        def forward(self, hidden_states, timestep, *,
+                    encoder_hidden_states=None):  # type: ignore[no-untyped-def]
+            return hidden_states
+
+    spec = ExportSpec(family="wan-ti2v-shaped", target="transformer",
+                      fork=(("expand_timesteps", True),))
+    with pytest.raises(MintRefused, match="KEYWORD-ONLY"):
+        aot_declaration.declared_inputs(KwOnly(), spec, _ti2v_shaped_decl())
+
+
+def test_lifted_lora_mint_requires_the_torch_213_floor(monkeypatch) -> None:
+    """Pod 8 (pgw#723 residuals): torch 2.9 strict export refuses
+    bind_views' in-trace setattr ('Mutating module attribute lora_a during
+    export') that 2.13 traces fine — a mint PRECONDITION when the lifted
+    fork is declared, recorded as a named refusal instead of a deep-trace
+    AssertionError."""
+    lifted = ExportSpec(family="f", target="t", lora_bucket=64)
+    plain = ExportSpec(family="f", target="t")
+
+    assert aot_mint.lifted_torch_gap(plain) == ""
+    # This box runs the 2.13 prod floor, so the lifted spec passes here...
+    assert aot_mint.lifted_torch_gap(lifted) == ""
+    # ...and refuses by name on the measured pod-8 version.
+    monkeypatch.setattr(torch, "__version__", "2.9.1+cu126")
+    gap = aot_mint.lifted_torch_gap(lifted)
+    assert "2.13" in gap and "bind_views" in gap
+    assert aot_mint.lifted_torch_gap(plain) == ""
+    monkeypatch.setattr(torch, "__version__", "nonsense")
+    assert "cannot parse" in aot_mint.lifted_torch_gap(lifted)
 
 
 # ---------------------------------------------------------------------------
