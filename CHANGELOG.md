@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.76.5 — pgw#754 host-ISA portability (the AOT SIGILL fix) + pgw#752 + th#1259 SDK half
+
+One patch train, AOT-flip-critical. Ships as 0.76.5: th#1259's stamp was the
+highest aboard; pgw#752's 0.76.4 claim is ABSORBED into this release (its
+section below) — no version hole.
+
+- **pgw#754 (the headline)**: AOT cells no longer SIGILL foreign hosts. Root
+  cause: the mint host compiled its .pt2 wrapper code with -march=native
+  (AVX-512 on the mint host) while torch hashes cpp.march=None identically
+  everywhere — the seal was blind to real machine-code ISA. Host compiles now
+  CLAMP to x86-64-v3 (measured perf-neutral: the wrapper has zero vector
+  instructions), the clamp is SEAL-VISIBLE (SEAL_VERSION 5 -> 6), discovery
+  filters unexecutable cells BEFORE download, and serve refuses by name before
+  dlopen. CONSEQUENCE: seal_v6 retires ALL pre-clamp cells (JIT and AOT,
+  including the prod-recipe AOT cells and canary cells) — remint required, by
+  design (the recipe changed).
+- **pgw#752**: clean page cache is RAM the next load can have (capability
+  probe + residency accounting; see its absorbed section below).
+- **th#1259 SDK half**: a ref the PAYLOAD named fails the REQUEST
+  (typed payload-ref provenance), never the release — the worker-side half of
+  the breaker-poisoning fix (the hub half rides a hub train).
+
 ## 0.78.0 (2026-07-28) — th#1276/pgw#753: the ref grammar's default tag is `prod`, not `latest`
 
 Paul's ruling. A bare `owner/repo` now means `owner/repo:prod`. `prod` is the STABLE
@@ -256,6 +278,7 @@ which knows the ref came from the payload, converts. Downstream-of-resolution fa
 Hub half in tensorhub th#1259 (breaker input allowlist). **Version claim: 0.76.5** is the
 first worker that classifies payload-ref misses; older workers still report these FATAL.
 ## 0.76.4 (2026-07-27) — pgw#752: clean page cache is RAM the next load can have
+## 0.76.4 stamp — ABSORBED INTO 0.76.5 (never separately published) — pgw#752: clean page cache is RAM the next load can have
 
 ie#535's last wan-2.2 blocker. `text_to_video_turbo` was refused on an H100 pod with
 **251 GB of host RAM** for "~64.3GiB incoming + 8.0GiB safety floor = 72.3GiB required;
