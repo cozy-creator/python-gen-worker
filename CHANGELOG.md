@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.76.5 (2026-07-27) — th#1259: a bad address in the payload fails the REQUEST, not the release
+
+A `score_benchmark` invoke passed the ref-STEM of a two-address image where the content
+digest belonged. `ctx.materialize_blob` raised a bare `RuntimeError: blob fetch 404`, the
+executor mapped that to `JOB_STATUS_FATAL`, and the hub counted a fatal as evidence the
+RELEASE was unhealthy — `503 release_broken / model_load_failure_streak` for every caller
+of release `866eaaefa7b868289aa65855`. One wrong field, no special privilege, shared release
+down until a new one was cut.
+
+**PROVENANCE decides the class** — not the status code, not the message text. A resolve
+boundary now says where the address came from, and only that answers "whose fault":
+
+- `REF_ORIGIN_PAYLOAD` (default) — the caller named it. A terminal miss raises the typed
+  `PayloadRefError` family (`BlobNotFoundError` / `BlobForbiddenError` /
+  `DatasetNotFoundError`, all `ValidationError`), so `_map_exception` returns
+  `JOB_STATUS_INVALID`: the REQUEST fails 4xx with a machine-readable code and the hub
+  books no health signal at all.
+- `REF_ORIGIN_PLATFORM` — the hub produced the address (dataset manifest blobs, via the
+  new `_fetch_platform_blob`). Unchanged: still fatal, still real breaker evidence.
+
+`str(exc)` is `"<code>: <detail>"` so the code survives the `safe_message` hop into the
+request's `error.code`. `resolve_dataset` classifies at the same boundary — the `_datasets`
+helpers see an opaque id and raise the internal `DatasetRefNotFound` marker; the caller,
+which knows the ref came from the payload, converts. Downstream-of-resolution faults
+(empty manifest, silent hub, exhausted download) stay platform faults.
+
+Hub half in tensorhub th#1259 (breaker input allowlist). **Version claim: 0.76.5** is the
+first worker that classifies payload-ref misses; older workers still report these FATAL.
+## 0.76.4 (2026-07-27) — pgw#752: clean page cache is RAM the next load can have
+
+ie#535's last wan-2.2 blocker. `text_to_video_turbo` was refused on an H100 pod with
+**251 GB of host RAM** for "~64.3GiB incoming + 8.0GiB safety floor = 72.3GiB required;
+71.5GiB available" — then bounced 5 attempts across 2 identically-sized pods (th#1228).
+
+- **Root cause: the model was charged twice.** `probe_host_ram` credited only the
+  *inactive* file LRU back out of `memory.current`. Pages read or written seconds ago sit
+  on the ACTIVE file LRU, so the pipeline's own freshly-downloaded 64.3 GiB snapshot cache
+  counted as consumed memory in the very decision about whether there was room to load
+  that snapshot. ~180 GiB of a 251 GB cgroup read as unavailable. The turbo tier tipped
+  over first only because its two LoRA halves added ~1.8 GiB of fresh cache that the base
+  tier did not read — base cleared the same bar by luck, and bounced once itself.
+- **Fix**: the working set is `memory.current` minus every reclaimable clean page (both
+  file LRUs), excluding what the kernel genuinely cannot drop on demand — shmem/tmpfs,
+  dirty and writeback pages. Anonymous memory is still fully charged, so an over-admit
+  cannot trade a false refusal for an OOM kill. `HostRam.reclaimable_file_gb` reports it.
+- **A structural shortfall stops re-selling the same pod**: when the requirement exceeds
+  the host's TOTAL RAM, no eviction and no identically-sized pod can ever satisfy it. That
+  verdict is now `HostRamCapacityError` (`reason=host_ram_capacity`, a HardwareUnmetError
+  carrying required-vs-total axes) — the function self-disables on this worker and the
+  orchestrator gets a placement fact instead of another dispatch. Genuine local pressure
+  stays `InsufficientHostRamError`/RETRYABLE.
+
 ## 0.76.3 — the reuse wave: adopt-without-mint unblocked + AOT flip seams
 
 The four structural bugs that held cell adoption at zero in the sdxl 0.2.14
@@ -150,30 +202,6 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   instead of plain attributes — `register_buffer` no longer has to pop `__dict__`
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
-
-## 0.76.4 (2026-07-27) — pgw#752: clean page cache is RAM the next load can have
-
-ie#535's last wan-2.2 blocker. `text_to_video_turbo` was refused on an H100 pod with
-**251 GB of host RAM** for "~64.3GiB incoming + 8.0GiB safety floor = 72.3GiB required;
-71.5GiB available" — then bounced 5 attempts across 2 identically-sized pods (th#1228).
-
-- **Root cause: the model was charged twice.** `probe_host_ram` credited only the
-  *inactive* file LRU back out of `memory.current`. Pages read or written seconds ago sit
-  on the ACTIVE file LRU, so the pipeline's own freshly-downloaded 64.3 GiB snapshot cache
-  counted as consumed memory in the very decision about whether there was room to load
-  that snapshot. ~180 GiB of a 251 GB cgroup read as unavailable. The turbo tier tipped
-  over first only because its two LoRA halves added ~1.8 GiB of fresh cache that the base
-  tier did not read — base cleared the same bar by luck, and bounced once itself.
-- **Fix**: the working set is `memory.current` minus every reclaimable clean page (both
-  file LRUs), excluding what the kernel genuinely cannot drop on demand — shmem/tmpfs,
-  dirty and writeback pages. Anonymous memory is still fully charged, so an over-admit
-  cannot trade a false refusal for an OOM kill. `HostRam.reclaimable_file_gb` reports it.
-- **A structural shortfall stops re-selling the same pod**: when the requirement exceeds
-  the host's TOTAL RAM, no eviction and no identically-sized pod can ever satisfy it. That
-  verdict is now `HostRamCapacityError` (`reason=host_ram_capacity`, a HardwareUnmetError
-  carrying required-vs-total axes) — the function self-disables on this worker and the
-  orchestrator gets a placement fact instead of another dispatch. Genuine local pressure
-  stays `InsufficientHostRamError`/RETRYABLE.
 
 ## 0.76.3 (2026-07-27) — pgw#747: an auxiliary slot stops claiming the function's family
 
