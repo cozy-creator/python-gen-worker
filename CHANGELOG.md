@@ -119,6 +119,34 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
 
+## 0.76.5 (2026-07-27) — th#1259: a bad address in the payload fails the REQUEST, not the release
+
+A `score_benchmark` invoke passed the ref-STEM of a two-address image where the content
+digest belonged. `ctx.materialize_blob` raised a bare `RuntimeError: blob fetch 404`, the
+executor mapped that to `JOB_STATUS_FATAL`, and the hub counted a fatal as evidence the
+RELEASE was unhealthy — `503 release_broken / model_load_failure_streak` for every caller
+of release `866eaaefa7b868289aa65855`. One wrong field, no special privilege, shared release
+down until a new one was cut.
+
+**PROVENANCE decides the class** — not the status code, not the message text. A resolve
+boundary now says where the address came from, and only that answers "whose fault":
+
+- `REF_ORIGIN_PAYLOAD` (default) — the caller named it. A terminal miss raises the typed
+  `PayloadRefError` family (`BlobNotFoundError` / `BlobForbiddenError` /
+  `DatasetNotFoundError`, all `ValidationError`), so `_map_exception` returns
+  `JOB_STATUS_INVALID`: the REQUEST fails 4xx with a machine-readable code and the hub
+  books no health signal at all.
+- `REF_ORIGIN_PLATFORM` — the hub produced the address (dataset manifest blobs, via the
+  new `_fetch_platform_blob`). Unchanged: still fatal, still real breaker evidence.
+
+`str(exc)` is `"<code>: <detail>"` so the code survives the `safe_message` hop into the
+request's `error.code`. `resolve_dataset` classifies at the same boundary — the `_datasets`
+helpers see an opaque id and raise the internal `DatasetRefNotFound` marker; the caller,
+which knows the ref came from the payload, converts. Downstream-of-resolution faults
+(empty manifest, silent hub, exhausted download) stay platform faults.
+
+Hub half in tensorhub th#1259 (breaker input allowlist). **Version claim: 0.76.5** is the
+first worker that classifies payload-ref misses; older workers still report these FATAL.
 ## 0.76.4 (2026-07-27) — pgw#752: clean page cache is RAM the next load can have
 
 ie#535's last wan-2.2 blocker. `text_to_video_turbo` was refused on an H100 pod with
