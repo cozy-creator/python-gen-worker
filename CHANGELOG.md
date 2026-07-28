@@ -119,6 +119,31 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
 
+## 0.76.6 (2026-07-27) — pgw#722 finding 2: a pure-AOT arm proves itself at boot (the #735 gap)
+
+The shipped #735 kind-aware boot proof ran only under `proves_inductor` — a worker whose
+ONLY arm is an adopted exported cell (the prod-flip shape: F1 adopts, the delivered dynamo
+artifact is skipped) skipped the boot warmup proof entirely and stayed armed UNPROVEN: an
+artifact that never executed, or executed and revoked, kept advertising itself. Hot-adopt's
+proof was already complete; boot now matches it.
+
+- **The proof loop runs for exported arms too** (`proves_inductor or proves_exported`);
+  per-object scoring is unchanged (dynamo by FX hits, exported by `aot_serve.proven_since`).
+- **Exported disarm goes through its own lane**: a disproven/unexercised exported arm gets
+  `aot_serve.unwrap` (restores the forward it captured — under the F2 flip, the lifted
+  LoRA forward) then `remove_lifted_lora_lanes`, landing back on the exact pre-flip eager
+  shape; identity quarantined in-process as before. Mandatory (w8a8) lanes keep the
+  pgw#672 degrade-to-eager posture.
+- FX-key forensics no longer fire on a pure-exported disproof (they would describe the
+  SKIPPED dynamo artifact's cache state — pure noise).
+- Red-verified both directions through the REAL executor setup path
+  (`tests/test_aot_boot_proof_gap_pgw735.py`): exercised arm => recorded proven;
+  unexercised arm => disarmed to true eager + quarantined.
+- Test-isolation fix on the way (pre-existing): `aot_serve.note_aot_key` learns into a
+  process-global set; the pgw#722 discovery suite's learned `ck5-999…` collided with the
+  adopt suite's stubbed mint digest and silently flipped its whole proof lane in combined
+  runs. Autouse conftest fixture restores the learned-key set per test.
+
 ## 0.76.5 (2026-07-27) — th#1259: a bad address in the payload fails the REQUEST, not the release
 
 A `score_benchmark` invoke passed the ref-STEM of a two-address image where the content
