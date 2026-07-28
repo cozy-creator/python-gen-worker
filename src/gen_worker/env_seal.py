@@ -59,9 +59,11 @@ logger = logging.getLogger(__name__)
 
 # v3 (pgw#718/#719 erase-and-impose): recorded-env facts left (scrubbed
 # vars are constants by construction); + hash-seed facts + loaded-library
-# digest. v2 added the operator `epoch` salt. Adding sealed facts bumps
-# THIS version only — never the key-axis set.
-SEAL_VERSION = 3
+# digest. v2 added the operator `epoch` salt. v4 (pgw#745): host driver
+# libs excluded from the loaded-lib manifest (gw#577: driver is never
+# identity). Adding/changing sealed facts bumps THIS version only — never
+# the key-axis set.
+SEAL_VERSION = 4
 SEAL_KEY = "env_seal"
 
 # R2: the operator-settable generation salt. Bumping it disowns every cell
@@ -212,6 +214,24 @@ _LIB_BASENAME_PREFIXES = (
     "libnvjitlink", "libtriton", "libnccl",
 )
 
+# Driver-side objects are NEVER identity (gw#577): the manifest enumerates
+# USERSPACE TOOLCHAIN libs only. The driver's userspace half (libcuda.so.*,
+# libnvidia-*, libcudadebugger) is mounted from the HOST at pod start —
+# it varies per machine and driver rollout, invisible to the image digest,
+# and sealing it fractures cell keys per driver cohort (pgw#745:
+# libcuda.so.580.126.16 vs .580.159.04 split an L4 fleet; every worker
+# kept self-minting). The driver stays a recorded-only metadata axis
+# (`cuda_driver`); compiled kernels are driver-portable within a major.
+# Note "libcuda" above still matches the image-shipped libcudart — the
+# exclusion is by exact driver basenames, checked FIRST.
+_DRIVER_LIB_BASENAME_PREFIXES = (
+    "libcuda.so", "libcudadebugger", "libnvidia-", "libnvcuvid", "libnvoptix",
+)
+
+
+# Seam for tests: the loader map surface this process enumerates.
+_MAPS_PATH = Path("/proc/self/maps")
+
 
 @functools.lru_cache(maxsize=256)
 def _lib_digest(path: str, mtime_ns: int, size: int) -> str:
@@ -227,7 +247,7 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
     LOADER actually mapped into this process (``/proc/self/maps``).
     Deterministic: resolved real paths, sorted basenames. Empty off-Linux
     (no maps surface — recorded as such)."""
-    maps = Path("/proc/self/maps")
+    maps = _MAPS_PATH
     if not maps.is_file():
         return ()
     paths: Dict[str, str] = {}
@@ -240,6 +260,8 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
             base = os.path.basename(file_path)
             if ".so" not in base or not base.startswith(_LIB_BASENAME_PREFIXES):
                 continue
+            if base.startswith(_DRIVER_LIB_BASENAME_PREFIXES):
+                continue  # host driver: recorded-only, never identity
             paths[base] = os.path.realpath(file_path)
     except OSError:
         return ()

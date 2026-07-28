@@ -546,7 +546,7 @@ def test_epoch_salt_disowns_a_generation(monkeypatch: Any) -> None:
     seal = _env_seal()
     monkeypatch.delenv(seal.EPOCH_ENV, raising=False)
     base = seal.effective_seal()
-    assert base["seal_v"] == 3 and base["epoch"] == "0"
+    assert base["seal_v"] == seal.SEAL_VERSION and base["epoch"] == "0"
     baseline = seal.seal_digest(base)
     monkeypatch.setenv(seal.EPOCH_ENV, "1")
     assert seal.seal_digest(seal.effective_seal()) != baseline
