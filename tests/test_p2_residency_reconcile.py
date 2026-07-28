@@ -353,6 +353,65 @@ def test_host_ram_failure_precedes_retryable_result_on_wire(tmp_path, monkeypatc
         blobs.shutdown()
 
 
+def test_structural_host_ram_shortfall_stops_reselling_the_same_pod(
+    tmp_path, monkeypatch,
+) -> None:
+    """pgw#752: a requirement larger than the WHOLE host is this pod SIZE's
+    verdict, not local pressure — an empty host of this size still refuses.
+
+    The wan-2.2 turbo failure bounced 5 attempts across 2 identically-sized
+    pods (th#1228) because every refusal claimed to be transient. A structural
+    shortfall crosses the wire as a hardware axis carrying required-vs-total,
+    and the worker stops advertising the function instead of inviting the
+    same dispatch again.
+    """
+    from gen_worker.models import disk_gc
+    from gen_worker.models import residency as residency_mod
+
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 8.0)
+
+    blobs = BlobHost(tmp_path)
+    try:
+        pipeline_payload = b"host-is-too-small"
+        pipeline_snap = blobs.one_file_snapshot(
+            "ram-pipeline", "pipeline", pipeline_payload)
+        vae_snap = blobs.one_file_snapshot("ram-vae", "vae", b"small-shared-vae")
+
+        def _tree_bytes(path) -> int:
+            data = (path / "model.safetensors").read_bytes()
+            # 40GiB of weights on a 31GiB host: no eviction can ever cover it.
+            return (40 if data == pipeline_payload else 1) * 1024**3
+
+        monkeypatch.setattr(disk_gc, "tree_bytes", _tree_bytes)
+
+        def is_host_ram_capacity(m) -> bool:
+            return (
+                m.WhichOneof("msg") == "fn_unavailable"
+                and m.fn_unavailable.function_name == "ram-pressure"
+            )
+
+        with hub_double() as (scheduler, _harness):
+            conn = scheduler.wait_connection(0)
+            conn.wait_for(is_ready)
+            conn.send(run_job=pb.RunJob(
+                request_id="r-host-ram-structural", attempt=1,
+                function_name="ram-pressure",
+                input_payload=msgspec.msgpack.encode(EchoIn(text="x")),
+                snapshots={_RAM_PIPELINE_REF: pipeline_snap, _RAM_VAE_REF: vae_snap},
+            ))
+            sig = conn.wait_for(is_host_ram_capacity).fn_unavailable
+            assert sig.reason == "host_ram_capacity"
+            assert int(sig.axes["required_bytes"]) > int(sig.axes["total_bytes"]) > 0
+            conn.wait_for(
+                lambda m: m.WhichOneof("msg") == "state_delta"
+                and "ram-pressure" not in m.state_delta.available_functions
+            )
+            conn.wait_for(is_result_for("r-host-ram-structural"))
+    finally:
+        blobs.shutdown()
+
+
 def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) -> None:
     """Absorbed from test_snapshot_corruption.py (gw#408, J17 flood: a pod-
     churn-interrupted write left truncated safetensors trusted forever). A
