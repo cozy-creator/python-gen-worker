@@ -417,7 +417,10 @@ def enable_compiled(
             cache_dir=cache_dir,
         )
         if adopted is not None:
+            from . import aot_serve
+
             aot_armed = False
+            lane_refused = False
             try:
                 aot_armed = provision.enable_compiled(
                     pipe, cfg, cache_dir, adopted.artifact)
@@ -426,11 +429,19 @@ def enable_compiled(
                 # fallthrough raised — the ordinary policy below (with the
                 # delivered artifact) is still to run, so this is not
                 # terminal here.
+                lane_refused = True
                 logger.warning(
                     "fleet-cells: discovered AOT cell %s did not arm; "
                     "falling through to the ordinary arming policy",
                     adopted.ref)
-            from . import aot_serve
+                activity_mod.emit_event(
+                    aot_serve.ADOPT_EVENT,
+                    f"family={family} key={adopted.cell_key} "
+                    f"ref={adopted.ref}: arm refused and the mandatory-lane "
+                    "fallthrough raised; ordinary policy resumes with the "
+                    "delivered artifact",
+                    phase="lane_unavailable",
+                )
             if aot_armed and aot_serve.is_armed(pipe):
                 logger.info(
                     "fleet-cells: armed discovered AOT cell %s (pgw#722)",
@@ -441,7 +452,25 @@ def enable_compiled(
                 # seeded dynamo cell picked up on the fallthrough): honest
                 # plain HIT — never advertise the AOT identity for bytes
                 # this pipe does not serve.
+                activity_mod.emit_event(
+                    aot_serve.ADOPT_EVENT,
+                    f"family={family} key={adopted.cell_key} "
+                    f"ref={adopted.ref}: armed via the fallthrough, NOT the "
+                    "discovered artifact; AOT identity not advertised",
+                    phase="armed_other_path",
+                )
                 return ArmOutcome(armed=True)
+            if not lane_refused:
+                # The classified inner refusal already rode its own
+                # ADOPT_EVENT (aot_serve.enable / cell_receipt_refused);
+                # this row binds it to the DISCOVERED candidate's identity.
+                activity_mod.emit_event(
+                    aot_serve.ADOPT_EVENT,
+                    f"family={family} key={adopted.cell_key} "
+                    f"ref={adopted.ref}: discovered cell did not arm; "
+                    "falling through to the ordinary arming policy",
+                    phase="did_not_arm",
+                )
 
     try:
         if provision.enable_compiled(pipe, cfg, cache_dir, artifact):

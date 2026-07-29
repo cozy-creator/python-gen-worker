@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.81.1 (2026-07-29) — pgw#733 arm half: every AOT adopt/arm outcome is a typed wire event
+
+The AOT verdict lane's blocker: cross-pod adopts fail inside stage/bind/arm with a
+classified `AdoptError` reason that `aot_serve.enable` / `fleet_cells.enable_compiled`
+reduced to `logger.warning` — invisible from hub-spawned workers (no stdout). One event
+class, `aot_adopt` (`aot_serve.ADOPT_EVENT`), now carries every outcome on the th#1250
+persisted-event pipe: `phase` = `armed` on success or the classified refusal reason
+(`host_isa_unsupported`/`key_mismatch`/`artifact_invalid`/`constants_*`/...), `detail`
+names the candidate cell (family + key, best-effort even on unreadable artifacts). The
+F1 consumer additionally binds fall-through outcomes to the DISCOVERED candidate's
+identity: `did_not_arm`, `armed_other_path`, `lane_unavailable` rows carry key + ref.
+
 ## 0.81.0 (2026-07-28) — pgw#758: multi-graph cells — every declared graph class in ONE .pt2
 
 Paul's ruling: "generate and generate_turbo are separate functions, they have separate
