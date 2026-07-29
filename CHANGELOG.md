@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.76.8 — envelope parity: return_dict=False callers get a tuple back
+
+The layer under 0.76.7, live-named twice (pods 8eer71y6nntxsc + lt6mojilt04ne3, identical
+chains): with bind fixed, the first in-contract call EXECUTED the adopted artifact — and the
+caller crashed downstream with "size of tensor a (4) must match b (2) at dimension 1",
+because a diffusers pipeline calls `unet(..., return_dict=False)[0]` and the exported graph
+returns a RAW tensor: `[0]` on a bare tensor slices the batch dim. The wrap now restores the
+caller's declared envelope (return_dict=False -> 1-tuple). No opinion when the flag is
+absent.
+
 ## 0.76.7 — nested added_cond input resolution at bind (the serve half of the flat mint convention)
 
 Live-named by the 0.76.6 wire events (pod ae2uc81yub0gyq): the FIRST successful cross-pod

@@ -350,3 +350,25 @@ def test_missing_nested_input_still_refuses_by_name() -> None:
             contract, (FakeTensor([2, 4, 128, 128]),),
             {"added_cond_kwargs": {"time_ids": FakeTensor([2, 6])}})
     assert exc.value.reason == "input_missing"
+
+
+# ---------------------------------------------------------------------------
+# 0.76.8 — envelope parity: return_dict=False callers get a tuple back
+# ---------------------------------------------------------------------------
+
+
+def test_return_dict_false_gets_tuple_envelope(
+    tmp_path: Path, events: List[Any], stub_runtime: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 4-vs-2 crash class: diffusers calls unet(..., return_dict=
+    False)[0]; a raw-tensor return means [0] slices the batch dim."""
+    monkeypatch.setattr(
+        aot_serve, "_load_package", lambda path: FakePackage())
+    pipe = FakePipeline()
+    assert aot_serve.enable(pipe, Cfg(), artifact=_tar(tmp_path))
+    sample = FakeTensor([2, 4, 128, 128])
+    out = pipe.unet.forward(sample, return_dict=False)
+    assert isinstance(out, tuple) and out[0] == "ARTIFACT_OUTPUT"
+    out2 = pipe.unet.forward(sample)
+    assert out2 == "ARTIFACT_OUTPUT"  # no envelope opinion without the flag
