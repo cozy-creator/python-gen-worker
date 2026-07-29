@@ -115,32 +115,62 @@ class Cfg:
     regional = False
 
 
-def _meta(**over):
-    m = {
-        "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
-        "family": FAMILY, "module": "unet", "precision": "w8a8",
-        "cell_key": "deadbeef", "inputs": [dict(r) for r in INPUTS],
+#: The single entry name every fixture cell carries (format 2: one entry is
+#: simply the N=1 case of a multi-graph cell).
+ENTRY = "unet/g"
+
+
+def _entry(**over):
+    """One format-2 entry block, range_digest/class_hash stamped the way
+    the mint stamps them (best effort for deliberately-malformed blocks)."""
+    e = {
+        "target": "unet", "fork": [], "class_dims": [],
+        "inputs": [dict(r) for r in INPUTS],
         "symbols": {k: list(v) for k, v in SYMBOLS.items()},
         "constants": [dict(r) for r in CONSTANTS],
+        "graph": {},
+    }
+    e.update(over)
+    try:
+        e["range_digest"] = aot.range_digest(e)
+    except (ValueError, TypeError):
+        e.setdefault("range_digest", "")
+    e["class_hash"] = aot.class_hash(e, strict=True, lora_bucket=0)
+    return e
+
+
+def _meta(**over):
+    entry_over = {
+        k: over.pop(k) for k in ("inputs", "symbols", "constants")
+        if k in over}
+    entries = over.pop("entries", None) or {ENTRY: _entry(**entry_over)}
+    m = {
+        "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
+        "family": FAMILY, "precision": "w8a8",
+        "cell_key": "deadbeef", "entries": entries,
+        "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         "source_ref": "", "source_digest": "",
     }
+    m["combined_graph_hash"] = aot.combined_graph_hash(
+        str((b or {}).get("class_hash") or "")
+        for b in entries.values() if isinstance(b, dict))
     m.update(over)
     return m
 
 
 def _contract(meta=None):
-    return aot.contract_from_meta(meta or _meta())
+    return aot.contract_from_meta((meta or _meta())["entries"][ENTRY])
 
 
 def _specs(meta=None):
-    return aot.constants_from_meta(meta or _meta())
+    return aot.constants_from_meta((meta or _meta())["entries"][ENTRY])
 
 
 def _runner(package=None, meta=None):
     return aot.ArtifactRunner(
         package=package or FakePackage(), contract=_contract(meta),
-        constants=_specs(meta), module_name="unet")
+        constants=_specs(meta), module_name="unet", entry=ENTRY)
 
 
 def _in_range_call(h=128, w=128):
@@ -372,7 +402,7 @@ def test_b2_symbol_consistency_across_inputs():
         {"name": "mask", "position": 1, "dtype": "bfloat16",
          "shape": [2, 1, "h", "w"]},
     ], symbols={"h": [64, 160], "w": [64, 160]})
-    contract = aot.contract_from_meta(meta)
+    contract = _contract(meta)
     # both individually in range, but inconsistent
     with pytest.raises(aot.IngressContractError) as excinfo:
         aot.assert_ingress(
@@ -424,7 +454,7 @@ def test_b2_non_tensor_argument_refused():
 def test_b2_unbounded_symbol_is_a_malformed_contract():
     """An unbounded symbol is the B2 hole with extra steps."""
     with pytest.raises(ValueError, match="no declared range"):
-        aot.contract_from_meta(_meta(symbols={"h": [64, 160]}))
+        aot.contract_from_meta(_entry(symbols={"h": [64, 160]}))
 
 
 # ---------------------------------------------------------------------------
@@ -576,46 +606,62 @@ def test_verify_rejects_malformed_contract(stub_runtime):
 
 def test_verify_rejects_tampered_range_digest(stub_runtime):
     meta = aot.artifact_metadata(
-        family=FAMILY, module="unet", precision="w8a8", cell_key="k",
-        inputs=INPUTS, symbols=SYMBOLS, constants=CONSTANTS)
+        family=FAMILY, precision="w8a8", cell_key="k",
+        entries=_entries_arg())
     assert aot.verify(meta) == ""
-    meta["symbols"]["h"] = [64, 4096]
-    assert "range_digest" in aot.verify(meta)
+    meta["entries"][ENTRY]["symbols"]["h"] = [64, 4096]
+    reason = aot.verify(meta)
+    assert "range_digest" in reason and ENTRY in reason
 
 
 def test_range_digest_separates_artifacts_that_admit_different_traffic():
     """Owed to ck6 (pgw#716/#717): three exports differing only in declared
     range produced the IDENTICAL node-only digest, so a node-only
     graph_hashes collides artifacts admitting different traffic."""
-    narrow = aot.range_digest(_meta())
-    wide = aot.range_digest(_meta(symbols={"h": [64, 320], "w": [64, 160]}))
+    narrow = aot.range_digest(_entry())
+    wide = aot.range_digest(_entry(symbols={"h": [64, 320], "w": [64, 160]}))
     assert narrow != wide
     # stable and order-insensitive
-    assert narrow == aot.range_digest(_meta(
+    assert narrow == aot.range_digest(_entry(
         symbols={"w": [64, 160], "h": [64, 160]}))
+
+
+def _entries_arg(**entry_over):
+    block = {
+        "target": "unet", "fork": [], "class_dims": [],
+        "inputs": [dict(r) for r in INPUTS],
+        "symbols": {k: list(v) for k, v in SYMBOLS.items()},
+        "constants": [dict(r) for r in CONSTANTS],
+        "graph": {}}
+    block.update(entry_over)
+    return {ENTRY: block}
 
 
 def test_artifact_metadata_validates_at_mint():
     """A malformed contract must fail on the pod, not on a paid request."""
     with pytest.raises(ValueError, match="no declared range"):
         aot.artifact_metadata(
-            family=FAMILY, module="unet", precision="w8a8", cell_key="k",
-            inputs=INPUTS, symbols={"h": [64, 160]}, constants=CONSTANTS)
+            family=FAMILY, precision="w8a8", cell_key="k",
+            entries=_entries_arg(symbols={"h": [64, 160]}))
     with pytest.raises(ValueError, match="unknown source"):
         aot.artifact_metadata(
-            family=FAMILY, module="unet", precision="w8a8", cell_key="k",
-            inputs=INPUTS, symbols=SYMBOLS,
-            constants=[{"fqn": "a", "source": "guess", "shape": []}])
+            family=FAMILY, precision="w8a8", cell_key="k",
+            entries=_entries_arg(
+                constants=[{"fqn": "a", "source": "guess", "shape": []}]))
     meta = aot.artifact_metadata(
-        family=FAMILY, module="unet", precision="w8a8", cell_key="k",
-        inputs=INPUTS, symbols=SYMBOLS, constants=CONSTANTS)
+        family=FAMILY, precision="w8a8", cell_key="k", entries=_entries_arg())
     assert meta["package_constants_in_so"] is False
-    assert meta["range_digest"] == aot.range_digest(meta)
+    entry = meta["entries"][ENTRY]
+    assert entry["range_digest"] == aot.range_digest(entry)
+    assert entry["class_hash"] == aot.class_hash(
+        entry, strict=True, lora_bucket=0)
+    assert meta["combined_graph_hash"] == aot.combined_graph_hash(
+        [entry["class_hash"]])
 
 
 def test_constant_manifest_rejects_duplicates():
     with pytest.raises(ValueError, match="repeats"):
-        aot.constants_from_meta(_meta(constants=[CONSTANTS[0], CONSTANTS[0]]))
+        _specs(_meta(constants=[CONSTANTS[0], CONSTANTS[0]]))
 
 
 def test_pack_unpack_roundtrip_is_deterministic(tmp_path):
@@ -703,7 +749,7 @@ def test_find_artifact(tmp_path):
 
 def test_enable_arms_and_binds_from_resident_weights(tmp_path, monkeypatch, stub_runtime):
     package = FakePackage()
-    monkeypatch.setattr(aot, "_load_package", lambda p: package)
+    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": package)
     module = FakeModule()
     pipeline = FakePipeline(module)
     original = module.forward
@@ -725,18 +771,19 @@ def test_enable_stays_eager_on_any_miss(tmp_path, monkeypatch, stub_runtime):
     # no artifact
     assert aot.enable(pipeline, Cfg(), tmp_path / "c") is False
     # wrong runtime key
-    monkeypatch.setattr(aot, "_load_package", lambda p: FakePackage())
+    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
     assert aot.enable(
         pipeline, Cfg(), tmp_path / "c",
         _tar(tmp_path, _meta(torch="2.12.0"), name="old.tar.gz")) is False
     # package will not load
-    def _boom(path):
+    def _boom(path, entry="model"):
         raise RuntimeError("dlopen failed: undefined symbol")
     monkeypatch.setattr(aot, "_load_package", _boom)
     assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)) is False
     # constants cannot bind
     monkeypatch.setattr(
-        aot, "_load_package", lambda p: FakePackage(fqns=("nope.weight",)))
+        aot, "_load_package",
+        lambda p, e="model": FakePackage(fqns=("nope.weight",)))
     assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)) is False
 
     # every miss leaves the pipeline exactly eager
@@ -745,7 +792,7 @@ def test_enable_stays_eager_on_any_miss(tmp_path, monkeypatch, stub_runtime):
 
 
 def test_enable_refuses_a_pipeline_without_the_target(tmp_path, monkeypatch, stub_runtime):
-    monkeypatch.setattr(aot, "_load_package", lambda p: FakePackage())
+    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
 
     class Bare:
         pass
@@ -761,7 +808,7 @@ def test_provision_dispatches_aot_kind_and_reports_a_hit(tmp_path, monkeypatch, 
     from gen_worker.models import provision
 
     package = FakePackage()
-    monkeypatch.setattr(aot, "_load_package", lambda p: package)
+    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": package)
     # the inductor lane must never be consulted for an aot-kind artifact
     def _unexpected(*a, **k):
         raise AssertionError("compile_cache.enable must not be reached")
@@ -779,7 +826,7 @@ def test_provision_falls_through_to_inductor_when_the_pt2_is_unusable(
     from gen_worker import compile_cache as cc
     from gen_worker.models import provision
 
-    def _boom(path):
+    def _boom(path, entry="model"):
         raise RuntimeError("dlopen failed")
     monkeypatch.setattr(aot, "_load_package", _boom)
     seen: list = []
@@ -801,7 +848,7 @@ def test_provision_still_routes_trt_and_inductor_kinds(tmp_path, monkeypatch, st
     from gen_worker import trt_engine as te
     from gen_worker.models import provision
 
-    monkeypatch.setattr(aot, "_load_package", lambda p: FakePackage())
+    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
     monkeypatch.setattr(te, "enable", lambda *a, **k: True)
     pipeline = FakePipeline()
     trt = _tar(tmp_path, _meta(kind="trt-engine"), name="trt.tar.gz")
@@ -830,7 +877,7 @@ def test_provision_drops_the_artifact_when_the_receipts_gate_refuses(
     from gen_worker.models import provision
 
     monkeypatch.setattr(receipts, "gate_delivered_artifact", lambda *a, **k: False)
-    def _unexpected(p):
+    def _unexpected(p, e="model"):
         raise AssertionError("a refused artifact must never be dlopen-ed")
     monkeypatch.setattr(aot, "_load_package", _unexpected)
     seen: list = []
@@ -863,10 +910,10 @@ def test_input_lifted_adapters_are_ordinary_declared_inputs():
         ],
         constants=CONSTANTS,  # no lora FQNs — nothing to bake
     )
-    specs = aot.constants_from_meta(meta)
+    specs = _specs(meta)
     assert not [s for s in specs if "lora" in s.fqn.lower()]
 
-    contract = aot.contract_from_meta(meta)
+    contract = _contract(meta)
     args = (*_in_range_call()[0], FakeTensor([64, 2048]), FakeTensor([2048, 64]))
     assert aot.assert_ingress(contract, args, {}) == {"h": 128, "w": 128}
 
@@ -1070,7 +1117,7 @@ def test_assert_lifted_contract_agrees_both_ways():
 def test_enable_refuses_a_lifted_module_against_a_branchless_cell(
         tmp_path, monkeypatch, stub_runtime):
     """The mismatch is caught at ARM time, by name, not at first call."""
-    monkeypatch.setattr(aot, "_load_package", lambda p: FakePackage())
+    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
     module = FakeModule()
     _lift(module)
     pipeline = FakePipeline(module)
@@ -1084,7 +1131,7 @@ def test_enable_refuses_a_lifted_module_against_a_branchless_cell(
 def test_enable_arms_a_lifted_module_against_a_lifted_cell(
         tmp_path, monkeypatch, stub_runtime):
     package = FakePackage()
-    monkeypatch.setattr(aot, "_load_package", lambda p: package)
+    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": package)
     module = FakeModule()
     binding = _lift(module)
     pipeline = FakePipeline(module)

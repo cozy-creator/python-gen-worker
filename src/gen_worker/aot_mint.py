@@ -1,15 +1,21 @@
-"""The AOT mint — export + AOTInductor-package a compile target as a cell
-(pgw#704 GO, #723; the produce half of the AOT migration).
+"""The AOT mint — export + AOTInductor-package a family's WHOLE declared
+class set as ONE multi-graph cell (pgw#704 GO, #723 mint path, #758 packaging).
 
-    compose -> torch.export.export -> aoti_compile_and_package(code-only)
-            -> gates -> pack -> publish
+    compose -> per declared class: torch.export.export -> aot_compile(code-only)
+            -> per-entry gates -> package_aoti({entry: files}) -> pack -> publish
+
+Paul's ruling (pgw#758): "generate and generate_turbo are separate functions,
+they have separate graphs, but they are COMBINED TOGETHER INTO ONE FILE." One
+mint invocation produces one cell per (family x lane x contract) carrying every
+declared graph class as a NAMED ENTRY — which removes the one-artifact-per-pod
+serving ceiling the pilot runbook accepted.
 
 ``aot_serve`` owns the ENVELOPE — metadata contract, ``pack``, ``verify`` (#721
 S1 / #723 S1: ONE source of truth, imported by both lanes, never re-declared)
 — and consumes the result. ``aot_package`` reads facts back out of a compiled
-``.pt2`` and holds the B1 gate. ``lora_lifted`` owns the no-baked-adapter gate.
-This module drives PRODUCTION and nothing else. Deliberately NOT folded into
-``compile_cache``:
+``.pt2`` (per entry) and holds the B1 gate. ``lora_lifted`` owns the
+no-baked-adapter gate. This module drives PRODUCTION and nothing else.
+Deliberately NOT folded into ``compile_cache``:
 ``trt_engine`` already established that a compiled-lane backend is its own
 module riding the compile-cache rails, and the dynamo mint stays live and
 fully-forced in parallel during rollout (#722: nothing retires before sdxl AOT
@@ -24,13 +30,18 @@ systematic ~7% AOTI regression (#730 owns it), so they mint only behind
 measured 7% slower, while calling the migration a win, would be a regression
 sold as progress.
 
-Why minting is a JOB
---------------------
-An AOTI mint costs roughly double a dynamo mint (an export pass plus the AOTI
-compile), and pgw#677 already proved a serving pod that spends minutes
-compiling is unacceptable. So this module is invoked as
-``python -m gen_worker.aot_mint`` on a pod designated for minting; serving pods
-never AOT-compile (#724 owns the fleet-side invariant).
+Where minting runs (#724 REJECTED — Paul, 2026-07-28)
+-----------------------------------------------------
+Serving pods background-mint their own cells under the proven pgw#677
+eager-first machinery — "I'd rather keep that, rather than a whole complex
+separate compilation system; our compilation system would only ever just be
+running the endpoint code we have already anyway." There is no dedicated mint
+fleet. ``python -m gen_worker.aot_mint`` stays CLI-invokable for ops and
+testing. Mint cost is INSTRUMENTED, not assumed: every mint records a
+per-phase, per-entry ``mint_phases`` table (export / lowering / codegen /
+triton / host C++ compile+link) plus the graph-class count and the autotune
+posture, so an AOT-vs-JIT comparison is labeled data, never folklore (#757
+consumes it).
 
 What is exported
 ----------------
@@ -537,22 +548,11 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def compile_package(
-    program: Any,
-    package_path: Path,
-    *,
-    inductor_configs: Optional[Mapping[str, Any]] = None,
-) -> Path:
-    """AOTI-compile an exported program into a CODE-ONLY ``.pt2``.
-
-    ``CODE_ONLY_CONFIGS`` is applied LAST so no caller-supplied config can
-    re-enable constant baking. That ordering is the point: B1 is a fleet
-    correctness requirement, not a default a caller may override.
-    """
-    import torch
-
-    package_path = Path(package_path)
-    package_path.parent.mkdir(parents=True, exist_ok=True)
+def _entry_configs(inductor_configs: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The per-entry inductor config: caller options + the non-negotiable
+    packaging flags. ``CODE_ONLY_CONFIGS`` is applied LAST so no caller-
+    supplied config can re-enable constant baking — B1 is a fleet
+    correctness requirement, not a default a caller may override."""
     configs: Dict[str, Any] = dict(inductor_configs or {})
     overridden = sorted(set(configs) & set(CODE_ONLY_CONFIGS))
     if overridden:
@@ -560,15 +560,141 @@ def compile_package(
             "aot-mint: ignoring caller inductor config %s — code-only is B1, "
             "not a knob", overridden)
     configs.update(CODE_ONLY_CONFIGS)
+    # Emit loose files for package_aoti to combine, instead of a per-entry
+    # archive: the multi-graph cell is ONE .pt2 (pgw#758).
+    configs["aot_inductor.package"] = True
+    return configs
+
+
+def compile_entry_files(
+    program: Any,
+    entry: str,
+    *,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+) -> List[Any]:
+    """AOTI-compile one exported program into CODE-ONLY loose files.
+
+    This is ``aoti_compile_and_package``'s own internal compile step
+    (verified on the pin: ``aot_compile(ep.module(check_guards=False),
+    *ep.example_inputs, options)``), deferred before packaging so N entries
+    combine into one archive. Compilation is byte-identical to the
+    single-model mint; only the packaging changes.
+    """
+    from torch._inductor import aot_compile
+
+    gm = program.module(check_guards=False)
+    args, kwargs = program.example_inputs
     try:
-        out = torch._inductor.aoti_compile_and_package(
-            program, package_path=str(package_path), inductor_configs=configs,
-        )
+        files = aot_compile(
+            gm, tuple(args), dict(kwargs or {}),
+            options=_entry_configs(inductor_configs))
     except Exception as exc:
         raise MintRefused(
-            f"aoti_compile_and_package failed: {type(exc).__name__}: {exc}"
-        ) from exc
-    return Path(out)
+            f"entry {entry!r}: aot_compile failed: "
+            f"{type(exc).__name__}: {exc}") from exc
+    if not isinstance(files, list):
+        raise MintRefused(
+            f"entry {entry!r}: aot_compile returned {type(files).__name__}, "
+            f"not the loose-file list packaging needs "
+            f"(aot_inductor.package was forced True)")
+    return files
+
+
+def package_cell(
+    files_by_entry: Mapping[str, Sequence[Any]], package_path: Path,
+) -> Path:
+    """Combine every entry's compiled files into ONE ``.pt2`` of named
+    models (``data/aotinductor/<entry>/`` each) — the pgw#758 cell."""
+    from torch._inductor.package import package_aoti
+
+    package_path = Path(package_path)
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    if not files_by_entry:
+        raise MintRefused("cannot package a cell with no entries")
+    try:
+        out = package_aoti(
+            str(package_path),
+            {str(name): list(files) for name, files in files_by_entry.items()})
+    except Exception as exc:
+        raise MintRefused(
+            f"package_aoti failed: {type(exc).__name__}: {exc}") from exc
+    return Path(str(out))
+
+
+# ---------------------------------------------------------------------------
+# Mint-phase telemetry (#757's instrument-first doctrine; recorded per cell)
+# ---------------------------------------------------------------------------
+
+#: ``compilation_time_metrics`` keys summarized into named phases. Host C++
+#: compile+link (``AotCodeCompiler.compile``) is the stage the JIT path
+#: skips entirely — its wrapper is Python — and the primary 3.9x suspect.
+_PHASE_KEYS: Dict[str, Tuple[str, ...]] = {
+    "lowering_s": ("GraphLowering.run",),
+    "codegen_s": ("GraphLowering.codegen",),
+    "host_compile_s": ("AotCodeCompiler.compile",),
+    "graph_passes_s": (
+        "_recursive_pre_grad_passes",
+        "_recursive_joint_graph_passes",
+        "_recursive_post_grad_passes",
+    ),
+}
+
+
+def _phase_snapshot() -> Dict[str, float]:
+    try:
+        import torch._dynamo.utils as du
+
+        return {
+            str(k): float(sum(v))
+            for k, v in du.compilation_time_metrics.items()}
+    except Exception:
+        return {}
+
+
+def _phase_delta(
+    before: Mapping[str, float], after: Mapping[str, float],
+) -> Dict[str, float]:
+    """Named phase seconds spent between two snapshots. ``triton_s`` sums
+    every async-compile/triton key so GPU kernel compilation is one
+    labeled number; the remainder of inductor time is NOT invented — the
+    coarse wall clocks around export/compile hold the totals."""
+    raw = {
+        k: round(float(after.get(k, 0.0)) - float(before.get(k, 0.0)), 3)
+        for k in set(after) | set(before)
+    }
+    out: Dict[str, float] = {}
+    for label, keys in _PHASE_KEYS.items():
+        value = round(sum(raw.get(k, 0.0) for k in keys), 3)
+        if value:
+            out[label] = value
+    triton = round(sum(
+        v for k, v in raw.items()
+        if ("async_compile" in k or "triton" in k.lower()) and v > 0), 3)
+    if triton:
+        out["triton_s"] = triton
+    return out
+
+
+def autotune_posture(
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The benchmark-driven kernel-selection posture of THIS mint —
+    recorded so an AOT-vs-JIT cost comparison can rule the asymmetry in or
+    out (#757: it would dominate everything else)."""
+    posture: Dict[str, Any] = {}
+    try:
+        import torch._inductor.config as inductor_config
+
+        for name in ("max_autotune", "max_autotune_pointwise",
+                     "max_autotune_gemm", "search_autotune_cache"):
+            if hasattr(inductor_config, name):
+                posture[name] = bool(getattr(inductor_config, name))
+    except Exception:
+        pass
+    for key, value in (inductor_configs or {}).items():
+        if "autotune" in str(key):
+            posture[f"override.{key}"] = value
+    return posture
 
 
 # ---------------------------------------------------------------------------
@@ -589,34 +715,117 @@ class MintResult:
         return str(self.metadata.get("cell_key") or "")
 
 
-def mint(
-    module: Any,
+@dataclass
+class _MintedEntry:
+    """One exported+compiled graph class, pre-packaging."""
+
+    name: str
+    spec: ExportSpec
+    module: Any
+    owner: Any
+    program: Any
+    input_names: Tuple[str, ...]
+    files: List[Any]
+    timings: Dict[str, Any]
+
+
+def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
+    """The per-entry :class:`ExportSpec` one mint plan derives from the
+    cell-level request."""
+    from dataclasses import replace
+
+    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
+
+    specialization = dict(spec.specialization)
+    specialization.setdefault("shape_strategy", str(decl.shape_strategy or ""))
+    specialization.setdefault("warm_changes_key", bool(decl.warm_changes_key))
+    for name, value in plan.fork:
+        specialization.setdefault(f"fork.{name}", value)
+    fork, dims = _decl.entry_coordinates(plan)
+    return replace(
+        spec,
+        target=str(plan.target),
+        fork=fork,
+        class_dims=dims,
+        dynamic=tuple(plan.dynamic),
+        specialization=specialization,
+    )
+
+
+def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
+    """Execute the declared mint-warm canon: one forward with the entry's
+    own seed inputs BEFORE export (the warm-canon obligation — z-image's
+    rope pre-warm measurably changes the graph, 4327 cold vs 4285 warmed
+    nodes; a family declaring ``warm_changes_key=True`` that skips this
+    mints the graph the fleet never serves, and the #699 double-mint
+    byte-compare flaps on warm order). Returns the warm seconds."""
+    import torch
+
+    t0 = time.monotonic()
+    try:
+        with torch.no_grad():
+            module(*args)
+    except Exception as exc:
+        raise MintRefused(
+            f"entry {entry!r}: declared mint-warm forward failed "
+            f"({type(exc).__name__}: {exc}) — warm_changes_key=True makes "
+            f"the pre-warm a mint obligation, not a best effort") from exc
+    return round(time.monotonic() - t0, 2)
+
+
+def _export_entry(
+    pipeline: Any,
     spec: ExportSpec,
-    out_dir: Path,
+    plan: Any,
+    decl: Any,
     *,
-    example_inputs: Callable[[], Tuple[Tuple[Any, ...], Mapping[str, Any]]],
-    allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
-) -> MintResult:
-    """Export, compile code-only, gate, and pack one exported cell.
+) -> _MintedEntry:
+    """Resolve, feed, (warm,) export, gate, and compile ONE declared graph
+    class. Every refusal is prefixed with the entry name — a multi-graph
+    mint that cannot say WHICH class failed is the silent-failure path in
+    a new hat (pgw#758)."""
+    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
+    from . import aot_inputs
 
-    Does NOT publish — :func:`publish` is a separate step so a mint can be
-    inspected, byte-compared (#699 double-mint), or produced on a box with no
-    hub credentials.
-    """
-    refusal = lane_admitted(spec, allow_regressed_lanes=allow_regressed_lanes)
-    if refusal:
-        raise MintRefused(refusal)
-    refusal = lifted_torch_gap(spec)
-    if refusal:
-        raise MintRefused(refusal)
+    espec = _entry_spec(spec, plan, decl)
+    entry = _decl.plan_entry_name(plan)
+    timings: Dict[str, Any] = {}
 
-    out_dir = Path(out_dir)
-    work = out_dir / "work"
-    work.mkdir(parents=True, exist_ok=True)
-    timings: Dict[str, float] = {}
+    resolved = _resolve_target(pipeline, espec.target)
+    if resolved is None:
+        raise MintRefused(
+            f"entry {entry!r}: pipeline {type(pipeline).__name__} has no "
+            f"compile target {espec.target!r}")
+    owner, attr, _fn = resolved
+    if decl.forks:
+        gaps = _decl.fork_gaps(
+            decl, dict(espec.fork), target=espec.target,
+            pipeline=pipeline, module=owner)
+        if gaps:
+            raise MintRefused(
+                f"entry {entry!r}: fork gate (pgw#739): " + "; ".join(gaps))
+    module = owner if attr == "forward" else _CallableTarget(owner, attr)
 
-    args, kwargs = example_inputs()
+    # The LoRA bucket is a CELL-level request but a PER-TARGET fact: adapters
+    # ride the branch-capable denoisers, never the VAE (wan's vae.decode
+    # entry is bucket-0 in the same cell as its bucket-128 transformer).
+    # Scoped by COMPOSED truth (lora_lifted.branch_targets), not vocabulary —
+    # and a branch-capable target whose lifting was not installed still fails
+    # the lifted-input gate by name, never silently mints bucket-0.
+    if espec.lora_bucket or espec.lifted_inputs or espec.lora_fqns:
+        from dataclasses import replace
+
+        from .models import lora_lifted
+
+        branch_owners = {
+            id(m) for m in lora_lifted.branch_targets(pipeline).values()}
+        if id(owner) not in branch_owners:
+            espec = replace(
+                espec, lora_bucket=0, lifted_inputs=(), lora_fqns=())
+
+    builder = aot_inputs.builder_for(espec.family, espec.target)
+    args, kwargs = builder(owner, espec)
     if kwargs:
         # All-positional example feeds are a MINT OBLIGATION (pgw#723
         # residuals, pod 9): the AOTI package's call convention mirrors the
@@ -627,27 +836,38 @@ def mint(
         # measured). Refused HERE so the failure is a named mint refusal
         # instead of a vacuous eager-serving artifact.
         raise MintRefused(
-            f"example feed carries keyword argument(s) {sorted(kwargs)!r} — "
-            f"all-positional feeds are a mint obligation (pod 9, pgw#723 "
-            f"residuals): a kwarg-traced package is uncallable by the "
-            f"positional serve marshal and fails only at first serve, "
-            f"silently revoking to eager. Feed every input positionally "
-            f"(signature defaults fill the gaps)")
+            f"entry {entry!r}: example feed carries keyword argument(s) "
+            f"{sorted(kwargs)!r} — all-positional feeds are a mint "
+            f"obligation (pod 9, pgw#723 residuals): a kwarg-traced package "
+            f"is uncallable by the positional serve marshal and fails only "
+            f"at first serve, silently revoking to eager. Feed every input "
+            f"positionally (signature defaults fill the gaps)")
+
+    # The WARM CANON, EXECUTED (declared per family; previously keyed but
+    # never acted on): sdxl declared False and skips; z-image's True runs.
+    if bool(decl.warm_changes_key):
+        timings["warm_s"] = _run_declared_warm(module, args, entry)
+
     input_names = _input_names(module, args, kwargs)
-    dynamic = dynamic_shapes_spec(spec.dynamic, input_names) \
-        if spec.dynamic else None
+    dynamic = dynamic_shapes_spec(espec.dynamic, input_names) \
+        if espec.dynamic else None
 
     t0 = time.monotonic()
-    program = export_program(
-        module, args, kwargs, dynamic_shapes=dynamic, strict=spec.strict)
+    try:
+        program = export_program(
+            module, args, kwargs, dynamic_shapes=dynamic, strict=espec.strict)
+    except MintRefused as exc:
+        raise MintRefused(f"entry {entry!r}: {exc}") from exc
     timings["export_s"] = round(time.monotonic() - t0, 2)
 
-    gaps = declared_range_gaps(program, spec.dynamic)
+    gaps = declared_range_gaps(program, espec.dynamic)
     if gaps:
-        raise MintRefused("declared-range gate: " + "; ".join(gaps))
-    lifted_gaps = lifted_input_gaps(program, spec)
+        raise MintRefused(
+            f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
+    lifted_gaps = lifted_input_gaps(program, espec)
     if lifted_gaps:
-        raise MintRefused("lifted-input gate: " + "; ".join(lifted_gaps))
+        raise MintRefused(
+            f"entry {entry!r}: lifted-input gate: " + "; ".join(lifted_gaps))
 
     # pgw#725 G3, on the EXPORTEDPROGRAM and before any packing: the adapter
     # must be absent from the constant table AND present among the user inputs.
@@ -655,62 +875,101 @@ def mint(
     # away, so every request silently gets the base model), and packing renames
     # a plain-__dict__ adapter to _tensor_constant0 — which makes the
     # package-side scan a false PASS. Free here, unsound there.
-    if spec.lora_bucket or spec.lifted_inputs or spec.lora_fqns:
+    if espec.lora_bucket or espec.lifted_inputs or espec.lora_fqns:
         from .api.errors import ValidationError
         from .models import lora_lifted
 
         try:
             lora_lifted.assert_no_baked_adapter(
-                program, label=f"{spec.family}/{spec.target}")
+                program, label=f"{espec.family}/{espec.target}")
         except ValidationError as exc:
-            raise MintRefused(f"no-baked-adapter gate (#725 G3): {exc}") from exc
+            raise MintRefused(
+                f"entry {entry!r}: no-baked-adapter gate (#725 G3): "
+                f"{exc}") from exc
+
+    before = _phase_snapshot()
+    t0 = time.monotonic()
+    files = compile_entry_files(
+        program, entry, inductor_configs=inductor_configs)
+    timings["compile_s"] = round(time.monotonic() - t0, 2)
+    phases = _phase_delta(before, _phase_snapshot())
+    if phases:
+        timings["phases"] = phases
+
+    return _MintedEntry(
+        name=entry, spec=espec, module=module, owner=owner, program=program,
+        input_names=input_names, files=files, timings=timings)
+
+
+def mint(
+    pipeline: Any,
+    spec: ExportSpec,
+    out_dir: Path,
+    *,
+    allow_regressed_lanes: bool = False,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+) -> MintResult:
+    """Export + compile EVERY declared graph class and pack them as ONE
+    multi-graph cell (pgw#758).
+
+    Does NOT publish — :func:`publish` is a separate step so a mint can be
+    inspected, byte-compared (#699 double-mint), or produced on a box with no
+    hub credentials.
+    """
+    from .api.export_contract import export_declaration
+
+    refusal = lane_admitted(spec, allow_regressed_lanes=allow_regressed_lanes)
+    if refusal:
+        raise MintRefused(refusal)
+    refusal = lifted_torch_gap(spec)
+    if refusal:
+        raise MintRefused(refusal)
+    decl = export_declaration(spec.family)
+    if decl is None:
+        raise MintRefused(
+            f"family {spec.family!r} has no registered export declaration — "
+            f"a multi-graph cell derives its class set from the declaration "
+            f"(pgw#739/#758); register one before minting")
+    if decl.warm_changes_key is None:
+        raise MintRefused(
+            f"family {spec.family!r} declares no mint-warm canon "
+            f"(warm_changes_key) — whether pre-warm changes the graph is a "
+            f"measured per-family FACT (sdxl False, z-image True), not a "
+            f"default")
+
+    out_dir = Path(out_dir)
+    work = out_dir / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    timings: Dict[str, float] = {}
+    t_mint = time.monotonic()
+
+    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
+
+    plans = _decl.cell_plans(decl)
+    minted: List[_MintedEntry] = []
+    for plan in plans:
+        minted.append(_export_entry(
+            pipeline, spec, plan, decl, inductor_configs=inductor_configs))
 
     t0 = time.monotonic()
-    package = compile_package(
-        program, work / aot_serve.PACKAGE_NAME,
-        inductor_configs=inductor_configs)
-    timings["aoti_compile_s"] = round(time.monotonic() - t0, 2)
-
-    violations = aot_package.code_only_violations(package)
-    if violations:
-        raise MintRefused("code-only gate (pgw#704 B1): " + "; ".join(violations))
-    unbindable = aot_package.unbindable_constants(
-        package, _state_dict_keys(module))
-    if unbindable:
-        raise MintRefused("bindability gate: " + "; ".join(unbindable))
-    # pgw#728: strict and non-strict traces lift DIFFERENT constant sets, so the
-    # manifest must be proven to describe the package that ships beside it. Two
-    # independent derivations (program vs generated wrapper) required to agree —
-    # drift the env seal cannot see, because both modes run identically sealed.
-    drift = aot_package.program_package_drift(program, package)
-    if drift:
-        raise MintRefused("constant-set drift: " + "; ".join(drift))
-    fused = aot_package.eliminated_constants(program, package)
-    if fused:
-        # Routine compiler fusion (measured on real sdxl: conv_out.bias folded
-        # into the conv epilogue). Recorded, never fatal — but a surprising jump
-        # in the count should be visible rather than silently discarded.
-        logger.info("aot-mint: %d lifted constant(s) fused away by the compiler "
-                    "(e.g. %s)", len(fused), fused[:3])
+    package = package_cell(
+        {row.name: row.files for row in minted}, work / aot_serve.PACKAGE_NAME)
+    timings["package_s"] = round(time.monotonic() - t0, 2)
 
     t0 = time.monotonic()
-    try:
-        inputs, symbols = aot_package.input_contract(program, input_names)
-        constants = aot_package.constants_manifest(package)
-    except aot_package.PackageIntrospectionError as exc:
-        raise MintRefused(f"declaration: {exc}") from exc
-    _write_literals(program, package, work)
+    entry_blocks: Dict[str, Dict[str, Any]] = {}
+    for row in minted:
+        entry_blocks[row.name] = _gate_and_declare_entry(row, package)
+    _write_literals(minted, package, work)
 
-    identity = identity_blocks(program, package, spec)
     try:
         meta = aot_serve.artifact_metadata(
             family=spec.family,
-            module=spec.target,
             precision=spec.precision,
             cell_key="",
-            inputs=inputs,
-            symbols=symbols,
-            constants=constants,
+            entries=entry_blocks,
+            strict_export=bool(spec.strict),
+            lora_bucket=int(spec.lora_bucket or 0),
             source_ref=spec.source_ref,
             source_digest=spec.source_digest,
         )
@@ -719,31 +978,163 @@ def mint(
         # fail HERE, on the mint pod, not at serve time on a paying request.
         raise MintRefused(
             f"envelope refused the declared contract: {exc}") from exc
-    meta.update(identity)
+    meta.update(shared_identity_blocks(spec))
     mode_drift = aot_package.strict_mode_drift(meta, spec.strict)
     if mode_drift:
         raise MintRefused("trace-mode drift: " + "; ".join(mode_drift))
-    meta["cell_key"] = key = cell_identity(meta, spec).digest
 
+    timings["declare_s"] = round(time.monotonic() - t0, 2)
+    timings["total_s"] = round(time.monotonic() - t_mint, 2)
+    phase_table = _mint_phase_table(minted, timings, inductor_configs)
+    _emit_phase_event(spec, phase_table)
+
+    meta["cell_key"] = key = cell_identity(meta, spec).digest
+    t0 = time.monotonic()
     artifact = aot_serve.pack(work, out_dir / f"{key}.tar.gz", meta)
     timings["pack_s"] = round(time.monotonic() - t0, 2)
+    # The phase table rides the RESULT (and the published checkpoint
+    # metadata + the typed event), never the packed envelope: durations in
+    # metadata.json would break the #699 double-mint byte-compare — the
+    # artifact deliberately carries no timestamps and no wall clocks.
+    meta["mint_phases"] = phase_table
 
-    literals = sum(
-        1 for row in constants if row["source"] == aot_serve.SOURCE_LITERAL)
     logger.info(
-        "aot-mint: %s target=%s lane=%s -> %s (%.1f MB package, %d declared "
-        "constants incl. %d literal, %d symbol(s), %s)",
-        spec.family, spec.target, spec.lane_label() or "(plain)", key,
-        package.stat().st_size / 1e6, len(constants), literals, len(symbols),
+        "aot-mint: %s lane=%s -> %s (%d entr%s across %d target(s), %.1f MB "
+        "package, combined=%s, %s)",
+        spec.family, spec.lane_label() or "(plain)", key,
+        len(minted), "y" if len(minted) == 1 else "ies",
+        len({row.spec.target for row in minted}),
+        package.stat().st_size / 1e6, meta.get("combined_graph_hash"),
         timings,
     )
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
 
 
-def identity_blocks(
-    program: Any, package: Path, spec: ExportSpec,
+def _gate_and_declare_entry(
+    row: _MintedEntry, package: Path,
 ) -> Dict[str, Any]:
-    """The ck5 identity facts an exported cell must record.
+    """Run every package-side gate for one entry and build its envelope
+    block. Refusals name the entry AND the cause (pgw#758)."""
+    entry = row.name
+    violations = aot_package.code_only_violations(package, entry)
+    if violations:
+        raise MintRefused(
+            f"entry {entry!r}: code-only gate (pgw#704 B1): "
+            + "; ".join(violations))
+    unbindable = aot_package.unbindable_constants(
+        package, _state_dict_keys(row.owner), entry)
+    if unbindable:
+        raise MintRefused(
+            f"entry {entry!r}: bindability gate: " + "; ".join(unbindable))
+    # pgw#728: strict and non-strict traces lift DIFFERENT constant sets, so the
+    # manifest must be proven to describe the package that ships beside it. Two
+    # independent derivations (program vs generated wrapper) required to agree —
+    # drift the env seal cannot see, because both modes run identically sealed.
+    drift = aot_package.program_package_drift(row.program, package, entry)
+    if drift:
+        raise MintRefused(
+            f"entry {entry!r}: constant-set drift: " + "; ".join(drift))
+    fused = aot_package.eliminated_constants(row.program, package, entry)
+    if fused:
+        # Routine compiler fusion (measured on real sdxl: conv_out.bias folded
+        # into the conv epilogue). Recorded, never fatal — but a surprising jump
+        # in the count should be visible rather than silently discarded.
+        logger.info(
+            "aot-mint: %s: %d lifted constant(s) fused away by the compiler "
+            "(e.g. %s)", entry, len(fused), fused[:3])
+    try:
+        inputs, symbols = aot_package.input_contract(
+            row.program, row.input_names)
+        constants = aot_package.constants_manifest(package, entry)
+    except aot_package.PackageIntrospectionError as exc:
+        raise MintRefused(f"entry {entry!r}: declaration: {exc}") from exc
+    return {
+        "target": row.spec.target,
+        "fork": [[str(n), v] for n, v in sorted(row.spec.fork)],
+        "class_dims": [
+            [str(n), int(v)] for n, v in sorted(row.spec.class_dims)],
+        "inputs": inputs,
+        "symbols": symbols,
+        "constants": constants,
+        "graph": entry_graph_block(row.program, package, row.name, row.spec),
+    }
+
+
+def _mint_phase_table(
+    minted: Sequence[_MintedEntry],
+    timings: Mapping[str, float],
+    inductor_configs: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """The per-mint phase table (#757's instrument-first deliverable): one
+    readable record of where the mint's seconds went, per entry and in
+    total, plus the two facts an AOT-vs-JIT comparison needs to be fair —
+    the graph-class COUNT this mint compiled and the autotune posture."""
+    entries = {
+        row.name: dict(row.timings) for row in minted}
+    totals: Dict[str, float] = {
+        "export_s": round(sum(
+            float(row.timings.get("export_s") or 0) for row in minted), 2),
+        "compile_s": round(sum(
+            float(row.timings.get("compile_s") or 0) for row in minted), 2),
+        "warm_s": round(sum(
+            float(row.timings.get("warm_s") or 0) for row in minted), 2),
+    }
+    phase_totals: Dict[str, float] = {}
+    for row in minted:
+        for label, value in (row.timings.get("phases") or {}).items():
+            phase_totals[label] = round(
+                phase_totals.get(label, 0.0) + float(value), 3)
+    return {
+        "v": 1,
+        "n_entries": len(minted),
+        "autotune": autotune_posture(inductor_configs),
+        "totals": {**totals, **{k: v for k, v in timings.items()}},
+        "phases": phase_totals,
+        "entries": entries,
+    }
+
+
+def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
+    """Typed telemetry event — the phase table must reach observability,
+    never only a pod log."""
+    try:
+        from . import activity as activity_mod
+
+        totals = dict(table.get("totals") or {})
+        activity_mod.emit_event(
+            "aot_mint_phases",
+            f"family={spec.family} lane={spec.lane_label() or 'plain'} "
+            f"n_entries={table.get('n_entries')} totals={totals} "
+            f"phases={dict(table.get('phases') or {})} "
+            f"autotune={dict(table.get('autotune') or {})}",
+            phase="minted",
+        )
+    except Exception:  # pragma: no cover — telemetry must never fail a mint
+        logger.debug("aot-mint: phase event emission failed", exc_info=True)
+
+
+def entry_graph_block(
+    program: Any, package: Path, entry: str, spec: ExportSpec,
+) -> Dict[str, Any]:
+    """The per-entry graph-interface facts (fold into that entry's
+    ``class_hash``): the declared constant FQN set, the lifted inputs, the
+    pytree spec, and the python branches export FROZE at trace time.
+    Constant BYTE SIZES are deliberately absent — they are a property of the
+    resident weights, and a fine-tune of one family must keep sharing
+    cells, which is the premise of family-scoped cells."""
+    return {
+        "v": 2,
+        "constant_fqns": sorted(aot_package.constant_names(package, entry)),
+        "fused_constants": sorted(
+            aot_package.eliminated_constants(program, package, entry)),
+        "lifted_inputs": sorted(str(n) for n in spec.lifted_inputs),
+        "pytree": _pytree_facts(program),
+        "specialization": _specialization_facts(spec),
+    }
+
+
+def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
+    """The cell-level ck5 identity facts an exported cell must record.
 
     ``aot_serve.artifact_metadata`` takes ``cell_key`` as a STRING, so the
     envelope on its own would carry a stamp WITHOUT the axes the stamp
@@ -751,30 +1142,14 @@ def identity_blocks(
     recomputed FROM recorded facts, so a stamp can never disagree with them.
     These blocks are what make that recomputation possible for the new kind, and
     they ride the metadata additively (the envelope's parsers read named fields
-    and are unaffected).
-
-    ``graph`` carries what IS the exported graph's interface: the declared
-    constant FQN set, the lifted inputs, the pytree spec, and the python
-    branches export FROZE at trace time. Constant BYTE SIZES are deliberately
-    absent — they are a property of the resident weights, and a fine-tune of one
-    family must keep sharing cells, which is the premise of family-scoped cells.
+    and are unaffected). Per-entry graph facts live in the ``entries`` blocks
+    (:func:`entry_graph_block`) and reach the key through the combined hash.
     """
     from . import compile_cache as cc
     from . import env_seal
 
     return {
-        "graph": {
-            "v": 1,
-            "constant_fqns": sorted(aot_package.constant_names(package)),
-            "fused_constants": sorted(
-                aot_package.eliminated_constants(program, package)),
-            "lifted_inputs": sorted(str(n) for n in spec.lifted_inputs),
-            "pytree": _pytree_facts(program),
-            "specialization": _specialization_facts(spec),
-        },
         "weight_lane": str(spec.weight_lane or ""),
-        "lora_bucket": int(spec.lora_bucket or 0),
-        "strict_export": bool(spec.strict),
         "sm": str(cc.runtime_key().get("sm") or ""),
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
@@ -818,22 +1193,26 @@ def _treespec_text(spec: Any) -> str:
 
 
 def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey:
-    """The cell key an exported artifact's OWN recorded facts describe.
+    """The cell key a multi-graph artifact's OWN recorded facts describe.
 
     Computed from the recorded blocks, never from separate probes, so the stamp
     can never disagree with the axes it summarizes — the discipline
     ``cell_key.from_artifact_metadata`` enforces for dynamo cells, mirrored for
     the new kind. ``cell_key.from_axes`` already accepts any ``kind`` VALUE (it
-    validates axis NAMES), so the new kind needs no KEY_SCHEME bump: the axis
-    set is unchanged and ``kind`` does the discriminating, which is what it is
-    for. That also means no dynamo cell is stranded by this lane existing.
+    validates axis NAMES), so no KEY_SCHEME bump: the axis set is unchanged and
+    ``kind`` does the discriminating. No dynamo cell is stranded.
 
-    The ``contract`` axis folds THREE things: the declared shape set, the
-    envelope's ``range_digest``, and the graph identity block. The range digest
-    is the #716/#723 S3 requirement — pgw#704 measured that three exports
-    differing ONLY in declared range produce the identical node-only digest, so
-    without it two artifacts admitting different traffic collide, and B2 means
-    nothing at runtime would refuse the difference.
+    The ``contract`` axis is the pgw#716 formula, IMPLEMENTED AS ANTICIPATED:
+    the cell keys on the ``combined_graph_hash`` — first 16 hex of the sha256
+    over the newline-joined SORTED per-class hashes — while the per-class
+    hashes ride ``entries[*].class_hash`` so a mismatch NAMES the class. Each
+    class hash folds that entry's ``range_digest`` (the #723 S3 requirement:
+    three exports differing ONLY in declared range produced identical node-only
+    digests) plus its coordinate and graph-interface block.
+
+    CONTRACT-FACTS SHAPE CHANGE (v1 -> v2, pgw#758): this re-keys every
+    published ``aot-inductor`` cell; single-graph format-1 cells are RETIRED —
+    correct and expected under ck5 exact identity.
     """
     from . import env_seal
 
@@ -842,31 +1221,31 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         raise MintRefused(
             "cannot state the compute capability (sm) of this runtime; an "
             "exported cell has no identity without it — mint on the target GPU")
-    range_digest = str(meta.get("range_digest") or "")
-    if not range_digest:
+    entries = dict(meta.get("entries") or {})
+    combined = str(meta.get("combined_graph_hash") or "")
+    if not entries or not combined:
         raise MintRefused(
-            "the envelope recorded no range_digest; an exported cell must not "
-            "be keyed without its admissible-shape range (#723 S3)")
+            "the envelope recorded no entries/combined_graph_hash; a "
+            "multi-graph cell must not be keyed without its class set "
+            "(pgw#716/#758)")
+    unhashed = sorted(
+        name for name, block in entries.items()
+        if not str((block or {}).get("class_hash") or ""))
+    if unhashed:
+        raise MintRefused(
+            f"entries {unhashed[:4]!r} carry no class_hash; a class the key "
+            f"cannot name is a class a mismatch cannot name (pgw#716)")
     contract_facts: Dict[str, Any] = {
-        "v": 1,
+        "v": 2,
+        "combined_graph_hash": combined,
+        "targets": sorted({
+            str((block or {}).get("target") or "") for block in entries.values()}),
         "shapes": sorted([int(v) for v in row] for row in spec.shapes),
-        "targets": [spec.target],
         "text_lens": sorted({int(v) for v in spec.text_lens}),
         "guidance": sorted(float(v) for v in spec.guidance_scales),
         "lora_bucket": int(spec.lora_bucket or 0),
-        "range_digest": range_digest,
-        "graph": dict(meta.get("graph") or {}),
         "strict": bool(spec.strict),
     }
-    # pgw#739: a fork is a DISTINCT graph class in #716's hash, and a
-    # static-rows artifact's identity is its class row. Present only when the
-    # spec carries a declaration coordinate, so pre-declaration cells keep
-    # their digests.
-    if spec.fork:
-        contract_facts["fork"] = [[str(n), v] for n, v in sorted(spec.fork)]
-    if spec.class_dims:
-        contract_facts["class_dims"] = [
-            [str(n), int(v)] for n, v in sorted(spec.class_dims)]
     contract = cell_key.contract_digest(contract_facts)
     return cell_key.from_axes({
         "format": str(meta.get("format") or ""),
@@ -892,8 +1271,11 @@ def _state_dict_keys(module: Any) -> Tuple[str, ...]:
         return ()
 
 
-def _write_literals(program: Any, package: Path, content_dir: Path) -> None:
-    """Pack the bytes of every declared LITERAL constant beside the package.
+def _write_literals(
+    minted: Sequence[_MintedEntry], package: Path, content_dir: Path,
+) -> None:
+    """Pack the bytes of every entry's declared LITERAL constants beside the
+    package, keys namespaced ``<entry>::<fqn>`` (pgw#758).
 
     A literal has no ``state_dict`` counterpart (folded scalars, sinusoidal
     tables, shape vectors), so a consumer cannot bind it from resident weights.
@@ -902,23 +1284,27 @@ def _write_literals(program: Any, package: Path, content_dir: Path) -> None:
     bytes is therefore not an optimization; it is what makes a code-only
     artifact loadable at all.
     """
-    literals = aot_package.literal_constants(package)
-    if not literals:
-        return
-    values = dict(getattr(program, "constants", {}) or {})
     tensors: Dict[str, Any] = {}
     missing: List[str] = []
-    for constant in literals:
-        tensor = values.get(constant.fqn) or values.get(constant.name)
-        if tensor is None:
-            missing.append(constant.fqn)
+    for row in minted:
+        literals = aot_package.literal_constants(package, row.name)
+        if not literals:
             continue
-        tensors[constant.fqn] = tensor.detach().cpu().contiguous()
+        values = dict(getattr(row.program, "constants", {}) or {})
+        for constant in literals:
+            tensor = values.get(constant.fqn) or values.get(constant.name)
+            if tensor is None:
+                missing.append(f"{row.name}{aot_serve.LITERAL_SEP}{constant.fqn}")
+                continue
+            tensors[f"{row.name}{aot_serve.LITERAL_SEP}{constant.fqn}"] = \
+                tensor.detach().cpu().contiguous()
     if missing:
         raise MintRefused(
-            f"{len(missing)} declared literal constant(s) have no value in the "
-            f"exported program, e.g. {missing[:6]!r} — the cell could never "
-            f"bind them and would segfault on first call (pgw#704 B1)")
+            f"{len(missing)} declared literal constant(s) have no value in "
+            f"their exported program, e.g. {missing[:6]!r} — the cell could "
+            f"never bind them and would segfault on first call (pgw#704 B1)")
+    if not tensors:
+        return
     from safetensors.torch import save_file
 
     save_file(tensors, str(Path(content_dir) / aot_serve.LITERALS_NAME))
@@ -988,51 +1374,6 @@ def lifted_input_gaps(program: Any, spec: ExportSpec) -> List[str]:
                 f"adapter would not be swappable (#725 option 2)"
             )
     return gaps
-
-
-def mint_target(
-    pipeline: Any,
-    spec: ExportSpec,
-    out_dir: Path,
-    *,
-    example_inputs: Callable[
-        [Any], Tuple[Tuple[Any, ...], Mapping[str, Any]]],
-    allow_regressed_lanes: bool = False,
-) -> MintResult:
-    """Resolve ``spec.target`` on a composed pipeline and mint it.
-
-    Target resolution reuses ``compile_cache._resolve_target`` so the exported
-    lane and the dynamo lane can never disagree about what ``"unet"`` or
-    ``"vae.decode"`` names.
-    """
-    resolved = _resolve_target(pipeline, spec.target)
-    if resolved is None:
-        raise MintRefused(
-            f"pipeline {type(pipeline).__name__} has no compile target "
-            f"{spec.target!r}")
-    owner, attr, _fn = resolved
-    # pgw#739 fork gate: every declared fork with a (pipeline|module, field)
-    # source is read off the COMPOSED objects and must agree with the minted
-    # arm — a graph exported under the wrong arm is the wrong class wearing
-    # the declared class's key (wan's expand_timesteps is a PIPELINE field a
-    # module-config reader never sees; ie#566 G6).
-    from .api.export_contract import export_declaration
-
-    decl = export_declaration(spec.family)
-    if decl is not None and decl.forks:
-        from . import aot_declaration
-
-        gaps = aot_declaration.fork_gaps(
-            decl, dict(spec.fork), target=spec.target,
-            pipeline=pipeline, module=owner)
-        if gaps:
-            raise MintRefused("fork gate (pgw#739): " + "; ".join(gaps))
-    module = owner if attr == "forward" else _CallableTarget(owner, attr)
-    return mint(
-        module, spec, out_dir,
-        example_inputs=lambda: example_inputs(owner),
-        allow_regressed_lanes=allow_regressed_lanes,
-    )
 
 
 class _CallableTarget:
@@ -1126,24 +1467,28 @@ def publish(result: MintResult, publisher: Any) -> str:
 
 
 def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
-    """An :class:`ExportSpec` from a JSON mint request.
+    """A cell-level :class:`ExportSpec` from a JSON mint request.
 
     The request is a file rather than a pile of flags because a mint request is
-    a CONTRACT (shapes, dims, frozen specialization) that wants review and
-    version control, not 20 argv strings.
+    a CONTRACT (lane, precision, provenance, frozen specialization) that wants
+    review and version control, not 20 argv strings. It names a FAMILY, never
+    a target/fork/class coordinate: the cell covers the whole declared class
+    set (pgw#758), so a coordinate-shaped request is refused by name rather
+    than silently minting a subset of the contract the key advertises.
     """
     body = json.loads(Path(path).read_text())
-    dims = tuple(
-        DynamicDim(
-            input_name=str(row["input"]), axis=int(row["axis"]),
-            min=int(row["min"]), max=int(row["max"]),
-            multiple_of=int(row.get("multiple_of") or 1),
-        )
-        for row in body.get("dynamic") or ()
-    )
+    subset_fields = sorted(
+        k for k in ("target", "fork", "class_dims", "dynamic")
+        if body.get(k))
+    if subset_fields:
+        raise MintRefused(
+            f"mint request {path} names {subset_fields!r} — a multi-graph "
+            f"cell covers the family's WHOLE declared class set (pgw#758); "
+            f"coordinates and dynamic rows derive from the declaration, "
+            f"never from the request")
     spec = ExportSpec(
         family=str(body.get("family") or ""),
-        target=str(body.get("target") or ""),
+        target="",
         weight_lane=str(body.get("weight_lane") or ""),
         precision=str(body.get("precision") or "bf16"),
         lora_bucket=int(body.get("lora_bucket") or 0),
@@ -1151,7 +1496,6 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         batch=int(body.get("batch") or 0),
         text_lens=tuple(int(v) for v in body.get("text_lens") or ()),
         guidance_scales=tuple(float(v) for v in body.get("guidance_scales") or ()),
-        dynamic=dims,
         specialization=dict(body.get("specialization") or {}),
         lora_fqns=tuple(str(v) for v in body.get("lora_fqns") or ()),
         lifted_inputs=tuple(str(v) for v in body.get("lifted_inputs") or ()),
@@ -1159,21 +1503,17 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         source_ref=str(body.get("source_ref") or ""),
         source_digest=str(body.get("source_digest") or ""),
         closure_roots=tuple(str(v) for v in body.get("closure_roots") or ()),
-        fork=tuple(sorted(
-            (str(k), v) for k, v in dict(body.get("fork") or {}).items())),
-        class_dims=tuple(sorted(
-            (str(k), int(v))
-            for k, v in dict(body.get("class_dims") or {}).items())),
     )
-    if not spec.family or not spec.target:
-        raise MintRefused(
-            f"mint request {path} must name both 'family' and 'target'")
+    if not spec.family:
+        raise MintRefused(f"mint request {path} must name 'family'")
     return spec, body
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """``python -m gen_worker.aot_mint <request.json> --out <dir>`` — produce
-    one exported cell on a mint pod.
+    one multi-graph cell (ops/testing entry point; production mints run in a
+    serving pod's background under the pgw#677 eager-first machinery — #724
+    was REJECTED, there is no dedicated mint fleet).
 
     Exit 0 minted (and published when asked), 2 a named mint refusal, 3 a bad
     invocation. Inspect-only by default: ``--publish`` is opt-in so a mint can
@@ -1181,7 +1521,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="gen_worker.aot_mint",
-        description="Export + AOTI-package a compile target as a cell.")
+        description="Export + AOTI-package a family's declared class set "
+                    "as one multi-graph cell.")
     parser.add_argument("request", type=Path, help="mint request JSON")
     parser.add_argument("--out", type=Path, required=True,
                         help="output directory for the packed artifact")
@@ -1205,14 +1546,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"BAD REQUEST {args.request}: {exc}", file=sys.stderr)
         return 3
     try:
-        # pgw#739: load the endpoint's declaration module (registers the
-        # family's export contract), then resolve the request against it —
-        # deriving the dynamic contract from the declared class rows. A
-        # family with no registration passes through untouched.
+        # pgw#739/#758: load the endpoint's declaration module (registers the
+        # family's export contract). The cell's class set, coordinates, and
+        # dynamic contracts all derive from it — the request only ever names
+        # the family and the lane facts.
         from . import aot_declaration
 
         aot_declaration.load_declaration(body, request_path=args.request)
-        spec = aot_declaration.apply_declaration(spec)
     except MintRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
@@ -1228,10 +1568,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 3
     try:
-        pipeline, build_inputs = compose_for_mint(model, spec, body)
-        result = mint_target(
+        pipeline, _build_inputs = compose_for_mint(model, spec, body)
+        result = mint(
             pipeline, spec, Path(args.out),
-            example_inputs=build_inputs,
             allow_regressed_lanes=args.allow_regressed_lanes,
         )
     except MintRefused as exc:
@@ -1240,6 +1579,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(json.dumps({
         "artifact": str(result.artifact),
         "cell_key": result.cell_key,
+        "entries": sorted((result.metadata.get("entries") or {})),
         "timings": result.timings,
     }, indent=1))
 
@@ -1314,19 +1654,21 @@ __all__ = [
     "MintResult",
     "PARITY_LANES",
     "REGRESSED_LANES",
+    "autotune_posture",
     "cell_identity",
-    "compile_package",
+    "compile_entry_files",
     "compose_for_mint",
     "declared_range_gaps",
     "dynamic_shapes_spec",
+    "entry_graph_block",
     "export_program",
-    "identity_blocks",
+    "shared_identity_blocks",
     "LIFTED_LORA_TORCH_FLOOR",
     "lane_admitted",
     "lifted_input_gaps",
     "lifted_torch_gap",
     "main",
     "mint",
-    "mint_target",
+    "package_cell",
     "publish",
 ]

@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.81.0 (2026-07-28) — pgw#758: multi-graph cells — every declared graph class in ONE .pt2
+
+Paul's ruling: "generate and generate_turbo are separate functions, they have separate
+graphs, but they are COMBINED TOGETHER INTO ONE FILE." One mint invocation now produces ONE
+cell per (family x lane x contract) carrying the family's WHOLE declared class set as named
+AOTI models (`data/aotinductor/<entry>/` — mechanism verified on the 2.13 pin: per-entry
+constant tables, per-entry bind, per-entry B1 segfault). Removes the pilot runbook's
+one-artifact-per-pod serving ceiling: sdxl's 18 declared classes (9 aspects x cfg/no-cfg)
+collapse from 6-18 artifacts to one, and a single resident cell serves generate AND
+generate-turbo compiled.
+
+- **Envelope format 2** (`aot_serve`): metadata carries an `entries` map — per-entry
+  target/fork/class-dim coordinate, ingress contract, constant manifest, graph block,
+  `range_digest`, `class_hash`. Literals namespace as `<entry>::<fqn>`. Entry names derive
+  from declaration coordinates (`unet/cfg=true/B=2,...`) — stable across mints.
+- **The pgw#716 key formula, implemented as anticipated**: `combined_graph_hash` = first 16
+  hex of sha256 over the newline-joined SORTED per-class hashes; per-class hashes ride
+  metadata so a mismatch NAMES the class; each class hash folds its entry's range digest
+  (the measured node-only-collision fix). Contract facts v1 -> v2 — **this re-keys and
+  RETIRES every published format-1 aot-inductor cell** (ck5 exact identity: correct and
+  expected; dynamo cells untouched). TRAIN CAVEAT: do not run mixed-SDK-version double-mint
+  experiments across this release — per-release fleet pinning already prevents it.
+- **Mint** (`aot_mint.mint(pipeline, spec, out)`): enumerates `cell_plans` across ALL
+  declared targets; every gate (declared-range, lifted-input, no-baked-adapter, B1
+  code-only, bindability, constant-set drift) runs PER ENTRY and refuses naming the entry
+  AND the cause. Requests name a family only — coordinate-shaped requests are refused.
+  LoRA buckets scope per target by composed truth (`branch_targets`): wan's vae.decode
+  entry mints bucket-0 beside its bucket-128 transformer.
+- **WARM CANON EXECUTED**: `warm_changes_key=True` families get their declared pre-warm RUN
+  before export (previously keyed but never acted on); a failed warm is a named refusal.
+- **Serve** (`aot_serve.load_and_wrap`): one staged artifact, EVERY entry bound before ANY
+  wrap, per-module `EntryDispatch` routes each call to the entry whose declared ingress
+  contract admits it (0 admitting = named refusal + eager; >1 = `entry_ambiguous`). Dotted
+  targets (`vae.decode`) wrap their owner method. Multi-target markers behind the same
+  `is_armed`/`execution_count`/`proven_since`/`unwrap` surface.
+- **Mint-phase telemetry** (#757's instrument-first doctrine): every mint records
+  `mint_phases` — per-entry export/compile/warm seconds plus labeled inductor phases
+  (lowering / codegen / triton / HOST C++ COMPILE+LINK — measured dominant on CPU tiny
+  models at ~9.5s of 11s, the 3.9x suspect), graph-class count, and the autotune posture —
+  and emits a typed `aot_mint_phases` event.
+- **#724 REJECTED fallout** (Paul): no dedicated mint fleet — serving pods background-mint
+  under the pgw#677 eager-first machinery; `python -m gen_worker.aot_mint` stays for
+  ops/testing. Docstrings no longer claim "serving pods never compile".
+- Removed: `aot_mint.mint_target`, `compile_package`, `identity_blocks` (split into
+  `compile_entry_files`/`package_cell` + `shared_identity_blocks`/`entry_graph_block`),
+  `aot_declaration.apply_declaration` (the CLI derives whole-cell plans now).
+
 ## 0.80.0 (2026-07-28) — pgw#756: the guard-closure classifier loses its veto
 
 Paul's ruling. `guard_closure` extracted dynamo's guard tree post-mint, classified every

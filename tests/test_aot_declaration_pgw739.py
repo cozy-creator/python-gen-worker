@@ -457,7 +457,15 @@ def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
     serve: the flat forward traced the lifted pair as kwargs, the package
     demanded kwargs, the positional serve marshal fed none — 'Ran into a
     kwarg keyword mismatch' swallowed on first call, every "armed" call
-    silently eager (splat_served=false, B_vs_eagerB_maxdiff=0.0)."""
+    silently eager (splat_served=false, B_vs_eagerB_maxdiff=0.0).
+
+    Declared Input rows are positionalized by construction, so the kwarg
+    shape can only arrive via a HAND-REGISTERED builder (the escape hatch
+    for families whose declaration is still being written) — which is
+    exactly where the mint must still refuse it, naming the entry."""
+    from types import SimpleNamespace
+
+    from gen_worker import aot_inputs
 
     class Tiny(torch.nn.Module):
         def __init__(self) -> None:
@@ -467,13 +475,25 @@ def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
         def forward(self, x, lora_a=None, lora_b=None):  # type: ignore[no-untyped-def]
             return self.proj(x)
 
-    spec = ExportSpec(family="f", target="t", weight_lane="w8a8")
-    with pytest.raises(MintRefused, match="kwarg"):
-        aot_mint.mint(
-            Tiny().eval(), spec, tmp_path,
-            example_inputs=lambda: (
-                (torch.randn(2, 4),),
-                {"lora_a": torch.randn(2, 4), "lora_b": torch.randn(4, 2)}))
+    register_export_declaration(Compile(
+        family="kwargfam", targets=("unet",),
+        dims=(Dim("B", carried_by=(("x", 0),)),),
+        classes=(GraphClass(dims={"B": 2}),),
+        shape_strategy="static-rows", warm_changes_key=False,
+    ))
+
+    @aot_inputs.inputs_for("kwargfam")
+    def _kwarg_builder(module, spec):  # type: ignore[no-untyped-def]
+        return ((torch.randn(2, 4),), {
+            "lora_a": torch.randn(2, 4), "lora_b": torch.randn(4, 2)})
+
+    try:
+        spec = ExportSpec(family="kwargfam", target="", weight_lane="w8a8")
+        with pytest.raises(MintRefused, match="kwarg"):
+            aot_mint.mint(
+                SimpleNamespace(unet=Tiny().eval()), spec, tmp_path)
+    finally:
+        aot_inputs._BUILDERS.pop(("kwargfam", ""), None)
 
 
 def test_positionalize_refuses_keyword_only_declared_inputs() -> None:
@@ -564,82 +584,101 @@ def test_fork_gate_refuses_missing_source_field_by_name() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Request resolution + identity
+# The whole-cell plan set + identity (pgw#758: apply_declaration's
+# single-plan request resolution is DELETED — the cell covers every plan)
 # ---------------------------------------------------------------------------
 
 
-def test_apply_declaration_refuses_hand_dynamic_rows() -> None:
-    register_export_declaration(_wan_a14b_decl())
-    spec = ExportSpec(
-        family="wan-2.2-t2v-a14b", target="transformer",
-        fork=(("expand_timesteps", False), ("use_tiling", False)),
-        dynamic=(aot_mint.DynamicDim("hidden_states", 3, 90, 160),))
-    with pytest.raises(MintRefused, match="hand-written"):
-        aot_declaration.apply_declaration(spec)
-
-
-def test_apply_declaration_requires_the_warm_canon() -> None:
+def test_cell_plans_span_every_target_and_derive_the_contract() -> None:
+    """What apply_declaration used to resolve for ONE coordinate now
+    enumerates for the whole cell: every target's plans, each with its
+    SDK-derived dynamic contract — never hand-math."""
     decl = _wan_a14b_decl()
-    unmeasured = Compile(**{**_fields(decl), "warm_changes_key": None})
-    register_export_declaration(unmeasured)
-    spec = ExportSpec(
-        family="wan-2.2-t2v-a14b", target="transformer",
-        fork=(("expand_timesteps", False), ("use_tiling", False)))
-    with pytest.raises(MintRefused, match="warm_changes_key"):
-        aot_declaration.apply_declaration(spec)
+    plans = aot_declaration.cell_plans(decl)
+    by_target = {p.target: p for p in plans}
+    assert sorted(by_target) == ["transformer", "transformer_2", "vae.decode"]
+    for target in ("transformer", "transformer_2"):
+        rows = {(d.input_name, d.axis): d for d in by_target[target].dynamic}
+        for axis in (3, 4):
+            d = rows[("hidden_states", axis)]
+            assert (d.min, d.max, d.multiple_of) == (90, 160, 2)
+    decode = {(d.input_name, d.axis) for d in by_target["vae.decode"].dynamic}
+    assert decode == {("z", 3), ("z", 4)}
 
 
-def test_apply_declaration_derives_the_contract() -> None:
-    register_export_declaration(_wan_a14b_decl())
-    spec = ExportSpec(
-        family="wan-2.2-t2v-a14b", target="transformer",
-        shapes=((1280, 720, 81), (720, 1280, 81)),
-        fork=(("expand_timesteps", False), ("use_tiling", False)))
-    out = aot_declaration.apply_declaration(spec)
-    assert {(d.input_name, d.axis, d.min, d.max) for d in out.dynamic} == {
-        ("hidden_states", 3, 90, 160), ("hidden_states", 4, 90, 160)}
-    assert out.specialization["shape_strategy"] == "dynamic-collapse"
-    assert out.specialization["warm_changes_key"] is False
-    assert out.specialization["fork.expand_timesteps"] is False
+def test_cell_plan_entry_names_are_deterministic_coordinates() -> None:
+    decl = _wan_a14b_decl()
+    names = sorted(
+        aot_declaration.plan_entry_name(p)
+        for p in aot_declaration.cell_plans(decl))
+    # Dynamic-collapse plans span their rows, so the dims segment is empty
+    # and the fork coordinate alone names the entry.
+    assert names == [
+        "transformer/expand_timesteps=false,use_tiling=false",
+        "transformer_2/expand_timesteps=false,use_tiling=false",
+        "vae.decode/expand_timesteps=false,use_tiling=false",
+    ]
 
 
-def test_unregistered_family_passes_through_untouched() -> None:
-    spec = ExportSpec(family="plain", target="unet")
-    assert aot_declaration.apply_declaration(spec) is spec
+def test_hand_dynamic_rows_are_refused_at_declaration_time() -> None:
+    """The apply_declaration hand-rows refusal lives in the vocabulary now:
+    a Compile with classes AND a hand range on a declared dim never
+    constructs (and the request side refuses 'dynamic' outright — see
+    test_cli_refuses_hand_dynamic_rows in the pgw#723 file)."""
+    from gen_worker.api.export_contract import DeclarationError
+
+    decl = _wan_a14b_decl()
+    with pytest.raises(DeclarationError, match="hand-ranges"):
+        Compile(**{
+            **_fields(decl),
+            "dynamic": (DynamicDim("H_lat", min=90, max=160),),
+        })
 
 
 def test_fork_and_row_reach_the_cell_identity() -> None:
     """A fork is a DISTINCT graph class in #716's hash; a static row is the
-    artifact's identity."""
-    meta = {"sm": "sm_89", "range_digest": "r1", "format": "pt2",
-            "family": "sdxl-shaped", "graph": {"v": 1}}
-    base = dict(family="sdxl-shaped", target="unet")
-    a = aot_mint.cell_identity(meta, ExportSpec(**base, fork=(("cfg", True),)))
-    b = aot_mint.cell_identity(meta, ExportSpec(**base, fork=(("cfg", False),)))
-    c = aot_mint.cell_identity(meta, ExportSpec(**base))
-    assert len({a.digest, b.digest, c.digest}) == 3
-    d1 = aot_mint.cell_identity(
-        meta, ExportSpec(**base, class_dims=(("H_lat", 128), ("W_lat", 128))))
-    d2 = aot_mint.cell_identity(
-        meta, ExportSpec(**base, class_dims=(("H_lat", 112), ("W_lat", 144))))
-    assert d1.digest != d2.digest
+    artifact's identity. Both now travel through the per-class hash into
+    the combined hash the key folds (pgw#758)."""
+    from gen_worker import aot_serve
+
+    def _identity(fork: list, class_dims: list) -> str:
+        entry = {
+            "target": "unet", "fork": fork, "class_dims": class_dims,
+            "range_digest": "r1", "graph": {"v": 2},
+        }
+        ch = aot_serve.class_hash(entry, strict=True, lora_bucket=0)
+        entry["class_hash"] = ch
+        meta = {
+            "sm": "sm_89", "format": 2, "family": "sdxl-shaped",
+            "entries": {"unet/main": entry},
+            "combined_graph_hash": aot_serve.combined_graph_hash([ch]),
+        }
+        spec = ExportSpec(family="sdxl-shaped", target="unet")
+        return aot_mint.cell_identity(meta, spec).digest
+
+    a = _identity([["cfg", True]], [])
+    b = _identity([["cfg", False]], [])
+    c = _identity([], [])
+    assert len({a, b, c}) == 3
+    d1 = _identity([], [["H_lat", 128], ["W_lat", 128]])
+    d2 = _identity([], [["H_lat", 112], ["W_lat", 144]])
+    assert d1 != d2
 
 
-def test_load_spec_parses_the_coordinate() -> None:
+def test_load_spec_refuses_the_coordinate() -> None:
+    """A request naming a fork/class coordinate would mint a SUBSET of the
+    contract the key advertises — refused by name (pgw#758)."""
     import json
-
-    body = {
-        "family": "sdxl-shaped", "target": "unet",
-        "fork": {"cfg": True},
-        "class_dims": {"H_lat": 128, "W_lat": 128, "B": 2, "T_txt": 77},
-    }
-    path = None
     import tempfile
     from pathlib import Path
 
+    body = {
+        "family": "sdxl-shaped",
+        "fork": {"cfg": True},
+        "class_dims": {"H_lat": 128, "W_lat": 128, "B": 2, "T_txt": 77},
+    }
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "req.json"
         path.write_text(json.dumps(body))
-        spec, _raw = aot_mint._load_spec(path)
-    assert spec.fork == (("cfg", True),)
-    assert dict(spec.class_dims)["H_lat"] == 128
+        with pytest.raises(MintRefused, match="WHOLE declared class set"):
+            aot_mint._load_spec(path)

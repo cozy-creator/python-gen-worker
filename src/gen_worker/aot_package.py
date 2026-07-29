@@ -108,14 +108,43 @@ class DeclaredConstant:
         }
 
 
-def _wrapper_source(package: Path) -> str:
+def _entry_member(name: str, entry: str) -> bool:
+    """Whether a zip member belongs to one named model of a multi-graph
+    package. AOTI packages every model under ``data/aotinductor/<name>/``
+    (verified on the pin, pgw#758); entry names may carry ``/`` so the
+    whole segment run is matched, not a single path component."""
+    marker = f"data/aotinductor/{entry}/"
+    return f"/{marker}" in name or name.startswith(marker)
+
+
+def _members(package: Path, suffix: str, entry: str) -> List[str]:
     with zipfile.ZipFile(package) as zf:
-        names = [n for n in zf.namelist() if n.endswith(".wrapper.cpp")]
-        if len(names) != 1:
-            raise PackageIntrospectionError(
-                f"{package}: expected exactly one *.wrapper.cpp in the "
-                f"package, found {len(names)}")
+        names = [n for n in zf.namelist() if n.endswith(suffix)]
+    if entry:
+        names = [n for n in names if _entry_member(n, entry)]
+    return names
+
+
+def _wrapper_source(package: Path, entry: str = "") -> str:
+    names = _members(package, ".wrapper.cpp", entry)
+    if len(names) != 1:
+        where = f" for entry {entry!r}" if entry else ""
+        raise PackageIntrospectionError(
+            f"{package}: expected exactly one *.wrapper.cpp in the "
+            f"package{where}, found {len(names)}")
+    with zipfile.ZipFile(package) as zf:
         return zf.read(names[0]).decode("utf-8", "replace")
+
+
+def package_entry_names(package: Path) -> Tuple[str, ...]:
+    """The named models a ``.pt2`` carries, read from its own layout —
+    every ``data/aotinductor/<name>/`` directory holding a wrapper."""
+    names = set()
+    for member in _members(Path(package), ".wrapper.cpp", ""):
+        _, _, rest = member.rpartition("data/aotinductor/")
+        if rest and "/" in rest:
+            names.add(rest.rsplit("/", 1)[0])
+    return tuple(sorted(names))
 
 
 def _last_call_argument(source: str, opening: str) -> str:
@@ -145,14 +174,15 @@ def _last_call_argument(source: str, opening: str) -> str:
     raise PackageIntrospectionError(f"unbalanced {opening!r} argument list")
 
 
-def constants_in_so(package: Path) -> bool:
+def constants_in_so(package: Path, entry: str = "") -> bool:
     """Whether the package BAKED its constants into the ``.so`` blob.
 
     Not an inference: this is the ``load_constants_from_blob`` argument
     AOTInductor rendered into its own generated constructor from the
     ``aot_inductor.package_constants_in_so`` config the mint passed.
+    ``entry`` scopes the read to one named model of a multi-graph package.
     """
-    arg = _last_call_argument(_wrapper_source(Path(package)), _MODEL_BASE)
+    arg = _last_call_argument(_wrapper_source(Path(package), entry), _MODEL_BASE)
     if arg not in ("true", "false"):
         raise PackageIntrospectionError(
             f"{package}: could not read load_constants_from_blob from the "
@@ -160,13 +190,14 @@ def constants_in_so(package: Path) -> bool:
     return arg == "true"
 
 
-def declared_constants(package: Path) -> Tuple[DeclaredConstant, ...]:
+def declared_constants(package: Path, entry: str = "") -> Tuple[DeclaredConstant, ...]:
     """The package's declared constant table, in declaration order.
 
     Present and identical whether or not the constants were baked — baking
-    changes where the BYTES live, never the declaration.
+    changes where the BYTES live, never the declaration. ``entry`` scopes
+    the read to one named model of a multi-graph package.
     """
-    source = _wrapper_source(Path(package))
+    source = _wrapper_source(Path(package), entry)
     fields: Dict[int, Dict[str, Any]] = {}
     for idx, field_name, text, number, boolean in _CONSTANT_FIELD.findall(source):
         row = fields.setdefault(int(idx), {})
@@ -204,7 +235,7 @@ def declared_constants(package: Path) -> Tuple[DeclaredConstant, ...]:
     return tuple(out)
 
 
-def constants_manifest(package: Path) -> List[Dict[str, Any]]:
+def constants_manifest(package: Path, entry: str = "") -> List[Dict[str, Any]]:
     """The declared constant manifest for ``aot_serve.artifact_metadata``.
 
     Derived from the package's OWN table rather than from the pipeline's
@@ -212,10 +243,10 @@ def constants_manifest(package: Path) -> List[Dict[str, Any]]:
     manifest against the loaded artifact's table — is a genuine cross-check of
     two independent derivations and not a tautology.
     """
-    return [c.as_manifest_row() for c in declared_constants(Path(package))]
+    return [c.as_manifest_row() for c in declared_constants(Path(package), entry)]
 
 
-def literal_constants(package: Path) -> Tuple[DeclaredConstant, ...]:
+def literal_constants(package: Path, entry: str = "") -> Tuple[DeclaredConstant, ...]:
     """Declared constants with no ``state_dict`` counterpart.
 
     Graph literals — folded scalars, sinusoidal tables, shape vectors. They
@@ -225,11 +256,11 @@ def literal_constants(package: Path) -> Tuple[DeclaredConstant, ...]:
     ``aot_serve.LITERALS_NAME``; that is not an optimization, it is what makes a
     code-only artifact loadable at all.
     """
-    return tuple(c for c in declared_constants(Path(package))
+    return tuple(c for c in declared_constants(Path(package), entry)
                  if c.source == SOURCE_LITERAL)
 
 
-def constant_names(package: Path) -> Tuple[str, ...]:
+def constant_names(package: Path, entry: str = "") -> Tuple[str, ...]:
     """ADVISORY package-side FQN read. Never a gate.
 
     Packing erases the FQN of a plain-``__dict__`` tensor (it becomes
@@ -237,7 +268,7 @@ def constant_names(package: Path) -> Tuple[str, ...]:
     pgw#725's adapter gate takes the ExportedProgram instead. Present for
     diagnostics and for the cross-check against the declared manifest.
     """
-    return tuple(c.fqn for c in declared_constants(Path(package)))
+    return tuple(c.fqn for c in declared_constants(Path(package), entry))
 
 
 # ---------------------------------------------------------------------------
@@ -263,14 +294,16 @@ _ELF_MAGIC = b"\x7fELF"
 _LRODATA = ".lrodata"
 
 
-def packaged_so(package: Path) -> Tuple[str, bytes]:
-    """``(archive name, bytes)`` of the single ``.so`` inside a ``.pt2``."""
+def packaged_so(package: Path, entry: str = "") -> Tuple[str, bytes]:
+    """``(archive name, bytes)`` of one model's ``.so`` inside a ``.pt2``.
+    ``entry`` scopes to one named model of a multi-graph package."""
+    names = _members(Path(package), ".so", entry)
+    if len(names) != 1:
+        where = f" for entry {entry!r}" if entry else ""
+        raise PackageIntrospectionError(
+            f"{package}: expected exactly one .so in the package{where}, "
+            f"found {len(names)}")
     with zipfile.ZipFile(package) as zf:
-        names = [n for n in zf.namelist() if n.endswith(".so")]
-        if len(names) != 1:
-            raise PackageIntrospectionError(
-                f"{package}: expected exactly one .so in the package, "
-                f"found {len(names)}")
         return names[0], zf.read(names[0])
 
 
@@ -305,20 +338,22 @@ def elf_section_sizes(blob: bytes) -> Dict[str, int]:
     return sizes
 
 
-def code_only_violations(package: Path) -> List[str]:
+def code_only_violations(package: Path, entry: str = "") -> List[str]:
     """Named reasons ``package`` is NOT code-only; empty when it is.
 
     Every reason names the offending tensors: "constants were baked" is not
     actionable, "these 743 parameters totalling 2.73 GiB were baked, largest
     ``down_blocks.0...``" is. Callers turn a non-empty list into a red refusal,
-    never a warning.
+    never a warning. ``entry`` scopes the gate to one named model; the multi-
+    graph mint runs it once per entry so a refusal names BOTH the entry and
+    the cause (pgw#758).
     """
     package = Path(package)
     reasons: List[str] = []
-    constants = declared_constants(package)
+    constants = declared_constants(package, entry)
     declared_bytes = sum(c.data_size for c in constants)
 
-    if constants_in_so(package):
+    if constants_in_so(package, entry):
         worst = sorted(constants, key=lambda c: -c.data_size)[:5]
         shown = ", ".join(f"{c.fqn} ({c.data_size}B)" for c in worst)
         reasons.append(
@@ -327,7 +362,7 @@ def code_only_violations(package: Path) -> List[str]:
             f"into the .so — largest: {shown}. Compile with "
             f"aot_inductor.package_constants_in_so=False (pgw#704 B1)")
 
-    so_name, blob = packaged_so(package)
+    so_name, blob = packaged_so(package, entry)
     lrodata = elf_section_sizes(blob).get(_LRODATA, 0)
     if declared_bytes and lrodata >= declared_bytes:
         reasons.append(
@@ -348,7 +383,9 @@ def program_constant_fqns(program: Any) -> Tuple[str, ...]:
     return tuple(sorted(names))
 
 
-def program_package_drift(program: Any, package: Path) -> List[str]:
+def program_package_drift(
+    program: Any, package: Path, entry: str = "",
+) -> List[str]:
     """Named reasons the package's constant table cannot be served.
 
     **The check is ASYMMETRIC, and first light is what taught us why.** The two
@@ -377,7 +414,7 @@ def program_package_drift(program: Any, package: Path) -> List[str]:
     the package would want constants the recorded program never lifted.
     """
     want = set(program_constant_fqns(program))
-    have = {c.fqn for c in declared_constants(Path(package))}
+    have = {c.fqn for c in declared_constants(Path(package), entry)}
     package_only = sorted(have - want)
     if not package_only:
         return []
@@ -389,7 +426,9 @@ def program_package_drift(program: Any, package: Path) -> List[str]:
     ]
 
 
-def eliminated_constants(program: Any, package: Path) -> List[str]:
+def eliminated_constants(
+    program: Any, package: Path, entry: str = "",
+) -> List[str]:
     """Constants the program lifted that the compiled artifact does not want.
 
     Routine compiler fusion (conv+bias, folded scalars). Recorded as
@@ -397,7 +436,7 @@ def eliminated_constants(program: Any, package: Path) -> List[str]:
     silently discarded — the count is stable for a given recipe.
     """
     want = set(program_constant_fqns(program))
-    have = {c.fqn for c in declared_constants(Path(package))}
+    have = {c.fqn for c in declared_constants(Path(package), entry)}
     return sorted(want - have)
 
 
@@ -427,7 +466,7 @@ def strict_mode_drift(meta: Any, strict: bool) -> List[str]:
 
 
 def unbindable_constants(
-    package: Path, state_dict_keys: Iterable[str],
+    package: Path, state_dict_keys: Iterable[str], entry: str = "",
 ) -> List[str]:
     """Declared state_dict-sourced constants no resident weight could bind.
 
@@ -439,7 +478,7 @@ def unbindable_constants(
     if not available:
         return []
     missing = [
-        c.fqn for c in declared_constants(Path(package))
+        c.fqn for c in declared_constants(Path(package), entry)
         if c.source == SOURCE_STATE_DICT and c.fqn not in available
     ]
     if not missing:
@@ -566,6 +605,7 @@ __all__ = [
     "input_contract",
     "literal_constants",
     "eliminated_constants",
+    "package_entry_names",
     "program_constant_fqns",
     "program_package_drift",
     "strict_mode_drift",

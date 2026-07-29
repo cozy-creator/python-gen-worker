@@ -65,12 +65,17 @@ def _runtime_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _pilot_meta(key: str, *, lane: str = "w8a8", bucket: int = 64,
                 **over: Any) -> Dict[str, Any]:
-    """A published-cell metadata dict shaped like the real pilot cells."""
+    """A published-cell metadata dict shaped like the real (format-2,
+    multi-graph) cells — one entry is simply the N=1 case."""
     meta = aot_serve.artifact_metadata(
-        family=FAMILY, module="unet", precision="bf16", cell_key=key,
-        inputs=INPUTS, symbols={}, constants=CONSTANTS)
+        family=FAMILY, precision="bf16", cell_key=key,
+        entries={"unet/g": {
+            "target": "unet", "fork": [], "class_dims": [],
+            "inputs": [dict(r) for r in INPUTS], "symbols": {},
+            "constants": [dict(r) for r in CONSTANTS], "graph": {},
+        }},
+        lora_bucket=bucket)
     meta["weight_lane"] = lane
-    meta["lora_bucket"] = bucket
     meta.update(over)
     return meta
 

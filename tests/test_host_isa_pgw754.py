@@ -11,9 +11,12 @@ Red-verified here through the REAL paths:
 
 * the boot clamp (``env_seal.establish`` -> ``host_isa.impose``) pins
   ``cpp.march``/``cpp.simdlen`` to the portable target, seal-visibly;
-* ``aot_mint.compile_package`` under the clamp emits NO instruction above
-  the target (objdump assertion on the produced ``.so``) and the package
-  still loads via ``aoti_load_package`` — portable by construction;
+* the mint's compile path (``aot_mint.compile_entry_files`` +
+  ``package_cell`` — the clamp is process-global inductor config, so it
+  binds every entry of a multi-graph cell identically) emits NO
+  instruction above the target (objdump assertion on the produced ``.so``)
+  and the package still loads via ``aoti_load_package`` — portable by
+  construction;
 * an artifact whose requirement this host genuinely lacks (this box has no
   AVX-512) is refused BY NAME (``adopt_failed:host_isa_unsupported``)
   before any dlopen — including legacy cells via the ``.pt2``'s own
@@ -122,7 +125,8 @@ def test_clamped_compile_package_is_portable_and_loads(
     monkeypatch.setattr(inductor_config.cpp, "simdlen", 128)
 
     program = torch.export.export(_Glue(), (torch.randn(4, 8),))
-    package = aot_mint.compile_package(program, tmp_path / "model.pt2")
+    files = aot_mint.compile_entry_files(program, "model")
+    package = aot_mint.package_cell({"model": files}, tmp_path / "model.pt2")
 
     with zipfile.ZipFile(package) as zf:
         so_names = [n for n in zf.namelist() if n.endswith(".so")]
@@ -152,12 +156,15 @@ def test_clamped_compile_package_is_portable_and_loads(
 
 def _artifact(tmp_path: Path, pt2_bytes: bytes) -> tuple[Path, dict]:
     meta = aot_serve.artifact_metadata(
-        family="sdxl", module="unet", precision="bf16", cell_key="",
-        inputs=[{
-            "name": "x", "position": 0, "dtype": "float32",
-            "shape": [1, 4], "optional": False,
-        }],
-        symbols={}, constants=[],
+        family="sdxl", precision="bf16", cell_key="",
+        entries={"unet/main": {
+            "target": "unet",
+            "inputs": [{
+                "name": "x", "position": 0, "dtype": "float32",
+                "shape": [1, 4], "optional": False,
+            }],
+            "symbols": {}, "constants": [],
+        }},
     )
     content = tmp_path / "content"
     content.mkdir(exist_ok=True)
