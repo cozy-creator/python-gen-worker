@@ -154,8 +154,9 @@ def _cfg():
 
 def test_a_real_hierarchy_with_both_triggers_closes(monkeypatch):
     """Both triggers in one module, compiled for real (CPU, backend='eager').
-    Pre-fix this produces LEAK rows and `assert_closure` raises — which is
-    exactly what refused every production self-mint."""
+    Pre-fix this produces LEAK rows — which, while the classifier still held
+    a veto, refused every production self-mint (the bug that motivated the
+    pgw#756 demotion). The rows must classify clean regardless."""
     unet = _Unet().eval()
 
     class _Pipe:
@@ -182,7 +183,7 @@ def test_a_real_hierarchy_with_both_triggers_closes(monkeypatch):
         assert not report.leaks, (
             "an in-contract call on a real module hierarchy leaked: "
             + "; ".join(str(leak) for leak in report.leaks))
-        gc.assert_closure(pipe, _cfg(), label="sdxl")
+        gc.closure_manifest(pipe, _cfg(), label="sdxl")
         counts = report.verdict_counts()
         assert counts.get(gc.MODULE_STRUCTURE, 0) > 0, (
             "the derived self-rooted guards must land as module structure, "

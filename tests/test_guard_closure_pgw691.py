@@ -154,14 +154,14 @@ def test_relational_family_judged_by_type_regardless_of_root() -> None:
 
 
 def test_sdxl_shaped_mint_gate_passes_closed() -> None:
-    """The definitive acceptance: assert_closure returns an exit-0 closed
+    """The definitive acceptance: closure_manifest returns a leak-free
     manifest on a real multi-tensor-input compiled module with the
     sdxl-shaped contract. Pre-fix: refused 100% (NO_TENSOR_ALIASING)."""
     pipe, fn = _sdxl_shaped_pipe(_sdxl_forward)
     compiled = torch.compile(fn, backend="eager", dynamic=None)
     compiled(guidance_scale=5.0, **_sdxl_inputs())
 
-    manifest = gc.assert_closure(pipe, _cfg(), label="sdxl")
+    manifest = gc.closure_manifest(pipe, _cfg(), label="sdxl")
     assert manifest["leaks"] == []
     assert manifest["graphs"]
     types = {
@@ -169,18 +169,18 @@ def test_sdxl_shaped_mint_gate_passes_closed() -> None:
     assert "NO_TENSOR_ALIASING" in types  # the P0 family really was present
 
 
-def test_sdxl_shaped_mint_gate_refuses_naming_the_variable() -> None:
-    """A genuinely undeclared scalar still fails the mint red, naming the
-    exact variable — the fix widens nothing."""
+def test_sdxl_shaped_mint_records_the_undeclared_variable() -> None:
+    """A genuinely undeclared scalar is still detected and named — the
+    pgw#691 fix widens nothing, and pgw#756 only removed the veto, so the
+    finding lands in the manifest instead of killing the mint."""
     pipe, fn = _sdxl_shaped_pipe(_sdxl_forward)
     compiled = torch.compile(fn, backend="eager", dynamic=None)
     compiled(guidance_scale=7.5, **_sdxl_inputs())  # 7.5 is NOT declared
 
-    with pytest.raises(gc.GuardClosureError) as excinfo:
-        gc.assert_closure(pipe, _cfg(), label="sdxl")
-    message = str(excinfo.value)
-    assert "L['guidance_scale']" in message
-    assert "7.5" in message
+    manifest = gc.closure_manifest(pipe, _cfg(), label="sdxl")
+    leaks = "\n".join(manifest["leaks"])
+    assert "L['guidance_scale']" in leaks
+    assert "7.5" in leaks
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.80.0 (2026-07-28) — pgw#756: the guard-closure classifier loses its veto
+
+Paul's ruling. `guard_closure` extracted dynamo's guard tree post-mint, classified every
+guard against the declared contract, and **refused the mint** on anything it could not
+classify. It is now ADVISORY: it extracts, classifies, records, emits a countable
+`guard_leak` event, and the mint CONTINUES.
+
+**Why.** The gate protects against WASTED REUSE, not incorrectness. Dynamo re-evaluates
+these very guards on every call at the consumer, so a cell depending on unpinned state
+fails its guards THERE — and with pgw#680 fail-on-recompile armed, that raises, serves
+eager, and reports the reason. A missed leak degrades gracefully and loudly; it can never
+produce a wrong result. A CLASSIFIER BUG, by contrast, refuses every mint on every family
+— which happened twice fleet-wide (pgw#691's NO_TENSOR_ALIASING root dispatch, pgw#733's
+`_source_root` prefix match) while the gate caught zero real leaks in production. The risk
+profile was inverted.
+
+- **`assert_closure` -> `closure_manifest`** (no alias — the name lied). Same extraction,
+  same classifier, same manifest, same `consolidate` fleet audit, same
+  `python -m gen_worker.guard_closure` CLI and exit codes. Only the veto is gone.
+- **`activity.KIND_GUARD_LEAK`** — one countable event per minting pod naming the suspected
+  variables, so a real leak class surfaces as a hub-side trend instead of a fleet outage.
+- **Manifest v3**: `+ "unproven"` rows (a cache entry whose guards could not be walked — a
+  fact about the torch guard debug surface, not about the mint) and `+ "gate": "advisory"`.
+- **Refusals RETAINED**, each proving a defect rather than inferring one: *no compiled
+  graphs at all* (nothing compiled — the cell would be empty) and *non-canonical process
+  posture* (pgw#695 — a measurement against exact canonical values). `canonical_ingress`'s
+  stride/dtype boundary errors (ie#544) are a different mechanism and are untouched.
+
+**Never rebuild this classifier.** torch's own `guard_filter_fn` / `GuardFilterEntry` is the
+supported structured hook — typed entries instead of the C++ guard-manager walk plus repr
+parsing where BOTH fleet-wide bugs lived — and upstream's precompile work already maintains
+a versioned `UNSUPPORTED_SERIALIZATION_GUARD_TYPES` classification. If a JIT-resident family
+ever needs the check, it is a thin call into those, never a hand-rolled grammar.
+
+**Step 2 (ratified, gated on the AOT migration):** when the last family migrates to AOT,
+`guard_closure.py` is DELETED outright — exported artifacts carry no dynamo and no guards at
+serve time, so the module becomes dead code. Tracked as pgw#756's second checklist.
+
+**Rollout note:** manifest v2 -> v3 changes `manifest_digest`, so two pods minting the SAME
+cell key on DIFFERENT SDK versions will report unequal manifest digests to the pgw#711
+confirmation gate. Do not straddle this version while double-minting a key.
+
 ## 0.79.0 (2026-07-28) — pgw#755: forward AWQ W4A16 encoders (te#137 producer)
 
 `svdq_awq` gains the production FORWARD path its decoders invert: `pack_w4x16`

@@ -334,7 +334,7 @@ def _pin_identity(monkeypatch):
     # never compile through dynamo, so extraction would honestly report
     # closure unprovable and refuse the republish.
     monkeypatch.setattr(
-        guard_closure, "assert_closure",
+        guard_closure, "closure_manifest",
         lambda pipe, cfg, label="": {
             "v": 1, "graphs": [{"target": "transformer", "code": "sim",
                                 "entry": 0, "guards": []}],

@@ -53,6 +53,11 @@ KIND_WARMUP = "warmup"
 # full confession. The hub accepts any kind and logs completions verbatim,
 # so top-N reasons are countable per (worker -> release, SKU) hub-side.
 KIND_GUARD_MISS = "guard_miss"
+# pgw#756: the guard-closure classifier flagged guards it cannot tie to the
+# declared contract. ADVISORY — the mint completes and publishes; the rows
+# ride the cell's guard manifest. Countable so a real leak class surfaces as
+# a trend hub-side instead of as a fleet-wide mint refusal (pgw#691/#733).
+KIND_GUARD_LEAK = "guard_leak"
 
 PHASE_LOAD = "load"
 PHASE_TRACE_GRAPH = "trace_graph"

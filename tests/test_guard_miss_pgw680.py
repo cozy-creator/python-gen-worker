@@ -527,7 +527,7 @@ class _Rig:
             from gen_worker import guard_closure as gc_mod
 
             monkeypatch.setattr(
-                gc_mod, "assert_closure", lambda *a, **k: dict())
+                gc_mod, "closure_manifest", lambda *a, **k: dict())
         except ImportError:
             pass
         monkeypatch.setattr(

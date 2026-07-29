@@ -3706,13 +3706,16 @@ def build(
             "was inductor already latched to another dir in this process?"
         )
 
-    # pgw#681: guard-closure gate — the platform build fails red on any
-    # guard the declared contract does not pin, naming the variable.
+    # pgw#681/#756: the guard-closure audit is ADVISORY — suspected
+    # out-of-contract guards are named in the log, emitted as a countable
+    # `guard_leak` event, and recorded in the manifest that rides the cell;
+    # the mint continues (the consumer re-evaluates these guards on every
+    # call, so a real leak degrades to explicit eager there).
     # pgw#719: the environment this capture traced under must still be the
     # BOOT environment — drift (endpoint code mutating config/env behind
     # our back) fails the mint red, naming the fact.
     env_seal.assert_seal_unchanged("mint")
-    guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
+    guard_manifest = guard_closure.closure_manifest(pipe, cfg, label=family)
 
     graph_signature, weight_contract = execution_contract(pipe, cfg)
     meta = artifact_metadata(
@@ -3827,13 +3830,14 @@ def mint_artifact(
             "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR"
         )
 
-    # pgw#681: guard-closure gate — a leak fails the mint red, naming the
-    # variable; the manifest rides the cell as its dependency dump.
+    # pgw#681/#756: the guard-closure audit is ADVISORY — a suspected leak
+    # is named and emitted as a `guard_leak` event, and the manifest rides
+    # the cell as its dependency dump; the mint is not refused.
     # pgw#719: the environment this capture traced under must still be the
     # BOOT environment — drift (endpoint code mutating config/env behind
     # our back) fails the mint red, naming the fact.
     env_seal.assert_seal_unchanged("mint")
-    guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
+    guard_manifest = guard_closure.closure_manifest(pipe, cfg, label=family)
 
     # gw#564: record the execution contract exactly like the production
     # build — w8a8 cells are contract_drift-gated on the graph signature and
@@ -3968,15 +3972,17 @@ def finish_fleet_mint(
             + _capture_forensics(capture, pipe)
         )
 
-    # pgw#681: the guard-closure gate. The proof confirmed the graphs SERVE;
-    # this confirms they depend on NOTHING the contract does not pin — an
-    # out-of-contract guard fails the mint red, naming the variable. The
+    # pgw#681/#756: the guard-closure audit. The proof confirmed the graphs
+    # SERVE; this DOCUMENTS what they depend on. Guards the contract does
+    # not pin are named and emitted as a `guard_leak` event but do NOT
+    # refuse the mint — dynamo re-checks them at the consumer, where a real
+    # leak fails its guards and degrades to explicit eager (pgw#680). The
     # returned manifest rides the cell as its dependency dump.
     # pgw#719: the environment this capture traced under must still be the
     # BOOT environment — drift (endpoint code mutating config/env behind
     # our back) fails the mint red, naming the fact.
     env_seal.assert_seal_unchanged("mint")
-    guard_manifest = guard_closure.assert_closure(pipe, cfg, label=family)
+    guard_manifest = guard_closure.closure_manifest(pipe, cfg, label=family)
 
     # gw#564: record the execution contract exactly like the production
     # build — w8a8 cells are contract_drift-gated on the graph signature and

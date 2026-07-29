@@ -1455,7 +1455,7 @@ def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
     # pgw#681 gate at its torch boundary, simmed like cc.apply's compile
     # leaf: this rig's "compiles" never touch dynamo, so extraction would
     # honestly report closure unprovable and refuse every finalize.
-    monkeypatch.setattr(guard_closure, "assert_closure", _sim_guard_closure)
+    monkeypatch.setattr(guard_closure, "closure_manifest", _sim_guard_closure)
     return captured, _Key.digest
 
 

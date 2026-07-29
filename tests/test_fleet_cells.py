@@ -71,7 +71,7 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
     # pgw#681 gate at its torch boundary, simmed: these rigs never compile
     # through dynamo, so extraction would honestly refuse every finalize.
     monkeypatch.setattr(
-        guard_closure, "assert_closure",
+        guard_closure, "closure_manifest",
         lambda pipe, cfg, label="": {
             "v": 1, "graphs": [{"target": "transformer", "code": "sim",
                                 "entry": 0, "guards": []}],

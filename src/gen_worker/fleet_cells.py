@@ -806,10 +806,11 @@ def republish_after_shape_warm(
 
     tmp_root = Path(tempfile.mkdtemp(prefix="cellrepub-"))
     try:
-        # pgw#681: the grown cell must stay guard-closed — a background
-        # novel-signature warm that baked an out-of-contract guard refuses
-        # to republish (caught below, non-fatal to serving, loudly named).
-        guard_manifest = guard_closure.assert_closure(
+        # pgw#681/#756: the grown cell's guard set is classified and rides
+        # the republished cell as its manifest. ADVISORY — a background
+        # novel-signature warm that baked an out-of-contract guard is named
+        # and emitted as a `guard_leak` event; it does not block republish.
+        guard_manifest = guard_closure.closure_manifest(
             pipe, cfg, label=family)
         graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
         meta = cc.artifact_metadata(
