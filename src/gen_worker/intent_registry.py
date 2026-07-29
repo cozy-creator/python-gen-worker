@@ -378,25 +378,53 @@ class IntentRegistry:
                     )
                 )
 
+        # th#1283: the hub declares fail-closed scope PER INTENT. Errors on
+        # mandatory work reject the command and latch; a command-level error
+        # rejects the command and latches only when that abandons mandatory
+        # work not already registered under the same identity; errors scoped
+        # to advisory intents decline exactly those intents and accept the
+        # rest, so a bad preposition or binding cannot brick the process.
+        declined: dict[str, tuple[int, str]] = {}
         if command_errors:
-            mandatory_ids = {
-                str(intent.intent_id or "").strip()
-                for intent in command.intents
-                if intent.mandatory
+            intents_by_id = {
+                str(intent.intent_id or "").strip(): intent for intent in command.intents
             }
-            fail_closed = bool(command.mandatory) or any(
-                not intent_id or intent_id in mandatory_ids
-                for intent_id, _code, _detail in command_errors
+            mandatory_ids = {
+                intent_id
+                for intent_id, intent in intents_by_id.items()
+                if intent_id and intent.mandatory
+            }
+            command_level = [error for error in command_errors if not error[0]]
+            touches_mandatory = any(
+                intent_id in mandatory_ids for intent_id, _code, _detail in command_errors
             )
-            return self._reject(
-                command,
-                command_errors,
-                digest,
-                fail_closed=fail_closed,
+            new_mandatory_work = any(
+                intent_id in mandatory_ids
+                and self._intent_digests.get(intent_id) != _intent_identity_digest(intent)
+                for intent_id, intent in intents_by_id.items()
             )
+            if command_level or touches_mandatory:
+                fail_closed = (
+                    bool(command.mandatory)
+                    or touches_mandatory
+                    or (bool(command_level) and new_mandatory_work)
+                )
+                return self._reject(
+                    command,
+                    command_errors,
+                    digest,
+                    fail_closed=fail_closed,
+                )
+            for intent_id, code, detail in command_errors:
+                declined.setdefault(intent_id, (code, detail))
 
         now = _now_ms()
-        incoming_ids = {str(intent.intent_id) for intent in command.intents}
+        accepted_intents = [
+            intent
+            for intent in command.intents
+            if str(intent.intent_id or "").strip() not in declined
+        ]
+        incoming_ids = {str(intent.intent_id) for intent in accepted_intents}
         for intent_id, state in self._intents.items():
             # pgw#654: a command is a full replacement of COMMAND-OWNED work
             # only. Worker-local compat obligations (job/setup/materialize
@@ -411,9 +439,9 @@ class IntentRegistry:
                 state.updated_at_unix_ms = now
                 state.state_seq = self._touch()
         self._desired_intents = {
-            str(intent.intent_id): _clone(intent) for intent in command.intents
+            str(intent.intent_id): _clone(intent) for intent in accepted_intents
         }
-        for intent in command.intents:
+        for intent in accepted_intents:
             intent_digest = _intent_identity_digest(intent)
             retained = self._intents.get(intent.intent_id)
             if retained is not None and self._intent_digests.get(intent.intent_id) == intent_digest:
@@ -450,6 +478,32 @@ class IntentRegistry:
                     updated_at_unix_ms=now,
                     deadline_at_unix_ms=command.first_action_by_unix_ms,
                 )
+        for intent_id, (code, detail) in declined.items():
+            state = self._intents.get(intent_id)
+            if state is not None and int(state.status) in _ACTIVE_INTENT_STATES:
+                self.transition(
+                    intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                    pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                    error_code=code,
+                    detail=detail,
+                )
+            elif state is None:
+                state = pb.IntentState(
+                    worker_session_id=self.worker_session_id,
+                    goal_id=command.goal_id,
+                    intent_id=intent_id,
+                    release_id=command.release_id,
+                    config_generation=command.config_generation,
+                    status=pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                    stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                    since_unix_ms=now,
+                    updated_at_unix_ms=now,
+                    error_code=code,
+                    detail=detail,
+                )
+                state.state_seq = self._touch()
+                self._intents[intent_id] = state
         self._trim_intents()
         self._last_command_seq = int(command.command_seq)
         self._last_command_digest = digest
@@ -466,6 +520,10 @@ class IntentRegistry:
             goal_id=command.goal_id,
             release_id=command.release_id,
             status=pb.GOAL_RECEIPT_STATUS_ACCEPTED,
+            rejections=[
+                pb.IntentRejection(intent_id=intent_id, error_code=code, detail=detail)
+                for intent_id, (code, detail) in declined.items()
+            ],
             received_at_unix_ms=now,
             command_digest=digest,
         )
