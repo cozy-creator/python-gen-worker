@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.82.0 (2026-07-29) — pgw#748 phase 0: multi-GPU bookkeeping that is wrong today
+
+Sequence parallelism's phase 0 ships alone, before any parallelism code, because both
+halves are latent bugs on the fleet we already run.
+
+- **`DeviceGroup` gains a placement mode; replicated groups budget against MIN, not SUM.**
+  `free_vram_bytes()` summed unconditionally across a group's devices — correct only when
+  the WEIGHTS are split. Context/sequence parallelism replicates weights and shards
+  activations, so a 2x24GB replicated group reported 48 GB free and would admit a 30 GB
+  model that fits on neither card: pgw#648's original all-device-sum bug reproduced one
+  level up. `DeviceGroup(devices=(0,1))` now defaults to `placement_mode="replicated"` and
+  reports `min` over members (a device the host does not have contributes 0, which
+  correctly makes the group unusable); `placement_mode="sharded"` keeps the sum for a
+  future TP mesh. `fits()` and `make_room()` both read through it, so admission changes
+  with it. Single-device groups are identical under both modes.
+- **`host_canary` gains a 2-GPU leg** (`interconnect`, `peer_gbps`, `peer_access`,
+  `topo_link` on `HostCanary`, tags 10-13). The hub can tell SXM from PCIe by SKU
+  identity; only the pod can say whether ITS two cards have peer access, and that is what
+  decides whether a sequence-parallel release meets its latency SLO. The leg classifies
+  the fabric (`nvlink | pcie-p2p | host-staged`) from `nvidia-smi topo -m` +
+  `can_device_access_peer` — peer access always overrules the wiring, which is the GeForce
+  case — and times a device-to-device copy of the same 256 MiB buffer the other legs use.
+  Inert on 1-GPU pods: it never runs, and the fields stay empty.
+- **`measure_peer_collective()`** is the deep leg, never run at boot: a real NCCL
+  `all_to_all_single` across N spawned ranks on the production activation shape
+  `[1, 40, 37800, 128]` bf16, optionally under `NCCL_P2P_DISABLE=1`.
+  `python -m gen_worker.host_canary` runs everything and prints JSON.
+  Measured 2xH100-80GB-HBM3 (RunPod Secure, NV18): 0.71 ms/call, 272.6 GB/s achieved
+  over-link, 113.6 ms per model call's worth of collectives; the same pod with P2P
+  disabled: 8.55 ms/call, 22.6 GB/s. The cheap boot leg's `peer_gbps` reads ~1.42x the
+  achieved collective bandwidth — an upper bound, with the classification exact.
+
 ## 0.81.1 (2026-07-29) — pgw#733 arm half: every AOT adopt/arm outcome is a typed wire event
 
 The AOT verdict lane's blocker: cross-pod adopts fail inside stage/bind/arm with a

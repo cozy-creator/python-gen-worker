@@ -284,6 +284,11 @@ class Lifecycle:
                 vcpus=c.vcpus,
                 ram_total_gb=c.ram_total_gb,
                 duration_ms=c.duration_ms,
+                # pgw#748: the measured GPU fabric, alongside gpu_count.
+                interconnect=c.interconnect,
+                peer_gbps=c.peer_gbps,
+                peer_access=c.peer_access,
+                topo_link=c.topo_link,
             )
         except Exception:
             logger.warning("host canary failed; Hello ships without it", exc_info=True)

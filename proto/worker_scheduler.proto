@@ -177,6 +177,16 @@ message HostCanary {
   int32  vcpus           = 7; // os.cpu_count() as seen in the container
   double ram_total_gb    = 8; // cgroup-capped host RAM total
   int64  duration_ms     = 9; // canary wall time (self-audit)
+
+  // pgw#748 2-GPU leg. The SKU says SXM; only the pod can say whether ITS
+  // cards have peer access, and that is what decides whether a
+  // sequence-parallel release meets its latency SLO. Inert on 1-GPU pods
+  // (gpu_count<=1 => interconnect "" and peer_gbps 0 = "not measured").
+  // Additive: old orchestrators ignore these; old workers send them unset.
+  string interconnect  = 10; // "" | host-staged | pcie-p2p | nvlink
+  double peer_gbps     = 11; // measured device->device copy bandwidth
+  bool   peer_access   = 12; // cudaDeviceCanAccessPeer(0,1)
+  string topo_link     = 13; // raw nvidia-smi topo code (NV18 / PIX / SYS / ...)
 }
 
 message ModelResidency {
