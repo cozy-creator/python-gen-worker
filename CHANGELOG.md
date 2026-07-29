@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.82.2 (2026-07-29) — discovery retires pre-clamp AOT cells (arm-events lane follow-up)
+
+Live-proven on the 0.76.6 canary (pod 3cjmd3ohuk98a5, first `aot_adopt` wire rows): a cell
+minted before the pgw#754 host-ISA stamp carries no metadata requirement, passes every
+discovery gate, gets downloaded, then refuses at stage with `host_isa_unsupported` (the
+.pt2's own torch package stamp — built x86-64-v4). Unstamped cells are structurally
+unadoptable across a mixed fleet: `aot_cells._candidates` now retires them by name instead
+of shipping doomed candidates. Also corrects the verdict lane's CP4 "unstable rows[0]"
+finding: the pick variance was the ISA filter reacting to per-host CPU capability
+(AVX-512 vs not), not ordering instability — ordering was already deterministic.
+
 ## 0.82.1 (2026-07-29) — pgw#760: swallowed-error audit — important fail-soft outcomes ride typed events
 
 Doctrine (Paul, verbatim in spirit): errors should be exposed to the orchestrator so it

@@ -220,6 +220,33 @@ def test_constants_refusal_named_on_the_wire(
 
 
 # ---------------------------------------------------------------------------
+# discovery — pre-clamp (unstamped host_isa) cells are retired by name
+# ---------------------------------------------------------------------------
+
+
+def test_candidates_retire_unstamped_preclamp_cells(
+    stub_runtime: None,
+) -> None:
+    """Live-proven 2026-07-29 (pod 3cjmd3ohuk98a5): an unstamped pre-clamp
+    cell passes every metadata gate, gets downloaded, then refuses at stage
+    (`host_isa_unsupported`, torch package stamp). Discovery must retire the
+    whole class instead of shipping doomed candidates."""
+    from gen_worker import host_isa
+
+    stamped = _meta(host_isa=host_isa.stamp())
+    unstamped = _meta()
+    assert "host_isa" not in unstamped
+    items = [
+        {"checkpoint_id": "ck-old-preclamp",
+         "updated_at": "2026-07-30T00:00:00Z", "metadata": unstamped},
+        {"checkpoint_id": "ck-stamped",
+         "updated_at": "2026-07-28T00:00:00Z", "metadata": stamped},
+    ]
+    rows = aot_cells._candidates(items, FAMILY, "")
+    assert [r[1] for r in rows] == ["ck-stamped"]
+
+
+# ---------------------------------------------------------------------------
 # fleet_cells F1 consumer — outcome bound to the DISCOVERED candidate
 # ---------------------------------------------------------------------------
 

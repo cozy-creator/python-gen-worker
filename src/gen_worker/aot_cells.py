@@ -132,6 +132,18 @@ def _candidates(
         if reason:
             logger.debug("aot-cells: %s filtered: %s", key, reason)
             continue
+        # Pre-clamp retirement (arm-events lane, live-proven 2026-07-29):
+        # a cell minted before the pgw#754 host-ISA stamp carries no
+        # metadata requirement, so its true ISA need is only discoverable
+        # AFTER download, at stage time — where an AVX-512-built .pt2
+        # refuses every non-AVX-512 host by name. Unstamped cells are
+        # structurally unadoptable across the fleet; retire them from
+        # discovery instead of downloading doomed candidates.
+        if not isinstance(meta.get("host_isa"), dict):
+            logger.debug(
+                "aot-cells: %s filtered: no host_isa stamp (pre-clamp cell)",
+                key)
+            continue
         if _lane_of_meta(meta) != want_lane:
             continue
         out.append((
