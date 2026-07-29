@@ -1,0 +1,211 @@
+{
+  "_source": "https://huggingface.co/api/models/PrunaAI/PrunaVAED/tree/main?recursive=1 (fetched 2026-07-29, metadata only)",
+  "repo_id": "PrunaAI/PrunaVAED",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "size": 4730
+    },
+    {
+      "path": "README.md",
+      "size": 16890
+    },
+    {
+      "path": "demo/demo_distilled_decode.py",
+      "size": 8461
+    },
+    {
+      "path": "example/Ltx23VAED/04MhZs7YN08-Scene-0048.mp4",
+      "size": 1697633
+    },
+    {
+      "path": "example/Ltx23VAED/7y57zc-GvBA-Scene-0009.mp4",
+      "size": 1697114
+    },
+    {
+      "path": "example/Ltx23VAED/8YSha7iU2ZI-Scene-1025.mp4",
+      "size": 828088
+    },
+    {
+      "path": "example/Ltx23VAED/97moBezrzLo-Scene-0076.mp4",
+      "size": 1848784
+    },
+    {
+      "path": "example/Ltx23VAED/9GDE5-rOOfk-Scene-0010.mp4",
+      "size": 2239655
+    },
+    {
+      "path": "example/Ltx23VAED/DZt-RtpcJZQ-Scene-0043.mp4",
+      "size": 1174232
+    },
+    {
+      "path": "example/Ltx23VAED/FAfMSWi0FSA-Scene-0200.mp4",
+      "size": 1864634
+    },
+    {
+      "path": "example/Ltx23VAED/a5M8hWgQbjU-Scene-0191.mp4",
+      "size": 3360331
+    },
+    {
+      "path": "example/Ltx23VAED/ijGuAu0lLNM-Scene-0008.mp4",
+      "size": 1711726
+    },
+    {
+      "path": "example/Ltx23VAED/zFehFw9SbDw-Scene-0034.mp4",
+      "size": 2125596
+    },
+    {
+      "path": "example/PrunaVAED/04MhZs7YN08-Scene-0048.mp4",
+      "size": 1797361
+    },
+    {
+      "path": "example/PrunaVAED/7y57zc-GvBA-Scene-0009.mp4",
+      "size": 1716725
+    },
+    {
+      "path": "example/PrunaVAED/8YSha7iU2ZI-Scene-1025.mp4",
+      "size": 898616
+    },
+    {
+      "path": "example/PrunaVAED/97moBezrzLo-Scene-0076.mp4",
+      "size": 1897236
+    },
+    {
+      "path": "example/PrunaVAED/9GDE5-rOOfk-Scene-0010.mp4",
+      "size": 2308198
+    },
+    {
+      "path": "example/PrunaVAED/DZt-RtpcJZQ-Scene-0043.mp4",
+      "size": 1214808
+    },
+    {
+      "path": "example/PrunaVAED/FAfMSWi0FSA-Scene-0200.mp4",
+      "size": 1883423
+    },
+    {
+      "path": "example/PrunaVAED/a5M8hWgQbjU-Scene-0191.mp4",
+      "size": 3051778
+    },
+    {
+      "path": "example/PrunaVAED/ijGuAu0lLNM-Scene-0008.mp4",
+      "size": 1697225
+    },
+    {
+      "path": "example/PrunaVAED/zFehFw9SbDw-Scene-0034.mp4",
+      "size": 2129229
+    },
+    {
+      "path": "example/prompts.json",
+      "size": 4790
+    },
+    {
+      "path": "patch_diffusers.py",
+      "size": 8796
+    },
+    {
+      "path": "requirements-demo.txt",
+      "size": 372
+    },
+    {
+      "path": "vae/config.json",
+      "size": 1475
+    },
+    {
+      "path": "vae/diffusion_pytorch_model.safetensors",
+      "size": 1327909418
+    }
+  ],
+  "vae_config": {
+    "_class_name": "AutoencoderKLLTX2Video",
+    "_diffusers_version": "0.38.0",
+    "block_out_channels": [
+      256,
+      512,
+      1024,
+      1024
+    ],
+    "decoder_block_out_channels": [
+      128,
+      256,
+      384,
+      1024
+    ],
+    "decoder_causal": false,
+    "decoder_inject_noise": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    "decoder_layers_per_block": [
+      4,
+      6,
+      4,
+      2,
+      2
+    ],
+    "decoder_spatial_padding_mode": "zeros",
+    "decoder_spatio_temporal_scaling": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "down_block_types": [
+      "LTX2VideoDownBlock3D",
+      "LTX2VideoDownBlock3D",
+      "LTX2VideoDownBlock3D",
+      "LTX2VideoDownBlock3D"
+    ],
+    "downsample_type": [
+      "spatial",
+      "temporal",
+      "spatiotemporal",
+      "spatiotemporal"
+    ],
+    "encoder_causal": true,
+    "encoder_spatial_padding_mode": "zeros",
+    "in_channels": 3,
+    "latent_channels": 128,
+    "layers_per_block": [
+      4,
+      6,
+      4,
+      2,
+      2
+    ],
+    "out_channels": 3,
+    "patch_size": 4,
+    "patch_size_t": 1,
+    "resnet_norm_eps": 1e-06,
+    "scaling_factor": 1.0,
+    "spatial_compression_ratio": 32,
+    "spatio_temporal_scaling": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "temporal_compression_ratio": 8,
+    "timestep_conditioning": false,
+    "upsample_factor": [
+      2,
+      2,
+      1,
+      2
+    ],
+    "upsample_residual": [
+      false,
+      false,
+      false,
+      false
+    ],
+    "upsample_type": [
+      "spatiotemporal",
+      "spatiotemporal",
+      "temporal",
+      "spatial"
+    ]
+  }
+}
