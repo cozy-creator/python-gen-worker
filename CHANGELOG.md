@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.79.0 (2026-07-28) — pgw#755: forward AWQ W4A16 encoders (te#137 producer)
+
+`svdq_awq` gains the production FORWARD path its decoders invert: `pack_w4x16`
+(tinychat pack_w4), `apply_adanorm_splits` (adaLN row interleave + bias+1), and
+`encode_awq_linear` (asymmetric per-group minmax int4, zeros stored pre-scaled
+AND pre-negated with upstream's exact double-rounding, grids padded to
+ceil_num_groups). Adapted from deepcompressor (Apache-2.0); bit-exactness vs
+the vendored upstream exporter asserted in tests. Consumed by conversion's
+`svdq_produce` (te#137) to emit our own nunchaku-v1 checkpoints.
+
 ## 0.78.0 (2026-07-28) — th#1276/pgw#753: the ref grammar's default tag is `prod`, not `latest`
 
 Paul's ruling. A bare `owner/repo` now means `owner/repo:prod`. `prod` is the STABLE
@@ -201,6 +211,33 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   instead of plain attributes — `register_buffer` no longer has to pop `__dict__`
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
+
+## 0.77.1 (2026-07-28) — pgw#738: an upload never parks a job forever; the publish phase becomes visible
+
+Root cause of te#125's silent deaths (62922680/d0cbf910: one evidence blob persisted, then
+3h51m of heartbeating silence on a billing H100): admission took GPU permit -> instance
+run_lock, but `save_bytes` yields the permit mid-handler while HOLDING run_lock — a second
+job packed on the worker took the freed permit, blocked on run_lock, and the uploader
+blocked forever in `reacquire()`. Classic ABBA inversion; no HTTP error ever happened.
+(The transport half of this class — origin discrimination + silence-bounded retries in
+`convert/hub.py` — shipped from this lane's WIP via pgw#743 in 0.76.2.)
+
+- **Lock order flipped: run_lock -> GPU permit -> turn_mutex** (tenant path and the
+  pgw#677 background-turn path). A job parked behind a busy instance holds NO permit, so
+  a yielded permit always comes back. Bonus: a parked job no longer pins the scarce GPU
+  permit while it waits.
+- **`reacquire()` is bounded and typed** (`GpuSlotReacquireTimeout` -> RETRYABLE, 30 min):
+  any future inversion fails the job loudly instead of parking it while the GPU bills.
+- **Never-silent guarantee**: a done-callback reaper on the job task emits a terminal
+  RETRYABLE JobResult if the task ends without reporting — the pgw#738 face where a job
+  goes back to `queued`/`assigned` with a full verdict banked (3318d70e) instead of
+  reaching terminal.
+- **The publish phase emits**: `publish_flavors` logs phase transitions + throttled part
+  progress through ctx.log (the same channel watchdogs read) and feeds the activity
+  proof-of-life beat; the R2 SDK-grant boto3 lane forwards byte progress (it was
+  progress-blind); botocore gets explicit connect/read timeouts. te#125's edit run was
+  killed on the dead-signature ~10 min into a publish that was silent BY CONSTRUCTION —
+  a live 20 GB publish is now distinguishable from a dead one.
 
 ## 0.76.6 stamp — SHIPPED IN 0.76.3 (relabelled by the train; kept for the chaos record) — pgw#722 finding 2: a pure-AOT arm proves itself at boot (the #735 gap)
 

@@ -282,3 +282,76 @@ def test_is_awq_linear_discriminates_on_wzeros() -> None:
                               "wscales": tensors["wscales"]})
     with pytest.raises(SvdqLayoutError, match="missing"):
         decode_awq_linear({"qweight": tensors["qweight"]}, 128, 64)
+
+
+# --- pgw#755: the production forward encoders ------------------------------
+
+from gen_worker.models.svdq_awq import (  # noqa: E402
+    apply_adanorm_splits,
+    encode_awq_linear,
+    pack_w4x16,
+)
+
+
+@pytest.mark.parametrize("oc,ic", [(18432, 3072), (128, 64), (256, 192)])
+def test_pack_w4x16_matches_the_vendored_upstream_packer(oc: int, ic: int) -> None:
+    gen = torch.Generator().manual_seed(20)
+    q = torch.randint(0, 16, (oc, ic), dtype=torch.int32, generator=gen)
+    assert torch.equal(pack_w4x16(q.to(torch.uint8)),
+                       _up_pack_w4(q).view(torch.int32))
+
+
+@pytest.mark.parametrize("splits", [2, 6])
+def test_apply_adanorm_matches_upstream_and_round_trips(splits: int) -> None:
+    oc, ic = 384 * splits, 64
+    gen = torch.Generator().manual_seed(21)
+    w = torch.randn(oc, ic, generator=gen)
+    b = torch.randn(oc, generator=gen)
+    w_up, b_up = _up_adanorm(w, b, splits)
+    w_us, b_us = apply_adanorm_splits(w, b, splits)
+    assert torch.equal(w_us, w_up) and torch.equal(b_us, b_up)
+    w_back, b_back = undo_adanorm_splits(w_us, b_us, splits)
+    assert torch.equal(w_back, w)
+    assert torch.allclose(b_back, b, atol=1e-6)
+
+
+@pytest.mark.parametrize("oc,ic,splits", [
+    (18432, 3072, 6),   # real qwen modulation geometry
+    (3072, 3072, 1),
+    (128, 128, 1),      # ceil_num_groups padding case
+])
+def test_encode_awq_linear_is_bit_exact_vs_the_vendored_exporter(
+    oc: int, ic: int, splits: int,
+) -> None:
+    """The production encoder must emit the same BYTES the upstream exporter
+    chain emits for the same weight — packed codes, padded bf16 grids, bias."""
+    tensors, w, b = _synth_awq(oc, ic, splits=splits, seed=22)
+    got = encode_awq_linear(w.clone(), b.clone(),
+                            group_size=64, adanorm_splits=splits)
+    assert torch.equal(got["qweight"], tensors["qweight"])
+    assert torch.equal(got["wscales"], tensors["wscales"])
+    assert torch.equal(got["wzeros"], tensors["wzeros"])
+    assert torch.equal(got["bias"], tensors["bias"])
+
+
+def test_encode_then_decode_recovers_the_original_linear() -> None:
+    """Round-trip through PRODUCTION code only (no vendored reference): encode
+    -> decode_awq_linear -> forward parity with the original module."""
+    oc, ic, splits = 18432, 3072, 6
+    gen = torch.Generator().manual_seed(23)
+    w = torch.randn(oc, ic, generator=gen).to(torch.bfloat16).float()
+    b = torch.randn(oc, generator=gen).to(torch.bfloat16).float()
+    tensors = encode_awq_linear(w, b, group_size=64, adanorm_splits=splits)
+    assert is_awq_linear(tensors)
+    lin = decode_awq_linear(tensors, oc, ic, adanorm_splits=splits,
+                            compute_dtype=torch.float32)
+    torch.manual_seed(24)
+    x = torch.randn(2, ic)
+    want = x @ w.t() + b
+    rel = ((lin(x) - want).norm() / want.norm()).item()
+    assert rel < 0.15, rel
+
+
+def test_encode_refuses_adanorm_without_bias() -> None:
+    with pytest.raises(SvdqLayoutError, match="requires a bias"):
+        encode_awq_linear(torch.randn(384, 64), None, adanorm_splits=6)
