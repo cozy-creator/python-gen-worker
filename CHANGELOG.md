@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.82.3 (2026-07-29) — nested added_cond input resolution at bind (arm-events lane)
+
+Live-named on the 0.76.6 canary (pod ae2uc81yub0gyq): the FIRST successful cross-pod AOT
+arm (`aot_adopt armed`) then refused every real call with `aot_ingress_refused
+input_missing: text_embeds` — the export flattens `added_cond_kwargs` entries into declared
+inputs, but every diffusers caller passes them nested in one dict kwarg, and
+`bind_call_inputs` never looked inside. Resolution: keyword -> position -> inside any
+mapping-valued kwarg -> optional -> named refusal. Shipped on the rerun line as 0.76.7.
+
 ## 0.82.2 (2026-07-29) — discovery retires pre-clamp AOT cells (arm-events lane follow-up)
 
 Live-proven on the 0.76.6 canary (pod 3cjmd3ohuk98a5, first `aot_adopt` wire rows): a cell

@@ -362,3 +362,40 @@ def test_fleet_lane_unavailable_row_names_the_candidate(
     rows = _adopt_rows(events)
     assert [e.phase for e in rows] == ["lane_unavailable"]
     assert KEY in rows[0].detail
+
+
+# ---------------------------------------------------------------------------
+# nested (added_cond_kwargs) input resolution at bind (arm-events lane)
+# ---------------------------------------------------------------------------
+
+
+def _nested_contract() -> Any:
+    entry = _entry(inputs=[
+        {"name": "sample", "position": 0, "dtype": "bfloat16",
+         "shape": [2, 4, 128, 128]},
+        {"name": "text_embeds", "position": 3, "dtype": "bfloat16",
+         "shape": [2, 1280]},
+    ])
+    return aot_serve.contract_from_meta(entry)
+
+
+def test_nested_kwarg_input_resolves_from_added_cond() -> None:
+    """Live refusal (pod ae2uc81yub0gyq): 'text_embeds' declared positional
+    by the export but passed NESTED in added_cond_kwargs by every diffusers
+    caller."""
+    contract = _nested_contract()
+    sample = FakeTensor([2, 4, 128, 128])
+    te = FakeTensor([2, 1280])
+    bound = aot_serve.bind_call_inputs(
+        contract, (sample,), {"added_cond_kwargs": {"text_embeds": te}})
+    assert bound["text_embeds"] is te
+    assert bound["sample"] is sample
+
+
+def test_missing_nested_input_still_refuses_by_name() -> None:
+    contract = _nested_contract()
+    with pytest.raises(aot_serve.IngressContractError) as exc:
+        aot_serve.bind_call_inputs(
+            contract, (FakeTensor([2, 4, 128, 128]),),
+            {"added_cond_kwargs": {"time_ids": FakeTensor([2, 6])}})
+    assert exc.value.reason == "input_missing"
