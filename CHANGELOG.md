@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.76.6 — pgw#733 arm half (backport): every AOT adopt/arm outcome is a typed wire event
+
+Micro-release on the 0.76.5 line for the AOT cross-pod verdict rerun. The verdict lane's
+named blocker: cross-pod adopts fail inside stage/bind/arm with a classified `AdoptError`
+reason that `aot_serve.enable` / `fleet_cells.enable_compiled` reduced to `logger.warning` —
+invisible from hub-spawned workers (no stdout). One event class, `aot_adopt`
+(`aot_serve.ADOPT_EVENT`), now rides the th#1250 persisted-event pipe for every outcome:
+`phase` = `armed` on success or the classified refusal reason (`host_isa_unsupported` /
+`key_mismatch` / `artifact_invalid` / `no_target` / `constants_*` / ...), `detail` names the
+candidate cell (family + key, best-effort even on unreadable artifacts). The F1 consumer
+additionally binds fall-through outcomes to the DISCOVERED candidate's identity:
+`did_not_arm`, `armed_other_path`, `lane_unavailable` rows carry key + ref. No behavior
+change on the arm path itself — observation only. Forward-ported to chaos as 0.81.1.
+
 ## 0.76.5 — pgw#754 host-ISA portability (the AOT SIGILL fix) + pgw#752 + th#1259 SDK half
 
 One patch train, AOT-flip-critical. Ships as 0.76.5: th#1259's stamp was the

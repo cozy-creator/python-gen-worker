@@ -82,6 +82,12 @@ METADATA_NAME = "metadata.json"
 PACKAGE_NAME = "model.pt2"
 LITERALS_NAME = "constants.safetensors"
 ARTIFACT_KIND = "aot-inductor"
+#: pgw#733 (arm half): every adopt/arm outcome of an AOT artifact — success
+#: AND every classified refusal — rides this ONE typed wire event. ``phase``
+#: carries the outcome class (``armed`` / the AdoptError reason), countable
+#: hub-side; ``detail`` names the candidate cell. Hub-spawned workers expose
+#: no stdout, so a reason that only reaches the logger does not exist.
+ADOPT_EVENT = "aot_adopt"
 ARTIFACT_FORMAT = 1
 _MARKER_ATTR = "_cozy_aot"
 _REQUIRED_MEMBERS = (METADATA_NAME, PACKAGE_NAME)
@@ -1235,6 +1241,24 @@ def load_and_wrap(
         staged.close()
 
 
+def _adopt_identity(artifact: Path) -> str:
+    """Best-effort ``family=… key=…`` from the artifact's own metadata for
+    the typed adopt event — a refusal must name the candidate cell even when
+    the refusal itself is a metadata problem."""
+    try:
+        with tarfile.open(artifact, mode="r:*") as tar:
+            for member in tar:
+                if member.name == METADATA_NAME and member.isfile():
+                    src = tar.extractfile(member)
+                    assert src is not None
+                    meta = json.loads(src.read().decode())
+                    return (f"family={meta.get('family')} "
+                            f"key={meta.get('cell_key')}")
+    except Exception:  # noqa: BLE001 — identity is best-effort by contract
+        pass
+    return f"artifact={artifact.name}"
+
+
 def enable(
     pipeline: Any,
     cfg: Any,
@@ -1253,13 +1277,29 @@ def enable(
     try:
         meta = load_and_wrap(pipeline, cfg, Path(artifact), cache_dir=cache_dir)
     except Exception as exc:
-        logger.warning("aot-serve: artifact unusable (%s); staying eager", exc)
+        reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
+        logger.warning(
+            "aot-serve: artifact unusable (%s: %s); staying eager",
+            reason, exc)
+        activity_mod.emit_event(
+            ADOPT_EVENT,
+            f"{_adopt_identity(Path(artifact))}: "
+            f"{type(exc).__name__}: {exc}",
+            phase=reason,
+        )
         return False
     logger.info(
         "aot-serve: armed %s (sku=%s torch=%s precision=%s, constants bound "
         "from resident weights)",
         meta.get("module"), meta.get("sku"), meta.get("torch"),
         meta.get("precision"))
+    activity_mod.emit_event(
+        ADOPT_EVENT,
+        f"family={meta.get('family')} key={meta.get('cell_key')} "
+        f"module={meta.get('module')} sku={meta.get('sku')} "
+        f"torch={meta.get('torch')} precision={meta.get('precision')}",
+        phase="armed",
+    )
     return True
 
 
@@ -1329,6 +1369,7 @@ def unwrap(pipeline: Any) -> bool:
 
 
 __all__ = [
+    "ADOPT_EVENT",
     "ARTIFACT_FORMAT",
     "ARTIFACT_KIND",
     "ArtifactContract",
