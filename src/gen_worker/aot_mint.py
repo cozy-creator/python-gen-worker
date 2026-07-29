@@ -548,12 +548,26 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
+#: Mint-path default worker count for inductor's parallel compile (#757,
+#: MEASURED): 32 -> 4 is FREE (-2% wall clock) and is the recommended
+#: default for background mints on serving pods — same speed, less CPU
+#: contention with live serving. NOT seal-relevant: compile_threads is
+#: outside cell identity per #757's re-key pre-verification, so this
+#: default (and a caller override) never re-keys a cell. A caller value
+#: wins; this is a default, not a clamp.
+MINT_COMPILE_THREADS = 4
+
+
 def _entry_configs(inductor_configs: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """The per-entry inductor config: caller options + the non-negotiable
     packaging flags. ``CODE_ONLY_CONFIGS`` is applied LAST so no caller-
     supplied config can re-enable constant baking — B1 is a fleet
-    correctness requirement, not a default a caller may override."""
+    correctness requirement, not a default a caller may override. One cell's
+    entries ALL compile under this one dict (a per-entry config drift would
+    be an identity fact nothing records), and the resolved dict is recorded
+    in the mint-phase telemetry."""
     configs: Dict[str, Any] = dict(inductor_configs or {})
+    configs.setdefault("compile_threads", MINT_COMPILE_THREADS)
     overridden = sorted(set(configs) & set(CODE_ONLY_CONFIGS))
     if overridden:
         logger.warning(
@@ -1084,10 +1098,21 @@ def _mint_phase_table(
         for label, value in (row.timings.get("phases") or {}).items():
             phase_totals[label] = round(
                 phase_totals.get(label, 0.0) + float(value), 3)
+    # The ONE resolved inductor config every entry compiled under, recorded
+    # verbatim: #757's open seal-bypass concern is a per-call config the
+    # seal cannot see, so whatever the mint passed is either identity-inert
+    # (compile_threads, #757 pre-verified) or visible RIGHT HERE for the
+    # audit that says otherwise.
+    resolved = {
+        key: value if isinstance(value, (bool, int, float, str, type(None)))
+        else repr(value)
+        for key, value in sorted(_entry_configs(inductor_configs).items())
+    }
     return {
         "v": 1,
         "n_entries": len(minted),
         "autotune": autotune_posture(inductor_configs),
+        "inductor_configs": resolved,
         "totals": {**totals, **{k: v for k, v in timings.items()}},
         "phases": phase_totals,
         "entries": entries,
@@ -1651,6 +1676,7 @@ __all__ = [
     "DynamicDim",
     "ExportSpec",
     "MintRefused",
+    "MINT_COMPILE_THREADS",
     "MintResult",
     "PARITY_LANES",
     "REGRESSED_LANES",

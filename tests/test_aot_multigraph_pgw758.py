@@ -362,6 +362,19 @@ def test_mint_records_the_phase_table(minted_cell) -> None:
     assert table["phases"].get("host_compile_s", 0) > 0
     assert "max_autotune" in table["autotune"]
     assert table["totals"]["compile_s"] > 0
+    # The ONE resolved inductor config every entry compiled under is
+    # recorded verbatim (#757's open per-call seal-bypass concern), and the
+    # #757-measured mint default rides it: compile_threads 32 -> 4 is FREE
+    # (-2% wall) and identity-inert.
+    resolved = table["inductor_configs"]
+    assert resolved["compile_threads"] == aot_mint.MINT_COMPILE_THREADS == 4
+    assert resolved["aot_inductor.package_constants_in_so"] is False
+
+
+def test_caller_compile_threads_override_wins() -> None:
+    configs = aot_mint._entry_configs({"compile_threads": 16})
+    assert configs["compile_threads"] == 16
+    assert aot_mint._entry_configs(None)["compile_threads"] == 4
 
 
 # ---------------------------------------------------------------------------

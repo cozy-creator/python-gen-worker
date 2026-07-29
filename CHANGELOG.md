@@ -46,6 +46,11 @@ generate-turbo compiled.
 - Removed: `aot_mint.mint_target`, `compile_package`, `identity_blocks` (split into
   `compile_entry_files`/`package_cell` + `shared_identity_blocks`/`entry_graph_block`),
   `aot_declaration.apply_declaration` (the CLI derives whole-cell plans now).
+- Mint default `compile_threads=4` (`MINT_COMPILE_THREADS`; #757 MEASURED: 32 -> 4 is FREE,
+  -2% wall clock — same speed, less CPU contention for background mints on serving pods;
+  identity-inert per #757's re-key pre-verification, caller override wins). The ONE resolved
+  inductor config every entry compiles under is recorded verbatim in `mint_phases`
+  (`inductor_configs`) — #757's open per-call seal-bypass concern is auditable there.
 
 ## 0.80.0 (2026-07-28) — pgw#756: the guard-closure classifier loses its veto
 
