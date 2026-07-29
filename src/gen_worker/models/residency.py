@@ -30,6 +30,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
+from .. import activity as activity_mod
 from .memory import (
     device_mismatches,
     estimate_cuda_resident_gb,
@@ -357,8 +358,17 @@ class Residency:
             return
         try:
             self._on_event(ref, state, int(vram_bytes), int(duration_ms))
-        except Exception:
+        except Exception as exc:
             logger.exception("residency event callback failed for %s", ref)
+            # pgw#760: the hub's residency view just silently diverged — the
+            # activity stream is an independent channel, so confess there.
+            activity_mod.emit_event(
+                activity_mod.KIND_RESIDENCY_FAULT,
+                f"ref={ref} state={state}: residency event callback failed "
+                f"(hub residency view may be stale): "
+                f"{type(exc).__name__}: {exc}",
+                phase="event_callback_failed",
+            )
 
     # ---- probes ---------------------------------------------------------------
 
@@ -618,8 +628,25 @@ class Residency:
                     "object is mixed-device and unusable",
                     ref or type(obj).__name__, restore, left[:5],
                 )
-        except Exception:
+                # pgw#760: the next forward on this object fatals mid-denoise
+                # ("Expected all tensors to be on the same device") — the
+                # hub must see the cause, not only the downstream job error.
+                activity_mod.emit_event(
+                    activity_mod.KIND_RESIDENCY_FAULT,
+                    f"ref={ref or type(obj).__name__} wanted={device} "
+                    f"restore={restore}: move AND rollback both incomplete "
+                    f"(e.g. {left[:3]}); object is mixed-device and unusable",
+                    phase="mixed_device_unusable",
+                )
+        except Exception as exc:
             logger.exception("residency: rollback .to(%s) failed for %s", restore, ref)
+            activity_mod.emit_event(
+                activity_mod.KIND_RESIDENCY_FAULT,
+                f"ref={ref or type(obj).__name__} wanted={device} "
+                f"restore={restore}: rollback move raised; object is likely "
+                f"mixed-device and unusable: {type(exc).__name__}: {exc}",
+                phase="mixed_device_unusable",
+            )
         flush_memory()
         return False
 

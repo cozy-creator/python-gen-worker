@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import activity as activity_mod
 from ..component_vocab import (
     denoiser_components,
     text_encoder_components,
@@ -440,6 +441,17 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
         except Exception as exc:
             logger.warning("fp8 storage failed on %s (%s); serving at full precision",
                            name, exc)
+            # pgw#760: the all-components failure is structurally reported
+            # (th#737 cast_dropped), but a PARTIAL failure returns
+            # applied=True and reads as success — this component alone now
+            # holds ~2x its budgeted VRAM at full precision.
+            activity_mod.emit_event(
+                activity_mod.KIND_SERVE_DEGRADE,
+                f"component={name} obj={type(obj).__name__}: fp8 storage "
+                f"cast failed; this component serves at full precision "
+                f"(over its budgeted VRAM): {type(exc).__name__}: {exc}",
+                phase="fp8_cast_failed",
+            )
     return applied
 
 

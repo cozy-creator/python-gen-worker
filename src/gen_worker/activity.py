@@ -58,6 +58,19 @@ KIND_GUARD_MISS = "guard_miss"
 # ride the cell's guard manifest. Countable so a real leak class surfaces as
 # a trend hub-side instead of as a fleet-wide mint refusal (pgw#691/#733).
 KIND_GUARD_LEAK = "guard_leak"
+# pgw#760 (error-visibility doctrine): a fail-soft outcome that changes what
+# or how this worker SERVES — or that a hub decision depends on — must ride
+# a typed event, never only a log line (hub-spawned workers expose no
+# stdout). One shape everywhere: ``emit_event(kind, detail, phase=reason)``
+# with ``phase`` a short stable reason token (countable hub-side) and
+# ``detail`` naming the identifiers (ref/function/label/request) + the
+# exception. Fail-soft BEHAVIOR is unchanged — these are confessions.
+KIND_SERVE_DEGRADE = "serve_degrade"
+KIND_TRT_ADOPT = "trt_adopt"
+KIND_LORA_HYGIENE = "lora_hygiene"
+KIND_ROTATION_PRELOAD = "rotation_preload"
+KIND_CAPABILITY_RENEWAL = "capability_renewal"
+KIND_RESIDENCY_FAULT = "residency_fault"
 
 PHASE_LOAD = "load"
 PHASE_TRACE_GRAPH = "trace_graph"

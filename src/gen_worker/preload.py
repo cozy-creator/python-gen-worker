@@ -53,6 +53,7 @@ import os
 import typing
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from . import activity as activity_mod
 from .api.binding import wire_ref
 from .models import residency as residency_mod
 from .models.pinned_swap import prestage_module
@@ -165,8 +166,17 @@ class Preloader:
                 await wake.wait()
         except asyncio.CancelledError:
             return
-        except Exception:
+        except Exception as exc:
             logger.exception("rotation preload driver crashed; parked until next poke")
+            # pgw#760: the whole background-staging subsystem is now off
+            # until the next poke — the hub's desired plan goes silently
+            # unfulfilled and every rotation pays the full visible swap.
+            activity_mod.emit_event(
+                activity_mod.KIND_ROTATION_PRELOAD,
+                f"driver crashed, parked until next poke: "
+                f"{type(exc).__name__}: {exc}",
+                phase="driver_crashed",
+            )
 
     async def _pass(self) -> bool:
         """One convergence look at the desired set. Returns True when it
@@ -187,6 +197,16 @@ class Preloader:
                     "rotation preload of %s failed (%s: %s); will retry on the "
                     "next desired set",
                     instance.function_name, type(exc).__name__, exc,
+                )
+                # pgw#760: the hub planned this instance hot; the stage is
+                # abandoned for the whole desired-set generation, so the next
+                # rotation to it pays the full visible swap.
+                activity_mod.emit_event(
+                    activity_mod.KIND_ROTATION_PRELOAD,
+                    f"fn={instance.function_name} "
+                    f"generation={self._generation}: stage failed, retried "
+                    f"only on a new desired set: {type(exc).__name__}: {exc}",
+                    phase="stage_failed",
                 )
                 continue
             if did:

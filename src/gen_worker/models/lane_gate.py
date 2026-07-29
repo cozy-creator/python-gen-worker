@@ -24,6 +24,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional, Type
 
+from .. import activity as activity_mod
 from .memory import get_available_vram_gb
 from .residency import Residency, Tier, _obj_offload_hooked
 
@@ -150,6 +151,16 @@ class LaneGate:
                             "%.1f GiB); serving CPU-offloaded",
                             self.label, get_available_vram_gb(),
                         )
+                        # pgw#760: a serve-time quality decision — this lane
+                        # now runs CPU-offloaded; countable on the wire.
+                        activity_mod.emit_event(
+                            activity_mod.KIND_SERVE_DEGRADE,
+                            f"ref={self.ref} label={self.label} "
+                            f"free_gb={get_available_vram_gb():.1f}: promote "
+                            f"cannot fit after {self.wait_s:.0f}s; serving "
+                            "CPU-offloaded",
+                            phase="lane_offload_engaged",
+                        )
                         return
                 except Exception:
                     logger.exception(
@@ -197,6 +208,16 @@ def arm_lane_gate(pipe: Any, gate: LaneGate) -> bool:
         logger.warning(
             "lane gate could not wrap %s (%s: %s); lane relies on eager "
             "promotion only", cls.__name__, type(exc).__name__, exc,
+        )
+        # pgw#760: the te#79 crash class (a demoted lane executing on cpu
+        # mid-denoise) is only prevented by this wrap — its silent absence
+        # is a serving hazard the hub should see.
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            f"ref={gate.ref} label={gate.label} cls={cls.__name__}: lane "
+            f"gate could not wrap __call__; demoted-lane promote-on-use "
+            f"protection is absent: {type(exc).__name__}: {exc}",
+            phase="lane_gate_unarmed",
         )
         return False
     return True

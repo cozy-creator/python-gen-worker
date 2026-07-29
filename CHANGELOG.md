@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.82.1 (2026-07-29) — pgw#760: swallowed-error audit — important fail-soft outcomes ride typed events
+
+Doctrine (Paul, verbatim in spirit): errors should be exposed to the orchestrator so it
+can report on them. The pgw#733 incident class — a classified reason reduced to a local
+`logger.warning`, structurally invisible on hub-spawned workers — was audited across the
+whole SDK (840 swallow-shaped except handlers reviewed). Nine seams affected serving,
+placement, health, or hub decisions with nothing on the wire; each now emits a typed
+event through the existing th#1250-persisted activity pipe. One shape everywhere:
+`emit_event(kind, detail, phase=reason)` — `phase` a stable countable reason token,
+`detail` the identifiers + exception. **No control flow changed anywhere** — every
+fail-soft stays fail-soft; this release is visibility only.
+
+- `trt_engine.enable` — classified `AdoptError` refusals and successful arms ride
+  `trt_adopt` (phase = the reason, mirroring pgw#733's `aot_adopt`); a mid-serve engine
+  failure that permanently reroutes to eager rides `serve_degrade/trt_runtime_failed`.
+- `hot_swap` — signature-vocabulary explosion (permanently disables concurrent routing),
+  background warm/heal compile failure (the outcome the `guard_miss` event's
+  `heal=healing` promise never reported), warm-worker crashes, and failed cell-republish
+  callbacks (fleet re-compiles that shape forever) all ride `serve_degrade`.
+- `utils/lora` (`lora_hygiene`) — failed deactivate/branch-clear (possible cross-request
+  adapter bleed), failed detach-on-demote, failed LRU eviction (VRAM creep).
+- `models/residency` (`residency_fault`) — a move whose rollback also fails leaves a
+  mixed-device unusable pipeline (the next forward fatals mid-denoise): named with the
+  ref at fault time, not discovered via the downstream job error. A failed residency
+  event callback (hub view silently diverging) confesses on the independent channel.
+- `preload` (`rotation_preload`) — a stage failure abandons the hub's desired-hot plan
+  for the whole generation; a driver crash parks the entire subsystem.
+- `capability_renewal` (`capability_renewal`) — terminal denial and silent retry
+  exhaustion, previously surfacing minutes later as a bare expired-token upload error.
+- `models/lane_gate` — serve-time CPU-offload engagement and a failed gate wrap (silent
+  loss of the te#79 promote-on-use protection) ride `serve_degrade`.
+- `models/loading` — a PARTIAL fp8 cast failure (one component of N) returned
+  `applied=True` and evaded the th#737 structural report entirely; per-component
+  failures now ride `serve_degrade/fp8_cast_failed`.
+- `runtimes/server` — an engine that boots on a degraded rung (fewer GPU layers /
+  CPU-only) rides `serve_degrade/engine_boot_degraded`.
+
+Red-verified in `tests/test_error_visibility_pgw760.py`: forced failure at each seam →
+captured `ActivityUpdate` naming the reason class and identifiers, with the fail-soft
+behavior asserted unchanged.
+
 ## 0.82.0 (2026-07-29) — pgw#748 phase 0: multi-GPU bookkeeping that is wrong today
 
 Sequence parallelism's phase 0 ships alone, before any parallelism code, because both
