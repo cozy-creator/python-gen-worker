@@ -61,6 +61,39 @@ def set_device_group(ordinal: int) -> contextvars.Token:
     return _current_group.set(int(ordinal))
 
 
+def group_cuda_device(ordinal: Optional[int] = None) -> str:
+    """The device string a group's weights belong on. ``cuda`` (thread-current)
+    for group 0, so a single-group worker is byte-identical to every placement
+    it has ever done."""
+    g = current_device_group() if ordinal is None else int(ordinal)
+    return "cuda" if g == 0 else f"cuda:{g}"
+
+
+def pin_cuda_device_for_group() -> None:
+    """Set THIS THREAD's current CUDA device to the current group's rank-0 card.
+
+    `torch.cuda.set_device` is thread-local and the load path never called it:
+    handler threads did (from ``ResolvedCompute.gpu_index``), but the SETUP and
+    materialization threads did not, so every group's weights were placed by a
+    plain ``.to("cuda")`` onto whatever card that pool thread happened to point
+    at — card 0. Measured live on a 4xL40S pod: `current_device` was correctly
+    cuda:0..3 per group while the WEIGHTS sat on cuda:0,0,0,3 (pgw#748 DP
+    width-4 acceptance). Cheap and idempotent; a no-op without CUDA and for
+    group 0.
+    """
+    ordinal = current_device_group()
+    if ordinal <= 0:
+        return
+    try:
+        import torch
+
+        if torch.cuda.is_available() and ordinal < torch.cuda.device_count():
+            torch.cuda.set_device(ordinal)
+    except Exception:  # noqa: BLE001 - placement is best-effort here; the
+        # residency promote still targets `cuda:N` explicitly.
+        logger.warning("could not pin thread to device %d", ordinal, exc_info=True)
+
+
 class device_group_scope:
     """Serve this block as ``ordinal``'s group."""
 

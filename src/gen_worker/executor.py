@@ -90,6 +90,7 @@ from .topology import (
     ExecutionTopology,
     current_device_group,
     device_group_scope,
+    pin_cuda_device_for_group,
 )
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
@@ -135,7 +136,17 @@ async def _to_thread_complete(func: Callable[..., Any], /, *args: Any, **kwargs:
     Diffusers/Accelerate mutate process-global meta-device hooks while loading,
     so a surrounding model-load lock must outlive the worker thread.
     """
-    work = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    # pgw#748: this is THE loop->thread hop of the model-load path (setup,
+    # slot injection, warmup). `torch.cuda.set_device` is thread-local, so a
+    # pool thread points at card 0 no matter which group's job scheduled it —
+    # and every `.to("cuda")` in the loader follows the CURRENT device. The
+    # group rides the contextvar into the thread; this makes the thread's
+    # device follow it. No-op for group 0, i.e. for every pod today.
+    def _pinned(*a: Any, **kw: Any) -> Any:
+        pin_cuda_device_for_group()
+        return func(*a, **kw)
+
+    work = asyncio.create_task(asyncio.to_thread(_pinned, *args, **kwargs))
     try:
         return await asyncio.shield(work)
     except asyncio.CancelledError:
