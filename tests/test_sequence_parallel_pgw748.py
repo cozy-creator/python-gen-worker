@@ -73,8 +73,8 @@ def _follower_dies(spec: RankSpec) -> None:  # pragma: no cover - spawned
     raise RuntimeError("this rank's card is not there")
 
 
-def _cpu_group(entry: Any) -> RankGroup:
-    return RankGroup(devices=(0, 1), backend="gloo", entry=entry)
+def _cpu_group(entry: Any, degree: int = 2) -> RankGroup:
+    return RankGroup(devices=tuple(range(degree)), backend="gloo", entry=entry)
 
 
 def test_rank_zero_decides_and_every_rank_obeys() -> None:
@@ -220,3 +220,82 @@ def test_indivisible_shapes_are_refused_before_a_pod_is_committed() -> None:
     with pytest.raises(ContextParallelUnavailable, match="head count"):
         refuse_unless_divisible(tokens=75600, heads=40, degree=16)
     refuse_unless_divisible(tokens=769, heads=41, degree=1)  # degree 1: no-op
+
+
+# ---------------------------------------------------------------------------
+# E. WIDTH 4 — Paul, 2026-07-29: "4 workers for sequence-parallelism as well.
+#    I just want to test these to make sure that they work right."
+#
+# Everything degree-4 that is not CUDA is provable here: a 4-rank rendezvous,
+# a 4-way plan broadcast, and divergence/death in ONE of four ranks failing
+# the whole group. NCCL bandwidth and Ulysses numerics need a pod; the
+# control plane does not.
+# ---------------------------------------------------------------------------
+
+
+def _follower_echo4(spec: RankSpec) -> None:  # pragma: no cover - spawned
+    import torch.distributed as dist
+
+    plan = broadcast_plan(None, rank=spec.rank)
+    assert plan.sp_degree == 4, plan
+    assert plan.gemm_mode == "rowwise"
+    assert plan.loras == (("style", 0.8),)
+    dist.barrier()
+
+
+def _follower_rank3_dies(spec: RankSpec) -> None:  # pragma: no cover - spawned
+    import torch.distributed as dist
+
+    if spec.rank == 3:
+        raise RuntimeError("rank 3's card fell off the bus")
+    broadcast_plan(None, rank=spec.rank)
+    dist.barrier()
+
+
+def test_degree_four_group_forms_and_every_rank_obeys_rank_zero() -> None:
+    group = _cpu_group(_follower_echo4, degree=4)
+    spec = group.form()
+    try:
+        assert (spec.rank, spec.world_size) == (0, 4)
+        assert group.degree == 4
+        plan = GroupPlan(
+            precision_lane="w8a8", gemm_mode="rowwise", sp_degree=4,
+            compile_armed=False, loras=(("style", 0.8),),
+        )
+        assert broadcast_plan(plan, rank=0) == plan
+        group.barrier()   # all four ranks reached it
+    finally:
+        group.close()
+
+
+def test_one_dead_rank_of_four_fails_the_whole_group() -> None:
+    # Three healthy ranks must NOT quietly serve a degree-4 request as a
+    # degree-3 one, and must not park forever on a rendezvous that can never
+    # complete.
+    import time
+
+    group = _cpu_group(_follower_rank3_dies, degree=4)
+    group.form()
+    try:
+        with pytest.raises(RankGroupError):
+            for _ in range(300):
+                group.check_alive()
+                time.sleep(0.05)
+    finally:
+        group.close()
+
+
+def test_width_four_refusals_are_the_same_refusals() -> None:
+    # The tested envelope is degree <= 4; nothing about the refusals is
+    # degree-2-specific.
+    with pytest.raises(RankDivergence, match="rowwise"):
+        GroupPlan(gemm_mode="pertensor", sp_degree=4).refuse_unless_cp_safe()
+    GroupPlan(gemm_mode="rowwise", sp_degree=4).refuse_unless_cp_safe()
+    # Wan T2V divides cleanly at 4 — 40 heads, 75,600 tokens.
+    refuse_unless_divisible(tokens=75600, heads=40, degree=4)
+    with pytest.raises(ContextParallelUnavailable, match="head count"):
+        refuse_unless_divisible(tokens=75600, heads=6, degree=4)
+    with pytest.raises(ContextParallelUnavailable, match="_cp_plan"):
+        install_context_parallel(_FakePipeline(), degree=4)
+    with pytest.raises(ContextParallelUnavailable, match="rowwise"):
+        refuse_unless_shard_invariant_quant(_FakePipeline("pertensor"), degree=4)

@@ -1269,7 +1269,10 @@ class ModelStore:
         return report
 
     def local_path(self, ref: str) -> Optional[Path]:
-        return self.residency.local_path(ref)
+        # Union across groups (pgw#748): the CAS is ONE hardlinked tree. A
+        # group that has not yet booked this ref must still SEE the bytes a
+        # sibling group already materialized.
+        return self.disk_local_path(ref)
 
     def has_snapshot(self, ref: str) -> bool:
         """A digest-carrying snapshot for ``ref`` was seen this connection
@@ -1491,8 +1494,10 @@ class ModelStore:
         for ref, ent in self._index.entries().items():
             p = Path(str(ent.get("path") or ""))
             if p.exists():
-                if self.residency.tier(ref) is None:
-                    self.residency.track_disk(ref, p)
+                # Every group's registry learns the shared disk tier at boot.
+                for reg in self.all_residencies():
+                    if reg.tier(ref) is None:
+                        reg.track_disk(ref, p)
             else:
                 self._index.remove(ref)
         removed = disk_gc.sweep_stale_writer_temp(self._cache_dir)
@@ -1735,6 +1740,12 @@ class ModelStore:
         acquired = False
 
         def complete(path: Path) -> _MaterializedLocal:
+            # pgw#748: the bytes are pod-wide but each group keeps its own
+            # ledger, so the group that asked must ALSO book the shared disk
+            # entry — otherwise a group riding a sibling's materialization
+            # never sees the ref in its own LRU, preserve set or eviction.
+            if self.residency.tier(ref) is None:
+                self.residency.track_disk(ref, path)
             if registry is not None:
                 registry.transition(
                     intent_id,
@@ -1765,7 +1776,10 @@ class ModelStore:
                     pb.LIFECYCLE_INTENT_STATUS_RUNNING,
                     pb.LIFECYCLE_INTENT_STAGE_VERIFYING,
                 )
-            cached = self.residency.local_path(ref)
+            # Union across groups: without this, group 1 loading a ref
+            # group 0 already fetched sees `None` and re-runs the whole
+            # download/verify — one pod, one copy, every group (pgw#748).
+            cached = self.disk_local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
             # materialization of the SAME ref at a DIFFERENT digest is stale
             # (flavor re-published — e.g. compile-cache digest-change
