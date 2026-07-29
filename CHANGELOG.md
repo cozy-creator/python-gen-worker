@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.82.4 (2026-07-29) — envelope parity: return_dict=False callers get a tuple back (arm-events lane)
+
+Live-named twice on the 0.76.7 canary: with bind fixed, in-contract calls EXECUTED the
+adopted artifact and the caller crashed downstream (4-vs-2 broadcast) because diffusers
+calls `unet(..., return_dict=False)[0]` on the raw-tensor return. The wrap restores the
+declared envelope. Shipped on the rerun line as 0.76.8.
+
 ## 0.82.3 (2026-07-29) — nested added_cond input resolution at bind (arm-events lane)
 
 Live-named on the 0.76.6 canary (pod ae2uc81yub0gyq): the FIRST successful cross-pod AOT

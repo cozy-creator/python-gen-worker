@@ -1322,7 +1322,17 @@ def wrap_module(
         if state["failed"]:
             return original(*args, **kwargs)
         try:
-            return runner(*args, **kwargs)
+            out = runner(*args, **kwargs)
+            # Envelope parity (live-named on the 0.76.x rerun line,
+            # 2026-07-29): the exported graph returns the RAW tensor, but a
+            # diffusers pipeline calls `unet(..., return_dict=False)[0]` —
+            # indexing a bare tensor silently slices the batch dim and the
+            # crash surfaces downstream as a broadcast error. Restore the
+            # caller's declared envelope: return_dict=False means a 1-tuple.
+            if kwargs.get("return_dict") is False and not isinstance(
+                    out, tuple):
+                return (out,)
+            return out
         except IngressContractError as exc:
             # B2: the exported graph would have run this and returned
             # unvalidated output. Named refusal + eager service.
