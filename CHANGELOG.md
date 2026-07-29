@@ -20,9 +20,14 @@ halves are latent bugs on the fleet we already run.
   identity; only the pod can say whether ITS two cards have peer access, and that is what
   decides whether a sequence-parallel release meets its latency SLO. The leg classifies
   the fabric (`nvlink | pcie-p2p | host-staged`) from `nvidia-smi topo -m` +
-  `can_device_access_peer` — peer access always overrules the wiring, which is the GeForce
-  case — and times a device-to-device copy of the same 256 MiB buffer the other legs use.
-  Inert on 1-GPU pods: it never runs, and the fields stay empty.
+  `can_device_access_peer` and times a device-to-device copy of the same 256 MiB buffer
+  the other legs use. Two classification rules, both measured on real pods rather than
+  assumed: **peer access overrules good-looking wiring** (2x RTX 4090 report `NODE` and no
+  P2P — 1.96 GB/s, identical with `NCCL_P2P_DISABLE=1`), and **`SYS` overrules peer
+  access** (2x H100 PCIe report `SYS` and peer access TRUE, yet achieve 14.5 GB/s
+  bit-identically with P2P disabled — the flag buys nothing across CPU sockets, so the
+  class is host-staged, not pcie-p2p). Inert on 1-GPU pods: it never runs, and the fields
+  stay empty.
 - **`measure_peer_collective()`** is the deep leg, never run at boot: a real NCCL
   `all_to_all_single` across N spawned ranks on the production activation shape
   `[1, 40, 37800, 128]` bf16, optionally under `NCCL_P2P_DISABLE=1`.

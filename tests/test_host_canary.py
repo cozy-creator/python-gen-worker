@@ -60,9 +60,21 @@ def test_peer_access_overrules_the_wiring() -> None:
     assert hc.classify_interconnect("", True) == "pcie-p2p"
     # The GeForce trap: two cards can look adjacent and still have no P2P at
     # all, in which case every byte is staged through host RAM. Wiring never
-    # overrules the capability query.
+    # overrules the capability query. MEASURED on 2x RTX 4090 (NODE,
+    # peer_access False): 1.96 GB/s, unchanged by NCCL_P2P_DISABLE=1.
+    assert hc.classify_interconnect("NODE", False) == "host-staged"
     assert hc.classify_interconnect("PIX", False) == "host-staged"
     assert hc.classify_interconnect("NV18", False) == "host-staged"
+
+
+def test_a_cross_socket_pair_is_host_staged_however_the_flag_reads() -> None:
+    # MEASURED on 2x H100 PCIe (SYS, peer_access TRUE): 14.5 GB/s, BIT-IDENTICAL
+    # with NCCL_P2P_DISABLE=1 — the P2P flag bought nothing because the path
+    # crosses the CPU sockets. That is the host-staged row of the projection
+    # table (~15 GB/s), not the PCIe-P2P row (~40); classing it pcie-p2p would
+    # promise a 1.70x wall where the hardware delivers 1.40x.
+    assert hc.classify_interconnect("SYS", True) == "host-staged"
+    assert hc.classify_interconnect("SYS", False) == "host-staged"
 
 
 @pytest.fixture()

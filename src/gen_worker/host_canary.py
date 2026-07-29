@@ -239,21 +239,37 @@ def _nvidia_smi_topo_link(a: int, b: int) -> str:
 
 def classify_interconnect(topo_link: str, peer_access: bool) -> str:
     """Map (topology code, peer-access capability) onto the fabric class the
-    latency model cares about.
+    latency model cares about. These are PERFORMANCE classes, not mechanisms:
+    each names a row of the projected-wall table, and the pgw#748 probe
+    measured all three on real RunPod pods.
 
     ``nvidia-smi`` reports NV# for an NVLink pair; PIX/PXB/PHB/NODE/SYS are
-    PCIe paths of decreasing quality. Peer access is the authority on whether
-    the copy actually crosses the fabric: without it every transfer is staged
-    through host RAM no matter how good the wiring looks (this is exactly the
-    GeForce case — two 4090s on one board with no P2P at all).
+    PCIe paths of decreasing quality.
+
+    Two rules, both measured rather than assumed:
+
+    - **Peer access overrules good-looking wiring.** Without it every transfer
+      is staged through host RAM however adjacent the cards look. Two RTX 4090s
+      reporting ``NODE`` and ``peer_access=False`` achieved **1.96 GB/s** on an
+      all-to-all — and the identical number with ``NCCL_P2P_DISABLE=1``, which
+      is the proof NCCL was already host-staging.
+    - **``SYS`` overrules peer access.** A cross-socket pair traverses the CPU
+      interconnect, and the P2P flag then buys nothing: two H100 PCIe cards
+      reporting ``SYS`` and ``peer_access=True`` achieved **14.5 GB/s**, again
+      bit-identical with P2P disabled. That is the host-staged row of the
+      table (assumed 15 GB/s), not the PCIe-P2P row (assumed 40). Calling it
+      ``pcie-p2p`` would overstate the achievable wall by 2.8x.
+
+    The raw code always rides alongside in ``topo_link``, so a consumer that
+    wants the mechanism rather than the class still has it.
     """
     link = (topo_link or "").strip().upper()
     if not peer_access:
         return INTERCONNECT_HOST_STAGED
-    if link.startswith("NV") and link != "NV":
+    if link.startswith("NV"):
         return INTERCONNECT_NVLINK
-    if link == "NV":
-        return INTERCONNECT_NVLINK
+    if link == "SYS":
+        return INTERCONNECT_HOST_STAGED
     return INTERCONNECT_PCIE_P2P
 
 
