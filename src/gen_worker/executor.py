@@ -2372,6 +2372,10 @@ class _ClassRecord:
     compile_targets: Dict[str, _CompileTargetRecord] = dc_field(default_factory=dict)
     # gw#661: consecutive will-retry setup losses; reset by any success.
     transient_setup_failures: int = 0
+    # pgw#748 phase 1: the armed degree-D rank group serving THIS record, or
+    # None at degree 1 (every record today). Owned by the record because it is
+    # bound to the record's pipeline objects and must die with them.
+    sp_runtime: Optional[Any] = None
     # pgw#671 eager-first boot: the in-flight background self-mint for this
     # record's live instance, when the boot went READY(eager) with the mint
     # deferred. Cleared when the mint completes, is disproven, or is
@@ -2638,6 +2642,9 @@ class Executor:
         # and never from an operator knob. An explicit gpu_slots= still wins
         # for the local `cli/serve` path and for tests.
         self.topology = topology or ExecutionTopology.single()
+        # pgw#748: id(record) -> the GroupPlan its ranks agreed on. Keyed by
+        # identity because a record is the group's owner and dies with it.
+        self._sequence_plans: Dict[int, Any] = {}
         self.store.bind_topology(self.topology)
         self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.groups)
         self._gpu_semaphore = asyncio.Semaphore(self._gpu_slots)
@@ -4254,6 +4261,33 @@ class Executor:
             "hub-connected worker never fetches a Slot's raw upstream "
             "default (pgw#532/gw#465) — the hub must resolve the slot to a "
             "tensorhub-CAS ref"
+        )
+
+    def _multi_group_handler_refusal(self, spec: EndpointSpec) -> str:
+        """pgw#748 residual, made LOUD instead of silently wrong.
+
+        ``ctx.device`` still resolves to ``cuda:{torch.cuda.current_device()}``.
+        For a SYNC handler that is correct by construction — the handler thread
+        runs ``set_device(group rank-0)`` and, since 6424bce, so does the load
+        thread. An ASYNC handler runs on the shared event loop, whose thread
+        device belongs to whichever group most recently touched it, so on a
+        multi-group worker ``ctx.device`` can name a card the job does not own.
+
+        A wrong device is not a crash; it is a request that quietly computes on
+        a sibling's card, competing for its VRAM. So it is refused, by name,
+        until ``ctx.device`` is explicit from the job's group. Single-group
+        workers — every pod today — are untouched.
+        """
+        if self.topology.groups <= 1 and self.topology.degree <= 1:
+            return ""
+        if not (spec.is_async or spec.is_async_gen):
+            return ""
+        return (
+            f"{spec.name}: async handlers are not yet served on a multi-group "
+            f"worker ({self.topology}). ctx.device resolves from the calling "
+            "thread's current CUDA device, which on the shared event loop is "
+            "not this job's group. Refused rather than served on a sibling's "
+            "card (pgw#748)."
         )
 
     def _dispatch_group(self, run: "pb.RunJob") -> int:
@@ -6392,6 +6426,10 @@ class Executor:
             # pgw#678: the pipeline identities, kept out of held_objects (which
             # is the residency/movement handle space).
             rec.slot_pipelines = dict(inj.slot_pipelines)
+            # pgw#748: a degree-D group becomes D ranks HERE — after the
+            # pipeline exists and its attention backend is set, before
+            # compile. Degree 1 (every pod today) is a no-op.
+            await self._arm_sequence_group(rec, spec, slot_refs)
             self._install_compile_targets(
                 rec,
                 spec,
@@ -6402,6 +6440,107 @@ class Executor:
             rec.stale = False
             await self._clear_host_ram_capacity(list(slot_refs.values()))
         return instance
+
+    # ---- sequence parallelism (pgw#748 phase 1) ------------------------------
+
+    def _sequence_boot_slot(
+        self, spec: EndpointSpec, rec: "_ClassRecord",
+    ) -> Optional[str]:
+        """The ONE class-annotated pipeline slot a degree-D group shards.
+
+        Refused typed, never guessed: a follower rebuilds its copy through
+        ``provision.load_slot`` from the pod's shared CAS path, so a
+        self-loading (str/Path) slot has no reproducible construction, and two
+        candidate pipelines have no single SPMD unit.
+        """
+        from .parallel import ContextParallelUnavailable
+
+        candidates = [s for s, pipe in rec.slot_pipelines.items() if pipe is not None]
+        if len(candidates) == 1:
+            return candidates[0]
+        raise ContextParallelUnavailable(
+            f"{spec.name}: sequence parallelism needs exactly ONE "
+            f"class-annotated pipeline slot to shard, found {candidates or 'none'}"
+        )
+
+    async def _arm_sequence_group(
+        self,
+        rec: "_ClassRecord",
+        spec: EndpointSpec,
+        slot_refs: Dict[str, str],
+    ) -> None:
+        """Turn this record's execution group into D ranks, or refuse loudly.
+
+        A refusal here is TERMINAL for the setup: the pod was bought for a
+        degree-D promise and serving degree 1 against it would silently
+        deliver a fraction of the tier that was sold. The hub's own answer to
+        an unservable degree is to re-pack the pod, and it can only do that if
+        the worker says so.
+        """
+        topo = self.topology
+        if topo.degree <= 1 or topo.parallel != "sequence":
+            return
+        from .parallel import GroupPlan
+        from .parallel.cp import w8a8_gemm_mode
+        from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
+
+        group = current_device_group()
+        device_group = topo.group(group)
+        slot = self._sequence_boot_slot(spec, rec)
+        pipe = rec.slot_pipelines[slot]
+        ref = slot_refs.get(slot, "")
+        path = self.store.local_path(ref) if ref else None
+        binding = spec.models.get(slot)
+
+        boot = BootPlan(
+            modules=tuple(sorted({
+                s.cls.__module__ for s in rec.specs if s.cls is not None
+            })),
+            function_name=spec.name,
+            slot=slot,
+            path=str(path or ""),
+            cache_dir=str(self.store._cache_dir),
+            degree=topo.degree,
+            dtype=str(getattr(binding, "dtype", "") or ""),
+            storage_dtype=str(getattr(binding, "storage_dtype", "") or ""),
+        )
+        # Rank 0 DECIDES; every rank obeys. Nothing below rank 0 ever measures
+        # its own card and adapts (pgw#748 §5.4).
+        plan = GroupPlan(
+            precision_lane=self._lane_label(spec, ""),
+            gemm_mode=w8a8_gemm_mode(pipe),
+            sp_degree=topo.degree,
+        )
+        runtime = SequenceRuntime(device_group.devices)
+        installed = await asyncio.to_thread(runtime.arm, pipe, boot, plan)
+        if not arm_sequence_gate(pipe, runtime):
+            runtime.close()
+            from .parallel import ContextParallelUnavailable
+
+            raise ContextParallelUnavailable(
+                f"{spec.name}: could not route {type(pipe).__name__}.__call__ "
+                "through the rank group; refusing rather than serving degree 1 "
+                "against a degree-{0} promise".format(topo.degree))
+        rec.sp_runtime = runtime
+        self._sequence_plans[id(rec)] = plan
+        logger.info(
+            "%s armed sequence parallelism degree=%d on devices %s (%s)",
+            spec.name, topo.degree, list(device_group.devices), list(installed))
+
+    def _close_sequence_group(self, rec: "_ClassRecord") -> None:
+        runtime, rec.sp_runtime = rec.sp_runtime, None
+        self._sequence_plans.pop(id(rec), None)
+        if runtime is None:
+            return
+        try:
+            runtime.close()
+        except Exception:  # noqa: BLE001 - teardown must not mask the vacate
+            logger.warning("closing the sequence group failed", exc_info=True)
+
+    def group_plan_for(self, rec: "_ClassRecord") -> Optional[Any]:
+        """The plan every rank of ``rec``'s group agreed on, or None at
+        degree 1. Read by the adaptive paths that must NOT decide locally."""
+        return self._sequence_plans.get(id(rec))
 
     def _register_residency(
         self,
@@ -9215,6 +9354,9 @@ class Executor:
         rec.lane_refs = set()
         rec.held_objects = {}
         rec.slot_pipelines = {}  # pgw#678: pipelines die with the instance
+        # pgw#748: the rank siblings are an implementation detail of THIS
+        # instance's pipeline; they must not outlive it holding D cards.
+        self._close_sequence_group(rec)
         # Do not let this teardown frame itself retain a departing pipeline
         # while the cgroup probe decides whether capacity really progressed.
         old_obj = None
@@ -9716,6 +9858,10 @@ class Executor:
         assert spec is not None
         spec = job.spec = self._group_effective_spec(
             spec, current_device_group())
+        refusal = self._multi_group_handler_refusal(spec)
+        if refusal:
+            await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=refusal)
+            return
         self._intent_transition(
             job.intent_id,
             pb.LIFECYCLE_INTENT_STATUS_RUNNING,
@@ -10523,6 +10669,40 @@ class Executor:
             return
         if spec.output_mode == "stream":
             return  # chunks already emitted; a replay would duplicate them
+        # pgw#748 §5.4: under sequence parallelism the degraded ladder is the
+        # single most dangerous adaptive path there is. It picks an offload
+        # rung from THIS card's measured free VRAM, so two ranks that OOM
+        # differently take different rungs, execute different numbers of
+        # collectives, and the group HANGS — or worse, agrees on the count and
+        # silently produces wrong output. And CPU offload does not compose
+        # with context parallelism at all (diffusers #12533: a shape error
+        # after the first pipe call). So the group refuses as a group. Rank 0
+        # decides; a rank that cannot honour the decision fails the whole
+        # group; nothing ever adapts locally.
+        rec_sp = self._classes.get(spec.instance_key)
+        if rec_sp is not None and rec_sp.sp_runtime is not None:
+            plan = self.group_plan_for(rec_sp)
+            logger.error(
+                "DEGRADED_MODE=refused fn=%s: CUDA OOM inside a degree-%d "
+                "sequence-parallel group. The ladder would pick a rung from "
+                "this rank's free VRAM alone (plan=%s); a per-rank rung either "
+                "hangs the collective or corrupts the output silently, and CPU "
+                "offload does not compose with context parallelism "
+                "(diffusers #12533). Failing the GROUP.",
+                spec.name, getattr(plan, "sp_degree", 0) or self.topology.degree,
+                plan,
+            )
+            try:
+                ctx.log(
+                    f"DEGRADED_MODE=refused fn={spec.name}: a sequence-parallel "
+                    "group cannot degrade one rank at a time; the request fails "
+                    "and the pod is re-packable by the hub.",
+                    level="error",
+                )
+            except Exception:
+                pass
+            rec_sp.stale = True
+            return
         # Diffusers component models expose some pipeline offload methods too
         # (notably AutoencoderKL via ModelMixin). Exclude only that known
         # component base, then retain the capability check below so custom

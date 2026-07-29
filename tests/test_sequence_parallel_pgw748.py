@@ -299,3 +299,124 @@ def test_width_four_refusals_are_the_same_refusals() -> None:
         install_context_parallel(_FakePipeline(), degree=4)
     with pytest.raises(ContextParallelUnavailable, match="rowwise"):
         refuse_unless_shard_invariant_quant(_FakePipeline("pertensor"), degree=4)
+
+
+# ---------------------------------------------------------------------------
+# F. The EXECUTOR WIRING — the pipeline call is the SPMD unit.
+# ---------------------------------------------------------------------------
+
+
+def test_the_call_gate_routes_the_pipeline_through_the_group() -> None:
+    from gen_worker.parallel.runtime import SequenceRuntime, arm_sequence_gate
+
+    calls: list = []
+
+    class _Pipe:
+        def __call__(self, *a, **kw):
+            calls.append((a, kw))
+            return "latent"
+
+    class _FakeRuntime(SequenceRuntime):
+        def __init__(self):
+            super().__init__(devices=(0, 1, 2, 3))
+            self.broadcast: list = []
+            self._armed = True
+
+        def call_with(self, base_call, pipe, *a, **kw):
+            self.broadcast.append((a, kw))
+            return base_call(pipe, *a, **kw)
+
+    pipe, rt = _Pipe(), _FakeRuntime()
+    assert arm_sequence_gate(pipe, rt)
+    # The endpoint calls its pipeline exactly as it always has...
+    assert pipe(3, steps=4) == "latent"
+    # ...and the group saw the same call.
+    assert rt.broadcast == [((3,), {"steps": 4})] == calls
+    # isinstance/identity survive the wrap (same technique as gw#551).
+    assert isinstance(pipe, _Pipe) and type(pipe).__name__ == "_Pipe"
+    # Idempotent: re-arming swaps the runtime, never re-wraps.
+    assert arm_sequence_gate(pipe, rt)
+
+    # Degree 1 never gates: today's worker must be byte-identical.
+    assert not arm_sequence_gate(_Pipe(), SequenceRuntime(devices=(0,)))
+
+
+def test_call_marshalling_survives_the_wire() -> None:
+    # The model call must arrive at every rank IDENTICAL. CUDA tensors go via
+    # CPU (the followers own other cards) and a Generator is not picklable at
+    # all — only its seed has to agree.
+    import pickle
+
+    from gen_worker.parallel.runtime import _dehydrate, _rehydrate
+
+    payload = {
+        "latents": torch.ones(2, 3),
+        "steps": 4,
+        "prompt": "a cat",
+        "generator": torch.Generator().manual_seed(1234),
+        "sigmas": [torch.zeros(2), 0.5],
+    }
+    wire = _dehydrate(payload)
+    pickle.loads(pickle.dumps(wire))          # must cross broadcast_object_list
+    back = _rehydrate(wire, device=0)
+    assert torch.equal(back["latents"].cpu(), payload["latents"])
+    assert back["steps"] == 4 and back["prompt"] == "a cat"
+    assert back["generator"].initial_seed() == 1234
+    assert torch.equal(back["sigmas"][0].cpu(), torch.zeros(2))
+    assert back["sigmas"][1] == 0.5
+
+
+def test_a_group_that_cannot_be_sharded_is_refused_not_served_at_degree_one() -> None:
+    # Serving degree 1 against a degree-D promise delivers a fraction of the
+    # tier that was sold, invisibly. Exactly one class-annotated pipeline slot
+    # can be the SPMD unit.
+    from gen_worker.executor import Executor, _ClassRecord
+    from gen_worker.parallel import ContextParallelUnavailable
+    from gen_worker.registry import EndpointSpec
+
+    def _h(self, ctx, payload):  # pragma: no cover
+        return None
+
+    class _C:
+        pass
+
+    spec = EndpointSpec(name="f", method=_h, kind="inference", payload_type=dict,
+                        output_mode="single", cls=_C)
+    ex = Executor.__new__(Executor)
+    rec = _ClassRecord(cls=_C)
+    for pipes in ({}, {"a": object(), "b": object()}):
+        rec.slot_pipelines = dict(pipes)
+        with pytest.raises(ContextParallelUnavailable, match="exactly ONE"):
+            ex._sequence_boot_slot(spec, rec)
+    rec.slot_pipelines = {"pipeline": object()}
+    assert ex._sequence_boot_slot(spec, rec) == "pipeline"
+
+
+def test_async_handlers_are_refused_on_a_multi_group_worker() -> None:
+    # ctx.device still resolves from the CALLING THREAD's current device. A
+    # sync handler's thread is pinned to its group; the shared event loop is
+    # not. Refuse by name rather than compute on a sibling's card.
+    from gen_worker.executor import Executor
+    from gen_worker.registry import EndpointSpec
+    from gen_worker.topology import ExecutionTopology
+
+    def _h(self, ctx, payload):  # pragma: no cover
+        return None
+
+    class _C:
+        pass
+
+    sync = EndpointSpec(name="s", method=_h, kind="inference", payload_type=dict,
+                        output_mode="single", cls=_C)
+    asy = type(sync)(**{**sync.__dict__, "name": "a", "is_async": True})
+
+    ex = Executor.__new__(Executor)
+    ex.topology = ExecutionTopology.single()
+    assert ex._multi_group_handler_refusal(sync) == ""
+    assert ex._multi_group_handler_refusal(asy) == ""   # one group: unchanged
+
+    ex.topology = ExecutionTopology(gpu_count=4, group_degree=1)
+    assert ex._multi_group_handler_refusal(sync) == ""
+    refusal = ex._multi_group_handler_refusal(asy)
+    assert "async handlers are not yet served" in refusal
+    assert "ctx.device" in refusal

@@ -191,3 +191,18 @@ def _named_modules(pipeline: Any) -> Sequence[Tuple[str, Any]]:
             seen.add(key)
             out.append((f"{cname}.{mname}" if mname else cname, module))
     return out
+
+
+def w8a8_gemm_mode(pipeline: Any) -> str:
+    """The one w8a8 GEMM mode this pipeline's quantized linears run, or "".
+
+    Reported into the GroupPlan so the mode is a GROUP fact that rank 0
+    decides, not something each rank re-derives from its own SM (which is
+    exactly how two ranks end up quantizing differently)."""
+    modes = {
+        m for _n, mod in _named_modules(pipeline)
+        if (m := str(getattr(mod, "gemm_mode", "") or ""))
+    }
+    if len(modes) == 1:
+        return modes.pop()
+    return "" if not modes else "mixed"
