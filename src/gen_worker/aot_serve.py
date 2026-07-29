@@ -691,21 +691,37 @@ def bind_call_inputs(
     contract: ArtifactContract, args: Sequence[Any], kwargs: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Match one call's actual arguments to the declared inputs by keyword
-    first, then by position. Missing non-optional input => named refusal."""
+    first, then by position, then INSIDE any mapping-valued kwarg. Missing
+    non-optional input => named refusal.
+
+    The nested lookup is the serve-side half of the mint's flat calling
+    convention (live-proven missing, run-9b pod ae2uc81yub0gyq 2026-07-29):
+    the export flattens ``added_cond_kwargs`` entries (``text_embeds``,
+    ``time_ids``) into declared positional inputs, but a diffusers pipeline
+    calls the denoiser with them NESTED in one dict kwarg — without this
+    resolution an armed artifact refuses every real call by name
+    (``input_missing: text_embeds``) and the cell serves nothing."""
     out: Dict[str, Any] = {}
     for spec in contract.inputs:
         if spec.name in kwargs:
             out[spec.name] = kwargs[spec.name]
         elif 0 <= spec.position < len(args):
             out[spec.name] = args[spec.position]
-        elif spec.optional:
-            continue
         else:
-            raise IngressContractError(
-                "input_missing",
-                f"declared input {spec.name!r} (position {spec.position}) is "
-                f"absent from the call ({len(args)} positional, "
-                f"kwargs {sorted(kwargs)[:8]!r})")
+            nested = next(
+                (v[spec.name] for v in kwargs.values()
+                 if isinstance(v, Mapping) and spec.name in v),
+                None)
+            if nested is not None:
+                out[spec.name] = nested
+            elif spec.optional:
+                continue
+            else:
+                raise IngressContractError(
+                    "input_missing",
+                    f"declared input {spec.name!r} (position {spec.position}) "
+                    f"is absent from the call ({len(args)} positional, "
+                    f"kwargs {sorted(kwargs)[:8]!r})")
     return out
 
 

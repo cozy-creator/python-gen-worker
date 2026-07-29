@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.76.7 — nested added_cond input resolution at bind (the serve half of the flat mint convention)
+
+Live-named by the 0.76.6 wire events (pod ae2uc81yub0gyq): the FIRST successful cross-pod
+AOT arm (`aot_adopt armed`, cell ck5-b9422afe) then refused every real call with
+`aot_ingress_refused input_missing: text_embeds` — the export flattens `added_cond_kwargs`
+entries into declared positional inputs, but every diffusers caller passes them nested in
+one dict kwarg, and `bind_call_inputs` never looked inside. Resolution order is now
+keyword -> position -> inside any mapping-valued kwarg -> optional -> named refusal.
+Without this an adopted SDXL cell can arm but never serve.
+
 ## 0.76.6 — pgw#733 arm half (backport): every AOT adopt/arm outcome is a typed wire event
 
 Micro-release on the 0.76.5 line for the AOT cross-pod verdict rerun. The verdict lane's

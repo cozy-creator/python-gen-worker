@@ -583,7 +583,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.76.6"
+version = "0.76.7"
 source = { editable = "." }
 dependencies = [
     { name = "blake3" },
