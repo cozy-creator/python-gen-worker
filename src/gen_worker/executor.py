@@ -86,6 +86,11 @@ from .models.download import ensure_local, lookup_provider_for_ref
 from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.lanes import LaneUnavailableError
 from .models.residency import Residency
+from .topology import (
+    ExecutionTopology,
+    current_device_group,
+    device_group_scope,
+)
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 from .runtime_config import ConfigStore, extract_job_config
@@ -830,7 +835,19 @@ class ModelStore:
                 )
         elif self._fill_source_dir is not None:
             logger.info("fill_source_enabled dir=%s (volume-warm CAS fill tier)", self._fill_source_dir)
-        self.residency = Residency(
+        # pgw#748 phase 1: ONE Residency registry per execution group, sharing
+        # only the disk tier. VRAM is not fungible between cards, so a group's
+        # LRU, leases and free-VRAM probe speak that group's devices and
+        # nothing else — which is exactly what DeviceGroup's docstring has
+        # promised since pgw#648. ``residency`` resolves the CURRENT group
+        # (the executor stamps it per job), so every existing call site keeps
+        # working and a single-group pod behaves byte-identically.
+        self._vram_budget_bytes = vram_budget_bytes
+        self._residency_by_group: Dict[int, Residency] = {}
+        self._residency_groups: Dict[int, "residency_mod.DeviceGroup"] = {}
+        self._residency_lock = threading.Lock()
+        self.residency_topology: Optional[Any] = None
+        self._residency_by_group[0] = Residency(
             on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
         )
         self._locks: Dict[str, asyncio.Lock] = {}
@@ -1059,6 +1076,92 @@ class ModelStore:
             model_event=self.model_event(ref, state, identity=identity, **kw)
         ))
 
+    # ---- per-group residency (pgw#748 phase 1) --------------------------------
+
+    @property
+    def residency(self) -> Residency:
+        """The registry for the execution group this task is serving.
+
+        The group is ambient because the device already is: every handler
+        thread runs under ``torch.cuda.set_device(gpu_index)`` and every
+        ``.to("cuda")`` in the load path follows the current device. This
+        makes that ambient fact explicit and bookkept, instead of leaving G
+        groups sharing one VRAM ledger they cannot all be true about.
+        """
+        return self.residency_for(current_device_group())
+
+    def residency_for(self, group: int) -> Residency:
+        g = int(group)
+        existing = self._residency_by_group.get(g)
+        if existing is not None:
+            return existing
+        with self._residency_lock:
+            existing = self._residency_by_group.get(g)
+            if existing is not None:
+                return existing
+            device_group = self._residency_groups.get(g)
+            if device_group is None:
+                # No topology delivered (or a group the topology does not
+                # describe): fall back to the single-device group at that
+                # ordinal rather than inventing a width.
+                device_group = residency_mod.DeviceGroup(devices=(g,))
+            reg = Residency(
+                on_event=self._on_residency_event,
+                vram_budget_bytes=self._vram_budget_bytes,
+                device_group=device_group,
+            )
+            # Cross-group invariants that are wired once at boot on group 0.
+            reg.pre_demote = self._residency_by_group[0].pre_demote
+            self._residency_by_group[g] = reg
+            logger.info(
+                "residency registry armed for group %d on devices %s",
+                g, list(device_group.devices),
+            )
+            return reg
+
+    def all_residencies(self) -> List[Residency]:
+        """Every armed group registry. Disk-facing questions (GC keep-sets,
+        in-use, local paths) must union across these — the CAS is one tree
+        with one page cache, shared by every group (§4.3)."""
+        return list(self._residency_by_group.values())
+
+    def bind_topology(self, topology: Any) -> None:
+        """Install the delivered `G×D` packing: one registry per group, each
+        accounting for exactly its own devices."""
+        self.residency_topology = topology
+        if topology is None:
+            return
+        with self._residency_lock:
+            for ordinal in range(int(topology.groups)):
+                self._residency_groups[ordinal] = topology.group(ordinal)
+            zero = self._residency_by_group.get(0)
+            if zero is not None:
+                # Group 0's registry predates the topology (it is created in
+                # __init__ so a topology-less worker is never registry-less).
+                # Retarget it rather than replace it: its entries and leases
+                # are already the live bookkeeping.
+                zero.device_group = self._residency_groups[0]
+
+    def disk_ref_in_use(self, ref: str) -> bool:
+        """In-use across ALL groups (§4.3 caveat 3): one group's GC must never
+        drop the pages another group is mmapping."""
+        return any(reg.in_use(ref) for reg in self.all_residencies())
+
+    def disk_local_path(self, ref: str) -> Optional[Path]:
+        for reg in self.all_residencies():
+            path = reg.local_path(ref)
+            if path is not None:
+                return path
+        return None
+
+    def disk_refs(self) -> List[str]:
+        """Union of DISK-tier refs across groups."""
+        seen: Dict[str, None] = {}
+        for reg in self.all_residencies():
+            for ref in reg.refs_in(residency_mod.Tier.DISK):
+                seen.setdefault(ref, None)
+        return list(seen)
+
     # ---- residency facade ----------------------------------------------------
 
     def residency_snapshot(self) -> List[pb.ModelResidency]:
@@ -1119,8 +1222,12 @@ class ModelStore:
         keep = set(self.keep)
         entries = self._index.entries()
         reclaimable: List[Tuple[str, int]] = []
-        for ref in self.residency.refs_in(residency_mod.Tier.DISK):
-            if ref in keep or self.residency.in_use(ref):
+        # pgw#748: the CAS is ONE tree with one page cache, hardlinked
+        # across every group, so the preserve set is the UNION across groups —
+        # dropping clean pages one group is done with would drop the pages a
+        # sibling group is still mmapping (§4.3 caveat 3).
+        for ref in self.disk_refs():
+            if ref in keep or self.disk_ref_in_use(ref):
                 continue
             ent = entries.get(ref)
             if not ent:
@@ -1397,8 +1504,8 @@ class ModelStore:
         excluded = set(exclude)
         candidates = [
             (self._index.last_used(ref), ref)
-            for ref in self.residency.refs_in(residency_mod.Tier.DISK)
-            if ref not in excluded and not self.residency.in_use(ref)
+            for ref in self.disk_refs()
+            if ref not in excluded and not self.disk_ref_in_use(ref)
         ]
         candidates.sort()
         return [ref for _last_used, ref in candidates]
@@ -1436,8 +1543,8 @@ class ModelStore:
         separate seam, see ``_disk_eviction_order``."""
         now = time.time()
         out: List[Tuple[float, str]] = []
-        for ref in self.residency.refs_in(residency_mod.Tier.DISK):
-            if ref in exclude or self.residency.in_use(ref):
+        for ref in self.disk_refs():
+            if ref in exclude or self.disk_ref_in_use(ref):
                 continue
             if (ref in keep) != include_keep:
                 continue
@@ -2474,7 +2581,8 @@ class Executor:
         *,
         settings: Any = None,
         store: Optional[ModelStore] = None,
-        gpu_slots: int = 1,
+        gpu_slots: Optional[int] = None,
+        topology: Optional[ExecutionTopology] = None,
     ) -> None:
         self.specs: Dict[str, EndpointSpec] = {s.name: s for s in specs}
         self._send = send
@@ -2499,7 +2607,14 @@ class Executor:
         # for it. Identity-stable so equal picks across requests derive equal
         # instance keys (one resident instance per (class, resolved pick)).
         self._hub_bindings: Dict[str, ModelRef] = {}
-        self._gpu_slots = max(1, gpu_slots)
+        # pgw#748 phase 1 / th#1285: the hub's `G×D` packing is authoritative.
+        # G == the slot semaphore, and it comes from the delivered topology —
+        # NEVER from torch.cuda.device_count() (at D>1 slots are not devices)
+        # and never from an operator knob. An explicit gpu_slots= still wins
+        # for the local `cli/serve` path and for tests.
+        self.topology = topology or ExecutionTopology.single()
+        self.store.bind_topology(self.topology)
+        self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.groups)
         self._gpu_semaphore = asyncio.Semaphore(self._gpu_slots)
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
@@ -4115,6 +4230,28 @@ class Executor:
             "default (pgw#532/gw#465) — the hub must resolve the slot to a "
             "tensorhub-CAS ref"
         )
+
+    def _dispatch_group(self, run: "pb.RunJob") -> int:
+        """Which execution group this dispatch names (pgw#748 / th#1285 §2a).
+
+        ``ResolvedCompute.gpu_index`` is unchanged on the wire and now names
+        the group's RANK-0 device — 0, D, 2D, … — so the whole derivation is
+        ``gpu_index // D``. At D == 1 this is the identity, which is why
+        nothing about today's dispatch path moves.
+        """
+        if not run.HasField("compute"):
+            return 0
+        return self.topology.group_ordinal(int(run.compute.gpu_index))
+
+    def _group_effective_spec(
+        self, spec: EndpointSpec, group: int
+    ) -> EndpointSpec:
+        """Bind the dispatch to its group. Two groups are two cards, so they
+        are two resident instances: the ordinal joins ``instance_key`` and the
+        existing one-record-per-key machinery does the rest."""
+        if int(group) == int(spec.device_group_ordinal):
+            return spec
+        return dc_replace(spec, device_group_ordinal=int(group))
 
     def _effective_spec(self, spec: EndpointSpec, run: "pb.RunJob") -> EndpointSpec:
         """The spec THIS dispatch runs (pgw#532): every declared Slot rebound
@@ -9542,6 +9679,18 @@ class Executor:
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
+        # pgw#748 phase 1: stamp the execution group BEFORE anything reads
+        # residency, admits, loads or sets a device. Contextvars propagate
+        # into every coroutine and to_thread hop this job makes, so the whole
+        # job — admission, staging, handler, teardown — speaks one group.
+        with device_group_scope(self._dispatch_group(run)):
+            await self._run_job_grouped(job, run)
+
+    async def _run_job_grouped(self, job: _Job, run: pb.RunJob) -> None:
+        spec = job.spec
+        assert spec is not None
+        spec = job.spec = self._group_effective_spec(
+            spec, current_device_group())
         self._intent_transition(
             job.intent_id,
             pb.LIFECYCLE_INTENT_STATUS_RUNNING,

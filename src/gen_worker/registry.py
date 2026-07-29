@@ -173,6 +173,16 @@ class EndpointSpec:
     # (validated at walk time; require a recorded warm_reason).
     warm_overrides: Dict[str, Any] = field(default_factory=dict)
     warm_reason: str = ""
+    # pgw#748 phase 1: which EXECUTION GROUP this dispatch runs on (th#1285
+    # `G×D` packing). Never authored and never discovered — the executor
+    # derives it from the delivered topology and the job's rank-0 device, then
+    # clones the spec so the group rides the identity every downstream
+    # consumer already threads. Two groups are two cards, so they are two
+    # resident instances; folding the ordinal into ``instance_key`` is what
+    # makes the whole per-group registry fall out of machinery that already
+    # keys one record per (class, resolved binding set). Omitted from the key
+    # at 0 so every single-group pod's keys stay byte-identical.
+    device_group_ordinal: int = 0
     # pgw#654 CLASS-scoped unions (set by extract_specs over the class's
     # sibling specs; a function-shaped endpoint unions with itself).
     guidance_union: tuple = ()
@@ -221,8 +231,13 @@ class EndpointSpec:
     @property
     def instance_key(self) -> Any:
         """Specs sharing this key share one class instance (same class + same
-        resolved binding set)."""
-        return (self.cls, tuple(sorted(self.models.items())))
+        resolved binding set + same execution group). The group ordinal is
+        elided at 0, so a single-group worker's keys are byte-identical to
+        every key this worker has ever computed (pgw#748)."""
+        base = (self.cls, tuple(sorted(self.models.items())))
+        return base if not self.device_group_ordinal else (
+            base + (("device_group", int(self.device_group_ordinal)),)
+        )
 
 
 def _derive_defaults_type(

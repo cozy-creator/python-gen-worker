@@ -650,10 +650,22 @@ class Residency:
         flush_memory()
         return False
 
-    def promote(self, ref: str, device: str = "cuda") -> bool:
+    @property
+    def vram_device(self) -> str:
+        """Where THIS registry's promotions land. ``cuda`` (thread-current,
+        byte-identical to every promotion this worker has ever done) for the
+        default group; an explicit ``cuda:N`` once a topology has told us the
+        group owns card N — a group-1 instance must never load onto card 0
+        merely because the loading thread's current device said so
+        (pgw#748)."""
+        primary = int(self.device_group.primary)
+        return "cuda" if primary == 0 else f"cuda:{primary}"
+
+    def promote(self, ref: str, device: str = "") -> bool:
         """RAM -> VRAM (makes room first). True when resident afterward —
         i.e. every tensor verified on ``device``; a failed/partial move is
         rolled back to CPU and refused instead of booked (gw#409)."""
+        device = device or self.vram_device
         with self._lock:
             e = self._entries.get(ref)
             if e is None or not e.movable:

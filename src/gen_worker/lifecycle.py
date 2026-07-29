@@ -91,12 +91,32 @@ def probe_hardware() -> Dict[str, Any]:
 
 
 def free_vram_bytes() -> int:
-    """Free VRAM summed across ALL CUDA devices (StateDelta.free_vram_bytes)."""
+    """Free VRAM for the BEST placement this worker can offer one job
+    (``StateDelta.free_vram_bytes``).
+
+    This used to be the sum across every CUDA device, which is the reporting
+    half of the bug pgw#648 fixed in the accounting half: VRAM is not fungible
+    between cards, so a 2x24GB pod that reports 48GB invites the hub to admit
+    a 30GB model that fits on neither. One job runs on one execution group, so
+    the honest number is the largest single group's free pool — MIN within a
+    replicated group (every member holds a full copy), MAX across groups
+    (the job goes to whichever group is roomiest). Single-GPU pods, which is
+    every pod today, are unchanged.
+    """
+    try:
+        from .topology import ExecutionTopology
+
+        groups = ExecutionTopology.from_env().all_groups()
+        best = max((g.free_vram_bytes() for g in groups), default=0)
+        if best:
+            return int(best)
+    except Exception:
+        pass
     try:
         import torch
 
-        if torch.cuda.is_available():
-            return sum(int(torch.cuda.mem_get_info(i)[0]) for i in range(torch.cuda.device_count()))
+        if torch.cuda.is_available() and torch.cuda.device_count():
+            return int(torch.cuda.mem_get_info(0)[0])
     except Exception:
         pass
     return 0
