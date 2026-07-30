@@ -81,7 +81,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import aot_package, aot_serve, cell_key
+from . import aot_package, aot_serve, aot_wrapper_split, cell_key
 from .compile_cache import (
     _resolve_target,
     lane_bucket,
@@ -614,9 +614,19 @@ def compile_entry_files(
     *ep.example_inputs, options)``), deferred before packaging so N entries
     combine into one archive. Compilation is byte-identical to the
     single-model mint; only the packaging changes.
+
+    pgw#793: the host C++ compile is 46% of an AOTI compile and is ONE g++
+    invocation on ONE translation unit whose largest function is inductor's
+    constants_info_ table spelled as 26k straight-line statements.
+    :func:`aot_wrapper_split.install` regroups exactly that run of
+    statements before g++ sees it — same statements, same order, verified by
+    reconstruction, declining unmodified on any wrapper shape it does not
+    recognise. It changes no compiler, flag, inductor config or library, so
+    no cell is re-keyed.
     """
     from torch._inductor import aot_compile
 
+    aot_wrapper_split.install()
     gm = program.module(check_guards=False)
     args, kwargs = program.example_inputs
     try:
