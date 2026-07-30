@@ -131,3 +131,53 @@ def _fresh_receipt_gate():
     _receipts.reset()
     yield
     _receipts.reset()
+
+
+@pytest.fixture(scope="session")
+def _postmortem_root(tmp_path_factory):
+    """One private carrier directory per test process (per xdist worker)."""
+    return tmp_path_factory.mktemp("postmortem")
+
+
+@pytest.fixture(autouse=True)
+def _postmortem_paths_off_the_host(_postmortem_root):
+    """pgw#801: the postmortem carriers are HOST paths, and the suite wrote
+    to the real ones.
+
+    ``postmortem.BOOT_RECORD_PATH`` resolves at import to ``$TENSORHUB_CACHE_DIR``
+    or ``/tmp``, and the in-flight marker, crash registry and fault dump are its
+    siblings. On a pod that is correct — the point is to survive process death.
+    On a dev box or CI runner ``/tmp`` is shared by every process, every lane and
+    every run, so a suite that reaches it is asserting about the RUNNER.
+
+    Measured 2026-07-30: ``/tmp/gen-worker-crash-streaks.json`` held
+    ``{"generate": {"count": 2, ...}}`` written by another lane's run minutes
+    earlier. ``NATIVE_CRASH_REFUSE_STREAK`` is 2, so from then on EVERY boot in
+    EVERY lane's suite refused ``generate`` — 6 tests across
+    ``test_boot_compile_deferral_gw584.py`` and ``test_resolution_rekey_gw494.py``
+    failed for everyone, in isolation as well as in the full run, until someone
+    deleted the file by hand. The registry is genuinely durable-by-design, which
+    is exactly why the suite must never share the production carrier.
+
+    The carrier directory is per-process, but the FILES are removed around
+    every test: a streak one test records is that test's fact, and the crash
+    gate is boot-scoped in production.
+    """
+    from gen_worker import postmortem as _pm
+
+    names = ("BOOT_RECORD_PATH", "INFLIGHT_PATH",
+             "CRASH_REGISTRY_PATH", "FAULT_DUMP_PATH")
+    saved = {name: getattr(_pm, name) for name in names}
+    redirected = [_postmortem_root / path.name for path in saved.values()]
+
+    def _wipe() -> None:
+        for path in redirected:
+            path.unlink(missing_ok=True)
+
+    for name, path in zip(names, redirected):
+        setattr(_pm, name, path)
+    _wipe()
+    yield
+    _wipe()
+    for name, path in saved.items():
+        setattr(_pm, name, path)
