@@ -16,7 +16,7 @@ import os
 from typing import List
 
 import msgspec
-from gen_worker import RequestContext, ValidationError, endpoint
+from gen_worker import RequestContext, Resources, ValidationError, endpoint
 
 
 class ProbeInput(msgspec.Struct):
@@ -52,9 +52,17 @@ def _cuda_or_refuse():
 
 
 @endpoint(
-    # th#1087 declaration gate — the endpoint's own switch only. The split flag is
-    # platform-injected (pgw#763 delta 0), never declared here.
-    env=["GEN_WORKER_OOM_PROBE"],
+    # The FUNCTION's declared resources are what the hub's compute-class
+    # resolver reads (from the discovery manifest) — endpoint.toml's
+    # `[resources]` is only the endpoint default, and the mutable
+    # release-level patch cannot promote a function that declared no GPU.
+    # Omitting this bought a CPU pod for a CUDA endpoint on the first GPU-arm
+    # attempt: `[compute-class] resolved function=cuda-probe class=cpu`, then
+    # the handler correctly refused with "requires a CUDA device".
+    resources=Resources(gpu=True),
+    # th#1087 declaration gate — see marco-polo's note: GEN_WORKER_PROCESS_SPLIT
+    # should be platform-reserved, not tenant-declared.
+    env=["GEN_WORKER_OOM_PROBE", "GEN_WORKER_PROCESS_SPLIT"],
 )
 class ProcSplitCudaProbe:
     def cuda_probe(self, ctx: RequestContext, data: ProbeInput) -> ProbeOutput:
