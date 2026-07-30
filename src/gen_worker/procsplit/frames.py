@@ -28,8 +28,14 @@ T_SHIPPED = 3        # pb.WorkerMessage bytes (model_event delivery receipts)
 T_HELLO_REQ = 4      # msgpack {}
 T_CONNECTED = 5      # empty
 T_DISCONNECTED = 6   # empty
-T_TOKEN = 7          # msgpack {"token": str, "exp": int}
+# 7 was T_TOKEN — the worker JWT, handed to the child on every rotation.
+# DELETED (delta 1): the child must never hold the signing identity, so there is
+# nothing to send. What replaced it is T_ACTION_REQ/RESP below: the child ASKS
+# the parent for a narrow, allowlisted, audited action and the parent — which
+# holds the JWT — performs it.
 T_FLUSH_ACK = 8      # msgpack {"flushed": bool}
+T_ACTION_RESP = 9    # msgpack {"id": int, "ok": bool, "status": int,
+                     #          "body": str, "error": str}
 
 # child -> parent
 T_HELLO = 20         # pb.Hello bytes
@@ -42,6 +48,12 @@ T_WATCHDOG = 24      # msgpack {}  (event-loop liveness: the loop is turning)
 # parent measures the child's CPU/IO itself, because a GIL-starved thread
 # cannot be the decider of its own process's liveness.
 T_LIVENESS = 25      # msgpack {"act": bool, "kind": str}
+# delta 1: the child's request for a parent-mediated action. The IPC surface is
+# an AUTHORIZATION surface — the child names an action and its arguments; the
+# parent decides, supplies the credential and the base URL, and returns only the
+# result. msgpack {"id": int, "method": str, "path": str, "query": {..},
+#                  "json": {..}, "timeout": float}
+T_ACTION_REQ = 26
 
 
 def pack_meta(obj: Any) -> bytes:

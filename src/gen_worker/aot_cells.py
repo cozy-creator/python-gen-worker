@@ -52,6 +52,7 @@ import requests
 from . import activity as activity_mod
 from . import aot_serve, cell_key
 from . import compile_cache as cc
+from .procsplit import broker
 from .config import get_settings
 from .convert.hub import blake3_file
 
@@ -92,20 +93,27 @@ def _emit(phase: str, detail: str) -> None:
 
 
 def _get(
-    url: str,
+    base_url: str,
+    path: str,
     bearer: str,
     *,
     params: Optional[Dict[str, str]] = None,
     timeout: float = _HTTP_TIMEOUT_S,
-    stream: bool = False,
-) -> requests.Response:
-    """GET with the worker bearer; one anonymous retry on 401/403 (public
-    family repos resolve anonymously — the #459 read posture)."""
-    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
-    resp = requests.get(
-        url, params=params, headers=headers, timeout=timeout, stream=stream)
+) -> Any:
+    """Authenticated GET; one ANONYMOUS retry on 401/403 (public family repos
+    resolve anonymously — the #459 read posture).
+
+    pgw#763 delta 1: the authenticated leg is parent-mediated under the split
+    (the compute child holds no worker JWT). The anonymous retry needs no
+    credential, so it stays a plain request from here either way — routing a
+    call that carries no authority through the authorization surface would only
+    make the allowlist read as if it granted more than it does."""
+    resp = broker.request(
+        "GET", path, base_url=base_url, bearer=bearer, params=params, timeout=timeout)
     if resp.status_code in (401, 403) and bearer:
-        resp = requests.get(url, params=params, timeout=timeout, stream=stream)
+        anon = requests.get(
+            base_url.rstrip("/") + path, params=params, timeout=timeout)
+        return broker.HubResponse(status_code=anon.status_code, text=anon.text)
     return resp
 
 
@@ -196,7 +204,7 @@ def _download_artifact(
     dest = dest_dir / f"{key}.tar.gz"
 
     resp = _get(
-        f"{base_url}/api/v1/repos/{repo}/resolve",
+        base_url, f"/api/v1/repos/{repo}/resolve",
         bearer, params={"digest": checkpoint_id})
     if resp.status_code != 200:
         _emit("resolve_failed",
@@ -263,7 +271,7 @@ def discover(
         repo = cc.system_repo(family)
         bearer = str(worker_jwt() or "").strip()
         resp = _get(
-            f"{base}/api/v1/repos/{repo}/checkpoints",
+            base, f"/api/v1/repos/{repo}/checkpoints",
             bearer, params={"limit": str(_LIST_LIMIT)})
         if resp.status_code != 200:
             _emit("list_failed",

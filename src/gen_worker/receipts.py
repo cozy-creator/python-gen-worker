@@ -47,6 +47,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from . import activity as activity_mod
+from .procsplit import broker
 
 logger = logging.getLogger(__name__)
 
@@ -261,10 +262,14 @@ def _kid_of(jws: str) -> str:
 
 
 def _fetch_receipt_jws(cfg: _Config, artifact_blake3: str, cell_key: str) -> str:
-    resp = requests.get(
-        cfg.base_url + RECEIPT_PATH,
+    # pgw#763 delta 1: parent-mediated when the split is on (the child holds no
+    # worker JWT); the identical GET otherwise.
+    resp = broker.request(
+        "GET",
+        RECEIPT_PATH,
+        base_url=cfg.base_url,
+        bearer=cfg.worker_jwt(),
         params={"blake3": artifact_blake3, "cell_key": cell_key},
-        headers={"Authorization": f"Bearer {cfg.worker_jwt()}"},
         timeout=_HTTP_TIMEOUT_S,
     )
     if resp.status_code == 404:
@@ -285,9 +290,11 @@ def _fetch_receipt_jws(cfg: _Config, artifact_blake3: str, cell_key: str) -> str
 
 
 def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
-    resp = requests.get(
-        cfg.base_url + REVOCATIONS_PATH,
-        headers={"Authorization": f"Bearer {cfg.worker_jwt()}"},
+    resp = broker.request(
+        "GET",
+        REVOCATIONS_PATH,
+        base_url=cfg.base_url,
+        bearer=cfg.worker_jwt(),
         timeout=_HTTP_TIMEOUT_S,
     )
     if resp.status_code != 200:

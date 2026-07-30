@@ -1,0 +1,294 @@
+"""pgw#763 driver 3: the parent/child seam as an AUTHORIZATION boundary.
+
+Stages 1-4 built the seam for resilience. These rows prove it is also the
+security boundary the issue's driver 3 says it must be: that the things tenant
+endpoint code could forge or steal while it shared the worker's process are now
+either impossible to reach or refused when asked for.
+
+Every row is the same shape as the fix it guards — an attack that no longer
+works, plus the legitimate use of the same path still working. The attacks are
+run by REAL endpoint handlers in a REAL compute child (that is the threat model:
+tenant code is imported into this process), or by a hostile frame peer that
+speaks the seam protocol directly (for the forgeries a well-behaved child would
+never emit).
+
+Run: uv run pytest tests/test_procsplit_security_pgw763.py -q
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import msgspec
+import pytest
+
+from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.procsplit import actions
+
+from harness.hub_double import is_ready, is_result_for
+from test_procsplit_pgw763 import (  # noqa: F401 — fixtures come with it
+    BOOT_TIMEOUT_S,
+    CHILD_MAIN,
+    SplitHarness,
+    _payload,
+    captured_dials,
+    isolated_postmortem,
+)
+
+WORKER_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ3LXBhcmVudCIsInJlbGVhc2VfaWQiOiJyZWwtNzYzIn0.sig"
+
+
+def _text(msg: pb.WorkerMessage) -> str:
+    """The handler's ProbeOut.response out of an OK JobResult."""
+    return msgspec.msgpack.decode(msg.job_result.inline)["response"]
+
+
+# --------------------------------------------------------------------------
+# A hub double for the parent's MEDIATED calls: a real HTTP server, so the
+# "legitimate path still works" half is an end-to-end round trip (child asks ->
+# parent authorizes -> parent attaches the JWT -> hub answers -> child reads).
+# --------------------------------------------------------------------------
+
+
+class _HubHTTP(BaseHTTPRequestHandler):
+    def _answer(self) -> None:
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}") \
+            if self.command == "POST" else {}
+        self.server.calls.append({  # type: ignore[attr-defined]
+            "method": self.command,
+            "path": self.path,
+            "authorization": self.headers.get("Authorization", ""),
+            "body": body,
+        })
+        payload = json.dumps(
+            self.server.reply  # type: ignore[attr-defined]
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    do_GET = _answer
+    do_POST = _answer
+
+    def log_message(self, *a: Any) -> None:
+        pass
+
+
+@pytest.fixture()
+def hub_http():
+    srv = HTTPServer(("127.0.0.1", 0), _HubHTTP)
+    srv.calls: List[Dict[str, Any]] = []          # type: ignore[attr-defined]
+    srv.reply = {"capability_token": "fresh-token", "expires_at_unix": 4102444800}  # type: ignore[attr-defined]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.fixture()
+def credentialed_split(tmp_path, captured_dials, monkeypatch, hub_http):
+    """A split whose PARENT holds a real-shaped worker JWT, delivered the way a
+    pod gets one: in the process environment."""
+    monkeypatch.setenv("WORKER_JWT", WORKER_JWT)
+    h = SplitHarness(
+        tmp_path,
+        extra_child_env={"PGW763_CHILD_MODULES": "harness.procsplit_endpoints"},
+    )
+    h.scheduler.file_base_url = f"http://127.0.0.1:{hub_http.server_address[1]}"
+    # The harness builds Settings with worker_jwt="" (its own default); give the
+    # parent the credential a real pod is launched with.
+    h.pc._settings = msgspec.structs.replace(h.pc._settings, worker_jwt=WORKER_JWT)
+    h.pc.transport._settings = h.pc._settings
+    try:
+        yield h
+    finally:
+        h.close()
+
+
+# ==========================================================================
+# DELTA 1 — the worker JWT is not in the child, and cannot be borrowed freely
+# ==========================================================================
+
+
+def test_delta1_tenant_code_finds_no_worker_jwt_in_its_process(credentialed_split):
+    """THE ATTACK: an endpoint handler reads the pod's signing identity.
+
+    It is one `os.environ["WORKER_JWT"]` away in a single-process worker, and
+    the deleted T_TOKEN frame used to re-deliver it on every rotation. The
+    handler sweeps all three routes — environment, loaded Settings, the
+    transport object — and must come back with nothing.
+    """
+    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+
+    conn.send(run_job=pb.RunJob(
+        request_id="r-steal", attempt=1, function_name="steal-credentials",
+        input_payload=_payload()))
+    got = conn.wait_for(is_result_for("r-steal"), timeout=60.0)
+    assert got.job_result.status == pb.JOB_STATUS_OK
+    leaked = _text(got)
+    assert leaked == "", (
+        f"tenant code reached the worker JWT via {leaked} — the compute child "
+        "must hold no signing identity (pgw#763 delta 1 / th#1311)"
+    )
+
+    # ...and the PARENT still has it: the credential moved, it did not vanish.
+    assert credentialed_split.pc.transport.current_worker_jwt == WORKER_JWT
+
+
+def test_delta1_parent_refuses_a_hub_call_the_allowlist_does_not_name(
+    credentialed_split, hub_http, captured_dials,
+):
+    """THE ATTACK: with no credential of its own, the child asks the parent to
+    make the call for it — an un-named path, i.e. the parent used as an open
+    proxy for its own JWT.
+
+    Mediation is only a boundary if the parent DECIDES. An un-named path is
+    refused, the credential never goes on the wire, and the refusal is banked
+    as a security event rather than logged and forgotten.
+    """
+    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+
+    conn.send(run_job=pb.RunJob(
+        request_id="r-forge", attempt=1, function_name="forge-hub-call",
+        input_payload=_payload("/v1/admin/orgs")))
+    got = conn.wait_for(is_result_for("r-forge"), timeout=60.0)
+    assert got.job_result.status == pb.JOB_STATUS_OK
+    answer = _text(got)
+    assert answer.startswith("refused:"), (
+        f"the parent performed an un-allowlisted hub call for the child ({answer})"
+    )
+    assert "not an allowlisted parent-mediated action" in answer
+    assert credentialed_split.pc.actions_refused >= 1
+    # Nothing reached the hub, so the JWT was never presented.
+    assert not [c for c in hub_http.calls if "/v1/admin/" in c["path"]]
+    assert any("compute_action_refused" in d for d in captured_dials)
+
+
+def test_delta1_parent_refuses_capability_renewal_for_a_foreign_request(
+    credentialed_split, hub_http,
+):
+    """THE ATTACK: the path IS allowlisted, so only parent STATE can refuse it —
+    a renewal for a request this worker was never dispatched. A path allowlist
+    alone would have forwarded it and let the hub decide with less context than
+    the parent has."""
+    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+
+    conn.send(run_job=pb.RunJob(
+        request_id="r-renew-forge", attempt=1,
+        function_name="forge-capability-renew",
+        input_payload=_payload("victim-request-id")))
+    got = conn.wait_for(is_result_for("r-renew-forge"), timeout=60.0)
+    answer = _text(got)
+    assert answer.startswith("refused:"), (
+        f"the parent renewed a capability for a job it never dispatched ({answer})"
+    )
+    assert "not an in-flight job on this worker" in answer
+    assert not [c for c in hub_http.calls if "capability/renew" in c["path"]]
+
+
+def test_delta1_the_legitimate_mediated_call_still_works(credentialed_split, hub_http):
+    """The other half: an ALLOWLISTED action for a job that IS in flight goes
+    through — the parent attaches the credential, the hub sees a normal
+    authenticated call, and the child gets the answer without ever holding the
+    bearer."""
+    pc = credentialed_split.pc
+    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+
+    # Stand in for a dispatched job (the relay records exactly this).
+    pc._in_flight[("r-live", 1)] = "echo"
+    status, body = _ask(pc, {
+        "method": "POST",
+        "path": "/v1/worker/capability/renew",
+        "json": {"request_id": "r-live", "attempt": 1, "capability_token": "old"},
+    })
+    assert status == 200, body
+    assert json.loads(body)["capability_token"] == "fresh-token"
+
+    call = [c for c in hub_http.calls if "capability/renew" in c["path"]][-1]
+    assert call["authorization"] == f"Bearer {WORKER_JWT}", (
+        "the parent must present the worker JWT on the child's behalf"
+    )
+    assert call["body"]["request_id"] == "r-live"
+
+
+def _ask(pc, req: Dict[str, Any]) -> Tuple[int, str]:
+    """Drive one action through the parent's real authorization path."""
+    import asyncio
+
+    fut = asyncio.run_coroutine_threadsafe(pc._perform_action(req), pc._loop)
+    out = fut.result(60.0)
+    return int(out["status"]), str(out["body"])
+
+
+# ==========================================================================
+# The allowlist itself — unit rows, because the table IS the policy
+# ==========================================================================
+
+
+@pytest.mark.parametrize(
+    "req,why",
+    [
+        ({"method": "GET", "path": "/v1/worker/secrets"}, "unlisted path"),
+        ({"method": "POST", "path": "/v1/worker/cells/receipt"}, "wrong method"),
+        ({"method": "GET", "path": "/api/v1/repos/a/b/../../admin/resolve"},
+         "traversal out of the allowlisted prefix"),
+        ({"method": "GET", "path": "/v1/worker/cells/receipt",
+          "query": {"blake3": "x", "owner": "root"}}, "query key not in the action"),
+        ({"method": "POST", "path": "/v1/worker/c2pa/sign",
+          "json": {"alg": "es256", "claim_b64": "AA", "callback_url": "http://evil"}},
+         "body key not in the action"),
+        ({"method": "POST", "path": "/v1/worker/capability/renew",
+          "json": {"request_id": "r", "attempt": 1,
+                   "capability_token": "x" * (300 * 1024)}},
+         "oversized body: the seam carries control, not data"),
+    ],
+)
+def test_action_table_refuses(req, why):
+    with pytest.raises(actions.ActionRefused):
+        actions.authorize(req)
+
+
+def test_action_table_admits_exactly_the_named_actions():
+    for req in (
+        {"method": "POST", "path": "/v1/worker/capability/renew",
+         "json": {"request_id": "r", "attempt": 1, "capability_token": "t"}},
+        {"method": "POST", "path": "/v1/worker/c2pa/sign",
+         "json": {"alg": "es256", "claim_b64": "AA=="}},
+        {"method": "GET", "path": "/v1/worker/cells/receipt",
+         "query": {"blake3": "b3", "cell_key": "k"}},
+        {"method": "GET", "path": "/v1/worker/cells/revocations"},
+        {"method": "GET", "path": "/api/v1/repos/root/system-sdxl/checkpoints",
+         "query": {"limit": "50"}},
+        {"method": "GET", "path": "/api/v1/repos/root/system-sdxl/resolve",
+         "query": {"digest": "ck5-abc"}},
+    ):
+        actions.authorize(req)
+
+
+def test_no_frame_carries_the_worker_jwt():
+    """A ratchet over the frame vocabulary itself: T_TOKEN is gone and nothing
+    replaced it. Catches a future frame that re-opens the same hole under a
+    different name."""
+    from gen_worker.procsplit import frames
+
+    assert not hasattr(frames, "T_TOKEN")
+    names = [n for n in dir(frames) if n.startswith("T_")]
+    for name in names:
+        assert "TOKEN" not in name and "JWT" not in name, (
+            f"frame {name} looks like it carries a credential to the compute child"
+        )

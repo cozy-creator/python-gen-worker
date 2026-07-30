@@ -40,6 +40,7 @@ from . import (
     ENV_LIVENESS_FD,
     ENV_SOCKET,
     ENV_WATCHDOG_PING_S,
+    actions,
     frames,
 )
 
@@ -76,6 +77,40 @@ _REPORTED_DEAD_CAP = 512
 # Minimum evidence advance that counts as life, mirroring activity._EVIDENCE_EPS
 # (not imported: the parent's import graph stays minimal and torch-free).
 _EVIDENCE_EPS = 0.05
+# delta 1: pod-launch envs that must not survive into the compute child. Every
+# one of them is a platform credential or the platform's identity claim, and
+# the child imports tenant code — so `os.environ` in that process is a public
+# noticeboard. WORKER_JWT is the signing identity; HF_TOKEN is the endpoint
+# author's own credential and legitimately belongs to the code that pulls
+# weights, so it deliberately stays.
+_CHILD_FORBIDDEN_ENVS = ("WORKER_JWT",)
+# A mediated hub call must not hold the parent's control loop open forever.
+_ACTION_HARD_TIMEOUT_S = 120.0
+_ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
+
+
+def _http_call(
+    method: str,
+    url: str,
+    token: str,
+    query: Dict[str, str],
+    body: Optional[Dict[str, Any]],
+    timeout: float,
+) -> Tuple[int, str]:
+    """The parent's half of a mediated call: the ONLY place the worker JWT is
+    put on the wire on the child's behalf. Runs in a thread — the control loop
+    never blocks on the hub."""
+    import requests
+
+    resp = requests.request(
+        method,
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        params=query or None,
+        json=body if method == "POST" else None,
+        timeout=timeout,
+    )
+    return resp.status_code, resp.text
 
 
 class _ChildLink:
@@ -201,6 +236,41 @@ class ParentControl:
         self._stop_deadline_task: Optional[asyncio.Task] = None
         self._reported_unretired = False
         self.unretired_results_at_exit = 0  # observability + tests
+        # delta 1: parent-mediated action accounting (observability + tests).
+        self._jwt_rotations = 0
+        self.actions_performed = 0
+        self.actions_refused = 0
+        self._last_action_refusal_report_at = 0.0
+        # The hub base the parent will direct mediated calls at. Captured from
+        # the HelloAck it relays — the CHILD never names a host.
+        self._file_base_url = ""
+        self._identity_cache: Optional[Tuple[str, str]] = None
+
+    # ---- identity (parent-owned) -----------------------------------------
+
+    def _identity(self) -> Tuple[str, str]:
+        """(worker_id, release_id) from the JWT THIS process holds.
+
+        The credential and the identity it asserts stay together: the child
+        cannot derive either (delta 1), and the parent refuses to relay a Hello
+        that claims a different one (``build_hello``).
+        """
+        if self._identity_cache is not None:
+            return self._identity_cache
+        worker_id = (self._settings.worker_id or "").strip()
+        release_id = ""
+        token = (self._settings.worker_jwt or "").strip()
+        if token:
+            try:
+                from ..request_context import _decode_unverified_jwt_claims
+
+                claims = _decode_unverified_jwt_claims(token)
+                worker_id = worker_id or str(claims.get("sub") or "").strip()
+                release_id = str(claims.get("release_id") or "").strip()
+            except Exception:
+                logger.warning("could not decode the worker JWT claims", exc_info=True)
+        self._identity_cache = (worker_id, release_id)
+        return self._identity_cache
 
     # ---- Transport handlers ---------------------------------------------
 
@@ -223,6 +293,16 @@ class ParentControl:
                     if self._hello_waiter is fut:
                         self._hello_waiter = None
                 hello = pb.Hello.FromString(raw)
+                # delta 1: identity is the credential holder's to assert. The
+                # child builds the serving state; the worker/release it claims
+                # to BE comes from the JWT in this process, so a child that
+                # rewrote either (tenant code reaches the whole Hello) cannot
+                # make the hub attribute its state to another worker.
+                worker_id, release_id = self._identity()
+                if worker_id:
+                    hello.worker_id = worker_id
+                if release_id:
+                    hello.release_id = release_id
                 if self._beat_interval <= 0 and hello.heartbeat_interval_ms > 0:
                     # The child's own promise is the cadence the parent keeps.
                     self._beat_interval = hello.heartbeat_interval_ms / 1000.0
@@ -239,6 +319,12 @@ class ParentControl:
             await self._link_ready.wait()
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
+        # delta 1: the hub's own base URL, for the parent-mediated actions the
+        # child asks for. Taking it here (rather than from a child-supplied
+        # argument) is what stops a compromised child from aiming the pod's
+        # worker JWT at a host of its choosing (th#1312).
+        if ack.file_base_url:
+            self._file_base_url = ack.file_base_url.rstrip("/")
         link = self._link
         if link is None:
             return
@@ -309,12 +395,15 @@ class ParentControl:
                 pass
 
     async def on_token_refresh(self, token: str, expires_at_unix: int) -> None:
-        link = self._link
-        if link is not None:
-            await link.writer.frame(
-                frames.T_TOKEN,
-                frames.pack_meta({"token": token, "exp": int(expires_at_unix)}),
-            )
+        """The rotated worker JWT stays HERE (delta 1).
+
+        This used to write a ``T_TOKEN`` frame, i.e. hand the pod's signing
+        identity to the process that imports tenant endpoint code — which is
+        the whole of th#1311's credential-laundering material, delivered on a
+        schedule. The transport keeps the token; the child asks for the narrow
+        actions it needs (``procsplit/actions.py``) and never sees the bearer.
+        """
+        self._jwt_rotations += 1
 
     # ---- child link (unix socket server) ---------------------------------
 
@@ -378,6 +467,15 @@ class ParentControl:
                 self._relaying = False
                 self._last_frame_at = time.monotonic()
             return
+        if ftype == frames.T_ACTION_REQ:
+            # Off the read loop: a mediated call is a network round trip, and
+            # blocking here would stop the child's frames (results, watchdog
+            # pings) from being read at all.
+            asyncio.create_task(
+                self._serve_action(link, frames.unpack_meta(payload)),
+                name="parent-action",
+            )
+            return
         if ftype == frames.T_PREPEND:
             msgs = [pb.WorkerMessage.FromString(b) for b in frames.unpack_meta(payload)]
             await self.transport.prepend_reconnect(msgs)
@@ -402,11 +500,140 @@ class ParentControl:
             return
         logger.warning("unknown child frame type %d ignored", ftype)
 
+    # ---- parent-mediated actions (delta 1) -------------------------------
+
+    async def _serve_action(self, link: _ChildLink, req: Dict[str, Any]) -> None:
+        """Decide and perform ONE action the child asked for.
+
+        The child holds no credential, so every identity-bearing hub call it
+        needs arrives here. The parent chooses the host, attaches the JWT, and
+        answers with the response body and nothing else — no headers, no
+        bearer, no redirect target.
+        """
+        rid = req.get("id")
+        try:
+            result = await self._perform_action(req)
+        except actions.ActionRefused as exc:
+            self.actions_refused += 1
+            logger.error(
+                "REFUSED parent-mediated action from the compute child: %s", exc
+            )
+            # A refusal is a security event: the child asked for authority it is
+            # not allowed to borrow. Bank it durably, throttled by the same
+            # report path every other typed worker event uses.
+            await self._report_action_refusal(str(exc))
+            reply: Dict[str, Any] = {"id": rid, "ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.warning("parent-mediated action failed", exc_info=True)
+            reply = {"id": rid, "ok": False,
+                     "error": f"{type(exc).__name__}: {exc}"}
+        else:
+            self.actions_performed += 1
+            reply = {"id": rid, "ok": True, **result}
+        try:
+            await link.writer.frame(frames.T_ACTION_RESP, frames.pack_meta(reply))
+        except (ConnectionError, OSError):
+            pass
+
+    async def _perform_action(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        named = str(req.get("action") or "")
+        if named:
+            if named != actions.ACTION_REPORT_DETAIL:
+                raise actions.ActionRefused(f"unknown action {named!r}")
+            # th#1310: a worker report is a fleet-wide verdict key, so it is
+            # worth more from the process that runs no tenant code. The child
+            # supplies the text; the parent supplies the identity and the dial.
+            detail = str(req.get("detail") or "")[:8000]
+            delivered = await asyncio.to_thread(
+                worker_fatal.report_worker_detail,
+                self._settings,
+                f"[compute-child] {detail}",
+            )
+            return {"result": {"delivered": bool(delivered)}}
+
+        action, query, body = actions.authorize(req)
+        base = self._file_base_url or (self._settings.tensorhub_public_url or "").rstrip("/")
+        if not base:
+            raise actions.ActionRefused(
+                f"{action.name}: no hub base URL is known yet (no HelloAck)"
+            )
+        if action.scoped_to_job:
+            body = self._narrow_job_scoped_action(action, dict(body or {}))
+        token = self.transport.current_worker_jwt
+        if not token:
+            raise actions.ActionRefused(f"{action.name}: this pod holds no worker JWT")
+        timeout = min(float(req.get("timeout") or action.timeout_s),
+                      action.timeout_s, _ACTION_HARD_TIMEOUT_S)
+        status, text = await asyncio.to_thread(
+            _http_call, action.method, base + str(req.get("path") or ""),
+            token, query, body, timeout,
+        )
+        logger.info(
+            "parent-mediated %s -> %d (child holds no credential)", action.name, status
+        )
+        return self._post_action(action, status, text)
+
+    def _narrow_job_scoped_action(
+        self, action: "actions.HubAction", body: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Hook for the per-job authority policy (delta 4). Delta 1 enforces the
+        one check that needs no token parsing: the parent will not renew a
+        capability for a request it never dispatched."""
+        if action.name != "capability.renew":
+            return body
+        rid = str(body.get("request_id") or "")
+        try:
+            attempt = int(body.get("attempt") or 0)
+        except (TypeError, ValueError):
+            attempt = -1
+        if (rid, attempt) not in self._in_flight:
+            raise actions.ActionRefused(
+                f"capability.renew for {rid}#{attempt}: not an in-flight job on "
+                "this worker — the parent renews only what it dispatched"
+            )
+        return body
+
+    def _post_action(
+        self, action: "actions.HubAction", status: int, text: str,
+    ) -> Dict[str, Any]:
+        """Last look at a response before it crosses back. Delta 4 narrows the
+        capability token here."""
+        return {"status": int(status), "body": text}
+
+    async def _report_action_refusal(self, detail: str) -> None:
+        now = time.monotonic()
+        if now - self._last_action_refusal_report_at < _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S:
+            return
+        self._last_action_refusal_report_at = now
+        await self._dial_detail(
+            f"phase=compute_action_refused refusals={self.actions_refused} "
+            f"detail={detail[:400]} — the compute child asked the control parent "
+            "for authority outside the allowlisted action table"
+        )
+
     # ---- child lifetime --------------------------------------------------
 
     async def _spawn_child(self) -> asyncio.subprocess.Process:
         env = dict(os.environ)
         env.update(self._child_env)
+        # delta 1: the compute child gets NO signing identity. Deleting the
+        # T_TOKEN frame is only half of it — the JWT also arrives at pod-launch
+        # in WORKER_JWT, and `os.environ` is the first place tenant code looks.
+        # Strip it from the child's environment so the credential's absence is
+        # a property of the process, not of the code paths we remembered to
+        # change. The PARENT keeps its own os.environ copy, so its Settings and
+        # its Transport are unaffected.
+        for name in _CHILD_FORBIDDEN_ENVS:
+            env.pop(name, None)
+        # ...but the child still needs its IDENTITY, which is not a credential:
+        # the intent registry and every lifecycle snapshot are keyed on the
+        # release id, and it used to be read out of the JWT the child no longer
+        # has. The parent decodes its own token and passes the two claims down.
+        worker_id, release_id = self._identity()
+        if worker_id:
+            env["WORKER_ID"] = worker_id
+        if release_id:
+            env["WORKER_RELEASE_ID"] = release_id
         env[ENV_CHILD] = "1"
         env[ENV_SOCKET] = self._socket_path
         # The gw#640 flight-recorder fork is redundant under this parent.

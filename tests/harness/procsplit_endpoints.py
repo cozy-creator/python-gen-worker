@@ -29,6 +29,81 @@ class SplitProbe:
     def echo(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         return ProbeOut(response=f"echo:{data.text}")
 
+    # ---- driver-3 probes: TENANT CODE going after platform credentials -----
+    # These handlers do what the threat model says untrusted endpoint code can
+    # do — it runs in this process, so every one of these is reachable. The
+    # security suite asserts each comes back EMPTY.
+
+    def steal_credentials(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """Sweep this process for the pod's signing identity.
+
+        Three routes, because closing one is not closing the class: the
+        environment (`WORKER_JWT` at pod-launch), the loaded Settings, and the
+        transport object the framework hands every handler's process.
+        """
+        found = []
+        if str(os.environ.get("WORKER_JWT", "") or "").strip():
+            found.append("env:WORKER_JWT")
+        try:
+            from gen_worker.config import get_settings
+
+            if str(getattr(get_settings(), "worker_jwt", "") or "").strip():
+                found.append("settings.worker_jwt")
+        except Exception:
+            pass
+        try:
+            import gc
+
+            from gen_worker.procsplit.child import ChildTransport
+
+            for obj in gc.get_objects():
+                if isinstance(obj, ChildTransport) and obj.current_worker_jwt:
+                    found.append("transport.current_worker_jwt")
+                    break
+        except Exception:
+            pass
+        return ProbeOut(response=",".join(found))
+
+    def forge_hub_call(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """Ask the control parent to make a call the allowlist does not name.
+
+        The IPC surface is the child's only route to worker authority, so it is
+        an authorization surface: an un-named path must be REFUSED, not proxied.
+        """
+        from gen_worker.procsplit import broker
+
+        if not broker.active():
+            return ProbeOut(response="no-broker")
+        try:
+            broker.request("GET", str(data.text or "/v1/worker/secrets"))
+        except Exception as exc:
+            return ProbeOut(response=f"refused:{exc}")
+        return ProbeOut(response="PERFORMED")
+
+    def forge_capability_renew(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """Renew a capability for a request this worker was never given.
+
+        The path IS allowlisted, so only the parent's own in-flight table can
+        refuse it — the check that needs parent state, not a path pattern.
+        """
+        from gen_worker.procsplit import broker
+
+        if not broker.active():
+            return ProbeOut(response="no-broker")
+        try:
+            broker.request(
+                "POST",
+                "/v1/worker/capability/renew",
+                json={
+                    "request_id": str(data.text or "someone-elses-request"),
+                    "attempt": 1,
+                    "capability_token": "stolen",
+                },
+            )
+        except Exception as exc:
+            return ProbeOut(response=f"refused:{exc}")
+        return ProbeOut(response="PERFORMED")
+
     def die_hard(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         """SIGKILL self: the cgroup-OOM shape — no exception, no finally."""
         os.kill(os.getpid(), signal.SIGKILL)

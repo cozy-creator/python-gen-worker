@@ -101,8 +101,8 @@ class ChildTransport:
         self._handlers = handlers
         self.queue = _QueueShim()
         self._connected = False
-        self._worker_jwt: Optional[str] = None
         self._stopping = asyncio.Event()
+        self._broker: Optional[Any] = None
         self._writer: Optional[frames.FrameWriter] = None
         self._flush_waiter: Optional[asyncio.Future] = None
         self._reported_handler_failures: set = set()
@@ -115,7 +115,21 @@ class ChildTransport:
 
     @property
     def current_worker_jwt(self) -> str:
-        return (self._worker_jwt or self._settings.worker_jwt or "").strip()
+        """Always empty in the compute child (delta 1).
+
+        The worker JWT is the pod's signing identity — the stream credential,
+        the capability minter, the authority behind the platform C2PA oracle.
+        This process imports tenant endpoint code, so anything it holds, that
+        code holds. The parent strips ``WORKER_JWT`` from this process's
+        environment and no frame carries it, so there is nothing here to
+        return; identity-bearing calls go through ``procsplit.broker`` and the
+        parent decides.
+
+        Kept as a property (rather than deleted) because it is the Transport
+        surface Lifecycle/Executor bind at boot, and an empty string is the
+        honest answer: this process has no credential.
+        """
+        return ""
 
     async def send(self, msg: pb.WorkerMessage) -> None:
         writer = self._writer
@@ -164,6 +178,11 @@ class ChildTransport:
         except OSError as exc:
             raise FatalTransportError(f"cannot reach control parent at {path}: {exc}") from exc
         self._writer = frames.FrameWriter(writer)
+        # delta 1: the child's only route to an identity-bearing hub call.
+        from .broker import ChildBroker, install as install_broker
+
+        self._broker = ChildBroker(asyncio.get_running_loop(), self._frame)
+        install_broker(self._broker)
         start_liveness_thread()
         ping = asyncio.create_task(self._watchdog_ping(), name="child-watchdog-ping")
         stop_task = asyncio.create_task(self._stopping.wait(), name="child-stop")
@@ -180,8 +199,20 @@ class ChildTransport:
                     t.cancel()
             await asyncio.gather(ping, recv, stop_task, return_exceptions=True)
             self._connected = False
+            from .broker import install as install_broker
+
+            if self._broker is not None:
+                self._broker.fail_all("control parent link lost")
+            install_broker(None)
+            self._broker = None
             self._writer.close()
             self._writer = None
+
+    async def _frame(self, ftype: int, payload: bytes) -> None:
+        writer = self._writer
+        if writer is None:
+            raise ConnectionError("control parent link is down")
+        await writer.frame(ftype, payload)
 
     async def _watchdog_ping(self) -> None:
         """EVENT-LOOP liveness (pgw#771): this proves the loop is turning, and
@@ -230,11 +261,9 @@ class ChildTransport:
                 writer = self._writer
                 if writer is not None:
                     await writer.frame(frames.T_HELLO, hello.SerializeToString())
-            elif ftype == frames.T_TOKEN:
-                meta = frames.unpack_meta(payload)
-                token = str(meta.get("token") or "").strip()
-                if token:
-                    self._worker_jwt = token
+            elif ftype == frames.T_ACTION_RESP:
+                if self._broker is not None:
+                    self._broker.resolve(frames.unpack_meta(payload))
             elif ftype == frames.T_FLUSH_ACK:
                 meta = frames.unpack_meta(payload)
                 waiter = self._flush_waiter
