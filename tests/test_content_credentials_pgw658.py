@@ -5,6 +5,11 @@ EU AI Act Art. 50 legal-critical path: every generated media asset must leave
 manifest when signing is configured. The pgw#609 test sweep deleted the
 original gw#518 suite; this is its greenfield replacement.
 
+th#1307: the private key is HUB-SIDE. Every round trip below therefore signs
+through a real HTTP signing oracle (``fake_hub_signer``) that holds the key and
+answers ``POST /v1/worker/c2pa/sign`` exactly like the hub route does —
+base64 COSE fixed-width r||s. The worker only ever holds the public chain.
+
 Chain fixture mirrors the production cert profile: ES256, keyUsage
 digitalSignature, EKU emailProtection, key in PKCS#8 — generated with openssl
 so a cert Paul buys per the th#714 runbook exercises the exact same code path.
@@ -12,12 +17,15 @@ so a cert Paul buys per the th#714 runbook exercises the exact same code path.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
 import os
 import subprocess
+import threading
 import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,18 +62,69 @@ def es256_chain(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     return {"cert": cert, "key": key}
 
 
+@pytest.fixture(scope="module")
+def fake_hub_signer(es256_chain):
+    """A stand-in for the hub's POST /v1/worker/c2pa/sign route.
+
+    Holds the private key (as the hub does), returns base64 COSE r||s (as
+    internal/orchestrator/c2pasign does), and refuses an unauthenticated
+    caller (as the worker-JWT gate does). This is the whole th#1307 contract
+    from the worker side.
+    """
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, utils as asym_utils
+
+    key = serialization.load_pem_private_key(
+        es256_chain["key"].read_bytes(), password=None
+    )
+    state = {"signatures": 0, "tokens": [], "claim_bytes": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            if self.path != cc.SIGN_PATH:
+                self.send_response(404); self.end_headers(); return
+            authz = self.headers.get("Authorization") or ""
+            if not authz.startswith("Bearer "):
+                self.send_response(401); self.end_headers(); return
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            claim = base64.b64decode(body["claim_b64"])
+            der = key.sign(claim, ec.ECDSA(hashes.SHA256()))
+            r, sv = asym_utils.decode_dss_signature(der)
+            sig = r.to_bytes(32, "big") + sv.to_bytes(32, "big")
+            state["signatures"] += 1
+            state["tokens"].append(authz.removeprefix("Bearer "))
+            state["claim_bytes"].append(len(claim))
+            out = json.dumps({"alg": "es256",
+                              "signature_b64": base64.b64encode(sig).decode()}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state["base_url"] = f"http://127.0.0.1:{server.server_port}"
+    yield state
+    server.shutdown()
+
+
 @pytest.fixture()
-def signer_configured(es256_chain, monkeypatch):
-    """Install the test signer process-wide; reset module state afterwards."""
+def signer_configured(es256_chain, fake_hub_signer, monkeypatch):
+    """Configure the worker exactly as a pod is configured: PUBLIC cert only,
+    signatures from the hub. Resets module state afterwards."""
     settings = SimpleNamespace(
         c2pa_cert_pem="",
-        c2pa_key_pem="",
         c2pa_cert_path=str(es256_chain["cert"]),
-        c2pa_key_path=str(es256_chain["key"]),
         c2pa_alg="es256",
         c2pa_ta_url="",
     )
     cc.configure(settings)
+    cc.configure_remote_signer(fake_hub_signer["base_url"], lambda: "worker-jwt-test")
     yield settings
     _reset(monkeypatch)
 
@@ -73,12 +132,12 @@ def signer_configured(es256_chain, monkeypatch):
 def _reset(monkeypatch):
     monkeypatch.setattr(cc, "_configured", False)
     monkeypatch.setattr(cc, "_config", None)
+    monkeypatch.setattr(cc, "_remote", None)
 
 
 def _unconfigure(monkeypatch):
     cc.configure(
-        SimpleNamespace(c2pa_cert_pem="", c2pa_key_pem="",
-                        c2pa_cert_path="", c2pa_key_path="",
+        SimpleNamespace(c2pa_cert_pem="", c2pa_cert_path="",
                         c2pa_alg="es256", c2pa_ta_url="")
     )
 
@@ -212,19 +271,19 @@ def test_sign_media_file_round_trip(signer_configured, tmp_path):
 # config semantics
 
 
-def test_inline_pem_config_signs(es256_chain, monkeypatch):
-    """GEN_WORKER_C2PA_*_PEM (hub-injected pod env, th#714) is sufficient."""
+def test_inline_pem_config_signs(es256_chain, fake_hub_signer, monkeypatch):
+    """GEN_WORKER_C2PA_CERT_PEM (hub-injected pod env, th#714) is sufficient —
+    the cert is the ONLY material a pod gets (th#1307)."""
     _reset(monkeypatch)
     cc.configure(
         SimpleNamespace(
             c2pa_cert_pem=es256_chain["cert"].read_text(),
-            c2pa_key_pem=es256_chain["key"].read_text(),
             c2pa_cert_path="",
-            c2pa_key_path="",
             c2pa_alg="es256",
             c2pa_ta_url="",
         )
     )
+    cc.configure_remote_signer(fake_hub_signer["base_url"], lambda: "worker-jwt-test")
     try:
         assert cc.enabled()
         signed = cc.sign_media_bytes(_png(), ref="o.png")
@@ -234,14 +293,12 @@ def test_inline_pem_config_signs(es256_chain, monkeypatch):
 
 
 def test_inline_pem_beats_broken_paths(es256_chain, monkeypatch):
-    """Inline PEM wins: bogus *_PATH values are not even read."""
+    """Inline PEM wins: a bogus *_PATH value is not even read."""
     _reset(monkeypatch)
     cc.configure(
         SimpleNamespace(
             c2pa_cert_pem=es256_chain["cert"].read_text(),
-            c2pa_key_pem=es256_chain["key"].read_text(),
             c2pa_cert_path="/nonexistent/cert.pem",
-            c2pa_key_path="/nonexistent/key.pem",
             c2pa_alg="es256",
             c2pa_ta_url="",
         )
@@ -269,32 +326,14 @@ def test_non_media_passthrough(signer_configured):
     assert cc.sign_media_bytes(payload, ref="outputs/result.json") is payload
 
 
-def test_cert_without_key_refuses(monkeypatch, es256_chain):
+def test_garbage_pem_refuses(monkeypatch):
     """Configured-but-broken must refuse (worker startup fails loudly)."""
     _reset(monkeypatch)
     with pytest.raises(cc.C2paSigningError):
         cc.configure(
             SimpleNamespace(
-                c2pa_cert_pem=es256_chain["cert"].read_text(),
-                c2pa_key_pem="",
-                c2pa_cert_path="",
-                c2pa_key_path="",
-                c2pa_alg="es256",
-                c2pa_ta_url="",
-            )
-        )
-    _reset(monkeypatch)
-
-
-def test_garbage_pem_refuses(monkeypatch):
-    _reset(monkeypatch)
-    with pytest.raises(cc.C2paSigningError):
-        cc.configure(
-            SimpleNamespace(
                 c2pa_cert_pem="not a pem",
-                c2pa_key_pem="also not a pem",
                 c2pa_cert_path="",
-                c2pa_key_path="",
                 c2pa_alg="es256",
                 c2pa_ta_url="",
             )

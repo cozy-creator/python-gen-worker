@@ -367,6 +367,22 @@ yet"), plus the flip-critical AOT serve seams.
 
 
 
+## Unreleased — C2PA signing moves hub-side (th#1307)
+
+- **The C2PA private key never enters a pod (th#1307).** The hub used to inject
+  `GEN_WORKER_C2PA_KEY_PEM` into every tenant pod and this process signed
+  in-process — tenant code shares the process, so one `print(os.environ[...])`
+  leaked the platform-wide leaf signing key. Now the worker holds only the PUBLIC
+  chain and signs through the hub: `content_credentials` installs a c2pa-rs
+  callback signer that POSTs the claim's COSE to-be-signed octets to
+  `/v1/worker/c2pa/sign` (worker-JWT authenticated, armed at HelloAck alongside
+  the cell-receipt gate). No media leaves the pod; a claim is ~1 KiB regardless
+  of asset size. `GEN_WORKER_C2PA_KEY_PEM` / `_KEY_PATH` are now REFUSED at
+  configure() and no longer exist as Settings fields, so a hub regression kills
+  the pod loudly instead of quietly re-creating the leak. Every failure mode
+  (unarmed signer, hub refusal, hub unreachable) RAISES: the request fails
+  rather than shipping media that looks signed and isn't.
+
 ## Unreleased (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
 
 Paul's exact-identity ruling chain (design of record: tracker pgw#716). This ships

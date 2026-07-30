@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
+from . import content_credentials
 from . import receipts
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
@@ -416,6 +417,14 @@ class Lifecycle:
         # before it may arm. Same wiring moment as the CellPublisher's.
         if self.executor.file_base_url:
             receipts.configure(
+                base_url=self.executor.file_base_url,
+                worker_jwt=self.executor.worker_jwt_provider,
+            )
+            # th#1307: arm the hub-side C2PA signer at the same moment. The
+            # platform private key never enters this pod — the hub signs the
+            # claim bytes. Until this call lands, a signing-configured worker
+            # FAILS media requests rather than shipping them unsigned.
+            content_credentials.configure_remote_signer(
                 base_url=self.executor.file_base_url,
                 worker_jwt=self.executor.worker_jwt_provider,
             )
