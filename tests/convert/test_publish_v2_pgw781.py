@@ -395,3 +395,31 @@ def test_a_grant_for_something_never_declared_is_refused(hub, tmp_path, monkeypa
         srv.shutdown()
         srv.server_close()
         t.join(timeout=5)
+
+
+def test_a_provenance_stamp_is_REFUSED_not_silently_dropped(hub, tmp_path):
+    """The v2 route writes `Provenance: []byte("{}")` unconditionally. Every
+    mirror publish carries `{"upstream_revision": <commit>}` — the field that
+    pins WHICH upstream commit we copied, and the one th#1301's strongest check
+    (our sha256 vs upstream's published value) is computed against. Accepting
+    and dropping it would blank lineage on every mirrored model, silently: the
+    same failure shape as a verifier that quietly checks nothing."""
+    with pytest.raises(HubPublishError, match="provenance"):
+        client(hub).publish_v2(
+            destination_repo="org/model",
+            files=[write(tmp_path, "config.json", payload(64))],
+            tags=["prod"],
+            provenance={"upstream_revision": "abc123"},
+        )
+    assert not hub.declared_bodies  # refused BEFORE the declare
+
+
+def test_an_EMPTY_provenance_mapping_does_not_block(hub, tmp_path):
+    """The refusal is about losing DATA, not about the argument being present —
+    a caller that threads an empty stamp through is losing nothing."""
+    res = client(hub).publish_v2(
+        destination_repo="org/model",
+        files=[write(tmp_path, "config.json", payload(64))],
+        tags=["prod"], provenance={"upstream_revision": ""},
+    )
+    assert res.checkpoint_id.startswith("sha256:")

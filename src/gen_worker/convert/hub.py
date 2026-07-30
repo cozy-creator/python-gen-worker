@@ -711,6 +711,7 @@ class HubClient:
         declared_tensors: Mapping[str, Any] | None = None,
         deletions: list[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
+        provenance: Mapping[str, Any] | None = None,
         repo_spec: Mapping[str, str] | None = None,
         progress: Any = None,
         part_progress: Optional[Callable[[int, int, int], None]] = None,
@@ -749,6 +750,24 @@ class HubClient:
 
         if not files:
             raise HubPublishError("publish_v2 requires at least one file")
+
+        # THE v2 ROUTE CANNOT CARRY A PROVENANCE STAMP YET. `repo_publish_v2`
+        # writes `Provenance: []byte("{}")` unconditionally — deliberately, since
+        # the orchestrator token claim that feeds it is a v1 commit-create
+        # concept. Accepting the argument and dropping it would blank
+        # `upstream_revision` on every mirror, silently: exactly the field that
+        # pins WHICH upstream commit we copied, and the one th#1301's strongest
+        # check (compare our sha256 against upstream's published value) is
+        # computed against. A publish that quietly loses its lineage is the same
+        # failure shape as a verifier that quietly checks nothing, so this
+        # REFUSES instead. Remove this the commit the route learns the field.
+        if provenance and any(v for v in dict(provenance).values()):
+            raise HubPublishError(
+                "publish_v2 cannot carry a provenance stamp yet — the v2 route "
+                f"writes an empty one (fields offered: {sorted(dict(provenance))}). "
+                "Publishing this over v2 would silently drop upstream lineage; "
+                "use commit() until the route accepts provenance."
+            )
         repo_path = self._repo_path(destination_repo)
 
         # ONE streaming pass per file yields the whole-file sha256 AND every
