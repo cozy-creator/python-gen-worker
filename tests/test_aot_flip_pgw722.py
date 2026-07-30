@@ -297,9 +297,20 @@ def test_discover_downloads_newest_and_registers_key(
         hub.close()
 
 
-def test_discover_retries_anonymously_on_401(
+def test_discover_names_a_refusal_and_never_retries_anonymously(
     tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    monkeypatch: Any,
 ) -> None:
+    """th#1335 (was: test_discover_retries_anonymously_on_401).
+
+    The anonymous retry is retired. th#1310 made the family cell repos private
+    and named the retry as the hazard that would turn one visibility flip into
+    unauthenticated cross-tenant enumeration; the worker JWT now carries a
+    hub-issued read grant instead. So a 401/403 must (a) NOT be re-issued
+    without the bearer, and (b) surface as a NAMED refusal — th#1230's lesson:
+    an authorization outcome the worker cannot tell apart from "this family has
+    no cells" is silently fatal to the whole lane.
+    """
     key = _key("8")
     meta = _pilot_meta(key)
     blob = _tarball(meta, tmp_path)
@@ -307,14 +318,25 @@ def test_discover_retries_anonymously_on_401(
         [{"checkpoint_id": "cafe02", "updated_at": "2026-07-28T00:00:00Z",
           "metadata": meta}],
         {"cafe02": blob}, refuse_bearer=True)
+    seen: List[Tuple[str, str]] = []
+    monkeypatch.setattr(
+        aot_cells, "_emit",
+        lambda phase, detail: seen.append((phase, detail)))
     try:
         adopted = aot_cells.discover(
             _FakePipe(), _Cfg(),
             base_url=hub.base_url, worker_jwt=lambda: "jwt-token",
             cache_dir=tmp_path / "cache")
-        assert adopted is not None and adopted.cell_key == key
+        assert adopted is None
     finally:
         hub.close()
+    phases = [p for p, _ in seen]
+    assert "not_authorized" in phases, seen
+    assert "list_failed" not in phases, (
+        "an authz refusal must not be laundered into the generic listing "
+        f"failure the worker treats as absence: {seen}")
+    # Not one request went out without the credential.
+    assert all(has_auth for _path, has_auth in hub.requests), hub.requests
 
 
 def test_discover_never_raises(

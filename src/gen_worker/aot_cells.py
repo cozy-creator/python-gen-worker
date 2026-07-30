@@ -51,6 +51,7 @@ import requests
 
 from . import activity as activity_mod
 from . import aot_serve, cell_key
+from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .config import get_settings
 from .convert.hub import blake3_file
@@ -62,6 +63,12 @@ _DOWNLOAD_TIMEOUT_S = 120
 _LIST_LIMIT = 200
 
 EVENT = "aot_cell_discovery"
+
+# th#1335: statuses that mean "you may not look", as opposed to "there is
+# nothing there". 403 is what the hub now answers a worker credential with no
+# read grant on a platform cell repo; 401 covers a credential the hub could not
+# verify at all.
+_NOT_AUTHORIZED = (401, 403)
 
 
 def prefer_aot() -> bool:
@@ -99,14 +106,19 @@ def _get(
     timeout: float = _HTTP_TIMEOUT_S,
     stream: bool = False,
 ) -> requests.Response:
-    """GET with the worker bearer; one anonymous retry on 401/403 (public
-    family repos resolve anonymously — the #459 read posture)."""
+    """GET with the worker bearer.
+
+    th#1335: the anonymous retry on 401/403 is GONE. It existed because the
+    family cell repos used to be public, but th#1310 made them private and
+    recorded the retry as the hazard that would turn one visibility flip into
+    unauthenticated cross-tenant enumeration. The worker JWT now carries a
+    hub-issued ``read_repo`` grant for exactly the families its release
+    declares, so a refusal is a real authorization answer and must be reported
+    as one — never laundered into an anonymous 404.
+    """
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
-    resp = requests.get(
+    return requests.get(
         url, params=params, headers=headers, timeout=timeout, stream=stream)
-    if resp.status_code in (401, 403) and bearer:
-        resp = requests.get(url, params=params, timeout=timeout, stream=stream)
-    return resp
 
 
 def _lane_of_meta(meta: Dict[str, Any]) -> str:
@@ -188,7 +200,35 @@ def _download_artifact(
     cache_dir: Optional[Path],
 ) -> Optional[Path]:
     """Resolve the checkpoint's manifest and fetch its artifact tarball,
-    blake3-verified against the manifest entry. Cached by cell key."""
+    blake3-verified against the manifest entry. Cached by cell key.
+
+    pgw#764: bracketed as the ``cell_fetch`` boot phase. Whether this was a
+    cold pull or a cache hit — and how many bytes it cost — is the difference
+    between a fast boot and a slow one, and nothing measured it before.
+    """
+    with boot_mod.span(
+        boot_mod.PHASE_CELL_FETCH,
+        artifact_kind=aot_serve.ARTIFACT_KIND,
+        artifact_key=key,
+    ) as fetch:
+        dest = _download_artifact_inner(
+            base_url, bearer, family, checkpoint_id, key, cache_dir, fetch)
+        if dest is None:
+            # A miss is a typed decline, not an exception: the pilot lane
+            # self-mints instead. Reason tokens already rode _emit above.
+            fetch.refused("fetch_miss")
+        return dest
+
+
+def _download_artifact_inner(
+    base_url: str,
+    bearer: str,
+    family: str,
+    checkpoint_id: str,
+    key: str,
+    cache_dir: Optional[Path],
+    fetch: "boot_mod.BootSpan",
+) -> Optional[Path]:
     repo = cc.system_repo(family)
     dest_dir = (
         Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
@@ -198,6 +238,11 @@ def _download_artifact(
     resp = _get(
         f"{base_url}/api/v1/repos/{repo}/resolve",
         bearer, params={"digest": checkpoint_id})
+    if resp.status_code in _NOT_AUTHORIZED:
+        _emit("not_authorized",
+              f"family={family} key={key}: resolve -> {resp.status_code} "
+              f"(worker credential carries no read grant for {repo})")
+        return None
     if resp.status_code != 200:
         _emit("resolve_failed",
               f"family={family} key={key}: resolve -> {resp.status_code}")
@@ -215,6 +260,7 @@ def _download_artifact(
     if want_b3.startswith("blake3:"):
         want_b3 = want_b3[7:]
     if dest.is_file() and want_b3 and blake3_file(dest) == want_b3:
+        fetch.bytes_moved(dest.stat().st_size, boot_mod.SOURCE_LOCAL)
         return dest
 
     url = str(entry.get("url") or "")
@@ -235,6 +281,7 @@ def _download_artifact(
               f"family={family} key={key}: downloaded bytes != manifest blake3")
         return None
     tmp.replace(dest)
+    fetch.bytes_moved(dest.stat().st_size, boot_mod.SOURCE_R2)
     return dest
 
 
@@ -250,7 +297,29 @@ def discover(
 
     Never raises: every failure is a MISS with a typed event — a broken
     discovery must cost the pilot lane, never the boot.
+
+    pgw#764: bracketed as the ``cell_discover`` boot phase, so the hub can see
+    what asking the catalog cost even when the answer was "no cell".
     """
+    with boot_mod.span(boot_mod.PHASE_CELL_DISCOVER) as found:
+        cell = _discover_inner(
+            pipe, cfg, base_url=base_url, worker_jwt=worker_jwt,
+            cache_dir=cache_dir)
+        if cell is None:
+            found.refused("no_cell")
+        else:
+            found.note(f"family={cell.family} key={cell.cell_key}")
+        return cell
+
+
+def _discover_inner(
+    pipe: Any,
+    cfg: Any,
+    *,
+    base_url: str,
+    worker_jwt: Callable[[], str],
+    cache_dir: Optional[Path] = None,
+) -> Optional[AdoptedAotCell]:
     family = str(getattr(cfg, "family", "") or "")
     if not family:
         return None
@@ -265,6 +334,16 @@ def discover(
         resp = _get(
             f"{base}/api/v1/repos/{repo}/checkpoints",
             bearer, params={"limit": str(_LIST_LIMIT)})
+        if resp.status_code in _NOT_AUTHORIZED:
+            # th#1335/th#1230: an authorization refusal is NOT an empty family.
+            # It is a config defect — this release's worker credential carries
+            # no read grant for its own family's cell repo — and it must be
+            # nameable as one, because the fail-soft path (self-mint) looks
+            # identical from the outside either way.
+            _emit("not_authorized",
+                  f"family={family}: checkpoint listing -> {resp.status_code} "
+                  f"(worker credential carries no read grant for {repo})")
+            return None
         if resp.status_code != 200:
             _emit("list_failed",
                   f"family={family}: checkpoint listing -> {resp.status_code}")
