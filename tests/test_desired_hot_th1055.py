@@ -284,19 +284,12 @@ def test_validation_refusal_emits_model_events(tmp_path, monkeypatch) -> None:
         "a refused hot intent must be fleet-visible, not a pod-local warning")
     assert setup_calls == []
 
-
-def test_unbound_default_less_slot_refuses_loud(tmp_path, monkeypatch) -> None:
-    """A hot intent missing a default-less slot cannot fall back to code —
-    refuse (loud), matching dispatch's mirror-first contract."""
-    setup_calls: List[Tuple[str, str]] = []
-    ex, sent, _enables = _harness(tmp_path, monkeypatch,
-                                  [_slot_only_spec(setup_calls)])
-
-    desired = pb.DesiredInstance(
-        function_name="generate",
-        models=[pb.ModelBinding(slot="pipeline", ref=RESOLVED_REF)],
-    )
+    # The missing-default-less-slot shape refuses through the same loud path.
+    sent.clear()
     with pytest.raises(ValidationError, match="declared slots"):
-        asyncio.run(ex.ensure_desired_instance(desired, {}))
+        asyncio.run(ex.ensure_desired_instance(pb.DesiredInstance(
+            function_name="generate",
+            models=[pb.ModelBinding(slot="pipeline", ref=RESOLVED_REF)],
+        ), {}))
     assert _failed_model_events(sent)
     assert setup_calls == []
