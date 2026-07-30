@@ -156,6 +156,21 @@
   'lora_a' is missing`. The wrapper now appends the pair to the denoiser's own positional
   parameters via `__signature__` and accepts it either way.
 
+- **pgw#795 (round 3) — three more load-induced failures, found by running the
+  suite against a clean `chaos` tree on a loaded box.** None was caused by any
+  code change; all three asserted the machine. `subprocess_runner.run_entrypoint`
+  turned its `subprocess.run(timeout=25.0)` TOTAL budget into a SILENCE window —
+  the entrypoint emits `worker.startup.phase` lines throughout boot, so a boot
+  that keeps talking now runs as long as it needs and only silence gives up
+  (red-verified: a chatty child survives 3.6 s through a 1.0 s window; a wedged
+  one is caught in 1.3 s and killed, output preserved). `test_mint_liveness_pgw784`
+  asserted a beat-gap margin three times tighter than the hub's own kill line and
+  failed at 0.51 s against 0.50 s while the kill line sat at 1.50 s — it now
+  asserts the property (the hub would never kill this worker) and reports the
+  margin. `test_p2_residency_reconcile` sampled `resident_identity` the instant an
+  event arrived and read `('snap-a', 0)`; it now waits for the store to rebase on
+  progress.
+
 - **pgw#795 (sweep + guard) — the anti-pattern is now detected, not remembered.**
   `test_magic_timeouts_gw666`'s guard pinned five NAMED constants in five NAMED
   `src/` files, so it missed this twice over: it never looked at `tests/`, and a

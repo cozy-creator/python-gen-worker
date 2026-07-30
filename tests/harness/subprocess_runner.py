@@ -12,10 +12,13 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import msgspec
+
+from gen_worker.stall import SilenceWindow
 
 from .hardware_report_hub import closed_port_addr
 
@@ -50,6 +53,17 @@ def run_entrypoint(
     env_overrides: Optional[Dict[str, str]] = None,
     timeout: float = 25.0,
 ) -> subprocess.CompletedProcess[str]:
+    """Boot a real entrypoint subprocess and collect its output.
+
+    pgw#795: ``timeout`` is a SILENCE window, not a total budget. It was a
+    ``subprocess.run(timeout=...)`` wall clock and it failed a full-suite run at
+    25s on a loaded box — a boot that is merely slow is not a boot that is
+    wedged, and the entrypoint says so continuously (``worker.startup.phase``
+    lines throughout). So a boot that keeps talking runs as long as it needs,
+    and only silence gives up. Same rule ``gen_worker.stall`` gives production
+    code, and the same reason: on a shared runner a fixed budget decides the
+    machine's speed, not the code's behaviour.
+    """
     manifest_path = tmp_path / "endpoint.lock"
     write_manifest(manifest_path, functions)
 
@@ -70,9 +84,50 @@ def run_entrypoint(
     }
     env.update(env_overrides or {})
 
-    return subprocess.run(
+    proc = subprocess.Popen(
         [sys.executable, "-m", "gen_worker.entrypoint"],
-        env=env, capture_output=True, text=True, timeout=timeout,
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    return _collect_until_silent(proc, silence_window_s=timeout)
+
+
+def _collect_until_silent(
+    proc: "subprocess.Popen[str]", *, silence_window_s: float,
+) -> "subprocess.CompletedProcess[str]":
+    window = SilenceWindow(silence_window_s)
+    chunks: Dict[str, List[str]] = {"out": [], "err": []}
+
+    def _drain(stream: Any, key: str) -> None:
+        for line in iter(stream.readline, ""):
+            chunks[key].append(line)
+            window.touch()
+        stream.close()
+
+    readers = [
+        threading.Thread(target=_drain, args=(proc.stdout, "out"), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, "err"), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    while True:
+        try:
+            proc.wait(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if window.stalled():
+                proc.kill()
+                proc.wait()
+                for reader in readers:
+                    reader.join(timeout=5.0)
+                raise subprocess.TimeoutExpired(
+                    proc.args, silence_window_s,
+                    output="".join(chunks["out"]), stderr="".join(chunks["err"]),
+                ) from None
+    for reader in readers:
+        reader.join(timeout=5.0)
+    return subprocess.CompletedProcess(
+        proc.args, proc.returncode,
+        "".join(chunks["out"]), "".join(chunks["err"]),
     )
 
 
