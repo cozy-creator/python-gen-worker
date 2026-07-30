@@ -57,7 +57,18 @@ _DISK_REPORT_TTL_S = 30.0
 
 
 def probe_hardware() -> Dict[str, Any]:
-    """Static hardware facts + gate inputs. torch is optional."""
+    """Static hardware facts + gate inputs. torch is optional.
+
+    ``gpu_free_mem`` is the input `gate_functions` turns into `unavailable` +
+    `serve_plans` for EVERY function, so on a wide pod it must be the free pool
+    of the group with the LEAST room, not card 0's (pgw#776/DPA-7). Card 0 is
+    always the least free card in practice — it carries group 0's weights plus
+    the allocator cache (measured: qwen 96.5 GiB on card 0 vs ~68 on 1-3) — so
+    reading it planned offload/fp8-fallback rungs for groups 1..G-1 from a card
+    they will never touch, and a genuinely-unfit card 0 refused functions the
+    other three could serve. The MIN is the honest single scalar until the fit
+    ladder is per-rank: it never promises a group room it does not have.
+    """
     info: Dict[str, Any] = {
         "gpu_count": 0,
         "gpu_total_mem": 0,
@@ -77,6 +88,13 @@ def probe_hardware() -> Dict[str, Any]:
             free_mem, total_mem = torch.cuda.mem_get_info(0)
             info["gpu_total_mem"] = int(total_mem)
             info["gpu_free_mem"] = int(free_mem)
+            worst = _worst_group_free_vram_bytes()
+            if worst and worst != int(free_mem):
+                logger.info(
+                    "fit inputs: gating on the least-free group (%d bytes) "
+                    "instead of card 0 (%d bytes) — pgw#776",
+                    int(worst), int(free_mem))
+                info["gpu_free_mem"] = int(worst)
     except Exception:
         pass
     try:
@@ -92,26 +110,51 @@ def probe_hardware() -> Dict[str, Any]:
     return info
 
 
+_MULTI_GPU_NO_TOPOLOGY_WARNED = False
+
+
+def _worst_group_free_vram_bytes() -> int:
+    """The free pool of the least-roomy execution group, or 0 if unknowable.
+
+    Reads the DELIVERED topology (pgw#776/DPA-5): on a pod this worker itself
+    demoted for a non-NVLink fabric, ``from_env`` describes a packing that is
+    not being served, so reporting from it makes the reported and served
+    topologies disagree.
+    """
+    from .topology import delivered_topology
+
+    groups = delivered_topology().all_groups()
+    return int(min((g.free_vram_bytes() for g in groups), default=0))
+
+
 def free_vram_bytes() -> int:
-    """Free VRAM for the BEST placement this worker can offer one job
-    (``StateDelta.free_vram_bytes``).
+    """Free VRAM the hub may admit against (``StateDelta.free_vram_bytes``).
 
     This used to be the sum across every CUDA device, which is the reporting
     half of the bug pgw#648 fixed in the accounting half: VRAM is not fungible
     between cards, so a 2x24GB pod that reports 48GB invites the hub to admit
-    a 30GB model that fits on neither. One job runs on one execution group, so
-    the honest number is the largest single group's free pool — MIN within a
-    replicated group (every member holds a full copy), MAX across groups
-    (the job goes to whichever group is roomiest). Single-GPU pods, which is
-    every pod today, are unchanged.
+    a 30GB model that fits on neither.
+
+    It then became the MAX across groups, which is honest PER JOB and dishonest
+    per POD (pgw#776/DPA-5): the hub admits against a single scalar and can
+    admit G concurrent jobs whose sum is G times what any one group has. With
+    one scalar on the wire the only safe answer is the MIN across groups — MIN
+    within a replicated group too, since every member holds a full copy — so
+    every one of the G jobs the hub may admit fits where it lands. At G == 1,
+    which is every pod today, MIN and MAX are the same number.
+
+    Multi-GPU host with NO delivered topology (every harness attach and
+    `cli serve`): the worker has ONE slot which places on the thread-current
+    device, so card 0 is the honest number and the other cards are invisible to
+    the hub. That is a real behaviour change from the historical all-device sum
+    (the pgw#748 G=1 invariant's one exception), so it is named and logged once
+    rather than left to be rediscovered.
     """
     try:
-        from .topology import ExecutionTopology
-
-        groups = ExecutionTopology.from_env().all_groups()
-        best = max((g.free_vram_bytes() for g in groups), default=0)
-        if best:
-            return int(best)
+        worst = _worst_group_free_vram_bytes()
+        if worst:
+            _warn_once_if_gpus_are_invisible()
+            return int(worst)
     except Exception:
         pass
     try:
@@ -122,6 +165,30 @@ def free_vram_bytes() -> int:
     except Exception:
         pass
     return 0
+
+
+def _warn_once_if_gpus_are_invisible() -> None:
+    global _MULTI_GPU_NO_TOPOLOGY_WARNED
+    if _MULTI_GPU_NO_TOPOLOGY_WARNED:
+        return
+    try:
+        import torch
+
+        from .topology import ENV_VAR, delivered_topology
+
+        if os.environ.get(ENV_VAR):
+            return
+        count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if count > 1 and delivered_topology().gpu_count == 1:
+            _MULTI_GPU_NO_TOPOLOGY_WARNED = True
+            logger.warning(
+                "this host has %d CUDA devices and NO delivered %s: the worker "
+                "serves ONE slot on card 0 and reports card 0's free VRAM. The "
+                "other %d card(s) are invisible to the hub (they are not "
+                "summed — VRAM is not fungible across cards). pgw#776",
+                count, ENV_VAR, count - 1)
+    except Exception:
+        pass
 
 
 def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
