@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 import msgspec
 
 from . import activity as activity_mod
+from . import cpu_budget
 from . import mint_budget
 from . import progress as progress_mod
 from .api.binding import ModelRef, wire_ref
@@ -2648,6 +2649,15 @@ class Executor:
         self.store.bind_topology(self.topology)
         self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.groups)
         self._gpu_semaphore = asyncio.Semaphore(self._gpu_slots)
+        # pgw#782: the slot count is also the CPU divisor. torch sizes its
+        # intra-op pool from the HOST's logical processors, so a 4-group pod
+        # runs four 48-thread teams against a 32-core quota. De-escalation
+        # only, and measured NEUTRAL on the width-4 sdxl burst (37.1s vs
+        # 36.7s) — the collapse is the shared interpreter (pgw#783), not this.
+        # Kept because the oversubscription is real and bites narrow-quota
+        # pods. Here, with the other process-global torch state (TF32 above),
+        # keyed off the same authoritative slot count.
+        self.cpu_budget = cpu_budget.impose_intra_op_threads(self._gpu_slots)
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
