@@ -136,6 +136,42 @@ def arrive_key(spec: RankSpec) -> str:
     return f"{spec.group_name or 'gwsp'}/arrive/{int(spec.rank)}"
 
 
+_NVLS_ENV = "NCCL_NVLS_ENABLE"
+
+
+def _refuse_nvls_multicast() -> None:
+    """Turn NVLink SHARP (NVLS) multicast OFF before NCCL builds a communicator.
+
+    Measured live on a 4xH100-80GB-HBM3 SXM pod (NV18, 366.7 GB/s peer,
+    NCCL 2.29.7): the group forms, CP installs, and then the FIRST all-to-all
+    of every arm — degree 2, degree 4 and both groups of a 2x2 — dies::
+
+        ncclUnhandledCudaError: Call to CUDA function failed.
+        Failed to bind NVLink SHARP (NVLS) Multicast memory of size 2097152 :
+        CUDA error 401 'the operation cannot be performed in the present state'
+
+    NCCL >= 2.2x enables NVLS by default on NVSwitch hosts, and binding
+    multicast memory needs a privilege our containers do not have. It is a
+    total failure, not a slowdown: sequence parallelism does not work at all on
+    a stock 4xH100 pod without this.
+
+    Switching it off costs nothing measurable HERE: Ulysses is all-to-all, and
+    NVLS accelerates switch-side reductions (all-reduce/reduce-scatter), not
+    all-to-all. CODE decides it, which is pgw#718's rule — an explicit value in
+    the image is left alone, so a platform that CAN bind multicast keeps it.
+    """
+    import os
+
+    if os.environ.get(_NVLS_ENV) is None:
+        os.environ[_NVLS_ENV] = "0"
+        logger.info(
+            "%s=0 for this rank group: NVLS multicast cannot be bound in our "
+            "containers (measured: ncclUnhandledCudaError / CUDA 401 on the "
+            "first all-to-all of every group) and Ulysses does not use it",
+            _NVLS_ENV,
+        )
+
+
 def init_rank(spec: RankSpec, store: Any = None) -> Any:
     """Join ``spec``'s group as a NON-default process group; returns the
     ProcessGroup handle every collective must be given explicitly.
@@ -147,6 +183,9 @@ def init_rank(spec: RankSpec, store: Any = None) -> Any:
     import torch.distributed as dist
     from torch.distributed import distributed_c10d as c10d
 
+    # Before any communicator exists in this process: NCCL reads its env at
+    # communicator creation, and after that it is too late.
+    _refuse_nvls_multicast()
     if spec.backend == "nccl":
         torch.cuda.set_device(spec.device)
     _ensure_local_default_group()
