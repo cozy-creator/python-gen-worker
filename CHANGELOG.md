@@ -183,6 +183,15 @@
   (entry, input, reason), with every occurrence counted and surfaced by
   `aot_serve.realigned_inputs(pipeline)`).
 
+  **Measured under control (RTX 4090, one artifact, one process, only the ingress differs):
+  the defect reproduces exactly — `timestep` is unaligned on 126 of 168 denoiser calls and the
+  pre-fix path logs 126 runner-side clone warnings against the fixed path's zero — but the COST
+  is +0.8 ms on a 3,373 ms request (+0.02%), not the ~119 ms the issue inferred from an
+  uncontrolled residual comparison.** So this is a contract fix and an OBSERVABILITY fix, not a
+  latency win: the warnings are written by C++ to fd 2, where even an in-process
+  `redirect_stderr` cannot see them, and the typed event is the only surface that reaches the
+  hub. WARM-INFERENCE-MATRIX §2c's 196-vs-77 ms residual gap needs another explanation.
+
 - **pgw#790 — a LoRA-bucket family now mints BOTH graph classes into one cell, and the serve
   path routes adapter-free traffic to the branchless one.** gw#627's canonical zeroed
   rank-bucket branch predicted "a small constant overhead" on non-LoRA requests; measured it is
