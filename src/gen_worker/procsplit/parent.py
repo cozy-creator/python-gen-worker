@@ -102,6 +102,7 @@ class ParentControl:
         watchdog_budget_s: float = _DEFAULT_WATCHDOG_BUDGET_S,
         stop_timeout_s: float = _DEFAULT_STOP_TIMEOUT_S,
         stop_flush_timeout_s: float = _STOP_FLUSH_TIMEOUT_S,
+        beat_interval_s: float = 0.0,   # 0 = adopt the child's declared cadence
         transport_backoff_base_s: float = 1.0,
         transport_backoff_cap_s: float = 30.0,
     ) -> None:
@@ -154,6 +155,17 @@ class ParentControl:
         self._liveness_activity = ""
         self._hang_armed_at: Optional[float] = None
         self._hang_hold_reported = False
+        # pgw#771: the app beat the hub reaps on. The CHILD declares the
+        # cadence and used to be the only sender, so a starved child stopped
+        # beating and the hub killed the pod at ~6 misses — the split fixed
+        # nothing there. The PARENT is the control loop now, so it originates
+        # the beat: the last state the child published, re-sent on the child's
+        # promised cadence, exactly the "periodic unchanged re-send" the hub
+        # already treats as proof the control loop is alive.
+        self._last_state_delta: Optional[pb.WorkerMessage] = None
+        self._last_state_delta_at = 0.0
+        self._beat_interval = beat_interval_s
+        self.parent_beats_sent = 0  # observability + tests
         # How long an OPEN activity may go without accruing CPU/IO before its
         # hold lapses: the child's ping cadence is the clock.
         raw_ping = (
@@ -210,6 +222,9 @@ class ParentControl:
                     if self._hello_waiter is fut:
                         self._hello_waiter = None
                 hello = pb.Hello.FromString(raw)
+                if self._beat_interval <= 0 and hello.heartbeat_interval_ms > 0:
+                    # The child's own promise is the cadence the parent keeps.
+                    self._beat_interval = hello.heartbeat_interval_ms / 1000.0
                 seen = {(j.request_id, j.attempt) for j in hello.in_flight}
                 for rid, att in self.transport.queue.pending_result_keys:
                     if (rid, att) not in seen:
@@ -343,9 +358,14 @@ class ParentControl:
             return
         if ftype == frames.T_WORKER_MSG:
             msg = pb.WorkerMessage.FromString(payload)
-            if msg.WhichOneof("msg") == "job_result":
+            which = msg.WhichOneof("msg")
+            if which == "job_result":
                 r = msg.job_result
                 self._in_flight.pop((r.request_id, r.attempt), None)
+            elif which == "state_delta":
+                # The freshest truth the child published; the beat re-sends it.
+                self._last_state_delta = msg
+                self._last_state_delta_at = time.monotonic()
             # SendQueue.put can backpressure (stream down, event lane full);
             # while the READ LOOP is blocked here the child's pings cannot be
             # read, so the watchdog must not mistake parent-side backpressure
@@ -864,6 +884,51 @@ class ParentControl:
             self._liveness_evidence = evidence
             self._liveness_evidence_at = now
 
+    # ---- the app beat (pgw#771) ------------------------------------------
+
+    async def _beat_loop(self) -> None:
+        """The PARENT originates the app heartbeat.
+
+        The hub's layer-2 reap counts StateDelta receipts: ~6 missed beats and
+        the pod dies. Before this, the only sender was the child's
+        ``_heartbeat_loop`` asyncio task, so a child whose loop is starved by
+        compute stopped beating and the hub killed a live pod at ~60s — the
+        split relayed the silence instead of curing it. Two claims, two
+        channels, per WORKER-CONTRACTS.md §1:
+
+        * THIS beat = "the worker is alive and reachable". The parent is the
+          control plane — stream, queue, JWT, no torch — so nothing here can be
+          starved, which makes it the truthful claimant of that question. What
+          it re-sends is the last state the CHILD published: the child cannot
+          change state without this relay carrying it, so an unchanged re-send
+          is true by construction (and is the very shape the hub documents as
+          proof the control loop lives).
+        * Progress = a SEPARATE claim, the child's own activity/progress
+          evidence, witnessed by the parent's /proc measurement. A wedged child
+          keeps the pod alive on this beat while its progress goes quiet, and
+          the hub's stall clock decides — no hub-side patience is assumed
+          (th#1299's hold was reverted; an open activity buys ZERO tolerance),
+          and no mint-specific keepalive is invented.
+        """
+        while not self._stopping.is_set():
+            interval = self._beat_interval if self._beat_interval > 0 else 10.0
+            await self._sleep_or_stop(max(0.25, interval / 2.0))
+            if self._stopping.is_set() or self._child_exited_clean:
+                return
+            msg = self._last_state_delta
+            if msg is None or self._link is None or not self.transport.connected:
+                # Nothing published yet, or no child to speak for: the hub's
+                # own machinery owns that gap. Never beat for an absent child.
+                continue
+            if time.monotonic() - self._last_state_delta_at < interval:
+                continue  # the child is beating for itself
+            self._last_state_delta_at = time.monotonic()
+            self.parent_beats_sent += 1
+            try:
+                await self.transport.send(msg)
+            except Exception:
+                logger.debug("parent beat send failed", exc_info=True)
+
     def _hang_verdict(self, now: float) -> Optional[str]:
         """``None`` = no decision yet, ``"held"`` = alive-but-starved,
         otherwise the reason the child is being killed."""
@@ -953,6 +1018,7 @@ class ParentControl:
         transport_task = asyncio.create_task(self.transport.run(), name="parent-transport")
         child_task = asyncio.create_task(self._child_loop(), name="parent-child-loop")
         watchdog_task = asyncio.create_task(self._watchdog_loop(), name="parent-watchdog")
+        beat_task = asyncio.create_task(self._beat_loop(), name="parent-beat")
         try:
             done, _ = await asyncio.wait(
                 (transport_task, child_task), return_when=asyncio.FIRST_COMPLETED
@@ -1015,7 +1081,7 @@ class ParentControl:
                 except ProcessLookupError:
                     pass
             self.transport.stop()
-            tasks = [transport_task, child_task, watchdog_task]
+            tasks = [transport_task, child_task, watchdog_task, beat_task]
             for extra in (self._stop_deadline_task, self._liveness_task):
                 if extra is not None:
                     tasks.append(extra)

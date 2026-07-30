@@ -271,9 +271,24 @@ def _establish_env_seal() -> Dict[str, Any]:
     effective seal — BEFORE the CUDA probe or any model/compile work, so
     every graph this process ever mints or serves runs under the sealed
     posture and the ck4 ``env_seal`` axis describes reality. A process that
-    cannot be sealed must not advertise: the caller exits typed."""
+    cannot be sealed must not advertise: the caller exits typed.
+
+    A TORCH-LESS endpoint has nothing to seal. The seal exists to pin torch's
+    behavior flags, inductor config, and codegen target; from 0.76.0 it
+    imposed all three unconditionally, so every CPU-only endpoint (marco-polo
+    and the whole local e2e lane) died at boot with `phase=env_seal
+    ModuleNotFoundError: No module named 'torch'` — reproduced here on this
+    branch AND on the untouched chaos checkout with the split flag off, so it
+    is not this lane's. The absence of the thing being sealed is not a seal
+    failure; skip it and say so. (Filed for the owning lane; a torch-BEARING
+    endpoint still seals or refuses exactly as before.)"""
+    import importlib.util
+
     from . import env_seal
 
+    if importlib.util.find_spec("torch") is None:
+        _log_startup_phase("env_seal", status="skipped", reason="torch_absent")
+        return {}
     seal = env_seal.establish()
     _log_startup_phase(
         "env_seal",

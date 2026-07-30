@@ -83,6 +83,7 @@ class SplitHarness:
         start_limit_interval_s: float = 600.0,
         stop_timeout_s: float = 120.0,
         stop_flush_timeout_s: float = 30.0,
+        beat_interval_s: float = 0.0,
         extra_child_env: Optional[dict] = None,
     ) -> None:
         self.scheduler = FakeScheduler()
@@ -121,6 +122,7 @@ class SplitHarness:
             start_limit_interval_s=start_limit_interval_s,
             stop_timeout_s=stop_timeout_s,
             stop_flush_timeout_s=stop_flush_timeout_s,
+            beat_interval_s=beat_interval_s,
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -591,5 +593,44 @@ def test_starved_compile_is_held_while_a_dead_child_is_still_killed(
         # ...and the hold is legible, not silent tolerance.
         assert any("compute_hang_verdict_held" in d for d in captured_dials), captured_dials
         assert any("activity=self_mint_compile" in d for d in captured_dials)
+    finally:
+        h.close()
+
+
+def test_parent_originates_the_beat_while_the_child_is_starved(
+    tmp_path, captured_dials,
+):
+    """pgw#771: the beat the hub reaps on must be unstarvable.
+
+    The child declares the cadence and used to be its only sender, so a starved
+    child stopped beating and the hub killed a live pod at ~6 misses — the
+    split relayed the silence rather than curing it. The parent is the control
+    plane (no torch, nothing to starve), so it originates the beat: the last
+    state the child published, re-sent on the child's own promised cadence.
+
+    Hub-side patience is deliberately NOT assumed: th#1299's activity hold was
+    reverted, and an open, freshly-advancing mint activity buys ZERO tolerance
+    (heartbeat_contract_th1299_test.go). The beat has to actually arrive.
+    """
+    h = SplitHarness(tmp_path, watchdog_budget_s=60.0, beat_interval_s=1.0)
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        before = sum(1 for m in conn.received if m.WhichOneof("msg") == "state_delta")
+        conn.send(run_job=pb.RunJob(
+            request_id="r-beat", attempt=1, function_name="starve-loop",
+            input_payload=_payload("8")))   # 8x the beat interval, loop pegged
+        res = conn.wait_for(is_result_for("r-beat"), timeout=90.0)
+        assert res.job_result.status == pb.JOB_STATUS_OK, res.job_result.safe_message
+        during = sum(
+            1 for m in conn.received if m.WhichOneof("msg") == "state_delta"
+        ) - before
+        # The child's loop was pegged for ~8 intervals, so anything that
+        # arrived came from the parent. Six misses is the hub's reap.
+        assert h.pc.parent_beats_sent >= 4, (
+            f"parent sent only {h.pc.parent_beats_sent} beats while the child "
+            "was starved — the hub would reap this live pod"
+        )
+        assert during >= 4, f"hub saw only {during} state_deltas during the starve"
     finally:
         h.close()
