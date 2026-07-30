@@ -1,6 +1,32 @@
 # Changelog
 
-## 0.83.0 (2026-07-29) — th#1283 worker half: per-intent fail-closed
+## 0.77.0 (2026-07-29) — everything since 0.76.8: the 0.77–0.83 chaos span ships as ONE release
+
+MAPPING: the chaos labels 0.77.0–0.83.0 below (entries re-marked "stamp — SHIPPED IN
+0.77.0") were version claims that never reached PyPI — nothing installable ever existed at
+any of them. Any reference elsewhere to "landed as 0.79.0" / "0.83.0 carries th#1283"
+means: first installable in THIS release. Previous published version: 0.76.8.
+
+Aboard, by chaos label:
+- 0.77.0 th#1257 serving-task declaration; 0.77.1 pgw#738 upload-park fix + publish phase
+- 0.78.0 th#1276/pgw#753 ref grammar defaults to `prod`
+- 0.79.0 pgw#755 forward AWQ W4A16 encoders (unblocks deleting the conversion
+  endpoint's vendored `awq_forward.py` at its next pin bump)
+- 0.80.0 pgw#756 guard-closure classifier veto removal
+- 0.81.0 pgw#758 multi-graph cells; 0.81.1 pgw#733 typed adopt/arm wire events
+- 0.82.0 pgw#748 phase 0 multi-GPU bookkeeping; 0.82.1 pgw#760 typed fail-soft events;
+  0.82.2 pre-clamp AOT cell retirement; 0.82.3 nested added_cond bind; 0.82.4
+  aot_forward envelope parity (also backported to 0.76.8)
+- 0.83.0 th#1283 worker half, per-intent fail-closed
+
+Plus unlabelled chaos work since those stamps: pgw#748 phase 1 (sequence-parallel
+runtime), pgw#761 standalone-component subfolder ingest, pgw#763 host-move guard +
+typed boot-phase errors, pgw#764 boot-milestone dedup, and the pgw#740 registry
+contract gate — this is the first release published through that gate (clean-venv
+install of the built wheel, bare-state + consumer-declaration contract asserted
+before upload).
+
+## 0.83.0 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — th#1283 worker half: per-intent fail-closed
 
 The hub now declares `mandatory` per intent instead of a blanket command flag,
 and `apply_command` matches. Errors on mandatory intents still reject and latch
@@ -11,17 +37,18 @@ without bricking the process. Errors scoped to advisory intents no longer
 reject the command at all: exactly those intents are declined (typed FAILED
 IntentState + `rejections` on an ACCEPTED receipt) and the rest applies, so a
 bad preposition or an unknown-function binding leaves the worker SERVING.
-NOT YET PUBLISHED: the v0.83.0 tag is held behind the pgw#740 registry fix —
-a fresh interpreter importing only the public entrypoint sees every family/
-convert/export registry EMPTY on this tree (verified 2026-07-29, th#1283).
-Publish rides after that fix lands, through its wheel-level publish gate.
+HOLD RESOLVED (2026-07-29, pgw#740 determination): the empty registries that held
+this tag are the DESIGN — vocabularies are endpoint declarations (pgw#740/#739),
+verified per-registry with stated-intent commits and merged adoption halves
+(te#130/ie#567). Nothing was defective; ships in 0.77.0 through the new
+registry-contract publish gate.
 
 Live-named twice on the 0.76.7 canary: with bind fixed, in-contract calls EXECUTED the
 adopted artifact and the caller crashed downstream (4-vs-2 broadcast) because diffusers
 calls `unet(..., return_dict=False)[0]` on the raw-tensor return. The wrap restores the
 declared envelope. Shipped on the rerun line as 0.76.8.
 
-## 0.82.3 (2026-07-29) — nested added_cond input resolution at bind (arm-events lane)
+## 0.82.3 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — nested added_cond input resolution at bind (arm-events lane)
 
 Live-named on the 0.76.6 canary (pod ae2uc81yub0gyq): the FIRST successful cross-pod AOT
 arm (`aot_adopt armed`) then refused every real call with `aot_ingress_refused
@@ -30,7 +57,7 @@ inputs, but every diffusers caller passes them nested in one dict kwarg, and
 `bind_call_inputs` never looked inside. Resolution: keyword -> position -> inside any
 mapping-valued kwarg -> optional -> named refusal. Shipped on the rerun line as 0.76.7.
 
-## 0.82.2 (2026-07-29) — discovery retires pre-clamp AOT cells (arm-events lane follow-up)
+## 0.82.2 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — discovery retires pre-clamp AOT cells (arm-events lane follow-up)
 
 Live-proven on the 0.76.6 canary (pod 3cjmd3ohuk98a5, first `aot_adopt` wire rows): a cell
 minted before the pgw#754 host-ISA stamp carries no metadata requirement, passes every
@@ -41,7 +68,7 @@ of shipping doomed candidates. Also corrects the verdict lane's CP4 "unstable ro
 finding: the pick variance was the ISA filter reacting to per-host CPU capability
 (AVX-512 vs not), not ordering instability — ordering was already deterministic.
 
-## 0.82.1 (2026-07-29) — pgw#760: swallowed-error audit — important fail-soft outcomes ride typed events
+## 0.82.1 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — pgw#760: swallowed-error audit — important fail-soft outcomes ride typed events
 
 Doctrine (Paul, verbatim in spirit): errors should be exposed to the orchestrator so it
 can report on them. The pgw#733 incident class — a classified reason reduced to a local
@@ -82,7 +109,7 @@ Red-verified in `tests/test_error_visibility_pgw760.py`: forced failure at each 
 captured `ActivityUpdate` naming the reason class and identifiers, with the fail-soft
 behavior asserted unchanged.
 
-## 0.82.0 (2026-07-29) — pgw#748 phase 0: multi-GPU bookkeeping that is wrong today
+## 0.82.0 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — pgw#748 phase 0: multi-GPU bookkeeping that is wrong today
 
 Sequence parallelism's phase 0 ships alone, before any parallelism code, because both
 halves are latent bugs on the fleet we already run.
@@ -119,7 +146,7 @@ halves are latent bugs on the fleet we already run.
   disabled: 8.55 ms/call, 22.6 GB/s. The cheap boot leg's `peer_gbps` reads ~1.42x the
   achieved collective bandwidth — an upper bound, with the classification exact.
 
-## 0.81.1 (2026-07-29) — pgw#733 arm half: every AOT adopt/arm outcome is a typed wire event
+## 0.81.1 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — pgw#733 arm half: every AOT adopt/arm outcome is a typed wire event
 
 The AOT verdict lane's blocker: cross-pod adopts fail inside stage/bind/arm with a
 classified `AdoptError` reason that `aot_serve.enable` / `fleet_cells.enable_compiled`
@@ -131,7 +158,7 @@ names the candidate cell (family + key, best-effort even on unreadable artifacts
 F1 consumer additionally binds fall-through outcomes to the DISCOVERED candidate's
 identity: `did_not_arm`, `armed_other_path`, `lane_unavailable` rows carry key + ref.
 
-## 0.81.0 (2026-07-28) — pgw#758: multi-graph cells — every declared graph class in ONE .pt2
+## 0.81.0 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — pgw#758: multi-graph cells — every declared graph class in ONE .pt2
 
 Paul's ruling: "generate and generate_turbo are separate functions, they have separate
 graphs, but they are COMBINED TOGETHER INTO ONE FILE." One mint invocation now produces ONE
@@ -183,7 +210,7 @@ generate-turbo compiled.
   inductor config every entry compiles under is recorded verbatim in `mint_phases`
   (`inductor_configs`) — #757's open per-call seal-bypass concern is auditable there.
 
-## 0.80.0 (2026-07-28) — pgw#756: the guard-closure classifier loses its veto
+## 0.80.0 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — pgw#756: the guard-closure classifier loses its veto
 
 Paul's ruling. `guard_closure` extracted dynamo's guard tree post-mint, classified every
 guard against the declared contract, and **refused the mint** on anything it could not
@@ -225,7 +252,7 @@ serve time, so the module becomes dead code. Tracked as pgw#756's second checkli
 cell key on DIFFERENT SDK versions will report unequal manifest digests to the pgw#711
 confirmation gate. Do not straddle this version while double-minting a key.
 
-## 0.79.0 (2026-07-28) — pgw#755: forward AWQ W4A16 encoders (te#137 producer)
+## 0.79.0 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — pgw#755: forward AWQ W4A16 encoders (te#137 producer)
 
 `svdq_awq` gains the production FORWARD path its decoders invert: `pack_w4x16`
 (tinychat pack_w4), `apply_adanorm_splits` (adaLN row interleave + bias+1), and
@@ -257,7 +284,7 @@ section below) — no version hole.
   (typed payload-ref provenance), never the release — the worker-side half of
   the breaker-poisoning fix (the hub half rides a hub train).
 
-## 0.78.0 (2026-07-28) — th#1276/pgw#753: the ref grammar's default tag is `prod`, not `latest`
+## 0.78.0 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — th#1276/pgw#753: the ref grammar's default tag is `prod`, not `latest`
 
 Paul's ruling. A bare `owner/repo` now means `owner/repo:prod`. `prod` is the STABLE
 SERVING pointer, which only moves on an explicit promote; `latest` is the MOVING PUBLISH
@@ -286,7 +313,7 @@ the receiver re-parses them with its own default, so a mixed-version fleet can d
 what a bare ref means — silently (wrong checkpoint served) or loudly (snapshot-key miss).
 See th#1276 for the scenarios and the durable fix.
 
-## 0.77.0 (2026-07-28) — th#1257: handlers declare the SERVING TASK they perform
+## 0.77.0 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — th#1257: handlers declare the SERVING TASK they perform
 
 The hub's human quality sign-off for a quantization lane is no longer keyed by model family
 alone — it is keyed `(family, task, variant, lane, quant_method)`. A fp8 approval earned on
@@ -459,7 +486,7 @@ and `torch.export` accepts it. This lands independent of the AOT migration.
   to get its tensors in, the FQNs are structural from construction, and a
   branch-disable cycle keeps the slots declared.
 
-## 0.77.1 (2026-07-28) — pgw#738: an upload never parks a job forever; the publish phase becomes visible
+## 0.77.1 stamp — SHIPPED IN 0.77.0 (chaos label; kept for the chaos record) — pgw#738: an upload never parks a job forever; the publish phase becomes visible
 
 Root cause of te#125's silent deaths (62922680/d0cbf910: one evidence blob persisted, then
 3h51m of heartbeating silence on a billing H100): admission took GPU permit -> instance
