@@ -5,14 +5,25 @@ runs on rank 0 ONLY: it owns the payload, `ctx`, VAE decode, mp4 export and the
 output path, exactly as SEQPAR-DESIGN §5.1 draws the line. What every rank must
 execute identically is the *model call*, because that is where the collectives
 live — so the runtime wraps the pipeline's ``__call__`` and, when rank 0 enters
-it, broadcasts the call and has the followers execute the same call on their own
-cards. Endpoint code never sees a rank, a degree or a device.
+it, sends the call over the command channel and has the followers execute the
+same call on their own cards. Endpoint code never sees a rank, a degree or a
+device.
 
 Why not run the handler on every rank: `RequestContext` is executor-owned, it
 carries the job's capability token, deferred outputs, progress channel and
 cancellation — a follower holding one would be a second worker, which is the
 thing Paul's one-connection ruling forbids. Why not wrap only the transformer:
 the denoise LOOP has to stay in lockstep, and it lives in the pipeline.
+
+**Error doctrine (pgw#774).** An exception cannot interrupt an SPMD region
+symmetrically: when rank 0 raises mid-call (OOM, deadline, cancel, endpoint
+bug) its peers are somewhere inside the same call waiting on collectives rank
+0 will never issue. There is no barrier that repairs that — only two honest
+outcomes: the peers' collectives time out TYPED (the process group carries a
+real timeout), and the group is CONDEMNED — the request fails with the
+original error, the runtime refuses further calls by name, teardown runs off
+the event loop, and the record goes stale so the next setup re-arms a fresh
+group. The worker keeps serving its other groups throughout.
 
 Restriction, refused typed rather than half-supported: sequence parallelism
 requires a CLASS-annotated slot (``Slot(SomePipeline)``), because the follower
@@ -25,27 +36,35 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+from dataclasses import dataclass
+from typing import Any, Optional, Tuple
 
 from .cp import (
     ContextParallelUnavailable,
+    CpComms,
     install_context_parallel,
     refuse_unless_shard_invariant_quant,
 )
-from .group import RankGroup, RankGroupError, RankSpec, init_rank
-from .plan import GroupPlan, broadcast_plan
+from .group import (
+    FollowerChannel,
+    RankGroup,
+    RankGroupError,
+    RankSpec,
+    _ARM_TIMEOUT_S,
+    _OP_CLOSE,
+    _OP_RUN,
+    init_rank,
+)
+from .plan import GroupPlan
 
 logger = logging.getLogger(__name__)
-
-_OP_RUN = "run"
-_OP_CLOSE = "close"
 
 
 @dataclass
 class BootPlan:
     """Everything a follower needs to build the SAME pipeline. Small and
-    picklable by construction — it crosses a spawn boundary and a collective."""
+    picklable by construction — it crosses a spawn boundary."""
 
     modules: Tuple[str, ...] = ()
     function_name: str = ""
@@ -56,21 +75,6 @@ class BootPlan:
     degree: int = 1
     dtype: str = ""
     storage_dtype: str = ""
-
-
-def _send(obj: Any) -> None:
-    import torch.distributed as dist
-
-    box: List[Any] = [obj]
-    dist.broadcast_object_list(box, src=0)
-
-
-def _recv() -> Any:
-    import torch.distributed as dist
-
-    box: List[Any] = [None]
-    dist.broadcast_object_list(box, src=0)
-    return box[0]
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +110,48 @@ def _rank_device(device: int) -> str:
     return f"cuda:{int(device)}" if torch.cuda.is_available() else "cpu"
 
 
+def _force_collectives(value: Any) -> Any:
+    """Materialize any lazy functional-collective tensors in a call result.
+
+    diffusers' gather hook returns ``AsyncCollectiveTensor``s whose actual
+    all-gather runs on first use. The gated call is the LAST point where the
+    group's failure domain is visible — the handler that consumes the output
+    is plain endpoint code — so completion is forced here: a peer that left
+    the collective surfaces as a typed in-call error (bounded by the process
+    group's timeout), never as a hang at some later `.cpu()`.
+    """
+    import torch
+
+    try:
+        from torch.distributed._functional_collectives import (
+            AsyncCollectiveTensor,
+        )
+    except Exception:  # pragma: no cover - ancient torch
+        return value
+    if isinstance(value, AsyncCollectiveTensor):
+        return value.wait()
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, list):
+        return [_force_collectives(v) for v in value]
+    if isinstance(value, tuple):
+        out = tuple(_force_collectives(v) for v in value)
+        return type(value)(*out) if hasattr(value, "_fields") else out
+    if isinstance(value, dict):
+        return {k: _force_collectives(v) for k, v in value.items()}
+    for attr in ("frames", "images", "videos", "audios"):
+        try:
+            inner = getattr(value, attr, None)
+        except Exception:  # pragma: no cover - exotic output objects
+            continue
+        if inner is not None:
+            try:
+                setattr(value, attr, _force_collectives(inner))
+            except Exception:  # pragma: no cover - frozen output objects
+                pass
+    return value
+
+
 def _rehydrate(value: Any, device: int) -> Any:
     import torch
 
@@ -126,34 +172,76 @@ def _rehydrate(value: Any, device: int) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# The gated-call flag: every forward through a CP-installed module must have
+# participants on every rank (pgw#775 uses this to refuse strays by name).
+# ---------------------------------------------------------------------------
+
+_tls = threading.local()
+
+
+class _gated_call:
+    def __enter__(self) -> None:
+        _tls.active = getattr(_tls, "active", 0) + 1
+
+    def __exit__(self, *exc: object) -> None:
+        _tls.active = max(0, getattr(_tls, "active", 1) - 1)
+
+
+def in_gated_call() -> bool:
+    return bool(getattr(_tls, "active", 0))
+
+
+# ---------------------------------------------------------------------------
 # The follower's whole life.
 # ---------------------------------------------------------------------------
 
 
-def sequence_rank_main(spec: RankSpec) -> None:  # pragma: no cover - spawned
-    """join -> obey the plan -> materialize -> {await call, run, barrier}.
+def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pragma: no cover - spawned
+    """join -> obey the plan -> materialize -> {await command, run}.
 
     No hub connection, no store, no lifecycle, no receipts, no output path.
-    Every adaptive decision arrives as a broadcast; nothing is decided here.
+    Every adaptive decision arrives from rank 0; nothing is decided here. A
+    follower that cannot honour the plan raises RankDivergence — fatal for
+    the group, never a local fallback (§5.4).
     """
     import torch
-    import torch.distributed as dist
 
-    from ..topology import set_device_group
+    pg = init_rank(spec)
+    if spec.backend == "nccl":
+        torch.cuda.set_device(spec.device)
 
-    init_rank(spec)
-    set_device_group(spec.rank)  # this rank's own bookkeeping identity
-    torch.cuda.set_device(spec.device)
-
-    plan = broadcast_plan(None, rank=spec.rank)
-    boot: BootPlan = _recv()
+    first = channel.next_command(timeout=_ARM_TIMEOUT_S)
+    if not isinstance(first, dict) or first.get("op") != "arm":
+        raise RankGroupError(
+            f"rank {spec.rank}: expected the arm command first, got {first!r}")
+    boot: BootPlan = first["boot"]
+    plan: GroupPlan = first["plan"]
+    plan.refuse_unless_cp_safe()
     pipe = _materialize(boot, spec)
     refuse_unless_shard_invariant_quant(pipe, degree=plan.sp_degree)
-    install_context_parallel(pipe, degree=plan.sp_degree)
-    dist.barrier()
+    # This rank's own view of the group facts, held against rank 0's
+    # broadcast plan: a disagreement (mismatched card, different toolchain)
+    # fails the group LOUDLY — a rank never adapts locally.
+    from .cp import w8a8_gemm_mode
+
+    mine = GroupPlan(
+        precision_lane=plan.precision_lane,
+        gemm_mode=w8a8_gemm_mode(pipe) or plan.gemm_mode,
+        degraded_plan=plan.degraded_plan,
+        compile_armed=plan.compile_armed,
+        compile_cell_key=plan.compile_cell_key,
+        loras=plan.loras,
+        sp_degree=spec.world_size,
+    )
+    mine.assert_agrees(plan, rank=spec.rank)
+    install_context_parallel(
+        pipe, degree=plan.sp_degree,
+        comms=CpComms(pg=pg, rank=spec.rank, device=_rank_device(spec.device)),
+    )
+    channel.report_ready(spec.rank)
 
     while True:
-        cmd = _recv()
+        cmd = channel.next_command()
         if not isinstance(cmd, dict) or cmd.get("op") == _OP_CLOSE:
             return
         if cmd.get("op") != _OP_RUN:
@@ -162,9 +250,8 @@ def sequence_rank_main(spec: RankSpec) -> None:  # pragma: no cover - spawned
         args = tuple(_rehydrate(a, spec.device) for a in cmd.get("args", ()))
         kwargs = {k: _rehydrate(v, spec.device)
                   for k, v in (cmd.get("kwargs") or {}).items()}
-        with torch.no_grad():
+        with torch.no_grad(), _gated_call():
             pipe(*args, **kwargs)   # output discarded: rank 0 owns the output
-        dist.barrier()
 
 
 def _materialize(boot: BootPlan, spec: RankSpec) -> Any:  # pragma: no cover
@@ -183,7 +270,7 @@ def _materialize(boot: BootPlan, spec: RankSpec) -> Any:  # pragma: no cover
     annotation = _slot_annotation(match, boot.slot)
     load = provision.load_slot(
         annotation, boot.path, binding=binding, slot=boot.slot,
-        device=f"cuda:{spec.device}",
+        device=_rank_device(spec.device),
     )
     if not load.is_pipeline:
         raise ContextParallelUnavailable(
@@ -212,42 +299,75 @@ class SequenceRuntime:
 
     def __init__(
         self, devices: Tuple[int, ...], *, entry: Optional[Any] = None,
+        backend: str = "nccl",
+        collective_timeout_s: Optional[float] = None,
+        arm_timeout_s: float = _ARM_TIMEOUT_S,
     ) -> None:
         self.devices = tuple(int(d) for d in devices)
         self.degree = len(self.devices)
-        # The follower entry point. Overridable ONLY so an acceptance probe can
-        # drive the shipped rank group against a bare model (no endpoint, no
-        # CAS) — production always uses `sequence_rank_main`.
+        # The follower entry point and gloo backend are overridable ONLY so
+        # an acceptance probe or the CPU rig can drive the shipped rank group
+        # against a bare model (no endpoint, no CAS) — production always uses
+        # `sequence_rank_main` over NCCL.
         self._entry = entry or sequence_rank_main
+        self._backend = backend
+        self._collective_timeout_s = collective_timeout_s
+        self._arm_timeout_s = float(arm_timeout_s)
         self._group: Optional[RankGroup] = None
         self._pipe: Any = None
         self._armed = False
+        self._broken = ""       # non-empty = condemned, with the reason
+        self._close_lock = threading.Lock()
 
     @property
     def armed(self) -> bool:
         return self._armed
 
+    @property
+    def broken(self) -> str:
+        return self._broken
+
+    @property
+    def process_group(self) -> Any:
+        return self._group.process_group if self._group is not None else None
+
     def arm(self, pipe: Any, boot: BootPlan, plan: GroupPlan) -> Tuple[str, ...]:
-        """Form the group, broadcast the plan, install CP on every rank.
+        """Form the group, deliver the plan, install CP on every rank.
 
         Ordering is forced and it is the whole reason this is one method:
         `set_attention_backend` (the endpoint's, already done by the time a
-        pipeline is materialized) -> `enable_parallelism` -> `torch.compile`.
+        pipeline is materialized) -> `enable_parallelism` -> (compile —
+        disabled at degree>1, pgw#775).
         """
-        import torch.distributed as dist
-
         if self.degree <= 1:
             return ()
         plan.refuse_unless_cp_safe()
         refuse_unless_shard_invariant_quant(pipe, degree=self.degree)
 
-        self._group = RankGroup(self.devices, backend="nccl",
-                                entry=self._entry)
-        self._group.form()
-        broadcast_plan(plan, rank=0)
-        _send(boot)
-        installed = install_context_parallel(pipe, degree=self.degree)
-        dist.barrier()
+        kwargs: dict = {"backend": self._backend, "entry": self._entry}
+        if self._collective_timeout_s is not None:
+            kwargs["collective_timeout_s"] = self._collective_timeout_s
+        self._group = RankGroup(self.devices, **kwargs)
+        try:
+            spec0 = self._group.form()
+            self._group.send({"op": "arm", "boot": boot, "plan": plan})
+            installed = install_context_parallel(
+                pipe, degree=self.degree,
+                comms=CpComms(
+                    pg=self._group.process_group,
+                    rank=0,
+                    device=_rank_device(spec0.device),
+                ),
+            )
+            # Queue-based readiness: a follower still materializing its
+            # pipeline parks nobody on a collective, and one that died is a
+            # loud typed failure here.
+            self._group.wait_armed(self._arm_timeout_s)
+        except BaseException:
+            group, self._group = self._group, None
+            if group is not None:
+                group.close()
+            raise
         self._pipe = pipe
         self._armed = True
         logger.info(
@@ -255,39 +375,69 @@ class SequenceRuntime:
             self.degree, list(self.devices), list(installed))
         return installed
 
-    def call(self, *args: Any, **kwargs: Any) -> Any:
+    def call_with(
+        self, base_call: Any, pipe: Any, *args: Any, **kwargs: Any
+    ) -> Any:
         """Run ONE model call across the group. Rank 0's result is the
         request's; the followers' identical results are discarded."""
-        import torch.distributed as dist
-
+        if self._broken:
+            raise RankGroupError(
+                f"sequence group condemned, refusing the call: {self._broken}")
         if not self._armed:
             raise RankGroupError("sequence group is not armed")
-        self._group.check_alive()  # type: ignore[union-attr]
-        _send({"op": _OP_RUN,
-               "args": tuple(_dehydrate(a) for a in args),
-               "kwargs": {k: _dehydrate(v) for k, v in kwargs.items()}})
+        group = self._group
+        assert group is not None
+        group.check_alive()
+        group.send({
+            "op": _OP_RUN,
+            "args": tuple(_dehydrate(a) for a in args),
+            "kwargs": {k: _dehydrate(v) for k, v in kwargs.items()},
+        })
         try:
-            out = self._pipe(*args, **kwargs)
-        finally:
-            # A rank that died mid-call must surface HERE, loudly, rather
-            # than as a barrier that never returns.
-            self._group.check_alive()  # type: ignore[union-attr]
-        dist.barrier()
+            with _gated_call():
+                out = _force_collectives(base_call(pipe, *args, **kwargs))
+        except BaseException as exc:
+            # Rank 0 left the SPMD region mid-call; the followers are inside
+            # it waiting on collectives that will never come. No barrier can
+            # repair that — condemn the group (their collectives time out
+            # typed; teardown off-thread) and surface the ORIGINAL error.
+            self._condemn(
+                f"rank 0 raised mid-call: {type(exc).__name__}: {exc}")
+            raise
+        try:
+            # A follower that died mid-call must surface HERE, loudly, rather
+            # than as output silently rendered at a lower effective degree.
+            group.check_alive()
+        except RankGroupError as exc:
+            self._condemn(str(exc))
+            raise
         return out
 
-    def close(self) -> None:
-        if self._group is None:
+    def _condemn(self, reason: str) -> None:
+        """Mark the group unusable by name and tear it down OFF this thread's
+        critical path. Idempotent; the record owning this runtime goes stale
+        via the executor's failure handling and re-arms a fresh group."""
+        if self._broken:
             return
-        try:
-            if self._armed:
-                _send({"op": _OP_CLOSE})
-        except Exception:  # noqa: BLE001 — teardown must not raise
-            logger.warning("sequence group close broadcast failed", exc_info=True)
-        finally:
+        self._broken = reason[:500]
+        self._armed = False
+        logger.error("sequence group CONDEMNED: %s", self._broken)
+        threading.Thread(
+            target=self.close, name="sp-condemn-close", daemon=True
+        ).start()
+
+    def close(self) -> None:
+        """Teardown without collectives: CLOSE over the command channel, then
+        join/terminate. Safe from any thread; must not run ON the event loop
+        (the executor calls it via a worker thread) because it joins
+        processes."""
+        with self._close_lock:
+            group, self._group = self._group, None
             self._armed = False
-            self._group.close()
-            self._group = None
             self._pipe = None
+            if group is None:
+                return
+            group.close(grace_s=2.0 if self._broken else 10.0)
 
 
 _SP_FLAG = "_gen_worker_sp_gated"
@@ -333,27 +483,3 @@ def arm_sequence_gate(pipe: Any, runtime: "SequenceRuntime") -> bool:
         return False
     object.__setattr__(pipe, _SP_ATTR, runtime)
     return True
-
-
-def _sequence_call_with(
-    self: "SequenceRuntime", base_call: Any, pipe: Any, *args: Any, **kwargs: Any
-) -> Any:
-    import torch.distributed as dist
-
-    if not self._armed:
-        raise RankGroupError("sequence group is not armed")
-    self._group.check_alive()  # type: ignore[union-attr]
-    _send({"op": _OP_RUN,
-           "args": tuple(_dehydrate(a) for a in args),
-           "kwargs": {k: _dehydrate(v) for k, v in kwargs.items()}})
-    try:
-        out = base_call(pipe, *args, **kwargs)
-    finally:
-        # A rank that died mid-call must surface HERE, loudly, rather than as
-        # a barrier that never returns.
-        self._group.check_alive()  # type: ignore[union-attr]
-    dist.barrier()
-    return out
-
-
-SequenceRuntime.call_with = _sequence_call_with  # type: ignore[attr-defined]

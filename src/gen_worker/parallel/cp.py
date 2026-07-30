@@ -32,7 +32,8 @@ armed together — a second, independent reason consumer multi-GPU is out.
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Any, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,73 @@ class ContextParallelUnavailable(RuntimeError):
     """This pipeline cannot be sharded, named exactly. A typed refusal — the
     hub demotes the pod; the worker never silently serves degree 1 against a
     degree-2 promise."""
+
+
+@dataclass(frozen=True)
+class CpComms:
+    """The GROUP's communication facts, passed explicitly (pgw#773).
+
+    ``pg`` is the group's NON-default ProcessGroup (from
+    ``parallel.group.init_rank``), ``rank`` this process's rank within THAT
+    group, ``device`` the rank's own card. CP is never installed against the
+    default process group again: the worker process is rank 0 of every
+    group, so "the default group" is not a well-defined thing to shard over.
+    """
+
+    pg: Any
+    rank: int
+    device: Any  # torch.device or str
+
+
+class _GroupMesh:
+    """The exact DeviceMesh surface diffusers' CP machinery consumes, backed
+    by ONE explicit process group.
+
+    diffusers ``ContextParallelConfig.setup`` performs
+    ``mesh["ring", "ulysses"]._flatten()`` / ``mesh["ring"]`` /
+    ``mesh["ulysses"]`` / ``get_local_rank()``, and the hooks + attention
+    dispatch then use only ``.size()``, ``.get_group()`` and
+    ``dist.get_rank/get_world_size(group)``. Ring degree is always 1 here
+    (Ulysses only), so the ring axis is a size-1 shim whose ``get_group`` is
+    a typed refusal — nothing may ever run a ring collective through it.
+    ``test_sequence_parallel`` pins this contract against the installed
+    diffusers so an upstream change breaks loudly, not silently.
+    """
+
+    def __init__(self, pg: Any, size: int, local_rank: int, *, axis: str = "ulysses") -> None:
+        self._pg = pg
+        self._size = int(size)
+        self._local_rank = int(local_rank)
+        self._axis = axis
+
+    def size(self) -> int:
+        return self._size
+
+    def get_group(self) -> Any:
+        if self._axis == "ring":
+            raise ContextParallelUnavailable(
+                "ring attention is not supported: the platform installs "
+                "Ulysses sequence parallelism only (ring_degree=1)"
+            )
+        return self._pg
+
+    def get_local_rank(self) -> int:
+        return self._local_rank
+
+    def _flatten(self) -> "_GroupMesh":
+        return _GroupMesh(self._pg, self._size, self._local_rank)
+
+    def __getitem__(self, key: Any) -> "_GroupMesh":
+        if isinstance(key, tuple):
+            return _GroupMesh(self._pg, self._size, self._local_rank)
+        if key == "ring":
+            return _GroupMesh(self._pg, 1, 0, axis="ring")
+        if key == "ulysses":
+            return _GroupMesh(self._pg, self._size, self._local_rank)
+        raise KeyError(key)
+
+    def __repr__(self) -> str:  # pragma: no cover - logging sugar
+        return f"_GroupMesh(size={self._size}, rank={self._local_rank}, axis={self._axis})"
 
 
 def _sharding_candidates(pipeline: Any) -> List[Tuple[str, Any]]:
@@ -72,18 +140,24 @@ def _sharding_candidates(pipeline: Any) -> List[Tuple[str, Any]]:
     return out
 
 
-def install_context_parallel(pipeline: Any, *, degree: int) -> Tuple[str, ...]:
+def install_context_parallel(
+    pipeline: Any, *, degree: int, comms: Optional[CpComms] = None,
+) -> Tuple[str, ...]:
     """Install Ulysses sequence parallelism at ``degree`` on every expert.
 
     Returns the component names that were sharded. Degree 1 installs nothing
     and returns ``()`` — a single-device group must be byte-identical to a
     worker that has never heard of this module.
+
+    ``comms`` is REQUIRED at degree>1 (pgw#773): installation binds the CP
+    hooks to that group's explicit process group. diffusers'
+    ``enable_parallelism`` reads rank/world/device from the DEFAULT process
+    group, which in the worker process (rank 0 of every group) is a size-1
+    local group — so this replicates its install sequence with group-correct
+    facts instead of calling it.
     """
     if int(degree) <= 1:
         return ()
-
-    from diffusers import ContextParallelConfig  # type: ignore
-
     components = _sharding_candidates(pipeline)
     if not components:
         raise ContextParallelUnavailable(
@@ -92,17 +166,104 @@ def install_context_parallel(pipeline: Any, *, degree: int) -> Tuple[str, ...]:
             "produce silently wrong output"
         )
     _refuse_if_offloaded(pipeline)
+    if comms is None:
+        raise ContextParallelUnavailable(
+            "context parallelism at degree>1 requires the group's explicit "
+            "process group (CpComms); installing against the default process "
+            "group is exactly the pgw#773 cross-group corruption"
+        )
 
-    config = ContextParallelConfig(ulysses_degree=int(degree))
     installed: List[str] = []
     for name, comp in components:
-        comp.enable_parallelism(config=config)
+        _install_on_component(comp, degree=int(degree), comms=comms)
         installed.append(name)
     logger.info(
-        "context parallelism installed: ulysses_degree=%d components=%s",
-        int(degree), installed,
+        "context parallelism installed: ulysses_degree=%d components=%s "
+        "group_rank=%d", int(degree), installed, int(comms.rank),
     )
     return tuple(installed)
+
+
+def _install_on_component(comp: Any, *, degree: int, comms: CpComms) -> None:
+    """The group-aware half of diffusers' ``ModelMixin.enable_parallelism``.
+
+    Same sequence, same objects: backend-compatibility check, a ParallelConfig
+    set up with THIS group's rank/world/device/mesh, ``_parallel_config``
+    stamped on the model and every attention processor, then
+    ``apply_context_parallel`` installs the split/gather hooks. The only
+    deltas are the mesh (an explicit-group ``_GroupMesh``, never
+    ``init_device_mesh`` over the default world) and rank/world/device (the
+    group's, never ``dist.get_rank()``'s). Pinned to diffusers 0.39.x by the
+    serving image; a surface change raises typed here instead of corrupting.
+    """
+    import torch
+
+    try:
+        from diffusers.hooks.context_parallel import apply_context_parallel
+        from diffusers.models._modeling_parallel import (
+            ContextParallelConfig,
+            ParallelConfig,
+        )
+        from diffusers.models.attention import AttentionModuleMixin
+        from diffusers.models.attention_dispatch import (
+            AttentionBackendName,
+            _AttentionBackendRegistry,
+        )
+        from diffusers.models.attention_processor import Attention
+    except Exception as exc:  # noqa: BLE001 - version drift must be typed
+        raise ContextParallelUnavailable(
+            f"diffusers CP surface unavailable: {type(exc).__name__}: {exc}"
+        ) from exc
+    try:
+        from diffusers.models.attention_processor import MochiAttention
+
+        attention_classes: tuple = (Attention, MochiAttention, AttentionModuleMixin)
+    except Exception:  # pragma: no cover - model-zoo dependent
+        attention_classes = (Attention, AttentionModuleMixin)
+
+    cp_config = ContextParallelConfig(ulysses_degree=int(degree))
+    config = ParallelConfig(context_parallel_config=cp_config)
+
+    # Backend compatibility, exactly as upstream checks it: the active
+    # attention backend must support CP or the hooks shard tensors an
+    # incompatible kernel then mis-reads.
+    for module in comp.modules():
+        if not isinstance(module, attention_classes):
+            continue
+        processor = getattr(module, "processor", None)
+        if processor is None or not hasattr(processor, "_attention_backend"):
+            continue
+        backend = processor._attention_backend
+        if backend is None:
+            backend, _ = _AttentionBackendRegistry.get_active_backend()
+        else:
+            backend = AttentionBackendName(backend)
+        if not _AttentionBackendRegistry._is_context_parallel_available(backend):
+            supported = sorted(_AttentionBackendRegistry._supports_context_parallel)
+            raise ContextParallelUnavailable(
+                f"attention backend {backend.value!r} does not support context "
+                f"parallelism; set one of {supported} before arming"
+            )
+        break
+
+    device = comms.device if isinstance(comms.device, torch.device) else torch.device(str(comms.device))
+    mesh = _GroupMesh(comms.pg, int(degree), int(comms.rank))
+    config.setup(int(comms.rank), int(degree), device, mesh=mesh)
+    comp._parallel_config = config
+    for module in comp.modules():
+        if not isinstance(module, attention_classes):
+            continue
+        processor = getattr(module, "processor", None)
+        if processor is not None and hasattr(processor, "_parallel_config"):
+            processor._parallel_config = config
+
+    plan = getattr(comp, "_cp_plan", None)
+    if not plan:
+        raise ContextParallelUnavailable(
+            f"{type(comp).__name__} lost its `_cp_plan` between candidate "
+            "discovery and install"
+        )
+    apply_context_parallel(comp, cp_config, plan)
 
 
 def _refuse_if_offloaded(pipeline: Any) -> None:

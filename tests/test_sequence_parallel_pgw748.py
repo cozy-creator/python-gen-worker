@@ -28,12 +28,12 @@ import pytest
 
 from gen_worker.parallel import (
     ContextParallelUnavailable,
+    FollowerChannel,
     GroupPlan,
     RankDivergence,
     RankGroup,
     RankGroupError,
     RankSpec,
-    broadcast_plan,
     init_rank,
     install_context_parallel,
     refuse_unless_divisible,
@@ -52,25 +52,39 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
-def _follower_echo(spec: RankSpec) -> None:  # pragma: no cover - spawned
+def _follower_echo(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
     """The narrow follower loop: join, receive the plan, barrier, exit."""
     import torch.distributed as dist
 
-    plan = broadcast_plan(None, rank=spec.rank)
+    pg = init_rank(spec)
+    cmd = chan.next_command(timeout=120)
+    plan = cmd["plan"]
     assert plan.precision_lane == "w8a8"
     assert plan.gemm_mode == "rowwise"
-    dist.barrier()
+    chan.report_ready(spec.rank)
+    dist.barrier(group=pg)
 
 
-def _follower_disagrees(spec: RankSpec) -> None:  # pragma: no cover - spawned
+def _follower_disagrees(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
     """A follower whose own card would have chosen differently. It must NOT
-    serve its own choice — it must fail the group."""
+    serve its own choice — it must fail the group (pgw#774 made
+    assert_agrees LIVE: the follower derives its own view and holds it
+    against the delivered plan)."""
+    init_rank(spec)
+    cmd = chan.next_command(timeout=120)
     mine = GroupPlan(precision_lane="bf16", sp_degree=2)
-    broadcast_plan(mine, rank=spec.rank)
+    mine.assert_agrees(cmd["plan"], rank=spec.rank)
 
 
-def _follower_dies(spec: RankSpec) -> None:  # pragma: no cover - spawned
+def _follower_dies_before_joining(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
+    """The card is not there at all: this rank dies before the rendezvous."""
     raise RuntimeError("this rank's card is not there")
+
+
+def _follower_dies_after_joining(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
+    """Joined the group, then died — the shape ``check_alive`` was written for."""
+    init_rank(spec)
+    raise RuntimeError("this rank's card fell off the bus")
 
 
 def _cpu_group(entry: Any, degree: int = 2) -> RankGroup:
@@ -86,8 +100,8 @@ def test_rank_zero_decides_and_every_rank_obeys() -> None:
             precision_lane="w8a8", gemm_mode="rowwise", sp_degree=2,
             loras=(("style", 0.8),),
         )
-        decided = broadcast_plan(plan, rank=0)
-        assert decided == plan
+        group.send({"op": "arm", "plan": plan})
+        group.wait_armed(timeout_s=60)
         group.barrier()
     finally:
         group.close()
@@ -100,8 +114,8 @@ def test_a_follower_that_disagrees_fails_the_group() -> None:
     group = _cpu_group(_follower_disagrees)
     group.form()
     try:
-        broadcast_plan(
-            GroupPlan(precision_lane="w8a8", sp_degree=2), rank=0)
+        group.send({"op": "arm",
+                    "plan": GroupPlan(precision_lane="w8a8", sp_degree=2)})
         with pytest.raises(RankGroupError):
             for _ in range(200):
                 group.check_alive()
@@ -113,7 +127,8 @@ def test_a_follower_that_disagrees_fails_the_group() -> None:
 
 
 def test_a_dead_follower_is_a_loud_failure_not_a_hang() -> None:
-    group = _cpu_group(_follower_dies)
+    # Died AFTER joining: form() succeeds, check_alive names the rank.
+    group = _cpu_group(_follower_dies_after_joining)
     group.form()
     try:
         import time
@@ -124,6 +139,23 @@ def test_a_dead_follower_is_a_loud_failure_not_a_hang() -> None:
                 time.sleep(0.05)
     finally:
         group.close()
+
+
+def test_a_follower_that_dies_before_the_rendezvous_fails_form_bounded() -> None:
+    # pgw#773/774: rank 0 must not enter the backend rendezvous blind. gloo
+    # and NCCL block in `connect` for the whole collective timeout when a peer
+    # is absent, so a follower that crashed on import turned "the group cannot
+    # form" into a multi-minute stall INSIDE form() — with the collective
+    # timeout (300s) as the only bound. Arrival is announced on the store and
+    # polled against liveness, so this is bounded and TYPED.
+    import time
+
+    group = _cpu_group(_follower_dies_before_joining)
+    start = time.monotonic()
+    with pytest.raises(RankGroupError, match="rank 1|exited"):
+        group.form()
+    assert time.monotonic() - start < 60
+    group.close()
 
 
 def test_degree_one_group_forms_nothing() -> None:
@@ -233,23 +265,24 @@ def test_indivisible_shapes_are_refused_before_a_pod_is_committed() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _follower_echo4(spec: RankSpec) -> None:  # pragma: no cover - spawned
+def _follower_echo4(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
     import torch.distributed as dist
 
-    plan = broadcast_plan(None, rank=spec.rank)
+    pg = init_rank(spec)
+    plan = chan.next_command(timeout=120)["plan"]
     assert plan.sp_degree == 4, plan
     assert plan.gemm_mode == "rowwise"
     assert plan.loras == (("style", 0.8),)
-    dist.barrier()
+    chan.report_ready(spec.rank)
+    dist.barrier(group=pg)
 
 
-def _follower_rank3_dies(spec: RankSpec) -> None:  # pragma: no cover - spawned
-    import torch.distributed as dist
-
+def _follower_rank3_dies(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
+    init_rank(spec)
     if spec.rank == 3:
         raise RuntimeError("rank 3's card fell off the bus")
-    broadcast_plan(None, rank=spec.rank)
-    dist.barrier()
+    chan.next_command(timeout=120)
+    chan.report_ready(spec.rank)
 
 
 def test_degree_four_group_forms_and_every_rank_obeys_rank_zero() -> None:
@@ -262,7 +295,8 @@ def test_degree_four_group_forms_and_every_rank_obeys_rank_zero() -> None:
             precision_lane="w8a8", gemm_mode="rowwise", sp_degree=4,
             compile_armed=False, loras=(("style", 0.8),),
         )
-        assert broadcast_plan(plan, rank=0) == plan
+        group.send({"op": "arm", "plan": plan})
+        group.wait_armed(timeout_s=120)
         group.barrier()   # all four ranks reached it
     finally:
         group.close()
@@ -277,6 +311,7 @@ def test_one_dead_rank_of_four_fails_the_whole_group() -> None:
     group = _cpu_group(_follower_rank3_dies, degree=4)
     group.form()
     try:
+        group.send({"op": "arm", "plan": GroupPlan(sp_degree=4)})
         with pytest.raises(RankGroupError):
             for _ in range(300):
                 group.check_alive()
@@ -357,7 +392,7 @@ def test_call_marshalling_survives_the_wire() -> None:
         "sigmas": [torch.zeros(2), 0.5],
     }
     wire = _dehydrate(payload)
-    pickle.loads(pickle.dumps(wire))          # must cross broadcast_object_list
+    pickle.loads(pickle.dumps(wire))          # must cross the command channel
     back = _rehydrate(wire, device=0)
     assert torch.equal(back["latents"].cpu(), payload["latents"])
     assert back["steps"] == 4 and back["prompt"] == "a cat"

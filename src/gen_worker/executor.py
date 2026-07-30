@@ -6524,7 +6524,7 @@ class Executor:
         runtime = SequenceRuntime(device_group.devices)
         installed = await asyncio.to_thread(runtime.arm, pipe, boot, plan)
         if not arm_sequence_gate(pipe, runtime):
-            runtime.close()
+            await asyncio.to_thread(runtime.close)
             from .parallel import ContextParallelUnavailable
 
             raise ContextParallelUnavailable(
@@ -6538,14 +6538,24 @@ class Executor:
             spec.name, topo.degree, list(device_group.devices), list(installed))
 
     def _close_sequence_group(self, rec: "_ClassRecord") -> None:
+        """Tear down a record's rank group OFF the event loop (pgw#774).
+
+        ``runtime.close()`` joins/terminates follower processes (bounded, but
+        seconds) and must never run on the loop: the old collective-based
+        close could block the loop — and the heartbeat with it — forever,
+        presenting a wedged group as a platform stall."""
         runtime, rec.sp_runtime = rec.sp_runtime, None
         self._sequence_plans.pop(id(rec), None)
         if runtime is None:
             return
-        try:
-            runtime.close()
-        except Exception:  # noqa: BLE001 - teardown must not mask the vacate
-            logger.warning("closing the sequence group failed", exc_info=True)
+
+        def _do() -> None:
+            try:
+                runtime.close()
+            except Exception:  # noqa: BLE001 - teardown must not mask the vacate
+                logger.warning("closing the sequence group failed", exc_info=True)
+
+        threading.Thread(target=_do, name="sp-close", daemon=True).start()
 
     def group_plan_for(self, rec: "_ClassRecord") -> Optional[Any]:
         """The plan every rank of ``rec``'s group agreed on, or None at
