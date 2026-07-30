@@ -94,6 +94,10 @@ dev = [
     "pyarrow>=17.0.0",
     "ruff>=0.6.0",
     "pytest>=9.0.0",
+    # pgw#796: the suite is ~190 files of independent processes/sockets/temp
+    # dirs; `--dist loadfile` keeps each file (and its module/session fixtures)
+    # on one worker, so nothing shares state that did not already share it.
+    "pytest-xdist>=3.8.0",
     "types-PyYAML>=6.0.12.20250915",
     "types-requests>=2.32.4.20250913",
 ]

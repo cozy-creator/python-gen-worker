@@ -33,8 +33,12 @@ jobs:
 
       # mypy already gates ci.yml on every push/PR to master (gw#497); tags are
       # cut from master after CI passes, so re-running it here is redundant.
+      # pgw#796: same wiring as ci.yml — a publish must run exactly the gate a
+      # PR ran, at the same width, or "PR green implies publish green" is a
+      # guess. This step was 22m21s; the tag job it blocked had already queued
+      # 4.6h (pgw#795).
       - name: Run tests
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -n 4 --dist loadfile
 
       - name: Build package
         run: uv build
