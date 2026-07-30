@@ -345,32 +345,54 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
     return WorkerResolvedRepo(snapshot_digest=snapshot_digest, files=files)
 
 
-def snapshot_dir_key(snapshot_digest: str, components: Sequence[str] = ()) -> str:
+def snapshot_dir_key(
+    snapshot_digest: str,
+    components: Sequence[str] = (),
+    exclude: Sequence[str] = (),
+) -> str:
     """On-disk snapshot-directory key (pgw#505): the bare digest normally, or
     ``<digest>__c<fingerprint>`` when ``components`` narrows the materialized
     tree to a SUBSET of the digest's full content. Keyed separately so a
     component-scoped (partial) materialization can never be mistaken for —
-    or collide with — the full one under the same digest."""
+    or collide with — the full one under the same digest.
+
+    ``exclude`` (th#1330 B2) narrows the same way from the other side and so
+    earns the same treatment: ``__x<fingerprint>``. The bare digest name is
+    reserved for a COMPLETE tree, full stop — that reservation is what lets
+    the executor's cached-path short-circuit keep trusting a bare-digest
+    directory without re-deriving anyone's fetch scope."""
     comps = sorted({c.strip() for c in components if c and str(c).strip()})
-    if not comps:
-        return snapshot_digest
-    fingerprint = hashlib.sha1("+".join(comps).encode()).hexdigest()[:12]
-    return f"{snapshot_digest}__c{fingerprint}"
+    drop = sorted({c.strip() for c in exclude if c and str(c).strip()})
+    key = snapshot_digest
+    if comps:
+        key += "__c" + hashlib.sha1("+".join(comps).encode()).hexdigest()[:12]
+    if drop:
+        key += "__x" + hashlib.sha1("+".join(drop).encode()).hexdigest()[:12]
+    return key
 
 
 def _filter_resolved_components(
-    ref: TensorhubRef, res: WorkerResolvedRepo, components: Sequence[str],
+    ref: TensorhubRef,
+    res: WorkerResolvedRepo,
+    components: Sequence[str],
+    exclude: Sequence[str] = (),
 ) -> WorkerResolvedRepo:
     """Narrow a validated :class:`WorkerResolvedRepo` to the declared
     pipeline components (+ root config files) — the tensorhub-source twin of
-    ``download.select_component_paths`` for the HF path."""
+    ``download.select_component_paths`` for the HF path.
+
+    ``exclude`` drops the named component subfolders (th#1330 B2). An
+    exclusion that matches nothing is a no-op, not an error: the caller
+    derives it from the dispatch's component overrides, and an override whose
+    component is not a subfolder of the base tree is a load-time refusal
+    (``ComponentSubstitutionError``), not a fetch-time one."""
     paths = [f.path for f in res.files]
-    if not components_present(paths, components):
+    if components and not components_present(paths, components):
         raise ValueError(
             f"components= {list(components)!r} matched nothing in "
             f"{ref.canonical()} snapshot {res.snapshot_digest[:16]}"
         )
-    keep = select_component_paths(paths, components)
+    keep = select_component_paths(paths, components, exclude)
     files = [f for f in res.files if f.path in keep]
     return WorkerResolvedRepo(snapshot_digest=res.snapshot_digest, files=files)
 
@@ -399,6 +421,7 @@ class CozySnapshotDownloader:
         resolved: Optional[WorkerResolvedRepo],
         progress: Optional[ProgressFn] = None,
         components: Sequence[str] = (),
+        exclude_components: Sequence[str] = (),
         fill_source_dir: Optional[Path] = None,
     ) -> Path:
         """``fill_source_dir`` (th#850 managed-tier ruling, gw#599): an
@@ -420,14 +443,17 @@ class CozySnapshotDownloader:
                 "cozy snapshot requires orchestrator-resolved URLs (resolved=None)"
             )
         res = _validate_resolved(ref, resolved)
-        if components:
-            res = _filter_resolved_components(ref, res, components)
+        if components or exclude_components:
+            res = _filter_resolved_components(
+                ref, res, components, exclude_components)
 
         # pgw#505: a components=-scoped fetch materializes a NARROWER tree
         # than the digest's full content, so it is keyed separately (never
         # under the bare digest — that name is reserved for the complete
-        # snapshot).
-        key = snapshot_dir_key(res.snapshot_digest, components)
+        # snapshot). th#1330 B2: an exclude_components= scope is narrower in
+        # the same sense and keys the same way.
+        key = snapshot_dir_key(
+            res.snapshot_digest, components, exclude_components)
         snap_dir = snaps_root / key
         trust_key = (str(snaps_root.resolve()), key)
         if snap_dir.exists() and trust_key in _TRUSTED_SNAPSHOTS:
@@ -993,10 +1019,12 @@ async def ensure_snapshot_async(
     resolved: Optional[WorkerResolvedRepo],
     progress: Optional[ProgressFn] = None,
     components: Sequence[str] = (),
+    exclude_components: Sequence[str] = (),
     fill_source_dir: Optional[Path] = None,
 ) -> Path:
     dl = CozySnapshotDownloader()
     return await dl.ensure_snapshot(
         base_dir, ref, resolved=resolved, progress=progress, components=components,
+        exclude_components=exclude_components,
         fill_source_dir=fill_source_dir,
     )

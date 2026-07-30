@@ -422,6 +422,39 @@ def _binding_wire_refs(binding: Any) -> List[str]:
     return [wire_ref(binding), *(ref for _, ref in _component_overrides(binding))]
 
 
+def _snapshot_files_without_components(
+    snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
+) -> "List[pb.SnapshotFile]":
+    """``snapshot.files`` minus every entry under an excluded ``<comp>/``
+    subfolder (th#1330 B2). The one place the worker's byte accounting agrees
+    with what the downloader will actually fetch."""
+    files = list(snapshot.files) if snapshot is not None else []
+    drop = {str(c).strip() for c in exclude if str(c or "").strip()}
+    if not drop:
+        return files
+    kept = []
+    for f in files:
+        rel = str(f.path).strip().lstrip("/")
+        top, sep, _ = rel.partition("/")
+        if sep and top in drop:
+            continue
+        kept.append(f)
+    return kept
+
+
+def _snapshot_without_components(
+    snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
+) -> "Optional[pb.Snapshot]":
+    """``snapshot`` re-stated over the narrowed file set — the manifest a
+    verifier must use when the tree on disk was fetched with an exclusion."""
+    if snapshot is None or not exclude:
+        return snapshot
+    return pb.Snapshot(
+        digest=snapshot.digest,
+        files=_snapshot_files_without_components(snapshot, exclude),
+    )
+
+
 def _alias_binding_matches(alias: "EndpointSpec", slot_key: str, ref: str) -> bool:
     """Does ``alias`` hold this load-time binding fact? ``slot_key`` is a
     slot name or ``<slot>.<component>`` override key (pgw#617)."""
@@ -888,6 +921,9 @@ class ModelStore:
             "materialize_intent", default=""
         )
         self._bindings: Dict[str, Any] = {}
+        # th#1330 B2: ref -> the component set last skipped for it, so the
+        # typed event fires on transitions and not once per materialization.
+        self._override_exclusions_reported: Dict[str, Tuple[str, ...]] = {}
         self.keep: list[str] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._index = disk_gc.RefIndex(self._cache_dir)
@@ -1236,6 +1272,64 @@ class ModelStore:
         a dispatch gate on its own)."""
         return self._cached_disk_usage_report
 
+    def _ref_blob_sizes(self, ref: str) -> Dict[str, int]:
+        """CAS digest -> bytes for ``ref``'s banked snapshot, or ``{}`` when
+        the worker has no manifest for it. The digest is the identity the CAS
+        dedups on: ``blobs/`` is hardlinked into every snapshot tree, so a
+        blob two refs share occupies the disk ONCE."""
+        snap = self._snapshots.get(ref)
+        if snap is None or not snap.files:
+            return {}
+        sizes: Dict[str, int] = {}
+        for f in snap.files:
+            digest = (str(getattr(f, "digest", "") or "").strip()
+                      or str(getattr(f, "blake3", "") or "").strip())
+            if not digest:
+                return {}
+            sizes[digest.lower()] = int(f.size_bytes)
+        return sizes
+
+    def _reclaimable_entries(
+        self, keep: set, entries: Dict[str, Any],
+    ) -> List[Tuple[str, int]]:
+        """(path, bytes) the disk GC could ACTUALLY free (th#1330 B4).
+
+        The previous figure summed each evictable ref's whole indexed tree
+        size, which over-reports twice: two evictable refs sharing a blob had
+        it counted in both, and a blob an evictable ref shares with a RETAINED
+        one is not reclaimable at all — ``sweep_orphan_blobs`` only unlinks
+        blobs at ``st_nlink == 1``, so deleting that tree frees nothing.
+        The hub sizes every capacity decision off this number.
+
+        A ref with no banked manifest keeps its full indexed size: an unknown
+        manifest is not a claim that the ref is free."""
+        retained: set = set()
+        for ref in self.disk_refs():
+            if ref in keep or self.disk_ref_in_use(ref):
+                retained.update(self._ref_blob_sizes(ref))
+        counted: set = set()
+        out: List[Tuple[str, int]] = []
+        for ref in self.disk_refs():
+            if ref in keep or self.disk_ref_in_use(ref):
+                continue
+            ent = entries.get(ref)
+            if not ent:
+                continue
+            path = str(ent.get("path") or "")
+            blobs = self._ref_blob_sizes(ref)
+            if not blobs:
+                out.append((path, int(ent.get("bytes") or 0)))
+                continue
+            freed = 0
+            for digest, size in blobs.items():
+                if digest in retained or digest in counted:
+                    continue
+                counted.add(digest)
+                freed += size
+            if freed > 0:
+                out.append((path, freed))
+        return out
+
     def _measure_disk_usage_report(self) -> pb.DiskUsageReport:
         """Blocking measurement — statvfs on the real mounts (CAS root =
         container tier; attached endpoint volume = volume tier; a shared
@@ -1253,20 +1347,11 @@ class ModelStore:
         loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
         entries = self._index.entries()
-        reclaimable: List[Tuple[str, int]] = []
         # pgw#748: the CAS is ONE tree with one page cache, hardlinked
         # across every group, so the preserve set is the UNION across groups —
         # dropping clean pages one group is done with would drop the pages a
         # sibling group is still mmapping (§4.3 caveat 3).
-        for ref in self.disk_refs():
-            if ref in keep or self.disk_ref_in_use(ref):
-                continue
-            ent = entries.get(ref)
-            if not ent:
-                continue
-            reclaimable.append(
-                (str(ent.get("path") or ""), int(ent.get("bytes") or 0))
-            )
+        reclaimable = self._reclaimable_entries(keep, entries)
         mounts = [disk_telemetry.MountSpec(
             tier=disk_telemetry.TIER_CONTAINER, path=str(self._cache_dir),
         )]
@@ -1365,10 +1450,51 @@ class ModelStore:
                 self._snapshots[ref] = snapshot
                 self._snapshot_generations[ref] = accepted_generation
 
+        self._prune_banked_snapshots(stored)
+
         for ref in stored:
             waiter = self._snapshot_waiters.get(ref)
             if waiter is not None:
                 waiter.set()
+
+    def _prune_banked_snapshots(self, desired: Dict[str, pb.Snapshot]) -> None:
+        """Drop banked manifests for refs that are neither desired, resident,
+        in use, nor being materialized (th#1330 B5).
+
+        ``_snapshots`` was append-only: a ref dropped from DesiredResidency
+        kept its manifest forever, so a later bare ``ensure_local(ref)`` — a
+        preload, a stale spec, a retry — could materialize OBSOLETE bytes off
+        a manifest the hub stopped asking for, with no hub prompting and no
+        way to notice. ``_verified``/``_snapshot_generations`` carried the same
+        stale entries.
+
+        The conditions are deliberately conservative: on disk, in use, or mid
+        materialization all keep the manifest, so nothing in flight can lose
+        the snapshot it is working from. A dropped ref that is wanted again
+        goes through ``_await_hub_snapshot``, which is the correct path —
+        the hub re-mints a manifest with LIVE presigned URLs."""
+        try:
+            resident = set(self.disk_refs())
+        except Exception:  # pragma: no cover - residency not yet bound
+            return
+        active = set(self._materialize_active)
+        keep = set(desired) | resident | active | set(self.keep)
+        with self._identity_lock:
+            stale = [
+                ref for ref in list(self._snapshots)
+                if ref not in keep and not self.disk_ref_in_use(ref)
+            ]
+            for ref in stale:
+                self._snapshots.pop(ref, None)
+                self._snapshot_generations.pop(ref, None)
+                self._verified.discard(ref)
+        if not stale:
+            return
+        logger.info(
+            "dropped %d banked snapshot manifest(s) for refs that are neither "
+            "desired nor resident (th#1330): %s",
+            len(stale), ", ".join(sorted(stale)[:8]),
+        )
 
     def snapshot_digest(self, ref: str, snapshot: Optional[pb.Snapshot] = None) -> str:
         candidate = snapshot
@@ -1617,9 +1743,34 @@ class ModelStore:
         if not self.residency.evict(ref):  # refuses in-use entries; emits EVICTED
             return
         if path is not None:
-            disk_gc.delete_ref_bytes(ref, path, self._cache_dir)
-            disk_gc.sweep_orphan_blobs(self._cache_dir)
+            # th#1330 B4: snapshot trees are keyed by DIGEST, so two refs that
+            # resolve to the same snapshot (a tag alias and its pin, the same
+            # checkpoint reached under two spellings) share ONE directory.
+            # rmtree-ing it here deleted the bytes a still-resident sibling ref
+            # was pointing at. Drop only this ref's bookkeeping in that case;
+            # the tree goes when its last holder does.
+            sharer = self._other_ref_at_path(ref, path)
+            if sharer:
+                logger.info(
+                    "disk-gc: keeping %s — %s still holds the same snapshot "
+                    "tree", path, sharer,
+                )
+            else:
+                disk_gc.delete_ref_bytes(ref, path, self._cache_dir)
+                disk_gc.sweep_orphan_blobs(self._cache_dir)
         self._index.remove(ref)
+
+    def _other_ref_at_path(self, ref: str, path: Path) -> str:
+        """A still-tracked ref (any group) materialized at the same path."""
+        target = str(path)
+        for reg in self.all_residencies():
+            for other in reg.refs_in(residency_mod.Tier.DISK):
+                if other == ref:
+                    continue
+                other_path = reg.local_path(other)
+                if other_path is not None and str(other_path) == target:
+                    return other
+        return ""
 
     async def _ensure_disk_headroom(
         self,
@@ -1662,6 +1813,53 @@ class ModelStore:
         download paths that only carry the bare ref (DesiredResidency or
         startup prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
+
+    def _override_excluded_components(
+        self, ref: str, binding: Any, snapshot: Optional[pb.Snapshot],
+    ) -> Tuple[str, ...]:
+        """Base-composition subfolders this materialization must NOT fetch
+        (th#1330 B2): the components a pgw#617 dispatch SUBSTITUTES.
+
+        The override's own tree is materialized separately and handed to
+        ``from_pretrained`` as a constructed object, so diffusers never reads
+        the base's copy — it was downloaded and discarded (~1.64 GB per SDXL
+        text-encoder override). The exclusion is derived only from the
+        binding's ``component_overrides``, i.e. from the dispatch that is
+        about to load, never from standing state.
+
+        Only components the snapshot ACTUALLY carries as a subfolder are
+        excluded, so the value is a fetch fact and not a guess — and a
+        narrowed tree therefore keys on exactly what was left out."""
+        overrides = _component_overrides(binding)
+        if not overrides:
+            return ()
+        present = {
+            str(f.path).strip().lstrip("/").partition("/")[0]
+            for f in (snapshot.files if snapshot is not None else ())
+            if "/" in str(f.path).strip().lstrip("/")
+        }
+        drop = tuple(sorted(
+            {comp for comp, _ in overrides if comp in present}))
+        if not drop:
+            return ()
+        saved = sum(
+            int(f.size_bytes) for f in (snapshot.files if snapshot else ())
+            if str(f.path).strip().lstrip("/").partition("/")[0] in drop
+        )
+        if self._override_exclusions_reported.get(ref) != drop:
+            self._override_exclusions_reported[ref] = drop
+            logger.info(
+                "not fetching %s from %s: substituted by a component override "
+                "(%d bytes skipped)", "/".join(drop), ref, saved,
+            )
+            activity_mod.emit_event(
+                "component_fetch_skipped",
+                f"base composition {ref} ships {'/'.join(drop)} that this "
+                f"dispatch substitutes with a component override; skipping "
+                f"{saved} bytes the load would discard (th#1330)",
+                phase="skipped",
+            )
+        return drop
 
     async def _await_hub_snapshot(
         self,
@@ -1750,6 +1948,11 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
+        # th#1330 B2: the components this dispatch SUBSTITUTES are not fetched
+        # from the base composition. The base is loaded with the override
+        # object handed to `from_pretrained` (pgw#617 load-then-substitute),
+        # so its own copy of that subfolder is downloaded and discarded.
+        exclude_components = self._override_excluded_components(ref, binding, snapshot)
         registry = self._intent_registry
         scoped_intent_id = self._materialize_intent_context.get()
         command_owned = bool(intent_id or scoped_intent_id)
@@ -1819,7 +2022,19 @@ class ModelStore:
             want = ""
             if snapshot is not None and snapshot.digest:
                 want = snapshot.digest.split(":", 1)[-1].strip().lower()
-            if cached is not None and cached.exists() and (not want or cached.name == want):
+            # th#1330 B2: with an override exclusion the acceptable cached
+            # names are the exclusion's own key OR the bare digest — the
+            # latter is a SUPERSET (a complete tree already on disk serves an
+            # excluded fetch for free, and is never narrowed retroactively).
+            acceptable = {want}
+            if want and exclude_components:
+                acceptable.add(cozy_snapshot.snapshot_dir_key(
+                    want, (), exclude_components))
+            cached_partial = (
+                cached is not None and want and cached.name != want
+                and cached.name in acceptable
+            )
+            if cached is not None and cached.exists() and (not want or cached.name in acceptable):
                 if ref in self._verified:
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
@@ -1828,7 +2043,9 @@ class ModelStore:
                 # pod-churn-truncated snapshot used to fatal every load until
                 # a manual delete; now it is quarantined + re-materialized.
                 ok, bad = await asyncio.to_thread(
-                    self._verify_snapshot_tree, cached, snapshot
+                    self._verify_snapshot_tree, cached,
+                    _snapshot_without_components(snapshot, exclude_components)
+                    if cached_partial else snapshot,
                 )
                 if ok:
                     self._verified.add(ref)
@@ -1865,13 +2082,19 @@ class ModelStore:
                         intent_id=intent_id,
                     )
                     operation_identity = self._snapshot_identity(ref, snapshot)
+            # th#1330 B2: every byte figure below (headroom gate, DOWNLOADING
+            # totals, the boot weights span) counts what will actually be
+            # fetched, so an override's skipped component never shows up as
+            # bytes anybody planned for or reported.
+            fetch_files = _snapshot_files_without_components(
+                snapshot, exclude_components)
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
                 failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM
                 await self._ensure_disk_headroom(
                     ref,
-                    sum(int(f.size_bytes) for f in snapshot.files),
+                    sum(int(f.size_bytes) for f in fetch_files),
                     operation_identity,
                     intent_id=intent_id,
                 )
@@ -1889,9 +2112,7 @@ class ModelStore:
             # 10s beat while an activity is open); snapshot sizes make the
             # total known up front, so the wire never shows total=0 for
             # tensorhub refs.
-            known_total = (
-                sum(int(f.size_bytes) for f in snapshot.files)
-                if snapshot is not None and snapshot.files else 0)
+            known_total = sum(int(f.size_bytes) for f in fetch_files)
             dl_counter = progress_mod.counter(
                 f"download:{ref}", progress_mod.UNIT_BYTES, total=known_total)
 
@@ -1961,6 +2182,7 @@ class ModelStore:
                                 hf_token=self._hf_token,
                                 allow_patterns=tuple(getattr(binding, "files", ()) or ()),
                                 components=tuple(getattr(binding, "components", ()) or ()),
+                                exclude_components=exclude_components,
                                 progress=_progress,
                                 fill_source_dir=self._fill_source_dir,
                             )

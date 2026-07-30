@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **th#1330 B2 — a component OVERRIDE no longer also fetches the component it overrides.**
+  pgw#617 is load-then-substitute: the override's tree is materialized separately and handed
+  to `from_pretrained` as a constructed object, so the base composition's copy of that
+  subfolder was downloaded and then never read — ~1.64 GB per SDXL text-encoder override, per
+  pod. `_materialize_local` now derives an exclusion from the binding's own
+  `component_overrides` (only for subfolders the snapshot actually carries) and passes it
+  through `ensure_local` -> `cozy_snapshot.ensure_snapshot`; every byte figure on the path
+  (disk-headroom gate, DOWNLOADING totals, the pgw#789 boot weights span) counts what is
+  actually fetched, and a typed `component_fetch_skipped` activity event names the bytes
+  skipped. The narrowed tree keys as `<digest>__x<fp>` (pgw#505's mechanism, negative side),
+  so it can never occupy the name reserved for a complete snapshot: a later FLAT dispatch of
+  the same base ref still materializes the full tree. Proven RED at HEAD / GREEN with the fix
+  on the real worker+CAS boundary in `tests/test_component_override_fetch_th1330.py` — the
+  evidence is the CAS itself, the base's `vae/` blob is absent from `blobs/`.
+
+- **th#1330 B4 (worker half) — `reclaimable_bytes` stopped over-promising, and disk GC stopped
+  deleting a tree a sibling ref still points at.** The reported figure summed each evictable
+  ref's whole indexed tree, so a blob two evictable refs shared was counted twice AND a blob
+  an evictable ref shares with a RETAINED one was counted as reclaimable even though
+  `sweep_orphan_blobs` only unlinks at `st_nlink == 1` — deleting that tree frees nothing.
+  The hub sizes every capacity decision off this number. Reclaimable is now the deduped set of
+  digests no retained ref holds; a ref with no banked manifest keeps its full indexed size.
+  Separately, `_evict_disk_ref` now refuses to `rmtree` a snapshot directory another
+  still-resident ref is materialized at (two refs at one digest share one directory).
+
+- **th#1330 B5 (worker half) — the banked snapshot map is no longer append-only.**
+  `ModelStore._snapshots` / `_snapshot_generations` / `_verified` kept a manifest forever, so a
+  ref dropped from DesiredResidency could still be materialized from OBSOLETE bytes by a later
+  bare `ensure_local(ref)`, with no hub prompting. `replace_desired_snapshots` now drops
+  manifests for refs that are neither desired, resident, in the preserve set, in use, nor mid
+  materialization; a ref wanted again goes through `_await_hub_snapshot`, which is the correct
+  path (the hub re-mints with LIVE presigned URLs).
+
 - **pgw#791 — the AOT serve path now satisfies the artifact's ALIGNED-input contract at
   ingress, once, instead of letting AOTInductor copy per call.** Inductor compiles its fast
   path for 16-byte-aligned inputs and, when a pointer is not, its generated wrapper clones the
