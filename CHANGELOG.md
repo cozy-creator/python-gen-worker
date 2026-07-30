@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **th#1322** — compile duration is a NUMBER on the wire, for both mint routes.
+  `ActivityUpdate.duration_ms` (proto field 17) carries the worker's own
+  monotonic span, and a new typed `jit_compile` event gives the JIT path the same
+  event shape `aot_mint_phases` has: `phase=minted` for the roll-up,
+  `phase=entry:<graph class>` / `shape:<WxH>` / `child:<phase>` for the spans
+  inside it. `aot_mint._emit_phase_event` now stamps `total_s` numerically and
+  emits a per-graph-class event; `compile_cache.emit_jit_compile_event` retires
+  the log-only `"compiled %s in %.0fs"` line at `compile_cache.py:3803`;
+  `mint_child` measures per-phase spans through its own `frame()` funnel and
+  `mint_delegate` turns the child's report into hub events (`phase=aborted` when
+  no cell came out, so a failed mint's real seconds are recorded without
+  polluting an AOT-vs-JIT comparison). Before this, AOT durations were only
+  parseable out of the free-text `detail` and JIT duration existed nowhere off
+  the pod. Hub half: tensorhub migration 0070 + `GET /v1/admin/compile-duration`.
+
 ## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, and the benchmark telemetry is finally connected
 
 Everything on chaos since 0.77.0. The headline trio, cut together because none of

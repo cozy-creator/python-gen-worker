@@ -75,6 +75,33 @@ class MintChildRefused(RuntimeError):
     """
 
 
+# th#1322: per-phase spans, measured HERE because this process owns the clock
+# the phases run on. `frame()` is the single funnel every phase transition goes
+# through, so accumulating on transition needs no second bookkeeping path that
+# could drift out of step with what the parent sees.
+_PHASE_SPANS: Dict[str, float] = {}
+_PHASE_OPEN: Tuple[str, float] = ("", 0.0)
+
+
+def _rotate_phase(phase: str) -> None:
+    """Close the open phase's span and open ``phase``'s. Repeat frames for the
+    SAME phase (step/note updates) keep the one span running."""
+    global _PHASE_OPEN
+    name, started = _PHASE_OPEN
+    if name == phase:
+        return
+    if name:
+        _PHASE_SPANS[name] = round(
+            _PHASE_SPANS.get(name, 0.0) + (time.monotonic() - started), 3)
+    _PHASE_OPEN = (phase, time.monotonic())
+
+
+def _close_phases() -> Dict[str, float]:
+    """Close the last open phase and return the measured table."""
+    _rotate_phase("")
+    return dict(_PHASE_SPANS)
+
+
 def frame(
     phase: str = "", step: int = 0, total: int = 0, note: str = "",
 ) -> None:
@@ -84,6 +111,8 @@ def frame(
     evidence (this process tree's CPU, the capture dir's bytes), never from a
     frame — a wedged child can still print.
     """
+    if phase:
+        _rotate_phase(phase)
     sys.stdout.write(frame_line(phase=phase, step=step, total=total, note=note))
     sys.stdout.flush()
 
@@ -376,6 +405,7 @@ def mint(request: MintRequest) -> MintReport:
         peak_vram_bytes=peak,
         peak_rss_bytes=rss,
         elapsed_s=time.monotonic() - started,
+        phases=_close_phases(),
     )
 
 
@@ -409,9 +439,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         report = mint(request)
     except MintChildRefused as exc:
+        # th#1322: a refused mint's phase table is where it spent the time
+        # BEFORE refusing — the most useful half of a failed mint.
         _write_report(report_path, MintReport(
             status="refused", detail=str(exc)[:2000],
-            elapsed_s=time.monotonic() - started))
+            elapsed_s=time.monotonic() - started, phases=_close_phases(),
+            phase=_PHASE_OPEN[0]))
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     except BaseException as exc:  # noqa: BLE001 — every death is classified
@@ -419,7 +452,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write_report(report_path, MintReport(
             status="resource" if resource_shortfall else "failed",
             detail=f"{type(exc).__name__}: {exc}"[:2000],
-            elapsed_s=time.monotonic() - started))
+            elapsed_s=time.monotonic() - started, phases=_close_phases(),
+            phase=_PHASE_OPEN[0]))
         logger.exception("mint-child: mint failed")
         if resource_shortfall:
             return EXIT_RESOURCE

@@ -1169,6 +1169,26 @@ message ActivityUpdate {
   // pod without waiting out its own stall window.
   bool  self_stalled   = 15;
   int64 stalled_for_ms = 16;
+  // th#1322: the WORKER-MEASURED duration of the work this event reports, in
+  // milliseconds. A numeric column, not prose: `aot_mint_phases` and
+  // `jit_compile` both carry their total here, so "how long does AOT mint take
+  // vs JIT mint" is ONE grouped query over worker_activity_events instead of a
+  // regex over `detail` (which cannot be indexed, cannot be percentiled, and
+  // returns NULL the first time the formatting changes).
+  //
+  // Deliberately its OWN field rather than an overload of stalled_for_ms (that
+  // one means "no counter advanced for this long" and the hub kills on it) —
+  // the same separation-of-concerns as WorkerMessage.boot_phase vs liveness:
+  // a measurement must not be able to satisfy or break pod condemnation.
+  //
+  // Semantics: the span of ONE completed unit of work, from the worker's own
+  // monotonic clock. 0 = not a timed event (every pre-th#1322 worker, every
+  // progress beat). Never derived from receipt timestamps — that would measure
+  // stream latency and clock skew instead of work. A breakdown finer than this
+  // total rides `detail`, and finer-grained SPANS ride their own events with
+  // their own `phase` (per graph-class entry, per warm shape), so the
+  // breakdown is groupable too.
+  int64 duration_ms = 17;
 }
 
 enum ActivityState {

@@ -1119,21 +1119,65 @@ def _mint_phase_table(
     }
 
 
+MINT_PHASES_KIND = "aot_mint_phases"
+
+
+def _entry_duration_s(timings: Mapping[str, Any]) -> float:
+    """One graph-class entry's own compile cost: export + compile + warm.
+
+    The package/declare/pack phases are per-MINT, not per-entry, so they belong
+    to the roll-up only — summing the entry rows must never reproduce
+    ``total_s`` or a reader would double-count.
+    """
+    return sum(
+        float(timings.get(key) or 0.0)
+        for key in ("export_s", "compile_s", "warm_s")
+    )
+
+
 def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
     """Typed telemetry event — the phase table must reach observability,
-    never only a pod log."""
+    never only a pod log.
+
+    th#1322: the mint's TOTAL now rides the numeric ``duration_ms`` field, and
+    each graph-class entry gets its own event under ``phase=entry:<name>``. The
+    interpolated table stays in ``detail`` as the breakdown you read per event
+    (exactly as ``stage_ms`` stays in the request payload), but every number a
+    measurement lane groups, percentiles or trends on is now a column.
+
+    Paul's question — "why is AOT mint so much slower than JIT mint?" — needs
+    the per-entry rows: an AOT mint compiles N graph classes where a JIT mint
+    compiles the graphs one real warm plan happens to trace, and the answer is
+    which entries the extra minutes are in, not just that there are more.
+    """
     try:
         from . import activity as activity_mod
 
         totals = dict(table.get("totals") or {})
+        lane = spec.lane_label() or "plain"
+        total_s = float(totals.get("total_s") or 0.0)
         activity_mod.emit_event(
-            "aot_mint_phases",
-            f"family={spec.family} lane={spec.lane_label() or 'plain'} "
+            MINT_PHASES_KIND,
+            f"family={spec.family} lane={lane} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
-            phase="minted",
+            phase=activity_mod.PHASE_MINTED,
+            duration_ms=int(round(total_s * 1000)),
         )
+        for name, timings in sorted((table.get("entries") or {}).items()):
+            if not isinstance(timings, Mapping):
+                continue
+            entry_s = _entry_duration_s(timings)
+            if entry_s <= 0:
+                continue
+            activity_mod.emit_event(
+                MINT_PHASES_KIND,
+                f"family={spec.family} lane={lane} entry={name} "
+                f"timings={dict(timings)}",
+                phase=f"entry:{name}",
+                duration_ms=int(round(entry_s * 1000)),
+            )
     except Exception:  # pragma: no cover — telemetry must never fail a mint
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
 

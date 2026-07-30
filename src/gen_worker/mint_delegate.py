@@ -227,6 +227,9 @@ async def build_cell(
         if outcome.report is not None and outcome.report.peak_vram_bytes:
             mint_budget.record_child_peak(
                 family, task.weight_lane, outcome.report.peak_vram_bytes)
+        _emit_jit_compile(
+            outcome, family=family, lane=task.weight_lane,
+            key=str(pending.cell_key), attempt=attempts)
 
         if outcome.status == mint_process.ABANDONED:
             return DelegatedResult(
@@ -261,6 +264,61 @@ async def build_cell(
     fleet_cells.abandon_self_mint(pending)
     return DelegatedResult(
         status=FAILED, detail=last, attempts=attempts, budget=budget)
+
+
+def _emit_jit_compile(
+    outcome: MintOutcome, *, family: str, lane: str, key: str, attempt: int,
+) -> None:
+    """th#1322: one delegated JIT mint's duration, as typed NUMERIC events.
+
+    This is the fleet's real JIT compile path — the child arms COLD and drives
+    the endpoint's own warm plan (gw#587), so its `warmup_forward` +
+    `inductor_compile` spans ARE "how long does JIT take". Before this the
+    number lived only in the child's stdout, and a serve pod exposes no logs
+    (pgw#760), so it was unrecoverable the moment the pod went away.
+
+    Shape matches ``aot_mint_phases`` exactly: `phase=minted` carries the total,
+    `phase=child:<phase>` the spans inside it. A mint that did NOT produce a
+    cell reports its total under `phase=aborted` instead — the seconds are real
+    and worth recording, but they must not enter an AOT-vs-JIT comparison as if
+    a cell came out.
+
+    Telemetry never changes the mint's outcome.
+    """
+    report = outcome.report
+    try:
+        head = f"family={family} lane={lane or 'plain'} key={key} attempt={attempt}"
+        phases: Dict[str, float] = dict(
+            report.phases) if report is not None else {}
+        for name, seconds in sorted(phases.items()):
+            value = float(seconds or 0.0)
+            if value <= 0:
+                continue
+            activity_mod.emit_event(
+                activity_mod.KIND_JIT_COMPILE,
+                f"{head} child_phase={name} seconds={round(value, 2)}",
+                phase=f"child:{name}",
+                duration_ms=int(round(value * 1000)),
+            )
+        # The child's own elapsed is authoritative when it wrote a report; the
+        # parent's wall clock covers a child that died before writing one (spawn
+        # + run, which is the honest cost of that attempt).
+        total_s = float(
+            report.elapsed_s if report is not None and report.elapsed_s > 0
+            else outcome.elapsed_s)
+        if total_s <= 0:
+            return
+        activity_mod.emit_event(
+            activity_mod.KIND_JIT_COMPILE,
+            f"{head} status={outcome.status} total_s={round(total_s, 2)} "
+            f"phases={phases}",
+            phase=(
+                activity_mod.PHASE_MINTED if outcome.minted else "aborted"),
+            duration_ms=int(round(total_s * 1000)),
+        )
+    except Exception:  # pragma: no cover — telemetry never fails a mint
+        logger.debug("mint-delegate: jit_compile event emission failed",
+                     exc_info=True)
 
 
 def _emit_abort(
