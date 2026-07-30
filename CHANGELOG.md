@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **pgw#763 driver 3 — the process split becomes an AUTHORIZATION boundary, not just a
+  fault boundary (flag still default-OFF).** Stages 1-4 built the parent/child seam for
+  resilience; the premise of the whole design is that tenant endpoint code is imported into
+  the worker process, so the JWT, capability tokens, hardware/canary measurement and billing
+  were all forgeable by that code. Six deltas move each of them to the parent side:
+
+  - the split switch itself is platform-reserved and pod-launch-injected (hub half:
+    tensorhub `e4016fe9`) — a boundary the contained code can decline is not a boundary;
+  - the compute child holds **no worker JWT**: `T_TOKEN` is deleted AND `WORKER_JWT` is
+    stripped from the child's environment, so identity-bearing hub calls become narrow,
+    allowlisted, audited **parent actions** (`procsplit/actions.py`) with the base URL chosen
+    by the parent. Identity travels as a claim (`WORKER_ID`, new `WORKER_RELEASE_ID`), never
+    as a credential;
+  - `Hello.resources` — the hardware and the boot canary, i.e. the fleet-wide verdict keys —
+    are measured by the PARENT in a subprocess that imports no endpoint module, and stamped
+    onto every relayed Hello;
+  - billable quantities the parent can observe (wall clock, dispatch concurrency, child RSS)
+    are attested by the parent; the ones it cannot see without pulling the data plane through
+    its interpreter stay child-reported and are NAMED in a durable record;
+  - the parent DECIDES on each per-job capability token — forward, or withhold and refuse the
+    job — instead of relaying whatever arrives;
+  - C2PA signing is a `sign(hash)` ask over the seam; neither the key nor the credential that
+    reaches the oracle exists in the child.
+
+  Nothing changes with `GEN_WORKER_PROCESS_SPLIT` unset, which is every pod today.
+
 - **pgw#788 — a TORCHLESS worker could not boot. torch is a CAPABILITY now, and its
   absence is a sealed FACT.** `entrypoint.py` calls `env_seal.establish()` on every boot
   regardless of `accelerator`, and from **0.70.3** onward that chain bare-imported torch at
