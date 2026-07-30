@@ -31,6 +31,34 @@ ENV_WATCHDOG_PING_S = "GEN_WORKER_CHILD_WATCHDOG_PING_S"
 # accounted evidence activity.watchdog already trusts.
 ENV_LIVENESS_FD = "GEN_WORKER_CHILD_LIVENESS_FD"
 
+# pgw#783: one child per EXECUTION GROUP. The hub's delivered packing is the
+# only source of G — there is no new knob to mis-set.
+ENV_TOPOLOGY = "WORKER_EXECUTION_TOPOLOGY"
+# Which group this child owns. Labelling only (logs, dials, per-group dirs);
+# no behaviour reads it, because the child is rewritten into a SINGLE-group
+# worker over its own cards (see procsplit.group).
+ENV_GROUP_ORDINAL = "GEN_WORKER_GROUP_ORDINAL"
+# How many compute children share this pod's cgroup. The one fact a child
+# needs about its siblings: the CPU (pgw#782) and host-RAM (pgw#752) budgets
+# are pod-wide quotas that must be divided by it, and the child's own rewritten
+# topology says G == 1.
+ENV_HOST_SIBLINGS = "GEN_WORKER_HOST_SIBLINGS"
+
+
+def host_siblings() -> int:
+    """Compute children sharing this container's CPU/RAM quota (>= 1)."""
+    try:
+        return max(1, int(os.environ.get(ENV_HOST_SIBLINGS, "") or 1))
+    except ValueError:
+        return 1
+
+
+def group_ordinal() -> int:
+    try:
+        return max(0, int(os.environ.get(ENV_GROUP_ORDINAL, "") or 0))
+    except ValueError:
+        return 0
+
 
 def split_enabled() -> bool:
     return os.environ.get(ENV_SPLIT, "").strip().lower() in ("1", "true", "yes")
@@ -43,10 +71,15 @@ def is_compute_child() -> bool:
 __all__ = [
     "ENV_CHILD",
     "ENV_CHILD_CMD",
+    "ENV_GROUP_ORDINAL",
+    "ENV_HOST_SIBLINGS",
     "ENV_LIVENESS_FD",
     "ENV_SOCKET",
     "ENV_SPLIT",
+    "ENV_TOPOLOGY",
     "ENV_WATCHDOG_PING_S",
+    "group_ordinal",
+    "host_siblings",
     "is_compute_child",
     "split_enabled",
 ]
