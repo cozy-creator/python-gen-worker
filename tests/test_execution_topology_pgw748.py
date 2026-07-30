@@ -290,11 +290,15 @@ def test_an_internal_group_is_never_demoted() -> None:
         assert (topo.groups, topo.degree, topo.parallel) == (1, 2, "internal")
 
 
-def test_free_vram_reports_the_best_group_never_the_pod_sum(
+def test_free_vram_reports_the_tightest_group_never_the_pod_sum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The REPORTING half of pgw#648: a 4-card pod that reports the sum invites
     # the hub to admit a model that fits on no single card.
+    #
+    # pgw#776 corrected the direction: MAX across groups was honest per JOB and
+    # dishonest per POD, because the hub admits G concurrent jobs against this
+    # ONE scalar. The MIN is the only safe single number.
     torch = pytest.importorskip("torch")
     from gen_worker import lifecycle
 
@@ -305,14 +309,16 @@ def test_free_vram_reports_the_best_group_never_the_pod_sum(
 
     monkeypatch.setenv(
         ENV_VAR, '{"gpu_count":4,"group_degree":1,"groups":4}')
-    # 4x1: four independent pools; the roomiest is the honest offer.
-    assert lifecycle.free_vram_bytes() == 40 * _GiB
+    # 4x1: four independent pools, and the hub may fill all four — so the
+    # honest offer is the tightest one, not the roomiest (pgw#776).
+    assert lifecycle.free_vram_bytes() == 10 * _GiB
 
     monkeypatch.setenv(
         ENV_VAR,
         '{"gpu_count":4,"group_degree":2,"groups":2,"parallel":"sequence"}')
-    # 2x2 replicated: group 0 = min(10,10) = 10, group 1 = min(40,20) = 20.
-    assert lifecycle.free_vram_bytes() == 20 * _GiB
+    # 2x2 replicated: group 0 = min(10,10) = 10, group 1 = min(40,20) = 20;
+    # the pod can only promise 10 to each of the two jobs it may be given.
+    assert lifecycle.free_vram_bytes() == 10 * _GiB
 
     monkeypatch.delenv(ENV_VAR, raising=False)
     assert lifecycle.free_vram_bytes() == 10 * _GiB

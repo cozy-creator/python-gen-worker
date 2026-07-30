@@ -390,20 +390,26 @@ def delivered_topology(
 def refuse_unless_groups_can_coexist(topo: ExecutionTopology) -> None:
     """pgw#773: refuse ``groups>1 AND degree>1`` by name.
 
-    The hub is already allowed to deliver ``gpu_count=4, group_degree=2``,
-    but every rank-0 lives in the ONE worker process and the current rank
-    plumbing installs the DEFAULT torch.distributed process group — so the
-    second group's broadcasts land in the first group's world: group 0's
-    follower executes group 1's calls and group 1's follower parks forever.
-    Silent corruption. Until per-group non-default process groups are
-    live-proven on NCCL, this is a typed boot refusal the hub can re-pack
-    against, never a wedge.
+    The original reason is FIXED: each group now owns a non-default process
+    group over its own store, so two groups can no longer corrupt each other's
+    collectives (proved on the gloo rig at the exact `gpu_count=4,
+    group_degree=2` shape). The refusal stays for a second, narrower reason
+    that is still live: ``group_cuda_device``/``pin_cuda_device_for_group``
+    treat the group ORDINAL as a device index, which is only true at D == 1.
+    At `G>1 ∧ D>1` group 1 of a 2x2 pod owns cards 2-3 while both helpers say
+    `cuda:1` — a placement bug, silent, on every load and bookkeeping path.
+    Refused at boot so the hub re-packs, never wedged.
+
+    Lifting it needs the ordinal -> rank-0-device translation everywhere those
+    two helpers are read, plus a live NCCL run of two concurrent degree-2
+    groups (the CPU rig proves isolation, not NVLink behaviour).
     """
     if topo.groups > 1 and topo.degree > 1:
         raise TopologyError(
             "topology_multi_group_sequence_unsupported",
-            f"{topo}: {topo.groups} degree-{topo.degree} execution groups in "
-            "one worker process would share one default process group and "
-            "corrupt each other's collectives (pgw#773); refusing at boot so "
-            "the hub re-packs instead of serving silently wrong",
+            f"{topo}: group placement derives the card from the group ORDINAL, "
+            f"which is only the rank-0 device at degree 1 — {topo.groups} "
+            f"degree-{topo.degree} groups would place weights on cards they do "
+            "not own (pgw#773); refusing at boot so the hub re-packs instead "
+            "of serving silently wrong",
         )
