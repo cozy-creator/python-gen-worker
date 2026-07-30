@@ -90,6 +90,7 @@ _CHILD_FORBIDDEN_ENVS = ("WORKER_JWT",)
 # A mediated hub call must not hold the parent's control loop open forever.
 _ACTION_HARD_TIMEOUT_S = 120.0
 _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
+_MAX_CONCURRENT_ACTIONS = 16
 # The host canary is a real benchmark (memcpy/D2H/CPU); on a cold pod with a
 # large card it is seconds, not milliseconds. Generous, and bounded.
 _MEASURE_TIMEOUT_S = 180.0
@@ -253,6 +254,7 @@ class ParentControl:
         self.actions_performed = 0
         self.actions_refused = 0
         self._last_action_refusal_report_at = 0.0
+        self._action_slots = asyncio.Semaphore(_MAX_CONCURRENT_ACTIONS)
         # The hub base the parent will direct mediated calls at. Captured from
         # the HelloAck it relays — the CHILD never names a host.
         self._file_base_url = ""
@@ -788,7 +790,11 @@ class ParentControl:
         """
         rid = req.get("id")
         try:
-            result = await self._perform_action(req)
+            # Bounded: a child that spams asks must not turn the control
+            # parent — the process that owes every job's liveness — into an
+            # unbounded outbound HTTP fan-out against the hub.
+            async with self._action_slots:
+                result = await self._perform_action(req)
         except actions.ActionRefused as exc:
             self.actions_refused += 1
             logger.error(
