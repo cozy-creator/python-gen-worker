@@ -41,7 +41,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Awaitable, Callable, Dict, Iterator, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional
 
 from .pb import worker_scheduler_pb2 as pb
 
@@ -451,6 +451,25 @@ def mark(
     ))
 
 
+def mark_once(phase: str, **kw: Any) -> bool:
+    """:func:`mark` the phase only if it has never been recorded in this
+    process. Returns True if it was recorded now.
+
+    Boot milestones are once-per-process by definition, but some of the call
+    sites that know about them fire repeatedly — ``on_hello_ack`` runs again on
+    every RECONNECT, and "process start -> hello" measured on the third
+    reconnect of a six-hour-old worker is not a boot number at all. Recording
+    it again would put a second, much larger `hello` row in the series and
+    quietly corrupt every boot aggregate that reads it.
+    """
+    with _lock:
+        seen = any(r.phase == phase and r.terminal for r in _rows)
+    if seen:
+        return False
+    mark(phase, **kw)
+    return True
+
+
 def servable_ms() -> Optional[int]:
     """Process start -> first-request-servable, in ms; None if not yet.
 
@@ -527,6 +546,7 @@ __all__ = [
     "span",
     "open_span",
     "mark",
+    "mark_once",
     "phase_class",
     "process_start_unix",
     "process_uptime_ms",

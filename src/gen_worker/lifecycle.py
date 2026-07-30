@@ -379,7 +379,10 @@ class Lifecycle:
             boot_mod.bind_sink(self.executor._send, asyncio.get_running_loop())
             # process start -> hello: the first boot number, and the one the
             # hub could previously only infer from pod create -> connect.
-            boot_mod.mark(boot_mod.PHASE_HELLO, since_process_start=True)
+            # ONCE per process: this handler runs again on every reconnect, and
+            # "process start -> hello" measured on a reconnect hours later is
+            # not a boot number.
+            boot_mod.mark_once(boot_mod.PHASE_HELLO, since_process_start=True)
         except Exception:  # telemetry must never break the handshake
             logger.debug("boot phase sink bind failed", exc_info=True)
         desired_command: Optional[pb.DesiredStateCommand] = None

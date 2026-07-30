@@ -10,10 +10,13 @@ The acceptance this file encodes:
   ``Executor.ensure_setup``, i.e. after weights are on disk, so every phase of
   a cold boot precedes any sink. A recorder that only forwarded live rows would
   report its own tail and silently drop the expensive part.
-* A REFUSED ARM appears with its classified reason. ``aot_serve.enable`` is
-  driven with a real ``AdoptError`` and the refusal must survive as
-  ``outcome=refused reason=<token>`` — not as a failure, because the worker
-  goes on serving eager.
+* A REFUSED ARM appears with its classified reason: a real ``AdoptError``
+  survives as ``outcome=refused reason=<token>`` — not as a failure, because
+  the worker declined that cell deliberately and goes on serving eager. (The
+  end-to-end assertion through ``aot_serve.enable`` itself lives in
+  ``test_boot_phases_arm_pgw764.py``, which is held out of the commit while a
+  sibling lane holds uncommitted WIP in ``aot_serve.py`` — see tracker
+  pgw#764.)
 * The phases RECONCILE: nested spans charge time to the child, so measured
   phases plus the residual equal the boot window (th#1111's rule, at boot
   scale). An instrument that does not close cannot say where the time went.
@@ -275,3 +278,17 @@ def test_shape_takes_the_executed_value_then_the_default() -> None:
     assert serving_mode.shape_of(_Payload(), _Defaults()) == (28, 1024, 768)
     # Non-spatial functions report 0 rather than inventing a shape.
     assert serving_mode.shape_of(object(), None) == (0, 0, 0)
+
+
+def test_a_boot_milestone_is_recorded_once_per_process() -> None:
+    """`on_hello_ack` runs again on every RECONNECT. "Process start -> hello"
+    measured on a reconnect hours into a worker's life is not a boot number,
+    and a second, much larger `hello` row would corrupt every boot aggregate
+    that reads the series."""
+    assert boot_phases.mark_once(boot_phases.PHASE_HELLO,
+                                 since_process_start=True) is True
+    assert boot_phases.mark_once(boot_phases.PHASE_HELLO,
+                                 since_process_start=True) is False
+    hellos = [r for r in boot_phases.recorded_rows()
+              if r.terminal and r.phase == boot_phases.PHASE_HELLO]
+    assert len(hellos) == 1
