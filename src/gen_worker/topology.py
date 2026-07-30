@@ -36,7 +36,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Iterator, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 from .models.residency import REPLICATED, SHARDED, DeviceGroup
 
@@ -298,7 +298,7 @@ class ExecutionTopology:
         return ExecutionTopology(gpu_count=self.gpu_count, group_degree=1)
 
     def as_dict(self) -> dict:
-        d = {
+        d: dict[str, Any] = {
             "gpu_count": self.gpu_count,
             "group_degree": self.group_degree,
             "groups": self.groups,

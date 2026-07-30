@@ -406,7 +406,9 @@ def get_host_canary() -> HostCanaryReport:
 # ---------------------------------------------------------------------------
 
 
-def _collective_rank_main(rank: int, world_size: int, shape, iters: int, out_dir: str) -> None:
+def _collective_rank_main(
+    rank: int, world_size: int, shape: Tuple[int, ...], iters: int, out_dir: str,
+) -> None:
     """One NCCL rank: init, time ``all_to_all_single``, write its JSON."""
     import torch
     import torch.distributed as dist

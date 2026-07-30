@@ -6839,7 +6839,7 @@ class Executor:
 
     def _sequence_boot_slot(
         self, spec: EndpointSpec, rec: "_ClassRecord",
-    ) -> Optional[str]:
+    ) -> str:
         """The ONE class-annotated pipeline slot a degree-D group shards.
 
         Refused typed, never guessed: a follower rebuilds its copy through
@@ -6874,6 +6874,7 @@ class Executor:
         topo = self.topology
         if topo.degree <= 1 or topo.parallel != "sequence":
             return
+        from . import compile_cache
         from .parallel import GroupPlan
         from .parallel.cp import w8a8_gemm_mode
         from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
@@ -6901,7 +6902,7 @@ class Executor:
         # Rank 0 DECIDES; every rank obeys. Nothing below rank 0 ever measures
         # its own card and adapts (pgw#748 §5.4).
         plan = GroupPlan(
-            precision_lane=self._lane_label(spec, ""),
+            precision_lane=compile_cache.cell_base_lane(pipe),
             gemm_mode=w8a8_gemm_mode(pipe),
             sp_degree=topo.degree,
         )

@@ -47,7 +47,6 @@ from .api.export_contract import (
     Fork,
     GraphClass,
     Input,
-    export_declaration,
 )
 
 logger = logging.getLogger(__name__)
