@@ -807,3 +807,38 @@ def test_parent_stays_torch_free_after_construction():
     import sys
     _parent(4)
     assert "torch" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# CPU divisor — G children share ONE cpu cgroup (783-C, cpu_budget)
+# ---------------------------------------------------------------------------
+
+from gen_worker import cpu_budget  # noqa: E402
+
+
+def test_cpu_divisor_multiplies_the_local_groups_by_the_sibling_count(monkeypatch):
+    """Under the split each child rewrites its own topology to a single local
+    group, so `groups` reads 1 in every child — but G of them share one cpu
+    cgroup. Without the sibling multiplier each would claim the whole allowance
+    and reinstate the 192-threads-on-32-cores oversubscription pgw#782 removed.
+    `impose` records the effective concurrency before the torch check, so this
+    holds torch-free."""
+    monkeypatch.setenv(ENV_HOST_SIBLINGS, "4")
+    facts = cpu_budget.impose_intra_op_threads(1)   # one local group per child
+    assert facts["host_siblings"] == 4
+    assert facts["concurrency"] == 4                # 1 local x 4 siblings
+
+    # A D>1 group (2 local groups) on a 2-sibling pod: 2 x 2 = 4.
+    monkeypatch.setenv(ENV_HOST_SIBLINGS, "2")
+    assert cpu_budget.impose_intra_op_threads(2)["concurrency"] == 4
+
+
+def test_cpu_divisor_is_unchanged_without_siblings(monkeypatch):
+    """siblings == 1 (every non-split pod) -> the divisor is `groups`, exactly
+    as pgw#782 shipped. Byte-identical."""
+    monkeypatch.delenv(ENV_HOST_SIBLINGS, raising=False)
+    facts = cpu_budget.impose_intra_op_threads(4)
+    assert facts["host_siblings"] == 1
+    assert facts["concurrency"] == 4                # groups, unmultiplied
+    # And the per-group threads use that effective divisor.
+    assert cpu_budget.per_group_threads(32.0, 4) == 8
