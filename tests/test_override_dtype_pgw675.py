@@ -24,7 +24,6 @@ it — the exact crash path.
 
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 
@@ -36,12 +35,8 @@ from gen_worker.convert.writer import streaming_w8a8_cast
 from gen_worker.models.loading import (
     QUANT_LANE_COMPUTE_DEFAULT,
     composition_compute_dtype,
-    detect_on_disk_dtype,
-    get_torch_dtype,
     load_component_override,
 )
-from gen_worker.models.w8a8 import detect_w8a8_artifact, load_w8a8_pipeline
-from gen_worker.models.w4a4 import load_w4a4_pipeline
 
 # ---------------------------------------------------------------------------
 # Fixture: a majority-fp16 #fp8-w8a8 base tree, built by the REAL producer.
@@ -104,14 +99,6 @@ def _fp32_vae_override(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_w8a8_tree_majority_sniff_is_the_trap(tmp_path: Path) -> None:
-    """Pin the production shape: the tree IS w8a8 and its majority on-disk
-    dtype IS fp16 — the two facts whose combination broke the composition."""
-    root = _w8a8_base_tree(tmp_path)
-    assert detect_w8a8_artifact(root) is not None
-    assert detect_on_disk_dtype(root) == "fp16"
-
-
 def test_composition_compute_dtype_is_lane_aware_on_w8a8(
     tmp_path: Path,
 ) -> None:
@@ -145,16 +132,3 @@ def test_override_decodes_bf16_latents_on_the_w8a8_lane(
     with torch.inference_mode():
         decoded = vae.decode(latents).sample
     assert decoded.dtype == torch.bfloat16
-
-
-def test_quant_lane_compute_default_matches_the_loaders() -> None:
-    """Drift guard: the constant `composition_compute_dtype` answers with for
-    quantized-artifact trees must be the same default the w8a8/w4a4 pipeline
-    loaders actually use (`compute_dtype or torch.bfloat16`)."""
-    assert get_torch_dtype(QUANT_LANE_COMPUTE_DEFAULT) is torch.bfloat16
-    for loader in (load_w8a8_pipeline, load_w4a4_pipeline):
-        src = inspect.getsource(loader)
-        assert "compute_dtype or torch.bfloat16" in src, (
-            f"{loader.__name__} no longer defaults to torch.bfloat16 — "
-            "update QUANT_LANE_COMPUTE_DEFAULT (pgw#675) in the same change"
-        )

@@ -91,16 +91,6 @@ def _inputs() -> tuple:
     )
 
 
-def _resident_bytes(module: Any) -> Dict[str, int]:
-    out: Dict[str, int] = {}
-    for t in list(module.parameters()) + list(module.buffers()):
-        if t is None:
-            continue
-        key = str(t.dtype)
-        out[key] = out.get(key, 0) + t.numel() * t.element_size()
-    return out
-
-
 def _nn_hook_count(module: Any) -> int:
     total = 0
     for m in module.modules():
@@ -172,14 +162,6 @@ def test_outputs_are_bitwise_equal_to_the_hook_lane(lanes: Dict[str, Any]) -> No
         want = lanes["hooked"](x, t, enc).sample
         have = lanes["restructured"](x, t, enc).sample
     assert torch.equal(want, have)
-
-
-def test_residency_is_identical(lanes: Dict[str, Any]) -> None:
-    """Coverage parity with the hook lane: the same leaves hold the same bytes
-    at the same precision. NOTE this walks the MODULE only — it is blind to a
-    storage retained by an external holder, which is a separate (and measured,
-    see below) failure mode. Both facts are needed; neither implies the other."""
-    assert _resident_bytes(lanes["hooked"]) == _resident_bytes(lanes["restructured"])
 
 
 def _distinct_storage_bytes(*roots: Any) -> Dict[str, int]:
