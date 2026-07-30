@@ -6,6 +6,11 @@ x-amz-checksum-sha256 header (400, and the object is not stored) and refusing a
 request whose header was changed from the one the grant signed (403). That
 enforcement is the whole premise of the design, so the test server implements
 it rather than accepting everything.
+
+The happy paths (declaration shape, chunk boundaries, dedup/resume) are pinned
+end-to-end through HubClient.publish_v2 in
+tests/convert/test_publish_v2_pgw781.py; this file keeps only the client-side
+refusal properties that an end-to-end pass cannot distinguish.
 """
 
 from __future__ import annotations
@@ -14,7 +19,6 @@ import base64
 import hashlib
 import http.server
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -112,95 +116,6 @@ class Store:
         self.httpd.server_close()
 
 
-def test_one_pass_produces_the_whole_hash_and_every_chunk(tmp_path):
-    data = make(CS * 3 + 11, seed=5)
-    f = tmp_path / "big.safetensors"
-    f.write_bytes(data)
-
-    d = hash_file_and_chunks(f, chunk_size=CS, rel_path="t/big.safetensors")
-    assert d.digest == "sha256:" + sha(data)
-    assert d.size_bytes == len(data)
-    assert len(d.chunks) == 4
-    # Boundaries are fixed multiples; the chunk hashes are of the real spans.
-    for i, c in enumerate(d.chunks):
-        assert c.offset == i * CS
-        span = data[c.offset:c.offset + c.length]
-        assert c.sha256 == sha(span)
-        assert c.length == (CS if i < 3 else 11)
-    assert sum(c.length for c in d.chunks) == len(data)
-    # And the wire shape matches the hub's manifest v2 entry.
-    wire = d.to_wire()
-    assert wire["digest"].startswith("sha256:")
-    assert wire["chunks"][0] == {"digest": d.chunks[0].sha256, "len": CS}
-
-
-def test_files_at_or_below_the_threshold_stay_whole(tmp_path):
-    for size in (1, CS - 1, CS):
-        data = make(size, seed=size)
-        f = tmp_path / f"s{size}.json"
-        f.write_bytes(data)
-        d = hash_file_and_chunks(f, chunk_size=CS)
-        assert d.chunks == [], f"{size} bytes must be stored whole"
-        assert d.digest == "sha256:" + sha(data)
-        assert "chunks" not in d.to_wire()
-    # One byte over and it chunks.
-    data = make(CS + 1, seed=99)
-    f = tmp_path / "over.bin"
-    f.write_bytes(data)
-    assert len(hash_file_and_chunks(f, chunk_size=CS).chunks) == 2
-
-
-def test_upload_puts_each_chunk_once_and_the_store_accepts_them(tmp_path):
-    data = make(CS * 3, seed=7)
-    f = tmp_path / "m.safetensors"
-    f.write_bytes(data)
-    d = hash_file_and_chunks(f, chunk_size=CS, rel_path="m.safetensors")
-    src = sources_from_declarations([d], {"m.safetensors": f})
-
-    store = Store()
-    try:
-        grants = [store.grant("sha256:" + c.sha256, c.length) for c in d.chunks]
-        rep = upload_grants(grants, lambda dg: src[dg], parallel=3)
-        assert rep.ok, rep.failures
-        assert (rep.granted, rep.uploaded) == (3, 3)
-        assert rep.bytes_uploaded == len(data)
-        # Reassembling what the store holds must reproduce the file exactly.
-        got = b"".join(store.objects[f"/staging/{c.sha256}"] for c in d.chunks)
-        assert got == data
-        assert sha(got) == d.digest.split(":")[1]
-    finally:
-        store.close()
-
-
-def test_resume_uploads_only_the_shrunken_need_set(tmp_path):
-    """Resume is not session state: the hub simply grants fewer objects the
-    second time, because the ones that landed are now resident."""
-    data = make(CS * 4, seed=11)
-    f = tmp_path / "m.bin"
-    f.write_bytes(data)
-    d = hash_file_and_chunks(f, chunk_size=CS, rel_path="m.bin")
-    src = sources_from_declarations([d], {"m.bin": f})
-
-    store = Store()
-    try:
-        first = [store.grant("sha256:" + c.sha256, c.length) for c in d.chunks[:2]]
-        rep = upload_grants(first, lambda dg: src[dg], parallel=2)
-        assert rep.ok and rep.uploaded == 2
-
-        # Re-declare: only the two that did not land come back as needs.
-        rest = [store.grant("sha256:" + c.sha256, c.length) for c in d.chunks[2:]]
-        rep2 = upload_grants(rest, lambda dg: src[dg], parallel=2)
-        assert rep2.ok and rep2.granted == 2 and rep2.uploaded == 2
-
-        got = b"".join(store.objects[f"/staging/{c.sha256}"] for c in d.chunks)
-        assert got == data
-        # Nothing was uploaded twice.
-        with store.httpd.lock:
-            assert all(v == 1 for v in store.httpd.attempts.values()), store.httpd.attempts
-    finally:
-        store.close()
-
-
 def test_a_substituted_checksum_claim_is_refused_by_the_store(tmp_path):
     """The checksum is inside the signature. Changing the claim must 403 — and
     the client must NOT retry a terminal 4xx into a storm."""
@@ -262,16 +177,3 @@ def test_shared_chunks_upload_once(tmp_path):
     assert set(src) == digests
 
 
-def test_declaration_self_check_catches_a_local_inconsistency(tmp_path):
-    data = make(CS * 2, seed=29)
-    f = tmp_path / "m.bin"
-    f.write_bytes(data)
-    d = hash_file_and_chunks(f, chunk_size=CS)
-    from gen_worker.models.chunk_upload import _assert_consistent
-
-    d.chunks[0].__class__  # frozen dataclass; rebuild to mutate
-    from gen_worker.models.chunk_upload import ChunkPlan
-
-    d.chunks[0] = ChunkPlan(sha256=d.chunks[0].sha256, offset=0, length=7)
-    with pytest.raises(ValueError):
-        _assert_consistent(d, CS)

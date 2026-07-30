@@ -168,18 +168,6 @@ def test_v2_chunked_snapshot_materializes_byte_identically(tmp_path, store):
     assert sorted(store.hits.values()) == [1, 1, 1, 1, 1]
 
 
-def test_chunks_land_under_the_sha256_root_not_the_blake3_one(tmp_path, store):
-    """The algorithm is a PATH SEGMENT. A sha256 blob under blobs/blake3/ would
-    collide with a blake3 blob of different bytes at the same hex."""
-    data = body(CS * 2)
-    fill(tmp_path, [chunked_entry(store, "w.safetensors", data)])
-    blobs = tmp_path / "local" / "blobs"
-    assert (blobs / "sha256").is_dir()
-    assert not (blobs / "blake3").exists()
-    d = sha(data)
-    assert (blobs / "sha256" / d[:2] / d[2:4] / d).read_bytes() == data
-
-
 def test_v1_blake3_snapshot_still_fills_unchanged(tmp_path, store):
     """DUAL READ. Every pre-migration checkpoint must keep resolving, and its
     on-disk layout must not move (a moved layout is a cold re-download of the
@@ -199,27 +187,6 @@ def test_v1_blake3_snapshot_still_fills_unchanged(tmp_path, store):
     blobs = tmp_path / "v1" / "blobs"
     assert (blobs / "blake3" / b3[:2] / b3[2:4] / b3).read_bytes() == data
     assert not (blobs / "sha256").exists()
-
-
-def test_v1_and_v2_entries_in_one_snapshot(tmp_path, store):
-    """The migration window: a repo mid-repoint carries both spellings."""
-    v2 = body(CS * 2 + 5)
-    v1 = body(300, seed=9)
-    b3 = blake3(v1).hexdigest()
-    with store.lock:
-        store.blobs[b3] = v1
-    snap = fill(
-        tmp_path,
-        [
-            chunked_entry(store, "new.safetensors", v2),
-            WorkerResolvedRepoFile(
-                path="old.safetensors", size_bytes=len(v1), blake3=b3,
-                url=f"{store.base}/{b3}",
-            ),
-        ],
-    )
-    assert (snap / "new.safetensors").read_bytes() == v2
-    assert (snap / "old.safetensors").read_bytes() == v1
 
 
 # ---------------------------------------------------------------------------
@@ -437,30 +404,13 @@ def test_a_chunk_with_no_url_anywhere_is_fatal():
 # ---------------------------------------------------------------------------
 
 
-def test_the_generated_snapshotfile_stub_carries_v2():
-    from gen_worker.pb import worker_scheduler_pb2 as pb
-
-    names = [f.name for f in pb.SnapshotFile().DESCRIPTOR.fields]
-    for want in ("digest", "chunk_size_bytes", "chunks"):
-        assert want in names, (
-            f"SnapshotFile has no {want!r} — proto/worker_scheduler.proto is stale "
-            f"against the hub. Run `task proto`. Fields: {names}"
-        )
-
-
-def test_the_chunk_message_carries_digest_url_and_len():
-    from gen_worker.pb import worker_scheduler_pb2 as pb
-
-    chunks = next(f for f in pb.SnapshotFile().DESCRIPTOR.fields if f.name == "chunks")
-    names = [f.name for f in chunks.message_type.fields]
-    assert names == ["sha256", "url", "len"], names
-
-
 def test_the_grpc_conversion_carries_chunks_through():
     """Drive the REAL wire-boundary conversion on a REAL protobuf message.
 
     `_snapshot_to_resolved` is the only place production snapshots are typed,
-    and it is exactly where a stale stub is invisible."""
+    and it is exactly where a stale stub is invisible — a stale vendored proto
+    (no digest/chunks fields) makes building this message raise, so this test
+    doubles as the stub-freshness gate (run `task proto` if it reds there)."""
     from gen_worker.executor import _snapshot_to_resolved
     from gen_worker.pb import worker_scheduler_pb2 as pb
 

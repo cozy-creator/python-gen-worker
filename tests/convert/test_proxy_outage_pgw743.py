@@ -38,7 +38,9 @@ def _one_file(tmp_path: Path) -> CommitFile:
     return CommitFile(path="model.safetensors", local_path=p)
 
 
-@pytest.mark.parametrize("proxy_status", [503, 502, 403, 404])
+# 503 = the live incident's status; 404 = the spiciest (the pre-fix code
+# discriminated on 404 alone). 502/403 ride the same not-from-the-hub branch.
+@pytest.mark.parametrize("proxy_status", [503, 404])
 def test_proxy_outage_of_any_status_is_ridden_out(
     fake_hub: Any, tmp_path: Path, proxy_status: int,
 ) -> None:

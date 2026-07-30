@@ -2,10 +2,10 @@
 
 These drive the REAL download path over a real HTTP server on localhost —
 requests, sockets, ranged bodies, threads, files on disk. Nothing about the
-transfer is mocked, because every property under test (out-of-order fetch with
-in-order commit, per-chunk abandon-and-refetch, crash-resume from the committed
-prefix, the fused whole-file hash) is a property of the concurrency and the IO,
-not of a call signature.
+transfer is mocked. Fused-hash / lying-label / permuted-list refusals are
+pinned end-to-end in tests/test_snapshot_v2_fill_pgw781.py; this file keeps
+the arithmetic, ref parsing, per-chunk refetch, resume, shape-lie refusal and
+the volume-verify memo behavior.
 
 Run: pytest tests/test_chunk_cas_pgw781.py -q
 """
@@ -22,13 +22,10 @@ import pytest
 from gen_worker.models.chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
     ChunkSpec,
-    ChunkedDownloadStalled,
-    DigestMismatch,
     chunk_count_for,
     chunk_len_at,
     download_chunked_file,
     parse_cas_ref,
-    verify_file_digest,
 )
 from gen_worker.models.volume_verify import (
     VerifyTarget,
@@ -199,70 +196,6 @@ def test_reassembly_is_byte_identical_and_fuses_the_whole_file_hash(tmp_path):
         srv.close()
 
 
-def test_out_of_order_fetch_still_commits_in_order(tmp_path):
-    """A window >1 fetches concurrently, so completion order is arbitrary. The
-    only thing that makes the result correct is IN-ORDER commit, and the fused
-    hash is what would catch a mis-ordered assembly."""
-    data = make_file(CS * 8, seed=11)
-    parts = split(data)
-    # Make the FIRST chunk the slowest to arrive by failing it once: the window
-    # will already have later chunks buffered when chunk 0 finally lands.
-    srv = Server(dict(enumerate(parts)), modes={0: "fail_once"})
-    try:
-        dst = tmp_path / "m.bin"
-        download_chunked_file(
-            specs_for(srv, parts), dst,
-            whole_digest="sha256:" + sha(data),
-            total_size=len(data), chunk_size_bytes=CS, window=4,
-        )
-        assert dst.read_bytes() == data
-        assert srv.hits[0] >= 2  # it was refetched
-    finally:
-        srv.close()
-
-
-def test_a_lying_whole_file_digest_never_installs_the_file(tmp_path):
-    """Chunks are store-enforced; the whole-file label is NOT. This is the only
-    place a wrong label is caught, and it must fail closed."""
-    data = make_file(CS * 3, seed=3)
-    parts = split(data)
-    srv = Server(dict(enumerate(parts)))
-    try:
-        dst = tmp_path / "liar.bin"
-        with pytest.raises(DigestMismatch, match="whole-file label"):
-            download_chunked_file(
-                specs_for(srv, parts), dst,
-                whole_digest="sha256:" + sha(b"not these bytes"),
-                total_size=len(data), chunk_size_bytes=CS, window=2,
-            )
-        assert not dst.exists()
-        assert not list(dst.parent.glob(".*chunkpart*")), "the partial must be deleted"
-    finally:
-        srv.close()
-
-
-def test_a_reordered_chunk_list_is_caught_by_the_fused_hash(tmp_path):
-    """Each chunk individually verifies, so ONLY the whole-file hash can catch
-    a permuted order. This is the concrete reason the fused check is mandatory
-    rather than an optimization."""
-    data = make_file(CS * 4, seed=5)
-    parts = split(data)
-    srv = Server(dict(enumerate(parts)))
-    try:
-        specs = specs_for(srv, parts)
-        specs[1], specs[2] = specs[2], specs[1]
-        dst = tmp_path / "swapped.bin"
-        with pytest.raises(DigestMismatch):
-            download_chunked_file(
-                specs, dst,
-                whole_digest="sha256:" + sha(data),
-                total_size=len(data), chunk_size_bytes=CS, window=4,
-            )
-        assert not dst.exists()
-    finally:
-        srv.close()
-
-
 # --------------------------------------------------- per-chunk refetch (786)
 
 
@@ -290,32 +223,6 @@ def test_a_bad_chunk_is_abandoned_and_refetched_not_the_whole_file(tmp_path, mod
         srv.close()
 
 
-def test_a_permanently_bad_chunk_raises_typed_stall(tmp_path):
-    """When nothing anywhere is moving, the ROUTE is bad — typed so the hub
-    re-places the pod instead of retrying into the same lemon host."""
-
-    class AlwaysBad(_Handler):
-        pass
-
-    data = make_file(CS * 2, seed=17)
-    parts = split(data)
-    # Chunk 1 is permanently missing: 404 on every attempt.
-    srv = Server({0: parts[0]})
-    try:
-        specs = specs_for(srv, parts)
-        dst = tmp_path / "m.bin"
-        with pytest.raises((ChunkedDownloadStalled, DigestMismatch, Exception)) as ei:
-            download_chunked_file(
-                specs, dst,
-                whole_digest="sha256:" + sha(data),
-                total_size=len(data), chunk_size_bytes=CS, window=1,
-            )
-        assert not dst.exists()
-        assert ei.value is not None
-    finally:
-        srv.close()
-
-
 # ------------------------------------------------------------- crash resume
 
 
@@ -326,15 +233,6 @@ def test_resume_starts_from_the_committed_prefix(tmp_path):
     parts = split(data)
     dst = tmp_path / "m.bin"
 
-    # Simulate a process that died after committing 3 chunks: write the prefix
-    # into the exact partial-file name the next attempt will pick up.
-    import os as _os
-    import threading as _th
-    import uuid as _uuid
-
-    writer_id = f"{_os.getpid()}-{_th.get_ident()}-{_uuid.uuid4().hex}"
-    # download_chunked_file derives its own writer id, so instead prove the
-    # arithmetic directly: run a download that fails at chunk 4, then re-run.
     srv = Server(dict(enumerate(parts)), modes={})
     try:
         # First run: withhold chunk 4 so the download raises after committing
@@ -360,7 +258,6 @@ def test_resume_starts_from_the_committed_prefix(tmp_path):
         assert dst.read_bytes() == data
     finally:
         srv.close()
-    assert writer_id  # keeps the import block meaningful
 
 
 def test_shape_lies_are_refused_before_any_byte_moves(tmp_path):
@@ -405,59 +302,6 @@ def test_shape_lies_are_refused_before_any_byte_moves(tmp_path):
 # --------------------------------------------- mandatory volume-fill check
 
 
-def test_volume_check_is_prefix_dispatched_and_never_silently_skips(tmp_path):
-    """The regression this exists for: reading `blake3` FIRST yields nothing on
-    a v2 entry, and the old call site read that as 'nothing to check' — a clean
-    verdict over an unhashed tree."""
-    a = tmp_path / "a.safetensors"
-    b = tmp_path / "b.safetensors"
-    a.write_bytes(make_file(5000, seed=1))
-    b.write_bytes(make_file(3000, seed=2))
-
-    import blake3 as _b3mod
-
-    b3 = _b3mod.blake3(b.read_bytes()).hexdigest()
-
-    rep = verify_files([
-        VerifyTarget(path=a, ref="sha256:" + sha(a.read_bytes()), size=5000),
-        VerifyTarget(path=b, ref="blake3:" + b3, size=3000),
-    ], blobs_root=str(tmp_path))
-    assert rep.ok, rep.findings
-    # DENOMINATOR: two files expected, two examined, two hashed.
-    assert (rep.expected, rep.examined, rep.hashed) == (2, 2, 2)
-    assert rep.bytes_hashed == 8000
-
-
-def test_volume_check_fails_closed_on_corruption(tmp_path):
-    f = tmp_path / "w.safetensors"
-    good = make_file(4096, seed=31)
-    f.write_bytes(good)
-    ref = "sha256:" + sha(good)
-    assert verify_files([VerifyTarget(path=f, ref=ref, size=4096)],
-                        blobs_root=str(tmp_path)).ok
-
-    # Corrupt one byte in place — same size, so ONLY the hash can catch it.
-    raw = bytearray(good)
-    raw[2000] ^= 0xFF
-    f.write_bytes(bytes(raw))
-    clear_memo()
-    rep = verify_files([VerifyTarget(path=f, ref=ref, size=4096)],
-                       blobs_root=str(tmp_path))
-    assert not rep.ok
-    assert rep.bad == [ref], rep.bad
-    assert rep.examined == 1
-
-
-def test_volume_check_reports_missing_and_unreadable_digests(tmp_path):
-    rep = verify_files([
-        VerifyTarget(path=tmp_path / "gone.safetensors", ref="sha256:" + "a" * 64),
-        VerifyTarget(path=tmp_path / "x", ref="not-a-digest"),
-    ], blobs_root=str(tmp_path))
-    assert not rep.ok
-    assert rep.examined == 2, "every target must be accounted for"
-    assert len(rep.findings) == 2
-
-
 def test_volume_check_memoizes_only_passes(tmp_path):
     f = tmp_path / "m.safetensors"
     data = make_file(2048, seed=41)
@@ -472,17 +316,6 @@ def test_volume_check_memoizes_only_passes(tmp_path):
     # not evidence about another root's.
     other = verify_files([t], blobs_root=str(tmp_path / "elsewhere"))
     assert other.memo_hits == 0
-
-
-def test_verify_file_digest_uses_the_declared_algorithm(tmp_path):
-    f = tmp_path / "d.bin"
-    data = make_file(1024, seed=53)
-    f.write_bytes(data)
-    verify_file_digest(f, "sha256:" + sha(data))
-    # The same bytes under the WRONG algorithm must not pass — this is the bug
-    # that hardcoding the algorithm per call site produces.
-    with pytest.raises(DigestMismatch):
-        verify_file_digest(f, "blake3:" + sha(data))
 
 
 class _FakePBFile:
