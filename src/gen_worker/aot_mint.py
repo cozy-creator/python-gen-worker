@@ -1289,6 +1289,23 @@ def _entry_duration_s(timings: Mapping[str, Any]) -> float:
 
 
 def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
+    """The mint's own emission (see :func:`emit_phase_events`).
+
+    The spec is read inside the guard: telemetry must never fail the compile
+    it measures, and reading the lane label off a broken spec is still
+    telemetry.
+    """
+    try:
+        family, lane = spec.family, spec.lane_label() or "plain"
+    except Exception:  # pragma: no cover — telemetry never fails a mint
+        logger.debug("aot-mint: phase event emission failed", exc_info=True)
+        return
+    emit_phase_events(family=family, lane=lane, table=table)
+
+
+def emit_phase_events(
+    *, family: str, lane: str, table: Mapping[str, Any],
+) -> None:
     """Typed telemetry event — the phase table must reach observability,
     never only a pod log.
 
@@ -1307,11 +1324,11 @@ def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
         from . import activity as activity_mod
 
         totals = dict(table.get("totals") or {})
-        lane = spec.lane_label() or "plain"
+        lane = lane or "plain"
         total_s = float(totals.get("total_s") or 0.0)
         activity_mod.emit_event(
             MINT_PHASES_KIND,
-            f"family={spec.family} lane={lane} "
+            f"family={family} lane={lane} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
@@ -1326,7 +1343,7 @@ def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
                 continue
             activity_mod.emit_event(
                 MINT_PHASES_KIND,
-                f"family={spec.family} lane={lane} entry={name} "
+                f"family={family} lane={lane} entry={name} "
                 f"timings={dict(timings)}",
                 phase=f"entry:{name}",
                 duration_ms=int(round(entry_s * 1000)),
@@ -1934,6 +1951,7 @@ __all__ = [
     "compose_for_mint",
     "declared_range_gaps",
     "dynamic_shapes_spec",
+    "emit_phase_events",
     "entry_graph_block",
     "export_program",
     "shared_identity_blocks",

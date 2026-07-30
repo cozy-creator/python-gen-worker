@@ -76,6 +76,13 @@ from .models.memory import low_vram_mode
 
 logger = logging.getLogger(__name__)
 
+#: pgw#805 mint recipes. ``dynamo`` is the inductor FX capture this module has
+#: run since gw#587; ``aot`` is torch.export + AOTInductor (``aot_mint``) —
+#: the ONLY kind ``aot_cells.discover`` will ever adopt, and the kind no
+#: serving pod has ever produced because nothing on this path called it.
+RECIPE_DYNAMO = "dynamo"
+RECIPE_AOT = "aot"
+
 
 @dataclass(frozen=True)
 class SelfMint:
@@ -136,6 +143,13 @@ class PendingSelfMint:
     #: plain eager until ``adopt_delegated_mint`` swaps it through the
     #: ordinary delivered-cell path.
     delegated: bool = False
+    #: pgw#805: WHICH mint produces this cell. ``"dynamo"`` is the inductor FX
+    #: capture this module has always run; ``"aot"`` is torch.export +
+    #: AOTInductor (``aot_mint``), the artifact kind ``aot_cells.discover``
+    #: actually looks for. An ``"aot"`` pending's ``cell_key``/``ref`` are a
+    #: CAPTURE HANDLE only — a real AOT key folds the combined graph hash and
+    #: is unknowable until the export finishes, so it is never advertised.
+    recipe: str = RECIPE_DYNAMO
     _state: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -673,6 +687,10 @@ def enable_compiled(
             "(mandatory lane or regional targets) — minting in-process "
             "instead (pgw#784)", family)
         delegate = False
+    # pgw#805: WHICH recipe this miss mints, decided once, after `delegate` is
+    # final. Called on both branches so an AOT decline is named even when the
+    # in-process shape is the one that runs.
+    recipe = mint_recipe(pipe, cfg, delegate=delegate)
     if delegate:
         # pgw#784: NOTHING is armed on the live pipeline. It keeps serving
         # plain eager — no guarded wrappers, no branch containers, no
@@ -686,14 +704,22 @@ def enable_compiled(
             ref=f"{cc.system_repo(family)}#{key}",
             cfg=cfg, target=target, capture_dir=capture_dir,
             mint_root=mint_root, publisher=publisher, cache_dir=cache_dir,
-            delegated=True,
+            delegated=True, recipe=recipe,
         )
         with _PENDING_LOCK:
             _PENDING.setdefault(key, pending)
         logger.info(
-            "fleet-cells: DELEGATED self-mint for %s (key=%s) — a child "
+            "fleet-cells: DELEGATED %s self-mint for %s (key=%s) — a child "
             "process builds the cell while this process serves eager "
-            "(pgw#784)", family, key)
+            "(pgw#784/#805)", recipe, family, key)
+        activity_mod.emit_event(
+            "self_mint_started",
+            f"family={family} recipe={recipe} key={key} "
+            f"lane={loading.pipeline_weight_lane(pipe) or 'plain'}: a "
+            f"compile-cell miss opened a delegated mint; this worker serves "
+            f"eager throughout",
+            phase=recipe,
+        )
         return ArmOutcome(
             armed=False, self_mint=pending, selection_bug=selection_bug)
 
@@ -718,7 +744,7 @@ def enable_compiled(
     pending = PendingSelfMint(
         family=family, cell_key=key, ref=f"{cc.system_repo(family)}#{key}",
         cfg=cfg, target=target, capture_dir=capture_dir, mint_root=mint_root,
-        publisher=publisher, cache_dir=cache_dir,
+        publisher=publisher, cache_dir=cache_dir, recipe=recipe,
     )
     with _PENDING_LOCK:
         _PENDING[key] = pending
@@ -726,6 +752,12 @@ def enable_compiled(
         "fleet-cells: armed self-mint capture for %s (key=%s) — the real "
         "warmup proof performs the only compile this mint will see",
         family, key)
+    activity_mod.emit_event(
+        "self_mint_started",
+        f"family={family} recipe={recipe} key={key}: a compile-cell miss "
+        f"armed an in-process capture",
+        phase=recipe,
+    )
     return ArmOutcome(
         armed=True, self_mint=pending, selection_bug=selection_bug)
 
@@ -864,8 +896,19 @@ def adopt_delegated_mint(
         except OSError:
             shutil.copy2(artifact, pending.target)
     try:
-        armed = cc.enable(pipe, pending.cfg, pending.cache_dir,
-                          artifact=pending.target)
+        if pending.recipe == RECIPE_AOT:
+            # pgw#805: an exported cell arms through the AOT gates
+            # (lifted-binding install -> aot_serve.enable -> rollback), not
+            # the inductor seed path. Same gates a hub-delivered `.pt2`
+            # passes; `provision.enable_compiled` itself is not reusable here
+            # because its pgw#709 receipts gate would drop a cell this pod
+            # minted seconds ago and the hub has not countersigned yet.
+            armed = provision.arm_aot(
+                pipe, pending.cfg, pending.cache_dir, pending.target,
+                int(getattr(pending.cfg, "lora_bucket", 0) or 0))
+        else:
+            armed = cc.enable(pipe, pending.cfg, pending.cache_dir,
+                              artifact=pending.target)
     except cc.CellSelectionBugError as exc:
         # th#883, delegated edition: the child's own cell, whose axes describe
         # exactly this runtime, refused to arm. Loud — it is a bug in the one
@@ -1064,6 +1107,108 @@ def _unregister(pending: "PendingSelfMint") -> None:
             del _PENDING[pending.cell_key]
 
 
+def mint_recipe(
+    pipe: Any, cfg: Any, *, delegate: bool, emit: bool = True,
+) -> str:
+    """WHICH mint a miss on this pipeline should run (pgw#805).
+
+    The AOT lane was a pure CONSUMER: ``aot_cells.discover`` filtered for
+    ``kind == "aot-inductor"`` artifacts and a miss fell through to the dynamo
+    self-mint, whose cell can never satisfy that filter. So a fleet with
+    ``prefer_aot`` armed missed, re-minted the wrong kind (or nothing), and
+    missed identically on every subsequent pod, forever.
+
+    Every decline here is NAMED on the wire. A silent decline is the defect
+    class this issue exists to kill: five real L4 pods produced no mint and no
+    refusal, which is indistinguishable from a crash.
+    """
+    if not aot_cells.prefer_aot():
+        return RECIPE_DYNAMO
+    family = str(getattr(cfg, "family", "") or "")
+
+    def _decline(reason: str, detail: str) -> str:
+        logger.info("fleet-cells: AOT mint declined (%s): %s", reason, detail)
+        if emit:
+            activity_mod.emit_event(
+                "self_mint_skipped",
+                f"family={family}: prefer_aot is armed but this miss cannot "
+                f"mint an aot-inductor cell — {detail}; falling back to the "
+                f"dynamo self-mint (its artifact will NOT satisfy AOT "
+                f"discovery, so a later pod misses again)",
+                phase=reason,
+            )
+        return RECIPE_DYNAMO
+
+    if not delegate:
+        # An AOTI export holds the GPU for the whole compile with no router to
+        # yield through; in-process it would violate the eager-first serving
+        # contract outright. Delegation is not an optimization here.
+        return _decline(
+            "aot_requires_delegation",
+            "out-of-process minting is disabled (GEN_WORKER_MINT_IN_PROCESS "
+            "or eager-first off) and an AOTI export has no eager tier to "
+            "serve from while it compiles")
+
+    from .api.export_contract import export_declaration
+
+    if export_declaration(family) is None:
+        return _decline(
+            "no_export_declaration",
+            f"family {family!r} registered no export declaration (a "
+            f"`compile=` block carrying graph classes, pgw#739/#758) — the "
+            f"class set a multi-graph cell covers is undeclared")
+
+    from . import aot_mint
+
+    spec = aot_export_spec(pipe, cfg)
+    # #730's hold is a MEASURED policy (plain/fp8 are 6.9-7.0% slower under
+    # AOTI), so a pod on a held lane must decline BY NAME rather than mint a
+    # regression — and must never be silent about it, which is what the five
+    # measured L4 pods were.
+    refusal = aot_mint.lane_admitted(spec, allow_regressed_lanes=False)
+    if refusal:
+        return _decline("aot_lane_regressed", refusal)
+    refusal = aot_mint.lifted_torch_gap(spec)
+    if refusal:
+        return _decline("aot_lifted_torch_gap", refusal)
+    return RECIPE_AOT
+
+
+def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
+    """The :class:`aot_mint.ExportSpec` a LIVE serving pipeline describes.
+
+    The operator CLI reads these facts from a hand-written mint-request JSON.
+    A serving pod has something strictly better: the composed pipeline and the
+    endpoint's own ``CompileCell``. Everything the request file carried is
+    either declared (shapes/text_lens/guidance/bucket/family), observed on the
+    pipeline (weight lane, precision), or owned by the export DECLARATION
+    (the class rows, coordinates, dynamic contracts and input bindings) — so
+    nothing here is a per-pod guess.
+    """
+    from . import aot_mint
+    from .models import lora_lifted
+
+    lane = loading.pipeline_weight_lane(pipe)
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    return aot_mint.ExportSpec(
+        family=str(getattr(cfg, "family", "") or ""),
+        target="",
+        weight_lane=lane,
+        precision=lane or "bf16",
+        lora_bucket=bucket,
+        shapes=tuple(
+            tuple(int(v) for v in row) for row in (getattr(cfg, "shapes", ()) or ())),
+        text_lens=tuple(int(v) for v in (getattr(cfg, "text_lens", ()) or ())),
+        guidance_scales=tuple(
+            float(v) for v in (getattr(cfg, "guidance_scales", ()) or ())),
+        # Input LIFTING is an SDK fact, not a family one: the bucket-bearing
+        # lane promotes exactly these adapter tensors to graph inputs so one
+        # artifact serves the whole bucket (pgw#725 option 2).
+        lifted_inputs=(
+            tuple(lora_lifted.LIFTED_INPUT_NAMES) if bucket else ()),
+    )
+
+
 def _fail_closed(
     pipe: Any, reason: str,
     selection_bug: Optional["cc.CellSelectionBugError"] = None,
@@ -1087,7 +1232,18 @@ def _fail_closed(
         if selection_bug is not None:
             raise refusal from selection_bug
         raise refusal
+    # pgw#805: this exit used to be a bare `logger.info` — and a serve pod
+    # exposes no logs (pgw#760), so "declared a compile target, minted
+    # nothing, refused nothing" was the whole observable behaviour of five
+    # real L4 pods. A plain lane DEGRADING to eager is a legitimate policy
+    # outcome; being unable to say so is not.
     logger.info("fleet-cells: serving eager (%s)", reason)
+    activity_mod.emit_event(
+        "self_mint_skipped",
+        f"lane={lane or 'plain'}: no cell and no mint — {reason}; this "
+        f"worker serves eager and publishes nothing",
+        phase="mint_unavailable",
+    )
     return ArmOutcome(armed=False, selection_bug=selection_bug)
 
 

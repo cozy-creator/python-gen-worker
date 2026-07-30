@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **pgw#805 — an AOT cell-discovery MISS never started a mint. The AOT lane was a
+  pure consumer.** `aot_mint.mint()` was reachable only from
+  `python -m gen_worker.aot_mint`: no module on the serving path imported it, so a
+  `prefer_aot` pod's miss fell through to the DYNAMO self-mint, whose artifact kind
+  `aot_cells._candidates` rejects — every pod missed, "re-minted" the wrong kind, and
+  the next pod missed identically. Measured on five real 0.78.0 L4 pods with every
+  precondition present: discovery missed honestly and then nothing happened, for the
+  rest of each pod's life, with **no refusal of any kind** on the wire. A miss now
+  chooses a RECIPE (`fleet_cells.mint_recipe`) and an AOT miss mints out of process
+  (pgw#784's route — an AOTI export has no router to yield through, so in-process
+  would break eager-first outright), exporting the family's whole declared class set
+  as one multi-graph cell against the pipeline the child already loaded through the
+  endpoint's own `setup()`. A self-minted `.pt2` adopts through the AOT gates
+  (`provision.arm_aot`, extracted), not the inductor seed path.
+
+  Two more wires were missing behind it. **The declaration**: `export_declaration`
+  registered only when a mint REQUEST named a module, which a serving pod has no
+  access to — a `compile=` block carrying graph classes is now registered as its
+  family's export declaration at endpoint-collection time. **The telemetry**:
+  `aot_mint` emits `aot_mint_phases` from the mint CHILD, which holds no orchestrator
+  session, so th#1322's column has been empty on both stacks since it shipped; the
+  parent now re-emits the child's phase table (`phase=minted` roll-up,
+  `phase=entry:<class>` rows, `phase=aborted` when no cell came out).
+
+  And the silence is gone. `_fail_closed`'s plain-lane eager degrade was a bare
+  `logger.info` on a pod that exposes no logs (pgw#760); every decline now names
+  itself — `self_mint_started phase=<recipe>`, `self_mint_skipped` with
+  `no_export_declaration` / `aot_lane_regressed` / `aot_lifted_torch_gap` /
+  `aot_requires_delegation` / `mint_unavailable`, and a
+  `boot_ended_uncompiled` backstop when a declared compile target ends a boot
+  unarmed with no mint in flight. Note the five measured pods were on the PLAIN
+  lane, which #730 holds on dynamo: they must decline. The hold was right; being
+  unable to say so was the defect.
+
 - **th#1335 — cell discovery names an authorization refusal.** th#1310 made the
   platform's `root/family-*` cell repos private, and the worker's checkpoint
   listing then answered 404: indistinguishable from "this family has no cells",

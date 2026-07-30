@@ -177,6 +177,11 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: different config traces different graphs and the parent's proof misses.
     lane: str = ""
     configs: Dict[str, Dict[str, Any]] = {}
+    #: pgw#805: ``"dynamo"`` (inductor FX capture, the original recipe) or
+    #: ``"aot"`` (torch.export + AOTInductor). The parent decides; the child
+    #: never guesses, because the recipe determines the artifact KIND and a
+    #: pod that adopts the wrong kind is a silent permanent miss.
+    recipe: str = "dynamo"
 
 
 class MintFrame(msgspec.Struct, frozen=True, kw_only=True):
@@ -214,6 +219,15 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     #: measure pipe latency instead of work. Empty from a child that died before
     #: writing its report, which is honest: no measurement, not zero.
     phases: Dict[str, float] = msgspec.field(default_factory=dict)
+    #: pgw#805: the AOT recipe's per-entry phase TABLE
+    #: (``aot_mint._mint_phase_table``). The child emits it too, but a mint
+    #: child holds no orchestrator session, so the child's events go nowhere —
+    #: the parent re-emits from this, exactly as it does for `jit_compile`.
+    #: Empty for the dynamo recipe, which has no per-graph-class breakdown.
+    mint_phases: Dict[str, Any] = msgspec.field(default_factory=dict)
+    #: Which recipe actually produced this report, echoed back so the parent
+    #: never has to infer the artifact kind from the request it sent.
+    recipe: str = "dynamo"
 
 
 @dataclass(frozen=True)

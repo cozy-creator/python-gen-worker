@@ -87,6 +87,14 @@ KIND_RESIDENCY_FAULT = "residency_fault"
 # routes is ONE grouped query over worker_activity_events rather than a regex
 # over free text on one side and a log grep on the other.
 KIND_JIT_COMPILE = "jit_compile"
+# pgw#805: the AOT (torch.export + AOTInductor) mint's duration, same shape.
+# The hub has read this kind since th#1322 (`worker_activity_events`,
+# /v1/admin/worker-activity-events?kind=aot_mint_phases) and the table stayed
+# EMPTY on both stacks because no producer existed: `aot_mint` was reachable
+# only from `python -m gen_worker.aot_mint`, and no serving-pod code path
+# imported it. `phase=minted` carries the roll-up, `phase=entry:<name>` one
+# declared graph class, `phase=stage:<name>` a mint-wide span (package/seal).
+KIND_AOT_MINT = "aot_mint_phases"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.

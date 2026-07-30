@@ -159,6 +159,11 @@ def build_request(
         vram_cap_bytes=int(cap_bytes),
         lane=task.lane,
         configs={k: dict(v) for k, v in task.configs.items()},
+        # pgw#805: the recipe rides the pending the arming brain built. The
+        # child never decides it — the recipe determines the artifact KIND,
+        # and a pod that mints the kind its own discovery does not accept is
+        # the permanent-miss loop this issue exists to close.
+        recipe=str(getattr(pending, "recipe", "dynamo") or "dynamo"),
     )
 
 
@@ -227,9 +232,12 @@ async def build_cell(
         if outcome.report is not None and outcome.report.peak_vram_bytes:
             mint_budget.record_child_peak(
                 family, task.weight_lane, outcome.report.peak_vram_bytes)
-        _emit_jit_compile(
-            outcome, family=family, lane=task.weight_lane,
-            key=str(pending.cell_key), attempt=attempts)
+        if str(getattr(pending, "recipe", "")) == "aot":
+            _emit_aot_phases(outcome, family=family, lane=task.weight_lane)
+        else:
+            _emit_jit_compile(
+                outcome, family=family, lane=task.weight_lane,
+                key=str(pending.cell_key), attempt=attempts)
 
         if outcome.status == mint_process.ABANDONED:
             return DelegatedResult(
@@ -264,6 +272,48 @@ async def build_cell(
     fleet_cells.abandon_self_mint(pending)
     return DelegatedResult(
         status=FAILED, detail=last, attempts=attempts, budget=budget)
+
+
+def _emit_aot_phases(
+    outcome: MintOutcome, *, family: str, lane: str,
+) -> None:
+    """pgw#805: one delegated AOT mint's phase table, re-emitted PARENT-side.
+
+    ``aot_mint`` already emits `aot_mint_phases` — but it runs in the mint
+    CHILD, which holds no orchestrator session, so those events reach nothing.
+    Re-emitting from the parent (which owns the connection and the 10 s beat)
+    is what finally puts rows in a table that has been empty on both stacks
+    since th#1322 shipped the column.
+
+    A mint that produced NO cell still reports its total, under
+    `phase=aborted`: the seconds are real and worth recording, and they must
+    not enter an AOT-vs-JIT comparison as if a cell came out.
+    """
+    from . import aot_mint
+
+    report = outcome.report
+    table = dict(getattr(report, "mint_phases", None) or {}) \
+        if report is not None else {}
+    try:
+        if table:
+            aot_mint.emit_phase_events(family=family, lane=lane, table=table)
+        if outcome.minted:
+            return
+        total_s = float(
+            report.elapsed_s if report is not None and report.elapsed_s > 0
+            else outcome.elapsed_s)
+        if total_s <= 0:
+            return
+        activity_mod.emit_event(
+            activity_mod.KIND_AOT_MINT,
+            f"family={family} lane={lane or 'plain'} status={outcome.status} "
+            f"total_s={round(total_s, 2)} — no cell produced",
+            phase="aborted",
+            duration_ms=int(round(total_s * 1000)),
+        )
+    except Exception:  # pragma: no cover — telemetry never fails a mint
+        logger.debug("mint-delegate: aot phase event emission failed",
+                     exc_info=True)
 
 
 def _emit_jit_compile(

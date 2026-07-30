@@ -2574,6 +2574,17 @@ def _selection_for(
     with the fully finalized one once it packs the proven capture.
     """
     if mint is not None:
+        if (getattr(mint, "recipe", "") == "aot"
+                and getattr(mint, "artifact", None) is None):
+            # pgw#805: an AOT cell's key folds the COMBINED GRAPH HASH of the
+            # exported class set, so it does not exist until the export
+            # finishes. The dynamo pending's key is computable from static
+            # axes and is therefore honest to advertise at arm time; an AOT
+            # pending's is not, and advertising the dynamo-shaped handle would
+            # publish a self-attested ref no artifact will ever carry. Nothing
+            # is advertised until `adopt_delegated_mint` reads the real key
+            # off the packed envelope.
+            return delivered
         path = getattr(mint, "artifact", None)
         if path is None:
             path = mint.target
@@ -5690,6 +5701,26 @@ class Executor:
             ref=armed,
             outcome=(boot_mod.OUTCOME_OK if armed else boot_mod.OUTCOME_REFUSED),
             reason="" if armed else "serving_eager",
+        )
+        if armed or rec.background_mint is not None:
+            return
+        # pgw#805: a boot that DECLARED a compile target and ends with no
+        # artifact and no mint in flight must say so. This is the terminal
+        # backstop for the whole miss policy — the individual declines
+        # (fleet_cells._fail_closed, mint_recipe, mint_delegate) each name
+        # themselves, and this one catches whatever route a future decline
+        # takes. Five real L4 pods reached exactly this state and emitted
+        # nothing at all, which reads identically to a hung worker.
+        if not any(
+            s.compile is not None and s.compile.family for s in rec.specs
+        ):
+            return
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"fn={function}: setup finished with a declared compile target, "
+            f"no compiled artifact armed and no mint in flight — this worker "
+            f"serves eager for the rest of its life and publishes no cell",
+            phase="boot_ended_uncompiled",
         )
 
     @contextmanager

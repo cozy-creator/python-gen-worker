@@ -66,6 +66,11 @@ from .mint_process import (
 
 logger = logging.getLogger(__name__)
 
+#: pgw#805 recipes (mirrors ``fleet_cells.RECIPE_*``; duplicated as literals
+#: rather than imported so the child never pulls the whole arming brain in).
+RECIPE_DYNAMO = "dynamo"
+RECIPE_AOT = "aot"
+
 
 class MintChildRefused(RuntimeError):
     """A named, deterministic reason this mint cannot happen here.
@@ -307,6 +312,76 @@ def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
         time.sleep(poll_s)
 
 
+def _mint_aot(
+    request: MintRequest, pipe: Any, cfg: Any, target: Path, *,
+    started: float, blake3_file: Any,
+) -> MintReport:
+    """pgw#805: the AOT recipe — torch.export + AOTInductor over the family's
+    whole declared graph-class set, packed as ONE multi-graph cell (pgw#758).
+
+    This is the wire that never existed. ``aot_mint.mint`` has been complete
+    and operator-driven since pgw#723/#758, and ``aot_cells.discover`` has
+    filtered for its artifact kind since pgw#722 — but no serving-pod code
+    path imported ``aot_mint``, so a discovery MISS could only ever fall
+    through to the dynamo recipe, whose cell that filter rejects. Every pod
+    missed, "re-minted" the wrong kind, and the next pod missed identically.
+
+    Runs against the pipeline the child ALREADY loaded through the endpoint's
+    own ``setup()``, so the exported graphs are the serving graphs.
+    """
+    from . import aot_mint, fleet_cells
+
+    frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
+    spec = fleet_cells.aot_export_spec(pipe, cfg)
+    out_dir = target.parent / "aot"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        result = aot_mint.mint(pipe, spec, out_dir)
+    except aot_mint.MintRefused as exc:
+        # A named export refusal is a REFUSAL, not a crash: the parent must
+        # not retry it, and the sentence is the whole diagnostic on a pod
+        # that exposes no logs (pgw#760).
+        raise MintChildRefused(f"aot mint refused: {exc}") from exc
+
+    frame(phase="seal_publish", note=f"packed {result.artifact.name}")
+    artifact = Path(result.artifact)
+    if artifact != target:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(artifact, target)
+    frame(phase="finalize", note=f"cell {result.cell_key}")
+
+    peak = 0
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            peak = int(torch.cuda.max_memory_allocated())
+    except Exception:
+        peak = 0
+    try:
+        import resource
+
+        rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    except Exception:
+        rss = 0
+    return MintReport(
+        status="minted",
+        artifact=str(target),
+        digest=blake3_file(target),
+        cell_key=str(result.cell_key),
+        detail=(
+            f"exported {len((result.metadata.get('entries') or {}))} graph "
+            f"class(es) for family {cfg.family!r} as one aot-inductor cell"),
+        phase="finalize",
+        peak_vram_bytes=peak,
+        peak_rss_bytes=rss,
+        elapsed_s=time.monotonic() - started,
+        phases=_close_phases(),
+        mint_phases=dict(result.metadata.get("mint_phases") or {}),
+        recipe=RECIPE_AOT,
+    )
+
+
 def mint(request: MintRequest) -> MintReport:
     """Build the cell. Raises ``MintChildRefused`` for a named refusal."""
     from . import compile_cache as cc
@@ -345,6 +420,17 @@ def mint(request: MintRequest) -> MintReport:
 
     if cfg.lora_bucket:
         cc.apply_lora_lane(pipe, cfg.lora_bucket)
+
+    if request.recipe == RECIPE_AOT:
+        # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
+        # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
+        # model ref for an operator's mint pod): the graphs this cell must
+        # serve are the graphs the ENDPOINT's own composed pipeline runs, and
+        # composing a second time is how a mint exports something the serving
+        # pod cannot adopt.
+        return _mint_aot(
+            request, pipe, cfg, target, started=started,
+            blake3_file=blake3_file)
 
     jobs = _warm_jobs(siblings)
     # Arm COLD, pointed at our own capture dir: the warm forwards below are
