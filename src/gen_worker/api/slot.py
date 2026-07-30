@@ -277,7 +277,11 @@ def resolve_slot(
     at metadata-PUT time, so a partial merge would silently hide invalid
     metadata behind the code default). ``default_config`` LOSES to repo
     metadata — it is a recipe of last resort. Missing metadata AND no
-    default_config is a clear error, not a silent empty object.
+    default_config falls back to the family's NEUTRAL schema defaults
+    (``defaults_cls()``) when a vocabulary is derivable, else resolves with
+    ``defaults=None`` — the SDK v2 (0.60.0) tail, backported in 0.58.3
+    (ie#576): boot warmup runs with no RunJob metadata, so an error here
+    was a guaranteed warmup FATAL.
 
     ``lora_metadata_json`` (pgw#516, in lora-ride order — riding
     ``ModelBinding.loras[i].inference_defaults`` on the wire) applies LAST,
@@ -325,10 +329,21 @@ def resolve_slot(
             name, ref, merged,
             inference_regime=inference_regime, allowed_regimes=allowed_regimes,
         )
-    raise ValueError(
-        f"slot {name!r}: no repo inference-defaults metadata for the "
-        "resolved model and no Slot(default_config=...) on the endpoint — "
-        "nothing to resolve this slot's defaults from"
+    # ie#576 (0.58.3): SDK v2 tail backported from 0.60.0. Boot warmup builds
+    # its context with NO RunJob metadata, so the old ValueError here was a
+    # guaranteed warmup FATAL for any defaults-bearing slot without
+    # Slot(default_config=...). Fall back to the family's NEUTRAL schema
+    # defaults when a vocabulary is derivable; otherwise the ref itself still
+    # resolves (handlers that never read .defaults).
+    if defaults_cls is not None:
+        neutral = _apply_lora_overrides(name, defaults_cls(), fam, lora_metadata_json)
+        return _finish_resolved(
+            name, ref, neutral,
+            inference_regime=inference_regime, allowed_regimes=allowed_regimes,
+        )
+    return _finish_resolved(
+        name, ref, None,
+        inference_regime=inference_regime, allowed_regimes=allowed_regimes,
     )
 
 
