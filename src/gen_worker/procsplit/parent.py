@@ -155,6 +155,7 @@ class ParentControl:
         self._liveness_activity = ""
         self._hang_armed_at: Optional[float] = None
         self._hang_hold_reported = False
+        self._stall_reported = False
         # pgw#771: the app beat the hub reaps on. The CHILD declares the
         # cadence and used to be the only sender, so a starved child stopped
         # beating and the hub killed the pod at ~6 misses — the split fixed
@@ -479,6 +480,7 @@ class ParentControl:
             self._child_saw_hello = False
             self._hang_armed_at = None
             self._hang_hold_reported = False
+            self._stall_reported = False
             oom_before = postmortem.oom_kill_count()
             started = time.monotonic()
             self._last_frame_at = started
@@ -796,17 +798,19 @@ class ParentControl:
                 # it here would fabricate a watchdog_hang out of a clean drain.
                 continue
             now = time.monotonic()
+            # Witness the child's accounted work on EVERY tick, not only once
+            # the loop has gone quiet: the parent beat now keeps the pod
+            # reachable, so the honest report of what the child is DOING is the
+            # only signal left that distinguishes working from stalled. A
+            # frozen child whose loop still turns would otherwise be invisible.
+            self._sample_child_evidence(proc.pid, now)
+            await self._report_stall_if_any(now)
             silent_for = now - self._last_frame_at
             if silent_for <= self._watchdog_budget:
                 self._hang_armed_at = None
                 continue
             if self._hang_armed_at is None:
                 self._hang_armed_at = now
-                # Start the evidence clock at the arm edge, not at boot.
-                self._liveness_evidence = self._child_evidence(proc.pid)
-                self._liveness_evidence_at = now
-            else:
-                self._sample_child_evidence(proc.pid, now)
             verdict = self._hang_verdict(now)
             if verdict is None:
                 continue
@@ -883,6 +887,40 @@ class ParentControl:
         if previous is None or evidence - previous >= _EVIDENCE_EPS:
             self._liveness_evidence = evidence
             self._liveness_evidence_at = now
+            self._stall_reported = False
+
+    async def _report_stall_if_any(self, now: float) -> None:
+        """Say so when the child owes work and is accruing none.
+
+        The parent's beat keeps the pod reachable, so silence is no longer how a
+        stall reaches the hub — an honest report is. This is also the only claim
+        about the child's progress that is not self-reported by the code being
+        measured (the security driver: a value tenant code produces is a hint;
+        a parent-side /proc measurement is evidence).
+        """
+        if self._liveness_evidence is None or self._stall_reported:
+            return
+        if not self._in_flight and not self._liveness_activity:
+            # Nothing owed: an idle child legitimately accrues nothing, and
+            # calling that a stall would be noise, not truth.
+            return
+        age = now - self._liveness_evidence_at
+        if age <= self._evidence_hold_window:
+            return
+        self._stall_reported = True
+        logger.warning(
+            "compute child has accrued no CPU/IO for %.1fs while %d job(s) and "
+            "activity %r are open — reporting the stall (stream and beat kept)",
+            age, len(self._in_flight), self._liveness_activity,
+        )
+        await self._dial_detail(
+            f"phase=compute_child_stalled evidence_age_s={age:.1f} "
+            f"activity={self._liveness_activity or 'none'} "
+            f"in_flight={sorted(f'{r}#{a}' for (r, a) in self._in_flight)} "
+            f"loop_silent_s={now - self._last_frame_at:.1f} "
+            f"window_s={self._evidence_hold_window:.0f} — measured by the parent "
+            "from /proc, not self-reported by the child"
+        )
 
     # ---- the app beat (pgw#771) ------------------------------------------
 

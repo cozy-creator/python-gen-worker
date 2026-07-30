@@ -634,3 +634,62 @@ def test_parent_originates_the_beat_while_the_child_is_starved(
         assert during >= 4, f"hub saw only {during} state_deltas during the starve"
     finally:
         h.close()
+
+
+def test_wedged_child_keeps_the_stream_alive_and_is_reported_not_hidden(
+    tmp_path, captured_dials,
+):
+    """A fully wedged (SIGSTOPped) child must not take the POD down.
+
+    Paul's contract, and the security driver's version of it: the parent is the
+    only honest claimant of "the worker is alive and reachable", so it keeps
+    beating; and the parent's /proc measurement is the only claim about the
+    child's progress that tenant code cannot forge, so the stall is REPORTED
+    rather than reaching the hub as silence. The hub kills nothing while the
+    parent reports honestly — the child is what gets replaced.
+    """
+    h = SplitHarness(
+        tmp_path,
+        # Generous watchdog so the beat/stall behaviour is observed BEFORE the
+        # child is reaped; the reap itself is the wedge row above.
+        watchdog_budget_s=25.0,
+        beat_interval_s=1.0,
+    )
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        before = sum(1 for m in conn.received if m.WhichOneof("msg") == "state_delta")
+        conn.send(run_job=pb.RunJob(
+            request_id="r-wedge-beat", attempt=1, function_name="freeze",
+            input_payload=_payload()))
+        # SIGSTOP freezes every thread: the loop, the frame ping, the liveness
+        # thread. Nothing the child owns can speak for it.
+        waited = 0.0
+        while waited < 20.0 and not any("compute_child_stalled" in d for d in captured_dials):
+            time.sleep(0.5)
+            waited += 0.5
+        assert any("compute_child_stalled" in d for d in captured_dials), captured_dials
+        stall = [d for d in captured_dials if "compute_child_stalled" in d][0]
+        assert "r-wedge-beat#1" in stall, stall
+        assert "measured by the parent from /proc" in stall
+        # The pod stayed reachable across the wedge: the parent's beats landed
+        # while the child could not send a thing.
+        during = sum(
+            1 for m in conn.received if m.WhichOneof("msg") == "state_delta"
+        ) - before
+        assert h.pc.parent_beats_sent >= 4, h.pc.parent_beats_sent
+        assert during >= 4, f"hub saw {during} state_deltas while the child was frozen"
+        assert h.alive and h.exit_code is None, "the parent (the worker) stayed up"
+
+        # And the beat is not an immortality bug: it is the PARENT's claim, so
+        # when the parent dies — the true worker-death case — the stream goes
+        # silent and the hub's own reap applies.
+        h.pc.stop()
+        h._thread.join(20.0)
+        settled = sum(1 for m in conn.received if m.WhichOneof("msg") == "state_delta")
+        time.sleep(3.0)   # 3 beat intervals
+        assert sum(
+            1 for m in conn.received if m.WhichOneof("msg") == "state_delta"
+        ) == settled, "beats continued after the parent died — liveness would be a lie"
+    finally:
+        h.close()
