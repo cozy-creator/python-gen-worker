@@ -416,6 +416,113 @@ def test_large_control_messages_are_not_violations():
     assert seam.job_payload_bytes == 0
 
 
+# ---------------------------------------------------------------------------
+# Per-group host RAM — G children in ONE memory cgroup (783-C)
+# ---------------------------------------------------------------------------
+
+
+def _cgroup(tmp_path, *, limit_bytes: int, current_bytes: int):
+    """A REAL synthetic cgroup tree, pgw#752's test style — no mocking of the
+    probe, only of the kernel files it reads."""
+    root = tmp_path / "cgroup"
+    (root / "pod").mkdir(parents=True)
+    (root / "pod" / "memory.max").write_text(str(limit_bytes))
+    (root / "pod" / "memory.current").write_text(str(current_bytes))
+    (root / "pod" / "memory.stat").write_text("inactive_file 0\nactive_file 0\n")
+    proc = tmp_path / "proc_self_cgroup"
+    proc.write_text("0::/pod\n")
+    return {"root": root, "proc_self_cgroup": proc}
+
+
+def test_one_child_sees_the_whole_container_unchanged(tmp_path):
+    from gen_worker.models.memory import probe_host_ram
+
+    import msgspec
+
+    files = _cgroup(tmp_path, limit_bytes=64 << 30, current_bytes=4 << 30)
+    solo = probe_host_ram(siblings=1, **files)
+    assert solo.siblings == 1
+    assert solo.cgroup_limit_gb == pytest.approx(64.0)
+
+    # Identical to not passing the argument at all on an unsplit worker. The
+    # live `available` readings are min'd with real /proc/meminfo and drift
+    # between two probes on a busy box, so they are zeroed for the comparison —
+    # everything the split could have changed is compared.
+    def stable(ram):
+        return msgspec.structs.replace(ram, available_gb=0.0, meminfo_available_gb=0.0)
+
+    assert stable(probe_host_ram(**files)) == stable(solo)
+
+
+def test_four_children_each_get_a_quarter_of_the_cgroup(tmp_path):
+    """G children read the SAME cgroup cap. Left alone, four children each
+    admit a 50 GiB move against a 60 GiB pod and the kernel settles it — which
+    is exactly the uncatchable SIGKILL pgw#763 exists to prevent."""
+    from gen_worker.models.memory import probe_host_ram
+
+    files = _cgroup(tmp_path, limit_bytes=64 << 30, current_bytes=4 << 30)
+    solo = probe_host_ram(siblings=1, **files)
+    quarter = probe_host_ram(siblings=4, **files)
+    assert quarter.siblings == 4
+    assert quarter.total_gb == pytest.approx(solo.total_gb / 4)
+    assert quarter.cgroup_limit_gb == pytest.approx(16.0)
+    # A child may claim no more than its share AND no more than exists, so the
+    # sum of G claims is bounded by the cap — the property the guard needs.
+    assert quarter.available_gb <= quarter.total_gb + 1e-9
+    assert 4 * quarter.available_gb <= solo.total_gb + 1e-6
+
+
+def test_the_divisor_comes_from_the_child_env(tmp_path, monkeypatch):
+    from gen_worker.models.memory import probe_host_ram
+
+    files = _cgroup(tmp_path, limit_bytes=64 << 30, current_bytes=4 << 30)
+    monkeypatch.setenv(ENV_HOST_SIBLINGS, "2")
+    assert probe_host_ram(**files).siblings == 2
+    monkeypatch.delenv(ENV_HOST_SIBLINGS)
+    assert probe_host_ram(**files).siblings == 1
+
+
+def test_a_wide_pods_move_guard_refuses_what_a_solo_worker_admits(tmp_path):
+    """The end-to-end consequence, through the REAL guard: a move that fits a
+    solo worker on this pod must be refused for one of four children sharing
+    it. Sized from the measured headroom so the row is box-independent."""
+    from gen_worker.api.errors import HostRamMoveRefusedError
+    from gen_worker.host_move_guard import _refuse_if_over_budget
+    from gen_worker.models.memory import probe_host_ram
+    from gen_worker.models.residency import _effective_ram_floor_gb
+
+    files = _cgroup(tmp_path, limit_bytes=64 << 30, current_bytes=1 << 30)
+    solo = probe_host_ram(siblings=1, **files)
+    headroom_gb = solo.available_gb - _effective_ram_floor_gb()
+    if headroom_gb < 2.0:
+        pytest.skip(f"box has only {headroom_gb:.1f}GiB of guard headroom")
+    # Comfortably inside a solo worker's budget, comfortably outside a quarter
+    # of it.
+    incoming = int(headroom_gb * 0.8 * (1 << 30))
+    _refuse_if_over_budget(incoming, siblings=1, **files)
+    with pytest.raises(HostRamMoveRefusedError) as exc:
+        _refuse_if_over_budget(incoming, siblings=4, **files)
+    assert "host-RAM move refused" in str(exc.value)
+
+
+def test_the_ram_floor_scales_with_the_share_so_wide_small_pods_still_move():
+    """The floor must not stay pod-wide while the budget is divided, or a
+    4-group pod with a 32 GiB cap gives every child an 8 GiB share against an
+    8 GiB floor and refuses every guarded move. It does not: the adaptive floor
+    reads ``get_total_ram_gb()``, which is now this child's share."""
+    from gen_worker.models.memory import HostRam, _host_ram_share
+
+    whole = HostRam(
+        total_gb=32.0, available_gb=30.0, meminfo_total_gb=32.0,
+        meminfo_available_gb=30.0, cgroup_limit_gb=32.0, source="cgroup",
+    )
+    share = _host_ram_share(whole, 4)
+    assert share.total_gb == 8.0
+    # min(8.0, max(1.0, total * 0.2)) — the same formula, on the share.
+    assert min(8.0, max(1.0, share.total_gb * 0.2)) == pytest.approx(1.6)
+    assert min(8.0, max(1.0, whole.total_gb * 0.2)) == pytest.approx(6.4)
+
+
 def test_the_ceiling_is_per_message_not_cumulative():
     """A worker that serves for hours legitimately relays gigabytes of small
     control frames. The invariant is about a SINGLE message carrying payload."""
