@@ -13,7 +13,7 @@ Artifact = deterministic ``.tar.gz`` (the receipts gate reads
 ``metadata.json`` straight out of the digested bytes, so the envelope is
 identical in shape to a TRT engine's)::
 
-    metadata.json           kind/format, runtime key (sku, torch, cuda),
+    metadata.json           kind/format, runtime key (sm, torch, cuda + sku),
                             family, cell_key, and the ENTRIES map — one
                             block per NAMED GRAPH CLASS carrying its
                             target, fork/class-dim coordinate, INPUT
@@ -127,6 +127,17 @@ SOURCE_STATE_DICT = "state_dict"
 #: reconstructed — nothing outside the artifact knows its value.
 SOURCE_LITERAL = "literal"
 
+#: The hardware/toolchain axes an ``.pt2`` is genuinely pinned to (pgw#765).
+#: ``sm`` is the GPU identity: AOTInductor itself keys on
+#: ``AOTI_COMPUTE_CAPABILITY`` — capability, never the marketing name
+#: (``codecache.get_device_information``). ``sku`` is deliberately ABSENT:
+#: Paul's ruling ("AOT cells are locked into the sm_x version, not the actual
+#: GPU"), the pgw#691 collapse that removed it from cell identity on
+#: byte-identical evidence, and the pgw#754 ISA clamp that made the host half
+#: portable. It stays in metadata for observability and as the discovery
+#: SELECTION PREFERENCE (``aot_cells._candidates``) — never as a refusal.
+IDENTITY_AXES: Tuple[str, ...] = ("sm", "torch", "cuda")
+
 
 # ---------------------------------------------------------------------------
 # Typed refusals
@@ -186,14 +197,20 @@ def torch_maj_min(version: str) -> str:
 
 
 def runtime_key() -> Dict[str, str]:
-    """Consumer-side half of the artifact key, probed from this process."""
-    key = {"sku": "", "torch": torch_version(), "cuda": ""}
+    """Consumer-side half of the artifact key, probed from this process.
+
+    ``sm`` is the compiled-code identity (:data:`IDENTITY_AXES`); ``sku`` is
+    the GPU's marketing slug, recorded for observability and selection.
+    """
+    key = {"sku": "", "sm": "", "torch": torch_version(), "cuda": ""}
     try:
         import torch
 
         key["cuda"] = str(torch.version.cuda or "")
         if torch.cuda.is_available():
             key["sku"] = sku_slug(torch.cuda.get_device_name(0))
+            major, minor = torch.cuda.get_device_capability(0)
+            key["sm"] = f"sm_{major}{minor}"
     except Exception:
         pass
     return key
@@ -543,6 +560,14 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     An AOTI ``.pt2`` is a ``dlopen``-ed ELF built against one exact torch
     C++ ABI on one compute capability — the FULL torch version must match,
     not maj.min, or the load either fails obscurely or is undefined.
+
+    Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA +
+    contract hashes) and never on ``sku`` (pgw#765): a cell minted on an l4
+    and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
+    refusing the cross-SKU adoption discards the whole point of the pgw#691
+    collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
+    (``compile_cache.verify``) carried the identical hard sku pin and shed it
+    in the ck3 wave; this is the same defect on the exported lane.
     """
     if int(meta.get("format") or 0) != ARTIFACT_FORMAT:
         return f"format {meta.get('format')!r} != {ARTIFACT_FORMAT}"
@@ -558,8 +583,16 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     here = runtime_key()
     if not here["torch"]:
         return "torch not importable"
-    for field_name in ("sku", "torch", "cuda"):
+    for field_name in IDENTITY_AXES:
         want, have = str(meta.get(field_name) or ""), here[field_name]
+        if field_name == "sm" and not want:
+            # A pre-pgw#765 cell stamped no capability. Its REAL arch is
+            # readable from the .pt2's own AOTI_COMPUTE_CAPABILITY once the
+            # bytes are staged (:func:`verify_package_compute_capability`,
+            # the pgw#754 two-tier shape), so the axis is not silently
+            # dropped — it is ruled on where the answer exists, before any
+            # dlopen. Metadata-only callers (discovery) cannot know it.
+            continue
         if want != have:
             return f"{field_name} {want!r} != runtime {have!r}"
     isa_reason = host_isa_reason(meta)
@@ -624,29 +657,77 @@ def verify_package_host_isa(meta: Mapping[str, Any], package: Path) -> str:
         return reason
     if isinstance(meta.get("host_isa"), Mapping):
         return ""  # stamped and satisfied; no legacy sniff needed
+    for row in _package_torch_stamps(package):
+        level = host_isa.vec_isa_level(str(row.get("AOTI_CPU_ISA") or ""))
+        machine = str(row.get("AOTI_MACHINE") or "")
+        reason = host_isa.unsupported_reason(level, machine)
+        if reason:
+            return reason + " (torch package stamp, pre-pgw#754 cell)"
+    return ""
+
+
+def _package_torch_stamps(package: Path) -> List[Dict[str, Any]]:
+    """Torch's own ``*_metadata.json`` rows inside a ``.pt2`` — the mint
+    environment as TORCH recorded it (``AOTI_CPU_ISA`` / ``AOTI_MACHINE`` /
+    ``AOTI_COMPUTE_CAPABILITY``, written by
+    ``codecache.get_device_information``). Empty list when unreadable: an
+    unreadable package fails later, loudly, in the load path with its own
+    named error, and a gate only rules on what it can read.
+    """
+    rows: List[Dict[str, Any]] = []
     try:
         import zipfile
 
         with zipfile.ZipFile(package) as zf:
-            names = [
-                n for n in zf.namelist() if n.endswith("_metadata.json")]
-            for name in names:
+            for name in zf.namelist():
+                if not name.endswith("_metadata.json"):
+                    continue
                 try:
                     row = json.loads(zf.read(name).decode("utf-8"))
                 except (ValueError, UnicodeDecodeError):
                     continue
-                if not isinstance(row, dict):
-                    continue
-                level = host_isa.vec_isa_level(
-                    str(row.get("AOTI_CPU_ISA") or ""))
-                machine = str(row.get("AOTI_MACHINE") or "")
-                reason = host_isa.unsupported_reason(level, machine)
-                if reason:
-                    return reason + " (torch package stamp, pre-pgw#754 cell)"
+                if isinstance(row, dict):
+                    rows.append(row)
     except (OSError, zipfile.BadZipFile) as exc:
-        # An unreadable package fails later, loudly, in the load path with
-        # its own named error; the ISA gate only rules on what it can read.
-        logger.debug("aot-serve: host-isa package sniff failed: %s", exc)
+        logger.debug("aot-serve: package stamp read failed: %s", exc)
+    return rows
+
+
+def verify_package_compute_capability(
+    meta: Mapping[str, Any], package: Path,
+) -> str:
+    """The staged-bytes GPU-architecture gate: torch's own
+    ``AOTI_COMPUTE_CAPABILITY`` inside the ``.pt2`` against this device's
+    capability. '' = same architecture (or unknowable).
+
+    The second tier that lets :func:`verify` stop refusing on ``sku``
+    without loosening the axis that actually matters (pgw#765). It rules on
+    the two cases metadata cannot: a pre-pgw#765 cell that stamped no ``sm``
+    axis at all, and a cell whose stamp disagrees with its own bytes. A
+    cubin built for another arch has no PTX fallback (pgw#698 packs cubins
+    only), so without this the refusal would be a raw CUDA load error
+    instead of a named ``adopt_failed:sm_mismatch``.
+
+    The METADATA ``sm`` axis stays :func:`verify`'s (reported as
+    ``key_mismatch`` like every other stamped axis, and rulable before the
+    bytes are ever fetched).
+    """
+    here = runtime_key()["sm"]
+    if not here:
+        return ""  # no CUDA device to rule against; the load path will say so
+    # torch writes the capability as ``major*10+minor`` ("89"); digits-only
+    # comparison also admits the dotted/tuple spellings other device
+    # interfaces use, so a shape surprise is never read as a mismatch.
+    here_digits = "".join(c for c in here if c.isdigit())
+    legacy = "" if meta.get("sm") else "pre-pgw#765 cell, "
+    for row in _package_torch_stamps(package):
+        raw = str(row.get("AOTI_COMPUTE_CAPABILITY") or "").strip()
+        digits = "".join(c for c in raw if c.isdigit())
+        if not digits:
+            continue
+        if digits != here_digits:
+            return (f"sm 'sm_{digits}' != runtime {here!r} "
+                    f"({legacy}torch package stamp)")
     return ""
 
 
@@ -777,6 +858,14 @@ def stage_artifact(
         reason = verify(meta, family=family)
         if reason:
             raise AdoptError("key_mismatch", reason)
+        # pgw#765: the GPU-architecture axis as the BYTES declare it, ruled
+        # on by name before dlopen — the tier that keeps cross-SKU adoption
+        # honest now that ``sku`` no longer stands in for the arch. Runs
+        # after `verify` so a stamped axis mismatch keeps its own name.
+        sm_reason = verify_package_compute_capability(
+            meta, root / PACKAGE_NAME)
+        if sm_reason:
+            raise AdoptError("sm_mismatch", sm_reason)
         return _StagedAotArtifact(meta, root, temporary)
     except AdoptError:
         temporary.cleanup()
@@ -1706,6 +1795,7 @@ __all__ = [
     "ConstantSpec",
     "ConstantsUnboundError",
     "EntryDispatch",
+    "IDENTITY_AXES",
     "IngressContractError",
     "InputContract",
     "LITERAL_SEP",
@@ -1750,6 +1840,7 @@ __all__ = [
     "unpack_metadata",
     "unwrap",
     "verify",
+    "verify_package_compute_capability",
     "verify_package_host_isa",
     "wrap_module",
 ]

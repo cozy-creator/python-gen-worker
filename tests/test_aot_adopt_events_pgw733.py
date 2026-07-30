@@ -27,7 +27,8 @@ from gen_worker import activity, aot_cells, aot_serve, fleet_cells
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 FAMILY = "sdxl"
-RUNTIME = {"sku": "l4", "torch": "2.13.0+cu130", "cuda": "13.0"}
+RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
+           "cuda": "13.0"}
 KEY = "ck5-" + "a" * 56
 
 INPUTS = [
@@ -168,7 +169,9 @@ def test_successful_arm_emits_armed(
 def test_key_mismatch_named_on_the_wire(
     tmp_path: Path, events: List[Any], stub_runtime: None,
 ) -> None:
-    art = _tar(tmp_path, _meta(sku="a100"))
+    # pgw#765: an sm mismatch is the key mismatch; a SKU difference alone is
+    # adopted (same-sm cross-SKU cells are the point of the pgw#691 collapse).
+    art = _tar(tmp_path, _meta(sm="sm_80"))
     assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
     rows = _adopt_rows(events)
     assert [e.phase for e in rows] == ["key_mismatch"]

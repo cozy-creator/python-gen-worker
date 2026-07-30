@@ -23,10 +23,13 @@ needs a hub tie-break first; the runbook records the hazard.
 Filter (SDXL-AOT-PILOT-RUNBOOK.md §3 F1):
 
 * ``kind == aot-inductor`` with a stamped ck5 ``cell_key``;
-* runtime-key + contract check via ``aot_serve.verify`` (sku, torch,
+* runtime-key + contract check via ``aot_serve.verify`` (sm, torch,
   cuda, family, code-only flag, contract/constants parse);
 * canonical lane/bucket match against THIS pipeline's traced lane;
-* newest wins (checkpoint ``updated_at``; key digest tie-break).
+* preference: same SKU first (autotune affinity), then a stamped ``sm``,
+  then newest (checkpoint ``updated_at``; key digest tie-break). SKU is a
+  preference and never a filter (pgw#765) — an l4-minted cell is adopted on
+  an rtx-4090 because both are sm_89.
 
 Receipt verification is NOT duplicated here — the downloaded artifact
 flows through ``receipts.gate_delivered_artifact`` at the one arming
@@ -114,8 +117,15 @@ def _lane_of_meta(meta: Dict[str, Any]) -> str:
 def _candidates(
     items: List[Dict[str, Any]], family: str, want_lane: str,
 ) -> List[Tuple[str, str, Dict[str, Any]]]:
-    """(updated_at, checkpoint_id, metadata) rows that pass the filter,
-    newest first."""
+    """(updated_at, checkpoint_id, metadata) rows that pass the filter, best
+    candidate first.
+
+    The filter is the REAL identity (``aot_serve.verify``: sm/torch/cuda,
+    host ISA, family, contract) — never ``sku`` (pgw#765). SKU is the
+    SELECTION PREFERENCE below: a same-SKU cell was autotuned on this exact
+    board, so it is preferred when one exists, and a same-sm cell from
+    another SKU is adopted rather than refused when one does not.
+    """
     out: List[Tuple[str, str, Dict[str, Any]]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -151,9 +161,21 @@ def _candidates(
             str(item.get("checkpoint_id") or "").strip(),
             meta,
         ))
-    # Newest wins; the key digest breaks updated_at ties deterministically.
-    out.sort(key=lambda row: (row[0], str(row[2].get("cell_key"))),
-             reverse=True)
+    # Preference order (pgw#765), all descending:
+    #   1. same SKU — the cell's inductor autotuning ran on this board;
+    #   2. a stamped ``sm`` axis — provably this architecture pre-download,
+    #      where an unstamped legacy cell only resolves at stage time;
+    #   3. newest (checkpoint ``updated_at``), key digest as the
+    #      deterministic tie-break.
+    here_sku = aot_serve.runtime_key()["sku"]
+    out.sort(
+        key=lambda row: (
+            str(row[2].get("sku") or "") == here_sku and bool(here_sku),
+            bool(str(row[2].get("sm") or "")),
+            row[0],
+            str(row[2].get("cell_key")),
+        ),
+        reverse=True)
     return out
 
 

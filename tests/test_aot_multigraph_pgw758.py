@@ -53,6 +53,11 @@ def fake_sm(monkeypatch):
     pgw#723 tests)."""
     full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
     monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
+    # The consumer probe must agree with the mint probe: aot_serve.verify
+    # rules on sm (pgw#765), so a fake sm is only coherent in both.
+    monkeypatch.setattr(aot_serve, "runtime_key", lambda: {
+        "sku": full["sku"], "sm": full["sm"], "torch": full["torch"],
+        "cuda": full["cuda"]})
     return full
 
 
@@ -97,6 +102,9 @@ def minted_cell(tmp_path_factory, request) -> Dict[str, Any]:
     request.addfinalizer(mp.undo)
     full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
     mp.setattr(compile_cache, "runtime_key", lambda: dict(full))
+    mp.setattr(aot_serve, "runtime_key", lambda: {
+        "sku": full["sku"], "sm": full["sm"], "torch": full["torch"],
+        "cuda": full["cuda"]})
     reset_export_declarations()
     _declare()
     tmp = tmp_path_factory.mktemp("cell758")

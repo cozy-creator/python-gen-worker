@@ -24,7 +24,8 @@ import pytest
 from gen_worker import aot_serve as aot
 
 FAMILY = "sdxl-base"
-RUNTIME = {"sku": "l4", "torch": "2.13.0+cu130", "cuda": "13.0"}
+RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
+           "cuda": "13.0"}
 
 # 1024x1024 exported with symbolic latent dims: the pgw#704 headline is that
 # the SAME artifact serves 1152x896 (144x112 latent units), so the declared
@@ -590,8 +591,11 @@ def test_verify_refuses_baked_weights(stub_runtime):
 
 def test_verify_is_abi_exact(stub_runtime):
     assert "torch" in aot.verify(_meta(torch="2.12.0+cu130"))
-    assert "sku" in aot.verify(_meta(sku="h100-80gb-hbm3"))
+    assert "sm" in aot.verify(_meta(sm="sm_80"))
     assert "cuda" in aot.verify(_meta(cuda="12.8"))
+    # pgw#765: the GPU MODEL is not an axis — an h100-minted cell would be
+    # refused on sm_90-vs-sm_89, never on the marketing name.
+    assert aot.verify(_meta(sku="h100-80gb-hbm3")) == ""
     assert "kind" in aot.verify(_meta(kind="trt-engine"))
     assert "format" in aot.verify(_meta(format=99))
     assert "family" in aot.verify(_meta(family="flux2"), family=FAMILY)

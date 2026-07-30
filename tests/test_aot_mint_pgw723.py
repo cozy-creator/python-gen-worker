@@ -191,7 +191,8 @@ def _gpu_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     }
     monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: {
-        "sku": full["sku"], "torch": full["torch"], "cuda": full["cuda"]})
+        "sku": full["sku"], "sm": full["sm"], "torch": full["torch"],
+        "cuda": full["cuda"]})
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +264,9 @@ def cell(tmp_path_factory: pytest.TempPathFactory, request: Any) -> Dict[str, An
     request.addfinalizer(mp.undo)
     full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
     mp.setattr(compile_cache, "runtime_key", lambda: dict(full))
+    mp.setattr(aot_serve, "runtime_key", lambda: {
+        "sku": full["sku"], "sm": full["sm"], "torch": full["torch"],
+        "cuda": full["cuda"]})
     reset_export_declarations()
     register_export_declaration(_cell_decl())
     module = CellModule().eval()

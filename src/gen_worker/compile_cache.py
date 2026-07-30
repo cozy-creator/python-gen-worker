@@ -512,6 +512,13 @@ def _record_guard_miss(
 # Key
 # ---------------------------------------------------------------------------
 
+#: The axes :func:`verify` refuses on — the runtime facts a seeded FX cache
+#: is genuinely pinned to. ``sku`` left in the pgw#691/ck3 collapse (see
+#: :func:`verify`) and must never return; ``sm`` is the GPU identity. The
+#: exported lane declares the same shape as ``aot_serve.IDENTITY_AXES``.
+IDENTITY_AXES: Tuple[str, ...] = ("torch", "triton", "sm", "cuda",
+                                  "image_digest")
+
 
 def sku_slug(gpu_name: str) -> str:
     """Deterministic SKU slug: ``NVIDIA GeForce RTX 4090`` -> ``rtx-4090``,
@@ -1069,7 +1076,7 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     # cuda_driver is deliberately NOT here either (gw#577): triton's disk
     # cache keys on the wheel's ptxas + SM arch; the host libcuda build
     # never enters any compiled-artifact key. Recorded for observability.
-    for field in ("torch", "triton", "sm", "cuda", "image_digest"):
+    for field in IDENTITY_AXES:
         want, have = str(meta.get(field) or ""), here[field]
         if want != have:
             return f"{field} {want!r} != runtime {have!r}"
