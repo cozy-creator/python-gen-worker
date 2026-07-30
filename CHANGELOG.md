@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
+
+> ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL
+>
+> Every release up to and including 0.79.0 was a pure AOT *consumer*: discovery
+> missed, nothing was minted, and the next pod missed identically — with no
+> refusal on the wire. That wire is connected here. Two consequences for
+> whoever runs the first proof:
+>
+> - **The lane matters.** pgw#730 holds the PLAIN lane on dynamo, so a
+>   plain-lane release (e.g. `d9d9bf2691d0e1f89e23999d`, `sdxl` 0.2.93) now
+>   correctly declines with `self_mint_skipped phase=aot_lane_regressed`
+>   instead of minting. A serving-pod AOT mint proof needs the **w8a8** lane.
+> - **`aot_mint_phases` was empty on both stacks since th#1322 shipped**, because
+>   the child process that fills it holds no orchestrator session. The parent
+>   now re-emits the child's phase table, so that column starts carrying rows
+>   from this version — an empty column on 0.80.0 means no mint ran, which is
+>   information the previous releases could not give.
 
 - **th#1303 phase 3, producer class 2: the CONVERSION producer publishes v2.**
   `publish_flavors` — the surface every quantize / fuse / cast / distil / produce
@@ -53,6 +70,46 @@
   lane, which #730 holds on dynamo: they must decline. The hold was right; being
   unable to say so was the defect.
 
+- **pgw#797 — the boot spans pgw#789 shipped never ran on the real path.** Three real
+  hub-spawned L4 boots on 0.78.0 recorded two rows each, `first_request_servable` at
+  ordinal 1 and `hello` at ordinal 2 — the boot closing seconds before the stream to
+  the hub existed, and `in_boot()` then suppressing `weights_fetch`, `pipeline_load`
+  and `warm_complete` for the rest of the process. One cause: `Worker.arun` runs
+  `Lifecycle.startup()` concurrently with the transport, and every real release
+  declares `Compile`/`Slot`, so its specs go to `dynamic`, `awaiting_hub` is empty,
+  and pgw#789's guarded mark fired anyway. The milestone now has ONE owner —
+  `maybe_send_state_delta`, marking on the fact that a StateDelta advertising a
+  function went out — and the recorder HOLDS a close that arrives before `hello`, so
+  the inversion is unrepresentable rather than unlikely. Cumulative rows can no
+  longer be a span's child, and the span stack is a ContextVar so interleaved
+  setup/mint/adopt tasks nest against their own creator.
+
+- **pgw#797 — warmup is its own phase.** `warmup` split out of `pipeline_load` as a
+  nested span tagged `armed=0|1` (so "what does a cell save on warmup" is a GROUP BY,
+  not an estimate), one `warmup_iteration` row per forward because the first
+  dominates, the eager custom-`warmup()` duration ungated from `spec.compile is not
+  None` and put on `ActivityUpdate.duration_ms` instead of a logger no hub-spawned pod
+  can read, and the post-arm warm recorded as a boot row matching th#1329's
+  `warmup_ms` by construction. `pipeline_load` now means weights->VRAM.
+
+- **pgw#797 — the test that would have caught it.** `test_boot_span_ladder_pgw797.py`
+  drives the REAL entrypoint sequence (real Worker, real gRPC socket, hub-stamped
+  DesiredInstance, rows read off the wire) instead of calling the emitters, which is
+  what pgw#789's suite did while production emitted nothing.
+
+- **pgw#793 — AOT mint host compile is 7-9 % cheaper, with no cell re-key.** pgw#793
+  measured that an AOTI mint's whole host cost is ONE `g++ -O1 -c wrapper.cpp` (46 % of
+  the AOTI compile; linking is 0.5 %), and that the largest function in that TU is
+  inductor's `constants_info_` table written as 26,642 straight-line statements — data
+  compiled as code, executed once at model construction. `gen_worker.aot_wrapper_split`
+  regroups exactly that run into chunked `noinline`/`optimize("O0")` helpers before the
+  compiler sees the source: **−20 % on the wrapper object on an idle host** (−14 % under
+  heavy load), which is ~8-11 minutes off an 18-entry sdxl cell. It verifies itself by
+  re-inlining its output to the original byte for byte and declines unmodified on any
+  wrapper shape it does not recognise, emitting a typed `aot_wrapper_split` event either
+  way. `GEN_WORKER_AOT_WRAPPER_SPLIT_OFF=1` disables it. No compiler, flag, inductor
+  config or library changes, so no cell is re-keyed.
+
 - **th#1335 — cell discovery names an authorization refusal.** th#1310 made the
   platform's `root/family-*` cell repos private, and the worker's checkpoint
   listing then answered 404: indistinguishable from "this family has no cells",
@@ -98,6 +155,27 @@
   cap. Validated against the live API on both paths. **Finding it surfaced: v0.78.0's
   published tree was never itself CI-green** — the promotion PR tested master plus
   cherry-picks, a different tree from the chaos commit the tag pointed at.
+
+- **pgw#806 / pgw#802 / pgw#738+#764 — suite minimization and test health (no library
+  behaviour change).** The publish gate is the suite, so a test that fails on the
+  runner's mood is a release-blocking defect. Source-text handcuffs (tests asserting the
+  presence or ABSENCE of a string in `src/`) are deleted in favour of behavioural
+  assertions; four issue-labelled satellite files that were four views of one seam
+  collapse into the e2e file that already drives it; pgw#802's postmortem carriers are
+  redirected in `conftest.py` on the SUBPROCESS half too, so a child that records a
+  native crash can no longer poison the host's machine-global crash registry and fail
+  six of every other lane's tests; and four untracked tests that were red for every lane
+  are adjudicated against a clean archive rather than the shared worktree — none of them
+  was actually broken. One production-visible line rides along: pgw#797's warm-iteration
+  counter advances only inside the boot window, so a steady-state warm cannot misreport
+  a later boot span's iteration total.
+
+- **Correction to the 0.79.0 entry (the tag cannot change, so it is recorded here).**
+  0.79.0's `publish_v2` bullet says the route REFUSES a provenance stamp and that "the
+  mirror flip is blocked on the route (th#1331)". `f50dae2` landed in that same release
+  and deleted the guard: as shipped in 0.79.0, `publish_v2` WRITES `body["provenance"]`
+  and the mirror publishes v2. The 0.79.0 bullet describes an intermediate state no
+  published artifact has.
 
 ## 0.79.0 (2026-07-30) — the v2 serving path actually works: the vendored proto is no longer stale, the chunked manifest parses against the REAL hub shape, and a publish refusal stops being retried as an outage
 
