@@ -785,6 +785,12 @@ def _apply_lane_to_bindings(bindings: Dict[str, Any], lane_str: str) -> Dict[str
     return out
 
 
+def _discard(_value: Any) -> None:
+    """pgw#784 made ``run_setup`` return the loaded slots; ``on_resolved``'s
+    contract is still a None-returning callback."""
+    return None
+
+
 def dispatch_request(
     *,
     selected: _SelectedFunction,
@@ -1060,7 +1066,8 @@ def _run_inner(args: argparse.Namespace) -> int:
             offline=bool(args.offline),
             emit=_stderr_emitter,
             write_event=_write_event,
-            on_resolved=lambda resolved: run_setup(instance, resolved, device=device),
+            on_resolved=lambda resolved: _discard(
+                run_setup(instance, resolved, device=device)),
         )
     except CanceledError:
         raise

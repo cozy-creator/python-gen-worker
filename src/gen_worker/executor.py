@@ -9046,14 +9046,15 @@ class Executor:
                     result.budget or mint_budget.probe(),
                     result.detail)
                 continue
-            if not result.ok:
+            minted = result.minted
+            if not result.ok or minted is None:
                 logger.warning(
                     "delegated mint for %s produced no adoptable cell (%s); "
                     "that object stays eager", spec.name, result.detail)
                 continue
             for pid in pids:
-                finalized[pid] = result.minted
-            compile_cache.record_cell_proven(str(result.minted.ref))
+                finalized[pid] = minted
+            compile_cache.record_cell_proven(str(minted.ref))
 
         if not finalized:
             if declined is not None:
