@@ -3212,6 +3212,25 @@ class Executor:
                 f"signal={(worst[1] or {}).get('last_signal') or 'unknown'})")
         for name, spec in self.specs.items():
             r = spec.resources
+            # pgw#778: never ADVERTISE what dispatch will refuse. The
+            # multi-group async-handler refusal used to fail every request
+            # JOB_STATUS_INVALID — the status that means the CALLER's input was
+            # bad, so the hub neither retried elsewhere nor charged the worker
+            # — while the function stayed in available_functions and the hub
+            # kept routing to it. A wide pod with an async endpoint became a
+            # 100%-INVALID black hole blamed on the caller. Withdrawing it here
+            # is the same seam every other hardware refusal uses, so the hub
+            # re-packs or routes elsewhere.
+            group_refusal = self._multi_group_handler_refusal(spec)
+            if group_refusal:
+                logger.warning(
+                    "withdrawing %r on this pod: %s", name, group_refusal)
+                self.unavailable[name] = (
+                    "multi_group_async_handler", group_refusal,
+                    {"groups": str(self.topology.groups),
+                     "degree": str(self.topology.degree)})
+                self._gate_owned.add(name)
+                continue
             streak_row = crash_streaks.get(name)
             streak = int((streak_row or {}).get("count") or 0)
             if streak >= postmortem.NATIVE_CRASH_REFUSE_STREAK:
@@ -9923,7 +9942,18 @@ class Executor:
             spec, current_device_group())
         refusal = self._multi_group_handler_refusal(spec)
         if refusal:
-            await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=refusal)
+            # pgw#778: this is now belt-and-braces — gate_functions withdraws
+            # the function, so a dispatch can only arrive from a hub that had
+            # not yet seen the withdrawal. RETRYABLE, never INVALID: nothing
+            # about the CALLER's input is wrong, and INVALID meant the hub
+            # neither re-routed nor charged the worker, so every request came
+            # back blaming the caller.
+            self.unavailable.setdefault(
+                spec.name,
+                ("multi_group_async_handler", refusal,
+                 {"groups": str(self.topology.groups),
+                  "degree": str(self.topology.degree)}))
+            await self._finish(job, pb.JOB_STATUS_RETRYABLE, safe_message=refusal)
             return
         self._intent_transition(
             job.intent_id,
