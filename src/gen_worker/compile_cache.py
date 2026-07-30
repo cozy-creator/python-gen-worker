@@ -3657,10 +3657,11 @@ def build(
     pipe = load_from_pretrained(
         load_cls, str(model_path), dtype=dtype,
         storage_dtype=storage_dtype,
-        # Producer/consumer LANE parity (ie#381): the serving worker decides
-        # the bf16-resident upgrade against its function's declared envelope;
-        # the producer must decide with the same input or it traces the
-        # other lane and the cell never adopts.
+        # Producer/consumer LANE parity is now structural (pgw#772): the
+        # voluntary free-VRAM bf16-resident upgrade is removed, so both
+        # sides land the lane the declared config names. declared_vram_gb
+        # is dead plumbing pending the coordinated wire sweep (pgw#772
+        # follow-up in the tracker).
         declared_vram_gb=declared_vram_gb)
     # Producer/consumer graph parity (gw#391): the worker prepares pipelines
     # with place_pipeline (placement + vae/attention low-VRAM flags), and

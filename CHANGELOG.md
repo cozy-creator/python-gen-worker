@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased (rides the next SDK train, with pgw#765) — pgw#772: the serving lane is deterministic; the voluntary bf16-resident upcast is REMOVED
+
+The gw#534 "rung 2" free-VRAM upgrade (`bf16_resident_fits` /
+`BF16_RESIDENT_MARGIN_GB`, and `load_from_pretrained`'s
+`allow_bf16_resident_upgrade=` parameter) is deleted — REMOVED outright, not
+default-off: any knob that can flip it back per-pod re-forks cell identity,
+and a release that genuinely wants plain bf16 residency declares it (bind the
+bf16 flavor / `storage_dtype=""`) instead of probing for it. A declared fp8
+storage lane is now served as fp8 storage on every card, so the serving lane
+— and with it the ck5 `lane` axis, the ONLY GPU-dependent axis in the key —
+is a pure function of (release × declared config), never of the individual
+card's free VRAM.
+
+Why (th#1198 CP-D wire evidence + pgw#727 numbers): on the same release,
+image, and sm_89, an RTX 4090's ~1.5 GiB `mem_get_info` surplus over an L4
+passed the probe and silently moved it to base lane `""` — a lane nothing
+mints for — so it missed all 144 published checkpoints INCLUDING its own
+same-SKU cell and served eager for life (the L4 armed and banked −21%
+request-level). The cast tax the upgrade dodged re-measured **+1.9%** for the
+structural storage lane (pgw#727; the +44–73% that justified it measured the
+retired hook form), so VRAM-rich cards were paying ~2x weight VRAM and
+forfeiting the compiled win for a 1.9% saving.
+
+Unblocks BOTH halves th#1198 found broken: JIT cross-SKU key convergence
+(pull-by-key can now match across cards) and production-path AOT adoption on
+higher-VRAM cards (pgw#765 removed the `sku` pin; this removes the `lane`
+fork — together they make cross-SKU adoption real end-to-end). Lane
+populations converge; NO key-scheme change (identity axes untouched — cells
+minted at the declared lane become adoptable by every card of that config).
+
+Involuntary transitions are PRESERVED and red-tested: the fit ladder's
+can't-fit rungs (runtime fp8-E4M3, emergency nf4) and the w8a8/w4a4
+dequant-on-unsupported-host lanes are declared rungs, structurally reported —
+degradation is fine; a probe deciding identity was the bug.
+`tests/test_lane_determinism_pgw772.py` carries the standing guard: same
+declared config under 4 GiB vs 999 GiB of mocked free VRAM must compute
+identical requested cell keys (red on the pre-fix tree), and no adoption or
+identity path may take a live device measurement as a hash input.
+
 ## 0.77.0 (2026-07-29) — everything since 0.76.8: the 0.77–0.83 chaos span ships as ONE release
 
 MAPPING: the chaos labels 0.77.0–0.83.0 below (entries re-marked "stamp — SHIPPED IN
