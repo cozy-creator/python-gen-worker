@@ -670,3 +670,140 @@ def test_the_ceiling_is_per_message_not_cumulative():
     assert seam.clean
     assert seam.job_payload_bytes == 20_000_000
     assert "job_progress" in seam.summary()
+
+
+# ---------------------------------------------------------------------------
+# The ParentControl multi-slot core (pgw#783 parent.py refactor)
+#
+# These drive the parent's routing + fan-in wiring WITHOUT spawning real
+# children (the heavy end-to-end G=2 spawn rides the procsplit integration
+# harness). A ParentControl is constructed with a delivered topology; its
+# Transport is built but never run.
+# ---------------------------------------------------------------------------
+
+from gen_worker.config import load_settings  # noqa: E402
+from gen_worker.procsplit.parent import ParentControl, _ChildSlot  # noqa: E402
+
+
+def _parent(gpu_count=1, degree=1, parallel=""):
+    settings = load_settings(
+        orchestrator_public_addr="127.0.0.1:1", worker_id="w-test", worker_jwt="",
+    )
+    topo = ExecutionTopology(gpu_count=gpu_count, group_degree=degree, parallel=parallel)
+    return ParentControl(settings, socket_path=SOCK, topology=topo)
+
+
+def test_parent_builds_one_slot_per_execution_group():
+    p1 = _parent(1)
+    assert p1.groups == 1
+    assert [s.ordinal for s in p1._slots] == [0]
+    # G==1: the ONE slot has an empty env delta and stage-1's socket path.
+    assert dict(p1._slots[0].group_env) == {}
+    assert p1._slots[0].socket_path == SOCK
+
+    p4 = _parent(4)
+    assert p4.groups == 4
+    assert [s.devices for s in p4._slots] == [(0,), (1,), (2,), (3,)]
+    assert len({s.socket_path for s in p4._slots}) == 4
+    assert dict(p4._slots[2].group_env)["CUDA_VISIBLE_DEVICES"] == "2"
+    assert dict(p4._slots[2].group_env)[ENV_HOST_SIBLINGS] == "4"
+
+
+def test_absent_topology_is_a_single_slot_worker():
+    settings = load_settings(
+        orchestrator_public_addr="127.0.0.1:1", worker_id="w", worker_jwt="",
+    )
+    p = ParentControl(settings, socket_path=SOCK, topology=ExecutionTopology.single())
+    assert p.groups == 1
+    assert dict(p._slots[0].group_env) == {}
+
+
+def test_route_slot_is_the_identity_at_G1_and_refuses_misdispatch_at_G4():
+    p1 = _parent(1)
+    # G==1: any dispatch (even one with a wild gpu_index or none) is the one slot.
+    assert p1._route_slot(pb.RunJob(request_id="r")) is p1._slots[0]
+    wild = pb.RunJob(request_id="r", compute=pb.ResolvedCompute(gpu_index=9))
+    assert p1._route_slot(wild) is p1._slots[0]
+
+    p4 = _parent(4)
+    for gi, ordinal in ((0, 0), (1, 1), (3, 3)):
+        run = pb.RunJob(request_id="r", compute=pb.ResolvedCompute(gpu_index=gi))
+        assert p4._route_slot(run) is p4._slots[ordinal]
+    # No compute block on a wide pod cannot be routed -> None (RETRYABLE upstream).
+    assert p4._route_slot(pb.RunJob(request_id="r")) is None
+
+
+def test_in_flight_helpers_span_all_slots():
+    p = _parent(4)
+    p._slots[0].in_flight[("r1", 1)] = "fn-a"
+    p._slots[2].in_flight[("r2", 1)] = "fn-b"
+    assert p._is_in_flight("r1", 1) and p._is_in_flight("r2", 1)
+    assert not p._is_in_flight("r3", 1)
+    assert p._slot_for_request(("r2", 1)) is p._slots[2]
+    assert set(p._all_in_flight()) == {("r1", 1), ("r2", 1)}
+
+
+def test_fan_in_is_verbatim_at_G1():
+    """The whole safety property: at G==1 a child frame relays byte-identically
+    to the pre-pgw#783 parent — no aggregation touches it."""
+    p = _parent(1)
+    slot = p._slots[0]
+    for msg in (
+        pb.WorkerMessage(job_result=pb.JobResult(request_id="r", status=pb.JOB_STATUS_OK)),
+        pb.WorkerMessage(state_delta=pb.StateDelta(available_functions=["a"])),
+        pb.WorkerMessage(activity_update=pb.ActivityUpdate(kind="mint", seq=5)),
+        pb.WorkerMessage(job_progress=pb.JobProgress(request_id="r")),
+    ):
+        assert p._fan_in(slot, msg) is msg  # same object, verbatim
+
+
+def test_note_state_delta_is_the_childs_message_at_G1_merged_at_G2():
+    p1 = _parent(1)
+    m = pb.WorkerMessage(state_delta=pb.StateDelta(
+        available_functions=["a"], free_vram_bytes=10))
+    p1._slots[0].last_state_delta = m
+    p1._note_state_delta()
+    assert p1._last_state_delta is m  # byte-identical beat at G==1
+
+    p2 = _parent(2)
+    p2._slots[0].last_state_delta = pb.WorkerMessage(state_delta=pb.StateDelta(
+        available_functions=["a"], free_vram_bytes=10))
+    p2._slots[1].last_state_delta = pb.WorkerMessage(state_delta=pb.StateDelta(
+        available_functions=["b"], free_vram_bytes=30))
+    p2._note_state_delta()
+    st = p2._last_state_delta.state_delta
+    assert list(st.available_functions) == ["a", "b"]  # UNION
+    assert st.free_vram_bytes == 40                     # SUM
+
+
+def test_fan_in_reconciles_activity_across_groups_at_G2():
+    """Two groups minting the same kind collapse to ONE worker activity with a
+    parent-minted seq (the hub sees one worker, not two mints)."""
+    p = _parent(2)
+    a0 = pb.WorkerMessage(activity_update=pb.ActivityUpdate(
+        kind="self_mint_compile", state=pb.ACTIVITY_STATE_RUNNING, step=2, seq=100))
+    out0 = p._fan_in(p._slots[0], a0)
+    a1 = pb.WorkerMessage(activity_update=pb.ActivityUpdate(
+        kind="self_mint_compile", state=pb.ACTIVITY_STATE_RUNNING, step=5, seq=7))
+    out1 = p._fan_in(p._slots[1], a1)
+    assert out1.activity_update.state == pb.ACTIVITY_STATE_RUNNING
+    assert out1.activity_update.step == 5              # furthest group
+    # parent-minted, monotonic, NOT either child's seq (100 or 7)
+    assert out0.activity_update.seq == 1
+    assert out1.activity_update.seq == 2
+
+
+def test_fan_in_suppresses_fn_unavailable_while_a_sibling_serves_it():
+    """One group losing a function must not retire it worker-wide."""
+    p = _parent(2)
+    # group 0 reports it unavailable; group 1 has never reported it (serves it).
+    fu = pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
+        function_name="f", reason="insufficient_vram"))
+    out = p._fan_in(p._slots[0], fu)
+    assert out is None  # suppressed: the worker still serves f via group 1
+
+
+def test_parent_stays_torch_free_after_construction():
+    import sys
+    _parent(4)
+    assert "torch" not in sys.modules

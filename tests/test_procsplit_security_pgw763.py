@@ -210,7 +210,7 @@ def test_delta1_the_legitimate_mediated_call_still_works(credentialed_split, hub
     conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
 
     # Stand in for a dispatched job (the relay records exactly this).
-    pc._in_flight[("r-live", 1)] = "echo"
+    pc._slots[0].in_flight[("r-live", 1)] = "echo"
     status, body = _ask(pc, {
         "method": "POST",
         "path": "/v1/worker/capability/renew",
@@ -561,7 +561,7 @@ def test_delta4_a_grant_for_another_request_is_withheld(split_for_capability):
     assert "scoped to request r-someone-else" in got.job_result.safe_message
     assert pc.capability_withheld >= 1
     # Never dispatched: no accounting for a job the parent refused.
-    assert ("r-mine", 1) not in pc._in_flight
+    assert ("r-mine", 1) not in pc._all_in_flight()
 
 
 def test_delta4_an_expired_grant_is_withheld_retryable(split_for_capability):
