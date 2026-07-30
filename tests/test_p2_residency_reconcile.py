@@ -23,7 +23,7 @@ import msgspec
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.blob_host import BlobHost, CorruptingBlobHost
-from harness.progress_wait import await_progress
+from harness.progress_wait import Cadence, await_progress
 from harness.hub_double import (
     hub_double,
     is_exact_model_event,
@@ -191,7 +191,7 @@ def test_mutable_tag_move_fences_events_by_digest_and_generation(tmp_path) -> No
                 lambda: harness.worker.executor.store.resident_identity(_MODEL_REF),
                 lambda seen: seen == ("snap-b", 2),
                 what=f"the resident identity of {_MODEL_REF} to rebase to (snap-b, 2)",
-                cadence=conn.cadence,
+                cadence=Cadence(),
                 gone=lambda: None if harness.alive else "the worker thread exited",
             )
     finally:

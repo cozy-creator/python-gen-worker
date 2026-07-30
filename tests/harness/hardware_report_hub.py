@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 from concurrent import futures
 from contextlib import contextmanager
-from typing import Iterator, List, Tuple
+from typing import Iterator, List, Tuple, Optional
 
 import grpc
 
@@ -40,16 +40,44 @@ class RecordingHardwareReportServicer(pb_grpc.WorkerSchedulerServicer):
             pass
         return iter(())
 
-    def wait_for_message(self, timeout: float = DEFAULT_TIMEOUT_S) -> pb.WorkerMessage:
+    def wait_for_message(self, timeout: Optional[float] = None) -> pb.WorkerMessage:
+        """Wait for the worker's first message.
+
+        pgw#795: the DEFAULT (``timeout=None``) is progress-gated — a boot on a
+        loaded runner is slow, not broken, and a caller's ``timeout=5.0`` was
+        measured taking 25.11s while the worker was booting the whole time.
+
+        An explicit ``timeout`` still means exactly what it always did. That
+        split is load-bearing, not politeness: widening every call site at once
+        (raising this into a 30s floor for everyone) turned a 5s wait into a 30s
+        one somewhere that did NOT want it, and the delay left state behind
+        that failed six unrelated tests in a full run. A wait that must happen
+        opts in by passing nothing.
+        """
         import time
 
-        deadline = time.monotonic() + timeout
+        from .progress_wait import Cadence, StalledError
+
+        cadence = Cadence()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        started = time.monotonic()
         with self._cond:
             while not self.received:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("no WorkerMessage received within timeout")
-                self._cond.wait(remaining)
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"no WorkerMessage received within {timeout}s"
+                        )
+                    self._cond.wait(remaining)
+                    continue
+                silent = time.monotonic() - started
+                if silent >= cadence.window_s:
+                    raise StalledError(
+                        f"no WorkerMessage in {silent:.1f}s of silence "
+                        f"(staleness window {cadence.describe()})"
+                    )
+                self._cond.wait(min(0.25, cadence.window_s - silent))
             return self.received[0]
 
 

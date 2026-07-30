@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#795 (round 4) — the fix's own defect: a flake traded for a 13-minute hang.**
+  `Cadence` shared its slowest sample session-wide with a `10x` window, so one slow
+  advance anywhere multiplied every later wait and a wait with NO progress could sit
+  for many minutes where the old code flaked at 15s. That is a worse release gate,
+  not a better one: a flake costs one re-run and names itself; a hang costs the whole
+  job and says nothing. A cadence is now scoped to ONE wait, so the bound is
+  `max(floor, headroom x this wait's own slowest advance)` — a wait that never
+  advances dies at the floor, always, and only a wait that IS advancing may extend
+  itself. `test_residency_republish_pgw628` went 62.1s -> 2.5s with the same
+  correction (its `_settle()` scaled a quiet period to `10x` a measured latency;
+  a runaway re-announce loop re-announces immediately or not at all, so waiting
+  longer catches nothing).
+
+  Also: `WorkerHarness.stop()` discarded its 15s join result, so a worker that never
+  exited passed teardown in silence — the one outcome nothing asserted. It is now a
+  loud failure (red-verified: a wedged worker is caught, a clean exit returns in
+  0.2s). `run_entrypoint`'s silence floor is a FLOOR on a caller's number, never a
+  cap, and its expiry now says "produced no output for Ns (a SILENCE window, not a
+  time budget)" instead of `TimeoutExpired`'s misleading stock message.
+  `hardware_report_hub.wait_for_message()` is progress-gated only when the caller
+  passes no bound — widening every call site at once was measured breaking six
+  unrelated tests, so a must-happen wait opts in.
+
+- **pgw#795 / th#1314 — the publish gate asserts PROVENANCE instead of re-deriving it.**
+  `publish.yml` no longer re-runs the suite `ci.yml` already ran green on the same
+  tree with the same `--locked` resolution; a second identical run cannot produce new
+  information, only flake, and it produced three in a row for v0.78.0. It now asserts
+  that some successful CI run carries this exact TREE (trees, not commit SHAs — a
+  release branch, a squash merge and a cherry-pick all give different commits for
+  identical content), then runs only the artifact-facing steps. STRICT: an unproven
+  tree refuses to publish, with a message naming the two one-run ways to satisfy it.
+  It also gains `timeout-minutes: 20` — it had none, so a hang ran to GitHub's 6-hour
+  cap. Validated against the live API on both paths. **Finding it surfaced: v0.78.0's
+  published tree was never itself CI-green** — the promotion PR tested master plus
+  cherry-picks, a different tree from the chaos commit the tag pointed at.
+
 ## 0.79.0 (2026-07-30) — the v2 serving path actually works: the vendored proto is no longer stale, the chunked manifest parses against the REAL hub shape, and a publish refusal stops being retried as an outage
 
 > ### ⚠ 0.79.0 IS THE FLOOR FOR SERVING ANY CHUNKED (v2) CHECKPOINT — 0.78.0 CANNOT

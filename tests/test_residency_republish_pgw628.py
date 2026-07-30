@@ -16,7 +16,7 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.blob_host import BlobHost
 from harness.hub_double import Conn, WorkerHarness, hub_double, is_model_event, is_ready
-from harness.progress_wait import await_count
+from harness.progress_wait import Cadence, await_count
 
 # pgw#795 (the v0.78.0 release blocker): this ref must NOT be one a toy
 # endpoint declares. It used to be `harness/residency-tiny`, which
@@ -53,7 +53,7 @@ def _count_on_disk(conn: Conn) -> int:
         )
 
 
-def _wait_on_disk_count(conn: Conn, harness: WorkerHarness, want: int) -> float:
+def _wait_on_disk_count(conn: Conn, harness: WorkerHarness, want: int) -> None:
     """Wait for ``want`` ON_DISK re-reports — on PROGRESS, never on a clock.
 
     pgw#795: this wait used to be a fixed 15-second deadline, and on
@@ -70,31 +70,31 @@ def _wait_on_disk_count(conn: Conn, harness: WorkerHarness, want: int) -> float:
       alive, or busy, or chattering about other things is not evidence that the
       answer is coming, and a window that resets on those never closes.
     """
-    started = time.monotonic()
     await_count(
         lambda: _count_on_disk(conn),
         want,
         what=f"ON_DISK re-reports of {_MODEL_REF}",
-        cadence=conn.cadence,
+        cadence=Cadence(),
         gone=lambda: (
             "the worker ended the stream" if conn.client_done.is_set()
             else None if harness.alive
             else "the worker thread exited"
         ),
     )
-    return time.monotonic() - started
 
 
-def _settle(answered_in_s: float) -> None:
+def _settle() -> None:
     """Let a runaway re-announce loop, if there is one, show itself.
 
-    A fixed sleep here is sound where a fixed deadline was not: its expiry
-    makes the test PASS, so a slow runner weakens the check instead of failing
-    the release. It still scales with the machine — the quiet period is a
-    multiple of how long the re-announce it is checking actually took on this
-    machine.
+    A fixed quiet period is sound here where a fixed DEADLINE was not: this is
+    an absence probe, and its expiry makes the test PASS — a slow runner weakens
+    the check instead of failing the release. It is also why it must stay SHORT.
+    Scaling it to ``10x`` the measured re-announce latency (pgw#795 round 1) was
+    a mistake in the other direction: it made this the slowest test in the suite
+    at 62s, buying nothing, because a runaway loop re-announces immediately or
+    not at all — waiting longer cannot catch a loop that is not looping.
     """
-    time.sleep(max(0.5, 10 * answered_in_s))
+    time.sleep(0.5)
 
 
 def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
@@ -121,7 +121,7 @@ def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
             # its identity dedupe.
             baseline = _count_on_disk(conn)
             conn.send(hello_ack=_disk_only_ack(snapshot, generation=1))
-            answered_in = _wait_on_disk_count(conn, harness, baseline + 1)
+            _wait_on_disk_count(conn, harness, baseline + 1)
             events = [
                 m.model_event
                 for m in conn.received
@@ -133,13 +133,13 @@ def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
             assert events[-1].residency_generation == 1
 
             # And exactly one per applied plan: no runaway re-announce loop.
-            _settle(answered_in)
+            _settle()
             assert _count_on_disk(conn) == baseline + 1
 
             # A third re-send opens a third epoch: one more re-report.
             conn.send(hello_ack=_disk_only_ack(snapshot, generation=1))
-            answered_in = _wait_on_disk_count(conn, harness, baseline + 2)
-            _settle(answered_in)
+            _wait_on_disk_count(conn, harness, baseline + 2)
+            _settle()
             assert _count_on_disk(conn) == baseline + 2
     finally:
         blobs.shutdown()

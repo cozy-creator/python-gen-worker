@@ -41,7 +41,10 @@ def test_probe_failure_boot_dials_hub_sends_report_and_exits_cleanly(tmp_path: P
         report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_hardware_report")
         assert report_phase.get("delivered") is True, report_phase
 
-        msg = servicer.wait_for_message(timeout=5.0)
+        # pgw#795: no explicit bound — this message MUST arrive, and the boot
+        # that produces it was measured taking 25.11s on a loaded runner while
+        # 5.0 was the number here.
+        msg = servicer.wait_for_message()
         assert msg.WhichOneof("msg") == "hardware_unsuitable"
         hw = msg.hardware_unsuitable
         assert hw.worker_id == "gw619-smoke-worker"

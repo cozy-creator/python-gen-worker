@@ -23,12 +23,23 @@ So a wait here ends in one of three ways:
 A test whose property is genuinely broken must still FAIL, and quickly enough
 to be useful — so the give-up is real, it just keys on evidence.
 
-:class:`Cadence` is the third one. Every advance a wait actually sits through is
-a sample of how fast this machine answers today; the window is a multiple of the
-slowest such sample, shared across the session because a slow runner is slow for
-every test on it. Ten times slower a machine, ten times wider the window. The
-floor is what an uncalibrated first wait gets, and it is a SILENCE floor, not a
-work budget: it bounds how long we tolerate hearing nothing at all.
+:class:`Cadence` is the third one, and its scope is the load-bearing part.
+
+A window is derived from the advances THIS WAIT has itself observed, and from
+nothing else. The first version shared the slowest sample across the whole
+session, reasoning that a slow runner is slow for every test on it. That is true
+and it was still wrong: one slow advance anywhere multiplied every later wait, so
+a wait that never advanced at all could sit for many minutes instead of failing.
+Measured, in this very file's own test: **a 13-minute hang** where the old code
+would have flaked at 15 seconds. **A flake traded for an unbounded hang is a
+worse release gate, not a better one** — a flake costs one re-run and names
+itself; a hang costs the whole job and says nothing.
+
+So the rule is: a wait that makes NO progress dies at the floor, always. Only a
+wait that IS advancing may extend itself, and only in proportion to its own
+advances — which is self-limiting, because the thing granting the extension is
+the same thing that will end the wait. The floor is a SILENCE floor, not a work
+budget: it bounds how long we tolerate hearing nothing at all.
 
 And when a wait does expire, it says what it was waiting on, what it last saw,
 how long the silence was, and how the window was derived — "saw 2 of 3" was the
@@ -37,7 +48,6 @@ only reason pgw#795 was diagnosable at all, and that is the bar.
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import Any, Callable, Optional
 
@@ -56,55 +66,53 @@ class StalledError(TimeoutError):
 
 
 class Cadence:
-    """The staleness window this run has earned, in seconds.
+    """The staleness window ONE wait has earned, in seconds.
 
-    ``record(waited_s)`` feeds it one sample: how long a wait sat before the
+    ``record(waited_s)`` feeds it one sample: how long this wait sat before the
     thing it wanted advanced. ``window_s`` is ``headroom`` times the slowest
-    sample seen (by this cadence or anywhere in the session), floored.
+    sample THIS cadence has seen, floored.
 
-    There is deliberately no total-wait bound. A wait whose peer keeps
-    advancing runs as long as the work does, exactly like
+    Scope is the whole design. A cadence belongs to one wait (or, for a
+    connection, to one test's traffic on it) and never to the session: sharing
+    made every later wait inherit the slowest advance anywhere, so a wait with
+    zero progress could sit for minutes. Now the bound is:
+
+        window <= max(floor, headroom x this wait's own slowest advance)
+
+    which means a wait that never advances is bounded by ``floor``, full stop,
+    and a wait that keeps advancing extends only as far as its own progress
+    justifies. There is deliberately still no TOTAL-wait bound — a peer that
+    keeps delivering is allowed to take as long as the work takes, exactly like
     :class:`gen_worker.stall.SilenceWindow`, which this composes.
     """
 
-    _session_lock = threading.Lock()
-    _session_slowest = 0.0
-
-    def __init__(
-        self, *, floor_s: float = 30.0, headroom: float = 10.0, share: bool = True
-    ) -> None:
+    def __init__(self, *, floor_s: float = 30.0, headroom: float = 10.0) -> None:
         if floor_s <= 0 or headroom <= 0:
             raise ValueError("floor_s and headroom must be positive")
         self.floor_s = float(floor_s)
         self.headroom = float(headroom)
-        self.share = bool(share)
         self._slowest = 0.0
 
     def record(self, waited_s: float) -> None:
-        waited_s = max(0.0, float(waited_s))
-        self._slowest = max(self._slowest, waited_s)
-        if self.share:
-            with Cadence._session_lock:
-                Cadence._session_slowest = max(Cadence._session_slowest, waited_s)
+        self._slowest = max(self._slowest, max(0.0, float(waited_s)))
 
     @property
     def slowest_s(self) -> float:
-        if not self.share:
-            return self._slowest
-        with Cadence._session_lock:
-            return max(self._slowest, Cadence._session_slowest)
+        return self._slowest
 
     @property
     def window_s(self) -> float:
-        return max(self.floor_s, self.headroom * self.slowest_s)
+        return max(self.floor_s, self.headroom * self._slowest)
 
     def describe(self) -> str:
-        slowest = self.slowest_s
-        if self.headroom * slowest <= self.floor_s:
-            return f"{self.window_s:.1f}s silence floor (slowest advance {slowest:.2f}s)"
+        if self.headroom * self._slowest <= self.floor_s:
+            return (
+                f"{self.window_s:.1f}s silence floor (slowest advance in THIS "
+                f"wait {self._slowest:.2f}s)"
+            )
         return (
-            f"{self.window_s:.1f}s = {self.headroom:g}x the slowest advance "
-            f"this run measured ({slowest:.2f}s)"
+            f"{self.window_s:.1f}s = {self.headroom:g}x the slowest advance in "
+            f"THIS wait ({self._slowest:.2f}s)"
         )
 
 

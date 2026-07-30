@@ -9,8 +9,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: pypi
+    # pgw#795: this job had NO timeout, so a hang ran to GitHub's 6-hour cap.
+    # It no longer runs the suite, so it should finish in a couple of minutes;
+    # this is a hang bound, not a budget for work.
+    timeout-minutes: 20
     permissions:
       contents: read   # Required for checkout on private repos
+      actions: read    # Required to look up this tree's CI run (below)
       id-token: write  # Required for trusted publishing
     steps:
       - uses: actions/checkout@v4
@@ -31,14 +36,57 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra dev
 
-      # mypy already gates ci.yml on every push/PR to master (gw#497); tags are
-      # cut from master after CI passes, so re-running it here is redundant.
-      # pgw#796: same wiring as ci.yml — a publish must run exactly the gate a
-      # PR ran, at the same width, or "PR green implies publish green" is a
-      # guess. This step was 22m21s; the tag job it blocked had already queued
-      # 4.6h (pgw#795).
-      - name: Run tests
-        run: uv run pytest tests/ -n 4 --dist loadfile
+      # pgw#795 / th#1314: the publish gate asserts PROVENANCE, it does not
+      # re-derive it.
+      #
+      # This step used to be `pytest tests/` — the same suite, on the same tree,
+      # with the same `--locked` resolution that ci.yml had already run green.
+      # A second identical run cannot produce new information; its only possible
+      # novel outcomes are infrastructure flake and timing flake, and it produced
+      # three of those in a row for v0.78.0 at ~22 minutes each, on top of a 4.6h
+      # scheduling stall, blocking three downstream lanes. So: ci.yml's full
+      # suite at -n 4 is THE test gate, and this job runs only what is
+      # artifact-facing (build + the pgw#740 wheel contract) once the tree it is
+      # about to ship is known to have passed it.
+      #
+      # STRICT, and deliberately so: an unproven tree REFUSES to publish. It
+      # never silently skips testing, because a publish that skips both the
+      # suite and the proof is worse than the duplication it replaced.
+      - name: Assert this exact tree passed CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag_sha=$(git rev-parse HEAD)
+          tag_tree=$(git rev-parse "HEAD^{tree}")
+          echo "publishing $tag_sha (tree $tag_tree)"
+          # Trees, not commit SHAs: a release branch, a squash merge and a
+          # cherry-pick all produce different commits for identical content, and
+          # what CI proved is the CONTENT.
+          for sha in $(gh api "repos/$REPO/actions/workflows/ci.yml/runs?per_page=100" \
+                        --jq '.workflow_runs[] | select(.conclusion=="success") | .head_sha' \
+                       | awk '!seen[$0]++'); do
+            tree=$(gh api "repos/$REPO/commits/$sha" --jq '.commit.tree.sha' 2>/dev/null) || continue
+            if [ "$tree" = "$tag_tree" ]; then
+              echo "PROVEN: green CI run on $sha carries this exact tree"
+              exit 0
+            fi
+          done
+          cat >&2 <<EOF
+          ::error::No successful CI run carries this tree ($tag_tree).
+          This tag's content has never been tested AS TAGGED, so it will not be
+          published. Two ways to satisfy it, both one CI run:
+            * before tagging: gh workflow run ci.yml --ref <branch-you-will-tag>
+              and tag that exact commit once it is green; or
+            * after tagging:  gh workflow run ci.yml --ref <this-tag>
+              and re-run this publish job once it is green.
+          Do NOT relax this check to unblock a release: pgw#795 found that
+          v0.78.0 was published from a chaos commit whose tree no CI run had
+          ever seen -- the promotion PR tested master plus cherry-picks, which
+          is a different tree. That gap is what this step closes.
+          EOF
+          exit 1
 
       - name: Build package
         run: uv build

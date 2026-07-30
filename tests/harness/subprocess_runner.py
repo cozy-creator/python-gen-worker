@@ -88,7 +88,33 @@ def run_entrypoint(
         [sys.executable, "-m", "gen_worker.entrypoint"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    return _collect_until_silent(proc, silence_window_s=timeout)
+    # A caller's number is a FLOOR on tolerated silence, never a cap: it can
+    # only make the wait more patient. Measured why (pgw#795 round 4): on a
+    # contended box a starved boot went 25s without printing, and 25.0 was the
+    # number the call site happened to carry.
+    from .progress_wait import Cadence
+
+    return _collect_until_silent(
+        proc, silence_window_s=max(timeout, Cadence().floor_s)
+    )
+
+
+class _WentSilent(subprocess.TimeoutExpired):
+    """The child stopped SAYING anything — not "the child ran too long".
+
+    Subclasses ``TimeoutExpired`` so existing handlers keep working, but says
+    what actually happened: ``TimeoutExpired``'s stock message ("timed out
+    after 25.0 seconds") reads as a total budget and sent this lane looking for
+    a slow boot rather than a silent one.
+    """
+
+    def __str__(self) -> str:
+        tail = "".join((self.output or "").splitlines(keepends=True)[-3:]).strip()
+        return (
+            f"the boot subprocess produced no output for {self.timeout}s "
+            f"(a SILENCE window, not a time budget — the process was killed). "
+            f"Last output: {tail!r}"
+        )
 
 
 def _collect_until_silent(
@@ -119,7 +145,7 @@ def _collect_until_silent(
                 proc.wait()
                 for reader in readers:
                     reader.join(timeout=5.0)
-                raise subprocess.TimeoutExpired(
+                raise _WentSilent(
                     proc.args, silence_window_s,
                     output="".join(chunks["out"]), stderr="".join(chunks["err"]),
                 ) from None
