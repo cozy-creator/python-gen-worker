@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+> ### ⚠ 0.78.0 SHIPS A DEFECT THAT MAKES CHUNKED CHECKPOINTS UNRESOLVABLE — cut the next release promptly
+>
+> `models/hub_client._parse_chunks` in 0.78.0 requires a `url` INSIDE each chunk
+> object. The hub cannot put one there: `chunks: [{digest, len}]` IS the
+> content-addressed manifest identity, so resolve-time URLs ride in a SEPARATE
+> index-aligned `chunk_urls: []`. Against a real hub, EVERY chunked (>64 MiB)
+> checkpoint therefore fails to parse with `missing digest/url/len` and
+> `resolve_repo` refuses it. Fixed below. Impact is bounded only because no v2
+> artifact is in production yet — it lands the moment one is. Whole files and
+> every v1/blake3 checkpoint are unaffected.
+
+- **pgw#781 / th#1303 — the live acceptance, and the three defects it found.**
+  `v2 publish -> promoted -> resolve -> worker fill -> byte-identical` now runs
+  end to end against a real hub and real R2 (evidence:
+  `~/cozy/samples/ingestv2-accept/`). Everything below was found by that run and
+  by nothing else; each had passing unit tests over it.
+
+  - **The chunked-manifest wire shape** (above). The parser was written from a
+    design document instead of from the hub's serializer, and the unit tests
+    encoded the same assumption — a self-consistent suite proving the client
+    agreed with itself. For a WIRE contract the fixture must come from the
+    producer's serializer or a captured real response. `chunk_urls` is now read
+    index-aligned, a nested `url` still works (the proto's `ChunkRef` carries
+    `sha256`/`url`/`len` together, so one library serves both transports), and a
+    MISALIGNED url list is fatal rather than "fetch fewer chunks" — index
+    position is the only thing binding a URL to its digest.
+
+  - **A typed refusal was retried into a different error.** A v2 completion does
+    not answer with an error envelope; it answers with the th#1301 PROJECTION,
+    whose refusal carries an explicit `status.failure.retryable`.
+    `_send_with_retries` guesses definiteness from body SHAPE, so it read
+    `retryable: false` as a proxy non-answer and retried — and the retry, finding
+    the session terminal, returned 409 `publish_repudiated`. Measured twice: the
+    caller was told a consequence while the cause
+    (`invalid_manifest_for_kind: missing_diffusers_single_file_safetensors`) was
+    discarded. A publish is not idempotent to re-complete, so a blind retry there
+    can only destroy the diagnosis. `_send_with_retries` gains an optional
+    `definite` predicate; `/complete` supplies one and the error now leads with
+    the hub's own code, retryable bit and failing stage.
+
+  - **The publish error envelope is a SECOND hub shape.** tensorhub's
+    `publishError.body()` emits `{"error": "<code>", "message": ...}` — the code
+    as a STRING, not an object — which `response_is_from_hub` did not recognise.
+    So every publish refusal, on **v1 as well as v2**, has been classified
+    proxy-shaped and retried under the silence window. It stayed invisible
+    because a retried v1 refusal usually fails again identically. pgw#743's bias
+    is preserved and re-pinned: an unrecognised body is still proxy-shaped,
+    because mis-terminating an outage throws away paid-for work while
+    mis-retrying a refusal costs a bounded backoff.
+
+- **pgw#781 / th#1303 — `publish_v2` REFUSES a provenance stamp rather than
+  dropping it.** The v2 declare route writes `Provenance: []byte("{}")`
+  unconditionally, while every mirror publish carries
+  `{"upstream_revision": …}`. Flipping the mirror path to v2 would blank,
+  silently, the field naming which upstream commit we copied — the field
+  th#1301's strongest check (our sha256 vs upstream's published sha256, the
+  interop the whole re-key was for) is computed against. Filed as th#1331; the
+  guard is deleted in the same commit the route learns the field.
+
+
 - **th#1330 B2 — a component OVERRIDE no longer also fetches the component it overrides.**
   pgw#617 is load-then-substitute: the override's tree is materialized separately and handed
   to `from_pretrained` as a constructed object, so the base composition's copy of that
