@@ -31,7 +31,10 @@ digests, and finalization; R2 is only the byte store.
   (seekable files make multipart retry safe).
 - **Civitai**: a bounded provider-specific downloader/API integration.
 - **Tensorhub**: presigned R2 GETs against the resolved snapshot manifest,
-  blake3-verified into the local CAS.
+  digest-verified into the local CAS. The algorithm comes from the manifest
+  entry's tagged `digest` (`sha256:<hex>` — v2, th#1303) and falls back to the
+  legacy bare-hex `blake3` field only when `digest` is absent. Blobs land under
+  `blobs/{algo}/{xx}/{yy}/{hex}`, so the two namespaces never collide.
 
 Transfer defaults are chosen from benchmarks
 (`scripts/benchmark_model_transfer.py` — reliability first, then wall-clock,

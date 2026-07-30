@@ -517,8 +517,18 @@ max_guidance untouched (the lora left them null).
 | `digest` | O resolver | W CAS layout + dedupe | pinned snapshot digest |
 | `files[].path` | O | W file placement | repo-relative path |
 | `files[].size_bytes` | O | W disk-headroom check + progress totals | file size |
-| `files[].blake3` | O | W post-download verification (digest-poisoning guard) | content hash |
-| `files[].url` | O presigner | W downloader | presigned GET; expiry ⇒ `ModelEvent{FAILED, error:"url_expired"}` and O re-sends the same desired generation or job with fresh URLs |
+| `files[].blake3` | O | W post-download verification (digest-poisoning guard) | **LEGACY (th#1303)**, bare blake3 hex. Empty on a v2 snapshot. Deleted at phase 4 |
+| `files[].url` | O presigner | W downloader | presigned GET for the whole file; expiry ⇒ `ModelEvent{FAILED, error:"url_expired"}` and O re-sends the same desired generation or job with fresh URLs |
+| `files[].digest` | O resolver | W post-download verification | **v2 (th#1303)**, ALWAYS algorithm-tagged (`sha256:<hex>`). For a whole file this is the CAS key the store enforced at write time; for a chunked file it is the whole-file sha256 |
+| `files[].chunk_size_bytes` | O resolver | W reassembly | v2; 64 MiB. Non-zero ⇒ the file is delivered as an ordered chunk list |
+| `files[].chunks[]` | O presigner | W reassembly + per-chunk verify | v2 `ChunkRef{sha256, url, len}`; the ordered list IS the file's manifest identity |
+
+**Verification rule (th#1303).** A consumer MUST dispatch on `digest` first and
+fall back to `blake3` only when `digest` is empty. `if want_b3 and hash != want_b3`
+is the WRONG shape: on a v2 entry `blake3` is absent, so the guard is vacuously
+true and the integrity check silently disappears. Absent-digest must REFUSE, not
+pass. Both algorithms are readable for the whole dual-read window; blake3 is
+removed entirely at phase 4.
 
 Standalone CLIENTS (cozy CLI, `gen-worker prefetch`) pull the SAME shape over
 HTTP instead: `GET /api/v1/repos/:tenant/:name/resolve?tag=&flavor=` (#560 —
