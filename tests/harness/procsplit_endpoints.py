@@ -80,6 +80,22 @@ class SplitProbe:
             return ProbeOut(response=f"refused:{exc}")
         return ProbeOut(response="PERFORMED")
 
+    def c2pa_sign(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """Sign a claim through the REAL content_credentials path (delta 5).
+
+        The child has no worker JWT, so the ask must reach the hub through the
+        parent. `data.text` is the hub base the handler would use — it is
+        ignored under the split, which is itself the point.
+        """
+        from gen_worker import content_credentials as cc
+
+        remote = cc._RemoteSigner(base_url=str(data.text or ""), worker_jwt=lambda: "")
+        try:
+            sig = cc._hub_sign_claim(remote, "es256", b"claim-to-be-signed")
+        except Exception as exc:
+            return ProbeOut(response=f"refused:{exc}")
+        return ProbeOut(response=f"signed:{sig.decode(errors='replace')}")
+
     def forge_capability_renew(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         """Renew a capability for a request this worker was never given.
 

@@ -464,6 +464,58 @@ def test_delta3_an_honest_report_passes_through_unchanged():
 
 
 # ==========================================================================
+# DELTA 5 — C2PA signing is a parent-side action; the child sends a hash
+# ==========================================================================
+
+
+def test_delta5_the_child_signs_through_the_parent_holding_no_credential(
+    credentialed_split, hub_http,
+):
+    """th#1307, finished at the seam.
+
+    The platform private key already left the pod (the credbound lane made
+    signing a hub oracle). What remained was WHO makes the call: the oracle is
+    authenticated with the pod's worker JWT, and that call was made from the
+    process running tenant code. Now the child sends the claim's to-be-signed
+    octets and receives a signature; the credential is the parent's.
+    """
+    import base64
+
+    hub_http.reply = {"signature_b64": base64.b64encode(b"SIGNATURE").decode()}
+    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+
+    # The handler passes a base URL of its own choosing. It is IGNORED: the
+    # parent aims its own credential, at the host the hub named (th#1312).
+    conn.send(run_job=pb.RunJob(
+        request_id="r-sign", attempt=1, function_name="c2pa-sign",
+        input_payload=_payload("http://attacker.invalid")))
+    got = conn.wait_for(is_result_for("r-sign"), timeout=60.0)
+    assert got.job_result.status == pb.JOB_STATUS_OK
+    assert _text(got) == "signed:SIGNATURE", _text(got)
+
+    call = [c for c in hub_http.calls if c["path"] == "/v1/worker/c2pa/sign"][-1]
+    assert call["authorization"] == f"Bearer {WORKER_JWT}", (
+        "the signing oracle must be authenticated by the parent's credential"
+    )
+    # A hash and the algorithm. Nothing else crosses — not the media, not a
+    # destination, not a header.
+    assert set(call["body"]) == {"alg", "claim_b64"}, call["body"]
+    assert base64.b64decode(call["body"]["claim_b64"]) == b"claim-to-be-signed"
+
+
+def test_delta5_the_sign_action_cannot_be_widened(credentialed_split, hub_http):
+    """The narrowness IS the fix: the child asks the parent to sign a hash it
+    was given, and nothing more. A body key the action does not name is
+    refused, so the oracle cannot be turned into a general signer."""
+    with pytest.raises(actions.ActionRefused):
+        actions.authorize({
+            "method": "POST", "path": "/v1/worker/c2pa/sign",
+            "json": {"alg": "es256", "claim_b64": "AA==", "key_id": "platform"},
+        })
+
+
+# ==========================================================================
 # DELTA 4 — the parent DECIDES on the per-job capability token
 # ==========================================================================
 
