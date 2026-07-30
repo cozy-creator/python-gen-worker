@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import activity as activity_mod
 from ..component_vocab import (
     denoiser_components,
     text_encoder_components,
@@ -440,6 +441,17 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
         except Exception as exc:
             logger.warning("fp8 storage failed on %s (%s); serving at full precision",
                            name, exc)
+            # pgw#760: the all-components failure is structurally reported
+            # (th#737 cast_dropped), but a PARTIAL failure returns
+            # applied=True and reads as success — this component alone now
+            # holds ~2x its budgeted VRAM at full precision.
+            activity_mod.emit_event(
+                activity_mod.KIND_SERVE_DEGRADE,
+                f"component={name} obj={type(obj).__name__}: fp8 storage "
+                f"cast failed; this component serves at full precision "
+                f"(over its budgeted VRAM): {type(exc).__name__}: {exc}",
+                phase="fp8_cast_failed",
+            )
     return applied
 
 
@@ -753,33 +765,27 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
     return merged
 
 
-# --- fp8 download, bf16 resident (gw#534 rung 2) ----------------------------
-# W8A16 layerwise casting is never chosen voluntarily (Paul 2026-07-13: the
-# per-forward cast tax measured +44% H100 / +73% B200 wall). A planned fp8
-# storage lane (stored #fp8 flavor or resolved cast) is UPGRADED to plain
-# bf16-resident weights when the whole snapshot fits free VRAM with headroom:
-# the fp8 artifact stays the small download, the upcast happens ONCE at load
-# (from_pretrained's torch_dtype already does it — we simply skip the fp8
-# storage lane that would re-cast down). fp8 storage remains only when bf16
-# does not fit.
-# PREMISE REPLACED — the +44%/+73% figure above measured the HOOK form of this
-# lane, which pgw#727 replaced with module structure. RE-MEASURED on an L4
-# (pgw#727 pod session): cast tax vs plain bf16 is **+1.9% for the structural
-# storage lane** and +27.7% for the hooks it replaced, and the storage lane is
-# 20.2% faster than hooks compiled. So the tax this upgrade exists to dodge is
-# an order of magnitude smaller than the number that justified it.
-#
-# The upgrade below is DELIBERATELY LEFT ON — flipping a prod serving-fit
-# policy (Paul's "never voluntary W8A16" ruling, and it moves cells between the
-# "" and "fp8-hooks" lane keys) is a coordinator/Paul decision, not a
-# refactor's. But it is now trading ~2x weight VRAM for ~1.9% latency, which is
-# the wrong side of every fit decision that VRAM headroom feeds (batch,
-# resolution, concurrency, and the ladder rungs below this one, which cost far
-# more than 1.9%). Decision-ready proposal + the numbers are on pgw#727.
-BF16_RESIDENT_MARGIN_GB = 4.0  # activations + allocator headroom
+# --- fp8 download stays the fp8 storage lane (pgw#772) ----------------------
+# The gw#534 "rung 2" voluntary upgrade (fp8 download upcast ONCE to plain
+# bf16-resident weights whenever the snapshot fit free VRAM with headroom,
+# `bf16_resident_fits` / BF16_RESIDENT_MARGIN_GB) is REMOVED, ruled by Paul on
+# pgw#772. The serving lane is deterministic per (release x declared config)
+# — never a function of the individual card's free VRAM. The probe made
+# `lane` the only GPU-dependent axis of the ck5 cell key: a 4090's ~1.5 GiB
+# VRAM surplus over an L4 (same release/image/sm_89) flipped it to base lane
+# "", a lane NOTHING mints for, so the better card missed all 144 published
+# checkpoints INCLUDING its own same-SKU cell and served eager for life
+# (th#1198 CP-D, −21% request-level AOT win forfeited). The tax the upgrade
+# dodged is +1.9% for the structural storage lane (pgw#727 re-measure; the
+# +44-73% figure that justified it measured the retired HOOK form), so it
+# traded ~2x weight VRAM for ~1.9% latency AND identity determinism.
+# Involuntary transitions stay: the fit-ladder rungs below (can't-fit fp8/nf4)
+# and the w8a8/w4a4 dequant-on-unsupported-host lanes are declared rungs, not
+# probe outcomes.
 
 # The pipeline's weight lane, part of the compile-cache graph key (gw#534):
-# "" = plain resident weights (incl. the bf16-resident upcast), "fp8-hooks" =
+# "" = plain resident weights (incl. the involuntary w8a8/w4a4 dequant
+# lanes), "fp8-hooks" =
 # fp8 weights resident with a per-layer upcast (traced INTO the FX graphs).
 # The "fp8-hooks" spelling is the WIRE value — tensorhub maps it to `w8a16`
 # and cells key on it — and it is kept byte-identical across the pgw#727
@@ -802,58 +808,6 @@ def pipeline_weight_lane(pipeline: Any) -> str:
     if getattr(pipeline, "_cozy_fp8_storage_applied", False):
         return "fp8-hooks"
     return ""
-
-
-def bf16_resident_fits(
-    path: Path, *, text_encoders: bool = False, free_gb: Optional[float] = None,
-    declared_vram_gb: float = 0.0,
-) -> bool:
-    """True when the snapshot can serve fully bf16-RESIDENT within free VRAM
-    minus :data:`BF16_RESIDENT_MARGIN_GB` (fp8-stored cast targets doubled for
-    the upcast). False on CPU-only hosts or unreadable snapshots — the caller
-    keeps today's hook path.
-
-    ``declared_vram_gb`` is the function's declared card envelope
-    (``Resources.vram_gb``) when known. The declaration was measured under
-    the STORED lane (fp8 weights + activation peak + margin); the upcast
-    steals exactly its extra weight bytes from that activation budget, so
-    the upgrade additionally requires the card to have that many GB SPARE
-    over the declaration: ``free >= declared + upcast_extra``. Without this
-    term (ie#381 discovery), a weights-only check upgraded LTX-22B on an
-    80 GB card and every >=10 s 1080p request silently fell to the DEGRADED
-    tiled-refine rung — slower AND quality-taxed, defeating the fp8+te
-    recipe the envelope was designed around. 0 = unknown (local CLI, plain
-    loads): the weights-margin rule alone applies, as before."""
-    if free_gb is None:
-        from .memory import get_available_vram_gb
-
-        free_gb = get_available_vram_gb()
-    if free_gb <= 0:
-        return False
-    comp = snapshot_component_weight_bytes(Path(path))
-    total = sum(comp.values())
-    if total <= 0:
-        return False
-    targets = set(_fp8_storage_components())
-    if text_encoders:
-        targets |= set(_fp8_text_encoder_components())
-    # Per-TENSOR fp8 byte accounting (ie#381 fix 2): the majority-dtype
-    # component gate returned "bf16" for produced fp8 flavors whose scale/
-    # norm tensors outnumber the (much larger) fp8 weight tensors, counting
-    # the upcast as ZERO and letting the upgrade eat the activation budget.
-    fp8 = snapshot_component_fp8_bytes(Path(path))
-    upcast_extra = 0
-    for name, nbytes in fp8.items():
-        if name in targets or not name:
-            upcast_extra += nbytes
-    resident_gb = (total + upcast_extra) / float(1 << 30)
-    if resident_gb > float(free_gb) - BF16_RESIDENT_MARGIN_GB:
-        return False
-    if declared_vram_gb and declared_vram_gb > 0:
-        upcast_gb = upcast_extra / float(1 << 30)
-        if float(free_gb) < float(declared_vram_gb) + upcast_gb:
-            return False
-    return True
 
 
 # --- Runtime fit rungs (th#546 emergency lane + th#683 fp8 storage) --------
@@ -1350,46 +1304,6 @@ def _safetensors_data_bytes(p: Path) -> int:
     return total
 
 
-def _safetensors_fp8_bytes(p: Path) -> int:
-    """Bytes of F8_E4M3-stored tensors in one safetensors file (header-only)."""
-
-    with open(p, "rb") as f:
-        raw = f.read(8)
-        if len(raw) < 8:
-            return 0
-        (n,) = struct.unpack("<Q", raw)
-        if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
-            return 0
-        header = json.loads(f.read(n))
-    total = 0
-    for value in header.values():
-        if (isinstance(value, dict) and value.get("dtype") == "F8_E4M3"
-                and "data_offsets" in value):
-            s_, e_ = value["data_offsets"]
-            total += int(e_) - int(s_)
-    return total
-
-
-def snapshot_component_fp8_bytes(model_path: Path) -> Dict[str, int]:
-    """F8_E4M3 tensor bytes per top-level component dir. These are the bytes
-    a bf16-resident upcast DOUBLES — counted per tensor, not per component
-    majority label: a produced fp8 flavor stores scales/norms in bf16, so a
-    shard can be majority-BF16 by tensor COUNT while its weight bytes are
-    fp8 (LTX fp8 DiT: 247 bf16 vs 137 fp8 tensors per shard, but the fp8
-    tensors are ~3x the bytes — the majority-dtype gate undercounted the
-    upcast to zero, ie#381/gw#553)."""
-    out: Dict[str, int] = {}
-    root = Path(model_path)
-    try:
-        for p in sorted(root.rglob("*.safetensors")):
-            rel = p.relative_to(root)
-            comp = rel.parts[0] if len(rel.parts) > 1 else ""
-            out[comp] = out.get(comp, 0) + _safetensors_fp8_bytes(p)
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in out.items() if v > 0}
-
-
 def snapshot_component_weight_bytes(model_path: Path) -> Dict[str, int]:
     """Tensor bytes per top-level component dir (header-declared data ranges;
     no tensor reads). Root-level files book under ``""``. Empty dict when
@@ -1597,7 +1511,6 @@ def load_from_pretrained(
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
     declared_vram_gb: float = 0.0,
-    allow_bf16_resident_upgrade: bool = True,
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
@@ -1721,25 +1634,12 @@ def load_from_pretrained(
                 # torch-less environment (unit tests / CPU tools) — loaders
                 # that actually need torch will fail on their own terms.
                 pass
+    # pgw#772: a declared fp8 storage lane is SERVED as fp8 storage — the
+    # voluntary free-VRAM bf16-resident upgrade is removed (see the lane
+    # tombstone above BF16_RESIDENT's old site). Only the involuntary
+    # fit-ladder rungs below may move the lane, and only downward.
     fp8_storage = storage_dtype in ("fp8", "fp8+te") or sniffed == "fp8"
     fp8_text_encoders = storage_dtype == "fp8+te"
-    bf16_resident = False
-    # th#1043: a joint multi-lane fit decision (force_storage_dtype) budgets
-    # free VRAM for SIBLING lanes too — the single-lane resident-upcast
-    # check below would greedily un-force it and re-starve the group.
-    if (allow_bf16_resident_upgrade and fp8_storage and bf16_resident_fits(
-            Path(path), text_encoders=fp8_text_encoders,
-            declared_vram_gb=declared_vram_gb)):
-        # gw#534 rung 2: fp8 download, bf16 resident — skip the cast hooks
-        # (never voluntary W8A16); from_pretrained's torch_dtype upcasts once.
-        fp8_storage = False
-        fp8_text_encoders = False
-        bf16_resident = True
-        logger.info(
-            "RESIDENT_UPCAST model=%s: fp8 storage lane upgraded to "
-            "bf16-resident weights (fits with headroom); layerwise-cast "
-            "hooks skipped", path,
-        )
     adaptive_rung = ""  # gw#491: load-time rung engagement, stamped on the pipe
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
@@ -1822,11 +1722,6 @@ def load_from_pretrained(
                 setattr(pipe, _WEIGHT_LANE_ATTR, "fp8-hooks")
         except Exception:
             pass
-    elif bf16_resident:
-        try:
-            setattr(pipe, _WEIGHT_LANE_ATTR, "bf16-resident")
-        except Exception:
-            pass
     if adaptive_rung == "nf4":
         # gw#521: verify the quant actually LANDED — a config whose component
         # names miss the pipeline is silently ignored by diffusers, and a
@@ -1864,7 +1759,6 @@ __all__ = [
     "composition_compute_dtype",
     "QUANT_LANE_COMPUTE_DEFAULT",
     "apply_block_window_offload",
-    "bf16_resident_fits",
     "block_offload_active",
     "pipeline_weight_lane",
     "emergency_quant_enabled",

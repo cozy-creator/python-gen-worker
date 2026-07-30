@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, runtime_checkable
 
+from .. import activity as activity_mod
 from ..component_vocab import denoiser_components, text_encoder_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
 from dataclasses import replace
@@ -691,10 +692,20 @@ class AdapterResidency:
                         else:
                             w8a8_lora.clear_branch_adapters(model)
                     w8a8_lora.stamp_lane(pipe, targets)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "[request_id=%s] lora branch clear failed", request_id,
                     exc_info=True,
+                )
+                # pgw#760: adapter deltas may still be live in the branch
+                # buffers — the NEXT tenant's request can render with THIS
+                # request's LoRA. Serving-correctness, never log-only.
+                activity_mod.emit_event(
+                    activity_mod.KIND_LORA_HYGIENE,
+                    f"ref={ref} request={request_id}: branch clear failed; "
+                    f"adapter deltas may persist into later requests: "
+                    f"{type(exc).__name__}: {exc}",
+                    phase="branch_clear_failed",
                 )
             try:
                 # Peft-surface teardown only when peft attachments exist —
@@ -712,10 +723,18 @@ class AdapterResidency:
                     "[request_id=%s] lora adapters deactivated (disable_ms=%d attached=%d)",
                     request_id, int((time.monotonic() - t0) * 1000), len(st.attached),
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "[request_id=%s] lora deactivate failed; pipeline may have "
                     "active adapters", request_id, exc_info=True,
+                )
+                activity_mod.emit_event(
+                    activity_mod.KIND_LORA_HYGIENE,
+                    f"ref={ref} request={request_id} "
+                    f"attached={len(st.attached)}: peft deactivate failed; "
+                    f"pipeline may serve later requests with active "
+                    f"adapters: {type(exc).__name__}: {exc}",
+                    phase="deactivate_failed",
                 )
 
     def needs_deactivation(self, ref: str) -> bool:
@@ -739,9 +758,16 @@ class AdapterResidency:
                 if targets and w8a8_lora.pipeline_branch_bucket(pipe):
                     w8a8_lora.disable_branch_lanes(pipe)
                     w8a8_lora.stamp_lane(pipe, targets)
-            except Exception:
+            except Exception as exc:
                 logger.warning("lora branch drop on demote failed for %s",
                                ref, exc_info=True)
+                activity_mod.emit_event(
+                    activity_mod.KIND_LORA_HYGIENE,
+                    f"ref={ref}: branch-lane drop on demote failed; adapter "
+                    f"deltas may survive the demote: "
+                    f"{type(exc).__name__}: {exc}",
+                    phase="detach_failed",
+                )
             if st is None or not st.attached or st.pipe_id != id(pipe):
                 return
             try:
@@ -750,8 +776,15 @@ class AdapterResidency:
                     "lora attachments dropped on demote: ref=%s adapters=%d",
                     ref, len(st.attached),
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning("lora detach on demote failed for %s", ref, exc_info=True)
+                activity_mod.emit_event(
+                    activity_mod.KIND_LORA_HYGIENE,
+                    f"ref={ref} adapters={len(st.attached)}: peft unload on "
+                    f"demote failed; attachments persist on the demoted "
+                    f"pipeline: {type(exc).__name__}: {exc}",
+                    phase="detach_failed",
+                )
 
     def _evict_over_caps(self, st: _PipeAttachments, pipe: Any, keep: Set[str]) -> None:
         while len(st.attached) > self._max or (
@@ -764,8 +797,17 @@ class AdapterResidency:
             try:
                 pipe.delete_adapters(name)
                 logger.info("lora attachment evicted (LRU): %s", victim)
-            except Exception:
+            except Exception as exc:
                 logger.warning("lora eviction failed for %s", victim, exc_info=True)
+                # pgw#760: the attachment is dropped from bookkeeping but its
+                # tensors stay on the pipeline — repeated failures creep VRAM.
+                activity_mod.emit_event(
+                    activity_mod.KIND_LORA_HYGIENE,
+                    f"adapter={victim}: LRU eviction failed; adapter tensors "
+                    f"remain on the pipeline (VRAM creep): "
+                    f"{type(exc).__name__}: {exc}",
+                    phase="evict_failed",
+                )
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:

@@ -53,6 +53,37 @@ KIND_WARMUP = "warmup"
 # full confession. The hub accepts any kind and logs completions verbatim,
 # so top-N reasons are countable per (worker -> release, SKU) hub-side.
 KIND_GUARD_MISS = "guard_miss"
+# pgw#756: the guard-closure classifier flagged guards it cannot tie to the
+# declared contract. ADVISORY — the mint completes and publishes; the rows
+# ride the cell's guard manifest. Countable so a real leak class surfaces as
+# a trend hub-side instead of as a fleet-wide mint refusal (pgw#691/#733).
+KIND_GUARD_LEAK = "guard_leak"
+# pgw#760 (error-visibility doctrine): a fail-soft outcome that changes what
+# or how this worker SERVES — or that a hub decision depends on — must ride
+# a typed event, never only a log line (hub-spawned workers expose no
+# stdout). One shape everywhere: ``emit_event(kind, detail, phase=reason)``
+# with ``phase`` a short stable reason token (countable hub-side) and
+# ``detail`` naming the identifiers (ref/function/label/request) + the
+# exception. Fail-soft BEHAVIOR is unchanged — these are confessions.
+KIND_SERVE_DEGRADE = "serve_degrade"
+KIND_TRT_ADOPT = "trt_adopt"
+KIND_LORA_HYGIENE = "lora_hygiene"
+KIND_ROTATION_PRELOAD = "rotation_preload"
+KIND_CAPABILITY_RENEWAL = "capability_renewal"
+KIND_RESIDENCY_FAULT = "residency_fault"
+# th#1322: JIT (dynamo/inductor) compile duration, as a typed numeric event.
+# It used to be `logger.info("compiled %s in %.0fs")` and nothing else, so on a
+# hub-spawned pod (no stdout, pgw#760) the one number an AOT-vs-JIT comparison
+# needs did not exist anywhere. Same shape as `aot_mint_phases` deliberately:
+# `phase=minted` carries the mint's roll-up in `duration_ms`, `phase=shape:<WxH>`
+# / `phase=child:<phase>` carry the spans inside it, so comparing the two mint
+# routes is ONE grouped query over worker_activity_events rather than a regex
+# over free text on one side and a log grep on the other.
+KIND_JIT_COMPILE = "jit_compile"
+# th#1322: the roll-up phase both mint routes report their TOTAL under. A
+# reader groups on (kind, phase) and must never sum a roll-up together with
+# its own children.
+PHASE_MINTED = "minted"
 
 PHASE_LOAD = "load"
 PHASE_TRACE_GRAPH = "trace_graph"
@@ -116,8 +147,12 @@ def _emit(update: pb.ActivityUpdate) -> None:
         else:
             state = pb.ActivityState.Name(update.state)
             logger.info(
-                "[activity] %s %s %s/%s %s %s", update.kind, update.phase,
-                update.step, update.total_steps, state, update.error or update.detail,
+                "[activity] %s %s %s/%s %s%s %s", update.kind, update.phase,
+                update.step, update.total_steps, state,
+                # th#1322: the measured span belongs in the local UI too — the
+                # sinkless path IS the cozy-local progress display.
+                f" {update.duration_ms / 1000:.1f}s" if update.duration_ms else "",
+                update.error or update.detail,
             )
     except Exception:  # reporting must never break the work it reports on
         logger.debug("activity report dropped", exc_info=True)
@@ -230,9 +265,20 @@ class Activity:
         _end(self)
 
 
-def emit_event(kind: str, detail: str, phase: str = "") -> None:
+def emit_event(
+    kind: str, detail: str, phase: str = "", duration_ms: int = 0,
+) -> None:
     """One self-contained COMPLETED ActivityUpdate — a countable typed
     EVENT (pgw#680 ``guard_miss``), not a running activity.
+
+    ``duration_ms`` (th#1322) is the MEASURED span of the work this event
+    reports, taken from this process's monotonic clock. It lands in a numeric
+    ``worker_activity_events.duration_ms`` column, so a duration reported here
+    can be grouped and percentiled — which a number interpolated into
+    ``detail`` cannot. Pass it whenever the emitting site already timed the
+    work; leave it 0 when the event is not about a span (a refusal, a
+    classification). Never pass a duration the caller had to guess: 0 honestly
+    means "not measured here", and readers filter on ``duration_ms > 0``.
 
     Deliberately bypasses :func:`begin`: begin() swaps the module-global
     ``_current``, and ending an event would strand a concurrently open
@@ -243,6 +289,7 @@ def emit_event(kind: str, detail: str, phase: str = "") -> None:
         kind=kind, phase=phase[:300], seq=_next_seq(),
         state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
         detail=detail[:2000],
+        duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),
     ))
 

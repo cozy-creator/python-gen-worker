@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Sequence
+
+from .. import activity as activity_mod
 from ..subproc import LineTail
 from .llama import plan_for, resolve_gguf
 
@@ -213,9 +215,21 @@ class DegradingBoot:
 
     def start(self) -> ServerHandle:
         last: Optional[ServerBootError] = None
-        for proc in self.candidates:
+        for rung, proc in enumerate(self.candidates):
             try:
-                return proc.start()
+                handle = proc.start()
+                if rung > 0:
+                    # pgw#760: the engine is serving on a degraded rung
+                    # (fewer GPU layers / CPU-only) — a quality decision the
+                    # planned rung's failure would otherwise hide.
+                    activity_mod.emit_event(
+                        activity_mod.KIND_SERVE_DEGRADE,
+                        f"rung={rung} of {len(self.candidates) - 1}: engine "
+                        f"booted on a degraded rung after: "
+                        f"{last}",
+                        phase="engine_boot_degraded",
+                    )
+                return handle
             except ServerBootError as exc:
                 last = exc
                 logger.warning("engine boot failed (%s); trying degraded rung", exc)

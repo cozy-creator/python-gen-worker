@@ -46,7 +46,7 @@ import msgspec
 from .binding import BINDING_TYPES, Binding
 from .export_contract import Arg, Dim, Fork, GraphClass, Input, validate_contract
 from .formula import RuntimeFormula
-from .slot import OBJECTIVES, Slot
+from .slot import OBJECTIVES, TASKS, Slot
 from ..models import lanes as lanespec
 from ..runtimes.server import ServerHandle
 from .tree import is_introspectable
@@ -282,6 +282,15 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     handler does not branch on the objective; non-diffusion endpoints
     simply never declare it).
 
+    ``tasks`` (th#1257) — the SERVING TASKS this handler performs
+    (subset of :data:`~gen_worker.api.slot.TASKS`). Several means one
+    handler input-routes them (a merged ``generate()`` that does
+    text-to-image when given no image and image-edit when given one).
+    The hub scopes its human quality sign-off per task: an fp8 approval
+    earned on text-to-image says nothing about image-edit on the same
+    weights, so a handler that declares NOTHING can resolve no quant
+    approval at all and serves at base precision.
+
     ``distilled`` — tri-state: ``True`` = serves only distilled
     checkpoints, ``False`` = only non-distilled, ``None`` = either (e.g. a
     turbo lane overlaying a distillation LoRA on standard weights AND
@@ -299,6 +308,7 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     objectives: Optional[Tuple[str, ...]] = None
+    tasks: Optional[Tuple[str, ...]] = None
     distilled: Optional[bool] = None
     text_len: Optional[int] = None
     warm: Optional[Dict[str, Any]] = None
@@ -322,6 +332,21 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
             if len(set(objs)) != len(objs):
                 raise ValueError(f"@worker_function objectives= repeats a value: {objs!r}")
             force(self, "objectives", objs)
+        if self.tasks is not None:
+            tasks = tuple(str(v).strip().lower().replace("-", "_") for v in self.tasks)
+            if not tasks:
+                raise ValueError(
+                    "@worker_function tasks= must not be empty (omit it for a "
+                    "handler with no serving task, e.g. a utility function)"
+                )
+            bad = [t for t in tasks if t not in TASKS]
+            if bad:
+                raise ValueError(
+                    f"@worker_function: unknown task(s) {bad!r} (valid: {TASKS})"
+                )
+            if len(set(tasks)) != len(tasks):
+                raise ValueError(f"@worker_function tasks= repeats a value: {tasks!r}")
+            force(self, "tasks", tasks)
         if self.text_len is not None:
             tl = int(self.text_len)
             if tl < 0:
@@ -349,6 +374,7 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
 def worker_function(
     *,
     objectives: Optional[Sequence[str]] = None,
+    tasks: Optional[Sequence[str]] = None,
     distilled: Optional[bool] = None,
     text_len: Optional[int] = None,
     warm: Optional[Mapping[str, Any]] = None,
@@ -357,7 +383,7 @@ def worker_function(
     """Per-handler contract facts (pgw#654), declared AT the definition
     site — on class handler methods and on bare ``@endpoint`` functions::
 
-        @worker_function(objectives=("epsilon", "v_prediction"), distilled=False)
+        @worker_function(objectives=("epsilon",), tasks=("text_to_image",))
         def generate(self, ctx, payload: In) -> Out: ...
 
     See :class:`WorkerFunctionDecl` for field semantics. The class-level
@@ -366,6 +392,7 @@ def worker_function(
     """
     decl = WorkerFunctionDecl(
         objectives=tuple(objectives) if objectives is not None else None,
+        tasks=tuple(tasks) if tasks is not None else None,
         distilled=distilled,
         text_len=text_len,
         warm=dict(warm) if warm is not None else None,

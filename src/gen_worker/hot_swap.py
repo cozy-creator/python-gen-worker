@@ -29,6 +29,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, ContextManager, Iterator, Optional, Tuple
+from . import activity as activity_mod
 from . import compile_cache
 
 logger = logging.getLogger(__name__)
@@ -333,6 +334,18 @@ class Router:
                     "disabling concurrent routing for this pipeline",
                     _MAX_SIGS)
                 self.concurrent = False
+                # pgw#760: a permanent serving decision (every future novel
+                # signature on this pipeline now pays the inline compile)
+                # must not live only in pod logs.
+                activity_mod.emit_event(
+                    activity_mod.KIND_SERVE_DEGRADE,
+                    f"target={label} warm={len(self.warm)} "
+                    f"pending={len(self.pending)} failed={len(self.bg_failed)}"
+                    f": signature vocabulary exceeded {_MAX_SIGS}; concurrent "
+                    "routing disabled for this pipeline (a per-request scalar "
+                    "is leaking into signatures)",
+                    phase="sig_vocab_exceeded",
+                )
                 # pgw#677 reopen: NEVER inline-compile inside a seed — the
                 # seed holds the run gate. The sig stays eager (unwarmed);
                 # the mint driver's convergence loop fails LOUDLY instead.
@@ -524,8 +537,16 @@ def _worker_loop() -> None:
         job = _QUEUE.get()
         try:
             _run_warm(job)
-        except Exception:
+        except Exception as exc:
             logger.warning("hot-swap: warm worker item crashed", exc_info=True)
+            # pgw#760: background-thread exception outside _run_warm_compile's
+            # own catch — without this the crash has no channel at all.
+            activity_mod.emit_event(
+                activity_mod.KIND_SERVE_DEGRADE,
+                f"target={job.label}: warm worker item crashed: "
+                f"{type(exc).__name__}: {exc}",
+                phase="warm_worker_crashed",
+            )
         finally:
             _QUEUE.task_done()
 
@@ -651,6 +672,15 @@ def _run_warm_compile(job: _WarmJob) -> None:
             "hot-swap: background compile for %s failed (%s: %s); that "
             "signature stays eager for this process",
             job.label, type(exc).__name__, exc)
+        # pgw#760: the guard_miss event promised heal=healing; this is the
+        # heal's (or first warm's) terminal outcome — the signature serves
+        # eager for the life of the process. Name it on the wire.
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            f"target={job.label} sig={repr(job.sig)[:400]}: "
+            f"{type(exc).__name__}: {exc}",
+            phase="warm_compile_failed",
+        )
         return
     router.mark_warm(job.sig)
     with router.lock:
@@ -661,8 +691,16 @@ def _run_warm_compile(job: _WarmJob) -> None:
     if callback is not None:
         try:
             callback()
-        except Exception:
+        except Exception as exc:
             logger.warning("hot-swap: on_warmed callback failed", exc_info=True)
+            # pgw#760: on_warmed republishes the grown cell — a swallowed
+            # failure means the fleet re-compiles this shape forever.
+            activity_mod.emit_event(
+                activity_mod.KIND_SERVE_DEGRADE,
+                f"target={job.label}: on_warmed (cell republish) callback "
+                f"failed: {type(exc).__name__}: {exc}",
+                phase="republish_failed",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -717,8 +755,16 @@ class Debounce:
         while True:
             try:
                 self.fn()
-            except Exception:
+            except Exception as exc:
                 logger.warning("hot-swap: debounced callback failed", exc_info=True)
+                # pgw#760: the debounced fn is the cell republish path —
+                # same fleet-level consequence as a failed on_warmed.
+                activity_mod.emit_event(
+                    activity_mod.KIND_SERVE_DEGRADE,
+                    f"debounced cell-republish callback failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    phase="republish_failed",
+                )
             with self._lock:
                 if not self._dirty:
                     self._running = False

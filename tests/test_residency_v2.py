@@ -95,12 +95,36 @@ def test_free_vram_is_one_pool_never_the_pod_sum(three_by_24gb: _FakeCuda) -> No
     assert Residency(device_group=DeviceGroup(devices=(2,))).free_vram_bytes() == 24 * _GiB
 
 
-def test_multi_device_group_sums_within_the_group_only(three_by_24gb: _FakeCuda) -> None:
-    # A group SPANNING devices (future TP mesh) sums its own members — that
-    # is one placement unit by definition — and nothing else.
-    assert DeviceGroup(devices=(1, 2)).free_vram_bytes() == 48 * _GiB
-    # Devices the host does not have contribute 0, not an exception.
-    assert DeviceGroup(devices=(0, 7)).free_vram_bytes() == 24 * _GiB
+def test_multi_device_group_budget_follows_placement_mode(three_by_24gb: _FakeCuda) -> None:
+    # pgw#748 phase 0 — pgw#648's bug ONE LEVEL UP. A group spanning devices
+    # summed unconditionally; that is only true when the WEIGHTS are split.
+    # Sequence/context parallelism replicates weights and shards activations,
+    # so a 2x24GB replicated group has a 24GB budget, not 48GB — summing
+    # would admit a 30GB model that fits on neither card.
+    assert DeviceGroup(devices=(1, 2)).free_vram_bytes() == 24 * _GiB
+    assert DeviceGroup(devices=(1, 2), placement_mode="replicated").free_vram_bytes() == 24 * _GiB
+    # A genuinely sharded placement (future TP mesh) IS one pool of the sum.
+    assert DeviceGroup(devices=(1, 2), placement_mode="sharded").free_vram_bytes() == 48 * _GiB
+    # Single-device groups are identical under both modes.
+    assert DeviceGroup(devices=(1,), placement_mode="sharded").free_vram_bytes() == 24 * _GiB
+    # Devices the host does not have contribute 0, not an exception — which
+    # makes a replicated group spanning a missing card unusable, correctly.
+    assert DeviceGroup(devices=(0, 7)).free_vram_bytes() == 0
+    assert DeviceGroup(devices=(0, 7), placement_mode="sharded").free_vram_bytes() == 24 * _GiB
+    with pytest.raises(ValueError, match="placement_mode"):
+        DeviceGroup(devices=(0, 1), placement_mode="striped")
+
+
+def test_replicated_group_admission_refuses_what_fits_on_neither_card(
+    three_by_24gb: _FakeCuda,
+) -> None:
+    # The admission consequence, end to end: fits() reads free_vram_bytes(),
+    # so the mode decides whether a 30GB weight set is admitted onto a
+    # 2x24GB group. Replicated must refuse; sharded may accept.
+    replicated = Residency(device_group=DeviceGroup(devices=(0, 1)))
+    sharded = Residency(device_group=DeviceGroup(devices=(0, 1), placement_mode="sharded"))
+    assert replicated.fits({"m": 30 * _GiB}) is False
+    assert sharded.fits({"m": 30 * _GiB}) is True
 
 
 # ---------------------------------------------------------------------------

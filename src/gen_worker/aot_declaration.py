@@ -36,6 +36,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from . import aot_mint
 from .aot_mint import DynamicDim, ExportSpec, MintRefused
 from .api.decorators import Compile
 from .api.export_contract import (
@@ -46,7 +47,6 @@ from .api.export_contract import (
     Fork,
     GraphClass,
     Input,
-    export_declaration,
 )
 
 logger = logging.getLogger(__name__)
@@ -197,6 +197,78 @@ def mint_plans(decl: Compile, target: str) -> Tuple[MintPlan, ...]:
     return tuple(plans)
 
 
+def entry_coordinates(plan: MintPlan) -> Tuple[Tuple[Tuple[str, Any], ...], Tuple[Tuple[str, int], ...]]:
+    """The ``(fork, class_dims)`` coordinate one packaged entry is named by.
+
+    A static-rows plan is one class row, so its dims ARE the coordinate; a
+    dynamic-collapse plan spans its rows, so the dims segment is empty and
+    the fork coordinate alone names the entry (the admitted range is the
+    entry's recorded contract, not its name).
+    """
+    if len(plan.rows) == 1 and not plan.dynamic:
+        return plan.fork, plan.rows[0].dims
+    return plan.fork, ()
+
+
+def entry_name(
+    target: str,
+    fork: Tuple[Tuple[str, Any], ...] = (),
+    class_dims: Tuple[Tuple[str, int], ...] = (),
+) -> str:
+    """The deterministic NAMED-ENTRY label of one graph class inside a
+    multi-graph cell (pgw#758, Paul's ruling: separate graphs per function,
+    combined into one file).
+
+    ``<target>/<fork k=v,...>/<dims k=v,...>`` with empty segments omitted;
+    pairs are sorted, bools render lowercase. The name is the AOTI model
+    name inside the ``.pt2`` AND the key of ``metadata.entries``, so it must
+    be stable across mints — it derives only from declaration coordinates,
+    never from trace artifacts.
+    """
+
+    def _value(v: Any) -> str:
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return str(v)
+
+    segments = [str(target)]
+    if fork:
+        segments.append(",".join(
+            f"{n}={_value(v)}" for n, v in sorted((str(n), v) for n, v in fork)))
+    if class_dims:
+        segments.append(",".join(
+            f"{n}={int(v)}" for n, v in sorted((str(n), int(v)) for n, v in class_dims)))
+    return "/".join(segments)
+
+
+def plan_entry_name(plan: MintPlan) -> str:
+    fork, dims = entry_coordinates(plan)
+    return entry_name(plan.target, fork, dims)
+
+
+def cell_plans(decl: Compile) -> Tuple[MintPlan, ...]:
+    """EVERY mint plan of one family's declaration, across ALL declared
+    targets — the whole class set one cell packages (pgw#758). Refuses a
+    declaration whose plans would collide on an entry name (two classes one
+    label could not be told apart by a refusal)."""
+    if not decl.targets:
+        raise MintRefused(
+            f"family {decl.family!r} declares no targets — a cell with no "
+            f"functions has nothing to package")
+    plans: List[MintPlan] = []
+    for target in decl.targets:
+        plans.extend(mint_plans(decl, target))
+    seen: Dict[str, MintPlan] = {}
+    for plan in plans:
+        name = plan_entry_name(plan)
+        if name in seen:
+            raise MintRefused(
+                f"family {decl.family!r}: two mint plans share entry name "
+                f"{name!r} — the declaration does not discriminate them")
+        seen[name] = plan
+    return tuple(plans)
+
+
 def select_plan(
     decl: Compile,
     target: str,
@@ -207,7 +279,13 @@ def select_plan(
     """The mint plan for one requested coordinate, refused by name when the
     coordinate is not declared — reading only declared facts, never family
     knowledge."""
-    want_fork = tuple(sorted((str(k), v) for k, v in dict(fork).items()))
+    # pgw#790: the adapter arm is an SDK-synthesized coordinate — the endpoint
+    # never declared it, so it can never select a DECLARED plan. Stripped here
+    # (rather than at each call site) because every reader of a spec's fork
+    # goes through this function.
+    want_fork = tuple(sorted(
+        (str(k), v) for k, v in dict(fork).items()
+        if str(k) != aot_mint.ADAPTER_FORK))
     plans = [p for p in mint_plans(decl, target) if p.fork == want_fork]
     if not plans:
         have = sorted({str(dict(p.fork)) for p in mint_plans(decl, target)})
@@ -534,56 +612,19 @@ def load_declaration(request: Mapping[str, Any], request_path: Optional[Path] = 
         module_spec.loader.exec_module(mod)
 
 
-def apply_declaration(spec: ExportSpec) -> ExportSpec:
-    """Resolve a mint request against the family's registered declaration.
-
-    No registration -> the spec passes through untouched (the pre-#739
-    request shape stays valid for families that have not adopted the
-    vocabulary). With a registration: hand-written dynamic rows are REFUSED
-    (bounds derive from the rows), the mint-warm canon must be declared, and
-    the derived plan supplies the dynamic contract plus the identity facts.
-    """
-    decl = export_declaration(spec.family)
-    if decl is None:
-        return spec
-    if spec.dynamic:
-        raise MintRefused(
-            f"family {spec.family!r} has a registered export declaration; "
-            f"the request's hand-written 'dynamic' rows are refused — bounds "
-            f"derive from the declared class rows (#739)")
-    if decl.warm_changes_key is None:
-        raise MintRefused(
-            f"family {spec.family!r} declares no mint-warm canon "
-            f"(warm_changes_key) — whether pre-warm changes the graph is a "
-            f"measured per-family FACT (sdxl False, z-image True), not a "
-            f"default")
-    plan = select_plan(
-        decl, spec.target,
-        fork=dict(spec.fork),
-        class_dims=dict(spec.class_dims) if spec.class_dims else None)
-    specialization = dict(spec.specialization)
-    specialization.setdefault("shape_strategy", decl.shape_strategy)
-    specialization.setdefault("warm_changes_key", bool(decl.warm_changes_key))
-    for name, value in plan.fork:
-        specialization.setdefault(f"fork.{name}", value)
-    spec.dynamic = plan.dynamic
-    spec.fork = plan.fork
-    if not spec.class_dims and len(plan.rows) == 1:
-        spec.class_dims = plan.rows[0].dims
-    spec.specialization = specialization
-    return spec
-
-
 __all__ = [
     "MintPlan",
-    "apply_declaration",
+    "cell_plans",
     "declared_inputs",
     "derived_dynamic",
     "dim_hull",
+    "entry_coordinates",
+    "entry_name",
     "fork_gaps",
     "load_declaration",
     "mint_plans",
     "named_dynamic_rows",
+    "plan_entry_name",
     "select_plan",
     "target_args",
     "target_forks",

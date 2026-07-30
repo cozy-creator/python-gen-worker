@@ -8,29 +8,43 @@ every generated media asset as it passes through ``RequestContext.save_bytes``
 / ``save_file``, i.e. the last point the bytes touch trusted compute before
 upload.
 
-Config (Settings / env):
+**The private key is NOT here** (th#1307). A pod imports untrusted tenant code
+into this process, so a signing key in pod env or on the pod filesystem is one
+``print(os.environ[...])`` from being exfiltrated — and a leaked platform leaf
+key forges or strips provenance on every asset Cozy ever signed. So the split
+is: the worker builds the claim (it has the bytes) and the HUB signs it. The
+c2pa-rs callback signer sends the claim's COSE to-be-signed octets to
+``POST /v1/worker/c2pa/sign``, authenticated with this pod's worker JWT, and
+gets back a signature. No media leaves the pod; no key enters it.
+
+Config (Settings / env) — the PUBLIC half only:
 - ``GEN_WORKER_C2PA_CERT_PEM`` — inline PEM signing-cert chain (leaf first,
   then intermediates/root). The hub injects this into pod env at launch
   (RunPod pods have no file mounts). Takes precedence over ``_CERT_PATH``.
-- ``GEN_WORKER_C2PA_KEY_PEM``  — inline PKCS#8 PEM private key for the leaf.
-- ``GEN_WORKER_C2PA_CERT_PATH`` / ``GEN_WORKER_C2PA_KEY_PATH`` — file-path
-  variants for mounted material (dev / non-RunPod deploys).
+- ``GEN_WORKER_C2PA_CERT_PATH`` — file-path variant for mounted deploys.
 - ``GEN_WORKER_C2PA_ALG``      — COSE alg (default ``es256``).
 - ``GEN_WORKER_C2PA_TA_URL``   — optional RFC3161 timestamp authority URL.
 
-Signing is ON iff cert material is set (either variant).
+``GEN_WORKER_C2PA_KEY_PEM`` / ``_KEY_PATH`` are REFUSED: if either is present
+this module raises at configure() instead of using it. That is the ratchet —
+a hub regression that re-injects the key kills the pod loudly rather than
+quietly re-creating the leak.
 
-Policy: default-ON when the cert is configured; configured-but-broken fails
-worker startup (never silently ship unlabeled media believing signing is on);
-unconfigured no-ops with a loud startup warning. A sign failure at request
-time raises — the request fails rather than shipping an unlabeled asset.
+Signing is ON iff cert material is set. The hub transport is armed at HelloAck
+(``configure_remote_signer``, same wiring moment as the cell-receipt gate).
+
+Policy: default-ON when the cert is configured; a cert that does not parse
+fails worker startup (never silently ship unlabeled media believing signing is
+on); unconfigured no-ops with a loud startup warning. A sign failure at request
+time — including "the hub signer is unreachable / not armed" — RAISES: the
+request fails rather than shipping an unlabeled asset.
 
 Uses c2pa-python (official CAI binding over c2pa-rs; ``signing`` extra).
 """
 
 from __future__ import annotations
 
-import ctypes
+import base64
 import hashlib
 import io
 import json
@@ -44,6 +58,19 @@ import tempfile
 logger = logging.getLogger(__name__)
 
 _GENERATOR_NAME = "cozy-gen-worker"
+
+# COSE alg name -> c2pa.C2paSigningAlg member. The hub's signer (Go,
+# internal/orchestrator/c2pasign) speaks the same set; ECDSA signatures cross
+# the wire as COSE fixed-width r||s.
+_ALG_NAMES = {
+    "es256": "ES256",
+    "es384": "ES384",
+    "es512": "ES512",
+    "ed25519": "ED25519",
+    "ps256": "PS256",
+    "ps384": "PS384",
+    "ps512": "PS512",
+}
 
 # Formats we sign, by content sniff (magic bytes) with an extension fallback
 # for BMFF/audio containers whose sniff needs an offset. Everything else
@@ -124,30 +151,53 @@ def _ext_mime(ref: str) -> Optional[str]:
 @dataclass(frozen=True)
 class _SignerConfig:
     cert_pem: bytes
-    key_pem: bytes
     alg: str
     ta_url: str
     generator_version: str
 
 
+@dataclass(frozen=True)
+class _RemoteSigner:
+    """The hub signing oracle (th#1307). Armed at HelloAck."""
+
+    base_url: str
+    worker_jwt: Any  # Callable[[], str]
+
+
+# th#1307: env names that would carry a private key INTO the pod. Their
+# presence is a platform regression, not a configuration option.
+_REFUSED_KEY_ENVS = ("GEN_WORKER_C2PA_KEY_PEM", "GEN_WORKER_C2PA_KEY_PATH")
+
+SIGN_PATH = "/v1/worker/c2pa/sign"
+_SIGN_TIMEOUT_S = 30
+
 _lock = threading.Lock()
 _configured = False
 _config: Optional[_SignerConfig] = None
+_remote: Optional[_RemoteSigner] = None
 
 
 def configure(settings: Any) -> None:
-    """Install (or clear) the process-wide signer from Settings.
+    """Install (or clear) the process-wide signer config from Settings.
 
-    Called once at worker startup. Raises when a cert path is set but the
-    material is unusable — a worker that *thinks* it signs but doesn't is a
-    compliance hole, so it must not come up. Logs a loud warning when no
-    cert is configured (signing disabled).
+    Called once at worker startup. Raises when signing is configured but
+    unusable — a worker that *thinks* it signs but doesn't is a compliance
+    hole, so it must not come up — and raises when private-key material was
+    delivered to this pod at all (th#1307). Logs a loud warning when no cert
+    is configured (signing disabled).
     """
     global _configured, _config
+    for env_name in _REFUSED_KEY_ENVS:
+        if str(os.environ.get(env_name, "") or "").strip() or str(
+            getattr(settings, env_name.lower().removeprefix("gen_worker_"), "") or ""
+        ).strip():
+            raise C2paSigningError(
+                f"{env_name} is set: a C2PA PRIVATE KEY must never be delivered to a pod "
+                "(th#1307 — tenant code runs in this process and can read it). Signing is "
+                "hub-side: the hub holds the key and signs claims over POST " + SIGN_PATH
+            )
     inline_cert = str(getattr(settings, "c2pa_cert_pem", "") or "").strip()
-    inline_key = str(getattr(settings, "c2pa_key_pem", "") or "").strip()
     cert_path = str(getattr(settings, "c2pa_cert_path", "") or "").strip()
-    key_path = str(getattr(settings, "c2pa_key_path", "") or "").strip()
     with _lock:
         if not inline_cert and not cert_path:
             _config = None
@@ -159,40 +209,64 @@ def configure(settings: Any) -> None:
             )
             return
         if inline_cert:
-            # Inline PEM (hub-injected pod env) wins over mounted paths.
-            if not inline_key:
-                raise C2paSigningError(
-                    "GEN_WORKER_C2PA_CERT_PEM is set but GEN_WORKER_C2PA_KEY_PEM is not"
-                )
+            # Inline PEM (hub-injected pod env) wins over a mounted path.
             cert_pem = inline_cert.encode()
-            key_pem = inline_key.encode()
         else:
-            if not key_path:
-                raise C2paSigningError(
-                    "GEN_WORKER_C2PA_CERT_PATH is set but GEN_WORKER_C2PA_KEY_PATH is not"
-                )
             try:
                 cert_pem = open(cert_path, "rb").read()
-                key_pem = open(key_path, "rb").read()
             except OSError as e:
-                raise C2paSigningError(f"cannot read C2PA signing material: {e}") from e
+                raise C2paSigningError(f"cannot read C2PA signing cert: {e}") from e
+        alg = str(getattr(settings, "c2pa_alg", "") or "es256").strip().lower()
         cfg = _SignerConfig(
             cert_pem=cert_pem,
-            key_pem=key_pem,
-            alg=str(getattr(settings, "c2pa_alg", "") or "es256").strip().lower(),
+            alg=alg,
             ta_url=str(getattr(settings, "c2pa_ta_url", "") or "").strip(),
             generator_version=_generator_version(),
         )
-        # Probe: build a signer now so bad PEM / a missing c2pa wheel fails
-        # startup, not the first request.
-        _build_signer(cfg)
+        # Startup probe of everything checkable without the hub: the cert
+        # chain parses, the alg is one c2pa knows. The signer itself needs the
+        # HelloAck-armed transport, so it is built at first sign (and any
+        # failure there raises, failing the request — never an unsigned ship).
+        _validate_signing_cert(cfg)
         _config = cfg
         _configured = True
         logger.info(
-            "C2PA content-credential signing ENABLED (alg=%s, cert=%s)",
+            "C2PA content-credential signing ENABLED (alg=%s, cert=%s, signer=hub-side th#1307)",
             cfg.alg,
             "<inline env PEM>" if inline_cert else cert_path,
         )
+
+
+def configure_remote_signer(base_url: str, worker_jwt: Any) -> None:
+    """Arm the hub signing oracle (th#1307).
+
+    Called at HelloAck, the moment the hub wiring exists — the same seam that
+    arms the cell-receipt gate. Until this lands, a configured signer FAILS
+    requests rather than shipping unsigned media.
+    """
+    global _remote
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return
+    with _lock:
+        _remote = _RemoteSigner(base_url=base, worker_jwt=worker_jwt)
+    logger.info("C2PA hub-side signer armed (%s%s)", base, SIGN_PATH)
+
+
+def _validate_signing_cert(cfg: _SignerConfig) -> None:
+    """Fail startup on a cert we could never sign with."""
+    if cfg.alg not in _ALG_NAMES:
+        raise C2paSigningError(
+            f"unsupported C2PA alg {cfg.alg!r} (want one of {sorted(_ALG_NAMES)})"
+        )
+    try:
+        from cryptography import x509
+
+        x509.load_pem_x509_certificate(cfg.cert_pem)
+    except ImportError:  # pragma: no cover - cryptography is a hard dep
+        return
+    except Exception as e:
+        raise C2paSigningError(f"C2PA signing cert is not a usable PEM certificate: {e}") from e
 
 
 def enabled() -> bool:
@@ -293,6 +367,38 @@ def _generator_version() -> str:
         return "unknown"
 
 
+def _hub_sign_claim(remote: _RemoteSigner, alg: str, claim: bytes) -> bytes:
+    """Ask the hub to sign one claim's COSE to-be-signed octets (th#1307).
+
+    Only the claim travels — a few hundred bytes of hashes and assertions,
+    never the media. Any refusal raises, so the request fails instead of
+    shipping an asset with a missing or bogus manifest.
+    """
+    import requests
+
+    try:
+        resp = requests.post(
+            remote.base_url + SIGN_PATH,
+            json={"alg": alg, "claim_b64": base64.b64encode(claim).decode()},
+            headers={"Authorization": f"Bearer {remote.worker_jwt()}"},
+            timeout=_SIGN_TIMEOUT_S,
+        )
+    except Exception as e:
+        raise C2paSigningError(f"hub C2PA signer unreachable: {e}") from e
+    if resp.status_code != 200:
+        detail = resp.text[:300]
+        raise C2paSigningError(
+            f"hub C2PA signer refused ({resp.status_code}): {detail}"
+        )
+    try:
+        signature = base64.b64decode(resp.json()["signature_b64"])
+    except Exception as e:
+        raise C2paSigningError(f"hub C2PA signer returned a malformed signature: {e}") from e
+    if not signature:
+        raise C2paSigningError("hub C2PA signer returned an empty signature")
+    return signature
+
+
 def _build_signer(cfg: _SignerConfig) -> Any:
     try:
         import c2pa
@@ -301,19 +407,25 @@ def _build_signer(cfg: _SignerConfig) -> Any:
             "C2PA signing is configured but c2pa-python is not installed. "
             "Install with `pip install gen-worker[signing]`."
         ) from e
-    # The wrapper's C2paSignerInfo.__init__ rejects ta_url=None and passes
-    # b"" through as an (invalid) empty TSA URL, so build the ctypes struct
-    # directly to get a NULL ta_url when no TSA is configured.
-    info = c2pa.C2paSignerInfo.__new__(c2pa.C2paSignerInfo)
-    ctypes.Structure.__init__(
-        info,
-        cfg.alg.encode(),
-        cfg.cert_pem,
-        cfg.key_pem,
-        cfg.ta_url.encode() if cfg.ta_url else None,
-    )
+    remote = _remote
+    if remote is None:
+        # Fail CLOSED. A configured worker with no hub signer must fail the
+        # request, not hand back unsigned bytes that look signed (th#1307).
+        raise C2paSigningError(
+            "C2PA signing is configured but the hub signer is not armed "
+            "(no HelloAck file_base_url yet) — refusing to ship unsigned media"
+        )
+    alg_enum = getattr(c2pa.C2paSigningAlg, _ALG_NAMES[cfg.alg])
+    callback = lambda claim: _hub_sign_claim(remote, cfg.alg, claim)  # noqa: E731
     try:
-        return c2pa.Signer.from_info(info)
+        return c2pa.Signer.from_callback(
+            callback,
+            alg_enum,
+            cfg.cert_pem.decode(),
+            cfg.ta_url or None,
+        )
+    except C2paSigningError:
+        raise
     except Exception as e:
         raise C2paSigningError(f"cannot build C2PA signer: {e}") from e
 
@@ -381,6 +493,7 @@ def _sign_stream(
 __all__ = [
     "C2paSigningError",
     "configure",
+    "configure_remote_signer",
     "enabled",
     "sign_media_bytes",
     "sign_media_file",

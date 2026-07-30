@@ -39,7 +39,8 @@ from gen_worker.config import get_settings
 from gen_worker.convert.hub import blake3_file
 
 FAMILY = "sdxl"
-RUNTIME = {"sku": "l4", "torch": "2.13.0+cu130", "cuda": "13.0"}
+RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
+           "cuda": "13.0"}
 
 INPUTS = [
     {"name": "sample", "position": 0, "dtype": "bfloat16",
@@ -65,12 +66,17 @@ def _runtime_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _pilot_meta(key: str, *, lane: str = "w8a8", bucket: int = 64,
                 **over: Any) -> Dict[str, Any]:
-    """A published-cell metadata dict shaped like the real pilot cells."""
+    """A published-cell metadata dict shaped like the real (format-2,
+    multi-graph) cells — one entry is simply the N=1 case."""
     meta = aot_serve.artifact_metadata(
-        family=FAMILY, module="unet", precision="bf16", cell_key=key,
-        inputs=INPUTS, symbols={}, constants=CONSTANTS)
+        family=FAMILY, precision="bf16", cell_key=key,
+        entries={"unet/g": {
+            "target": "unet", "fork": [], "class_dims": [],
+            "inputs": [dict(r) for r in INPUTS], "symbols": {},
+            "constants": [dict(r) for r in CONSTANTS], "graph": {},
+        }},
+        lora_bucket=bucket)
     meta["weight_lane"] = lane
-    meta["lora_bucket"] = bucket
     meta.update(over)
     return meta
 
@@ -119,7 +125,7 @@ def test_candidates_filter_and_newest_wins(_runtime_key: None) -> None:
     wrong_kind = _pilot_meta(_key("c"), kind="torch-inductor-cache")
     wrong_lane = _pilot_meta(_key("d"), lane="w8a16")
     wrong_bucket = _pilot_meta(_key("e"), bucket=0)
-    wrong_sku = _pilot_meta(_key("f"), sku="a100")
+    wrong_sm = _pilot_meta(_key("f"), sm="sm_80")
     unkeyed = _pilot_meta(_key("1"), cell_key="not-a-key")
     items = [
         {"checkpoint_id": "ck-old", "updated_at": "2026-07-27T00:00:00Z",
@@ -133,13 +139,19 @@ def test_candidates_filter_and_newest_wins(_runtime_key: None) -> None:
         {"checkpoint_id": "x3", "updated_at": "2026-07-29T00:00:00Z",
          "metadata": wrong_bucket},
         {"checkpoint_id": "x4", "updated_at": "2026-07-29T00:00:00Z",
-         "metadata": wrong_sku},
+         "metadata": wrong_sm},
         {"checkpoint_id": "x5", "updated_at": "2026-07-29T00:00:00Z",
          "metadata": unkeyed},
         {"checkpoint_id": "x6", "updated_at": "2026-07-29T00:00:00Z"},
     ]
+    # pgw#765: a cross-SKU same-sm cell is a CANDIDATE (it sorts behind the
+    # same-SKU rows, which is the preference, not a filter).
+    other_sku = _pilot_meta(_key("9"), sku="a40")
+    items.append({"checkpoint_id": "ck-a40",
+                  "updated_at": "2026-07-29T00:00:00Z",
+                  "metadata": other_sku})
     rows = aot_cells._candidates(items, FAMILY, "w8a8-lora64")
-    assert [r[1] for r in rows] == ["ck-new", "ck-old"]
+    assert [r[1] for r in rows] == ["ck-new", "ck-old", "ck-a40"]
 
 
 # ---------------------------------------------------------------------------

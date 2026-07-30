@@ -26,7 +26,24 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
 from gen_worker.worker import Worker
 
+from harness.progress_wait import Cadence, StalledError
+
 DEFAULT_TIMEOUT_S = 15.0
+
+# pgw#795: how often a progress-gated wait re-evaluates its staleness window
+# while nothing is arriving. Not a deadline — the condition variable wakes it
+# the instant a message lands; this only bounds how stale the window estimate
+# may get when the peer is silent.
+_REEVALUATE_S = 0.25
+
+
+def _label(m: pb.WorkerMessage) -> str:
+    which = m.WhichOneof("msg")
+    if which == "job_result":
+        return f"job_result({m.job_result.request_id})"
+    if which == "job_accepted":
+        return f"job_accepted({m.job_accepted.request_id})"
+    return str(which)
 
 
 class Conn:
@@ -38,6 +55,11 @@ class Conn:
         self._recv_cond = threading.Condition()
         self._out: "queue.Queue[Any]" = queue.Queue()
         self.client_done = threading.Event()
+        # pgw#795: the staleness window these waits have EARNED on this
+        # machine, grown by every advance they sit through. Shared session-wide
+        # (Cadence default), because a runner that is slow for one hub-double
+        # test is slow for all 2000 of them.
+        self.cadence = Cadence()
 
     def send(self, **oneof: Any) -> None:
         self._out.put(pb.SchedulerMessage(**oneof))
@@ -55,31 +77,84 @@ class Conn:
             self.received.append(msg)
             self._recv_cond.notify_all()
 
-    def wait_for(
-        self, pred: Callable[[pb.WorkerMessage], bool], timeout: float = DEFAULT_TIMEOUT_S,
+    def _wait(
+        self,
+        take: Callable[[], Optional[pb.WorkerMessage]],
+        describe: Callable[[], str],
+        timeout: Optional[float],
     ) -> pb.WorkerMessage:
-        deadline = time.monotonic() + timeout
+        """The one waiting loop (pgw#795).
+
+        ``timeout=None`` — the default for "this MUST happen" waits — is
+        progress-gated: it ends when the worker delivers, when the worker is
+        provably gone (stream ended: definitive, no clock), or when the wait has
+        gone a staleness window without the message it asked for. That window is
+        derived from the advances this run has actually measured, so it widens
+        with the machine. Only the awaited message counts as progress: unrelated
+        traffic on the connection does not reset the window, because a peer
+        chattering about other things is not progress toward what you asked for
+        — and a window that resets on it never closes, so a broken test would
+        hang instead of failing (measured while authoring this).
+
+        Every wait that passes today does so inside the 15s TOTAL budget this
+        replaced, and the floor alone is twice that, so this is strictly more
+        patient than what it replaces — it just stops being patient for the
+        wrong reason.
+
+        An explicit ``timeout`` is preserved verbatim for the callers that
+        probe for ABSENCE ("no result within 2s") — there the bound IS the
+        assertion, and its expiry makes the test pass rather than flake.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._recv_cond:
-            checked = 0
+            last_advance = time.monotonic()
             while True:
-                for msg in self.received[checked:]:
-                    checked += 1
-                    if pred(msg):
-                        return msg
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    def _label(m: pb.WorkerMessage) -> str:
-                        which = m.WhichOneof("msg")
-                        if which == "job_result":
-                            return f"job_result({m.job_result.request_id})"
-                        if which == "job_accepted":
-                            return f"job_accepted({m.job_accepted.request_id})"
-                        return str(which)
-                    raise TimeoutError(
-                        f"no matching message within {timeout}s; got "
-                        f"{[_label(m) for m in self.received]}"
+                got = take()
+                if got is not None:
+                    self.cadence.record(time.monotonic() - last_advance)
+                    return got
+                now = time.monotonic()
+                if deadline is not None:
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        raise TimeoutError(f"{describe()} within {timeout}s")
+                    self._recv_cond.wait(remaining)
+                    continue
+                if self.client_done.is_set():
+                    raise StalledError(
+                        f"{describe()}: the worker ended the stream, so no "
+                        f"further message can arrive"
                     )
-                self._recv_cond.wait(remaining)
+                silent = now - last_advance
+                if silent >= self.cadence.window_s:
+                    raise StalledError(
+                        f"{describe()}: no such message in {silent:.1f}s "
+                        f"(staleness window {self.cadence.describe()})"
+                    )
+                self._recv_cond.wait(
+                    min(_REEVALUATE_S, self.cadence.window_s - silent)
+                )
+
+    def wait_for(
+        self,
+        pred: Callable[[pb.WorkerMessage], bool],
+        timeout: Optional[float] = None,
+    ) -> pb.WorkerMessage:
+        checked = 0
+
+        def _take() -> Optional[pb.WorkerMessage]:
+            nonlocal checked
+            for msg in self.received[checked:]:
+                checked += 1
+                if pred(msg):
+                    return msg
+            return None
+
+        return self._wait(
+            _take,
+            lambda: f"no matching message; got {[_label(m) for m in self.received]}",
+            timeout,
+        )
 
     def count(self, pred: Callable[[pb.WorkerMessage], bool]) -> int:
         with self._recv_cond:
@@ -89,21 +164,20 @@ class Conn:
         self,
         pred: Callable[[pb.WorkerMessage], bool],
         count: int,
-        timeout: float = DEFAULT_TIMEOUT_S,
+        timeout: Optional[float] = None,
     ) -> pb.WorkerMessage:
-        deadline = time.monotonic() + timeout
-        with self._recv_cond:
-            while True:
-                matches = [m for m in self.received if pred(m)]
-                if len(matches) >= count:
-                    return matches[count - 1]
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"only {len(matches)} matching messages within "
-                        f"{timeout}s; wanted {count}"
-                    )
-                self._recv_cond.wait(remaining)
+        def _take() -> Optional[pb.WorkerMessage]:
+            matches = [m for m in self.received if pred(m)]
+            return matches[count - 1] if len(matches) >= count else None
+
+        return self._wait(
+            _take,
+            lambda: (
+                f"only {sum(1 for m in self.received if pred(m))} matching "
+                f"messages; wanted {count}"
+            ),
+            timeout,
+        )
 
 
 class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
@@ -119,6 +193,11 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         self._conn_cond = threading.Condition()
         self.reject_unauthenticated = reject_unauthenticated
         self.file_base_url = file_base_url
+        # pgw#795: set by hub_double() once the worker exists. A worker that
+        # has EXITED can never dial in — that is the definitive give-up for
+        # wait_connection, and it needs no clock.
+        self.worker_alive: Optional[Callable[[], bool]] = None
+        self.cadence = Cadence()
 
     def Connect(self, request_iterator: Any, context: grpc.ServicerContext) -> Any:
         if self.reject_unauthenticated:
@@ -157,17 +236,43 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
                 raise item
             yield item
 
-    def wait_connection(self, index: int, timeout: float = DEFAULT_TIMEOUT_S) -> Conn:
-        deadline = time.monotonic() + timeout
+    def wait_connection(self, index: int, timeout: Optional[float] = None) -> Conn:
+        """Wait for the worker to dial in (pgw#795: progress-gated by default).
+
+        A boot on a loaded runner is slow, not broken — the honest give-up is
+        "the worker process is gone", which is definitive, plus a staleness
+        window calibrated from the advances this run has measured.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._conn_cond:
+            started = time.monotonic()
             while len(self.connections) <= index:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"connection #{index} never arrived "
-                        f"({len(self.connections)} so far)"
+                now = time.monotonic()
+                if deadline is not None:
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"connection #{index} never arrived within "
+                            f"{timeout}s ({len(self.connections)} so far)"
+                        )
+                    self._conn_cond.wait(remaining)
+                    continue
+                if self.worker_alive is not None and not self.worker_alive():
+                    raise StalledError(
+                        f"connection #{index} never arrived: the worker exited "
+                        f"({len(self.connections)} connections so far)"
                     )
-                self._conn_cond.wait(remaining)
+                waited = now - started
+                if waited >= self.cadence.window_s:
+                    raise StalledError(
+                        f"connection #{index} never arrived in {waited:.1f}s of "
+                        f"silence (staleness window {self.cadence.describe()}); "
+                        f"{len(self.connections)} connections so far"
+                    )
+                self._conn_cond.wait(
+                    min(_REEVALUATE_S, self.cadence.window_s - waited)
+                )
+            self.cadence.record(time.monotonic() - started)
             return self.connections[index]
 
 
@@ -214,6 +319,29 @@ class WorkerHarness:
 
     def _run(self) -> None:
         self.exit_code = self.worker.run()
+
+    @property
+    def alive(self) -> bool:
+        """Whether the worker is still running — the liveness half of every
+        progress-gated wait against it (pgw#795)."""
+        return self._thread.is_alive()
+
+    def reconcile_marker(self) -> tuple:
+        """A MARKER of residency-reconcile work, for progress-gated waits.
+
+        Deliberately not a "reconcile in flight?" boolean: a task that is stuck
+        is also not done, so a wait that refreshed on that predicate would
+        never end (pgw#795 red-verify measured exactly that hang). What counts
+        as evidence is CHANGE — a new pass, a pass finishing, a different work
+        item — so this returns the identity of both.
+        """
+        lifecycle = self.worker.lifecycle
+        task = getattr(lifecycle, "_residency_task", None)
+        return (
+            id(task) if task is not None else None,
+            task.done() if task is not None else None,
+            repr(getattr(lifecycle, "_reconcile_active", None)),
+        )
 
     def start(self) -> None:
         self._thread.start()
@@ -272,6 +400,7 @@ def hub_double(
             modules=modules, worker_id=worker_id, gpu_slots=gpu_slots,
             backoff_base_s=backoff_base_s, backoff_cap_s=backoff_cap_s,
         )
+        scheduler.worker_alive = lambda: harness.alive
         harness.start()
         try:
             yield scheduler, harness

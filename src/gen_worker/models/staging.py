@@ -49,6 +49,17 @@ _RAM_FLOOR_FRACTION = 0.2
 _PINNED_TOTAL_FRACTION = 0.5
 
 
+def _current_group() -> int:
+    """Which execution group is asking. Import-local: staging is imported by
+    the residency/loading core that topology itself imports."""
+    from ..topology import current_device_group
+
+    try:
+        return current_device_group()
+    except Exception:
+        return 0
+
+
 def _floor_bytes() -> int:
     total = get_total_ram_gb()
     if total <= 0:
@@ -69,6 +80,28 @@ class PinnedPool:
         self._budget_fn = budget_fn
         self._lock = threading.Lock()
         self._reserved = 0
+        # pgw#748 phase 1: pinned host RAM is a POD budget, not a per-instance
+        # one, and it is the harshest allocation class there is (unswappable).
+        # With G execution groups the cap must be SHARED, or group 0 claims
+        # the whole 50% and a G=4 degraded pod pages itself to death (§4.3
+        # caveat 2). One process gets the honest total for free; this is the
+        # fair-share half — each group may claim at most cap/G.
+        self._groups = 1
+        self._reserved_by_group: dict = {}
+
+    def set_group_count(self, groups: int) -> None:
+        with self._lock:
+            self._groups = max(1, int(groups))
+
+    @property
+    def group_count(self) -> int:
+        return self._groups
+
+    def _group_cap(self) -> int:
+        total = int(get_total_ram_gb() * _GiB)
+        if total <= 0 or self._groups <= 1:
+            return 0
+        return int(total * _PINNED_TOTAL_FRACTION) // self._groups
 
     def budget_bytes(self) -> int:
         if self._budget_fn is not None:
@@ -80,6 +113,11 @@ class PinnedPool:
             cap = int(total * _PINNED_TOTAL_FRACTION)
             remaining = cap - self.reserved_bytes()
             headroom = min(headroom, remaining)
+        share = self._group_cap()
+        if share:
+            with self._lock:
+                mine = int(self._reserved_by_group.get(_current_group(), 0))
+            headroom = min(headroom, share - mine)
         return max(0, headroom)
 
     def reserved_bytes(self) -> int:
@@ -95,16 +133,22 @@ class PinnedPool:
         # needs the reserved counter (handled inside budget_bytes).
         if nbytes > self.budget_bytes():
             return False
+        group = _current_group()
         with self._lock:
             self._reserved += nbytes
+            self._reserved_by_group[group] = int(
+                self._reserved_by_group.get(group, 0)) + nbytes
         return True
 
     def release(self, nbytes: int) -> None:
         nbytes = int(nbytes)
         if nbytes <= 0:
             return
+        group = _current_group()
         with self._lock:
             self._reserved = max(0, self._reserved - nbytes)
+            self._reserved_by_group[group] = max(
+                0, int(self._reserved_by_group.get(group, 0)) - nbytes)
 
 
 _pool = PinnedPool()

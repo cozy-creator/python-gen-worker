@@ -162,6 +162,9 @@ class EndpointSpec:
     # pgw#654: this handler's declared objective contract (from
     # @worker_function). None = unrestricted / serves either.
     objectives: Optional[tuple] = None
+    # th#1257: this handler's declared serving tasks (@worker_function).
+    # None = undeclared, which resolves NO quant approval hub-side.
+    tasks: Optional[tuple] = None
     distilled: Optional[bool] = None
     # pgw#654 gap #6: this handler's effective text pin
     # (@worker_function(text_len=) else the class Compile.text_len).
@@ -170,6 +173,16 @@ class EndpointSpec:
     # (validated at walk time; require a recorded warm_reason).
     warm_overrides: Dict[str, Any] = field(default_factory=dict)
     warm_reason: str = ""
+    # pgw#748 phase 1: which EXECUTION GROUP this dispatch runs on (th#1285
+    # `G×D` packing). Never authored and never discovered — the executor
+    # derives it from the delivered topology and the job's rank-0 device, then
+    # clones the spec so the group rides the identity every downstream
+    # consumer already threads. Two groups are two cards, so they are two
+    # resident instances; folding the ordinal into ``instance_key`` is what
+    # makes the whole per-group registry fall out of machinery that already
+    # keys one record per (class, resolved binding set). Omitted from the key
+    # at 0 so every single-group pod's keys stay byte-identical.
+    device_group_ordinal: int = 0
     # pgw#654 CLASS-scoped unions (set by extract_specs over the class's
     # sibling specs; a function-shaped endpoint unions with itself).
     guidance_union: tuple = ()
@@ -218,8 +231,13 @@ class EndpointSpec:
     @property
     def instance_key(self) -> Any:
         """Specs sharing this key share one class instance (same class + same
-        resolved binding set)."""
-        return (self.cls, tuple(sorted(self.models.items())))
+        resolved binding set + same execution group). The group ordinal is
+        elided at 0, so a single-group worker's keys are byte-identical to
+        every key this worker has ever computed (pgw#748)."""
+        base = (self.cls, tuple(sorted(self.models.items())))
+        return base if not self.device_group_ordinal else (
+            base + (("device_group", int(self.device_group_ordinal)),)
+        )
 
 
 def _derive_defaults_type(
@@ -581,6 +599,7 @@ def _spec_for_handler(
         variant_of=variant_of_slug,
         variant_kind=variant_kind,
         objectives=(tuple(wf.objectives) if wf is not None and wf.objectives is not None else None),
+        tasks=(tuple(wf.tasks) if wf is not None and wf.tasks is not None else None),
         distilled=(wf.distilled if wf is not None else None),
         text_len=(wf_text_len if wf_text_len is not None
                   else (decl.compile.text_len if decl.compile is not None else None)),

@@ -196,9 +196,14 @@ def test_rebind_pick_is_the_single_fold() -> None:
     assert wire_ref(out) == "acme/z-image#fp8"
     out = rebind_pick(b, resolved_ref="", cast="fp8")
     assert out.storage_dtype == "fp8" and wire_ref(out) == "acme/z-image"
-    # non-normal hub spelling still round-trips (':latest' is elided form)
-    out = rebind_pick(b, resolved_ref="acme/z-image:latest#fp8")
+    # non-normal hub spelling still round-trips (':prod' is the elided form
+    # since th#1276)
+    out = rebind_pick(b, resolved_ref="acme/z-image:prod#fp8")
     assert wire_ref(out) == "acme/z-image#fp8"
+    # ...and a pick at a genuinely DIFFERENT tag is refused, because the
+    # rebound binding could not re-mint it (two residency identities).
+    with pytest.raises(ValueError):
+        rebind_pick(b, resolved_ref="acme/z-image:latest#fp8")
 
     # ladder path: flavor/cast overlay with the same guard
     out = rebind_pick(b, flavor="svdq-int4-r128", cast="")

@@ -17,6 +17,7 @@ from .executor import Executor, ModelStore
 from .lifecycle import Lifecycle
 from .pb import worker_scheduler_pb2 as pb
 from .registry import collect_endpoints
+from .topology import ExecutionTopology, delivered_topology
 from .transport import FatalTransportError, Transport
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,8 @@ class Worker:
         user_module_names: List[str],
         *,
         manifest: Optional[Dict[str, Any]] = None,
-        gpu_slots: int = 1,
+        gpu_slots: Optional[int] = None,
+        topology: Optional["ExecutionTopology"] = None,
         queue_maxsize: int = 1024,
         backoff_base_s: float = 1.0,
         backoff_cap_s: float = 30.0,
@@ -98,6 +100,16 @@ class Worker:
         if not (settings.orchestrator_public_addr or "").strip():
             raise ValueError("Settings.orchestrator_public_addr is required")
         self.settings = settings
+        # pgw#763: an endpoint-authored oversized `.to("cpu")` becomes a typed
+        # job error instead of a cgroup OOM SIGKILL of the whole worker.
+        from .host_move_guard import install as _install_host_move_guard
+
+        _install_host_move_guard()
+        # pgw#748 / th#1285: the delivered `G×D` packing. Absent env == one
+        # slot, which is every pod that exists today. A malformed one is a
+        # typed refusal raised here — booting one slot on a pod the hub is
+        # dispatching G jobs to is worse than not booting.
+        self.topology = topology if topology is not None else delivered_topology()
 
         if manifest:
             from .models.download import (
@@ -116,7 +128,8 @@ class Worker:
             self._send, hf_home=settings.hf_home, hf_token=settings.hf_token
         )
         self.executor = Executor(
-            specs, self._send, settings=settings, store=store, gpu_slots=gpu_slots
+            specs, self._send, settings=settings, store=store,
+            gpu_slots=gpu_slots, topology=self.topology,
         )
         if (settings.config_snapshot_path or "").strip():
             from .runtime_config import ConfigStore

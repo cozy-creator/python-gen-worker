@@ -51,8 +51,11 @@ quantized (w8a8/w4a4) lanes keep their typed fail-closed refusal.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
+import os
 import shutil
+import tarfile
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -128,6 +131,11 @@ class PendingSelfMint:
     mint_root: Path
     publisher: Optional["CellPublisher"]
     cache_dir: Optional[Path] = None
+    #: pgw#784: this mint is built by a CHILD PROCESS, so the live pipeline
+    #: was never armed and this process holds no capture. The live pipe stays
+    #: plain eager until ``adopt_delegated_mint`` swaps it through the
+    #: ordinary delivered-cell path.
+    delegated: bool = False
     _state: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -365,12 +373,37 @@ def _publish_async(publisher: CellPublisher, family: str, artifact: Path, meta: 
     return t
 
 
+def delegatable(pipe: Any, cfg: Any) -> bool:
+    """pgw#784: may this pipeline's mint be DELEGATED to a child process?
+
+    Only if the pipeline can serve EAGER meanwhile, because that is the entire
+    premise: nothing is armed here, so a pipe that must serve compiled has
+    nothing to serve at all until the child finishes. Two refusals:
+
+    * a mandatory quantized lane (w8a8/w4a4) never serves eager (gw#586), and
+      ``mandatory_serving`` is the ONE serveability brain (hub execution lane
+      first, weight-lane stamp as fallback — pgw#677's live break);
+    * regional targets have no separable eager callable to route to.
+
+    Both keep today's in-process capture. They are the same two exclusions
+    ``_eager_first_eligible`` applies, asserted at the arm instead of after it,
+    because by then the choice is already made.
+    """
+    if bool(getattr(cfg, "regional", False)):
+        return False
+    try:
+        return not cc.mandatory_serving(pipe)
+    except Exception:  # noqa: BLE001 — an unanswerable lane keeps the old path
+        return False
+
+
 def enable_compiled(
     pipe: Any,
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
     publisher: Optional[CellPublisher] = None,
+    delegate: Optional[bool] = None,
 ) -> ArmOutcome:
     """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
 
@@ -396,6 +429,15 @@ def enable_compiled(
     """
     family = str(getattr(cfg, "family", "") or "")
     selection_bug: Optional[cc.CellSelectionBugError] = None
+    if delegate is None:
+        # pgw#784: whether a miss mints out of process is a POLICY of the
+        # arming brain, not an argument its callers thread through. Keeping it
+        # here means the executor's call is unchanged, every existing arming
+        # double keeps working, and there is exactly one place the decision
+        # lives. The parameter stays for tests that need to force either shape.
+        from . import mint_delegate
+
+        delegate = mint_delegate.delegated()
 
     # pgw#722 F1 (flag-gated, default OFF): PREFER a published aot-inductor
     # cell over the delivered dynamo artifact. Discovery is fetch-and-filter
@@ -417,7 +459,10 @@ def enable_compiled(
             cache_dir=cache_dir,
         )
         if adopted is not None:
+            from . import aot_serve
+
             aot_armed = False
+            lane_refused = False
             try:
                 aot_armed = provision.enable_compiled(
                     pipe, cfg, cache_dir, adopted.artifact)
@@ -426,11 +471,19 @@ def enable_compiled(
                 # fallthrough raised — the ordinary policy below (with the
                 # delivered artifact) is still to run, so this is not
                 # terminal here.
+                lane_refused = True
                 logger.warning(
                     "fleet-cells: discovered AOT cell %s did not arm; "
                     "falling through to the ordinary arming policy",
                     adopted.ref)
-            from . import aot_serve
+                activity_mod.emit_event(
+                    aot_serve.ADOPT_EVENT,
+                    f"family={family} key={adopted.cell_key} "
+                    f"ref={adopted.ref}: arm refused and the mandatory-lane "
+                    "fallthrough raised; ordinary policy resumes with the "
+                    "delivered artifact",
+                    phase="lane_unavailable",
+                )
             if aot_armed and aot_serve.is_armed(pipe):
                 logger.info(
                     "fleet-cells: armed discovered AOT cell %s (pgw#722)",
@@ -441,7 +494,25 @@ def enable_compiled(
                 # seeded dynamo cell picked up on the fallthrough): honest
                 # plain HIT — never advertise the AOT identity for bytes
                 # this pipe does not serve.
+                activity_mod.emit_event(
+                    aot_serve.ADOPT_EVENT,
+                    f"family={family} key={adopted.cell_key} "
+                    f"ref={adopted.ref}: armed via the fallthrough, NOT the "
+                    "discovered artifact; AOT identity not advertised",
+                    phase="armed_other_path",
+                )
                 return ArmOutcome(armed=True)
+            if not lane_refused:
+                # The classified inner refusal already rode its own
+                # ADOPT_EVENT (aot_serve.enable / cell_receipt_refused);
+                # this row binds it to the DISCOVERED candidate's identity.
+                activity_mod.emit_event(
+                    aot_serve.ADOPT_EVENT,
+                    f"family={family} key={adopted.cell_key} "
+                    f"ref={adopted.ref}: discovered cell did not arm; "
+                    "falling through to the ordinary arming policy",
+                    phase="did_not_arm",
+                )
 
     try:
         if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
@@ -481,7 +552,12 @@ def enable_compiled(
     if not cc.has_compile_target(pipe, cfg):
         return _fail_closed(
             pipe, "no compile target resolves on this pipeline", selection_bug)
-    if cc.delivered_cell_seeded():
+    if cc.delivered_cell_seeded() and not delegate:
+        # pgw#784: this gate exists ONLY because an in-process capture moves
+        # the process-global inductor cache dir. A DELEGATED mint's capture
+        # lives in the child, so the hazard does not exist — and a sibling
+        # whose own cell is missing can now mint it instead of being eager
+        # for life because an unrelated slot got a delivered cell first.
         return _fail_closed(
             pipe,
             "a delivered cell is seeded in this process; a self-mint "
@@ -569,7 +645,7 @@ def enable_compiled(
     with _PENDING_LOCK:
         existing = _PENDING.get(key)
         conflict = next((k for k in _PENDING if k != key), None)
-    if conflict is not None and existing is None:
+    if conflict is not None and existing is None and not delegate:
         logger.warning(
             "fleet-cells: self-mint declined for %s key=%s — capture already "
             "pending for key=%s (one inductor capture dir per process)",
@@ -590,6 +666,36 @@ def enable_compiled(
             cc.runtime_key()["sku"], cc.runtime_key()["torch"],
             loading.pipeline_weight_lane(pipe))
         target = mint_root / f"{label}.tar.gz"
+
+    if delegate and not delegatable(pipe, cfg):
+        logger.info(
+            "fleet-cells: %s cannot serve eager while a child mints "
+            "(mandatory lane or regional targets) — minting in-process "
+            "instead (pgw#784)", family)
+        delegate = False
+    if delegate:
+        # pgw#784: NOTHING is armed on the live pipeline. It keeps serving
+        # plain eager — no guarded wrappers, no branch containers, no
+        # inductor state, and (unlike the in-process capture) no
+        # process-global TORCHINDUCTOR_CACHE_DIR move, which is why the
+        # one-live-capture-per-process restriction above does not apply.
+        # ``armed=False`` is the honest answer: this pipe serves eager right
+        # now. The mint obligation rides the returned pending.
+        pending = PendingSelfMint(
+            family=family, cell_key=key,
+            ref=f"{cc.system_repo(family)}#{key}",
+            cfg=cfg, target=target, capture_dir=capture_dir,
+            mint_root=mint_root, publisher=publisher, cache_dir=cache_dir,
+            delegated=True,
+        )
+        with _PENDING_LOCK:
+            _PENDING.setdefault(key, pending)
+        logger.info(
+            "fleet-cells: DELEGATED self-mint for %s (key=%s) — a child "
+            "process builds the cell while this process serves eager "
+            "(pgw#784)", family, key)
+        return ArmOutcome(
+            armed=False, self_mint=pending, selection_bug=selection_bug)
 
     try:
         cc.begin_fleet_mint(pipe, cfg, capture_dir)
@@ -713,6 +819,100 @@ def finalize_self_mint(
     return minted
 
 
+def _packed_metadata(artifact: Path) -> Dict[str, Any]:
+    """The stamped metadata inside a packed cell (metadata members only)."""
+    with tarfile.open(artifact, mode="r:*") as tar:
+        member = tar.extractfile(cc.METADATA_NAME)
+        if member is None:
+            raise RuntimeError(f"{artifact} carries no {cc.METADATA_NAME}")
+        return dict(json.loads(member.read().decode()))
+
+
+def adopt_delegated_mint(
+    pipe: Any, pending: "PendingSelfMint", artifact: Path,
+) -> Optional[SelfMint]:
+    """pgw#784: adopt a cell a CHILD PROCESS just built, then publish it.
+
+    The delegated twin of :func:`finalize_self_mint`, and deliberately a
+    thinner one: there is nothing to pack here — the child already packed —
+    so this is exactly the DELIVERED-cell adoption the cache-HIT path runs
+    (``compile_cache.enable`` with an explicit artifact: stage, ``verify()``,
+    key match, drift, seed, arm). ``verify()`` semantics are untouched
+    (th#1098 exact identity): the child's cell either describes this runtime
+    on every axis or it does not exist for it.
+
+    That is the whole point of the split. In-process capture made the proof
+    tautological — the artifact was byte-derived from the very execution the
+    proof observed, so it could not fail to match. A child-built cell has to
+    EARN adoption through the same gates a hub-delivered cell does, and when
+    it cannot, the honest outcome is the one every miss already has: unwrap,
+    serve eager, leave the cell absent, publish nothing. A parity gap
+    degrades; it never poisons the store.
+
+    ``None`` = not adoptable. The caller treats that exactly like a disproven
+    candidate (the mint failed, the worker keeps serving).
+    """
+    state = pending._state
+    if "minted" in state:
+        return state["minted"]
+
+    artifact = Path(artifact)
+    if artifact != pending.target:
+        try:
+            pending.target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(artifact, pending.target)
+        except OSError:
+            shutil.copy2(artifact, pending.target)
+    try:
+        armed = cc.enable(pipe, pending.cfg, pending.cache_dir,
+                          artifact=pending.target)
+    except cc.CellSelectionBugError as exc:
+        # th#883, delegated edition: the child's own cell, whose axes describe
+        # exactly this runtime, refused to arm. Loud — it is a bug in the one
+        # selection brain, not a compatibility miss.
+        logger.error(
+            "fleet-cells: cell_selection_bug adopting this pod's DELEGATED "
+            "mint (family=%s key=%s): %s",
+            pending.family, pending.cell_key, exc)
+        armed = False
+    except Exception as exc:  # noqa: BLE001 — adoption failure => eager
+        logger.warning(
+            "fleet-cells: delegated mint for %s did not adopt (%s)",
+            pending.family, exc)
+        armed = False
+    if not armed:
+        activity_mod.emit_event(
+            "self_mint_abort",
+            f"family={pending.family} key={pending.cell_key}: the child "
+            "process produced a cell this runtime could not adopt; serving "
+            "stays eager and nothing is published",
+            phase="delegated_adopt_failed",
+        )
+        state["minted"] = None
+        _unregister(pending)
+        shutil.rmtree(pending.mint_root, ignore_errors=True)
+        return None
+
+    meta = _packed_metadata(pending.target)
+    key = str(meta.get("cell_key") or "").strip() or pending.cell_key
+    minted = SelfMint(
+        family=pending.family, cell_key=key,
+        ref=f"{cc.system_repo(pending.family)}#{key}",
+        snapshot_digest="blake3:" + blake3_file(pending.target),
+        artifact=pending.target,
+    )
+    state["minted"] = minted
+    state["meta"] = dict(meta)
+    _unregister(pending)
+    with _PENDING_LOCK:
+        _FINALIZED[key] = minted
+    logger.info(
+        "fleet-cells: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
+        "worker served eager throughout and now serves compiled",
+        pending.family, key, pending.target.stat().st_size / 1e6)
+    return minted
+
+
 def publish_self_mint(pending: "PendingSelfMint") -> None:
     """Ship a FINALIZED mint to the fleet store, once (gw#612 restructure).
 
@@ -806,10 +1006,11 @@ def republish_after_shape_warm(
 
     tmp_root = Path(tempfile.mkdtemp(prefix="cellrepub-"))
     try:
-        # pgw#681: the grown cell must stay guard-closed — a background
-        # novel-signature warm that baked an out-of-contract guard refuses
-        # to republish (caught below, non-fatal to serving, loudly named).
-        guard_manifest = guard_closure.assert_closure(
+        # pgw#681/#756: the grown cell's guard set is classified and rides
+        # the republished cell as its manifest. ADVISORY — a background
+        # novel-signature warm that baked an out-of-contract guard is named
+        # and emitted as a `guard_leak` event; it does not block republish.
+        guard_manifest = guard_closure.closure_manifest(
             pipe, cfg, label=family)
         graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
         meta = cc.artifact_metadata(
@@ -906,6 +1107,7 @@ __all__ = [
     "PendingSelfMint",
     "SelfMint",
     "abandon_self_mint",
+    "delegatable",
     "enable_compiled",
     "finalize_self_mint",
     "finalized_in_process",

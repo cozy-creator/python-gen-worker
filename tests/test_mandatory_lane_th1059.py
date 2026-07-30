@@ -21,8 +21,8 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 
 
-BARE = "acme/wai-illustrious:prod"
-MIXED = "acme/wai-illustrious:prod#fp8-w8a8"
+BARE = "acme/wai-illustrious"
+MIXED = "acme/wai-illustrious#fp8-w8a8"
 
 
 class _Resolutions:
@@ -76,7 +76,7 @@ def test_w8a8_resolution_lane_stays_mandatory() -> None:
 def test_flavor_token_fallback_without_lane_evidence() -> None:
     ex = _Resolutions({})
     assert ex._resolved_mandatory_lane(MIXED) == "w8a8"
-    assert ex._resolved_mandatory_lane("acme/other:prod#nvfp4-w4a4") == "w4a4"
+    assert ex._resolved_mandatory_lane("acme/other#nvfp4-w4a4") == "w4a4"
     assert ex._resolved_mandatory_lane(BARE) == ""
     empty_lane = _Resolutions({BARE: (MIXED, "", "")})
     assert empty_lane._resolved_mandatory_lane(MIXED) == "w8a8"
@@ -85,7 +85,7 @@ def test_flavor_token_fallback_without_lane_evidence() -> None:
 def test_conflicting_lane_evidence_fails_closed() -> None:
     ex = _Resolutions({
         BARE: (MIXED, "", "fp8-w8a16+compiled"),
-        "acme/alias:prod": (MIXED, "", "fp8-w8a8-dynamic+compiled"),
+        "acme/alias": (MIXED, "", "fp8-w8a8-dynamic+compiled"),
     })
     assert ex._resolved_mandatory_lane(MIXED) == "w8a8"
 

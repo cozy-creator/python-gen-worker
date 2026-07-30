@@ -13,8 +13,10 @@ import logging
 import time
 from typing import Callable, Optional, Tuple
 
-from .request_context import _decode_unverified_jwt_claims
 import requests
+
+from . import activity as activity_mod
+from .request_context import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +122,16 @@ async def renew_capability_while_running(
                 )
             except RenewDenied as exc:
                 logger.warning("capability renewal for %s stopped: %s", request_id, exc)
+                # pgw#760: the job keeps a token that will expire; its next
+                # upload fails with a bare auth error unless the denial is
+                # named on the wire NOW.
+                activity_mod.emit_event(
+                    activity_mod.KIND_CAPABILITY_RENEWAL,
+                    f"request={request_id} attempt={attempt}: terminal "
+                    f"renewal denial; the job keeps its current token and "
+                    f"fails on next use: {exc}",
+                    phase="denied",
+                )
                 return
             except Exception as exc:
                 logger.warning(
@@ -136,5 +148,15 @@ async def renew_capability_while_running(
             logger.error(
                 "capability renewal for %s exhausted retries; token will expire",
                 request_id,
+            )
+            # pgw#760: retries exhausted silently — the downstream symptom
+            # (an expired-token upload failure minutes later) never names
+            # this cause without the typed event.
+            activity_mod.emit_event(
+                activity_mod.KIND_CAPABILITY_RENEWAL,
+                f"request={request_id} attempt={attempt}: "
+                f"{_TRANSIENT_RETRIES} transient renewal attempts exhausted; "
+                "token will expire",
+                phase="exhausted",
             )
             return

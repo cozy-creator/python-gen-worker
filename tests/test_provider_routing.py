@@ -121,8 +121,12 @@ def test_lookup_exact_flavor_beats_repo_fallback() -> None:
     set_provider_index({"owner/flux#bf16": "hf", "owner/flux#fp8": "tensorhub"})
     assert lookup_provider_for_ref("owner/flux#fp8") == "tensorhub"
     assert lookup_provider_for_ref("owner/flux#bf16") == "hf"
-    # normalization: ':latest' and flavor case fold to the same key
-    assert lookup_provider_for_ref("owner/flux:latest#FP8") == "tensorhub"
+    # normalization: the DEFAULT tag (':prod', th#1276) and flavor case fold
+    # to the same key...
+    assert lookup_provider_for_ref("owner/flux:prod#FP8") == "tensorhub"
+    # ...but an explicit non-default tag is a DISTINCT key, so it misses the
+    # exact match and lands on the repo-identity fallback.
+    assert lookup_provider_for_ref("owner/flux:latest#fp8") == "hf"
     # unseen flavor -> repo-identity fallback (first provider indexed)
     assert lookup_provider_for_ref("owner/flux#svdq-int4") == "hf"
     set_provider_index(None)
@@ -131,8 +135,8 @@ def test_lookup_exact_flavor_beats_repo_fallback() -> None:
 @pytest.mark.parametrize(
     "wire_ref",
     [
-        "bfl/FLUX.2-klein-4B:latest#bf16",  # canonicalizer stamped :latest
-        "bfl/FLUX.2-klein-4B:prod#bf16",    # non-default tag
+        "bfl/FLUX.2-klein-4B:latest#bf16",  # non-default tag (th#1276)
+        "bfl/FLUX.2-klein-4B:prod#bf16",    # the grammar default, stamped
         "bfl/FLUX.2-klein-4B#bf16",         # bare form (no regression)
     ],
 )

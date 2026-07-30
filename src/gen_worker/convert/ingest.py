@@ -74,6 +74,11 @@ def _download_attempts() -> int:
             pass
     return 3
 
+# pgw#761: how many candidate component subfolders' config.json we will fetch
+# before classification. Real component repos publish one; the cap keeps a
+# pathological listing from turning classification into N round-trips.
+_MAX_COMPONENT_CONFIG_FETCHES = 8
+
 _SAFETENSORS_DTYPE_NAMES = {
     "F32": "fp32", "F16": "fp16", "BF16": "bf16",
     "F8_E4M3": "fp8", "F8_E5M2": "fp8:e5m2",
@@ -180,6 +185,31 @@ def _hf_classification_inputs(
             side["config_json"] = json.loads(Path(local).read_text(encoding="utf-8"))
         except Exception:
             side["config_json"] = None
+
+    if "config.json" not in paths and "model_index.json" not in paths:
+        # pgw#761: no root marker at all. A standalone component published
+        # under the pipeline key it overrides (PrunaAI/PrunaVAED's
+        # vae/config.json) is only recognizable from the SUBFOLDER's config —
+        # fetch every candidate's (tiny) config so the classifier can re-root
+        # onto one, or see the ambiguity and refuse.
+        component_configs: dict[str, Any] = {}
+        candidates = sorted({
+            p.split("/", 1)[0] for p in paths
+            if p.count("/") == 1
+            and p.rsplit("/", 1)[1].lower().startswith("diffusion_pytorch_model")
+        })
+        for sub in candidates[:_MAX_COMPONENT_CONFIG_FETCHES]:
+            if f"{sub}/config.json" not in paths:
+                continue
+            try:
+                local = hf().hf_hub_download(repo_id, f"{sub}/config.json",
+                                             revision=revision, token=(hf_token or None))
+                component_configs[sub] = json.loads(
+                    Path(local).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+        if component_configs:
+            side["component_configs"] = component_configs
 
     root_st = [p for p in paths if "/" not in p and p.lower().endswith(".safetensors")]
     if root_st and "model_index.json" not in paths and "adapter_config.json" not in paths:
@@ -323,6 +353,7 @@ def plan_huggingface(
         paths,
         sizes=sizes,
         config_json=side.get("config_json"),
+        component_configs=side.get("component_configs"),
         safetensors_metadata=side.get("safetensors_metadata"),
         readme_tags=side.get("readme_tags") or (),
         dtype_pref=tuple(dtype_preference or ("bf16", "fp16", "fp32")),
@@ -456,6 +487,7 @@ def ingest_huggingface(
     if progress is not None:
         progress(selected_bytes, selected_bytes or None)
 
+    subfolder = str(getattr(classification, "component_subfolder", "") or "")
     layout_info = detect_huggingface_source_layout(repo_dir=dest_dir, files=paths)
     library = classification.runtime_library
     library_name = {
@@ -490,6 +522,19 @@ def ingest_huggingface(
         "selected_bytes": str(selected_bytes),
         "source_file_count": str(len(paths)),
     }
+    if subfolder:
+        # pgw#761 (Paul's ruling, 2026-07-29): the PUBLISHER'S layout is what
+        # we mirror — the component stays under ``<subfolder>/``, which is
+        # its own role declaration and exactly what ``load_component``'s
+        # ``src = root / component`` resolves. tensorhub's diffusers layout
+        # contract is still root-anchored (single-file counts ROOT weight
+        # files; multi-file demands model_index.json), so this shape takes
+        # the same sanctioned validator opt-out as the TRELLIS pipeline tree
+        # and the multi-weight bundles rather than being rewritten flat.
+        # ``class_name`` still rides the repo spec — that is the fact the
+        # hub's component binding check narrows on.
+        repo_spec["library_name"] = ""
+        metadata["component_subfolder"] = subfolder
     if library == "diffusers-single-file" and _is_multi_weight_bundle(dest_dir):
         # Multi-component bundle (distinct component single-files, e.g.
         # chatterbox t3/s3gen/ve): no library loads it as one artifact —

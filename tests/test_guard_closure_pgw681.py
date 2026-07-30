@@ -178,11 +178,12 @@ def test_noncanonical_minted_stride_is_a_leak() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Acceptance: out-of-contract scalar leak fails the mint red
+# Acceptance: an out-of-contract scalar leak is RECORDED, not refused
+# (pgw#756 — the classifier lost its veto; see test_guard_gate_advisory_pgw756)
 # ---------------------------------------------------------------------------
 
 
-def test_out_of_contract_scalar_fails_the_gate_naming_the_variable() -> None:
+def test_out_of_contract_scalar_is_recorded_naming_the_variable() -> None:
     def forward(self: Any, x: Any, scale: float) -> Any:
         return self.lin(x) * scale
 
@@ -190,22 +191,23 @@ def test_out_of_contract_scalar_fails_the_gate_naming_the_variable() -> None:
     compiled = torch.compile(fn, backend="eager", dynamic=None)
     compiled(torch.randn(2, 4, 8), 3.25)  # 3.25 is NOT declared
 
-    with pytest.raises(gc.GuardClosureError) as excinfo:
-        gc.assert_closure(pipe, _cfg(), label="toyfam")
-    message = str(excinfo.value)
-    assert "L['scale']" in message
-    assert "3.25" in message
+    manifest = gc.closure_manifest(pipe, _cfg(), label="toyfam")
+    leaks = "\n".join(manifest["leaks"])
+    assert "L['scale']" in leaks
+    assert "3.25" in leaks
+    assert manifest[gc.GATE_KEY] == gc.GATE_ADVISORY
 
-    # Red-verified other direction: the SAME graph passes once the contract
-    # declares the pin — the gate keys on the contract, not the code shape.
-    manifest = gc.assert_closure(
+    # The other direction still works: the SAME graph classifies clean once
+    # the contract declares the pin — classification keys on the contract,
+    # not the code shape.
+    manifest = gc.closure_manifest(
         pipe, _cfg(guidance_scales=(3.25,)), label="toyfam")
     assert manifest["leaks"] == []
 
 
 def test_gate_refuses_when_nothing_is_extractable() -> None:
-    """Closure must be PROVEN — an armed pipe with no live compiled graphs
-    (extraction empty) refuses the mint instead of waving it through."""
+    """A mint that compiled NOTHING is a proven defect (the cell would be
+    empty) — this refusal survives the pgw#756 demotion."""
 
     class _Mod:
         def forward(self, x: Any) -> Any:  # pragma: no cover - never called
@@ -218,13 +220,16 @@ def test_gate_refuses_when_nothing_is_extractable() -> None:
     mod = _Mod()
     pipe.transformer = mod  # type: ignore[attr-defined]
     _arm_marker(pipe, mod, mod.forward)
-    with pytest.raises(gc.GuardClosureError, match="unprovable"):
-        gc.assert_closure(pipe, _cfg())
+    with pytest.raises(gc.GuardClosureError, match="nothing was compiled"):
+        gc.closure_manifest(pipe, _cfg())
 
 
-def test_finish_fleet_mint_runs_the_gate_red_and_green(tmp_path: Path) -> None:
-    """The gate rides the real mint finalize: a leaking capture refuses to
-    pack; a closed capture packs with the manifest riding metadata.json."""
+def test_finish_fleet_mint_records_the_manifest_leaking_or_clean(
+    tmp_path: Path,
+) -> None:
+    """The audit rides the real mint finalize: a leaking capture PACKS
+    anyway (pgw#756) carrying its leak, and a clean capture packs with an
+    empty leak list — both with the manifest riding metadata.json."""
 
     def forward(self: Any, x: Any, scale: float) -> Any:
         return self.lin(x) * scale
@@ -239,9 +244,11 @@ def test_finish_fleet_mint_runs_the_gate_red_and_green(tmp_path: Path) -> None:
     (fx_entry / "entry").write_bytes(b"fx")
     target = tmp_path / "cell.tar.gz"
 
-    with pytest.raises(gc.GuardClosureError, match=r"L\['scale'\]"):
-        cc.finish_fleet_mint(pipe, _cfg(), "toyfam", target, capture)
-    assert not target.exists()
+    leaky = tmp_path / "leaky.tar.gz"
+    meta = cc.finish_fleet_mint(pipe, _cfg(), "toyfam", leaky, capture)
+    assert leaky.exists(), "an undeclared scalar must no longer refuse the mint"
+    assert any("L['scale']" in row for row in meta[gc.MANIFEST_KEY]["leaks"])
+    assert gc.load_manifest(leaky)["leaks"] == meta[gc.MANIFEST_KEY]["leaks"]
 
     meta = cc.finish_fleet_mint(
         pipe, _cfg(guidance_scales=(3.25,)), "toyfam", target, capture)

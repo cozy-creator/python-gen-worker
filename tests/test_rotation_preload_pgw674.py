@@ -227,7 +227,7 @@ def test_preload_double_buffers_next_instance_while_busy(
 
     async def _run() -> None:
         _fake_busy_job(ex)
-        ck = "acme/next-ckpt:prod"
+        ck = "acme/next-ckpt"
         _seed_preloader(ex, [_instance("generate", ck)], _snapshots(ck, "d2" * 16))
         did = await asyncio.wait_for(ex.preloader._pass(), timeout=60)
         assert did is True
@@ -267,7 +267,7 @@ def test_preload_skips_ref_resident_under_moved_identity(
     ex.store.residency._vram_budget = 64 * _GiB
 
     async def _run() -> None:
-        ck = "acme/moving-tag:prod"
+        ck = "acme/moving-tag"
         eff = _pick(ex, "generate", ck)
         await ex.ensure_setup(eff, _snapshots(ck, "d1" * 16))
         rec = ex._classes[eff.instance_key]
@@ -344,7 +344,7 @@ def test_preload_component_staging_feeds_injection(
 
     async def _run() -> None:
         _fake_busy_job(ex)
-        ck = "acme/qwen-finetune:prod"
+        ck = "acme/qwen-finetune"
         snaps = _composed_snapshot(ck, "e1" * 16)
         _seed_preloader(ex, [_instance("render", ck)], snaps)
         did = await asyncio.wait_for(ex.preloader._pass(), timeout=60)
@@ -395,7 +395,7 @@ def test_preload_component_staging_skips_quantized_lanes(
         tmp_path, monkeypatch, ComposedFamily, tree_writer=_composed_tree_writer)
 
     async def _run() -> None:
-        ck = "acme/qwen-finetune:prod#fp8"
+        ck = "acme/qwen-finetune#fp8"
         snaps = _composed_snapshot(ck, "e2" * 16)
         _seed_preloader(ex, [_instance("render", ck)], snaps)
         await asyncio.wait_for(ex.preloader._pass(), timeout=60)
@@ -521,7 +521,7 @@ def test_update_desired_spawns_and_stop_kills_the_driver(
     ex.store.residency._vram_budget = 64 * _GiB
 
     async def _run() -> None:
-        ck = "acme/spawned:prod"
+        ck = "acme/spawned"
         ex.preloader.update_desired(
             [_instance("generate", ck)], _snapshots(ck, "d9" * 16), 1)
         task = ex.preloader._task
@@ -541,8 +541,8 @@ def test_update_desired_spawns_and_stop_kills_the_driver(
         assert ex.preloader._task is None
         # A post-stop update is inert (drain must not restage).
         ex.preloader.update_desired(
-            [_instance("generate", "acme/late:prod")],
-            _snapshots("acme/late:prod", "da" * 16), 2)
+            [_instance("generate", "acme/late")],
+            _snapshots("acme/late", "da" * 16), 2)
         assert ex.preloader._task is None
 
     asyncio.run(_run())
@@ -555,7 +555,7 @@ def test_stale_generation_ignored(
     pl = ex.preloader
     snaps_new: Dict[str, pb.Snapshot] = {}
     pl._generation = 5
-    pl._hot = (_instance("generate", "acme/current:prod"),)
-    pl.update_desired([_instance("generate", "acme/old:prod")], snaps_new, 3)
+    pl._hot = (_instance("generate", "acme/current"),)
+    pl.update_desired([_instance("generate", "acme/old")], snaps_new, 3)
     assert pl._generation == 5
-    assert pl._hot[0].models[0].ref == "acme/current:prod"
+    assert pl._hot[0].models[0].ref == "acme/current"

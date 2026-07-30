@@ -30,6 +30,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
+from .. import activity as activity_mod
 from .memory import (
     device_mismatches,
     estimate_cuda_resident_gb,
@@ -98,6 +99,11 @@ class HostRamHeadroom:
         return self.total_bytes > 0 and self.required_bytes > self.total_bytes
 
 
+REPLICATED = "replicated"
+SHARDED = "sharded"
+_PLACEMENT_MODES = (REPLICATED, SHARDED)
+
+
 @dataclass(frozen=True)
 class DeviceGroup:
     """The unit of placement (pgw#648, WORKER-RESIDENCY-DESIGN "Multi-GPU").
@@ -108,9 +114,25 @@ class DeviceGroup:
     has three 24GB pools, not one 72GB pool. One :class:`Residency` registry
     accounts for exactly one group's pool; the future multi-group agent owns
     one registry per executor/device-group, sharing only the disk tier.
+
+    ``placement_mode`` says how a materialization occupies the group, and it
+    decides the arithmetic (pgw#748 phase 0 — pgw#648's bug one level up):
+
+    - ``replicated`` (default) — every member holds a FULL copy of the
+      weights. Sequence/context parallelism is this: activations shard,
+      weights do not. The group's budget is therefore the **smallest**
+      member's free pool, never the sum. A 2x24GB replicated group that
+      summed would report 48GB and admit a 30GB model that fits on neither
+      card — the same class of bug pgw#648 fixed across groups.
+    - ``sharded`` — the weights themselves are split across members (a
+      future TP/pipeline mesh), so the pool genuinely IS the sum.
+
+    A single-device group is identical under both; the distinction only
+    starts paying at degree >= 2.
     """
 
     devices: Tuple[int, ...] = (0,)
+    placement_mode: str = REPLICATED
 
     def __post_init__(self) -> None:
         if not self.devices:
@@ -119,26 +141,46 @@ class DeviceGroup:
             raise ValueError(f"DeviceGroup devices must be unique: {self.devices}")
         if any(int(d) < 0 for d in self.devices):
             raise ValueError(f"DeviceGroup devices must be >= 0: {self.devices}")
+        if self.placement_mode not in _PLACEMENT_MODES:
+            raise ValueError(
+                f"DeviceGroup placement_mode must be one of {_PLACEMENT_MODES}: "
+                f"{self.placement_mode!r}"
+            )
 
     @property
     def primary(self) -> int:
         return self.devices[0]
 
-    def free_vram_bytes(self) -> int:
-        """Measured free VRAM across THIS group's devices only. Devices the
-        host does not actually have contribute 0 (a group is a plan; the
-        probe reports physics)."""
-        try:
-            import torch
+    @property
+    def replicated(self) -> bool:
+        return self.placement_mode == REPLICATED
 
-            if not torch.cuda.is_available():
-                return 0
-            count = int(torch.cuda.device_count())
-            return sum(
-                int(torch.cuda.mem_get_info(d)[0])
-                for d in self.devices
-                if 0 <= int(d) < count
+    def _per_device_free_bytes(self) -> List[int]:
+        """Measured free bytes for each member, in declaration order. A
+        device the host does not actually have contributes 0 (a group is a
+        plan; the probe reports physics) — which under ``replicated`` makes
+        the whole group unusable, correctly: you cannot replicate onto a
+        card that is not there."""
+        import torch
+
+        if not torch.cuda.is_available():
+            return []
+        count = int(torch.cuda.device_count())
+        out: List[int] = []
+        for d in self.devices:
+            out.append(
+                int(torch.cuda.mem_get_info(d)[0]) if 0 <= int(d) < count else 0
             )
+        return out
+
+    def free_vram_bytes(self) -> int:
+        """Free VRAM budget for THIS group under its placement mode: the
+        MIN across members when replicated, the sum when sharded."""
+        try:
+            per_device = self._per_device_free_bytes()
+            if not per_device:
+                return 0
+            return sum(per_device) if not self.replicated else min(per_device)
         except Exception:
             return 0
 
@@ -316,8 +358,17 @@ class Residency:
             return
         try:
             self._on_event(ref, state, int(vram_bytes), int(duration_ms))
-        except Exception:
+        except Exception as exc:
             logger.exception("residency event callback failed for %s", ref)
+            # pgw#760: the hub's residency view just silently diverged — the
+            # activity stream is an independent channel, so confess there.
+            activity_mod.emit_event(
+                activity_mod.KIND_RESIDENCY_FAULT,
+                f"ref={ref} state={state}: residency event callback failed "
+                f"(hub residency view may be stale): "
+                f"{type(exc).__name__}: {exc}",
+                phase="event_callback_failed",
+            )
 
     # ---- probes ---------------------------------------------------------------
 
@@ -577,15 +628,44 @@ class Residency:
                     "object is mixed-device and unusable",
                     ref or type(obj).__name__, restore, left[:5],
                 )
-        except Exception:
+                # pgw#760: the next forward on this object fatals mid-denoise
+                # ("Expected all tensors to be on the same device") — the
+                # hub must see the cause, not only the downstream job error.
+                activity_mod.emit_event(
+                    activity_mod.KIND_RESIDENCY_FAULT,
+                    f"ref={ref or type(obj).__name__} wanted={device} "
+                    f"restore={restore}: move AND rollback both incomplete "
+                    f"(e.g. {left[:3]}); object is mixed-device and unusable",
+                    phase="mixed_device_unusable",
+                )
+        except Exception as exc:
             logger.exception("residency: rollback .to(%s) failed for %s", restore, ref)
+            activity_mod.emit_event(
+                activity_mod.KIND_RESIDENCY_FAULT,
+                f"ref={ref or type(obj).__name__} wanted={device} "
+                f"restore={restore}: rollback move raised; object is likely "
+                f"mixed-device and unusable: {type(exc).__name__}: {exc}",
+                phase="mixed_device_unusable",
+            )
         flush_memory()
         return False
 
-    def promote(self, ref: str, device: str = "cuda") -> bool:
+    @property
+    def vram_device(self) -> str:
+        """Where THIS registry's promotions land. ``cuda`` (thread-current,
+        byte-identical to every promotion this worker has ever done) for the
+        default group; an explicit ``cuda:N`` once a topology has told us the
+        group owns card N — a group-1 instance must never load onto card 0
+        merely because the loading thread's current device said so
+        (pgw#748)."""
+        primary = int(self.device_group.primary)
+        return "cuda" if primary == 0 else f"cuda:{primary}"
+
+    def promote(self, ref: str, device: str = "") -> bool:
         """RAM -> VRAM (makes room first). True when resident afterward —
         i.e. every tensor verified on ``device``; a failed/partial move is
         rolled back to CPU and refused instead of booked (gw#409)."""
+        device = device or self.vram_device
         with self._lock:
             e = self._entries.get(ref)
             if e is None or not e.movable:

@@ -152,6 +152,11 @@ class RepoClassification:
     allow_patterns: list[str]
     attrs: dict[str, str] = field(default_factory=dict)
     detection_reason: str = ""
+    # pgw#761: the subfolder the standalone component lives in ("vae" for
+    # PrunaAI/PrunaVAED), empty when the component is at the repo root. Both
+    # shapes are first-class; the subfolder name IS the component's role
+    # declaration, and the mirror preserves it (Paul's ruling, 2026-07-29).
+    component_subfolder: str = ""
 
 
 def _norm(p: str) -> str:
@@ -274,11 +279,48 @@ def _pick_diffusers_component_weight_set(
     return weights, indexes, _dtype_of_tag(selected_tag)
 
 
+def _subfolder_component_candidates(
+    paths: Sequence[str],
+    component_configs: Mapping[str, Mapping[str, object]] | None,
+    dtype_pref: Sequence[str],
+) -> dict[str, tuple[str, list[str], list[str], str]]:
+    """Top-level subdirs that ARE a standalone diffusers component: their own
+    ``config.json`` carries ``_class_name`` and they hold a canonical
+    ``diffusion_pytorch_model*`` weight set (pgw#761).
+
+    Returns ``{subdir: (class_name, weights, indexes, dtype)}`` with paths
+    repo-relative. Only the subdir's OWN top level is considered — a deeper
+    tree (``example/PrunaVAED/*.mp4``) is demo material, not a component.
+    """
+    by_subdir: dict[str, list[str]] = {}
+    for p in paths:
+        head, _, rest = p.partition("/")
+        if not rest or "/" in rest:
+            continue
+        by_subdir.setdefault(head, []).append(rest)
+
+    out: dict[str, tuple[str, list[str], list[str], str]] = {}
+    for sub, names in by_subdir.items():
+        if "config.json" not in {n.lower() for n in names}:
+            continue
+        cfg = (component_configs or {}).get(sub) or {}
+        cls = str(cfg.get("_class_name") or "").strip()
+        if not cls:
+            continue
+        weights, indexes, dtype = _pick_diffusers_component_weight_set(names, dtype_pref)
+        if not weights:
+            continue
+        out[sub] = (cls, [f"{sub}/{n}" for n in weights],
+                    [f"{sub}/{n}" for n in indexes], dtype)
+    return out
+
+
 def classify_repo(
     files: Sequence[str],
     *,
     sizes: Mapping[str, int] | None = None,
     config_json: Mapping[str, object] | None = None,
+    component_configs: Mapping[str, Mapping[str, object]] | None = None,
     safetensors_metadata: Mapping[str, str] | None = None,
     readme_tags: Sequence[str] = (),
     dtype_pref: Sequence[str] = ("bf16", "fp16", "fp32"),
@@ -287,7 +329,10 @@ def classify_repo(
     """Classify a HF repo from its file listing and build allow_patterns.
 
     ``config_json`` is the parsed root ``config.json`` when present (needed
-    only to distinguish transformers repos). ``safetensors_metadata`` is the
+    only to distinguish transformers repos). ``component_configs`` maps a
+    top-level subdir to its parsed ``config.json`` — what a component
+    published under its pipeline key needs to be recognized (pgw#761).
+    ``safetensors_metadata`` is the
     ``__metadata__`` block of the largest root safetensors (kohya LoRA
     detection; pass ``huggingface_hub.get_safetensors_metadata`` output).
     Raises :class:`RepoRefusal` when the repo has no ingestable weights.
@@ -306,8 +351,13 @@ def classify_repo(
     always = [p for p in root if p.lower() in _ALWAYS_INCLUDE]
 
     def _finish(strategy: str, library: str, weights: list[str], indexes: list[str],
-                attrs: dict[str, str], reason: str) -> RepoClassification:
-        allow = sorted(set(weights) | set(indexes) | set(configs) | set(always))
+                attrs: dict[str, str], reason: str, *,
+                config_paths: Sequence[str] | None = None,
+                component_subfolder: str = "") -> RepoClassification:
+        allow = sorted(
+            set(weights) | set(indexes)
+            | set(configs if config_paths is None else config_paths)
+            | set(always))
         # Size gate on the SELECTED set, not the whole repo: only
         # allow_patterns are downloaded, and multi-quant GGUF repos
         # legitimately total 100s of GB while one quant is ~18GB.
@@ -318,6 +368,7 @@ def classify_repo(
         return RepoClassification(
             strategy=strategy, runtime_library=library, allow_patterns=allow,
             attrs=attrs, detection_reason=reason,
+            component_subfolder=component_subfolder,
         )
 
     # 1. sentence-transformers
@@ -398,6 +449,34 @@ def classify_repo(
             component_attrs,
             f"diffusers component config ({diffusers_class})",
         )
+
+    # 3.6 the SAME standalone component, published under its own component
+    # key — PrunaAI/PrunaVAED is vae/config.json + vae/diffusion_pytorch_
+    # model.safetensors with NO root marker of any kind (pgw#761). Both
+    # shapes are first-class (Paul, 2026-07-29): the mirror preserves the
+    # publisher's layout, so the subfolder rides through to the catalog
+    # artifact, where ``load_component``'s ``src = root / component`` reads
+    # it as the component it names. Exactly one candidate or we refuse: two
+    # component subfolders with no root marker is a shape we will not guess
+    # at, and a source_include narrowing the listing to one subfolder IS the
+    # caller saying which.
+    if "config.json" not in root_set:
+        candidates = _subfolder_component_candidates(paths, component_configs, dtype_pref)
+        if len(candidates) == 1:
+            sub, (sub_class, sub_weights, sub_indexes, sub_dtype) = next(
+                iter(candidates.items()))
+            # A component directory tree, not a root single file: the layout
+            # label matches what detect_huggingface_source_layout reads off
+            # the same tree, so passthrough and cast publishes agree.
+            sub_attrs = {"file_layout": "diffusers", "architecture": sub_class}
+            if sub_dtype:
+                sub_attrs["dtype"] = sub_dtype
+            return _finish(
+                "diffusers_component", "diffusers", sub_weights, sub_indexes,
+                sub_attrs, f"diffusers component config in {sub}/ ({sub_class})",
+                config_paths=[p for p in configs if p.startswith(f"{sub}/")],
+                component_subfolder=sub,
+            )
 
     has_st = any(p.lower().endswith(".safetensors") for p in paths)
     has_st_index = any(_is_safetensors_index(p) for p in paths)

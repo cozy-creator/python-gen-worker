@@ -153,8 +153,8 @@ def test_eager_boot_reduces_and_instance_swaps_verify_once(
 
     async def _run() -> None:
         # --- boot: first checkpoint instance -------------------------------
-        eff1 = _pick(ex, "generate", "acme/sdxl-base:prod")
-        await ex.ensure_setup(eff1, _snapshots("acme/sdxl-base:prod", "d1" * 16))
+        eff1 = _pick(ex, "generate", "acme/sdxl-base")
+        await ex.ensure_setup(eff1, _snapshots("acme/sdxl-base", "d1" * 16))
         boot_calls = list(CALLS)
         # generate's full eager cross-product would be 6 runs (2 cfg x 3
         # aspects). The eager reduction runs one shape representative per
@@ -171,17 +171,17 @@ def test_eager_boot_reduces_and_instance_swaps_verify_once(
         # A sibling-alias dispatch on the SAME pick joins the ready record
         # without any further warm work.
         CALLS.clear()
-        turbo1 = _pick(ex, "generate-turbo", "acme/sdxl-base:prod")
+        turbo1 = _pick(ex, "generate-turbo", "acme/sdxl-base")
         assert turbo1.instance_key == eff1.instance_key
         await ex.ensure_setup(
-            turbo1, _snapshots("acme/sdxl-base:prod", "d1" * 16))
+            turbo1, _snapshots("acme/sdxl-base", "d1" * 16))
         assert CALLS == []
 
         # --- juggle swap: second checkpoint, same family/contract ----------
         CALLS.clear()
-        eff2 = _pick(ex, "generate", "acme/cyberrealistic-xl:prod")
+        eff2 = _pick(ex, "generate", "acme/cyberrealistic-xl")
         assert eff2.instance_key != eff1.instance_key
-        await ex.ensure_setup(eff2, _snapshots("acme/cyberrealistic-xl:prod", "d2" * 16))
+        await ex.ensure_setup(eff2, _snapshots("acme/cyberrealistic-xl", "d2" * 16))
         assert len(CALLS) == 1, (
             "an instance swap must be a warm-contract cache hit "
             f"(one verification run), got {CALLS}"
@@ -189,8 +189,8 @@ def test_eager_boot_reduces_and_instance_swaps_verify_once(
 
         # --- third instance: same again ------------------------------------
         CALLS.clear()
-        eff3 = _pick(ex, "generate", "acme/nova-anime-xl:prod")
-        await ex.ensure_setup(eff3, _snapshots("acme/nova-anime-xl:prod", "d3" * 16))
+        eff3 = _pick(ex, "generate", "acme/nova-anime-xl")
+        await ex.ensure_setup(eff3, _snapshots("acme/nova-anime-xl", "d3" * 16))
         assert len(CALLS) == 1, CALLS
 
         # All three instances are READY and share ONE warm contract.
@@ -207,16 +207,16 @@ def test_warm_contract_key_splits_on_lane_and_overrides_not_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ex = _executor(tmp_path, monkeypatch)
-    base = _pick(ex, "generate", "acme/sdxl-base:prod")
-    fine_tune = _pick(ex, "generate", "acme/cyberrealistic-xl:prod")
+    base = _pick(ex, "generate", "acme/sdxl-base")
+    fine_tune = _pick(ex, "generate", "acme/cyberrealistic-xl")
     assert ex._warm_contract_key(base) == ex._warm_contract_key(fine_tune)
 
-    quant = _pick(ex, "generate", "acme/sdxl-base:prod#fp8-w8a8")
+    quant = _pick(ex, "generate", "acme/sdxl-base#fp8-w8a8")
     assert ex._warm_contract_key(quant) != ex._warm_contract_key(base)
 
     run = pb.RunJob(function_name="generate", models=[pb.ModelBinding(
-        slot="pipeline", ref="acme/sdxl-base:prod",
-        components={"vae": "tensorhub/sdxl-vae-fp16-fix:prod"},
+        slot="pipeline", ref="acme/sdxl-base",
+        components={"vae": "tensorhub/sdxl-vae-fp16-fix"},
     )])
     overridden = ex._effective_spec(ex.specs["generate"], run)
     assert ex._warm_contract_key(overridden) != ex._warm_contract_key(base)

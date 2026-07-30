@@ -30,6 +30,7 @@ from gen_worker.discovery.heavy_deps import stub_missing_heavy_deps
 from gen_worker.discovery.names import slugify_name
 from gen_worker.discovery.project import load_project_config
 from gen_worker.discovery.walk import EndpointImportError, find_endpoints
+from gen_worker.models.refs import DEFAULT_REF_TAG
 from gen_worker.registry import extract_specs
 from .validation import validate_endpoint_lock
 
@@ -341,10 +342,11 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         "ref": binding.path,
     }
     if binding.source == "tensorhub":
-        # Normal form (gw#492): the default tag ('latest') is elided at the
-        # manifest boundary so hub-minted keep/routing refs stay byte-equal
-        # to worker-minted wire refs (Go folds a non-empty tag verbatim).
-        if binding.tag and binding.tag != "latest":
+        # Normal form (gw#492): the default tag ('prod', th#1276) is elided
+        # at the manifest boundary so hub-minted keep/routing refs stay
+        # byte-equal to worker-minted wire refs (Go folds a non-empty tag
+        # verbatim). An explicit 'latest' is stamped, never elided.
+        if binding.tag and binding.tag != DEFAULT_REF_TAG:
             out["tag"] = binding.tag
         if binding.flavor:
             out["flavor"] = binding.flavor
@@ -391,7 +393,7 @@ def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
     block: ``{source, path, tag?, flavor?, revision?, version?, components?}``
     — a structured ModelRef (pgw#511; ``components`` added pgw#505)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
-    if ref.tag and ref.tag != "latest":
+    if ref.tag and ref.tag != DEFAULT_REF_TAG:
         out["tag"] = ref.tag
     if ref.flavor:
         out["flavor"] = ref.flavor
@@ -702,6 +704,11 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["objectives"] = list(es.objectives)
         if es.distilled is not None:
             fn["distilled"] = bool(es.distilled)
+        # th#1257: declared serving tasks — the axis the hub's lane-verdict
+        # store keys on. Omitted = undeclared, and every quant lane then
+        # resolves unmeasured (serves at base precision).
+        if es.tasks is not None:
+            fn["tasks"] = list(es.tasks)
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)

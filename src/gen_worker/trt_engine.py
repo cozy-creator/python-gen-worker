@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from . import activity as activity_mod
 from .compile_cache import (
     AdoptError,
     CompiledLaneUnavailableError,
@@ -544,6 +545,17 @@ def wrap_module(
                 "trt-engine: %s failed (%s: %s); eager for the rest of this process",
                 meta.get("module"), type(exc).__name__, exc,
             )
+            # pgw#760: a permanent serve-path decision (this module runs
+            # eager until the process dies) — countable on the wire, not
+            # only in pod logs.
+            activity_mod.emit_event(
+                activity_mod.KIND_SERVE_DEGRADE,
+                f"module={meta.get('module')} sku={meta.get('sku')} "
+                f"trt={meta.get('trt')} precision={meta.get('precision')}: "
+                f"engine call failed, eager for the rest of this process: "
+                f"{type(exc).__name__}: {exc}",
+                phase="trt_runtime_failed",
+            )
             return original(*args, **kwargs)
         if kwargs.get("return_dict", True):
             from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
@@ -576,9 +588,30 @@ def enable(
             "trt-engine: armed %s (sku=%s trt=%s precision=%s, refit from resident weights)",
             meta.get("module"), meta.get("sku"), meta.get("trt"), meta.get("precision"),
         )
+        activity_mod.emit_event(
+            activity_mod.KIND_TRT_ADOPT,
+            f"family={getattr(cfg, 'family', '')} "
+            f"module={meta.get('module')} sku={meta.get('sku')} "
+            f"trt={meta.get('trt')} precision={meta.get('precision')}: "
+            f"armed {Path(artifact).name}",
+            phase="armed",
+        )
         return True
     except Exception as exc:
-        logger.warning("trt-engine: artifact unusable (%s); staying eager", exc)
+        # pgw#760 (the pgw#733 pattern, TRT half): the classified AdoptError
+        # reason was reduced to logger.warning — structurally invisible on
+        # hub-spawned workers. phase carries the reason class, countable
+        # hub-side; detail names the candidate artifact.
+        reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
+        logger.warning(
+            "trt-engine: artifact unusable (%s: %s); staying eager",
+            reason, exc)
+        activity_mod.emit_event(
+            activity_mod.KIND_TRT_ADOPT,
+            f"family={getattr(cfg, 'family', '')} "
+            f"artifact={Path(artifact).name}: {type(exc).__name__}: {exc}",
+            phase=reason,
+        )
         return False
 
 

@@ -24,7 +24,13 @@ from typing import Any, Literal
 import msgspec
 from msgspec import structs
 
-from ..models.refs import HuggingFaceRef, fold_ref, normalize_model_ref, parse_model_ref
+from ..models.refs import (
+    DEFAULT_REF_TAG,
+    HuggingFaceRef,
+    fold_ref,
+    normalize_model_ref,
+    parse_model_ref,
+)
 
 ModelSource = Literal["tensorhub", "huggingface", "civitai", "modelscope"]
 
@@ -125,7 +131,7 @@ class ModelRef(msgspec.Struct, frozen=True):
             )
         if self.source == "tensorhub":
             if not self.tag:
-                msgspec.structs.force_setattr(self, "tag", "latest")
+                msgspec.structs.force_setattr(self, "tag", DEFAULT_REF_TAG)
             if not self.path:
                 raise ValueError("Hub requires a non-empty ref")
         elif self.source == "huggingface":
@@ -157,7 +163,7 @@ class ModelRef(msgspec.Struct, frozen=True):
         label = self.path
         if self.source == "civitai" and self.version:
             label += f"@{self.version}"
-        elif self.tag and self.tag != "latest":
+        elif self.tag and self.tag != DEFAULT_REF_TAG:
             label += f":{self.tag}"
         if self.flavor:
             label += f"#{self.flavor}"
@@ -167,7 +173,7 @@ class ModelRef(msgspec.Struct, frozen=True):
 def Hub(
     ref: str,
     *,
-    tag: str = "latest",
+    tag: str = DEFAULT_REF_TAG,
     flavor: str = "",
     storage_dtype: str = "",
     components: tuple[str, ...] = (),
@@ -244,14 +250,15 @@ def wire_ref(binding: Binding) -> str:
     """Normal-form ref string for the wire / cache key — delegates to the ONE
     grammar module (``gen_worker.models.refs``, gw#492).
 
-    Hub refs carry ``:tag`` (elided when ``latest``, the grammar default) and
+    Hub refs carry ``:tag`` (elided when ``prod``, the grammar default — an
+    explicit ``tag="latest"`` is stamped verbatim, th#1276) and
     ``#flavor`` suffixes; HF refs carry ``@revision``. Load-time metadata
     (dtype/subfolder/files/storage_dtype) never enters the ref.
     """
 
     if binding.source == "tensorhub":
         # The default tag never overrides one embedded in ``ref``.
-        tag = binding.tag if binding.tag != "latest" else ""
+        tag = binding.tag if binding.tag != DEFAULT_REF_TAG else ""
         return fold_ref(binding.path, tag=tag, flavor=binding.flavor)
     if binding.source == "huggingface":
         return HuggingFaceRef(binding.path, binding.revision or None).canonical()

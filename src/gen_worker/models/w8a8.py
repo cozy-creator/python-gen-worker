@@ -128,16 +128,24 @@ def _root_weight_files(d: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(files))
 
 
-def detect_w8a8_artifact(model_path: Path) -> Optional[W8a8Artifact]:
-    """Header-sniff a snapshot for the w8a8 contract: any denoiser layer with
-    an F8_E4M3 ``weight`` AND a ``weight_scale`` twin. A scale-FREE fp8 tree
-    (the storage-cast ``#fp8`` flavor) never matches — the scales are the
-    distinguisher. Diffusers trees scan the denoiser component dirs;
-    everything else scans the root weight set (singlefile/sharded-
-    transformers layouts, gw#562). Cheap: header reads only."""
+def detect_w8a8_artifacts(model_path: Path) -> tuple[W8a8Artifact, ...]:
+    """EVERY quantized denoiser in a snapshot, in vocabulary order.
+
+    A mixture-of-experts family carries more than one denoiser (Wan 2.2 A14B:
+    ``transformer`` + ``transformer_2``), and the producer quantizes all of
+    them — ``fp8_default_components()`` is the denoiser vocabulary, not a
+    single name. Returning only the first is how a dual-expert artifact gets
+    HALF served: the high-noise expert reaches scaled_mm and the low-noise one
+    is handed fp8 bytes by a loader that cannot read them. There is no
+    picture-level symptom to catch that, so it is found here or not at all.
+
+    Diffusers trees scan the denoiser component dirs; everything else scans
+    the root weight set (singlefile/sharded-transformers layouts, gw#562) and
+    can only ever be one. Cheap: header reads only."""
     root = Path(model_path)
     if not root.is_dir():
-        return None
+        return ()
+    found: list[W8a8Artifact] = []
     if (root / "model_index.json").exists():
         for comp in denoiser_components():
             comp_dir = root / comp
@@ -149,20 +157,28 @@ def detect_w8a8_artifact(model_path: Path) -> Optional[W8a8Artifact]:
                 continue
             quantized, static = _quantized_layers(files)
             if quantized:
-                return W8a8Artifact(
+                found.append(W8a8Artifact(
                     component=comp, files=files, quantized=quantized,
                     static_input_scales=static,
-                )
-        return None
+                ))
+        return tuple(found)
     files = _root_weight_files(root)
     if files:
         quantized, static = _quantized_layers(files)
         if quantized:
-            return W8a8Artifact(
+            found.append(W8a8Artifact(
                 component="", files=files, quantized=quantized,
                 static_input_scales=static,
-            )
-    return None
+            ))
+    return tuple(found)
+
+
+def detect_w8a8_artifact(model_path: Path) -> Optional[W8a8Artifact]:
+    """The FIRST quantized denoiser, for callers that ask a yes/no question or
+    address one named component. Anything that BUILDS a pipeline must use
+    :func:`detect_w8a8_artifacts` — see its docstring."""
+    arts = detect_w8a8_artifacts(model_path)
+    return arts[0] if arts else None
 
 
 def _probe_scales(mode: str, m: int, n: int, device: str = "cuda") -> tuple:
@@ -572,21 +588,33 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
                        compute_dtype: Any = None,
                        components: Optional[Dict[str, Any]] = None,
                        fp8_text_encoders: bool = False) -> Any:
-    """Build the pipeline with the w8a8 denoiser wired in (svdq-style
+    """Build the pipeline with EVERY quantized denoiser wired in (svdq-style
     component injection). Stamps ``_cozy_weight_lane`` ("w8a8" on the
     scaled_mm lane, "bf16-resident" on the dequant lane) — the compile-cache
     graph key (lane_drift, gw#534). ``fp8_text_encoders`` (the
     ``storage_dtype="fp8+te"`` binding, gw#557) arms the gw#460 block-window
     fp8 storage on the TEXT ENCODERS ONLY — the denoiser already holds fp8
-    scaled-mm modules that cast hooks must never touch."""
+    scaled-mm modules that cast hooks must never touch.
+
+    ``art`` names the entry point; its SIBLINGS are rediscovered from ``path``
+    so a mixture-of-experts snapshot lands every expert on the same lane. A
+    caller that passes one expert of a pair does not get half a pipeline: it
+    gets the pair, because half a quantized MoE is unserveable and silent
+    (gw#679's routing lesson, applied to weights instead of adapters)."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
     mode = w8a8_gemm_mode() or "dequant"
-    denoiser = load_w8a8_denoiser(
-        path, art, compute_dtype=compute, mode=mode)
     kwargs: Dict[str, Any] = dict(components or {})
-    kwargs[art.component] = denoiser
+    arts = detect_w8a8_artifacts(Path(path)) or (art,)
+    if not any(a.component == art.component for a in arts):
+        arts = arts + (art,)
+    for a in arts:
+        kwargs[a.component] = load_w8a8_denoiser(
+            path, a, compute_dtype=compute, mode=mode)
+    if len(arts) > 1:
+        logger.info("w8a8: %d quantized denoisers wired (%s)", len(arts),
+                    ", ".join(a.component for a in arts))
     pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
     try:
         pipe._cozy_weight_lane = "w8a8" if mode != "dequant" else "bf16-resident"
@@ -861,6 +889,7 @@ __all__ = [
     "W8a8Error",
     "W8a8SnapshotError",
     "detect_w8a8_artifact",
+    "detect_w8a8_artifacts",
     "fp8_scaled_linear_class",
     "load_w8a8_denoiser",
     "load_w8a8_pipeline",

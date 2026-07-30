@@ -237,7 +237,7 @@ def test_slot_components_share_automatically_without_declaration(tmp_path) -> No
         Slot(_Pipe, share_components=("vae",))  # type: ignore[call-arg]
 
     blobs = BlobHost(tmp_path)
-    ref = "harness/juggle-share:prod"
+    ref = "harness/juggle-share"
     snap = blobs.snapshot("snap-share", [
         blobs.file("w-share", b"weights-share",
                    path_in_snapshot="transformer/weights.txt"),
@@ -305,7 +305,7 @@ def test_four_checkpoints_stay_hot_in_one_dynamic_slot(tmp_path) -> None:
     picks = {}
     for name in ("alpha", "beta", "gamma", "delta"):
         picks[name] = (
-            f"harness/juggle-{name}:prod",
+            f"harness/juggle-{name}",
             blobs.snapshot(f"snap-{name}", [blobs.file(
                 f"w-{name}", f"weights-{name}".encode(),
                 path_in_snapshot="transformer/weights.txt")]),

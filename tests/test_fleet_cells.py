@@ -71,7 +71,7 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
     # pgw#681 gate at its torch boundary, simmed: these rigs never compile
     # through dynamo, so extraction would honestly refuse every finalize.
     monkeypatch.setattr(
-        guard_closure, "assert_closure",
+        guard_closure, "closure_manifest",
         lambda pipe, cfg, label="": {
             "v": 1, "graphs": [{"target": "transformer", "code": "sim",
                                 "entry": 0, "guards": []}],
@@ -108,6 +108,21 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 # arming policy
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _in_process_mint_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pgw#784: this module covers the IN-PROCESS capture shape, pinned.
+
+    Out-of-process minting is the production DEFAULT now (a mint that compiles
+    inside the serving process starves the 10s beat — th#1299), but the
+    in-process capture is still the shape that runs whenever a pipeline cannot
+    serve eager meanwhile: a mandatory quantized lane or regional targets, per
+    ``fleet_cells.delegatable``. So this coverage stays load-bearing rather
+    than legacy — it just has to say which shape it is testing. The delegated
+    shape has its own tests in ``test_mint_delegate_pgw784.py``.
+    """
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
 
 
 def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):

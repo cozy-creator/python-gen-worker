@@ -778,7 +778,7 @@ def test_dynamic_sdxl_pick_target_uses_derived_load_time_binding(tmp_path):
         models={"pipeline": Hub("tensorhub/sdxl-default", tag="prod")},
     )
     ex, _sent = _wire_executor(authored, tmp_path, ready=False, resident=False)
-    picked_ref = "tensorhub/cyberrealistic-pony:prod"
+    picked_ref = "tensorhub/cyberrealistic-pony"
     picked_digest = "blake3:" + "d" * 64
     derived = replace(
         authored,
@@ -1455,7 +1455,7 @@ def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
     # pgw#681 gate at its torch boundary, simmed like cc.apply's compile
     # leaf: this rig's "compiles" never touch dynamo, so extraction would
     # honestly report closure unprovable and refuse every finalize.
-    monkeypatch.setattr(guard_closure, "assert_closure", _sim_guard_closure)
+    monkeypatch.setattr(guard_closure, "closure_manifest", _sim_guard_closure)
     return captured, _Key.digest
 
 

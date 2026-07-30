@@ -48,9 +48,11 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "CIVITAI_API_KEY": "civitai_api_key",
     "GEN_WORKER_PREFER_AOT": "compile_prefer_aot",
     "GEN_WORKER_C2PA_CERT_PEM": "c2pa_cert_pem",
-    "GEN_WORKER_C2PA_KEY_PEM": "c2pa_key_pem",
     "GEN_WORKER_C2PA_CERT_PATH": "c2pa_cert_path",
-    "GEN_WORKER_C2PA_KEY_PATH": "c2pa_key_path",
+    # th#1307: GEN_WORKER_C2PA_KEY_PEM / _KEY_PATH are deliberately NOT
+    # mapped — a private key must never be readable by tenant code in this
+    # process. content_credentials.configure() refuses to start if either is
+    # present in the environment.
     "GEN_WORKER_C2PA_ALG": "c2pa_alg",
     "GEN_WORKER_C2PA_TA_URL": "c2pa_ta_url",
 }

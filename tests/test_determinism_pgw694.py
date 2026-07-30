@@ -88,7 +88,11 @@ def test_assert_posture_names_every_drifted_fact() -> None:
 
 
 def test_mint_manifest_carries_the_posture_seal() -> None:
-    """assert_closure seals the live posture into the manifest (v2)."""
+    """closure_manifest seals the live posture into the manifest (v3).
+
+    pgw#756: the posture refusal SURVIVES the gate demotion — it measures
+    live torch state against exact canonical values rather than inferring
+    anything from a guard classification."""
     import threading
 
     def forward(self: Any, x: Any) -> Any:
@@ -119,14 +123,14 @@ def test_mint_manifest_carries_the_posture_seal() -> None:
     compiled = torch.compile(mod.forward, backend="eager", dynamic=None)
     compiled(torch.randn(2, 4, 8))
 
-    manifest = gc.assert_closure(pipe, _cfg(), label="toyfam")
+    manifest = gc.closure_manifest(pipe, _cfg(), label="toyfam")
     assert manifest[gc.POSTURE_KEY] == gc.CANONICAL_POSTURE
-    assert gc.MANIFEST_VERSION == 2 and manifest["v"] == 2
+    assert gc.MANIFEST_VERSION == 3 and manifest["v"] == 3
 
     # A mint attempted in a non-canonical posture fails red, named.
     with torch.no_grad():
         with pytest.raises(gc.PostureError, match="grad_enabled"):
-            gc.assert_closure(pipe, _cfg(), label="toyfam")
+            gc.closure_manifest(pipe, _cfg(), label="toyfam")
 
 
 def test_arm_refuses_on_posture_drift_named() -> None:

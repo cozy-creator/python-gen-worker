@@ -19,4 +19,15 @@ class MissingSnapshotError(RuntimeError):
     re-sends DOWNLOAD on ``ModelEvent{FAILED, error:"missing_snapshot"}``."""
 
 
-__all__ = ["UrlExpiredError", "MissingSnapshotError"]
+class PickleWeightRefused(RuntimeError):
+    """A resolved snapshot contains a pickle-format weight (.bin/.ckpt/.pt/
+    .pth/.pkl/.pickle). Unpickling is arbitrary code execution in THIS process,
+    which holds hub credentials and other tenants' work, so the snapshot is
+    refused at resolve time and its bytes are never downloaded.
+
+    Terminal, never retried: the artifact must be republished as safetensors.
+    tensorhub refuses these at publish (th#1313); this is the defence in depth
+    for blobs that predate that refusal or reach a worker by another path."""
+
+
+__all__ = ["UrlExpiredError", "MissingSnapshotError", "PickleWeightRefused"]

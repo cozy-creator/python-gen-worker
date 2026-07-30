@@ -1,4 +1,4 @@
-"""Guard-closure gate + boundary canonicalization (pgw#681).
+"""Guard-closure ADVISORY audit + boundary canonicalization (pgw#681, demoted pgw#756).
 
 Dynamo's guard set for a compiled graph IS the exhaustive list of everything
 that graph depends on — so closure against the declared compile contract is
@@ -12,8 +12,10 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    carries ``get_source()``) + ``get_leaf_guards()`` (each carries its type
    name and ``verbose_code_parts()``). A repr parse of the guard manager's
    ``TREE_GUARD_MANAGER`` dump is the fallback when the structured walk is
-   unavailable. Extraction failure is NEVER silent: a mint whose closure
-   cannot be proven fails red (pgw#657 fail-loud doctrine).
+   unavailable. An entry whose guards cannot be read records an
+   :data:`UNPROVEN` row (never silent — it is logged and rides the manifest),
+   because that is a fact about our diagnostic surface on this torch build,
+   not about the mint.
 
 2. **Closure classifier** (:func:`classify`): the RelationalGuard family
    (aliasing, symbolic shapes) is judged by TYPE first — torch attaches it
@@ -26,8 +28,34 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    through call inputs and ambient process state, so those two roots form a
    CLOSED WORLD: every input/ambient guard type must be explicitly covered
    by the contract (declared shapes/dynamic dims, pinned scalars, structural
-   constants) or canonicalized away at the ingress — anything else is a
-   LEAK, and a leak fails the mint naming the exact variable.
+   constants) or canonicalized away at the ingress — anything else is
+   reported as a LEAK.
+
+   **The classifier has NO VETO (pgw#756, Paul's ruling).** It protects
+   against WASTED REUSE, not incorrectness: dynamo re-evaluates its own
+   guards on every call at the consumer, so a cell depending on unpinned
+   state fails its guards THERE — and with pgw#680 fail-on-recompile armed
+   that raises, serves eager, and reports the reason as a countable
+   ``guard_miss``. A missed leak therefore degrades gracefully and loudly;
+   it can never produce a wrong result. A CLASSIFIER BUG, by contrast,
+   refuses every mint on every family — which happened twice fleet-wide
+   (pgw#691's NO_TENSOR_ALIASING root dispatch, pgw#733's ``_source_root``
+   prefix match) while the gate caught zero real leaks in production. So
+   :func:`closure_manifest` classifies, records, emits a typed
+   ``guard_leak`` event, and CONTINUES the mint. Hard refusals survive only
+   where a defect is PROVEN rather than inferred: zero compiled graphs
+   (nothing was compiled — the cell would be empty) and posture drift
+   (:func:`assert_posture` — a measurement against exact canonical values).
+
+   **Never rebuild this classifier.** torch's own ``guard_filter_fn`` /
+   ``GuardFilterEntry`` is the supported structured hook (typed entries, no
+   C++ manager walk and no repr parsing — where BOTH fleet-wide bugs lived),
+   and upstream's precompile work already maintains a versioned
+   ``UNSUPPORTED_SERIALIZATION_GUARD_TYPES`` classification. torch.export /
+   AOTI removes the question entirely — which is why step 2 of pgw#756
+   DELETES this module when the last family migrates to AOT. If a
+   JIT-resident family ever genuinely needs the check, implement it as a
+   thin call into ``guard_filter_fn`` plus upstream's serializability list.
 
 3. **Boundary canonicalization** (:func:`canonical_ingress`): one wrapper at
    the single compiled-graph ingress (installed by ``compile_cache.apply``
@@ -40,9 +68,9 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    size ``(4,1,8)``), so the residue case rebuilds via ``as_strided``.
    Tensor dtypes are memo-asserted per argument path — a drift raises a
    NAMED :class:`GuardBoundaryError` instead of a silent recompile. Scalar
-   policy is enforced at the mint gate (only contract-pinned scalars may be
-   baked into guards; declared dynamism rides ``mark_dynamic``) — the
-   ingress never rewrites scalar values.
+   policy is REPORTED by the classifier (only contract-pinned scalars belong
+   in guards; declared dynamism rides ``mark_dynamic``) — the ingress never
+   rewrites scalar values.
 
 The full guard dump rides the cell as ``metadata.json``'s
 ``guard_manifest`` block (deterministic: comments stripped, ASLR ids
@@ -72,14 +100,22 @@ from pathlib import Path
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Tuple)
 
+from . import activity as activity_mod
+from . import torch_capability
+
 logger = logging.getLogger(__name__)
 
-MANIFEST_VERSION = 2  # v2 (pgw#695): + "posture" process-seal block
+# v2 (pgw#695): + "posture" process-seal block
+# v3 (pgw#756): advisory gate — + "unproven" rows, + "gate" disposition
+MANIFEST_VERSION = 3
 MANIFEST_KEY = "guard_manifest"
 POSTURE_KEY = "posture"
+GATE_KEY = "gate"
+GATE_ADVISORY = "advisory"
 
-# Verdicts. LEAK is the only failing one.
+# Verdicts. LEAK and UNPROVEN are REPORTED, never fatal (pgw#756).
 LEAK = "LEAK"
+UNPROVEN = "unproven"                    # guards unreadable on this torch build
 RUNTIME_STATE = "runtime-state"          # ambient process state (cell-key runtime axes)
 CODE_IDENTITY = "code-identity"          # G[...] roots (version/image axes)
 MODULE_STRUCTURE = "module-structure"    # L['self'] roots (family/graph/weight axes)
@@ -160,8 +196,9 @@ _SOURCE_EMBEDDED_GLOBAL_RE = re.compile(r"\bG[\['.]")
 
 
 class GuardClosureError(RuntimeError):
-    """The mint's guard set is not closed over the declared contract (or
-    could not be extracted). The message names every leaking variable."""
+    """The mint produced no readable compiled graphs, or a stored manifest
+    is unreadable. NOTE (pgw#756): a classification LEAK no longer raises —
+    it is recorded in the manifest and emitted as a ``guard_leak`` event."""
 
 
 class GuardBoundaryError(RuntimeError):
@@ -223,8 +260,17 @@ class ClosureReport:
         return tuple(out)
 
     @property
+    def unproven(self) -> Tuple[str, ...]:
+        """Entries whose guards could not be read (pgw#756). Reported, never
+        fatal: this is a fact about the torch build's guard debug surface,
+        not about the mint."""
+        return tuple(
+            f"target={g.target} entry={g.entry}: {r.expr}"
+            for g in self.graphs for r in g.guards if r.verdict == UNPROVEN)
+
+    @property
     def closed(self) -> bool:
-        return bool(self.graphs) and not self.leaks
+        return bool(self.graphs) and not self.leaks and not self.unproven
 
     def verdict_counts(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
@@ -246,6 +292,8 @@ class ClosureReport:
             ],
             "verdicts": self.verdict_counts(),
             "leaks": list(self.leaks),
+            "unproven": list(self.unproven),
+            GATE_KEY: GATE_ADVISORY,
         }
 
     def text(self) -> str:
@@ -255,6 +303,8 @@ class ClosureReport:
         ]
         for leak in self.leaks:
             lines.append(f"  LEAK {leak}")
+        for row in self.unproven:
+            lines.append(f"  UNPROVEN {row}")
         if not self.graphs:
             lines.append("  (no compiled graphs extractable)")
         return "\n".join(lines)
@@ -394,13 +444,28 @@ def extract_target_guards(
     pins = contract_pins(cfg, getattr(code, "co_freevars", ()) or ())
     graphs: List[GraphGuards] = []
     for index, entry in enumerate(_debug_get_cache_entry_list(code)):
-        records = sorted(
-            {
-                _classify_row(guard_type, source, raw, pins)
-                for guard_type, source, raw in _entry_guard_rows(entry)
-            },
-            key=lambda r: (r.guard_type, r.source, r.expr),
-        )
+        try:
+            rows = _entry_guard_rows(entry)
+        except Exception as exc:  # noqa: BLE001 — recorded, never fatal
+            # pgw#756: the guards of a LIVE compiled graph were unreadable.
+            # That is a torch-surface fact, not a mint defect, so it is
+            # recorded as an UNPROVEN row and the mint continues.
+            logger.warning(
+                "guard-closure: %s entry %d guards unreadable (%s: %s) — "
+                "recorded UNPROVEN, mint continues",
+                target, index, type(exc).__name__, exc)
+            records = [GuardRecord(
+                guard_type="EXTRACTION", source="",
+                expr=f"{type(exc).__name__}: {exc}", verdict=UNPROVEN,
+                axis="guard debug surface unreadable on this torch build")]
+        else:
+            records = sorted(
+                {
+                    _classify_row(guard_type, source, raw, pins)
+                    for guard_type, source, raw in rows
+                },
+                key=lambda r: (r.guard_type, r.source, r.expr),
+            )
         graphs.append(GraphGuards(
             target=str(target), code=str(getattr(code, "co_qualname", code.co_name)),
             entry=index, guards=tuple(records),
@@ -699,8 +764,11 @@ CANONICAL_POSTURE: Dict[str, str] = {
 
 
 def posture_snapshot() -> Dict[str, str]:
-    """The live process posture in canonical string form."""
-    import torch
+    """The live process posture in canonical string form. On a torchless
+    worker the only honest fact is the absence itself (pgw#788)."""
+    torch = torch_capability.torch_or_none()
+    if torch is None:
+        return {"torch": torch_capability.ABSENT}
 
     return {
         "grad_enabled": str(torch.is_grad_enabled()),
@@ -731,8 +799,13 @@ def establish_posture() -> Dict[str, str]:
     SET (grad mode, deterministic algos); ambient contexts that library code
     must not pop from under the embedding process (an active autocast, a
     foreign torch-function mode, a moved default device) REFUSE with a named
-    :class:`PostureError` instead."""
-    import torch
+    :class:`PostureError` instead.
+
+    pgw#788: a torchless worker has no grad mode, no autocast stack and no
+    default device to set or refuse. It seals the absence and boots."""
+    torch = torch_capability.torch_or_none()
+    if torch is None:
+        return {"torch": torch_capability.ABSENT}
 
     torch.set_grad_enabled(True)
     torch.use_deterministic_algorithms(False)
@@ -754,7 +827,7 @@ def assert_posture(sealed: Mapping[str, Any], label: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# The mint gate + armed-cell audit
+# The advisory closure audit (pgw#756: no veto) + armed-cell audit
 # ---------------------------------------------------------------------------
 
 
@@ -763,36 +836,62 @@ def audit_armed(pipeline: Any, cfg: Any) -> ClosureReport:
     return extract(pipeline, cfg)
 
 
-def assert_closure(pipeline: Any, cfg: Any, label: str = "") -> Dict[str, Any]:
-    """The guard-closure mint gate: every compiled graph's guard set must be
-    closed over the declared contract. Returns the deterministic guard
-    manifest to embed in the cell metadata; raises :class:`GuardClosureError`
-    naming every out-of-contract variable (mint red — downstream the pgw#672
-    posture degrades to explicit eager, never a pod death)."""
+def closure_manifest(pipeline: Any, cfg: Any, label: str = "") -> Dict[str, Any]:
+    """Classify every compiled graph's guard set against the declared
+    contract and return the deterministic manifest to embed in the cell
+    metadata.
+
+    **ADVISORY (pgw#756).** Suspected leaks and unreadable entries are
+    logged, recorded in the returned manifest, and emitted as a countable
+    ``guard_leak`` event — the mint CONTINUES. Rationale: the consumer
+    re-evaluates these very guards on every call, so an unpinned dependency
+    fails there and degrades to explicit eager with a named reason
+    (pgw#680); a classifier bug, by contrast, refuses every mint on every
+    family (pgw#691, pgw#733). The classification is diagnosis, not a gate.
+
+    Two refusals survive, because each PROVES a defect rather than inferring
+    one:
+
+    * **no compiled graphs at all** — nothing was compiled, so the cell
+      would be empty; the mint is broken independently of any guard;
+    * **non-canonical process posture** (pgw#695) — a measurement of live
+      torch state against exact canonical values, not a classification. Such
+      a mint would arm nowhere, since every canonical consumer refuses its
+      seal.
+    """
     report = audit_armed(pipeline, cfg)
     name = label or type(pipeline).__name__
     if not report.graphs:
         raise GuardClosureError(
-            f"guard-closure gate ({name}): no compiled graphs extractable "
-            "from the armed targets — closure is unprovable, refusing the "
-            "mint")
-    if report.leaks:
-        leak_lines = "\n  ".join(report.leaks)
-        raise GuardClosureError(
-            f"guard-closure gate ({name}): {len(report.leaks)} out-of-"
-            f"contract guard(s) — the mint depends on variables the "
-            f"contract does not pin:\n  {leak_lines}")
+            f"guard-closure ({name}): no compiled graphs extractable from "
+            "the armed targets — nothing was compiled, refusing to publish "
+            "an empty cell")
+    if report.leaks or report.unproven:
+        lines = list(report.leaks) + [f"UNPROVEN {u}" for u in report.unproven]
+        detail = (
+            f"guard-closure ADVISORY ({name}): {len(report.leaks)} "
+            f"out-of-contract guard(s), {len(report.unproven)} unreadable "
+            f"entrie(s) — recorded in the cell manifest, mint continues "
+            f"(pgw#756; the consumer's own guard evaluation is the real "
+            f"check):\n  " + "\n  ".join(lines))
+        logger.warning("%s", detail)
+        phase = "+".join(
+            t for t, on in (("leak", report.leaks), ("unproven", report.unproven))
+            if on)
+        activity_mod.emit_event(
+            activity_mod.KIND_GUARD_LEAK, detail, phase=phase)
+    else:
+        logger.info(
+            "guard-closure (%s): CLOSED — %d graph(s), verdicts=%s",
+            name, len(report.graphs), report.verdict_counts())
     # pgw#695: a mint in a non-canonical posture would arm nowhere (every
     # canonical consumer refuses its seal) — fail THIS mint red instead.
     posture = posture_snapshot()
     canonical_diffs = _posture_diff(CANONICAL_POSTURE, posture)
     if canonical_diffs:
         raise PostureError(
-            f"guard-closure gate ({name}): minted in a non-canonical "
+            f"guard-closure ({name}): minted in a non-canonical "
             "process posture: " + "; ".join(canonical_diffs))
-    logger.info(
-        "guard-closure gate (%s): CLOSED — %d graph(s), verdicts=%s",
-        name, len(report.graphs), report.verdict_counts())
     manifest = report.manifest()
     manifest[POSTURE_KEY] = posture
     return manifest
@@ -1036,6 +1135,8 @@ __all__ = [
     "CONTRACT_SCALAR",
     "CONTRACT_SHAPE",
     "ClosureReport",
+    "GATE_ADVISORY",
+    "GATE_KEY",
     "ContractPins",
     "FleetAudit",
     "GraphGuards",
@@ -1050,12 +1151,13 @@ __all__ = [
     "PostureError",
     "RUNTIME_STATE",
     "STRUCTURAL",
-    "assert_closure",
+    "UNPROVEN",
     "assert_posture",
     "audit_armed",
     "canonical_ingress",
     "canonical_strides",
     "classify",
+    "closure_manifest",
     "consolidate",
     "contract_pins",
     "establish_posture",

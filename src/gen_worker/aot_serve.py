@@ -13,12 +13,29 @@ Artifact = deterministic ``.tar.gz`` (the receipts gate reads
 ``metadata.json`` straight out of the digested bytes, so the envelope is
 identical in shape to a TRT engine's)::
 
-    metadata.json           kind/format, runtime key (sku, torch, cuda),
-                            family, module, cell_key, the INPUT CONTRACT
-                            (per-input dtype + symbolic shape), the SYMBOL
-                            RANGES, and the declared CONSTANT manifest
-    model.pt2               the AOTI package — CODE ONLY
-    constants.safetensors   optional: the non-weight lifted constants
+    metadata.json           kind/format, runtime key (sm, torch, cuda + sku),
+                            family, cell_key, and the ENTRIES map — one
+                            block per NAMED GRAPH CLASS carrying its
+                            target, fork/class-dim coordinate, INPUT
+                            CONTRACT, SYMBOL RANGES, declared CONSTANT
+                            manifest, and per-class hash
+    model.pt2               ONE AOTI package holding every entry as a
+                            named model (``data/aotinductor/<entry>/``) —
+                            CODE ONLY
+    constants.safetensors   optional: non-weight lifted constants, keys
+                            namespaced ``<entry>::<fqn>``
+
+Format 2 — multi-graph cells (pgw#758, Paul's ruling)
+-----------------------------------------------------
+"generate and generate_turbo are separate functions, they have separate
+graphs, but they are COMBINED TOGETHER INTO ONE FILE." One cell per
+(family x lane x contract) carries EVERY declared graph class as a named
+entry; one resident artifact serves them all. Serve-side dispatch selects
+the entry whose DECLARED ingress contract admits the call — zero admitting
+entries is a named refusal (eager service), and more than one is
+``entry_ambiguous``: a declaration defect made visible, never a guess.
+Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER ENTRY —
+the unbound-entry segfault was re-measured per named model on the pin.
 
 Why the artifact is code-only, and what that costs
 --------------------------------------------------
@@ -52,6 +69,7 @@ compile stack keeps ``import gen_worker`` off the torch/pb import graph.
 
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import io
@@ -82,7 +100,34 @@ METADATA_NAME = "metadata.json"
 PACKAGE_NAME = "model.pt2"
 LITERALS_NAME = "constants.safetensors"
 ARTIFACT_KIND = "aot-inductor"
-ARTIFACT_FORMAT = 1
+#: pgw#733 (arm half): every adopt/arm outcome of an AOT artifact — success
+#: AND every classified refusal — rides this ONE typed wire event. ``phase``
+#: carries the outcome class (``armed`` / the AdoptError reason), countable
+#: hub-side; ``detail`` names the candidate cell. Hub-spawned workers expose
+#: no stdout, so a reason that only reaches the logger does not exist.
+ADOPT_EVENT = "aot_adopt"
+#: pgw#791: an input the artifact was compiled for as 16-byte aligned arrived
+#: unaligned (or non-contiguous) and this ingress realigned it. Typed and
+#: hub-visible because the ALTERNATIVE is what shipped: AOTInductor's own
+#: ``run_impl`` copies the input on EVERY call and says so on the worker's
+#: stderr, which is unreachable on hub-spawned pods — a fleet paying the tax
+#: was indistinguishable from one that was not. Coalesced: once per
+#: (entry, input, reason).
+REALIGN_EVENT = "aot_input_realigned"
+#: AOTInductor generates its aligned-input fast path at 16 bytes
+#: (``torch._inductor.codegen.aoti_runtime``'s ALIGNMENT). An input whose
+#: ``data_ptr()`` is not a multiple of this — diffusers hands the denoiser
+#: ``timesteps[i]``, a scalar VIEW at an odd element offset — makes the
+#: runner clone it per call. Not a knob: it is the compiler's constant.
+AOTI_ALIGNMENT = 16
+#: Format 2 = multi-graph cells (pgw#758): the envelope carries an
+#: ``entries`` map instead of one flat contract. Format-1 cells are RETIRED
+#: (ck5 exact identity: a recipe change strands old cells, which is fine).
+ARTIFACT_FORMAT = 2
+#: Separator between the entry name and the constant FQN in
+#: ``constants.safetensors`` keys. Entry names never contain it (targets are
+#: dotted identifiers; coordinate values are ints/bools/identifiers).
+LITERAL_SEP = "::"
 _MARKER_ATTR = "_cozy_aot"
 _REQUIRED_MEMBERS = (METADATA_NAME, PACKAGE_NAME)
 _OPTIONAL_MEMBERS = (LITERALS_NAME,)
@@ -95,6 +140,17 @@ SOURCE_STATE_DICT = "state_dict"
 #: literal). Tiny, so it ships inside the artifact rather than being
 #: reconstructed — nothing outside the artifact knows its value.
 SOURCE_LITERAL = "literal"
+
+#: The hardware/toolchain axes an ``.pt2`` is genuinely pinned to (pgw#765).
+#: ``sm`` is the GPU identity: AOTInductor itself keys on
+#: ``AOTI_COMPUTE_CAPABILITY`` — capability, never the marketing name
+#: (``codecache.get_device_information``). ``sku`` is deliberately ABSENT:
+#: Paul's ruling ("AOT cells are locked into the sm_x version, not the actual
+#: GPU"), the pgw#691 collapse that removed it from cell identity on
+#: byte-identical evidence, and the pgw#754 ISA clamp that made the host half
+#: portable. It stays in metadata for observability and as the discovery
+#: SELECTION PREFERENCE (``aot_cells._candidates``) — never as a refusal.
+IDENTITY_AXES: Tuple[str, ...] = ("sm", "torch", "cuda")
 
 
 # ---------------------------------------------------------------------------
@@ -155,14 +211,20 @@ def torch_maj_min(version: str) -> str:
 
 
 def runtime_key() -> Dict[str, str]:
-    """Consumer-side half of the artifact key, probed from this process."""
-    key = {"sku": "", "torch": torch_version(), "cuda": ""}
+    """Consumer-side half of the artifact key, probed from this process.
+
+    ``sm`` is the compiled-code identity (:data:`IDENTITY_AXES`); ``sku`` is
+    the GPU's marketing slug, recorded for observability and selection.
+    """
+    key = {"sku": "", "sm": "", "torch": torch_version(), "cuda": ""}
     try:
         import torch
 
         key["cuda"] = str(torch.version.cuda or "")
         if torch.cuda.is_available():
             key["sku"] = sku_slug(torch.cuda.get_device_name(0))
+            major, minor = torch.cuda.get_device_capability(0)
+            key["sm"] = f"sm_{major}{minor}"
     except Exception:
         pass
     return key
@@ -243,6 +305,15 @@ class ArtifactContract:
     #: symbol -> (min, max), inclusive. Mint packs this from
     #: ``ep.range_constraints``.
     symbols: Mapping[str, Tuple[int, int]]
+    #: Inputs this graph class REFUSES to be given (pgw#790). The positive
+    #: contract says what a graph takes; a multi-class cell also needs the
+    #: negative one, because "input absent" is what discriminates a
+    #: BRANCHLESS class from a branch-bearing one whose extra inputs a
+    #: name-keyed bind would simply ignore. Without it both classes admit an
+    #: adapter-bearing call and :class:`EntryDispatch` refuses
+    #: ``entry_ambiguous`` — a declaration that cannot discriminate two graph
+    #: classes by ingress, which its own contract calls a defect.
+    excluded: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -313,7 +384,24 @@ def contract_from_meta(meta: Mapping[str, Any]) -> ArtifactContract:
                 raise ValueError(
                     f"input {spec.name!r} dim {pos} references symbol "
                     f"{dim!r} with no declared range")
-    return ArtifactContract(inputs=tuple(inputs), symbols=symbols)
+
+    raw_excluded = meta.get("excluded_inputs") or []
+    if not isinstance(raw_excluded, (list, tuple)):
+        raise ValueError("excluded_inputs is not a list")
+    excluded: List[str] = []
+    declared_names = {spec.name for spec in inputs}
+    for value in raw_excluded:
+        name = str(value or "").strip()
+        if not name:
+            raise ValueError("excluded_inputs carries an empty name")
+        if name in declared_names:
+            raise ValueError(
+                f"input {name!r} is declared AND excluded — a graph class "
+                f"cannot both take an input and refuse it")
+        excluded.append(name)
+    return ArtifactContract(
+        inputs=tuple(inputs), symbols=symbols,
+        excluded=tuple(sorted(set(excluded))))
 
 
 def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
@@ -376,41 +464,130 @@ def range_digest(meta: Mapping[str, Any]) -> str:
         ],
         "symbols": {k: list(v) for k, v in sorted(contract.symbols.items())},
     }
+    # pgw#790: the NEGATIVE half of the declared admissible traffic. Two
+    # classes that differ only in what they REFUSE admit different traffic,
+    # so the digest must see it or the ck6 collision this function exists to
+    # close reopens for adapter forks. Keyed only when non-empty: a contract
+    # that excludes nothing is the contract every already-published cell
+    # declares, and re-keying the fleet's 144 live checkpoints to add a field
+    # that says "unchanged" would strand every one of them.
+    if contract.excluded:
+        canon["excluded"] = list(contract.excluded)
     blob = json.dumps(canon, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()[:32]
+
+
+def class_hash(
+    entry: Mapping[str, Any], *, strict: bool, lora_bucket: int,
+) -> str:
+    """The per-class graph hash of one packaged entry (pgw#716/#758).
+
+    Folds the entry's coordinate (target, fork, class dims), its
+    ``range_digest`` (the MEASURED node-only-collision fix: three exports
+    differing only in declared range hashed identically), its graph
+    interface block, and the trace-mode/lora facts. 16-hex, recomputable
+    from the entry block alone — so a consumer can prove the stamp and a
+    mismatch NAMES the class (the receipts principle).
+    """
+    facts = {
+        "v": 2,
+        "target": str(entry.get("target") or ""),
+        "fork": [[str(n), v] for n, v in (entry.get("fork") or [])],
+        "class_dims": [
+            [str(n), int(v)] for n, v in (entry.get("class_dims") or [])],
+        "range_digest": str(entry.get("range_digest") or ""),
+        "graph": dict(entry.get("graph") or {}),
+        "strict": bool(strict),
+        "lora_bucket": int(lora_bucket or 0),
+    }
+    blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def combined_graph_hash(hashes: Iterable[str]) -> str:
+    """The ck6 combined hash, VERBATIM per pgw#716: the first 16 hex chars
+    of the sha256 over the newline-joined SORTED per-class hash values
+    (sorted by the hash string itself, single ``\\n`` joins, no trailing
+    newline, UTF-8 bytes)."""
+    joined = "\n".join(sorted(str(h) for h in hashes))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def entries_from_meta(meta: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """The validated ``entries`` map of a format-2 artifact.
+
+    Every entry block must parse as a full contract (inputs, symbols,
+    constants) and carry a target — an entry the dispatch cannot route or
+    assert is B2 with extra steps. Raises :class:`ValueError` naming the
+    entry."""
+    raw = meta.get("entries")
+    if not isinstance(raw, Mapping) or not raw:
+        raise ValueError("metadata declares no entries map")
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, block in raw.items():
+        label = str(name or "").strip()
+        if not label:
+            raise ValueError("entries map carries an unnamed entry")
+        if not isinstance(block, Mapping):
+            raise ValueError(f"entry {label!r} is not an object")
+        if LITERAL_SEP in label:
+            raise ValueError(
+                f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
+                f"literal namespace reserves")
+        if not str(block.get("target") or "").strip():
+            raise ValueError(f"entry {label!r} declares no target")
+        try:
+            contract_from_meta(block)
+            constants_from_meta(block)
+        except ValueError as exc:
+            raise ValueError(f"entry {label!r}: {exc}") from exc
+        out[label] = dict(block)
+    return out
 
 
 def artifact_metadata(
     *,
     family: str,
-    module: str,
     precision: str,
     cell_key: str,
-    inputs: Sequence[Mapping[str, Any]],
-    symbols: Mapping[str, Sequence[int]],
-    constants: Sequence[Mapping[str, Any]],
+    entries: Mapping[str, Mapping[str, Any]],
+    strict_export: bool = True,
+    lora_bucket: int = 0,
     source_ref: str = "",
     source_digest: str = "",
 ) -> Dict[str, Any]:
-    """Build one artifact's ``metadata.json``.
+    """Build one multi-graph artifact's ``metadata.json`` (format 2).
 
     THE single source of truth for the envelope: the mint lane calls this
     rather than hand-rolling a dict, so producer and consumer cannot drift
-    into two interpretations of the same bytes. Validates the contract it
-    is handed (a malformed contract must fail at MINT, on the pod, not at
-    serve time on a paying request).
+    into two interpretations of the same bytes. Each entry block carries
+    ``target``/``fork``/``class_dims``/``inputs``/``symbols``/``constants``
+    (+ ``graph``); this function validates every one, stamps its
+    ``range_digest`` and ``class_hash``, and stamps the ck6
+    ``combined_graph_hash`` over the sorted per-class hashes. A malformed
+    contract must fail at MINT, on the pod, not at serve time on a paying
+    request.
     """
+    stamped: Dict[str, Dict[str, Any]] = {}
+    for name, block in entries.items():
+        # Deep copy: the stamped envelope must not alias the caller's nested
+        # containers (a later caller-side mutation would silently rewrite the
+        # recorded contract).
+        row = copy.deepcopy(dict(block))
+        row["range_digest"] = range_digest(row)
+        row["class_hash"] = class_hash(
+            row, strict=bool(strict_export), lora_bucket=int(lora_bucket or 0))
+        stamped[str(name)] = row
     meta: Dict[str, Any] = {
         "format": ARTIFACT_FORMAT,
         "kind": ARTIFACT_KIND,
         **runtime_key(),
         "family": str(family or ""),
-        "module": str(module or ""),
         "precision": str(precision or ""),
         "cell_key": str(cell_key or ""),
-        "inputs": [dict(row) for row in inputs],
-        "symbols": {str(k): [int(v[0]), int(v[1])] for k, v in symbols.items()},
-        "constants": [dict(row) for row in constants],
+        "entries": stamped,
+        "strict_export": bool(strict_export),
+        "lora_bucket": int(lora_bucket or 0),
         "package_constants_in_so": False,
         "source_ref": str(source_ref or ""),
         "source_digest": str(source_digest or ""),
@@ -420,9 +597,9 @@ def artifact_metadata(
         # first and SIGILL second.
         "host_isa": host_isa.stamp(),
     }
-    contract_from_meta(meta)
-    constants_from_meta(meta)
-    meta["range_digest"] = range_digest(meta)
+    entries_from_meta(meta)
+    meta["combined_graph_hash"] = combined_graph_hash(
+        row["class_hash"] for row in stamped.values())
     return meta
 
 
@@ -432,6 +609,14 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     An AOTI ``.pt2`` is a ``dlopen``-ed ELF built against one exact torch
     C++ ABI on one compute capability — the FULL torch version must match,
     not maj.min, or the load either fails obscurely or is undefined.
+
+    Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA +
+    contract hashes) and never on ``sku`` (pgw#765): a cell minted on an l4
+    and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
+    refusing the cross-SKU adoption discards the whole point of the pgw#691
+    collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
+    (``compile_cache.verify``) carried the identical hard sku pin and shed it
+    in the ck3 wave; this is the same defect on the exported lane.
     """
     if int(meta.get("format") or 0) != ARTIFACT_FORMAT:
         return f"format {meta.get('format')!r} != {ARTIFACT_FORMAT}"
@@ -447,8 +632,16 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     here = runtime_key()
     if not here["torch"]:
         return "torch not importable"
-    for field_name in ("sku", "torch", "cuda"):
+    for field_name in IDENTITY_AXES:
         want, have = str(meta.get(field_name) or ""), here[field_name]
+        if field_name == "sm" and not want:
+            # A pre-pgw#765 cell stamped no capability. Its REAL arch is
+            # readable from the .pt2's own AOTI_COMPUTE_CAPABILITY once the
+            # bytes are staged (:func:`verify_package_compute_capability`,
+            # the pgw#754 two-tier shape), so the axis is not silently
+            # dropped — it is ruled on where the answer exists, before any
+            # dlopen. Metadata-only callers (discovery) cannot know it.
+            continue
         if want != have:
             return f"{field_name} {want!r} != runtime {have!r}"
     isa_reason = host_isa_reason(meta)
@@ -458,13 +651,26 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     if family and want_fam and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
     try:
-        contract_from_meta(meta)
-        constants_from_meta(meta)
+        entries = entries_from_meta(meta)
     except ValueError as exc:
         return f"malformed declared contract: {exc}"
-    stamped = str(meta.get("range_digest") or "")
-    if stamped and stamped != range_digest(meta):
-        return "range_digest does not match the declared contract"
+    strict = bool(meta.get("strict_export", True))
+    bucket = int(meta.get("lora_bucket") or 0)
+    hashes: List[str] = []
+    for name, block in entries.items():
+        stamped = str(block.get("range_digest") or "")
+        if stamped and stamped != range_digest(block):
+            return f"entry {name!r}: range_digest does not match its contract"
+        stamped_hash = str(block.get("class_hash") or "")
+        if not stamped_hash:
+            return f"entry {name!r}: no class_hash stamped"
+        if stamped_hash != class_hash(block, strict=strict, lora_bucket=bucket):
+            # The receipts principle (pgw#716): a hash mismatch NAMES the class.
+            return f"entry {name!r}: class_hash does not match its recorded facts"
+        hashes.append(stamped_hash)
+    stamped_combined = str(meta.get("combined_graph_hash") or "")
+    if stamped_combined and stamped_combined != combined_graph_hash(hashes):
+        return "combined_graph_hash does not match the per-entry class hashes"
     return ""
 
 
@@ -500,29 +706,77 @@ def verify_package_host_isa(meta: Mapping[str, Any], package: Path) -> str:
         return reason
     if isinstance(meta.get("host_isa"), Mapping):
         return ""  # stamped and satisfied; no legacy sniff needed
+    for row in _package_torch_stamps(package):
+        level = host_isa.vec_isa_level(str(row.get("AOTI_CPU_ISA") or ""))
+        machine = str(row.get("AOTI_MACHINE") or "")
+        reason = host_isa.unsupported_reason(level, machine)
+        if reason:
+            return reason + " (torch package stamp, pre-pgw#754 cell)"
+    return ""
+
+
+def _package_torch_stamps(package: Path) -> List[Dict[str, Any]]:
+    """Torch's own ``*_metadata.json`` rows inside a ``.pt2`` — the mint
+    environment as TORCH recorded it (``AOTI_CPU_ISA`` / ``AOTI_MACHINE`` /
+    ``AOTI_COMPUTE_CAPABILITY``, written by
+    ``codecache.get_device_information``). Empty list when unreadable: an
+    unreadable package fails later, loudly, in the load path with its own
+    named error, and a gate only rules on what it can read.
+    """
+    rows: List[Dict[str, Any]] = []
     try:
         import zipfile
 
         with zipfile.ZipFile(package) as zf:
-            names = [
-                n for n in zf.namelist() if n.endswith("_metadata.json")]
-            for name in names:
+            for name in zf.namelist():
+                if not name.endswith("_metadata.json"):
+                    continue
                 try:
                     row = json.loads(zf.read(name).decode("utf-8"))
                 except (ValueError, UnicodeDecodeError):
                     continue
-                if not isinstance(row, dict):
-                    continue
-                level = host_isa.vec_isa_level(
-                    str(row.get("AOTI_CPU_ISA") or ""))
-                machine = str(row.get("AOTI_MACHINE") or "")
-                reason = host_isa.unsupported_reason(level, machine)
-                if reason:
-                    return reason + " (torch package stamp, pre-pgw#754 cell)"
+                if isinstance(row, dict):
+                    rows.append(row)
     except (OSError, zipfile.BadZipFile) as exc:
-        # An unreadable package fails later, loudly, in the load path with
-        # its own named error; the ISA gate only rules on what it can read.
-        logger.debug("aot-serve: host-isa package sniff failed: %s", exc)
+        logger.debug("aot-serve: package stamp read failed: %s", exc)
+    return rows
+
+
+def verify_package_compute_capability(
+    meta: Mapping[str, Any], package: Path,
+) -> str:
+    """The staged-bytes GPU-architecture gate: torch's own
+    ``AOTI_COMPUTE_CAPABILITY`` inside the ``.pt2`` against this device's
+    capability. '' = same architecture (or unknowable).
+
+    The second tier that lets :func:`verify` stop refusing on ``sku``
+    without loosening the axis that actually matters (pgw#765). It rules on
+    the two cases metadata cannot: a pre-pgw#765 cell that stamped no ``sm``
+    axis at all, and a cell whose stamp disagrees with its own bytes. A
+    cubin built for another arch has no PTX fallback (pgw#698 packs cubins
+    only), so without this the refusal would be a raw CUDA load error
+    instead of a named ``adopt_failed:sm_mismatch``.
+
+    The METADATA ``sm`` axis stays :func:`verify`'s (reported as
+    ``key_mismatch`` like every other stamped axis, and rulable before the
+    bytes are ever fetched).
+    """
+    here = runtime_key()["sm"]
+    if not here:
+        return ""  # no CUDA device to rule against; the load path will say so
+    # torch writes the capability as ``major*10+minor`` ("89"); digits-only
+    # comparison also admits the dotted/tuple spellings other device
+    # interfaces use, so a shape surprise is never read as a mismatch.
+    here_digits = "".join(c for c in here if c.isdigit())
+    legacy = "" if meta.get("sm") else "pre-pgw#765 cell, "
+    for row in _package_torch_stamps(package):
+        raw = str(row.get("AOTI_COMPUTE_CAPABILITY") or "").strip()
+        digits = "".join(c for c in raw if c.isdigit())
+        if not digits:
+            continue
+        if digits != here_digits:
+            return (f"sm 'sm_{digits}' != runtime {here!r} "
+                    f"({legacy}torch package stamp)")
     return ""
 
 
@@ -586,9 +840,11 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
     if not meta:
         raise ValueError(f"{ARTIFACT_KIND} artifact {artifact} has no {METADATA_NAME}")
     # A literal-sourced constant with no payload member would only be
-    # discovered at bind time, mid-arm. Name it here.
+    # discovered at bind time, mid-arm. Name it (and its entry) here.
     literals = [
-        s.fqn for s in constants_from_meta(meta) if s.source == SOURCE_LITERAL]
+        f"{name}{LITERAL_SEP}{s.fqn}"
+        for name, block in entries_from_meta(meta).items()
+        for s in constants_from_meta(block) if s.source == SOURCE_LITERAL]
     if literals and LITERALS_NAME not in seen:
         raise ValueError(
             f"{ARTIFACT_KIND} artifact {artifact} declares literal constants "
@@ -651,6 +907,14 @@ def stage_artifact(
         reason = verify(meta, family=family)
         if reason:
             raise AdoptError("key_mismatch", reason)
+        # pgw#765: the GPU-architecture axis as the BYTES declare it, ruled
+        # on by name before dlopen — the tier that keeps cross-SKU adoption
+        # honest now that ``sku`` no longer stands in for the arch. Runs
+        # after `verify` so a stamped axis mismatch keeps its own name.
+        sm_reason = verify_package_compute_capability(
+            meta, root / PACKAGE_NAME)
+        if sm_reason:
+            raise AdoptError("sm_mismatch", sm_reason)
         return _StagedAotArtifact(meta, root, temporary)
     except AdoptError:
         temporary.cleanup()
@@ -685,21 +949,37 @@ def bind_call_inputs(
     contract: ArtifactContract, args: Sequence[Any], kwargs: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Match one call's actual arguments to the declared inputs by keyword
-    first, then by position. Missing non-optional input => named refusal."""
+    first, then by position, then INSIDE any mapping-valued kwarg. Missing
+    non-optional input => named refusal.
+
+    The nested lookup is the serve-side half of the mint's flat calling
+    convention (live-proven missing on the 0.76.x line, pod ae2uc81yub0gyq
+    2026-07-29): the export flattens ``added_cond_kwargs`` entries
+    (``text_embeds``, ``time_ids``) into declared inputs, but a diffusers
+    pipeline calls the denoiser with them NESTED in one dict kwarg —
+    without this resolution an armed artifact refuses every real call by
+    name (``input_missing: text_embeds``) and the cell serves nothing."""
     out: Dict[str, Any] = {}
     for spec in contract.inputs:
         if spec.name in kwargs:
             out[spec.name] = kwargs[spec.name]
         elif 0 <= spec.position < len(args):
             out[spec.name] = args[spec.position]
-        elif spec.optional:
-            continue
         else:
-            raise IngressContractError(
-                "input_missing",
-                f"declared input {spec.name!r} (position {spec.position}) is "
-                f"absent from the call ({len(args)} positional, "
-                f"kwargs {sorted(kwargs)[:8]!r})")
+            nested = next(
+                (v[spec.name] for v in kwargs.values()
+                 if isinstance(v, Mapping) and spec.name in v),
+                None)
+            if nested is not None:
+                out[spec.name] = nested
+            elif spec.optional:
+                continue
+            else:
+                raise IngressContractError(
+                    "input_missing",
+                    f"declared input {spec.name!r} (position {spec.position}) "
+                    f"is absent from the call ({len(args)} positional, "
+                    f"kwargs {sorted(kwargs)[:8]!r})")
     return out
 
 
@@ -749,6 +1029,138 @@ def marshal_positional(
     return feeds
 
 
+def excluded_inputs_present(
+    contract: ArtifactContract, kwargs: Mapping[str, Any],
+) -> Tuple[str, ...]:
+    """The contract's EXCLUDED inputs this call actually carries (pgw#790).
+
+    Keyword and nested-mapping only, mirroring :func:`bind_call_inputs`'
+    resolution order minus the positional leg: an excluded input has no
+    position in this graph's signature, so a positional index would name a
+    different argument entirely. A ``None`` value does not count as carrying
+    it — that is how a diffusers pipeline says "absent".
+    """
+    if not contract.excluded:
+        return ()
+    found: List[str] = []
+    for name in contract.excluded:
+        value = kwargs.get(name, None)
+        if value is None:
+            value = next(
+                (v[name] for v in kwargs.values()
+                 if isinstance(v, Mapping) and v.get(name) is not None),
+                None)
+        if value is not None:
+            found.append(name)
+    return tuple(found)
+
+
+def alignment_gap(value: Any) -> str:
+    """'' when a feed satisfies the artifact's aligned-input contract, else
+    the named reason (pgw#791).
+
+    AOTInductor compiles the fast path for 16-byte-aligned, contiguous
+    inputs. When the run-time pointer is not aligned its ``run_impl`` copies
+    the tensor to an aligned buffer ON EVERY CALL and reports it with a C++
+    ``TORCH_WARN`` — i.e. on the worker's stderr, which hub-spawned pods do
+    not expose. Measured on an RTX 4090 (WARM-INFERENCE-MATRIX §2c): the
+    request residual over 28x(per-forward) is 196 ms for the armed AOT
+    artifact against 77 ms for the equivalent dynamo cell, and diffusers'
+    ``timesteps[i]`` scalar view is the offending input. So the check the
+    serve path never performed cost more than the artifact kind was worth.
+    """
+    ptr = getattr(value, "data_ptr", None)
+    if not callable(ptr):
+        return ""
+    is_contig = getattr(value, "is_contiguous", None)
+    if callable(is_contig) and not is_contig():
+        return "non_contiguous"
+    try:
+        if int(ptr()) % AOTI_ALIGNMENT:
+            return "unaligned_16b"
+    except (RuntimeError, ValueError):  # pragma: no cover — meta/fake tensors
+        return ""
+    return ""
+
+
+class FeedAligner:
+    """Owned aligned staging buffers for one runner's declared inputs.
+
+    The fix pgw#791 asks for is "align once at ingress rather than copying
+    per call", and for a value that CHANGES every call (the timestep does)
+    the honest reading is: allocate once, copy the value. The allocation —
+    which is what the runner repeats, along with a stderr write and an ATen
+    dispatch — happens exactly once per (input, shape, dtype, device); after
+    that the feed is a pointer-stable, correctly aligned buffer the call
+    writes into. Pointer stability is also what cudagraph static inputs want,
+    so this cannot cost the lane a capture later.
+    """
+
+    __slots__ = ("_buffers",)
+
+    def __init__(self) -> None:
+        self._buffers: Dict[str, Any] = {}
+
+    def staged(self, name: str, value: Any) -> Any:
+        """A 16-byte-aligned contiguous copy of ``value`` in an owned buffer."""
+        import torch
+
+        buf = self._buffers.get(name)
+        if (buf is None or buf.dtype is not value.dtype
+                or buf.device != value.device
+                or tuple(buf.shape) != tuple(value.shape)):
+            buf = torch.empty(
+                tuple(value.shape), dtype=value.dtype, device=value.device)
+            if int(buf.data_ptr()) % AOTI_ALIGNMENT:
+                # torch's caching allocator hands out 512-byte-aligned blocks
+                # (CPU: 64). If that ever stops being true, realigning by
+                # allocation is not a fix and this must fail loudly rather
+                # than quietly hand the runner another unaligned pointer.
+                raise IngressContractError(
+                    "realign_unavailable",
+                    f"a freshly allocated buffer for input {name!r} is itself "
+                    f"not {AOTI_ALIGNMENT}-byte aligned "
+                    f"(ptr%{AOTI_ALIGNMENT}="
+                    f"{int(buf.data_ptr()) % AOTI_ALIGNMENT}); the artifact's "
+                    f"aligned-input contract cannot be satisfied here")
+            self._buffers[name] = buf
+        buf.copy_(value)
+        return buf
+
+    def buffered(self) -> Tuple[str, ...]:
+        return tuple(sorted(self._buffers))
+
+
+def aligned_feeds(
+    contract: ArtifactContract,
+    feeds: Sequence[Any],
+    aligner: FeedAligner,
+    report: Optional[Callable[[str, str], None]] = None,
+) -> List[Any]:
+    """``feeds`` with every out-of-contract input realigned in place (pgw#791).
+
+    ``feeds`` is :func:`marshal_positional`'s output, so it is one value per
+    declared input in ``position`` order — the same order this walks, which is
+    what lets a reason NAME the input instead of an index.
+    """
+    specs = sorted(contract.inputs, key=lambda s: s.position)
+    if len(specs) != len(feeds):
+        raise IngressContractError(
+            "feed_arity_mismatch",
+            f"{len(feeds)} marshalled feed(s) for {len(specs)} declared "
+            f"input(s); an aligned-ingress pass that cannot name its inputs "
+            f"would realign the wrong slot")
+    out = list(feeds)
+    for idx, (spec, value) in enumerate(zip(specs, feeds)):
+        reason = alignment_gap(value)
+        if not reason:
+            continue
+        out[idx] = aligner.staged(spec.name, value)
+        if report is not None:
+            report(spec.name, reason)
+    return out
+
+
 def assert_ingress(
     contract: ArtifactContract,
     args: Sequence[Any],
@@ -770,6 +1182,14 @@ def assert_ingress(
       graph requires it, so a mismatch is out-of-contract even when both
       values are individually in range.
     """
+    present = excluded_inputs_present(contract, kwargs)
+    if present:
+        raise IngressContractError(
+            "input_excluded",
+            f"this graph class REFUSES input(s) {list(present)!r}: the call "
+            f"carries them, so it must be served by the class that declares "
+            f"them (pgw#790 — a branchless class fed an adapter would return "
+            f"the base model and look correct)")
     bound = bind_call_inputs(contract, args, kwargs)
     symbols: Dict[str, int] = {}
     owner: Dict[str, str] = {}
@@ -825,18 +1245,36 @@ def assert_ingress(
 # ---------------------------------------------------------------------------
 
 
-def _load_package(path: Path) -> Any:
-    """Load one ``.pt2`` (the sole torch entry point for the load path —
-    tests substitute this)."""
-    import torch
+def _load_package(path: Path, entry: str = "model") -> Any:
+    """Load one NAMED model out of a ``.pt2`` (the sole torch entry point
+    for the load path — tests substitute this). ``"model"`` is torch's own
+    default name for a single-model package."""
+    from torch._inductor.package import load_package
 
-    return torch._inductor.aoti_load_package(str(path))
+    return load_package(str(path), model_name=str(entry or "model"))
 
 
 def _load_literals(path: Path, device: str) -> Dict[str, Any]:
     from safetensors.torch import load_file
 
     return dict(load_file(str(path), device=device))
+
+
+def split_literals(literals: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Split a namespaced literal payload into per-entry tables.
+
+    Keys are ``<entry>::<fqn>`` (:data:`LITERAL_SEP`); a key with no
+    namespace is refused by name — a literal the dispatch cannot attribute
+    to an entry could bind to the wrong graph."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, value in literals.items():
+        entry, sep, fqn = str(key).partition(LITERAL_SEP)
+        if not sep or not entry or not fqn:
+            raise ValueError(
+                f"literal key {key!r} is not namespaced "
+                f"'<entry>{LITERAL_SEP}<fqn>'")
+        out.setdefault(entry, {})[fqn] = value
+    return out
 
 
 def resolve_constants(
@@ -915,13 +1353,26 @@ class ArtifactRunner:
     contract: ArtifactContract
     constants: Tuple[ConstantSpec, ...]
     module_name: str = ""
+    entry: str = ""
     bound: bool = False
     bound_fqns: Tuple[str, ...] = ()
     calls: int = 0
     refusals: Dict[str, int] = field(default_factory=dict)
+    #: pgw#791. ``"<input>/<reason>" -> count``; the typed event fires on the
+    #: first of each, the count keeps the whole tax countable afterwards.
+    realigned: Dict[str, int] = field(default_factory=dict)
+    aligner: FeedAligner = field(default_factory=FeedAligner)
+    #: Set by :func:`load_and_wrap` so the typed realignment event can name
+    #: the cell it belongs to.
+    family: str = ""
 
     def declared_fqns(self) -> Tuple[str, ...]:
         return tuple(s.fqn for s in self.constants)
+
+    def excludes(self, names: Sequence[str]) -> bool:
+        """True when this class refuses every one of ``names`` (pgw#790)."""
+        wanted = set(str(n) for n in names)
+        return bool(wanted) and wanted <= set(self.contract.excluded)
 
     def bind(
         self, state_dict: Mapping[str, Any], literals: Mapping[str, Any],
@@ -969,26 +1420,138 @@ class ArtifactRunner:
         self.bound = True
 
     def assert_ready(self) -> None:
-        """The gate that keeps the segfault unreachable."""
+        """The gate that keeps the segfault unreachable — per ENTRY: the
+        unbound-call segfault was re-measured per named model (pgw#758)."""
         if not self.bound:
             raise ConstantsUnboundError(
                 "constants_unbound",
-                f"refusing to invoke code-only artifact "
-                f"({self.module_name or 'unknown module'}) with "
+                f"refusing to invoke code-only artifact entry "
+                f"({self.entry or self.module_name or 'unknown'}) with "
                 f"{len(self.constants)} unbound constant(s): calling before "
                 f"load_constants segfaults the worker process")
+
+    def _report_realigned(self, name: str, reason: str) -> None:
+        """First occurrence of an (input, reason) is a typed hub-visible
+        event; every occurrence is counted (pgw#791).
+
+        Coalesced deliberately: the defect fires 28+ times per request, and a
+        per-call event would be the stderr spam it replaces, on a wire that
+        costs money. One event names the input; the counter carries the rest.
+        """
+        key = f"{name}/{reason}"
+        seen = self.realigned.get(key, 0)
+        self.realigned[key] = seen + 1
+        if seen:
+            return
+        logger.warning(
+            "aot-serve: input %r arrived %s for entry %r; realigning into an "
+            "owned aligned buffer at ingress (the artifact would otherwise "
+            "copy it on every call and report only on stderr)",
+            name, reason, self.entry or self.module_name)
+        activity_mod.emit_event(
+            REALIGN_EVENT,
+            f"family={self.family} entry={self.entry or self.module_name} "
+            f"target={self.module_name} input={name}: {reason} — realigned at "
+            f"ingress into an owned {AOTI_ALIGNMENT}-byte aligned buffer "
+            f"(AOTInductor would otherwise copy it on every call)",
+            phase=reason,
+        )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.assert_ready()
         try:
             assert_ingress(self.contract, args, kwargs)
             feeds = marshal_positional(self.contract, args, kwargs)
+            # pgw#791: satisfy the artifact's ALIGNED-input contract here,
+            # once, instead of letting the runner discover it per call.
+            feeds = aligned_feeds(
+                self.contract, feeds, self.aligner, self._report_realigned)
         except IngressContractError as exc:
             self.refusals[exc.reason] = self.refusals.get(exc.reason, 0) + 1
             raise
         out = self.package(*feeds)
         self.calls += 1
         return out
+
+
+@dataclass
+class EntryDispatch:
+    """Every named entry of one cell that serves ONE target, behind one
+    call site (pgw#758).
+
+    Dispatch is the declared contract itself: the call routes to the entry
+    whose ingress contract ADMITS it. No admitting entry is a named
+    per-request refusal (the caller serves eagerly); more than one is
+    ``entry_ambiguous`` — the declaration failed to discriminate two graph
+    classes by ingress, which is a defect to surface, never a coin to flip.
+    """
+
+    runners: Tuple[Tuple[str, ArtifactRunner], ...]
+
+    def select(
+        self, args: Sequence[Any], kwargs: Mapping[str, Any],
+    ) -> Tuple[str, ArtifactRunner]:
+        admitted: List[Tuple[str, ArtifactRunner]] = []
+        reasons: List[str] = []
+        for name, runner in self.runners:
+            try:
+                assert_ingress(runner.contract, args, kwargs)
+            except IngressContractError as exc:
+                reasons.append(f"{name}: {exc.reason}")
+                continue
+            admitted.append((name, runner))
+        if not admitted:
+            raise IngressContractError(
+                "no_entry_admits",
+                f"no packaged entry admits this call "
+                f"({len(self.runners)} tried): {'; '.join(reasons[:6])}")
+        if len(admitted) > 1:
+            names = sorted(name for name, _ in admitted)
+            raise IngressContractError(
+                "entry_ambiguous",
+                f"{len(admitted)} entries admit this call ({names[:6]!r}) — "
+                f"the declaration does not discriminate these graph classes "
+                f"by ingress contract")
+        return admitted[0]
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        _name, runner = self.select(args, kwargs)
+        return runner(*args, **kwargs)
+
+    @property
+    def calls(self) -> int:
+        return sum(runner.calls for _n, runner in self.runners)
+
+    def refusal_counts(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for _n, runner in self.runners:
+            for reason, count in runner.refusals.items():
+                out[reason] = out.get(reason, 0) + count
+        return out
+
+    def realignment_counts(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for _n, runner in self.runners:
+            for key, count in runner.realigned.items():
+                out[key] = out.get(key, 0) + count
+        return out
+
+    def entry_calls(self) -> Dict[str, int]:
+        """Per-entry served-call counts — which graph class actually served."""
+        return {name: runner.calls for name, runner in self.runners}
+
+    def excludes(self, names: Sequence[str]) -> bool:
+        """True when some packaged entry REFUSES every one of ``names``.
+
+        The adapter-free routing question, asked of the declaration rather
+        than of a flag: is there a class in this cell that serves calls
+        WITHOUT these inputs? (pgw#790)
+        """
+        wanted = set(str(n) for n in names)
+        if not wanted:
+            return False
+        return any(wanted <= set(runner.contract.excluded)
+                   for _n, runner in self.runners)
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1582,39 @@ def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
     return binding.call_kwargs() if binding is not None else {}
 
 
+def adapter_call_kwargs(
+    module: Any, runner: "ArtifactRunner | EntryDispatch",
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """``(artifact kwargs, eager kwargs)`` for one call's adapter inputs.
+
+    pgw#790's routing rule, in one place. The two differ in exactly one case:
+    the denoiser carries a lifted adapter, NO adapter is currently active, and
+    the cell packages a class that REFUSES the adapter inputs. Then the
+    artifact call omits the pair so the BRANCHLESS class admits it, while the
+    eager fallback still receives it — ``bind_views`` refuses a ``None`` half
+    by name, so the eager path needs the pair exactly as much as a
+    branch-bearing artifact does.
+
+    Nothing here is a new piece of state. "Is an adapter active" is
+    ``w8a8_lora``'s own ``_cozy_lora_active``, written by the per-request
+    attach/clear path (``utils.lora``) since gw#627; this only reads it. And
+    it decides only WHICH pre-compiled class serves the call — never the
+    shape of a program, never a baked constant. Both classes return the same
+    tensor for adapter-free traffic (a zeroed B adds exactly 0), so the
+    routing is a cost decision whose correctness does not depend on it.
+    """
+    lifted = lifted_call_kwargs(module)
+    if not lifted:
+        return {}, {}
+    if lora_lifted.adapter_active(module):
+        return lifted, lifted
+    if not runner.excludes(lora_lifted.LIFTED_INPUT_NAMES):
+        # One branch-bearing class only: it declares the pair as MANDATORY,
+        # so withholding it would refuse every request by name.
+        return lifted, lifted
+    return {}, lifted
+
+
 def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
     """The module's lifted state and the artifact's signature must AGREE.
 
@@ -1032,6 +1628,12 @@ def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
     declared = {spec.name for spec in contract.inputs}
     wanted = set(lora_lifted.LIFTED_INPUT_NAMES)
     lifted = lora_lifted.lifted_binding(module) is not None
+    if lifted and wanted <= set(contract.excluded):
+        # pgw#790: the BRANCHLESS arm of an adapter-forked cell. It says so
+        # explicitly — the adapter inputs are refused, not forgotten — so the
+        # dispatch can never route adapter-bearing traffic to it and "the
+        # branch was traced away" is impossible to reach silently.
+        return
     if lifted and not wanted <= declared:
         raise AdoptError(
             "lifted_inputs_undeclared",
@@ -1048,34 +1650,46 @@ def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
 
 def wrap_module(
     module: Any,
-    runner: ArtifactRunner,
+    runner: "ArtifactRunner | EntryDispatch",
     meta: Dict[str, Any],
     *,
+    attr: str = "forward",
+    target: str = "",
     eager_forward: Optional[Callable[..., Any]] = None,
 ) -> None:
-    """Swap ``module.forward`` for the artifact behind a fail-soft guard.
+    """Swap ``module.<attr>`` for the cell's dispatch behind a fail-soft
+    guard.
 
     Mirrors ``trt_engine.wrap_module``: the first artifact ERROR
     synchronously revokes scheduler-visible compiled proof and permanently
     routes to eager; the module object (config, dtype, device, weights)
     stays untouched, and its weights remain the constant-binding source.
+    ``runner`` is one target's :class:`EntryDispatch` (or a bare
+    :class:`ArtifactRunner` in focused tests — both are callable and count
+    calls); ``attr`` generalizes the swap beyond ``forward`` for dotted
+    targets like ``vae.decode`` (pgw#758).
 
     An :class:`IngressContractError` is NOT such an error. It is a named,
     counted, per-request contract refusal — the request serves eagerly and
     the artifact stays armed for in-contract traffic, because one
-    out-of-range request says nothing about the artifact's health.
+    out-of-range request (or an entry-dispatch miss/ambiguity) says nothing
+    about the artifact's health.
 
     pgw#725 LoRA seam: when the denoiser carries a lifted adapter, both
     ``lora_a``/``lora_b`` are MANDATORY call kwargs and this wrapper is the
     call site that supplies them — see :func:`lifted_call_kwargs`.
     """
-    original = eager_forward or module.forward
+    attr = str(attr or "forward")
+    label = target or f"{meta.get('family')}.{attr}"
+    original = eager_forward or getattr(module, attr)
     state: Dict[str, Any] = {
         "failed": False,
         "successful_calls": 0,
         "ingress_refusals": 0,
         "last_refusal": "",
         "original": original,
+        "attr": attr,
+        "target": label,
         "failure_callback": None,
         "revocation_error": "",
         "runner": runner,
@@ -1088,11 +1702,27 @@ def wrap_module(
         # the LoRA lane may install/remove lifting independently of arming,
         # and a stale capture would either starve the graph of a mandatory
         # input or feed one to a forward that no longer takes it.
-        kwargs = {**kwargs, **lifted_call_kwargs(module)}
+        # pgw#790: an adapter-FREE call omits the pair when the cell packages
+        # a branchless class, so the dispatch routes it to the graph that does
+        # not spend 32-45% of its compiled forward on arithmetic over zeros.
+        # The eager fallback always receives it.
+        artifact_lora, eager_lora = adapter_call_kwargs(module, runner)
+        eager_kwargs = {**kwargs, **eager_lora}
+        kwargs = {**kwargs, **artifact_lora}
         if state["failed"]:
-            return original(*args, **kwargs)
+            return original(*args, **eager_kwargs)
         try:
-            return runner(*args, **kwargs)
+            out = runner(*args, **kwargs)
+            # Envelope parity (live-named on the 0.76.x rerun line,
+            # 2026-07-29): the exported graph returns the RAW tensor, but a
+            # diffusers pipeline calls `unet(..., return_dict=False)[0]` —
+            # indexing a bare tensor silently slices the batch dim and the
+            # crash surfaces downstream as a broadcast error. Restore the
+            # caller's declared envelope: return_dict=False means a 1-tuple.
+            if kwargs.get("return_dict") is False and not isinstance(
+                    out, tuple):
+                return (out,)
+            return out
         except IngressContractError as exc:
             # B2: the exported graph would have run this and returned
             # unvalidated output. Named refusal + eager service.
@@ -1101,46 +1731,46 @@ def wrap_module(
             logger.warning(
                 "aot-serve: %s REFUSED out-of-contract input (%s: %s); "
                 "serving this request eager, artifact stays armed",
-                meta.get("module"), exc.reason, exc)
+                label, exc.reason, exc)
             activity_mod.emit_event(
                 "aot_ingress_refused",
-                f"family={meta.get('family')} module={meta.get('module')}: {exc}",
+                f"family={meta.get('family')} target={label}: {exc}",
                 phase=exc.reason,
             )
-            return original(*args, **kwargs)
+            return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
             # Reaching here means the arm order was violated. The gate did
             # its job (no segfault); the lane is structurally unusable.
             state["failed"] = True
             logger.error(
                 "aot-serve: %s invoked with unbound constants (%s); eager for "
-                "the rest of this process", meta.get("module"), exc)
+                "the rest of this process", label, exc)
             activity_mod.emit_event(
                 "aot_constants_unbound",
-                f"family={meta.get('family')} module={meta.get('module')}: {exc}",
+                f"family={meta.get('family')} target={label}: {exc}",
                 phase=exc.reason,
             )
             _revoke(state, f"constants unbound: {exc}")
-            return original(*args, **kwargs)
+            return original(*args, **eager_kwargs)
         except Exception as exc:  # noqa: BLE001 — ANY artifact problem => eager
             state["failed"] = True
             detail = (
-                f"AOTI artifact {meta.get('module')} failed: "
+                f"AOTI artifact {label} failed: "
                 f"{type(exc).__name__}: {exc}")
             _revoke(state, detail)
             logger.warning(
                 "aot-serve: %s failed (%s: %s); eager for the rest of this "
-                "process", meta.get("module"), type(exc).__name__, exc)
-            return original(*args, **kwargs)
+                "process", label, type(exc).__name__, exc)
+            return original(*args, **eager_kwargs)
 
     def _counted_forward(*args: Any, **kwargs: Any) -> Any:
         out = aot_forward(*args, **kwargs)
         state["successful_calls"] = int(runner.calls)
         return out
 
-    module.forward = _counted_forward
+    setattr(module, attr, _counted_forward)
     setattr(module, _MARKER_ATTR, {
-        "meta": {k: meta.get(k) for k in ("sku", "torch", "precision", "symbols")},
+        "meta": {k: meta.get(k) for k in ("sku", "torch", "precision")},
         "state": state,
     })
 
@@ -1160,79 +1790,156 @@ def _revoke(state: Dict[str, Any], detail: str) -> None:
         raise CompiledLaneUnavailableError(state["revocation_error"]) from callback_exc
 
 
+def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
+    """``(owner module, attribute)`` one entry target names on a pipeline:
+    ``"unet"`` -> ``(pipeline.unet, "forward")``; ``"vae.decode"`` ->
+    ``(pipeline.vae, "decode")``."""
+    owner_name, _, attr = str(target).partition(".")
+    module = getattr(pipeline, owner_name, None)
+    if module is None:
+        raise AdoptError("no_target", f"pipeline has no module {owner_name!r}")
+    attr = attr or "forward"
+    if not callable(getattr(module, attr, None)):
+        raise AdoptError(
+            "no_target", f"module {owner_name!r} has no callable {attr!r}")
+    return module, attr
+
+
 def load_and_wrap(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Stage + verify + load + BIND CONSTANTS, then perform the sole live wrap.
+    """Stage + verify + load EVERY named entry + BIND all constants, then
+    perform the live wraps (pgw#758: one resident artifact serves every
+    declared class, across every declared target).
 
     Raises :class:`AdoptError` with a classified reason on any failure, and
-    never publishes extracted files into a shared live cache. The wrap is
-    the last step: an artifact that cannot bind its constants never becomes
-    reachable from ``module.forward``.
+    never publishes extracted files into a shared live cache. ALL entries
+    bind before ANY wrap: a cell that cannot arm one of its graph classes
+    arms none of them — a partially served contract would be a silent
+    subset of what the cell key advertises.
     """
     family = str(getattr(cfg, "family", "") or "")
     staged = stage_artifact(Path(artifact), family, cache_dir=cache_dir)
     try:
         meta = staged.metadata
-        module_name = str(meta.get("module") or "unet")
-        module = getattr(pipeline, module_name, None)
-        if module is None:
-            raise AdoptError("no_target", f"pipeline has no module {module_name!r}")
-
-        eager_forward: Optional[Callable[..., Any]] = None
-        old_marker = getattr(pipeline, _MARKER_ATTR, None)
-        if old_marker is not None:
-            old_module = old_marker.get("module")
-            old_state = old_marker.get("state") or {}
-            eager_forward = old_state.get("original")
-            if old_module is not module or not callable(eager_forward):
-                raise AdoptError(
-                    "old_marker_invalid",
-                    "existing AOT marker does not retain this module's eager "
-                    "callable")
-
-        t0 = time.monotonic()
         try:
-            contract = contract_from_meta(meta)
-            constants = constants_from_meta(meta)
-            # pgw#725: the lifted-adapter signature must match the module's
-            # actual lifted state before anything is armed.
-            assert_lifted_contract(module, contract)
+            entries = entries_from_meta(meta)
         except ValueError as exc:
             raise AdoptError("contract_invalid", str(exc)) from exc
 
-        package = _load_package(staged.root / PACKAGE_NAME)
-        runner = ArtifactRunner(
-            package=package, contract=contract, constants=constants,
-            module_name=module_name)
+        # Group the entries by target and resolve every owner module first —
+        # an unresolvable target must refuse before any package is dlopen'd.
+        groups: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+        for name in sorted(entries):
+            block = entries[name]
+            groups.setdefault(str(block.get("target") or ""), []).append(
+                (name, block))
+        owners: Dict[str, Tuple[Any, str]] = {
+            target: _target_owner(pipeline, target) for target in groups}
 
-        literals: Dict[str, Any] = {}
+        # Re-arm: a previous wrap's eager originals must be preserved per
+        # target, or unwrap after a re-arm restores a wrapped callable.
+        eager_originals: Dict[str, Callable[..., Any]] = {}
+        old_marker = getattr(pipeline, _MARKER_ATTR, None)
+        if old_marker is not None:
+            old_targets = old_marker.get("targets") or {}
+            for target, row in old_targets.items():
+                old_state = row.get("state") or {}
+                original = old_state.get("original")
+                if row.get("module") is not owners.get(target, (None,))[0] \
+                        or not callable(original):
+                    raise AdoptError(
+                        "old_marker_invalid",
+                        f"existing AOT marker does not retain target "
+                        f"{target!r}'s eager callable")
+                eager_originals[target] = original
+
+        t0 = time.monotonic()
+        literals_by_entry: Dict[str, Dict[str, Any]] = {}
         literals_path = staged.root / LITERALS_NAME
         if literals_path.exists():
-            device = str(getattr(module, "device", "cuda"))
-            literals = _load_literals(literals_path, device)
-        try:
-            runner.bind(dict(module.state_dict()), literals)
-        except ConstantsUnboundError as exc:
-            raise AdoptError(f"constants_{exc.reason}", str(exc)) from exc
+            first_module = next(iter(owners.values()))[0]
+            device = str(getattr(first_module, "device", "cuda"))
+            try:
+                literals_by_entry = split_literals(
+                    _load_literals(literals_path, device))
+            except ValueError as exc:
+                raise AdoptError("contract_invalid", str(exc)) from exc
 
-        # First live mutation. Everything above is proven: complete artifact,
-        # matching runtime key, resolved target, loaded package, and a
-        # constant table proven bound against the declared manifest.
-        wrap_module(module, runner, meta, eager_forward=eager_forward)
-        module_marker = getattr(module, _MARKER_ATTR, {})
-        setattr(pipeline, _MARKER_ATTR, {
-            "meta": meta,
-            "state": module_marker.get("state", {}),
-            "module": module,
-        })
+        # Load + bind EVERY entry before the first live mutation.
+        dispatches: Dict[str, EntryDispatch] = {}
+        total_constants = 0
+        for target, rows in groups.items():
+            module, _attr = owners[target]
+            state_dict = dict(module.state_dict())
+            runners: List[Tuple[str, ArtifactRunner]] = []
+            for name, block in rows:
+                try:
+                    contract = contract_from_meta(block)
+                    constants = constants_from_meta(block)
+                    # pgw#725: the lifted-adapter signature must match the
+                    # module's actual lifted state, per entry.
+                    assert_lifted_contract(module, contract)
+                except ValueError as exc:
+                    raise AdoptError(
+                        "contract_invalid", f"entry {name!r}: {exc}") from exc
+                package = _load_package(staged.root / PACKAGE_NAME, name)
+                runner = ArtifactRunner(
+                    package=package, contract=contract, constants=constants,
+                    module_name=target, entry=name, family=family)
+                try:
+                    runner.bind(state_dict, literals_by_entry.get(name, {}))
+                except ConstantsUnboundError as exc:
+                    raise AdoptError(
+                        f"constants_{exc.reason}",
+                        f"entry {name!r}: {exc}") from exc
+                total_constants += len(constants)
+                runners.append((name, runner))
+            dispatches[target] = EntryDispatch(tuple(runners))
+
+        # First live mutation. Everything above is proven for EVERY entry:
+        # complete artifact, matching runtime key, resolved targets, loaded
+        # named models, constant tables proven bound against the manifests.
+        target_rows: Dict[str, Dict[str, Any]] = {}
+        for target, dispatch in dispatches.items():
+            module, attr = owners[target]
+            wrap_module(
+                module, dispatch, meta, attr=attr, target=target,
+                eager_forward=eager_originals.get(target))
+            module_marker = getattr(module, _MARKER_ATTR, {})
+            target_rows[target] = {
+                "module": module,
+                "attr": attr,
+                "state": module_marker.get("state", {}),
+            }
+        setattr(pipeline, _MARKER_ATTR, {"meta": meta, "targets": target_rows})
         logger.info(
-            "aot-serve: loaded+bound %s in %.1fs (%d constants, symbols %s)",
-            module_name, time.monotonic() - t0, len(constants),
-            dict(contract.symbols))
+            "aot-serve: loaded+bound %d entr%s across %d target(s) in %.1fs "
+            "(%d declared constants, combined_graph_hash=%s)",
+            len(entries), "y" if len(entries) == 1 else "ies", len(groups),
+            time.monotonic() - t0, total_constants,
+            meta.get("combined_graph_hash"))
         return meta
     finally:
         staged.close()
+
+
+def _adopt_identity(artifact: Path) -> str:
+    """Best-effort ``family=… key=…`` from the artifact's own metadata for
+    the typed adopt event — a refusal must name the candidate cell even when
+    the refusal itself is a metadata problem."""
+    try:
+        with tarfile.open(artifact, mode="r:*") as tar:
+            for member in tar:
+                if member.name == METADATA_NAME and member.isfile():
+                    src = tar.extractfile(member)
+                    assert src is not None
+                    meta = json.loads(src.read().decode())
+                    return (f"family={meta.get('family')} "
+                            f"key={meta.get('cell_key')}")
+    except Exception:  # noqa: BLE001 — identity is best-effort by contract
+        pass
+    return f"artifact={artifact.name}"
 
 
 def enable(
@@ -1253,30 +1960,97 @@ def enable(
     try:
         meta = load_and_wrap(pipeline, cfg, Path(artifact), cache_dir=cache_dir)
     except Exception as exc:
-        logger.warning("aot-serve: artifact unusable (%s); staying eager", exc)
+        reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
+        logger.warning(
+            "aot-serve: artifact unusable (%s: %s); staying eager",
+            reason, exc)
+        activity_mod.emit_event(
+            ADOPT_EVENT,
+            f"{_adopt_identity(Path(artifact))}: "
+            f"{type(exc).__name__}: {exc}",
+            phase=reason,
+        )
         return False
     logger.info(
-        "aot-serve: armed %s (sku=%s torch=%s precision=%s, constants bound "
-        "from resident weights)",
-        meta.get("module"), meta.get("sku"), meta.get("torch"),
-        meta.get("precision"))
+        "aot-serve: armed %s [%d entr%s] (sku=%s torch=%s precision=%s, "
+        "constants bound from resident weights)",
+        meta.get("family"), len(meta.get("entries") or {}),
+        "y" if len(meta.get("entries") or {}) == 1 else "ies",
+        meta.get("sku"), meta.get("torch"), meta.get("precision"))
+    activity_mod.emit_event(
+        ADOPT_EVENT,
+        f"family={meta.get('family')} key={meta.get('cell_key')} "
+        f"entries={len(meta.get('entries') or {})} sku={meta.get('sku')} "
+        f"torch={meta.get('torch')} precision={meta.get('precision')}",
+        phase="armed",
+    )
     return True
 
 
-def execution_count(pipeline: Any) -> int:
-    """Successful artifact calls observed on this exact wrapped pipeline."""
+def _marker_states(pipeline: Any) -> List[Dict[str, Any]]:
+    """Every wrapped target's state dict on a pipeline marker (format-2
+    multi-target markers plus the legacy single-``state`` shape tests use)."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    state = marker.get("state") or {}
-    runner = state.get("runner")
-    if runner is not None:
-        return int(getattr(runner, "calls", 0))
-    return int(state.get("successful_calls", 0))
+    rows = marker.get("targets")
+    if isinstance(rows, dict) and rows:
+        return [row.get("state") or {} for row in rows.values()]
+    state = marker.get("state")
+    return [state] if isinstance(state, dict) and state else []
+
+
+def execution_count(pipeline: Any) -> int:
+    """Successful artifact calls observed on this exact wrapped pipeline,
+    summed over every wrapped target."""
+    total = 0
+    for state in _marker_states(pipeline):
+        runner = state.get("runner")
+        if runner is not None:
+            total += int(getattr(runner, "calls", 0))
+        else:
+            total += int(state.get("successful_calls", 0))
+    return total
 
 
 def ingress_refusals(pipeline: Any) -> int:
-    """Out-of-contract calls refused by name on this pipeline (B2)."""
-    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    return int((marker.get("state") or {}).get("ingress_refusals", 0))
+    """Out-of-contract calls refused by name on this pipeline (B2),
+    summed over every wrapped target."""
+    return sum(
+        int(state.get("ingress_refusals", 0))
+        for state in _marker_states(pipeline))
+
+
+def realigned_inputs(pipeline: Any) -> Dict[str, int]:
+    """``"<input>/<reason>" -> count`` of ingress realignments (pgw#791).
+
+    Zero is the contract holding. Non-zero is the tax MEASURED rather than
+    inferred from a stderr line nobody can read — and it is paid at ingress
+    into an owned buffer, not by the runner per call.
+    """
+    out: Dict[str, int] = {}
+    for state in _marker_states(pipeline):
+        runner = state.get("runner")
+        counts = getattr(runner, "realignment_counts", None)
+        rows = counts() if callable(counts) else getattr(runner, "realigned", {})
+        for key, count in dict(rows or {}).items():
+            out[key] = out.get(key, 0) + int(count)
+    return out
+
+
+def served_entry_calls(pipeline: Any) -> Dict[str, int]:
+    """``entry -> served calls`` across every wrapped target (pgw#790).
+
+    Which GRAPH CLASS served, not just that something did: an adapter-forked
+    cell is only doing its job when adapter-free traffic lands on the
+    branchless entry.
+    """
+    out: Dict[str, int] = {}
+    for state in _marker_states(pipeline):
+        runner = state.get("runner")
+        getter = getattr(runner, "entry_calls", None)
+        rows = getter() if callable(getter) else {}
+        for name, count in dict(rows or {}).items():
+            out[name] = out.get(name, 0) + int(count)
+    return out
 
 
 def proven_since(pipeline: Any, before: int) -> bool:
@@ -1294,49 +2068,72 @@ def proven_since(pipeline: Any, before: int) -> bool:
 
 
 def is_armed(pipeline: Any) -> bool:
-    """Whether an AOTI artifact is currently serving this pipeline."""
-    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    state = marker.get("state") or {}
-    return bool(state) and not state.get("failed", False)
+    """Whether the AOTI cell is currently serving this pipeline — EVERY
+    wrapped target must still be live: one revoked target means the cell no
+    longer serves the contract its key advertises."""
+    states = _marker_states(pipeline)
+    return bool(states) and not any(s.get("failed", False) for s in states)
 
 
 def set_guard_failure_callback(pipeline: Any, callback: Any) -> bool:
-    """Bind scheduler-state revocation to an armed artifact's guard."""
-    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    state = marker.get("state")
-    if not isinstance(state, dict):
+    """Bind scheduler-state revocation to every wrapped target's guard."""
+    states = _marker_states(pipeline)
+    if not states:
         return False
-    state["failure_callback"] = callback
+    for state in states:
+        state["failure_callback"] = callback
     return True
 
 
 def unwrap(pipeline: Any) -> bool:
-    """Restore eager forward — rotation/eviction and the unproven-adoption
-    rollback both go through here, same as the TRT lane."""
+    """Restore every wrapped target's eager callable — rotation/eviction
+    and the unproven-adoption rollback both go through here, same as the
+    TRT lane."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    module = marker.get("module")
-    state = marker.get("state") or {}
-    original = state.get("original")
-    if module is None or not callable(original):
-        return False
-    module.forward = original
-    for holder in (module, pipeline):
+    rows: List[Dict[str, Any]] = []
+    targets = marker.get("targets")
+    if isinstance(targets, dict) and targets:
+        rows = list(targets.values())
+    elif marker.get("module") is not None:
+        rows = [{
+            "module": marker.get("module"),
+            "attr": (marker.get("state") or {}).get("attr", "forward"),
+            "state": marker.get("state") or {},
+        }]
+    restored = False
+    for row in rows:
+        module = row.get("module")
+        state = row.get("state") or {}
+        original = state.get("original")
+        if module is None or not callable(original):
+            continue
+        setattr(module, str(row.get("attr") or "forward"), original)
         try:
-            delattr(holder, _MARKER_ATTR)
+            delattr(module, _MARKER_ATTR)
         except AttributeError:
             pass
-    return True
+        restored = True
+    if restored:
+        try:
+            delattr(pipeline, _MARKER_ATTR)
+        except AttributeError:
+            pass
+    return restored
 
 
 __all__ = [
+    "ADOPT_EVENT",
     "ARTIFACT_FORMAT",
     "ARTIFACT_KIND",
     "ArtifactContract",
     "ArtifactRunner",
     "ConstantSpec",
     "ConstantsUnboundError",
+    "EntryDispatch",
+    "IDENTITY_AXES",
     "IngressContractError",
     "InputContract",
+    "LITERAL_SEP",
     "LITERALS_NAME",
     "METADATA_NAME",
     "PACKAGE_NAME",
@@ -1347,9 +2144,12 @@ __all__ = [
     "assert_lifted_contract",
     "assert_ingress",
     "bind_call_inputs",
+    "class_hash",
+    "combined_graph_hash",
     "constants_from_meta",
     "contract_from_meta",
     "enable",
+    "entries_from_meta",
     "execution_count",
     "proven_since",
     "find_artifact",
@@ -1368,12 +2168,14 @@ __all__ = [
     "resolve_constants",
     "runtime_key",
     "set_guard_failure_callback",
+    "split_literals",
     "torch_maj_min",
     "torch_version",
     "unpack",
     "unpack_metadata",
     "unwrap",
     "verify",
+    "verify_package_compute_capability",
     "verify_package_host_isa",
     "wrap_module",
 ]

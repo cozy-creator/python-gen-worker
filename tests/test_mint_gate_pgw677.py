@@ -188,7 +188,7 @@ class _Harness:
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
         monkeypatch.setattr(
-            guard_closure, "assert_closure",
+            guard_closure, "closure_manifest",
             lambda pipe, cfg, label="": {
                 "v": 1, "graphs": [{"target": "transformer", "code": "sim",
                                     "entry": 0, "guards": []}],

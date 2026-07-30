@@ -32,8 +32,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 import msgspec
 
 from . import activity as activity_mod
+from . import boot_phases as boot_mod
+from . import cpu_budget
 from . import mint_budget
 from . import progress as progress_mod
+from . import serving_mode as serving_mode_mod
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -86,6 +89,13 @@ from .models.download import ensure_local, lookup_provider_for_ref
 from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.lanes import LaneUnavailableError
 from .models.residency import Residency
+from .topology import (
+    ExecutionTopology,
+    TopologyError,
+    current_device_group,
+    device_group_scope,
+    pin_cuda_device_for_group,
+)
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 from .runtime_config import ConfigStore, extract_job_config
@@ -130,7 +140,17 @@ async def _to_thread_complete(func: Callable[..., Any], /, *args: Any, **kwargs:
     Diffusers/Accelerate mutate process-global meta-device hooks while loading,
     so a surrounding model-load lock must outlive the worker thread.
     """
-    work = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    # pgw#748: this is THE loop->thread hop of the model-load path (setup,
+    # slot injection, warmup). `torch.cuda.set_device` is thread-local, so a
+    # pool thread points at card 0 no matter which group's job scheduled it —
+    # and every `.to("cuda")` in the loader follows the CURRENT device. The
+    # group rides the contextvar into the thread; this makes the thread's
+    # device follow it. No-op for group 0, i.e. for every pod today.
+    def _pinned(*a: Any, **kw: Any) -> Any:
+        pin_cuda_device_for_group()
+        return func(*a, **kw)
+
+    work = asyncio.create_task(asyncio.to_thread(_pinned, *args, **kwargs))
     try:
         return await asyncio.shield(work)
     except asyncio.CancelledError:
@@ -377,7 +397,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     re-mint — never an upstream self-fetch). Raises ``ValueError`` when
     ``ref`` does not parse under that grammar (e.g. a raw upstream id the
     hub stamped for an unmirrored slot default)."""
-    from .models.refs import parse_model_ref
+    from .models.refs import DEFAULT_REF_TAG, parse_model_ref
 
     parsed = parse_model_ref(ref)
     th = parsed.tensorhub
@@ -386,7 +406,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     return ModelRef(
         source="tensorhub",
         path=f"{th.owner}/{th.repo}",
-        tag=th.tag or "latest",
+        tag=th.tag or DEFAULT_REF_TAG,
         flavor=th.flavor or "",
     )
 
@@ -525,7 +545,11 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     """pb.Snapshot -> the typed resolved-manifest struct (gw#497): the ONE
     wire-boundary conversion; everything downstream (ensure_local,
     ensure_snapshot_async) is typed — no dict laundering."""
-    from .models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
+    from .models.hub_client import (
+        WorkerResolvedChunk,
+        WorkerResolvedRepo,
+        WorkerResolvedRepoFile,
+    )
 
     return WorkerResolvedRepo(
         snapshot_digest=snap.digest,
@@ -535,6 +559,19 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
                 size_bytes=int(f.size_bytes),
                 blake3=f.blake3,
                 url=f.url or None,
+                # th#1303 manifest v2: the algorithm-tagged digest and the
+                # ordered chunk list. Dropping these here is what would make
+                # every chunked snapshot look like a whole file with no URL.
+                digest=getattr(f, "digest", "") or "",
+                chunks=tuple(
+                    WorkerResolvedChunk(
+                        sha256=(c.sha256 or "").strip().lower(),
+                        url=c.url,
+                        length=int(c.len),
+                    )
+                    for c in getattr(f, "chunks", ())
+                ),
+                chunk_size_bytes=int(getattr(f, "chunk_size_bytes", 0) or 0),
             )
             for f in snap.files
         ],
@@ -830,7 +867,19 @@ class ModelStore:
                 )
         elif self._fill_source_dir is not None:
             logger.info("fill_source_enabled dir=%s (volume-warm CAS fill tier)", self._fill_source_dir)
-        self.residency = Residency(
+        # pgw#748 phase 1: ONE Residency registry per execution group, sharing
+        # only the disk tier. VRAM is not fungible between cards, so a group's
+        # LRU, leases and free-VRAM probe speak that group's devices and
+        # nothing else — which is exactly what DeviceGroup's docstring has
+        # promised since pgw#648. ``residency`` resolves the CURRENT group
+        # (the executor stamps it per job), so every existing call site keeps
+        # working and a single-group pod behaves byte-identically.
+        self._vram_budget_bytes = vram_budget_bytes
+        self._residency_by_group: Dict[int, Residency] = {}
+        self._residency_groups: Dict[int, "residency_mod.DeviceGroup"] = {}
+        self._residency_lock = threading.Lock()
+        self.residency_topology: Optional[Any] = None
+        self._residency_by_group[0] = Residency(
             on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
         )
         self._locks: Dict[str, asyncio.Lock] = {}
@@ -1059,6 +1108,92 @@ class ModelStore:
             model_event=self.model_event(ref, state, identity=identity, **kw)
         ))
 
+    # ---- per-group residency (pgw#748 phase 1) --------------------------------
+
+    @property
+    def residency(self) -> Residency:
+        """The registry for the execution group this task is serving.
+
+        The group is ambient because the device already is: every handler
+        thread runs under ``torch.cuda.set_device(gpu_index)`` and every
+        ``.to("cuda")`` in the load path follows the current device. This
+        makes that ambient fact explicit and bookkept, instead of leaving G
+        groups sharing one VRAM ledger they cannot all be true about.
+        """
+        return self.residency_for(current_device_group())
+
+    def residency_for(self, group: int) -> Residency:
+        g = int(group)
+        existing = self._residency_by_group.get(g)
+        if existing is not None:
+            return existing
+        with self._residency_lock:
+            existing = self._residency_by_group.get(g)
+            if existing is not None:
+                return existing
+            device_group = self._residency_groups.get(g)
+            if device_group is None:
+                # No topology delivered (or a group the topology does not
+                # describe): fall back to the single-device group at that
+                # ordinal rather than inventing a width.
+                device_group = residency_mod.DeviceGroup(devices=(g,))
+            reg = Residency(
+                on_event=self._on_residency_event,
+                vram_budget_bytes=self._vram_budget_bytes,
+                device_group=device_group,
+            )
+            # Cross-group invariants that are wired once at boot on group 0.
+            reg.pre_demote = self._residency_by_group[0].pre_demote
+            self._residency_by_group[g] = reg
+            logger.info(
+                "residency registry armed for group %d on devices %s",
+                g, list(device_group.devices),
+            )
+            return reg
+
+    def all_residencies(self) -> List[Residency]:
+        """Every armed group registry. Disk-facing questions (GC keep-sets,
+        in-use, local paths) must union across these — the CAS is one tree
+        with one page cache, shared by every group (§4.3)."""
+        return list(self._residency_by_group.values())
+
+    def bind_topology(self, topology: Any) -> None:
+        """Install the delivered `G×D` packing: one registry per group, each
+        accounting for exactly its own devices."""
+        self.residency_topology = topology
+        if topology is None:
+            return
+        with self._residency_lock:
+            for ordinal in range(int(topology.groups)):
+                self._residency_groups[ordinal] = topology.group(ordinal)
+            zero = self._residency_by_group.get(0)
+            if zero is not None:
+                # Group 0's registry predates the topology (it is created in
+                # __init__ so a topology-less worker is never registry-less).
+                # Retarget it rather than replace it: its entries and leases
+                # are already the live bookkeeping.
+                zero.device_group = self._residency_groups[0]
+
+    def disk_ref_in_use(self, ref: str) -> bool:
+        """In-use across ALL groups (§4.3 caveat 3): one group's GC must never
+        drop the pages another group is mmapping."""
+        return any(reg.in_use(ref) for reg in self.all_residencies())
+
+    def disk_local_path(self, ref: str) -> Optional[Path]:
+        for reg in self.all_residencies():
+            path = reg.local_path(ref)
+            if path is not None:
+                return path
+        return None
+
+    def disk_refs(self) -> List[str]:
+        """Union of DISK-tier refs across groups."""
+        seen: Dict[str, None] = {}
+        for reg in self.all_residencies():
+            for ref in reg.refs_in(residency_mod.Tier.DISK):
+                seen.setdefault(ref, None)
+        return list(seen)
+
     # ---- residency facade ----------------------------------------------------
 
     def residency_snapshot(self) -> List[pb.ModelResidency]:
@@ -1119,8 +1254,12 @@ class ModelStore:
         keep = set(self.keep)
         entries = self._index.entries()
         reclaimable: List[Tuple[str, int]] = []
-        for ref in self.residency.refs_in(residency_mod.Tier.DISK):
-            if ref in keep or self.residency.in_use(ref):
+        # pgw#748: the CAS is ONE tree with one page cache, hardlinked
+        # across every group, so the preserve set is the UNION across groups —
+        # dropping clean pages one group is done with would drop the pages a
+        # sibling group is still mmapping (§4.3 caveat 3).
+        for ref in self.disk_refs():
+            if ref in keep or self.disk_ref_in_use(ref):
                 continue
             ent = entries.get(ref)
             if not ent:
@@ -1162,7 +1301,10 @@ class ModelStore:
         return report
 
     def local_path(self, ref: str) -> Optional[Path]:
-        return self.residency.local_path(ref)
+        # Union across groups (pgw#748): the CAS is ONE hardlinked tree. A
+        # group that has not yet booked this ref must still SEE the bytes a
+        # sibling group already materialized.
+        return self.disk_local_path(ref)
 
     def has_snapshot(self, ref: str) -> bool:
         """A digest-carrying snapshot for ``ref`` was seen this connection
@@ -1384,8 +1526,10 @@ class ModelStore:
         for ref, ent in self._index.entries().items():
             p = Path(str(ent.get("path") or ""))
             if p.exists():
-                if self.residency.tier(ref) is None:
-                    self.residency.track_disk(ref, p)
+                # Every group's registry learns the shared disk tier at boot.
+                for reg in self.all_residencies():
+                    if reg.tier(ref) is None:
+                        reg.track_disk(ref, p)
             else:
                 self._index.remove(ref)
         removed = disk_gc.sweep_stale_writer_temp(self._cache_dir)
@@ -1397,8 +1541,8 @@ class ModelStore:
         excluded = set(exclude)
         candidates = [
             (self._index.last_used(ref), ref)
-            for ref in self.residency.refs_in(residency_mod.Tier.DISK)
-            if ref not in excluded and not self.residency.in_use(ref)
+            for ref in self.disk_refs()
+            if ref not in excluded and not self.disk_ref_in_use(ref)
         ]
         candidates.sort()
         return [ref for _last_used, ref in candidates]
@@ -1436,8 +1580,8 @@ class ModelStore:
         separate seam, see ``_disk_eviction_order``."""
         now = time.time()
         out: List[Tuple[float, str]] = []
-        for ref in self.residency.refs_in(residency_mod.Tier.DISK):
-            if ref in exclude or self.residency.in_use(ref):
+        for ref in self.disk_refs():
+            if ref in exclude or self.disk_ref_in_use(ref):
                 continue
             if (ref in keep) != include_keep:
                 continue
@@ -1628,6 +1772,12 @@ class ModelStore:
         acquired = False
 
         def complete(path: Path) -> _MaterializedLocal:
+            # pgw#748: the bytes are pod-wide but each group keeps its own
+            # ledger, so the group that asked must ALSO book the shared disk
+            # entry — otherwise a group riding a sibling's materialization
+            # never sees the ref in its own LRU, preserve set or eviction.
+            if self.residency.tier(ref) is None:
+                self.residency.track_disk(ref, path)
             if registry is not None:
                 registry.transition(
                     intent_id,
@@ -1658,7 +1808,10 @@ class ModelStore:
                     pb.LIFECYCLE_INTENT_STATUS_RUNNING,
                     pb.LIFECYCLE_INTENT_STAGE_VERIFYING,
                 )
-            cached = self.residency.local_path(ref)
+            # Union across groups: without this, group 1 loading a ref
+            # group 0 already fetched sees `None` and re-runs the whole
+            # download/verify — one pod, one copy, every group (pgw#748).
+            cached = self.disk_local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
             # materialization of the SAME ref at a DIFFERENT digest is stale
             # (flavor re-published — e.g. compile-cache digest-change
@@ -1776,6 +1929,21 @@ class ModelStore:
                         unit="bytes",
                     ),
                 )
+            # pgw#789: THE weights-fetch boot span. It lives here, not at a
+            # caller, because this is the only layer that sees every
+            # materialization path (startup prefetch, DesiredResidency
+            # disk_refs, hot instances, RunJob delivery) AND the only layer
+            # that knows where the bytes came from — net_scope separates a cold
+            # R2 pull from a warm volume/CAS hit, which is the difference
+            # between a 270s boot and a 40s one. Gated on `in_boot()` so a
+            # steady-state materialization hours later does not land in the
+            # boot ladder.
+            fetch_span = (
+                boot_mod.open_span(boot_mod.PHASE_WEIGHTS_FETCH, ref=ref)
+                if boot_mod.in_boot() else None
+            )
+            fetch_exc: Optional[BaseException] = None
+            fetch_bytes = 0
             try:
                 delay = 1.0
                 for attempt in range(1, _DOWNLOAD_RETRIES + 1):
@@ -1829,6 +1997,7 @@ class ModelStore:
                         # tree_bytes stats every file — off-loop (gw#407: no
                         # multi-GB directory walks on the event loop).
                         size = await asyncio.to_thread(disk_gc.tree_bytes, path)
+                        fetch_bytes = int(size)
                         self._index.record(ref, path, size)
                         # Fresh downloads were digest-verified by the downloader.
                         self._verified.add(ref)
@@ -1872,8 +2041,33 @@ class ModelStore:
                             )
                         delay *= 4
                 raise RuntimeError("unreachable")
+            except BaseException as exc:
+                fetch_exc = exc
+                raise
             finally:
                 dl_counter.finish()
+                if fetch_span is not None:
+                    net = int(net_scope.network_bytes)
+                    if net > 0:
+                        source = boot_mod.SOURCE_R2
+                    elif known_total > 0:
+                        # A CAS snapshot materialized with zero network bytes:
+                        # every blob was already under blobs_root (local CAS) or
+                        # came off the endpoint's warm datacenter volume.
+                        source = (
+                            boot_mod.SOURCE_VOLUME if self._fill_source_dir
+                            else boot_mod.SOURCE_LOCAL
+                        )
+                    else:
+                        # No snapshot: a provider-direct pull into the HF cache.
+                        source = boot_mod.SOURCE_HF_CACHE
+                    fetch_span.bytes_moved(net or known_total or fetch_bytes, source)
+                    fetch_span.note(
+                        f"ref={ref} net_bytes={net} manifest_bytes={known_total} "
+                        f"tree_bytes={fetch_bytes} "
+                        f"fill={'yes' if self._fill_source_dir else 'no'}"
+                    )
+                    fetch_span.close(fetch_exc)
         except asyncio.CancelledError:
             if registry is not None:
                 if command_owned:
@@ -1929,39 +2123,66 @@ class ModelStore:
         """Integrity of a materialized snapshot (worker thread; blocking IO).
 
         With a resolved manifest every regular file is checked against its
-        declared size AND blake3 digest; files the manifest cannot cover
-        (reassembled chunked originals, merged single-file checkpoints) plus
-        manifest-less trees (hf/civitai) get the structural safetensors check
-        (header parses + every declared tensor byte present). Returns
-        ``(ok, bad_digests)`` — the digests name blobs to quarantine."""
-        from .models.cozy_cas import _blake3_file
-        from .models.cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
+        declared size AND their CONTENT DIGEST, hashed under the algorithm the
+        manifest named; files the manifest cannot cover (reassembled chunked
+        originals, merged single-file checkpoints) plus manifest-less trees
+        (hf/civitai) get the structural safetensors check (header parses +
+        every declared tensor byte present). Returns ``(ok, bad_digests)`` —
+        the digests name blobs to quarantine."""
+        from .models.cozy_snapshot import _norm_rel_path
         from .models.loading import safetensors_file_valid
+        from .models.volume_verify import snapshot_verify_targets, verify_files
 
         p = Path(path)
         bad: List[str] = []
         covered: set[Path] = set()
         files = list(snapshot.files) if snapshot is not None else []
         if files and p.is_dir():
-            for f in files:
-                if _is_parts_manifest(f.path) or _is_part_file(f.path):
-                    continue  # not materialized: parts live only in blobs/
+            # pgw#769/#781 (th#1303): the hash algorithm comes from the DIGEST,
+            # never from this call site. This used to read `f.blake3` and hash
+            # with blake3 -- but under manifest v2 that field is EMPTY and the
+            # digest lives in `f.digest` as "sha256:<hex>", so `digest` was ""
+            # and BOTH the size check and the hash check were skipped. The tree
+            # was then reported CLEAN WITHOUT BEING HASHED. On a volume shared
+            # across releases and pods that is a security hole, not a cosmetic
+            # gap, and it is the same false-clean shape as reading
+            # manifest["files"] when the key is "entries": a verifier that
+            # examines nothing looks exactly like one that passes.
+            targets, skipped = snapshot_verify_targets(files, p)
+            for rel in skipped:
                 try:
-                    dst = p / _norm_rel_path(f.path)
+                    covered.discard(p / _norm_rel_path(rel))
                 except ValueError:
-                    continue
-                covered.add(dst)
-                digest = (f.blake3 or "").strip().lower()
-                try:
-                    if not dst.exists():
-                        raise ValueError("missing")
-                    if f.size_bytes and dst.stat().st_size != int(f.size_bytes):
-                        raise ValueError("size mismatch")
-                    if digest and _blake3_file(dst).lower() != digest:
-                        raise ValueError("blake3 mismatch")
-                except (OSError, ValueError) as exc:
-                    logger.warning("snapshot file %s/%s corrupt: %s", p.name, f.path, exc)
-                    bad.append(digest or f.path)
+                    pass
+            for t in targets:
+                covered.add(t.path)
+            if targets:
+                rep = verify_files(targets, blobs_root=str(p.parent))
+                bad.extend(rep.bad)
+                for finding in rep.findings:
+                    logger.warning("snapshot %s: %s", p.name, finding)
+                # DENOMINATOR GUARD, and it applies only to an otherwise-CLEAN
+                # report: a verdict that found nothing wrong is trustworthy only
+                # if it actually read the bytes. `examined` must cover every
+                # target handed in, and a clean run that neither hashed nor
+                # memo-hit anything read nothing at all. (A report that already
+                # names bad files is not vacuous -- it did its job, and folding
+                # it in here would double-report the same digest.)
+                vacuous = (
+                    not rep.bad
+                    and not rep.findings
+                    and rep.hashed == 0
+                    and rep.memo_hits == 0
+                )
+                if rep.examined != rep.expected or vacuous:
+                    logger.error(
+                        "snapshot %s verification is not trustworthy: examined=%d "
+                        "expected=%d hashed=%d memo=%d bytes=%d -- treating as corrupt",
+                        p.name, rep.examined, rep.expected, rep.hashed,
+                        rep.memo_hits, rep.bytes_hashed,
+                    )
+                    already = set(bad)
+                    bad.extend(t.ref for t in targets if t.ref not in already)
         try:
             candidates = [p] if p.is_file() else sorted(p.rglob("*.safetensors"))
         except OSError:
@@ -2240,6 +2461,10 @@ class _ClassRecord:
     compile_targets: Dict[str, _CompileTargetRecord] = dc_field(default_factory=dict)
     # gw#661: consecutive will-retry setup losses; reset by any success.
     transient_setup_failures: int = 0
+    # pgw#748 phase 1: the armed degree-D rank group serving THIS record, or
+    # None at degree 1 (every record today). Owned by the record because it is
+    # bound to the record's pipeline objects and must die with them.
+    sp_runtime: Optional[Any] = None
     # pgw#671 eager-first boot: the in-flight background self-mint for this
     # record's live instance, when the boot went READY(eager) with the mint
     # deferred. Cleared when the mint completes, is disproven, or is
@@ -2302,6 +2527,39 @@ class _BackgroundMint:
     # (idle-granted turns only — stolen turns run to completion). A tenant
     # admission cancels it; the driver re-queues the unit.
     seed_ctx: Optional[Any] = None
+    # pgw#784: the two facts a DELEGATED mint's child process needs and cannot
+    # rediscover for itself — the endpoint module(s) to walk (the child re-runs
+    # discovery in a fresh interpreter) and the ALREADY-materialized local
+    # snapshot path per setup slot. The paths matter: a mint is compute, and a
+    # mint process that could download is a mint process that can stall on a
+    # lemon host (pgw#786).
+    modules: Tuple[str, ...] = ()
+    snapshot_paths: Dict[str, str] = dc_field(default_factory=dict)
+    # th#1299: WHY this mint was asked to stop. The abort event used to report
+    # "(adopt-on-arm / vacate / shutdown)" — three unrelated causes in one
+    # string — so a mint that died could not be told from a mint that was
+    # legitimately superseded without joining the hub's pod tables by hand.
+    # Set by abandon_background_mint before the signal, read by the terminal
+    # handler; a code (queryable) and the human sentence beside it.
+    abandon_code: str = "unspecified"
+    abandon_reason: str = ""
+
+
+def _mint_modules(spec: EndpointSpec) -> Tuple[str, ...]:
+    """The module list a mint child re-runs discovery over (pgw#784).
+
+    The spec's own declaring module — which is what the baked manifest named
+    for this function. ``registry.collect_endpoints`` walks it and its
+    submodules, so the child rediscovers this class AND its sibling functions
+    (the warm plan is class-scoped, pgw#654) without the parent serializing
+    anything live.
+    """
+    module = str(getattr(spec, "module", "") or "").strip()
+    return (module,) if module else ()
+
+
+def _delegated_pendings(pendings: typing.Mapping[int, Any]) -> bool:
+    return any(getattr(p, "delegated", False) for p in pendings.values())
 
 
 def _eager_first_boot_enabled() -> bool:
@@ -2410,11 +2668,33 @@ class _Job:
     # th#913/gw#596: the CONCRETE lane serving this job (stamped post-setup,
     # reported on JobMetrics.lane). "" = not yet determined.
     lane: str = ""
+    # pgw#789 (th#1293 dimensions): this request was served EAGER by a compiled
+    # lane — a pgw#680 guard miss, a router heal/volatile verdict, or an
+    # aot_serve ingress refusal. Set from the guard-miss callback, which fires
+    # DURING the request and names it via postmortem.current_inflight_request().
+    # Without it a fallback sample reports lane=...+compiled and silently
+    # contaminates every compiled-vs-eager latency comparison with eager data.
+    served_eager_fallback: bool = False
+    fallback_reason: str = ""
+    # pgw#789: (steps, width, height) of the EXECUTED payload, defaults
+    # applied — the axes latency is a function of. Stamped beside `lane`,
+    # where the resolved payload is in scope; 0 means "not applicable"
+    # (non-spatial function), never "zero".
+    shape: Tuple[int, int, int] = (0, 0, 0)
     admitted_at: float = dc_field(default_factory=time.monotonic)
     # One JobProgress seq space per job, shared by stream chunks and ctx
     # events so interleaved sends stay monotonic. itertools.count.__next__
     # is atomic under the GIL — safe from handler threads.
     seq: "itertools.count[int]" = dc_field(default_factory=lambda: itertools.count(1))
+
+
+class DispatchGroupUnresolved(RetryableError):
+    """pgw#779: this dispatch does not name an execution group this pod has.
+
+    RETRYABLE, not INVALID: nothing about the tenant's input is wrong — the
+    hub's `ResolvedCompute` is missing or disagrees with the delivered packing,
+    and a dispatch that carries the right one serves fine. Refused rather than
+    floored onto group 0, which is the group that is always busiest."""
 
 
 class _GpuSlotLease:
@@ -2474,7 +2754,8 @@ class Executor:
         *,
         settings: Any = None,
         store: Optional[ModelStore] = None,
-        gpu_slots: int = 1,
+        gpu_slots: Optional[int] = None,
+        topology: Optional[ExecutionTopology] = None,
     ) -> None:
         self.specs: Dict[str, EndpointSpec] = {s.name: s for s in specs}
         self._send = send
@@ -2499,8 +2780,42 @@ class Executor:
         # for it. Identity-stable so equal picks across requests derive equal
         # instance keys (one resident instance per (class, resolved pick)).
         self._hub_bindings: Dict[str, ModelRef] = {}
-        self._gpu_slots = max(1, gpu_slots)
-        self._gpu_semaphore = asyncio.Semaphore(self._gpu_slots)
+        # pgw#748 phase 1 / th#1285: the hub's `G×D` packing is authoritative.
+        # G == the slot semaphore, and it comes from the delivered topology —
+        # NEVER from torch.cuda.device_count() (at D>1 slots are not devices)
+        # and never from an operator knob. An explicit gpu_slots= still wins
+        # for the local `cli/serve` path and for tests.
+        self.topology = topology or ExecutionTopology.single()
+        # pgw#748: id(record) -> the GroupPlan its ranks agreed on. Keyed by
+        # identity because a record is the group's owner and dies with it.
+        self._sequence_plans: Dict[int, Any] = {}
+        self.store.bind_topology(self.topology)
+        self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.groups)
+        # pgw#779: G INDEPENDENT permits, not a COUNT of G. A count admits G
+        # concurrent jobs but binds none of them to a group, so four dispatches
+        # naming the same card serialized on one `run_lock` while three cards
+        # idled — reported as four healthy slots. One permit per group makes
+        # "one GPU job per group" the invariant the object expresses.
+        # ``gpu_slots=`` (the `cli serve`/test override, never a production
+        # knob) still means what it meant: its concurrency is divided among the
+        # groups, so at G==1 group 0's permit IS today's whole pool.
+        per_group = max(1, self._gpu_slots // max(1, self.topology.groups))
+        self._gpu_permits: Tuple[asyncio.Semaphore, ...] = tuple(
+            asyncio.Semaphore(per_group)
+            for _ in range(max(1, self.topology.groups))
+        )
+        self._gpu_permits_each = per_group
+        # Group 0's permit. At G == 1 — every pod today — this IS the pool.
+        self._gpu_semaphore = self._gpu_permits[0]
+        # pgw#782: the slot count is also the CPU divisor. torch sizes its
+        # intra-op pool from the HOST's logical processors, so a 4-group pod
+        # runs four 48-thread teams against a 32-core quota. De-escalation
+        # only, and measured NEUTRAL on the width-4 sdxl burst (37.1s vs
+        # 36.7s) — the collapse is the shared interpreter (pgw#783), not this.
+        # Kept because the oversubscription is real and bites narrow-quota
+        # pods. Here, with the other process-global torch state (TF32 above),
+        # keyed off the same authoritative slot count.
+        self.cpu_budget = cpu_budget.impose_intra_op_threads(self._gpu_slots)
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
@@ -3055,6 +3370,25 @@ class Executor:
                 f"signal={(worst[1] or {}).get('last_signal') or 'unknown'})")
         for name, spec in self.specs.items():
             r = spec.resources
+            # pgw#778: never ADVERTISE what dispatch will refuse. The
+            # multi-group async-handler refusal used to fail every request
+            # JOB_STATUS_INVALID — the status that means the CALLER's input was
+            # bad, so the hub neither retried elsewhere nor charged the worker
+            # — while the function stayed in available_functions and the hub
+            # kept routing to it. A wide pod with an async endpoint became a
+            # 100%-INVALID black hole blamed on the caller. Withdrawing it here
+            # is the same seam every other hardware refusal uses, so the hub
+            # re-packs or routes elsewhere.
+            group_refusal = self._multi_group_handler_refusal(spec)
+            if group_refusal:
+                logger.warning(
+                    "withdrawing %r on this pod: %s", name, group_refusal)
+                self.unavailable[name] = (
+                    "multi_group_async_handler", group_refusal,
+                    {"groups": str(self.topology.groups),
+                     "degree": str(self.topology.degree)})
+                self._gate_owned.add(name)
+                continue
             streak_row = crash_streaks.get(name)
             streak = int((streak_row or {}).get("count") or 0)
             if streak >= postmortem.NATIVE_CRASH_REFUSE_STREAK:
@@ -3519,6 +3853,39 @@ class Executor:
         )
         activity_mod.emit_event(
             activity_mod.KIND_GUARD_MISS, detail, phase=reason_class)
+        # pgw#789: charge the fallback to THIS request's JobMetrics. The event
+        # above makes the miss countable per (release, SKU, reason); this makes
+        # the LATENCY SAMPLE honest, which is a different question — an eager
+        # sample tagged serving_mode=aot_cell argues against the optimization
+        # that is in fact working. `heal` is the router's own verdict
+        # (healing = transient, volatile = permanently eager for this shape),
+        # so it outranks the generic guard_miss class.
+        self._mark_request_eager_fallback(
+            request_id,
+            (miss.heal if miss.heal in (
+                serving_mode_mod.FALLBACK_HEALING,
+                serving_mode_mod.FALLBACK_VOLATILE) else
+             serving_mode_mod.FALLBACK_GUARD_MISS),
+        )
+
+    def _mark_request_eager_fallback(self, request_id: str, reason: str) -> None:
+        """Record that ``request_id`` was served eager by a compiled lane.
+
+        Called from a HANDLER thread (the guard-miss callback), so it only
+        writes two plain fields on the job — no locks, no event-loop hop. A
+        request id that names no live job (a background warm compile, a raced
+        terminal) is dropped: there is no sample to correct.
+        """
+        if not request_id:
+            return
+        for job in list(self.jobs.values()):
+            if job.request_id != request_id or job.finished:
+                continue
+            job.served_eager_fallback = True
+            # First reason wins: `volatile` is a terminal verdict and must not
+            # be downgraded to `guard_miss` by a later miss on the same request.
+            if not job.fallback_reason:
+                job.fallback_reason = reason
 
     def _install_compile_targets(
         self,
@@ -3534,6 +3901,16 @@ class Executor:
         cfg = spec.compile_cell()
         rec.compile_targets = {}
         if cfg is None:
+            return
+        # pgw#775: no targets at degree>1. A target is what routes a novel
+        # signature to the shared warm thread, which forwards the compile-
+        # capable OBJECT (not the gated pipeline) on rank 0 alone — the exact
+        # forward that hangs the group. No targets means no hot-swap routing,
+        # no background mint turn and no adoption for this record.
+        eager_only = self._eager_only_reason()
+        if eager_only:
+            logger.info(
+                "%s: no compile targets installed — %s", spec.name, eager_only)
             return
         # Production injection supplies object-scoped slot ownership. Keep
         # bare objects accepted for focused unit construction only, deriving
@@ -4116,6 +4493,126 @@ class Executor:
             "tensorhub-CAS ref"
         )
 
+    def _multi_group_handler_refusal(self, spec: EndpointSpec) -> str:
+        """pgw#748 residual, made LOUD instead of silently wrong.
+
+        ``ctx.device`` still resolves to ``cuda:{torch.cuda.current_device()}``.
+        For a SYNC handler that is correct by construction — the handler thread
+        runs ``set_device(group rank-0)`` and, since 6424bce, so does the load
+        thread. An ASYNC handler runs on the shared event loop, whose thread
+        device belongs to whichever group most recently touched it, so on a
+        multi-group worker ``ctx.device`` can name a card the job does not own.
+
+        A wrong device is not a crash; it is a request that quietly computes on
+        a sibling's card, competing for its VRAM. So it is refused, by name,
+        until ``ctx.device`` is explicit from the job's group. Single-group
+        workers — every pod today — are untouched.
+        """
+        if self.topology.groups <= 1 and self.topology.degree <= 1:
+            return ""
+        if not (spec.is_async or spec.is_async_gen):
+            return ""
+        return (
+            f"{spec.name}: async handlers are not yet served on a multi-group "
+            f"worker ({self.topology}). ctx.device resolves from the calling "
+            "thread's current CUDA device, which on the shared event loop is "
+            "not this job's group. Refused rather than served on a sibling's "
+            "card (pgw#748)."
+        )
+
+    def _eager_only_reason(self) -> str:
+        """Non-empty when this pod's topology forbids compile arming (pgw#775).
+
+        Once ``enable_parallelism`` installs the CP hooks, EVERY forward
+        through the sharded modules issues collectives — and the only
+        participant-supplying seam is the pipeline-level SP gate. A hot-swap
+        warm compile, a mint seed, a proof warmup or an activation probe all
+        forward on rank 0 only, outside that gate, and hang the group. "Eager
+        only at degree>1" is therefore enforced by construction: no compile
+        selection is fetched, no arming scope opens, no targets install, no
+        cell adopts. This is the code the a08a3bd commit message claimed.
+        """
+        topo = self.topology
+        if topo.degree > 1 and topo.parallel == "sequence":
+            return (
+                f"eager only at {topo}: compile/hot-swap/self-mint are "
+                "disabled under context parallelism (pgw#775) — any forward "
+                "outside the sequence gate would hang the degree-"
+                f"{topo.degree} group"
+            )
+        return ""
+
+    def _dispatch_group(self, run: "pb.RunJob") -> int:
+        """Which execution group this dispatch names (pgw#748 / th#1285 §2a).
+
+        ``ResolvedCompute.gpu_index`` is unchanged on the wire and now names
+        the group's RANK-0 device — 0, D, 2D, … — so the whole derivation is
+        ``gpu_index // D``. At D == 1 this is the identity, which is why
+        nothing about today's dispatch path moves.
+
+        On a WIDE pod the hub's answer is load-bearing and a wrong one is
+        silent: a missing ``compute`` used to floor to group 0 and an index
+        that is not a rank-0 device was floored to a real group with a
+        `logger.warning`, so four jobs could pile onto one card while three sat
+        idle and the pod still reported four healthy slots. At G>1 both are
+        typed refusals (pgw#779) — RETRYABLE, because a dispatch that carries
+        the field serves fine, and nothing about the tenant's input is wrong.
+        Single-group pods keep the historical behaviour exactly: CPU functions
+        and pre-topology hubs have no compute and there is only one group to
+        mean.
+        """
+        if self.topology.groups <= 1:
+            return 0
+        if not run.HasField("compute"):
+            raise DispatchGroupUnresolved(
+                f"dispatch carries no resolved compute on a {self.topology} "
+                "pod: the execution group cannot be derived, and serving it as "
+                "group 0 would pack this job onto a card another group owns"
+            )
+        try:
+            return self.topology.group_ordinal_exact(int(run.compute.gpu_index))
+        except TopologyError as exc:
+            raise DispatchGroupUnresolved(
+                f"dispatched gpu_index={int(run.compute.gpu_index)} is not a "
+                f"rank-0 device of {self.topology}: {exc}. The hub and the "
+                "worker disagree about the packing; refused rather than "
+                "floored onto a group this job does not own"
+            ) from exc
+
+    def _gpu_permit_for_group(self, group: int) -> asyncio.Semaphore:
+        """The permit that IS group ``group``'s card (pgw#779).
+
+        Out of range is a programming error, not a thing to floor: the group
+        was derived by `_dispatch_group`, which already refused anything the
+        topology does not contain.
+        """
+        g = int(group)
+        if g < 0 or g >= len(self._gpu_permits):
+            raise DispatchGroupUnresolved(
+                f"no GPU permit for group {g} of {len(self._gpu_permits)} "
+                f"({self.topology})"
+            )
+        return self._gpu_permits[g]
+
+    def _gpu_permit_for_record(self, rec: "_ClassRecord") -> asyncio.Semaphore:
+        """A record belongs to exactly one group — its specs carry the
+        ordinal, and `instance_key` includes it, so this is a lookup and not a
+        guess."""
+        ordinals = {
+            int(s.device_group_ordinal) for s in rec.specs
+        } or {int(current_device_group())}
+        return self._gpu_permit_for_group(sorted(ordinals)[0])
+
+    def _group_effective_spec(
+        self, spec: EndpointSpec, group: int
+    ) -> EndpointSpec:
+        """Bind the dispatch to its group. Two groups are two cards, so they
+        are two resident instances: the ordinal joins ``instance_key`` and the
+        existing one-record-per-key machinery does the rest."""
+        if int(group) == int(spec.device_group_ordinal):
+            return spec
+        return dc_replace(spec, device_group_ordinal=int(group))
+
     def _effective_spec(self, spec: EndpointSpec, run: "pb.RunJob") -> EndpointSpec:
         """The spec THIS dispatch runs (pgw#532): every declared Slot rebound
         to the hub-resolved pick in ``RunJob.models``. A pick that differs
@@ -4326,6 +4823,38 @@ class Executor:
                 self.runtime_config.stamp_function(spec.name, stamped, gen)
             values.update(stamped or {})
         return values
+
+    def _served_identity(
+        self, spec: Optional[EndpointSpec], job: Optional["_Job"] = None,
+    ) -> "serving_mode_mod.ServedIdentity":
+        """pgw#764/th#1293 dimensions for one completed request.
+
+        `_served_lane` already reports `...+compiled`, but that axis is BINARY
+        platform-wide: it cannot tell an AOT `.pt2` replay from a JIT dynamo
+        cell and it names no artifact, so "AOT vs JIT p50 on 4090s for sdxl
+        w8a8" was unanswerable over our own production traffic even though the
+        worker knew the answer for every request. The discriminator is the
+        ARMED artifact (`aot_serve` owns it), never the lane string.
+
+        Reads the same `rec.compile_targets` scan `_served_lane` uses, so the
+        two can never disagree about whether this request ran compiled.
+        """
+        ref, pipeline = "", None
+        if spec is not None and spec.cls is not None:
+            rec = self._classes.get(spec.instance_key)
+            if rec is not None:
+                for target in rec.compile_targets.values():
+                    with target.state_lock:
+                        active = str(target.active_compile_ref or "")
+                    if active:
+                        ref, pipeline = active, target.pipeline
+                        break
+        return serving_mode_mod.resolve(
+            active_compile_ref=ref,
+            pipeline=pipeline,
+            guard_missed=bool(job is not None and job.served_eager_fallback),
+            verdict=(job.fallback_reason if job is not None else ""),
+        )
 
     def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
         """th#1050: the instructed lane's body when the endpoint DECLARES it
@@ -4562,12 +5091,19 @@ class Executor:
         inside this target's before/after window and falsely certify it.
         These maintenance paths run before a job holds a permit themselves.
         """
+        # pgw#779: EVERY group's permit, each to its full depth — "exclusive"
+        # means no other job on this pod, and with per-group permits that is
+        # G x per-group, not a count of G.
+        all_permits = [
+            permit for permit in self._gpu_permits
+            for _ in range(self._gpu_permits_each)
+        ]
         acquired = 0
         try:
-            for _ in range(self._gpu_slots):
+            for permit in all_permits:
                 await self._intent_await(
                     intent_id,
-                    self._gpu_semaphore.acquire(),
+                    permit.acquire(),
                     operation="exclusive GPU permit",
                     status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
                     stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
@@ -4586,15 +5122,15 @@ class Executor:
                 pb.LIFECYCLE_INTENT_STATUS_CANCELED,
                 (
                     resume_stage
-                    if acquired == self._gpu_slots
+                    if acquired == len(all_permits)
                     else pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT
                 ),
                 detail="exclusive GPU wait canceled",
             )
             raise
         finally:
-            for _ in range(acquired):
-                self._gpu_semaphore.release()
+            for permit in all_permits[:acquired]:
+                permit.release()
 
     # ---- setup -------------------------------------------------------------
 
@@ -5431,7 +5967,13 @@ class Executor:
                 component_paths.setdefault(slot, {})[comp] = str(comp_mat.path)
                 if comp_mat.identity[0]:
                     override_digests[comp_ref] = comp_mat.identity[0]
-        compile_selection = await self._fetch_compile_snapshot(spec, snapshots)
+        eager_only = self._eager_only_reason()
+        if eager_only and spec.compile is not None:
+            logger.info("%s: %s", spec.name, eager_only)
+        compile_selection = (
+            None if eager_only
+            else await self._fetch_compile_snapshot(spec, snapshots)
+        )
         compile_artifact = compile_selection.path if compile_selection else None
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
@@ -5516,7 +6058,12 @@ class Executor:
                 # reaches the same cache-artifact-gated policy. No-op when
                 # spec.compile is None.
                 arming_scope = provision.ArmingScope(
-                    spec.compile_cell(), self.store._cache_dir, compile_artifact,
+                    # pgw#775: a None cell makes the scope a no-op, so an
+                    # endpoint's own `gen_worker.arm_compile(pipe)` inside
+                    # setup() cannot arm a compile — and cannot self-mint —
+                    # on a context-parallel pod.
+                    None if eager_only else spec.compile_cell(),
+                    self.store._cache_dir, compile_artifact,
                     enable=self._arming_enable,
                 )
                 with arming_scope:
@@ -5545,7 +6092,11 @@ class Executor:
                     inj.add_compile_object(pipe, self_loaded_slots)
                     mint = scope_mints.get(id(pipe))
                     selection = _selection_for(compile_selection, mint)
-                    if armed and selection is not None:
+                    if getattr(mint, "delegated", False):
+                        # pgw#784: see the slot path above — recorded, but
+                        # never advertised as an active artifact.
+                        inj.pending_self_mints[id(pipe)] = mint
+                    elif armed and selection is not None:
                         inj.active_compile_artifacts[id(pipe)] = selection
                         if trt_engine.is_engine_ref(selection.ref):
                             inj.trt_execution_before[id(pipe)] = (
@@ -5570,7 +6121,16 @@ class Executor:
             # selection, no proof loop, targets registered active-less
             # (advertising the requested cell key for peer adoption).
             eager_first = self._eager_first_eligible(spec, inj)
-            if eager_first and not self._mint_budget_ok(spec, inj):
+            delegated_mints = _delegated_pendings(inj.pending_self_mints)
+            if eager_first and delegated_mints:
+                # pgw#784: _mint_budget_ok gates an IN-PROCESS capture that
+                # will never exist here — nothing is armed on these pipes. The
+                # child's own co-residency ask (its weights + one activation
+                # set + inductor workspace + a CUDA context) is budgeted per
+                # attempt by mint_delegate, against the card as it actually is
+                # at spawn time rather than as it was at boot.
+                pass
+            elif eager_first and not self._mint_budget_ok(spec, inj):
                 # pgw#737: THE gate. It sits here and not only in the driver
                 # because arming + enabling the routers is already the first
                 # allocation of the capture — the boot warm's own forwards
@@ -5581,6 +6141,26 @@ class Executor:
                 # (never the foreground compile-then-serve mint, which is
                 # strictly worse for the tenant).
                 eager_first = False
+            if delegated_mints and not eager_first:
+                # pgw#784: nothing is armed on these pipes, so the foreground
+                # compile-then-serve path below cannot drive them. Discard the
+                # obligation and serve eager with the cell absent — the honest
+                # miss policy — rather than run a warmup proof against an
+                # unarmed pipeline. (fleet_cells.delegatable already refused to
+                # delegate anything that MUST serve compiled, so this is the
+                # custom-warmup / mixed-delivered-artifact remainder.)
+                from . import fleet_cells as _fc_undelegate
+
+                for _pid, _mint in list(inj.pending_self_mints.items()):
+                    if not getattr(_mint, "delegated", False):
+                        continue
+                    logger.info(
+                        "%s: delegated mint discarded — this boot is not "
+                        "eager-first, so there is no eager tier to serve "
+                        "from while a child compiles; serving eager with the "
+                        "cell absent", spec.name)
+                    _fc_undelegate.abandon_self_mint(_mint)
+                    inj.pending_self_mints.pop(_pid, None)
             if eager_first:
                 from . import hot_swap
 
@@ -5591,6 +6171,14 @@ class Executor:
                     if pid not in inj.pending_self_mints:
                         continue
                     sel = inj.active_compile_artifacts.pop(pid, None)
+                    if sel is None:
+                        # pgw#784: a DELEGATED pending never entered
+                        # active_compile_artifacts (nothing is armed on its
+                        # pipe), but its claimed key ref is computable now from
+                        # static axes, and th#910's self-attested dispatch
+                        # fence wants it advertised while the child compiles.
+                        sel = _selection_for(
+                            None, inj.pending_self_mints.get(pid))
                     if sel is not None:
                         mint_selections[pid] = sel
                     mint_pipes[pid] = candidate.pipeline
@@ -5606,6 +6194,8 @@ class Executor:
                     pendings=dict(inj.pending_self_mints),
                     pipes=mint_pipes,
                     selections=mint_selections,
+                    modules=_mint_modules(spec),
+                    snapshot_paths=dict(paths),
                 )
                 logger.info(
                     "eager-first boot for %s (pgw#671): READY at eager tier "
@@ -6230,6 +6820,10 @@ class Executor:
             # pgw#678: the pipeline identities, kept out of held_objects (which
             # is the residency/movement handle space).
             rec.slot_pipelines = dict(inj.slot_pipelines)
+            # pgw#748: a degree-D group becomes D ranks HERE — after the
+            # pipeline exists and its attention backend is set, before
+            # compile. Degree 1 (every pod today) is a no-op.
+            await self._arm_sequence_group(rec, spec, slot_refs)
             self._install_compile_targets(
                 rec,
                 spec,
@@ -6240,6 +6834,118 @@ class Executor:
             rec.stale = False
             await self._clear_host_ram_capacity(list(slot_refs.values()))
         return instance
+
+    # ---- sequence parallelism (pgw#748 phase 1) ------------------------------
+
+    def _sequence_boot_slot(
+        self, spec: EndpointSpec, rec: "_ClassRecord",
+    ) -> str:
+        """The ONE class-annotated pipeline slot a degree-D group shards.
+
+        Refused typed, never guessed: a follower rebuilds its copy through
+        ``provision.load_slot`` from the pod's shared CAS path, so a
+        self-loading (str/Path) slot has no reproducible construction, and two
+        candidate pipelines have no single SPMD unit.
+        """
+        from .parallel import ContextParallelUnavailable
+
+        candidates = [s for s, pipe in rec.slot_pipelines.items() if pipe is not None]
+        if len(candidates) == 1:
+            return candidates[0]
+        raise ContextParallelUnavailable(
+            f"{spec.name}: sequence parallelism needs exactly ONE "
+            f"class-annotated pipeline slot to shard, found {candidates or 'none'}"
+        )
+
+    async def _arm_sequence_group(
+        self,
+        rec: "_ClassRecord",
+        spec: EndpointSpec,
+        slot_refs: Dict[str, str],
+    ) -> None:
+        """Turn this record's execution group into D ranks, or refuse loudly.
+
+        A refusal here is TERMINAL for the setup: the pod was bought for a
+        degree-D promise and serving degree 1 against it would silently
+        deliver a fraction of the tier that was sold. The hub's own answer to
+        an unservable degree is to re-pack the pod, and it can only do that if
+        the worker says so.
+        """
+        topo = self.topology
+        if topo.degree <= 1 or topo.parallel != "sequence":
+            return
+        from . import compile_cache
+        from .parallel import GroupPlan
+        from .parallel.cp import w8a8_gemm_mode
+        from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
+
+        group = current_device_group()
+        device_group = topo.group(group)
+        slot = self._sequence_boot_slot(spec, rec)
+        pipe = rec.slot_pipelines[slot]
+        ref = slot_refs.get(slot, "")
+        path = self.store.local_path(ref) if ref else None
+        binding = spec.models.get(slot)
+
+        boot = BootPlan(
+            modules=tuple(sorted({
+                s.cls.__module__ for s in rec.specs if s.cls is not None
+            })),
+            function_name=spec.name,
+            slot=slot,
+            path=str(path or ""),
+            cache_dir=str(self.store._cache_dir),
+            degree=topo.degree,
+            dtype=str(getattr(binding, "dtype", "") or ""),
+            storage_dtype=str(getattr(binding, "storage_dtype", "") or ""),
+        )
+        # Rank 0 DECIDES; every rank obeys. Nothing below rank 0 ever measures
+        # its own card and adapts (pgw#748 §5.4).
+        plan = GroupPlan(
+            precision_lane=compile_cache.cell_base_lane(pipe),
+            gemm_mode=w8a8_gemm_mode(pipe),
+            sp_degree=topo.degree,
+        )
+        runtime = SequenceRuntime(device_group.devices)
+        installed = await asyncio.to_thread(runtime.arm, pipe, boot, plan)
+        if not arm_sequence_gate(pipe, runtime):
+            await asyncio.to_thread(runtime.close)
+            from .parallel import ContextParallelUnavailable
+
+            raise ContextParallelUnavailable(
+                f"{spec.name}: could not route {type(pipe).__name__}.__call__ "
+                "through the rank group; refusing rather than serving degree 1 "
+                "against a degree-{0} promise".format(topo.degree))
+        rec.sp_runtime = runtime
+        self._sequence_plans[id(rec)] = plan
+        logger.info(
+            "%s armed sequence parallelism degree=%d on devices %s (%s)",
+            spec.name, topo.degree, list(device_group.devices), list(installed))
+
+    def _close_sequence_group(self, rec: "_ClassRecord") -> None:
+        """Tear down a record's rank group OFF the event loop (pgw#774).
+
+        ``runtime.close()`` joins/terminates follower processes (bounded, but
+        seconds) and must never run on the loop: the old collective-based
+        close could block the loop — and the heartbeat with it — forever,
+        presenting a wedged group as a platform stall."""
+        runtime, rec.sp_runtime = rec.sp_runtime, None
+        self._sequence_plans.pop(id(rec), None)
+        if runtime is None:
+            return
+
+        def _do() -> None:
+            try:
+                runtime.close()
+            except Exception:  # noqa: BLE001 - teardown must not mask the vacate
+                logger.warning("closing the sequence group failed", exc_info=True)
+
+        threading.Thread(target=_do, name="sp-close", daemon=True).start()
+
+    def group_plan_for(self, rec: "_ClassRecord") -> Optional[Any]:
+        """The plan every rank of ``rec``'s group agreed on, or None at
+        degree 1. Read by the adaptive paths that must NOT decide locally."""
+        return self._sequence_plans.get(id(rec))
 
     def _register_residency(
         self,
@@ -7394,7 +8100,16 @@ class Executor:
                         if compile_cache.has_compile_target(pipe, spec.compile):
                             result.add_compile_object(pipe, (slot,))
                             selection = _selection_for(compile_selection, pipe_mint)
-                            if armed and selection is not None:
+                            # pgw#784: a DELEGATED mint arms NOTHING, so it
+                            # reports armed=False and must still be recorded —
+                            # the obligation is real, it is just owed to a
+                            # child process. It deliberately does NOT enter
+                            # active_compile_artifacts: this pipe serves eager,
+                            # and claiming an active artifact for it would
+                            # advertise bytes it does not serve (gw#586).
+                            if getattr(pipe_mint, "delegated", False):
+                                result.pending_self_mints[id(pipe)] = pipe_mint
+                            elif armed and selection is not None:
                                 result.active_compile_artifacts[id(pipe)] = selection
                                 from . import trt_engine
 
@@ -7707,7 +8422,8 @@ class Executor:
         }
 
     async def abandon_background_mint(
-        self, rec: _ClassRecord, *, reason: str, free_targets: bool = False,
+        self, rec: _ClassRecord, *, reason: str, code: str = "unspecified",
+        free_targets: bool = False,
     ) -> None:
         """Cleanly stop an in-flight background mint (adopt-on-arm, vacate,
         shutdown): signal, let the driver finish its current unit, then
@@ -7716,6 +8432,8 @@ class Executor:
         bg = rec.background_mint
         if bg is None:
             return
+        bg.abandon_code = code
+        bg.abandon_reason = reason
         bg.abandon.set()
         task = bg.task
         if task is not None and not task.done():
@@ -7824,14 +8542,16 @@ class Executor:
         except (_MintAbandoned, asyncio.CancelledError):
             self._abandon_mint_state(rec, bg)
             logger.info(
-                "background mint for %s abandoned cleanly; serving continues "
-                "at its current tier", bg.spec.name)
+                "background mint for %s abandoned cleanly (%s: %s); serving "
+                "continues at its current tier",
+                bg.spec.name, bg.abandon_code, bg.abandon_reason)
             activity_mod.emit_event(
                 "self_mint_abort",
                 f"background mint for {bg.spec.name} abandoned "
-                "(adopt-on-arm / vacate / shutdown); serving continues at "
-                "its current tier",
-                phase="abandoned",
+                f"({bg.abandon_code}"
+                + (f": {bg.abandon_reason}" if bg.abandon_reason else "")
+                + "); serving continues at its current tier",
+                phase=f"abandoned_{bg.abandon_code}",
             )
             act.completed()
         except Exception as exc:
@@ -7856,6 +8576,26 @@ class Executor:
         finally:
             if rec.background_mint is bg:
                 rec.background_mint = None
+            # pgw#789: WARM-COMPLETE. The eager-first boot (pgw#671) advertises
+            # READY on the eager tier and then mints in the background, so
+            # `first_request_servable` is NOT when the pod starts serving
+            # compiled — and the gap between them is exactly the window a pod
+            # bills at eager speed. This milestone closes it: measured from
+            # process start (cumulative), it IS the "time to compiled serving"
+            # number an AOT-vs-JIT comparison needs, and `outcome` says whether
+            # compiled serving was reached at all.
+            armed = next(
+                (t.active_compile_ref for t in rec.compile_targets.values()
+                 if t.active_compile_ref), "")
+            boot_mod.mark(
+                boot_mod.PHASE_WARM_COMPLETE,
+                since_process_start=True,
+                function=bg.spec.name,
+                ref=armed,
+                outcome=(boot_mod.OUTCOME_OK if armed
+                         else boot_mod.OUTCOME_REFUSED),
+                reason="" if armed else "serving_eager",
+            )
             self._on_state_change()
 
     async def _background_mint_run(
@@ -7867,6 +8607,15 @@ class Executor:
         from . import warmup as warmup_mod
 
         spec = bg.spec
+        if _delegated_pendings(bg.pendings):
+            # pgw#784: the compile leaves this interpreter. Everything below
+            # runs the mint INSIDE the serving process, which is th#1299's
+            # contract violation — long-running GIL-holding inductor Python on
+            # the one asyncio task that carries both the 10s beat and eager
+            # serving. It stays reachable only to red-verify that
+            # (GEN_WORKER_MINT_IN_PROCESS=1).
+            await self._delegated_mint_run(rec, bg, act)
+            return
         # pgw#737: the capture's VRAM pre-budget, BEFORE any seed touches
         # the card. The boot warm has already run one real eager forward on
         # these shapes, so the peak high-water is a measured anchor, not a
@@ -8178,10 +8927,35 @@ class Executor:
                 "background mint finalization produced no advertisable "
                 "cell; serving stays eager")
 
-        # Phase 4 — HOT-SWAP the advertisement: activate the finalized
-        # identity on the live targets (state stays READY throughout — the
-        # tier flips eager->compiled in the next capability projection) and
-        # keep pgw#622 alive for post-mint novel shapes.
+        # Phase 4 — HOT-SWAP the advertisement (shared with the delegated
+        # route, pgw#784: an adopted cell is advertised the same way whichever
+        # process built it).
+        self._advertise_minted_cells(rec, bg, act, finalized)
+        # Contract-keyed warm memory (pgw#654): the full plan executed in
+        # this process — compiled — so later checkpoint instances of this
+        # contract may inherit down to one verification run.
+        memory = self._warm_contract_runs.setdefault(
+            self._warm_contract_key(spec), set())
+        memory.update(wj.graph_key for wj in jobs)
+        logger.info(
+            "background mint for %s armed: %d compile object(s) hot-swapped "
+            "to compiled (tier flips in the next capability projection)",
+            spec.name, len(finalized))
+
+    def _advertise_minted_cells(
+        self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
+        finalized: Dict[int, Any],
+    ) -> None:
+        """Activate a finalized self-mint identity on the live targets.
+
+        State stays READY throughout — the tier flips eager->compiled in the
+        next capability projection — and pgw#622 stays alive for post-mint
+        novel shapes. Shared by the in-process and delegated routes (pgw#784):
+        the artifact SOURCE differs, what it means to advertise one does not.
+        """
+        from . import hot_swap
+
+        spec = bg.spec
         act.phase(activity_mod.PHASE_FINALIZE)
         for pid, outcome in finalized.items():
             pipe = bg.pipes[pid]
@@ -8211,15 +8985,103 @@ class Executor:
                 pipe,
                 on_warmed=hot_swap.Debounce(
                     self._shape_warm_republisher(spec, pipe)))
-        # Contract-keyed warm memory (pgw#654): the full plan executed in
-        # this process — compiled — so later checkpoint instances of this
-        # contract may inherit down to one verification run.
-        memory = self._warm_contract_runs.setdefault(
-            self._warm_contract_key(spec), set())
-        memory.update(wj.graph_key for wj in jobs)
+
+    async def _delegated_mint_run(
+        self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
+    ) -> None:
+        """pgw#784: build every owed cell in a CHILD PROCESS, then advertise.
+
+        The delegated twin of ``_background_mint_run``, and far shorter,
+        because the phases that used to live here — seed, drain the queued
+        compiles, prove, pack — are the child's now. What stays is what only a
+        serving worker can do: keep serving eager and beating while it happens,
+        adopt the result through the DELIVERED-cell path, decide publish on
+        gw#612's sibling-coverage rule, and advertise the identity.
+
+        Raises exactly what ``_background_mint_run`` raises, so
+        ``_background_mint``'s outcome handling is untouched: ``_MintDeclined``
+        (an OUTCOME — tier stays eager, cell absent), ``_MintAbandoned``
+        (adopt-on-arm / vacate / shutdown), or a plain ``Exception`` (a failed
+        mint). Serving continues in every branch: the worker never dies with
+        its mint.
+        """
+        from . import compile_cache
+        from . import fleet_cells as fleet_cells_mod
+        from . import mint_delegate
+
+        spec = bg.spec
+        # One child per DISTINCT pending: sibling pipes of one record whose
+        # axes compute the same key share ONE cell (the qwen edit shape), and
+        # the child mints their union exactly once.
+        sharers: Dict[int, List[int]] = {}
+        for pid, pending in bg.pendings.items():
+            sharers.setdefault(id(pending), []).append(pid)
+        if not sharers:
+            raise RuntimeError("delegated mint has no pending cell to build")
+
+        finalized: Dict[int, Any] = {}
+        declined: Optional[_MintDeclined] = None
+        for pids in sharers.values():
+            pending = bg.pendings[pids[0]]
+            pipe = bg.pipes[pids[0]]
+            result = await mint_delegate.build_cell(
+                mint_delegate.MintTask(
+                    pending=pending,
+                    pipe=pipe,
+                    function=spec.name,
+                    modules=bg.modules or _mint_modules(spec),
+                    snapshots=dict(bg.snapshot_paths),
+                    weight_lane=compile_cache.cell_base_lane(pipe),
+                    lane=self._served_lane(spec),
+                    configs={spec.name: self._effective_config(spec)},
+                    device=mint_budget.device_of(pipe),
+                ),
+                act=act, abandon=bg.abandon)
+            if result.status == mint_delegate.ABANDONED:
+                raise _MintAbandoned()
+            if result.declined:
+                # Remembered, not raised yet: another pending may still fit.
+                declined = _MintDeclined(
+                    "insufficient_vram",
+                    result.budget or mint_budget.probe(),
+                    result.detail)
+                continue
+            minted = result.minted
+            if not result.ok or minted is None:
+                logger.warning(
+                    "delegated mint for %s produced no adoptable cell (%s); "
+                    "that object stays eager", spec.name, result.detail)
+                continue
+            for pid in pids:
+                finalized[pid] = minted
+            compile_cache.record_cell_proven(str(minted.ref))
+
+        if not finalized:
+            if declined is not None:
+                raise declined
+            raise RuntimeError(
+                "delegated mint produced no advertisable cell; serving stays "
+                "eager")
+
+        # Publish per shared cell on gw#612's rule: a family cell ships only
+        # when EVERY sharer is covered by it — a partial pack bricks every
+        # adopting boot at the gw#607 per-object proof.
+        for pids in sharers.values():
+            pending = bg.pendings[pids[0]]
+            gap = [pid for pid in pids if pid not in finalized]
+            if gap:
+                fleet_cells_mod.withhold_self_mint_publish(
+                    pending,
+                    f"{len(gap)}/{len(pids)} cell-sharing compile object(s) "
+                    "were not covered by the delegated mint")
+            else:
+                fleet_cells_mod.publish_self_mint(pending)
+
+        self._advertise_minted_cells(rec, bg, act, finalized)
         logger.info(
-            "background mint for %s armed: %d compile object(s) hot-swapped "
-            "to compiled (tier flips in the next capability projection)",
+            "delegated mint for %s armed: %d compile object(s) hot-swapped to "
+            "compiled — this worker served eager and beat at its normal "
+            "cadence for the whole mint (pgw#784)",
             spec.name, len(finalized))
 
     async def _report_cell_selection_bug(
@@ -8299,7 +9161,8 @@ class Executor:
 
     async def shutdown_instances(self) -> None:
         for rec in self._classes.values():
-            await self.abandon_background_mint(rec, reason="worker shutdown")
+            await self.abandon_background_mint(
+                rec, reason="worker shutdown", code="shutdown")
             inst, rec.instance, rec.ready = rec.instance, None, False
             rec.compile_targets.clear()
             shutdown = getattr(inst, "shutdown", None)
@@ -8627,7 +9490,8 @@ class Executor:
         # suspended so the adoption's proof warmup keeps its sequential
         # semantics (an eager route would falsify the proof).
         await self.abandon_background_mint(
-            expected_rec, reason=f"adopting peer cell {ref}")
+            expected_rec, reason=f"adopting peer cell {ref}",
+            code="adopt_on_arm")
         adopt_router = hot_swap_mod.router_of(expected_target.pipeline)
         if adopt_router is not None:
             adopt_router.suspend()
@@ -8986,7 +9850,8 @@ class Executor:
         """Tear an instance down and return refs whose owner was released."""
         # pgw#671: a departing instance takes its background mint with it —
         # stop the driver before any module teardown races a warm forward.
-        await self.abandon_background_mint(rec, reason="instance vacate")
+        await self.abandon_background_mint(
+            rec, reason="instance vacate", code="vacate")
         held_refs = self._record_refs(rec)
         held_objects = rec.held_objects
         released_refs: List[str] = []
@@ -9053,6 +9918,9 @@ class Executor:
         rec.lane_refs = set()
         rec.held_objects = {}
         rec.slot_pipelines = {}  # pgw#678: pipelines die with the instance
+        # pgw#748: the rank siblings are an implementation detail of THIS
+        # instance's pipeline; they must not outlive it holding D cards.
+        self._close_sequence_group(rec)
         # Do not let this teardown frame itself retain a departing pipeline
         # while the cgroup probe decides whether capacity really progressed.
         old_obj = None
@@ -9453,7 +10321,11 @@ class Executor:
             # Same order as the tenant path (permit -> run_lock ->
             # turn_mutex): a tenant landing on ANOTHER instance mid-seed
             # waits one bounded seed instead of contending for the device.
-            await self._gpu_semaphore.acquire()
+            # pgw#779: the RECORD's group permit. A background turn on group 2
+            # must not consume group 0's slot - with a count it did, so a mint
+            # anywhere stalled a tenant everywhere.
+            permit = self._gpu_permit_for_record(rec)
+            await permit.acquire()
             try:
                 async with rec.run_lock:
                     await self._bg_locked(rec.turn_mutex, abort_check)
@@ -9464,7 +10336,7 @@ class Executor:
                         self._bg_charge_debt(
                             stole, time.monotonic() - turn_t0)
             finally:
-                self._gpu_semaphore.release()
+                permit.release()
         finally:
             self._bg_unit_mutex.release()
 
@@ -9542,6 +10414,42 @@ class Executor:
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
+        # pgw#748 phase 1: stamp the execution group BEFORE anything reads
+        # residency, admits, loads or sets a device. Contextvars propagate
+        # into every coroutine and to_thread hop this job makes, so the whole
+        # job — admission, staging, handler, teardown — speaks one group.
+        try:
+            group = self._dispatch_group(run)
+        except DispatchGroupUnresolved as exc:
+            # pgw#779: reported here (not raised out of the task) so the job
+            # ends with a terminal state instead of going quiet.
+            logger.error("refusing %s: %s", run.request_id, exc)
+            await self._finish(
+                job, pb.JOB_STATUS_RETRYABLE, safe_message=_sanitize(str(exc)))
+            return
+        with device_group_scope(group):
+            await self._run_job_grouped(job, run)
+
+    async def _run_job_grouped(self, job: _Job, run: pb.RunJob) -> None:
+        spec = job.spec
+        assert spec is not None
+        spec = job.spec = self._group_effective_spec(
+            spec, current_device_group())
+        refusal = self._multi_group_handler_refusal(spec)
+        if refusal:
+            # pgw#778: this is now belt-and-braces — gate_functions withdraws
+            # the function, so a dispatch can only arrive from a hub that had
+            # not yet seen the withdrawal. RETRYABLE, never INVALID: nothing
+            # about the CALLER's input is wrong, and INVALID meant the hub
+            # neither re-routed nor charged the worker, so every request came
+            # back blaming the caller.
+            self.unavailable.setdefault(
+                spec.name,
+                ("multi_group_async_handler", refusal,
+                 {"groups": str(self.topology.groups),
+                  "degree": str(self.topology.degree)}))
+            await self._finish(job, pb.JOB_STATUS_RETRYABLE, safe_message=refusal)
+            return
         self._intent_transition(
             job.intent_id,
             pb.LIFECYCLE_INTENT_STATUS_RUNNING,
@@ -9773,6 +10681,13 @@ class Executor:
             # th#1050: ctx.lane exposes the same post-degrade truth to the
             # handler (declared-lane endpoints branch on it).
             job.lane = self._served_lane(spec, instructed=run.lane)
+            # pgw#789: the shape coordinate, taken from the EXECUTED payload
+            # with endpoint defaults applied. runtime_terms carries these only
+            # when the endpoint declares a runtime formula (and the hub drops
+            # that map after scaling reads it), so a latency comparison had no
+            # shape axis at all for most endpoints.
+            job.shape = serving_mode_mod.shape_of(
+                payload, self._effective_config(spec))
             ctx._set_lane(job.lane)
             # th#1087: effective declared-config values for this dispatch.
             effective_config = self._effective_config(spec, run)
@@ -9820,9 +10735,13 @@ class Executor:
         try:
             if needs_gpu:
                 permit_t0 = time.monotonic()
+                # pgw#779: THIS job's group permit, not one of G interchangeable
+                # tickets. The group was stamped from the dispatch before
+                # anything ran, so a permit and a card are the same fact.
+                gpu_permit = self._gpu_permit_for_group(current_device_group())
                 await self._intent_await(
                     job.intent_id,
-                    self._gpu_semaphore.acquire(),
+                    gpu_permit.acquire(),
                     operation=f"GPU permit for request {run.request_id}",
                     status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
                     stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
@@ -9832,7 +10751,7 @@ class Executor:
                 # handler window, so runtime_ms never saw it.
                 ctx._stages.record_pre("gpu_permit_wait", time.monotonic() - permit_t0)
                 self._loop = asyncio.get_running_loop()
-                lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
+                lease = _GpuSlotLease(gpu_permit, self._loop)
                 ctx._gpu_slot_lease = lease
                 # gw#516: the handler thread reports the terminal
                 # decode->finalize slot release so the hub sees the job as
@@ -10309,7 +11228,7 @@ class Executor:
             "(pgw#737)", spec.name)
         await self.abandon_background_mint(
             rec, reason="tenant OOM — the mint loses, the request wins",
-            free_targets=True)
+            code="tenant_oom", free_targets=True)
         activity_mod.emit_event(
             "self_mint_skipped",
             f"self-mint for {spec.name} evicted mid-flight: a tenant request "
@@ -10349,6 +11268,40 @@ class Executor:
             return
         if spec.output_mode == "stream":
             return  # chunks already emitted; a replay would duplicate them
+        # pgw#748 §5.4: under sequence parallelism the degraded ladder is the
+        # single most dangerous adaptive path there is. It picks an offload
+        # rung from THIS card's measured free VRAM, so two ranks that OOM
+        # differently take different rungs, execute different numbers of
+        # collectives, and the group HANGS — or worse, agrees on the count and
+        # silently produces wrong output. And CPU offload does not compose
+        # with context parallelism at all (diffusers #12533: a shape error
+        # after the first pipe call). So the group refuses as a group. Rank 0
+        # decides; a rank that cannot honour the decision fails the whole
+        # group; nothing ever adapts locally.
+        rec_sp = self._classes.get(spec.instance_key)
+        if rec_sp is not None and rec_sp.sp_runtime is not None:
+            plan = self.group_plan_for(rec_sp)
+            logger.error(
+                "DEGRADED_MODE=refused fn=%s: CUDA OOM inside a degree-%d "
+                "sequence-parallel group. The ladder would pick a rung from "
+                "this rank's free VRAM alone (plan=%s); a per-rank rung either "
+                "hangs the collective or corrupts the output silently, and CPU "
+                "offload does not compose with context parallelism "
+                "(diffusers #12533). Failing the GROUP.",
+                spec.name, getattr(plan, "sp_degree", 0) or self.topology.degree,
+                plan,
+            )
+            try:
+                ctx.log(
+                    f"DEGRADED_MODE=refused fn={spec.name}: a sequence-parallel "
+                    "group cannot degrade one rank at a time; the request fails "
+                    "and the pod is re-packable by the hub.",
+                    level="error",
+                )
+            except Exception:
+                pass
+            rec_sp.stale = True
+            return
         # Diffusers component models expose some pipeline offload methods too
         # (notably AutoencoderKL via ModelMixin). Exclude only that known
         # component base, then retain the capability check below so custom
@@ -10697,6 +11650,21 @@ class Executor:
         if isinstance(metrics, pb.JobMetrics) and job.ctx is not None:
             metrics.stage_ms.update(stage_ms_for_metrics(
                 getattr(job.ctx, "_stages", None), metrics.runtime_ms))
+        # pgw#789: stamp the th#1293 serving DIMENSIONS on EVERY terminal path,
+        # for the same reason stage_ms is stamped here — a failed or
+        # deadline-exceeded request's serving mode is exactly the one worth
+        # seeing, and `_metrics` is called from three separate places.
+        # Measured before this landed: 0 of 416 request_state rows on the chaos
+        # stack carried serving_mode, so `/v1/admin/request-latency` could not
+        # separate AOT from JIT from eager over any traffic at all.
+        if isinstance(metrics, pb.JobMetrics):
+            served = self._served_identity(job.spec, job)
+            metrics.serving_mode = served.serving_mode
+            metrics.served_cell_ref = served.served_cell_ref
+            metrics.served_eager_fallback = served.served_eager_fallback
+            metrics.fallback_reason = served.fallback_reason
+            metrics.sm = served.sm
+            metrics.steps, metrics.width, metrics.height = job.shape
         terminal_status = (
             pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
             if job.superseded

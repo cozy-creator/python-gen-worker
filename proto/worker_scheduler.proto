@@ -64,6 +64,14 @@ message WorkerMessage {
     // also replayed in Hello on every reconnect.
     GoalReceipt        goal_receipt        = 11;
     LifecycleSnapshot  lifecycle_snapshot  = 12;
+    // pgw#764/th#1293: per-phase BOOT telemetry. Deliberately NOT an
+    // ActivityUpdate kind: every ActivityUpdate folds into the hub's
+    // `info.Activities[kind]` map, which the th#965 liveness layers,
+    // SelfMintActivityRunning (th#1169 cap turnover) and the stall/condemn
+    // sweep all read. A measurement stream must not be able to satisfy or
+    // break pod-condemnation logic, and phases carry numbers (duration,
+    // bytes) that a text `detail` could only smuggle as JSON.
+    BootPhase          boot_phase          = 13;
   }
 }
 
@@ -177,6 +185,16 @@ message HostCanary {
   int32  vcpus           = 7; // os.cpu_count() as seen in the container
   double ram_total_gb    = 8; // cgroup-capped host RAM total
   int64  duration_ms     = 9; // canary wall time (self-audit)
+
+  // pgw#748 2-GPU leg. The SKU says SXM; only the pod can say whether ITS
+  // cards have peer access, and that is what decides whether a
+  // sequence-parallel release meets its latency SLO. Inert on 1-GPU pods
+  // (gpu_count<=1 => interconnect "" and peer_gbps 0 = "not measured").
+  // Additive: old orchestrators ignore these; old workers send them unset.
+  string interconnect  = 10; // "" | host-staged | pcie-p2p | nvlink
+  double peer_gbps     = 11; // measured device->device copy bandwidth
+  bool   peer_access   = 12; // cudaDeviceCanAccessPeer(0,1)
+  string topo_link     = 13; // raw nvidia-smi topo code (NV18 / PIX / SYS / ...)
 }
 
 message ModelResidency {
@@ -945,6 +963,40 @@ message JobMetrics {
   //                     window came from step marks, not an explicit bracket)
   // Invariant: measured stages + resid.unattributed == total.handler.
   map<string, int64> stage_ms = 15;
+  // pgw#764/th#1293: the DIMENSIONS that make per-request latency comparable
+  // across serving paths. `lane` (13) already says "fp8-w8a8-dynamic+compiled",
+  // but "+compiled" is a BINARY axis platform-wide (precision.ExecCompiled /
+  // lanes.EXEC_COMPILED / serving_tier): it cannot tell an AOT .pt2 replay
+  // from a JIT dynamo cell, and it names no artifact. So "AOT vs JIT latency
+  // on 4090s for sdxl w8a8" is unanswerable over our own production traffic
+  // even though the worker knows the answer for every single request.
+  //
+  //   serving_mode: "eager" | "jit_cell" | "aot_cell"
+  // Derived from the ARMED artifact, not from the lane string.
+  string serving_mode = 16;
+  // The cell ref/key that actually served, echoed back from the worker.
+  // resolved_models.runtime.compile_cell_ref is the hub's dispatch INTENT and
+  // is only set when RunJob.required_compile was; this is the confirmation.
+  string served_cell_ref = 17;
+  // TRUE when a compiled lane served THIS request eager anyway — a pgw#680
+  // guard miss, a router heal/volatile verdict, or an aot_serve ingress
+  // refusal. Today such a request reports lane=...+compiled, so the fallback
+  // is invisible per-request and silently contaminates any compiled-vs-eager
+  // latency comparison with eager samples. The fallback reason class rides
+  // `fallback_reason` (guard_miss | ingress_refused | healing | volatile).
+  bool   served_eager_fallback = 18;
+  string fallback_reason = 19;
+  // Device compute capability ("89"), matching WorkerResources.gpu_sm. The
+  // SKU string is a marketing name; sm is the fact cells are keyed by, and it
+  // is never persisted anywhere today.
+  string sm = 20;
+  // The executed shape coordinate + step count, defaults APPLIED — the axes
+  // latency is a function of. runtime_terms (14) carries these only when the
+  // endpoint declares a runtime formula, and the hub drops that map after
+  // scaling reads it. width/height are 0 for non-spatial functions.
+  int64  steps = 21;
+  int64  width = 22;
+  int64  height = 23;
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,
@@ -1117,6 +1169,26 @@ message ActivityUpdate {
   // pod without waiting out its own stall window.
   bool  self_stalled   = 15;
   int64 stalled_for_ms = 16;
+  // th#1322: the WORKER-MEASURED duration of the work this event reports, in
+  // milliseconds. A numeric column, not prose: `aot_mint_phases` and
+  // `jit_compile` both carry their total here, so "how long does AOT mint take
+  // vs JIT mint" is ONE grouped query over worker_activity_events instead of a
+  // regex over `detail` (which cannot be indexed, cannot be percentiled, and
+  // returns NULL the first time the formatting changes).
+  //
+  // Deliberately its OWN field rather than an overload of stalled_for_ms (that
+  // one means "no counter advanced for this long" and the hub kills on it) —
+  // the same separation-of-concerns as WorkerMessage.boot_phase vs liveness:
+  // a measurement must not be able to satisfy or break pod condemnation.
+  //
+  // Semantics: the span of ONE completed unit of work, from the worker's own
+  // monotonic clock. 0 = not a timed event (every pre-th#1322 worker, every
+  // progress beat). Never derived from receipt timestamps — that would measure
+  // stream latency and clock skew instead of work. A breakdown finer than this
+  // total rides `detail`, and finer-grained SPANS ride their own events with
+  // their own `phase` (per graph-class entry, per warm shape), so the
+  // breakdown is groupable too.
+  int64 duration_ms = 17;
 }
 
 enum ActivityState {
@@ -1124,6 +1196,86 @@ enum ActivityState {
   ACTIVITY_STATE_RUNNING     = 1;
   ACTIVITY_STATE_COMPLETED   = 2;
   ACTIVITY_STATE_FAILED      = 3;
+}
+
+// pgw#764/th#1293: ONE phase of ONE worker's boot, measured by the worker.
+//
+// Cold-boot time is the number the autoscaler prices every buy against
+// (th#1190's composed estimate) and the number every "why is TTFR 5 minutes"
+// investigation has had to hand-derive from log archaeology (th#1187's ladder
+// at tracker tensorhub/progress.md:13043). The pod-level facts the hub can
+// see for itself — create -> connect -> first-assign — bound the boot from
+// OUTSIDE; they say nothing about which of weights fetch, cell fetch, cell
+// load or warmup owns the seconds INSIDE. Only the worker knows that, and
+// today it dies with the pod.
+//
+// Shape follows th#1269's endpoint_build_phases: a row is OPENED at phase
+// start (terminal=false) and CLOSED at phase end (terminal=true), so a pod
+// that dies mid-boot still shows exactly where its time went. The worker's
+// own monotonic `duration_ms` is authoritative — deriving it from receipt
+// timestamps would measure stream latency and clock skew instead of work.
+//
+// Ordering/identity: `boot_id` is one worker PROCESS boot; `ordinal` is dense
+// and monotonic within it, and an open row and its close carry the SAME
+// ordinal. `parent_ordinal` nests a phase inside another so durations charge
+// EXCLUSIVELY to the innermost span (th#1111 stage_timing's rule) and the
+// measured phases plus a residual reconcile to the whole boot window. A
+// telemetry stream that does not reconcile cannot be trusted to say where the
+// time went, which is the only reason it exists.
+message BootPhase {
+  string boot_id = 1;
+  int64  ordinal = 2;
+  // 0 = a top-level phase.
+  int64  parent_ordinal = 3;
+  // Vocabulary is wire-shared with gen_worker/boot_phases.py (PHASE_*):
+  //   process_start | env_seal | manifest_load | cache_preflight | cuda_probe
+  //   | hello | weights_fetch | pipeline_load | cell_discover | cell_fetch
+  //   | cell_load | cell_arm | first_request_servable | first_request
+  //   | warm_complete
+  // Unknown phases are stored verbatim, never rejected: an old hub must not
+  // be able to refuse a newer worker's honest measurement.
+  string phase = 4;
+  bool   terminal = 5;
+  // Worker wall clock at phase open; informational (the hub stamps receipt).
+  int64  started_at_unix_ms = 6;
+  // Worker monotonic span, set on the terminal row only.
+  int64  duration_ms = 7;
+  // Milliseconds from OS process start to this phase's open. Makes the
+  // pre-first-phase cost (interpreter start, torch import) visible instead of
+  // hiding it in an unexplained residual.
+  int64  process_uptime_ms = 8;
+  // Bytes moved by this phase (weights/cell fetch). 0 = not a byte phase.
+  int64  bytes = 9;
+  // Where the bytes came from: cas | volume | r2 | hf_cache | inflight_share
+  // | local. The single most load-bearing boot fact after duration — the same
+  // release boots in wildly different times off a warm volume vs cold R2, and
+  // th#1190's weights-rate learning is keyed on exactly this distinction.
+  string source = 10;
+  // Model/checkpoint ref for weights phases.
+  string ref = 11;
+  // Cell artifact identity for cell phases: aot-inductor | trt | dynamo.
+  string artifact_kind = 12;
+  string artifact_key = 13;
+  string function = 14;
+  // Graph class proved, for warm_complete (proof is by graph COVERAGE).
+  string graph_class = 15;
+  // ok | refused | failed | skipped. `refused` is a TYPED refusal that left
+  // the worker serving something else (an unarmed cell), not an error.
+  string outcome = 16;
+  // The classified reason token when outcome != ok — AdoptError.reason,
+  // ConstantsUnboundError.reason, a lane-gate refusal. Short and stable so it
+  // is countable hub-side (the pgw#760 doctrine's `phase=reason`).
+  string reason = 17;
+  // Identifiers + exception, per pgw#760: ref=/key=/fn=/lane=/source=.
+  string detail = 18;
+  // TRUE when duration_ms is measured from PROCESS START rather than being a
+  // span of its own — i.e. this row is a cumulative MILESTONE (hello,
+  // first_request_servable), not a phase. Load-bearing for any consumer that
+  // adds durations up: a milestone's duration covers the same wall clock the
+  // spans already account for, so summing both double-counts the whole boot.
+  // Reconciliation excludes cumulative rows from the sum and uses the
+  // first_request_servable milestone as the boot TOTAL.
+  bool   cumulative = 19;
 }
 
 // ---------------------------------------------------------------------------
