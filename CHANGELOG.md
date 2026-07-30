@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **th#1335 — cell discovery names an authorization refusal.** th#1310 made the
+  platform's `root/family-*` cell repos private, and the worker's checkpoint
+  listing then answered 404: indistinguishable from "this family has no cells",
+  so one boot's discovery was abandoned and the pod served eager for life. The
+  worker JWT now carries a hub-issued `read_repo` grant for exactly the families
+  its release declares, 401/403 surface as a NAMED `not_authorized` phase on the
+  `aot_cell_discovery` event (distinct from `list_failed`), and the anonymous
+  retry on 401/403 is deleted — it was th#1310's own recorded hazard, one
+  visibility flip away from unauthenticated cross-tenant enumeration.
+
 - **pgw#795 (round 4) — the fix's own defect: a flake traded for a 13-minute hang.**
   `Cadence` shared its slowest sample session-wide with a `10x` window, so one slow
   advance anywhere multiplied every later wait and a wait with NO progress could sit
