@@ -55,6 +55,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..component_vocab import denoiser_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
+from . import adapter_fidelity
 from .fp8_storage import structural_base
 from .w8a8 import fp8_scaled_linear_class
 import inspect
@@ -561,15 +562,10 @@ def alloc_branch_buffers(mod: Any, bucket: int) -> None:
     dev = mod.weight.device
     # Branch tensors compute in the module's COMPUTE dtype — never its
     # storage dtype (on the fp8-storage lane weight AND bias rest in fp8).
-    # A pgw#727 fp8-storage leaf declares its compute dtype, so ask it first.
-    _compute = (torch.float16, torch.bfloat16, torch.float32)
-    dtype = torch.bfloat16
-    for cand in (getattr(mod, "compute_dtype", None),
-                 mod.weight.dtype if not _is_scaled_linear(mod) else None,
-                 mod.bias.dtype if mod.bias is not None else None):
-        if cand in _compute:
-            dtype = cand
-            break
+    # ONE definition, shared with pgw#794's fidelity gate: the grid the gate
+    # judges the delta against must be the grid the buffers are allocated in,
+    # by construction rather than by two copies agreeing.
+    dtype = adapter_fidelity.branch_compute_dtype(mod)
     _clear_branch_slots(mod)
     if isinstance(mod, nn.Conv2d):
         a = torch.zeros(bucket, mod.in_channels, *mod.kernel_size,
@@ -679,23 +675,39 @@ def pipeline_branch_bucket(pipe: Any) -> int:
 
 def _stage_for(
     model: Any, adapters: Sequence[Tuple[Dict[str, Any], float, str]],
+    *, request_id: str = "",
 ) -> List[Tuple[Dict[str, Any], float, str]]:
     """Map + stage one component's adapters. PURE — no module is touched, so
     an unmappable adapter fails before anything is attached (gw#679's
     never-partially-attach rule). Repeat swaps of a resident adapter (the
     AdapterCache serves the SAME dict object) skip the key-mapping pass AND
     the CPU flatten — the flatten measured ~700ms at SDXL scale, the actual
-    H2D+device placement ~130ms."""
+    H2D+device placement ~130ms.
+
+    pgw#794: also where the branch's FIDELITY gate runs. The delta is measured
+    against the dtype the branch buffers are actually allocated in — read from
+    the modules, so an fp8 branch would be judged as fp8 without an edit — and
+    an adapter the branch would destroy is refused HERE, on the pure pass,
+    before a buffer is touched. Survival is a property of (adapter, model), so
+    it is computed once on the cold path and cached beside the staging entry
+    (0.86 s for all 788 modules of sdxl lightning-4step on 4 CPU threads);
+    warm swaps re-check the cached verdict for free."""
     cache: Dict[Any, Any] = getattr(model, _MAPCACHE_ATTR, None) or {}
     staged: List[Tuple[Dict[str, Any], float, str]] = []
     for sd, w, ref in adapters:
         key = (ref, id(sd), len(sd))
         entry = cache.get(key)
+        fresh = entry is None
         if entry is None:
-            entry = _stage_adapter(map_adapter(sd, model, ref=ref))
+            mapped = map_adapter(sd, model, ref=ref)
+            entry = _stage_adapter(mapped)
+            entry["survival"] = adapter_fidelity.evaluate_branch(
+                mapped, branch_modules(model), ref=ref)
             cache[key] = entry
             while len(cache) > _MAPCACHE_MAX:
                 cache.pop(next(iter(cache)))
+        adapter_fidelity.gate(
+            entry.get("survival"), request_id=request_id, announce=fresh)
         staged.append((entry, w, ref))
     setattr(model, _MAPCACHE_ATTR, cache)
     return staged
@@ -868,7 +880,7 @@ def apply_branch_adapters(
     if not adapters:
         clear_branch_adapters(model)
         return _idle_stats(model)
-    staged = _stage_for(model, adapters)
+    staged = _stage_for(model, adapters, request_id=request_id)
     current = branch_bucket(model)
     bucket = _settle_bucket(
         [model], rank_bucket(max(_needed_rank(staged), int(rank_floor), 1)),
@@ -919,7 +931,8 @@ def apply_branch_adapter_set(
     staged: Dict[str, List[Tuple[Dict[str, Any], float, str]]] = {}
     for comp, model in targets.items():
         entries = list(routed.get(comp) or ())
-        staged[comp] = _stage_for(model, entries) if entries else []
+        staged[comp] = (
+            _stage_for(model, entries, request_id=request_id) if entries else [])
     want = max((_needed_rank(s) for s in staged.values()), default=0)
     pre = {comp: branch_bucket(model) for comp, model in targets.items()}
     current = max(pre.values(), default=0)

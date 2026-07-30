@@ -1,3 +1,6 @@
+from typing import Any
+
+
 class WorkerError(Exception):
     """Base class for worker execution errors."""
 
@@ -251,6 +254,36 @@ class RefCompatibilitySurprise(ValidationError):
         if ref:
             detail = f"{detail} (ref={ref})"
         super().__init__(detail)
+
+
+class AdapterFidelityRefused(RefCompatibilitySurprise):
+    """pgw#794: the adapter's delta does not SURVIVE the grid it would serve
+    through, so attaching or fusing it would render something that looks
+    adapted and is not.
+
+    Distinct from th#1036's zero-delta refusal, which catches an EMPTY
+    adapter. This one catches an INERT (or actively corrupting) adapter: fully
+    populated, arithmetically real, and destroyed by the target dtype. The
+    measured shape is qwen Lightning fused into fp8-E4M3 — surviving-delta
+    cosine 0.074 with 15x the true delta's norm, i.e. the served weights carry
+    a perturbation LARGER than the adapter and 99.7% orthogonal to it.
+
+    A ``ref_compatibility_surprise`` subtype deliberately: it is a property of
+    THIS adapter against THIS release's serving grid, deterministic, and
+    retrying anywhere reproduces it. ``survival``
+    (:class:`~gen_worker.models.adapter_fidelity.AdapterSurvival`) carries the
+    per-module evidence and the grid that was judged.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        ref: str = "",
+        survival: Any = None,
+    ) -> None:
+        self.survival = survival
+        super().__init__(message, ref=ref, axis="state_dict")
 
 
 class ChildCallError(WorkerError):

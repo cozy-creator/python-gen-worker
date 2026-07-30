@@ -68,6 +68,13 @@ KIND_GUARD_LEAK = "guard_leak"
 KIND_SERVE_DEGRADE = "serve_degrade"
 KIND_TRT_ADOPT = "trt_adopt"
 KIND_LORA_HYGIENE = "lora_hygiene"
+# pgw#794: the serve-side adapter-fidelity gate. `phase=refused` is a
+# fail-CLOSED decision (the request also gets a typed error); `phase=degraded`
+# is the gray band — served, but the delta measurably lost direction to the
+# target grid. `detail` carries the whole-adapter cosine, the grid judged, and
+# the worst per-module rows, so a release shipping an adapter its own serving
+# dtype destroys is countable hub-side without the pod's stdout.
+KIND_LORA_FIDELITY = "lora_fidelity"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"
