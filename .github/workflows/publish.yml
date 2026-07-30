@@ -39,6 +39,18 @@ jobs:
       - name: Build package
         run: uv build
 
+      # pgw#740 gate: assert the registry CONTRACT of the artifact we are about
+      # to ship — mechanisms work from a clean venv install of the built wheel,
+      # bare state matches the documented empty-by-design contract, and a
+      # representative consumer's declarations register via the documented
+      # load path. The suite imports the source tree; only this step tests the
+      # wheel.
+      - name: Registry contract on the built wheel (pgw#740)
+        run: |
+          uv venv --python 3.12 /tmp/wheel-contract
+          uv pip install --python /tmp/wheel-contract/bin/python dist/gen_worker-*.whl
+          cd /tmp && /tmp/wheel-contract/bin/python "$GITHUB_WORKSPACE/scripts/check_registry_contract.py" --installed
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         # Uses trusted publishing - no token needed
