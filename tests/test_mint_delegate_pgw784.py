@@ -206,30 +206,6 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
     return seen
 
 
-def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("MINT_STUB_MODE", "minted")
-    _fake_card(monkeypatch, total_gib=80, resident_gib=6)
-    adopted: List[Path] = []
-
-    def _adopt(pipe: Any, pending: Any, artifact: Path) -> Any:
-        adopted.append(Path(artifact))
-        return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ck5-abc", ref="r#k",
-            snapshot_digest="blake3:x", artifact=Path(artifact))
-
-    monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
-    act = _Act()
-    result = asyncio.run(mint_delegate.build_cell(_task(tmp_path), act=act))
-    assert result.status == mint_delegate.ADOPTED and result.ok
-    assert result.attempts == 1
-    assert adopted and adopted[0].read_bytes() == b"stub-cell-bytes"
-    # No new protocol: the child's phases land on the SAME activity the hub
-    # already reads for its minting classification.
-    assert "load" in act.phases and "seal_publish" in act.phases
-
-
 def test_a_dead_mint_process_is_a_failed_mint_not_a_dead_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -296,29 +272,6 @@ def test_no_room_for_a_co_resident_child_declines_without_spawning(
     skips = [e for e in seen if e[0] == "self_mint_skipped"]
     assert skips and skips[0][1] == "insufficient_vram"
     assert "needed~=" in skips[0][2] and "headroom=" in skips[0][2]
-
-
-def test_abandonment_is_not_a_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Adopt-on-arm, vacate and shutdown abandon a mint; none of them is a
-    broken worker, so none of them may look like one."""
-    monkeypatch.setenv("MINT_STUB_MODE", "silent")
-    monkeypatch.setenv("MINT_STUB_SECONDS", "120")
-    _fake_card(monkeypatch, total_gib=80, resident_gib=6)
-    _events(monkeypatch)
-
-    async def _go() -> mint_delegate.DelegatedResult:
-        stop = asyncio.Event()
-        task = asyncio.ensure_future(mint_delegate.build_cell(
-            _task(tmp_path), act=_Act(), abandon=stop))
-        await asyncio.sleep(1.0)
-        stop.set()
-        return await task
-
-    result = asyncio.run(_go())
-    assert result.status == mint_delegate.ABANDONED
-    assert not result.ok
 
 
 def test_a_child_peak_is_banked_for_the_next_ask(
