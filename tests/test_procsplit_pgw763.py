@@ -650,9 +650,12 @@ def test_wedged_child_keeps_the_stream_alive_and_is_reported_not_hidden(
     """
     h = SplitHarness(
         tmp_path,
-        # Generous watchdog so the beat/stall behaviour is observed BEFORE the
-        # child is reaped; the reap itself is the wedge row above.
-        watchdog_budget_s=25.0,
+        # The beat must accumulate BEFORE the verdict arms: the stall report
+        # rides the same arm-then-decide ladder as the kill (a child still
+        # sending frames is waiting, not stalled), so the budget is the window
+        # in which the parent's beats are the only thing keeping the pod
+        # reachable.
+        watchdog_budget_s=8.0,
         beat_interval_s=1.0,
     )
     try:
@@ -665,7 +668,7 @@ def test_wedged_child_keeps_the_stream_alive_and_is_reported_not_hidden(
         # SIGSTOP freezes every thread: the loop, the frame ping, the liveness
         # thread. Nothing the child owns can speak for it.
         waited = 0.0
-        while waited < 20.0 and not any("compute_child_stalled" in d for d in captured_dials):
+        while waited < 40.0 and not any("compute_child_stalled" in d for d in captured_dials):
             time.sleep(0.5)
             waited += 0.5
         assert any("compute_child_stalled" in d for d in captured_dials), captured_dials
@@ -693,3 +696,135 @@ def test_wedged_child_keeps_the_stream_alive_and_is_reported_not_hidden(
         ) == settled, "beats continued after the parent died — liveness would be a lie"
     finally:
         h.close()
+
+
+def test_a_waiting_job_is_never_called_stalled(tmp_path, captured_dials):
+    """The regression the first real-stack soak caught.
+
+    `marco-polo-slow` is 15s of `await asyncio.sleep` — zero CPU, zero disk, by
+    design — and the parent's /proc witness reported it STALLED twice while it
+    was perfectly healthy. Evidence alone cannot tell waiting from wedged; only
+    a child whose LOOP has gone silent can carry that claim. Same trap
+    activity.note_progress exists for (an I/O-bound fill is CPU-light and still
+    progressing).
+    """
+    h = SplitHarness(tmp_path, watchdog_budget_s=60.0, beat_interval_s=1.0)
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn.send(run_job=pb.RunJob(
+            request_id="r-wait", attempt=1, function_name="async-wait",
+            input_payload=_payload("8")))   # 8s of pure awaiting
+        res = conn.wait_for(is_result_for("r-wait"), timeout=60.0)
+        assert res.job_result.status == pb.JOB_STATUS_OK, res.job_result.safe_message
+        assert not any("compute_child_stalled" in d for d in captured_dials), (
+            "a legitimately waiting job was reported as stalled: " +
+            str([d for d in captured_dials if "compute_child_stalled" in d])
+        )
+        assert h.pc._spawn_count == 1 and h.alive
+    finally:
+        h.close()
+
+
+# ---------------------------------------------------------------------------
+# The seam made the Hello AWAITABLE, and that silently un-classified every
+# handshake refusal. Second regression from the first real-stack soak.
+# ---------------------------------------------------------------------------
+
+
+class _RefusingScheduler(pb_grpc.WorkerSchedulerServicer):
+    def __init__(self, code: grpc.StatusCode, details: str) -> None:
+        self._code, self._details = code, details
+
+    def Connect(self, request_iterator, context):  # noqa: N802
+        context.abort(self._code, self._details)
+
+
+class _AwaitableHelloHandlers:
+    """The split parent's shape: `build_hello` is a coroutine, because the
+    Hello is fetched from the compute child over the seam."""
+
+    def __init__(self, delay_s: float) -> None:
+        self._delay = delay_s
+
+    async def build_hello(self) -> pb.Hello:
+        await asyncio.sleep(self._delay)
+        return pb.Hello(worker_id="split-parent")
+
+    async def on_hello_ack(self, ack) -> None:  # pragma: no cover - never acked
+        pass
+
+    async def on_message(self, msg) -> None:  # pragma: no cover - never acked
+        pass
+
+    async def on_disconnect(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("hello_delay_s", [0.0, 0.05])
+def test_awaitable_hello_keeps_a_permanent_refusal_fatal(hello_delay_s: float) -> None:
+    """A refusal that cannot heal must still exit, not spin.
+
+    grpc.aio reports the first `write()` on an already-terminated call as
+    `InvalidStateError: RPC already finished`, which run()'s catch-all logs as a
+    nameless "connection failed" and retries forever. Awaiting the child for the
+    Hello put that await between `Connect()` and the write on EVERY dial, so in
+    split mode the whole handshake taxonomy — UNAUTHENTICATED's fatal-exit
+    ladder (the th#1311 revocation path), not_leader redirects,
+    protocol_version_mismatch, worker_id_mismatch — degraded to an infinite
+    retry loop. Observed live: a hub restart produced six backoff rounds of
+    `InvalidStateError` instead of the honest UNAVAILABLE.
+    """
+    from gen_worker.transport import FatalTransportError, Transport
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(
+        _RefusingScheduler(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            "worker_id_mismatch: hello=w1 jwt_sub=w2",
+        ),
+        server,
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        settings = load_settings(
+            orchestrator_public_addr=f"127.0.0.1:{port}",
+            worker_id="split-parent",
+            worker_jwt="",
+        )
+        transport = Transport(
+            settings,
+            _AwaitableHelloHandlers(hello_delay_s),
+            backoff_base_s=0.01,
+            backoff_cap_s=0.05,
+        )
+
+        async def _drive() -> None:
+            with pytest.raises(FatalTransportError, match="permanent registration"):
+                await asyncio.wait_for(transport.run(), 20.0)
+
+        asyncio.run(_drive())
+    finally:
+        server.stop(grace=0)
+
+
+def test_a_finished_rpc_still_yields_its_real_status() -> None:
+    """The belt for the same class: whenever grpc.aio does swallow the status,
+    the finished call is still asked for it, so the classifier keeps working."""
+    from gen_worker.transport import _terminal_rpc_error
+
+    async def _drive() -> None:
+        channel = grpc.aio.insecure_channel("127.0.0.1:1")
+        try:
+            stream = pb_grpc.WorkerSchedulerStub(channel).Connect()
+            await asyncio.sleep(0.1)  # let the dial fail first
+            with pytest.raises(asyncio.InvalidStateError):
+                await stream.write(pb.WorkerMessage(hello=pb.Hello()))
+            err = await _terminal_rpc_error(stream)
+            assert isinstance(err, grpc.aio.AioRpcError)
+            assert err.code() == grpc.StatusCode.UNAVAILABLE
+        finally:
+            await channel.close()
+
+    asyncio.run(_drive())

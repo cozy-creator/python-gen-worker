@@ -6,6 +6,7 @@ outright (shared-worktree etiquette).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import time
@@ -61,3 +62,15 @@ class SplitProbe:
                 while time.monotonic() < deadline:
                     pow(7, 4001, 10**9 + 7)   # real CPU, no await, no yield
         return ProbeOut(response=f"compiled:{seconds:.0f}")
+
+    async def async_wait(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """A job that legitimately WAITS: real asyncio sleeps, so the process
+        burns no CPU and moves no disk while its loop keeps turning.
+
+        The shape that falsified the parent's first stall report — a healthy
+        15s marco-polo-slow was called stalled on the first real-stack run
+        because /proc evidence alone cannot tell waiting from wedged.
+        """
+        for _ in range(int(float(data.text or "8") / 0.1)):
+            await asyncio.sleep(0.1)
+        return ProbeOut(response="waited")

@@ -804,13 +804,21 @@ class ParentControl:
             # only signal left that distinguishes working from stalled. A
             # frozen child whose loop still turns would otherwise be invisible.
             self._sample_child_evidence(proc.pid, now)
-            await self._report_stall_if_any(now)
             silent_for = now - self._last_frame_at
             if silent_for <= self._watchdog_budget:
                 self._hang_armed_at = None
                 continue
             if self._hang_armed_at is None:
                 self._hang_armed_at = now
+            # Only a child whose LOOP has gone silent can be called stalled.
+            # Accrued work alone cannot carry that claim: an async wait
+            # (marco-polo-slow's `await asyncio.sleep`, a throttled download,
+            # any I/O-bound leg) burns no CPU and moves no disk by design —
+            # this reported a perfectly healthy 15s job as stalled on the first
+            # real-stack run. It is the same trap activity.note_progress exists
+            # for. Loop silence ARMS, accrued work DECIDES: one ladder, used
+            # for the report exactly as for the kill.
+            await self._report_stall_if_any(now)
             verdict = self._hang_verdict(now)
             if verdict is None:
                 continue
@@ -897,6 +905,10 @@ class ParentControl:
         about the child's progress that is not self-reported by the code being
         measured (the security driver: a value tenant code produces is a hint;
         a parent-side /proc measurement is evidence).
+
+        Callers must have ARMED first (the child's loop is silent past the
+        watchdog budget). A child that is still sending frames is waiting, not
+        stalled, however little CPU it burns.
         """
         if self._liveness_evidence is None or self._stall_reported:
             return
