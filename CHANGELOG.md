@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.82.4 (2026-07-29) — envelope parity: return_dict=False callers get a tuple back (arm-events lane)
+## 0.83.0 (2026-07-29) — th#1283 worker half: per-intent fail-closed
+
+The hub now declares `mandatory` per intent instead of a blanket command flag,
+and `apply_command` matches. Errors on mandatory intents still reject and latch
+(`protocol_rejected`). A command-level error latches only when rejecting would
+abandon mandatory work not already registered under the same identity — so a
+hub-side `COMMAND_SEQ_CONFLICT` over already-registered work rejects the resend
+without bricking the process. Errors scoped to advisory intents no longer
+reject the command at all: exactly those intents are declined (typed FAILED
+IntentState + `rejections` on an ACCEPTED receipt) and the rest applies, so a
+bad preposition or an unknown-function binding leaves the worker SERVING.
+First published release of the SDK-v2 chaos line since 0.76.x; adoption notes
+in th#1283 (conversion bump additionally rides pgw#740's merged declarations).
 
 Live-named twice on the 0.76.7 canary: with bind fixed, in-contract calls EXECUTED the
 adopted artifact and the caller crashed downstream (4-vs-2 broadcast) because diffusers
