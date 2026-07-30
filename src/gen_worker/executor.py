@@ -2628,7 +2628,7 @@ MAX_TRANSIENT_SETUP_ATTEMPTS = 5
 
 
 @contextmanager
-def _pipeline_load_span(spec: EndpointSpec):
+def _pipeline_load_span(spec: EndpointSpec) -> typing.Iterator[Optional[boot_mod.BootSpan]]:
     """Open `pipeline_load` for one setup, or yield None outside the boot
     window (pgw#797).
 
@@ -5724,7 +5724,9 @@ class Executor:
         )
 
     @contextmanager
-    def _warmup_span(self, spec: EndpointSpec, rec: "_ClassRecord", inj: Any):
+    def _warmup_span(
+        self, spec: EndpointSpec, rec: "_ClassRecord", inj: Any
+    ) -> typing.Iterator[Optional[boot_mod.BootSpan]]:
         """`warmup`, nested under the open `pipeline_load` (pgw#797).
 
         The armed/unarmed tag is the point of the row, not decoration: an
@@ -7258,7 +7260,7 @@ class Executor:
 
     def _sequence_boot_slot(
         self, spec: EndpointSpec, rec: "_ClassRecord",
-    ) -> Optional[str]:
+    ) -> str:
         """The ONE class-annotated pipeline slot a degree-D group shards.
 
         Refused typed, never guessed: a follower rebuilds its copy through
@@ -7293,6 +7295,7 @@ class Executor:
         topo = self.topology
         if topo.degree <= 1 or topo.parallel != "sequence":
             return
+        from . import compile_cache
         from .parallel import GroupPlan
         from .parallel.cp import w8a8_gemm_mode
         from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
@@ -7320,7 +7323,7 @@ class Executor:
         # Rank 0 DECIDES; every rank obeys. Nothing below rank 0 ever measures
         # its own card and adapts (pgw#748 §5.4).
         plan = GroupPlan(
-            precision_lane=self._lane_label(spec, ""),
+            precision_lane=compile_cache.cell_base_lane(pipe),
             gemm_mode=w8a8_gemm_mode(pipe),
             sp_degree=topo.degree,
         )
@@ -9455,14 +9458,15 @@ class Executor:
                     result.budget or mint_budget.probe(),
                     result.detail)
                 continue
-            if not result.ok:
+            minted = result.minted
+            if not result.ok or minted is None:
                 logger.warning(
                     "delegated mint for %s produced no adoptable cell (%s); "
                     "that object stays eager", spec.name, result.detail)
                 continue
             for pid in pids:
-                finalized[pid] = result.minted
-            compile_cache.record_cell_proven(str(result.minted.ref))
+                finalized[pid] = minted
+            compile_cache.record_cell_proven(str(minted.ref))
 
         if not finalized:
             if declined is not None:

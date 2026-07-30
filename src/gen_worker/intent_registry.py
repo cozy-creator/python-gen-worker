@@ -384,7 +384,7 @@ class IntentRegistry:
         # work not already registered under the same identity; errors scoped
         # to advisory intents decline exactly those intents and accept the
         # rest, so a bad preposition or binding cannot brick the process.
-        declined: dict[str, tuple[int, str]] = {}
+        declined: dict[str, tuple["pb.LifecycleErrorCode", str]] = {}
         if command_errors:
             intents_by_id = {
                 str(intent.intent_id or "").strip(): intent for intent in command.intents
@@ -479,8 +479,8 @@ class IntentRegistry:
                     deadline_at_unix_ms=command.first_action_by_unix_ms,
                 )
         for intent_id, (code, detail) in declined.items():
-            state = self._intents.get(intent_id)
-            if state is not None and int(state.status) in _ACTIVE_INTENT_STATES:
+            prior = self._intents.get(intent_id)
+            if prior is not None and int(prior.status) in _ACTIVE_INTENT_STATES:
                 self.transition(
                     intent_id,
                     pb.LIFECYCLE_INTENT_STATUS_FAILED,
@@ -488,8 +488,8 @@ class IntentRegistry:
                     error_code=code,
                     detail=detail,
                 )
-            elif state is None:
-                state = pb.IntentState(
+            elif prior is None:
+                declined_state = pb.IntentState(
                     worker_session_id=self.worker_session_id,
                     goal_id=command.goal_id,
                     intent_id=intent_id,
@@ -502,8 +502,8 @@ class IntentRegistry:
                     error_code=code,
                     detail=detail,
                 )
-                state.state_seq = self._touch()
-                self._intents[intent_id] = state
+                declined_state.state_seq = self._touch()
+                self._intents[intent_id] = declined_state
         self._trim_intents()
         self._last_command_seq = int(command.command_seq)
         self._last_command_digest = digest

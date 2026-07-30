@@ -37,7 +37,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .chunk_cas import DigestMismatch, hash_file, parse_cas_ref
 
@@ -179,7 +179,9 @@ def verify_files(
     return rep
 
 
-def snapshot_verify_targets(files, root: Path) -> Tuple[List[VerifyTarget], List[str]]:
+def snapshot_verify_targets(
+    files: Sequence[Any], root: Path,
+) -> Tuple[List[VerifyTarget], List[str]]:
     """Build the verification target list for a materialized snapshot.
 
     ``files`` are protobuf SnapshotFile messages (duck-typed here so this module
