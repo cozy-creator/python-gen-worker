@@ -32,9 +32,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 import msgspec
 
 from . import activity as activity_mod
+from . import boot_phases as boot_mod
 from . import cpu_budget
 from . import mint_budget
 from . import progress as progress_mod
+from . import serving_mode as serving_mode_mod
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -1910,6 +1912,21 @@ class ModelStore:
                         unit="bytes",
                     ),
                 )
+            # pgw#789: THE weights-fetch boot span. It lives here, not at a
+            # caller, because this is the only layer that sees every
+            # materialization path (startup prefetch, DesiredResidency
+            # disk_refs, hot instances, RunJob delivery) AND the only layer
+            # that knows where the bytes came from — net_scope separates a cold
+            # R2 pull from a warm volume/CAS hit, which is the difference
+            # between a 270s boot and a 40s one. Gated on `in_boot()` so a
+            # steady-state materialization hours later does not land in the
+            # boot ladder.
+            fetch_span = (
+                boot_mod.open_span(boot_mod.PHASE_WEIGHTS_FETCH, ref=ref)
+                if boot_mod.in_boot() else None
+            )
+            fetch_exc: Optional[BaseException] = None
+            fetch_bytes = 0
             try:
                 delay = 1.0
                 for attempt in range(1, _DOWNLOAD_RETRIES + 1):
@@ -1963,6 +1980,7 @@ class ModelStore:
                         # tree_bytes stats every file — off-loop (gw#407: no
                         # multi-GB directory walks on the event loop).
                         size = await asyncio.to_thread(disk_gc.tree_bytes, path)
+                        fetch_bytes = int(size)
                         self._index.record(ref, path, size)
                         # Fresh downloads were digest-verified by the downloader.
                         self._verified.add(ref)
@@ -2006,8 +2024,33 @@ class ModelStore:
                             )
                         delay *= 4
                 raise RuntimeError("unreachable")
+            except BaseException as exc:
+                fetch_exc = exc
+                raise
             finally:
                 dl_counter.finish()
+                if fetch_span is not None:
+                    net = int(net_scope.network_bytes)
+                    if net > 0:
+                        source = boot_mod.SOURCE_R2
+                    elif known_total > 0:
+                        # A CAS snapshot materialized with zero network bytes:
+                        # every blob was already under blobs_root (local CAS) or
+                        # came off the endpoint's warm datacenter volume.
+                        source = (
+                            boot_mod.SOURCE_VOLUME if self._fill_source_dir
+                            else boot_mod.SOURCE_LOCAL
+                        )
+                    else:
+                        # No snapshot: a provider-direct pull into the HF cache.
+                        source = boot_mod.SOURCE_HF_CACHE
+                    fetch_span.bytes_moved(net or known_total or fetch_bytes, source)
+                    fetch_span.note(
+                        f"ref={ref} net_bytes={net} manifest_bytes={known_total} "
+                        f"tree_bytes={fetch_bytes} "
+                        f"fill={'yes' if self._fill_source_dir else 'no'}"
+                    )
+                    fetch_span.close(fetch_exc)
         except asyncio.CancelledError:
             if registry is not None:
                 if command_owned:
@@ -2548,6 +2591,19 @@ class _Job:
     # th#913/gw#596: the CONCRETE lane serving this job (stamped post-setup,
     # reported on JobMetrics.lane). "" = not yet determined.
     lane: str = ""
+    # pgw#789 (th#1293 dimensions): this request was served EAGER by a compiled
+    # lane — a pgw#680 guard miss, a router heal/volatile verdict, or an
+    # aot_serve ingress refusal. Set from the guard-miss callback, which fires
+    # DURING the request and names it via postmortem.current_inflight_request().
+    # Without it a fallback sample reports lane=...+compiled and silently
+    # contaminates every compiled-vs-eager latency comparison with eager data.
+    served_eager_fallback: bool = False
+    fallback_reason: str = ""
+    # pgw#789: (steps, width, height) of the EXECUTED payload, defaults
+    # applied — the axes latency is a function of. Stamped beside `lane`,
+    # where the resolved payload is in scope; 0 means "not applicable"
+    # (non-spatial function), never "zero".
+    shape: Tuple[int, int, int] = (0, 0, 0)
     admitted_at: float = dc_field(default_factory=time.monotonic)
     # One JobProgress seq space per job, shared by stream chunks and ctx
     # events so interleaved sends stay monotonic. itertools.count.__next__
@@ -3720,6 +3776,39 @@ class Executor:
         )
         activity_mod.emit_event(
             activity_mod.KIND_GUARD_MISS, detail, phase=reason_class)
+        # pgw#789: charge the fallback to THIS request's JobMetrics. The event
+        # above makes the miss countable per (release, SKU, reason); this makes
+        # the LATENCY SAMPLE honest, which is a different question — an eager
+        # sample tagged serving_mode=aot_cell argues against the optimization
+        # that is in fact working. `heal` is the router's own verdict
+        # (healing = transient, volatile = permanently eager for this shape),
+        # so it outranks the generic guard_miss class.
+        self._mark_request_eager_fallback(
+            request_id,
+            (miss.heal if miss.heal in (
+                serving_mode_mod.FALLBACK_HEALING,
+                serving_mode_mod.FALLBACK_VOLATILE) else
+             serving_mode_mod.FALLBACK_GUARD_MISS),
+        )
+
+    def _mark_request_eager_fallback(self, request_id: str, reason: str) -> None:
+        """Record that ``request_id`` was served eager by a compiled lane.
+
+        Called from a HANDLER thread (the guard-miss callback), so it only
+        writes two plain fields on the job — no locks, no event-loop hop. A
+        request id that names no live job (a background warm compile, a raced
+        terminal) is dropped: there is no sample to correct.
+        """
+        if not request_id:
+            return
+        for job in list(self.jobs.values()):
+            if job.request_id != request_id or job.finished:
+                continue
+            job.served_eager_fallback = True
+            # First reason wins: `volatile` is a terminal verdict and must not
+            # be downgraded to `guard_miss` by a later miss on the same request.
+            if not job.fallback_reason:
+                job.fallback_reason = reason
 
     def _install_compile_targets(
         self,
@@ -4657,6 +4746,38 @@ class Executor:
                 self.runtime_config.stamp_function(spec.name, stamped, gen)
             values.update(stamped or {})
         return values
+
+    def _served_identity(
+        self, spec: Optional[EndpointSpec], job: Optional["_Job"] = None,
+    ) -> "serving_mode_mod.ServedIdentity":
+        """pgw#764/th#1293 dimensions for one completed request.
+
+        `_served_lane` already reports `...+compiled`, but that axis is BINARY
+        platform-wide: it cannot tell an AOT `.pt2` replay from a JIT dynamo
+        cell and it names no artifact, so "AOT vs JIT p50 on 4090s for sdxl
+        w8a8" was unanswerable over our own production traffic even though the
+        worker knew the answer for every request. The discriminator is the
+        ARMED artifact (`aot_serve` owns it), never the lane string.
+
+        Reads the same `rec.compile_targets` scan `_served_lane` uses, so the
+        two can never disagree about whether this request ran compiled.
+        """
+        ref, pipeline = "", None
+        if spec is not None and spec.cls is not None:
+            rec = self._classes.get(spec.instance_key)
+            if rec is not None:
+                for target in rec.compile_targets.values():
+                    with target.state_lock:
+                        active = str(target.active_compile_ref or "")
+                    if active:
+                        ref, pipeline = active, target.pipeline
+                        break
+        return serving_mode_mod.resolve(
+            active_compile_ref=ref,
+            pipeline=pipeline,
+            guard_missed=bool(job is not None and job.served_eager_fallback),
+            verdict=(job.fallback_reason if job is not None else ""),
+        )
 
     def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
         """th#1050: the instructed lane's body when the endpoint DECLARES it
@@ -8320,6 +8441,26 @@ class Executor:
         finally:
             if rec.background_mint is bg:
                 rec.background_mint = None
+            # pgw#789: WARM-COMPLETE. The eager-first boot (pgw#671) advertises
+            # READY on the eager tier and then mints in the background, so
+            # `first_request_servable` is NOT when the pod starts serving
+            # compiled — and the gap between them is exactly the window a pod
+            # bills at eager speed. This milestone closes it: measured from
+            # process start (cumulative), it IS the "time to compiled serving"
+            # number an AOT-vs-JIT comparison needs, and `outcome` says whether
+            # compiled serving was reached at all.
+            armed = next(
+                (t.active_compile_ref for t in rec.compile_targets.values()
+                 if t.active_compile_ref), "")
+            boot_mod.mark(
+                boot_mod.PHASE_WARM_COMPLETE,
+                since_process_start=True,
+                function=bg.spec.name,
+                ref=armed,
+                outcome=(boot_mod.OUTCOME_OK if armed
+                         else boot_mod.OUTCOME_REFUSED),
+                reason="" if armed else "serving_eager",
+            )
             self._on_state_change()
 
     async def _background_mint_run(
@@ -10280,6 +10421,13 @@ class Executor:
             # th#1050: ctx.lane exposes the same post-degrade truth to the
             # handler (declared-lane endpoints branch on it).
             job.lane = self._served_lane(spec, instructed=run.lane)
+            # pgw#789: the shape coordinate, taken from the EXECUTED payload
+            # with endpoint defaults applied. runtime_terms carries these only
+            # when the endpoint declares a runtime formula (and the hub drops
+            # that map after scaling reads it), so a latency comparison had no
+            # shape axis at all for most endpoints.
+            job.shape = serving_mode_mod.shape_of(
+                payload, self._effective_config(spec))
             ctx._set_lane(job.lane)
             # th#1087: effective declared-config values for this dispatch.
             effective_config = self._effective_config(spec, run)
@@ -11242,6 +11390,21 @@ class Executor:
         if isinstance(metrics, pb.JobMetrics) and job.ctx is not None:
             metrics.stage_ms.update(stage_ms_for_metrics(
                 getattr(job.ctx, "_stages", None), metrics.runtime_ms))
+        # pgw#789: stamp the th#1293 serving DIMENSIONS on EVERY terminal path,
+        # for the same reason stage_ms is stamped here — a failed or
+        # deadline-exceeded request's serving mode is exactly the one worth
+        # seeing, and `_metrics` is called from three separate places.
+        # Measured before this landed: 0 of 416 request_state rows on the chaos
+        # stack carried serving_mode, so `/v1/admin/request-latency` could not
+        # separate AOT from JIT from eager over any traffic at all.
+        if isinstance(metrics, pb.JobMetrics):
+            served = self._served_identity(job.spec, job)
+            metrics.serving_mode = served.serving_mode
+            metrics.served_cell_ref = served.served_cell_ref
+            metrics.served_eager_fallback = served.served_eager_fallback
+            metrics.fallback_reason = served.fallback_reason
+            metrics.sm = served.sm
+            metrics.steps, metrics.width, metrics.height = job.shape
         terminal_status = (
             pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
             if job.superseded

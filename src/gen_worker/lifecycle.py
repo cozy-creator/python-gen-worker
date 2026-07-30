@@ -1132,12 +1132,16 @@ class Lifecycle:
             await self.set_phase(pb.WORKER_PHASE_DOWNLOADING_MODELS)
             for ref in prefetch_refs:
                 try:
-                    # pgw#764: per-checkpoint boot fetch span. Bytes and source
-                    # are stamped by the CAS layer (models/cozy_snapshot), which
-                    # is the only place that knows whether they came off a warm
-                    # volume, the local CAS, or a cold R2 pull.
-                    with boot_mod.span(boot_mod.PHASE_WEIGHTS_FETCH, ref=ref):
-                        await self.executor.store.ensure_local(ref)
+                    # pgw#789: the weights_fetch boot span lives in
+                    # `ModelStore._materialize_local`, NOT here. This call site
+                    # only covers hf/civitai prefetch refs; the tensorhub refs
+                    # that own the ~230s of a real cold boot arrive later via
+                    # DesiredResidency/RunJob and never pass through here, so a
+                    # span here measured the cheap path and left the expensive
+                    # one invisible. The materializer is also the only layer
+                    # that can stamp bytes AND source (network vs warm volume
+                    # vs local CAS), which is what the fetch rate needs.
+                    await self.executor.store.ensure_local(ref)
                 except Exception as exc:
                     # pgw#655: this used to log and walk on to READY with an
                     # unmaterialized model, so the failure resurfaced as a
@@ -1190,7 +1194,13 @@ class Lifecycle:
                 awaiting_hub[spec.name] = missing
                 continue
             try:
-                await self.executor.ensure_setup(spec)
+                # pgw#789: weights -> VRAM is a boot phase. Without this span
+                # the whole pipeline load landed in `residual_ms` and the
+                # cold-boot ladder could not say whether a slow boot was
+                # network-bound or load-bound.
+                with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
+                                   function=spec.name):
+                    await self.executor.ensure_setup(spec)
             except Exception as exc:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
         if dynamic:
@@ -1223,14 +1233,33 @@ class Lifecycle:
         # background) or fully compiled. Measured from OS process start, so it
         # is the same quantity the autoscaler's cold-boot horizon prices
         # against, and everything after it is optimization, not boot.
-        boot_mod.mark(
+        #
+        # pgw#789: EXCEPT when functions are still awaiting hub-supplied
+        # snapshots. READY with `awaiting_hub` non-empty advertises NO
+        # function, so the hub cannot dispatch — marking the milestone here
+        # measured "startup() returned", not "servable". Live proof (chaos
+        # stack, gen-worker 0.77.0, six boots): every recorded
+        # first_request_servable was 4.2-12.3s while the real boots were
+        # minutes, because the ~230s of tensorhub-ref weight fetching happens
+        # AFTER this line on exactly that path. `_setup_awaiting_functions`
+        # owns the milestone in that case; if the snapshots never arrive it is
+        # never marked, and a boot with no closing milestone is itself the
+        # finding (the same doctrine as an open mid-boot span).
+        if not awaiting_hub:
+            self._mark_servable()
+        await self.set_phase(pb.WORKER_PHASE_READY)
+
+    def _mark_servable(self) -> None:
+        """Close the boot: mark first-request-servable from process start,
+        carrying the reconciliation (measured/residual/per-class) as detail.
+        `mark_once` makes the call idempotent across the two owners."""
+        boot_mod.mark_once(
             boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
             since_process_start=True,
             detail=" ".join(
                 f"{k}={v}" for k, v in sorted(boot_mod.reconciliation().items())
             ),
         )
-        await self.set_phase(pb.WORKER_PHASE_READY)
 
     async def _heartbeat_loop(self) -> None:
         """th#965 layer 2 + pgw#610: force-send the full StateDelta (which
@@ -1260,7 +1289,9 @@ class Lifecycle:
                 if spec is None or fn in self.executor.unavailable:
                     continue
                 try:
-                    await self.executor.ensure_setup(spec)
+                    with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
+                                       function=fn):
+                        await self.executor.ensure_setup(spec)
                     logger.info(
                         "boot setup of %s completed after hub snapshot delivery (gw#591)", fn
                     )
@@ -1269,6 +1300,13 @@ class Lifecycle:
                 await self.maybe_send_state_delta()
             if pending:
                 await asyncio.sleep(_BOOT_SETUP_WATCH_INTERVAL_S)
+        # pgw#789: THIS is where a hub-snapshot-fed worker actually becomes
+        # servable — the functions it advertises are set up and the StateDelta
+        # carrying them has gone out. Deliberately outside the loop and after
+        # it: `pending` is empty here (or the worker is draining, in which case
+        # it never became servable and must not claim a boot number).
+        if not pending and not self.draining:
+            self._mark_servable()
 
     # ---- drain -------------------------------------------------------------------
 
