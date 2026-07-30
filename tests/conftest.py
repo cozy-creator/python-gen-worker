@@ -12,9 +12,25 @@ issue #345.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
-import gen_worker
+# pgw#802: point the postmortem carriers off the HOST before anything imports
+# `gen_worker.postmortem`, which resolves BOOT_RECORD_PATH (and its in-flight /
+# crash-registry / fault-dump siblings) ONCE at import from this variable.
+#
+# Doing it here rather than only in a fixture covers the case a fixture cannot:
+# tests that spawn a REAL child (`gen_worker.entrypoint`, the SIGSEGV boot in
+# test_native_crash_streak_pgw676) inherit os.environ, and a child that records
+# a native-crash streak into the shared /tmp registry refuses `generate` at
+# every later boot in EVERY lane's suite. Harnesses that build a replacement
+# env still set it explicitly (see tests/harness/subprocess_runner.py).
+os.environ.setdefault(
+    "GEN_WORKER_BOOT_RECORD",
+    str(Path(tempfile.mkdtemp(prefix="pgw-postmortem-")) / "boot-record.json"),
+)
+
+import gen_worker  # noqa: E402
 
 # Deterministic CPU encode wherever the suite runs (gw#476): never probe or
 # engage NVENC from tests — CI has no GPU, and dev boxes that have one must
