@@ -115,13 +115,28 @@ def hub_base_url(base_url: Optional[str] = None) -> str:
 
 
 def _parse_chunks(
-    ref: TensorhubRef, path: str, raw: Any
+    ref: TensorhubRef, path: str, raw: Any, urls: Any = None
 ) -> tuple[WorkerResolvedChunk, ...]:
     """Parse a v2 entry's ordered chunk list. Order is the file's byte order.
 
+    THE WIRE SHAPE, read off the hub's serializer rather than assumed:
+    `catalog.SnapshotManifestFile` carries `chunks: [{digest, len}]` — the
+    canonical manifest bytes, which cannot contain URLs because they are part of
+    the content-addressed identity — plus a SEPARATE, INDEX-ALIGNED
+    `chunk_urls: [...]` that exists only at resolve time. The URL is therefore
+    NOT nested inside each chunk on the REST path. (The gRPC path differs: its
+    `ChunkRef` carries `sha256`/`url`/`len` together, so a nested `url` is
+    accepted too.)
+
+    Getting this wrong is not cosmetic: requiring a nested `url` made every real
+    chunked checkpoint unparseable, which is how a v2 publish looks fine on the
+    hub and is unreachable to every standalone client.
+
     A malformed chunk list is a HARD failure, never a silent empty list: an
     empty list is indistinguishable from "stored whole", and reading a chunked
-    file as whole is how a 40 GiB shard becomes a 0-byte one.
+    file as whole is how a 40 GiB shard becomes a 0-byte one. A URL list of the
+    WRONG LENGTH is equally fatal — index alignment is the only thing tying a
+    URL to its digest, so a short list must never mean "fetch fewer chunks".
     """
     if not raw:
         return ()
@@ -129,6 +144,19 @@ def _parse_chunks(
         raise HubResolveError(
             f"tensorhub resolve for {ref.canonical()}: {path!r} chunks is not a list"
         )
+    url_list: list[str] = []
+    if urls is not None:
+        if not isinstance(urls, list):
+            raise HubResolveError(
+                f"tensorhub resolve for {ref.canonical()}: {path!r} chunk_urls is not a list"
+            )
+        url_list = [str(u or "").strip() for u in urls]
+        if url_list and len(url_list) != len(raw):
+            raise HubResolveError(
+                f"tensorhub resolve for {ref.canonical()}: {path!r} has {len(raw)} "
+                f"chunks but {len(url_list)} chunk_urls — index alignment is the "
+                "only thing binding a URL to its digest"
+            )
     out: list[WorkerResolvedChunk] = []
     for i, c in enumerate(raw):
         if not isinstance(c, dict):
@@ -137,7 +165,7 @@ def _parse_chunks(
             )
         digest = str(c.get("digest") or c.get("sha256") or "").strip().lower()
         digest = digest.removeprefix("sha256:")
-        url = str(c.get("url") or "").strip()
+        url = str(c.get("url") or "").strip() or (url_list[i] if i < len(url_list) else "")
         length = int(c.get("len") or c.get("length") or 0)
         if len(digest) != 64 or not url or length <= 0:
             raise HubResolveError(
@@ -230,7 +258,8 @@ def resolve_repo(
             b3 = b3[7:]
         tagged = str(ent.get("digest") or "").strip().lower()
         u = str(ent.get("url") or "").strip() or None
-        chunks = _parse_chunks(ref, path, ent.get("chunks"))
+        chunks = _parse_chunks(
+            ref, path, ent.get("chunks"), ent.get("chunk_urls"))
         # A chunked entry has NO whole-file url — its bytes only exist as
         # chunks. Requiring `url` here is what would classify every v2
         # snapshot as unresolvable.

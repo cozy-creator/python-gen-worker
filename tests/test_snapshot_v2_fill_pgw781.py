@@ -356,3 +356,71 @@ def test_network_bytes_counts_chunked_transfer(tmp_path, store):
     with NetworkBytesScope() as scope:
         fill(tmp_path, [chunked_entry(store, "w.safetensors", data)])
     assert scope.network_bytes == len(data)
+
+
+# ---------------------------------------------------------------------------
+# The REST wire shape, as the hub actually serializes it. These exist because
+# the first version of this parser was written from a prose contract instead of
+# from the hub's serializer, shipped in 0.78.0, and made every real chunked
+# checkpoint unparseable — a v2 publish that looked fine on the hub and was
+# unreachable to every standalone client. Unit tests all passed: they encoded
+# the same wrong assumption.
+# ---------------------------------------------------------------------------
+
+
+def _entry(n_chunks=2, **over):
+    e = {
+        "path": "model.safetensors", "size_bytes": 100,
+        "digest": "sha256:" + "a" * 64,
+        "chunk_size_bytes": 64,
+        "chunks": [{"digest": f"{i:02d}" + "b" * 62, "len": 50} for i in range(n_chunks)],
+        "chunk_urls": [f"https://r2.invalid/{i}" for i in range(n_chunks)],
+    }
+    e.update(over)
+    return e
+
+
+def _parse(entry):
+    from gen_worker.models.hub_client import _parse_chunks
+    from gen_worker.models.refs import TensorhubRef
+    return _parse_chunks(TensorhubRef(owner="o", repo="r"), entry["path"],
+                         entry.get("chunks"), entry.get("chunk_urls"))
+
+
+def test_chunk_urls_is_a_SEPARATE_index_aligned_array():
+    """`catalog.SnapshotManifestFile` cannot put URLs inside `chunks` — those
+    bytes ARE the content-addressed identity. The URLs ride alongside."""
+    got = _parse(_entry())
+    assert [c.url for c in got] == ["https://r2.invalid/0", "https://r2.invalid/1"]
+    assert [c.sha256[:2] for c in got] == ["00", "01"]
+    assert [c.length for c in got] == [50, 50]
+
+
+def test_a_nested_url_still_works_for_the_grpc_shape():
+    """The proto's ChunkRef carries sha256/url/len together, so both forms
+    must parse — one client library, two transports."""
+    e = _entry()
+    e["chunk_urls"] = None
+    for i, c in enumerate(e["chunks"]):
+        c["url"] = f"https://grpc.invalid/{i}"
+    got = _parse(e)
+    assert [c.url for c in got] == ["https://grpc.invalid/0", "https://grpc.invalid/1"]
+
+
+def test_a_MISALIGNED_url_list_is_fatal():
+    """Index alignment is the only thing binding a URL to its digest. A short
+    list must never silently mean 'fetch fewer chunks'."""
+    from gen_worker.models.hub_client import HubResolveError
+    e = _entry(n_chunks=3)
+    e["chunk_urls"] = ["https://r2.invalid/0"]
+    with pytest.raises(HubResolveError, match="index alignment"):
+        _parse(e)
+
+
+def test_a_chunk_with_no_url_anywhere_is_fatal():
+    """Unreachable bytes must fail loudly at parse, not at byte 0 of a fetch."""
+    from gen_worker.models.hub_client import HubResolveError
+    e = _entry()
+    e["chunk_urls"] = None
+    with pytest.raises(HubResolveError, match="missing digest/url/len"):
+        _parse(e)

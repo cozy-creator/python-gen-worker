@@ -177,6 +177,7 @@ def _send_with_retries(
     send: Callable[[], requests.Response],
     *,
     silence_window_s: Optional[float] = None,
+    definite: Optional[Callable[[requests.Response], bool]] = None,
 ) -> requests.Response:
     """Origin-discriminating, silence-bounded retry (pgw#715/#738/#743).
 
@@ -211,7 +212,12 @@ def _send_with_retries(
                 f"{what} failed ({type(exc).__name__}): {exc}") from exc
         else:
             code = int(resp.status_code)
-            if code != 429 and is_definite_hub_answer(resp):
+            # `definite` lets a caller supply its OWN definiteness rule for a
+            # route whose refusals are not envelope-shaped (th#1303's v2
+            # completion answers with a projection carrying an explicit
+            # `retryable` flag). The default stays the shape heuristic.
+            is_definite = definite(resp) if definite is not None else is_definite_hub_answer(resp)
+            if code != 429 and is_definite:
                 return resp  # definite hub answer
             last_resp, last_exc = resp, None
             delay = _retry_after_s(resp) or delay
@@ -691,6 +697,59 @@ class HubClient:
 
     # ---- v2: chunked sha256 CAS (th#1303 / pgw#781) ----
 
+    @staticmethod
+    def _v2_failure(resp: requests.Response) -> Optional[dict[str, Any]]:
+        """The v2 routes' TYPED failure, or None.
+
+        A v2 completion does not answer with an error envelope: it answers with
+        the th#1301 PROJECTION, and a refusal is
+        ``{"status": {"stage": "repudiated", "terminal": true,
+                      "failure": {"code", "retryable", "message"}}}``.
+        That `retryable` bit is the hub's own classification — the whole point
+        of th#1301's retryable-vs-terminal split — so it is read, never guessed
+        at from the body's shape.
+        """
+        try:
+            body = resp.json() if resp.text else {}
+        except Exception:  # noqa: BLE001 - an unparseable body is not a verdict
+            return None
+        if not isinstance(body, dict):
+            return None
+        status = body.get("status")
+        if not isinstance(status, dict):
+            return None
+        failure = status.get("failure")
+        if not isinstance(failure, dict) or not failure.get("code"):
+            return None
+        return failure
+
+    def _post_v2_complete(self, path: str) -> requests.Response:
+        """POST /complete WITHOUT the envelope-guessing retry loop.
+
+        `_send_with_retries` decides "did we hear from the hub?" from the body's
+        SHAPE, and a v2 completion's refusal is a projection rather than an
+        error envelope — so it read a real, typed, `retryable: false` refusal as
+        a proxy non-answer and retried it. MEASURED LIVE (twice): the retry
+        found the session already terminal and returned 409
+        `publish_repudiated`, so the caller was told the publish had been
+        repudiated instead of `invalid_manifest_for_kind:
+        missing_diffusers_single_file_safetensors` — a consequence in place of a
+        cause, and the actual reason was gone.
+
+        A publish is not idempotent to re-complete, so a blind retry here can
+        only ever destroy the diagnosis. Network-level failures still retry
+        (nothing was heard); an HTTP answer of any status is the hub speaking
+        and is returned as-is for the typed handling below.
+        """
+        return _send_with_retries(
+            f"POST {path}",
+            lambda: _http_session().post(
+                f"{self.base_url}{path}", headers=self._headers(),
+                timeout=(_CONNECT_TIMEOUT_S, _COMPLETE_TIMEOUT_S),
+            ),
+            definite=lambda resp: True,
+        )
+
     def publish_v2(
         self,
         *,
@@ -894,7 +953,7 @@ class HubClient:
                         f"publish re-plan failed ({again.status_code}): {again.text[:500]}")
                 grants = _grants_of(self._json(again))
 
-            done = self._post(
+            done = self._post_v2_complete(
                 f"{repo_path}/publishes/{urllib.parse.quote(publish_id, safe='')}/complete")
         except Exception:
             # Abort so the staging prefix is reclaimed and the session lands in
@@ -910,6 +969,26 @@ class HubClient:
             raise
 
         if done.status_code < 200 or done.status_code >= 300:
+            # Lead with the hub's OWN typed classification when it gave one. A
+            # refusal that reports its `code`, its `retryable` bit and the stage
+            # that produced it is actionable; a bare status code plus 800 bytes
+            # of truncated projection is what sent this lane looking in the
+            # wrong place twice.
+            failure = self._v2_failure(done)
+            if failure:
+                stage = ""
+                try:
+                    for s in (done.json().get("status") or {}).get("stages") or []:
+                        if s.get("status") == "failed":
+                            stage = str(s.get("stage") or "")
+                except Exception:  # noqa: BLE001 - the stage is a nicety
+                    pass
+                raise HubPublishError(
+                    f"publish {publish_id} {'repudiated' if not failure.get('retryable') else 'failed'}"
+                    f"{f' at {stage}' if stage else ''}: "
+                    f"{failure.get('code')}: {failure.get('message')} "
+                    f"(retryable={bool(failure.get('retryable'))})"
+                )
             raise HubPublishError(
                 f"publish complete failed ({done.status_code}): {done.text[:800]}")
         final = self._json(done)
