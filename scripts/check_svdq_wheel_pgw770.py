@@ -62,7 +62,7 @@ def main() -> int:
         "unpack_vector",
         "pack_wscales",
         "unpack_wscales",
-        "pack_weight",
+        "pack_qweight",
         "unpack_qweight",
         "decode_linear",
     ):
@@ -71,6 +71,15 @@ def main() -> int:
             hasattr(svdq_layout, name),
             f"{name} {'present' if hasattr(svdq_layout, name) else 'MISSING'}",
         )
+
+    # svdq_native.fold_to_dense is the other half decode_linear's callers use;
+    # the pgw#770 oracle imports it by name too.
+    try:
+        from gen_worker.models.svdq_native import fold_to_dense  # noqa: F401
+
+        _check("svdq_native", True, "fold_to_dense present")
+    except Exception as exc:  # noqa: BLE001
+        _check("svdq_native", False, f"fold_to_dense import failed: {exc!r}")
 
     try:
         import torch
