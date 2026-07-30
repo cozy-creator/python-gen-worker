@@ -702,6 +702,21 @@ def test_action_table_admits_exactly_the_named_actions():
         actions.authorize(req)
 
 
+def test_a_compute_child_with_no_seam_refuses_to_dial_the_hub_itself(monkeypatch):
+    """No silent downgrade. With the seam down, a direct call from the child
+    would be unauthenticated — which fails closed, but by accident. Refuse it
+    outright: that is how "the child never calls out" stays true instead of
+    quietly becoming "the child's calls happen to get 401s"."""
+    from gen_worker.procsplit import broker
+
+    monkeypatch.setenv("GEN_WORKER_COMPUTE_CHILD", "1")
+    broker.install(None)
+    with pytest.raises(broker.BrokerError) as exc:
+        broker.request("GET", "/v1/worker/cells/revocations",
+                       base_url="http://hub", bearer="")
+    assert "parent-mediated" in str(exc.value)
+
+
 def test_no_frame_carries_the_worker_jwt():
     """A ratchet over the frame vocabulary itself: T_TOKEN is gone and nothing
     replaced it. Catches a future frame that re-opens the same hole under a

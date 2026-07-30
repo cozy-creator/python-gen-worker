@@ -73,6 +73,19 @@ def request(
     broker = _broker
     if broker is not None:
         return broker.call(method, path, params=params, json=json, timeout=timeout)
+    from . import is_compute_child
+
+    if is_compute_child():
+        # The seam is down (or was never up) inside a compute child. Falling
+        # through to a direct call would be an unauthenticated request the hub
+        # rejects — which fails closed, but by accident. Say it instead: a
+        # process that holds no credential has no business dialling the hub,
+        # and a silent downgrade is how "the child never calls out" quietly
+        # stops being true.
+        raise BrokerError(
+            f"{method} {path}: the control seam is down and this compute child "
+            "holds no credential — hub calls are parent-mediated"
+        )
     import requests
 
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
