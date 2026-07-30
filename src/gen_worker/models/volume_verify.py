@@ -123,8 +123,13 @@ def verify_files(
         try:
             algo, want = parse_cas_ref(t.ref)
         except ValueError as exc:
+            # An unreadable digest is CORRUPT, not "nothing to check". Treating
+            # it as a mere finding would let a malformed manifest entry pass
+            # the tree — the same degrade-to-skip that made the v2 snapshot
+            # report clean without being hashed.
             with lock:
                 rep.examined += 1
+                rep.bad.append(label)
                 rep.findings.append(f"{t.path.name}: unreadable digest {t.ref!r}: {exc}")
             return
         memo_key = (blobs_root, f"{algo}:{want}")

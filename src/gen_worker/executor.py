@@ -2111,34 +2111,60 @@ class ModelStore:
         manifest-less trees (hf/civitai) get the structural safetensors check
         (header parses + every declared tensor byte present). Returns
         ``(ok, bad_digests)`` — the digests name blobs to quarantine."""
-        from .models.cozy_cas import _blake3_file
         from .models.cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
         from .models.loading import safetensors_file_valid
+        from .models.volume_verify import snapshot_verify_targets, verify_files
 
         p = Path(path)
         bad: List[str] = []
         covered: set[Path] = set()
         files = list(snapshot.files) if snapshot is not None else []
         if files and p.is_dir():
-            for f in files:
-                if _is_parts_manifest(f.path) or _is_part_file(f.path):
-                    continue  # not materialized: parts live only in blobs/
+            # pgw#769/#781 (th#1303): the hash algorithm comes from the DIGEST,
+            # never from this call site. This used to read `f.blake3` and hash
+            # with blake3 -- but under manifest v2 that field is EMPTY and the
+            # digest lives in `f.digest` as "sha256:<hex>", so `digest` was ""
+            # and BOTH the size check and the hash check were skipped. The tree
+            # was then reported CLEAN WITHOUT BEING HASHED. On a volume shared
+            # across releases and pods that is a security hole, not a cosmetic
+            # gap, and it is the same false-clean shape as reading
+            # manifest["files"] when the key is "entries": a verifier that
+            # examines nothing looks exactly like one that passes.
+            targets, skipped = snapshot_verify_targets(files, p)
+            for rel in skipped:
                 try:
-                    dst = p / _norm_rel_path(f.path)
+                    covered.discard(p / _norm_rel_path(rel))
                 except ValueError:
-                    continue
-                covered.add(dst)
-                digest = (f.blake3 or "").strip().lower()
-                try:
-                    if not dst.exists():
-                        raise ValueError("missing")
-                    if f.size_bytes and dst.stat().st_size != int(f.size_bytes):
-                        raise ValueError("size mismatch")
-                    if digest and _blake3_file(dst).lower() != digest:
-                        raise ValueError("blake3 mismatch")
-                except (OSError, ValueError) as exc:
-                    logger.warning("snapshot file %s/%s corrupt: %s", p.name, f.path, exc)
-                    bad.append(digest or f.path)
+                    pass
+            for t in targets:
+                covered.add(t.path)
+            if targets:
+                rep = verify_files(targets, blobs_root=str(p.parent))
+                bad.extend(rep.bad)
+                for finding in rep.findings:
+                    logger.warning("snapshot %s: %s", p.name, finding)
+                # DENOMINATOR GUARD, and it applies only to an otherwise-CLEAN
+                # report: a verdict that found nothing wrong is trustworthy only
+                # if it actually read the bytes. `examined` must cover every
+                # target handed in, and a clean run that neither hashed nor
+                # memo-hit anything read nothing at all. (A report that already
+                # names bad files is not vacuous -- it did its job, and folding
+                # it in here would double-report the same digest.)
+                vacuous = (
+                    not rep.bad
+                    and not rep.findings
+                    and rep.hashed == 0
+                    and rep.memo_hits == 0
+                )
+                if rep.examined != rep.expected or vacuous:
+                    logger.error(
+                        "snapshot %s verification is not trustworthy: examined=%d "
+                        "expected=%d hashed=%d memo=%d bytes=%d -- treating as corrupt",
+                        p.name, rep.examined, rep.expected, rep.hashed,
+                        rep.memo_hits, rep.bytes_hashed,
+                    )
+                    already = set(bad)
+                    bad.extend(t.ref for t in targets if t.ref not in already)
         try:
             candidates = [p] if p.is_file() else sorted(p.rglob("*.safetensors"))
         except OSError:
