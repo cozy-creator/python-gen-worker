@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import inspect
 import logging
 import random
 import time
@@ -439,10 +440,13 @@ class Transport:
     """Owns the channel + bidi stream + reconnect loop.
 
     handlers must provide:
-      build_hello() -> pb.Hello                     (fresh full snapshot)
+      build_hello() -> pb.Hello | Awaitable[pb.Hello]  (fresh full snapshot;
+        awaitable form serves the pgw#763 split parent, which fetches the
+        Hello from its compute child)
       on_hello_ack(ack: pb.HelloAck) -> Awaitable   (also mid-stream re-sends)
       on_message(msg: pb.SchedulerMessage) -> Awaitable  (MUST NOT block)
       on_message_shipped(msg: pb.WorkerMessage) -> Awaitable (optional)
+      on_token_refresh(token, expires_at_unix) -> Awaitable (optional)
       on_disconnect() -> Awaitable
     """
 
@@ -474,6 +478,11 @@ class Transport:
         # present the newest credential; the boot-time settings token is only
         # the pre-rotation fallback.
         self._worker_jwt: Optional[str] = None
+        # pgw#763: a supervisor-requested stream cycle (compute child respawn
+        # needs a fresh Hello). Cleared at the start of each connection, so a
+        # request set BEFORE a connection is satisfied by that connection's
+        # own fresh Hello.
+        self._cycle = asyncio.Event()
 
     # ---- send API --------------------------------------------------------
 
@@ -508,6 +517,12 @@ class Transport:
 
     def stop(self) -> None:
         self._stopping.set()
+
+    def cycle_connection(self) -> None:
+        """Drop the current stream (if any) and let the reconnect loop redial
+        with a fresh Hello (pgw#763: the compute child was respawned, so the
+        hub must re-sync desired state against the new process)."""
+        self._cycle.set()
 
     # ---- connection loop ---------------------------------------------------
 
@@ -661,13 +676,17 @@ class Transport:
 
     async def _connect_once(self, target: str, use_tls: bool) -> None:
         """One connection lifetime; sets self._connected_at once HelloAck lands."""
+        self._cycle.clear()
         channel = self._make_channel(target, use_tls)
         try:
             stub = pb_grpc.WorkerSchedulerStub(channel)
             stream = stub.Connect(metadata=self._metadata())
 
             async def _handshake() -> Any:
-                await stream.write(pb.WorkerMessage(hello=self._handlers.build_hello()))
+                hello = self._handlers.build_hello()
+                if inspect.isawaitable(hello):
+                    hello = await hello
+                await stream.write(pb.WorkerMessage(hello=hello))
                 return await stream.read()
 
             # Deadline on the whole dial+Hello+HelloAck handshake: a hub that
@@ -699,10 +718,31 @@ class Transport:
             send_task = asyncio.create_task(self._send_loop(stream), name="transport-send")
             recv_task = asyncio.create_task(self._recv_loop(stream), name="transport-recv")
             stop_task = asyncio.create_task(self._stopping.wait(), name="transport-stop")
+            cycle_task = asyncio.create_task(self._cycle.wait(), name="transport-cycle")
             try:
                 done, pending = await asyncio.wait(
-                    (send_task, recv_task, stop_task), return_when=asyncio.FIRST_COMPLETED
+                    (send_task, recv_task, stop_task, cycle_task),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
+                if cycle_task in done and stop_task not in done:
+                    # Same discipline as the drain close below: a write()
+                    # return only means "buffered", so an abrupt channel close
+                    # here would RST the call and discard the final buffered
+                    # writes — including the supervisor's typed death
+                    # JobResult, which mark_result_shipped has already retired
+                    # from the durable queue. Half-close and wait briefly for
+                    # the peer to end the call, then reconnect.
+                    send_task.cancel()
+                    try:
+                        await stream.done_writing()
+                        await asyncio.wait_for(asyncio.shield(recv_task), 5.0)
+                    except (asyncio.TimeoutError, ConnectionError):
+                        pass
+                    except Exception:
+                        pass
+                    raise ConnectionError(
+                        "stream cycled by supervisor (compute process restart)"
+                    )
                 if stop_task in done and self._clean_close:
                     # Drain close: half-close the stream, then WAIT for the
                     # peer to end the call. Closing the channel immediately
@@ -723,10 +763,12 @@ class Transport:
                     if t is not stop_task:
                         t.result()  # re-raise stream errors
             finally:
-                for t in (send_task, recv_task, stop_task):
+                for t in (send_task, recv_task, stop_task, cycle_task):
                     if not t.done():
                         t.cancel()
-                await asyncio.gather(send_task, recv_task, stop_task, return_exceptions=True)
+                await asyncio.gather(
+                    send_task, recv_task, stop_task, cycle_task, return_exceptions=True
+                )
         finally:
             self._connected.clear()
             await channel.close()
@@ -774,6 +816,18 @@ class Transport:
                         "worker JWT rotated by hub (exp=%d)",
                         msg.token_refresh.expires_at_unix,
                     )
+                    # pgw#763: the split parent forwards rotations to the
+                    # compute child (capability renewal reads the fresh JWT).
+                    refreshed = getattr(self._handlers, "on_token_refresh", None)
+                    if refreshed is not None:
+                        try:
+                            await refreshed(
+                                token, int(msg.token_refresh.expires_at_unix)
+                            )
+                        except Exception:
+                            logger.warning(
+                                "on_token_refresh handler failed", exc_info=True
+                            )
                 continue
             try:
                 await self._handlers.on_message(msg)

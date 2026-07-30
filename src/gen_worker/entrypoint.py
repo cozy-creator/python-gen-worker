@@ -34,10 +34,25 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # compile-worker subprocess. See compile_cache._disable_aot_autograd_cache.
 os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
 
+# pgw#763: with GEN_WORKER_PROCESS_SPLIT=1 this process becomes the CONTROL
+# PARENT — gRPC stream, identity, JWT, child supervision — and must run BEFORE
+# the heavy imports below so it never loads torch. It spawns/respawns compute
+# children (this same entrypoint with GEN_WORKER_COMPUTE_CHILD=1) and only
+# ever exits deliberately.
+if __name__ == "__main__":
+    from .procsplit import is_compute_child, split_enabled  # noqa: E402
+
+    if split_enabled() and not is_compute_child():
+        from .procsplit.parent import run_parent  # noqa: E402
+
+        os._exit(run_parent())
+
 # gw#640: fork the supervisor BEFORE the heavy imports below. The parent stays
 # a bare interpreter (so the OOM killer picks the fat child, not the reporter)
 # and outlives the worker to report WTERMSIG / cgroup oom_kill over the wire.
 # In the child this returns immediately; the parent never returns from it.
+# (In split mode the compute child skips this: the control parent IS the
+# survivor, and it sets GEN_WORKER_SUPERVISOR=0 in the child's env.)
 if __name__ == "__main__":
     from .supervisor import supervise  # noqa: E402
 
