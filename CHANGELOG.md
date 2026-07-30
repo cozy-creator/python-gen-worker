@@ -87,6 +87,23 @@
   is why the fix moves the compile out of the interpreter rather than trying to
   make it yield.
 
+  **Wired into the executor**, which is what makes any of the above run: a
+  compile-cell miss on a delegating boot now reaches `mint_delegate.build_cell`
+  instead of the in-process capture. The wiring exposed a defect that would have
+  made the feature a no-op — the pending-self-mint recording gate was `if armed
+  and selection is not None`, and a delegated arm reports `armed=False`
+  truthfully (nothing IS armed; the pipe serves eager), so the mint obligation
+  was silently dropped. Delegated pendings are recorded on their own merits and
+  deliberately kept OUT of `active_compile_artifacts` — that pipe serves eager,
+  and claiming an active artifact for it would advertise bytes it does not serve
+  (gw#586) — while still advertising the claimed key ref for th#910's
+  self-attested fence. Sibling pipes sharing a key mint their union in ONE child.
+  Delegation is eager-first by construction (the two switches move together) and
+  `fleet_cells.delegatable()` keeps mandatory quantized lanes and regional
+  targets on the in-process capture, since those cannot serve eager meanwhile.
+  Delegation is a POLICY of the arming brain, not a caller argument: threading a
+  `delegate=` flag from the executor broke every arming double in the suite.
+
 - **pgw#770 — native svdq decoded five of seven tensors in the wrong order; the
   official nunchaku qwen-image artifact rendered noise.** In a nunchaku v1
   checkpoint EVERY tensor is warp-fragment-permuted, not just
