@@ -51,8 +51,11 @@ quantized (w8a8/w4a4) lanes keep their typed fail-closed refusal.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
+import os
 import shutil
+import tarfile
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -128,6 +131,11 @@ class PendingSelfMint:
     mint_root: Path
     publisher: Optional["CellPublisher"]
     cache_dir: Optional[Path] = None
+    #: pgw#784: this mint is built by a CHILD PROCESS, so the live pipeline
+    #: was never armed and this process holds no capture. The live pipe stays
+    #: plain eager until ``adopt_delegated_mint`` swaps it through the
+    #: ordinary delivered-cell path.
+    delegated: bool = False
     _state: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -371,6 +379,7 @@ def enable_compiled(
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
     publisher: Optional[CellPublisher] = None,
+    delegate: bool = False,
 ) -> ArmOutcome:
     """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
 
@@ -510,7 +519,12 @@ def enable_compiled(
     if not cc.has_compile_target(pipe, cfg):
         return _fail_closed(
             pipe, "no compile target resolves on this pipeline", selection_bug)
-    if cc.delivered_cell_seeded():
+    if cc.delivered_cell_seeded() and not delegate:
+        # pgw#784: this gate exists ONLY because an in-process capture moves
+        # the process-global inductor cache dir. A DELEGATED mint's capture
+        # lives in the child, so the hazard does not exist — and a sibling
+        # whose own cell is missing can now mint it instead of being eager
+        # for life because an unrelated slot got a delivered cell first.
         return _fail_closed(
             pipe,
             "a delivered cell is seeded in this process; a self-mint "
@@ -598,7 +612,7 @@ def enable_compiled(
     with _PENDING_LOCK:
         existing = _PENDING.get(key)
         conflict = next((k for k in _PENDING if k != key), None)
-    if conflict is not None and existing is None:
+    if conflict is not None and existing is None and not delegate:
         logger.warning(
             "fleet-cells: self-mint declined for %s key=%s — capture already "
             "pending for key=%s (one inductor capture dir per process)",
@@ -619,6 +633,30 @@ def enable_compiled(
             cc.runtime_key()["sku"], cc.runtime_key()["torch"],
             loading.pipeline_weight_lane(pipe))
         target = mint_root / f"{label}.tar.gz"
+
+    if delegate:
+        # pgw#784: NOTHING is armed on the live pipeline. It keeps serving
+        # plain eager — no guarded wrappers, no branch containers, no
+        # inductor state, and (unlike the in-process capture) no
+        # process-global TORCHINDUCTOR_CACHE_DIR move, which is why the
+        # one-live-capture-per-process restriction above does not apply.
+        # ``armed=False`` is the honest answer: this pipe serves eager right
+        # now. The mint obligation rides the returned pending.
+        pending = PendingSelfMint(
+            family=family, cell_key=key,
+            ref=f"{cc.system_repo(family)}#{key}",
+            cfg=cfg, target=target, capture_dir=capture_dir,
+            mint_root=mint_root, publisher=publisher, cache_dir=cache_dir,
+            delegated=True,
+        )
+        with _PENDING_LOCK:
+            _PENDING.setdefault(key, pending)
+        logger.info(
+            "fleet-cells: DELEGATED self-mint for %s (key=%s) — a child "
+            "process builds the cell while this process serves eager "
+            "(pgw#784)", family, key)
+        return ArmOutcome(
+            armed=False, self_mint=pending, selection_bug=selection_bug)
 
     try:
         cc.begin_fleet_mint(pipe, cfg, capture_dir)
@@ -739,6 +777,100 @@ def finalize_self_mint(
             "fleet-cells: live-cache fold of the proven capture failed",
             exc_info=True)
 
+    return minted
+
+
+def _packed_metadata(artifact: Path) -> Dict[str, Any]:
+    """The stamped metadata inside a packed cell (metadata members only)."""
+    with tarfile.open(artifact, mode="r:*") as tar:
+        member = tar.extractfile(cc.METADATA_NAME)
+        if member is None:
+            raise RuntimeError(f"{artifact} carries no {cc.METADATA_NAME}")
+        return dict(json.loads(member.read().decode()))
+
+
+def adopt_delegated_mint(
+    pipe: Any, pending: "PendingSelfMint", artifact: Path,
+) -> Optional[SelfMint]:
+    """pgw#784: adopt a cell a CHILD PROCESS just built, then publish it.
+
+    The delegated twin of :func:`finalize_self_mint`, and deliberately a
+    thinner one: there is nothing to pack here — the child already packed —
+    so this is exactly the DELIVERED-cell adoption the cache-HIT path runs
+    (``compile_cache.enable`` with an explicit artifact: stage, ``verify()``,
+    key match, drift, seed, arm). ``verify()`` semantics are untouched
+    (th#1098 exact identity): the child's cell either describes this runtime
+    on every axis or it does not exist for it.
+
+    That is the whole point of the split. In-process capture made the proof
+    tautological — the artifact was byte-derived from the very execution the
+    proof observed, so it could not fail to match. A child-built cell has to
+    EARN adoption through the same gates a hub-delivered cell does, and when
+    it cannot, the honest outcome is the one every miss already has: unwrap,
+    serve eager, leave the cell absent, publish nothing. A parity gap
+    degrades; it never poisons the store.
+
+    ``None`` = not adoptable. The caller treats that exactly like a disproven
+    candidate (the mint failed, the worker keeps serving).
+    """
+    state = pending._state
+    if "minted" in state:
+        return state["minted"]
+
+    artifact = Path(artifact)
+    if artifact != pending.target:
+        try:
+            pending.target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(artifact, pending.target)
+        except OSError:
+            shutil.copy2(artifact, pending.target)
+    try:
+        armed = cc.enable(pipe, pending.cfg, pending.cache_dir,
+                          artifact=pending.target)
+    except cc.CellSelectionBugError as exc:
+        # th#883, delegated edition: the child's own cell, whose axes describe
+        # exactly this runtime, refused to arm. Loud — it is a bug in the one
+        # selection brain, not a compatibility miss.
+        logger.error(
+            "fleet-cells: cell_selection_bug adopting this pod's DELEGATED "
+            "mint (family=%s key=%s): %s",
+            pending.family, pending.cell_key, exc)
+        armed = False
+    except Exception as exc:  # noqa: BLE001 — adoption failure => eager
+        logger.warning(
+            "fleet-cells: delegated mint for %s did not adopt (%s)",
+            pending.family, exc)
+        armed = False
+    if not armed:
+        activity_mod.emit_event(
+            "self_mint_abort",
+            f"family={pending.family} key={pending.cell_key}: the child "
+            "process produced a cell this runtime could not adopt; serving "
+            "stays eager and nothing is published",
+            phase="delegated_adopt_failed",
+        )
+        state["minted"] = None
+        _unregister(pending)
+        shutil.rmtree(pending.mint_root, ignore_errors=True)
+        return None
+
+    meta = _packed_metadata(pending.target)
+    key = str(meta.get("cell_key") or "").strip() or pending.cell_key
+    minted = SelfMint(
+        family=pending.family, cell_key=key,
+        ref=f"{cc.system_repo(pending.family)}#{key}",
+        snapshot_digest="blake3:" + blake3_file(pending.target),
+        artifact=pending.target,
+    )
+    state["minted"] = minted
+    state["meta"] = dict(meta)
+    _unregister(pending)
+    with _PENDING_LOCK:
+        _FINALIZED[key] = minted
+    logger.info(
+        "fleet-cells: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
+        "worker served eager throughout and now serves compiled",
+        pending.family, key, pending.target.stat().st_size / 1e6)
     return minted
 
 
