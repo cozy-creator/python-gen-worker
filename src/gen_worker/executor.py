@@ -89,6 +89,7 @@ from .models.lanes import LaneUnavailableError
 from .models.residency import Residency
 from .topology import (
     ExecutionTopology,
+    TopologyError,
     current_device_group,
     device_group_scope,
     pin_cuda_device_for_group,
@@ -2554,6 +2555,15 @@ class _Job:
     seq: "itertools.count[int]" = dc_field(default_factory=lambda: itertools.count(1))
 
 
+class DispatchGroupUnresolved(RetryableError):
+    """pgw#779: this dispatch does not name an execution group this pod has.
+
+    RETRYABLE, not INVALID: nothing about the tenant's input is wrong — the
+    hub's `ResolvedCompute` is missing or disagrees with the delivered packing,
+    and a dispatch that carries the right one serves fine. Refused rather than
+    floored onto group 0, which is the group that is always busiest."""
+
+
 class _GpuSlotLease:
     """Thread-safe handle for a job's GPU slot (#382).
 
@@ -2648,7 +2658,22 @@ class Executor:
         self._sequence_plans: Dict[int, Any] = {}
         self.store.bind_topology(self.topology)
         self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.groups)
-        self._gpu_semaphore = asyncio.Semaphore(self._gpu_slots)
+        # pgw#779: G INDEPENDENT permits, not a COUNT of G. A count admits G
+        # concurrent jobs but binds none of them to a group, so four dispatches
+        # naming the same card serialized on one `run_lock` while three cards
+        # idled — reported as four healthy slots. One permit per group makes
+        # "one GPU job per group" the invariant the object expresses.
+        # ``gpu_slots=`` (the `cli serve`/test override, never a production
+        # knob) still means what it meant: its concurrency is divided among the
+        # groups, so at G==1 group 0's permit IS today's whole pool.
+        per_group = max(1, self._gpu_slots // max(1, self.topology.groups))
+        self._gpu_permits: Tuple[asyncio.Semaphore, ...] = tuple(
+            asyncio.Semaphore(per_group)
+            for _ in range(max(1, self.topology.groups))
+        )
+        self._gpu_permits_each = per_group
+        # Group 0's permit. At G == 1 — every pod today — this IS the pool.
+        self._gpu_semaphore = self._gpu_permits[0]
         # pgw#782: the slot count is also the CPU divisor. torch sizes its
         # intra-op pool from the HOST's logical processors, so a 4-group pod
         # runs four 48-thread teams against a 32-core quota. De-escalation
@@ -4358,10 +4383,59 @@ class Executor:
         the group's RANK-0 device — 0, D, 2D, … — so the whole derivation is
         ``gpu_index // D``. At D == 1 this is the identity, which is why
         nothing about today's dispatch path moves.
+
+        On a WIDE pod the hub's answer is load-bearing and a wrong one is
+        silent: a missing ``compute`` used to floor to group 0 and an index
+        that is not a rank-0 device was floored to a real group with a
+        `logger.warning`, so four jobs could pile onto one card while three sat
+        idle and the pod still reported four healthy slots. At G>1 both are
+        typed refusals (pgw#779) — RETRYABLE, because a dispatch that carries
+        the field serves fine, and nothing about the tenant's input is wrong.
+        Single-group pods keep the historical behaviour exactly: CPU functions
+        and pre-topology hubs have no compute and there is only one group to
+        mean.
         """
-        if not run.HasField("compute"):
+        if self.topology.groups <= 1:
             return 0
-        return self.topology.group_ordinal(int(run.compute.gpu_index))
+        if not run.HasField("compute"):
+            raise DispatchGroupUnresolved(
+                f"dispatch carries no resolved compute on a {self.topology} "
+                "pod: the execution group cannot be derived, and serving it as "
+                "group 0 would pack this job onto a card another group owns"
+            )
+        try:
+            return self.topology.group_ordinal_exact(int(run.compute.gpu_index))
+        except TopologyError as exc:
+            raise DispatchGroupUnresolved(
+                f"dispatched gpu_index={int(run.compute.gpu_index)} is not a "
+                f"rank-0 device of {self.topology}: {exc}. The hub and the "
+                "worker disagree about the packing; refused rather than "
+                "floored onto a group this job does not own"
+            ) from exc
+
+    def _gpu_permit_for_group(self, group: int) -> asyncio.Semaphore:
+        """The permit that IS group ``group``'s card (pgw#779).
+
+        Out of range is a programming error, not a thing to floor: the group
+        was derived by `_dispatch_group`, which already refused anything the
+        topology does not contain.
+        """
+        g = int(group)
+        if g < 0 or g >= len(self._gpu_permits):
+            raise DispatchGroupUnresolved(
+                f"no GPU permit for group {g} of {len(self._gpu_permits)} "
+                f"({self.topology})"
+            )
+        return self._gpu_permits[g]
+
+    def _gpu_permit_for_record(self, rec: "_ClassRecord") -> asyncio.Semaphore:
+        """A record belongs to exactly one group — its specs carry the
+        ordinal, and `instance_key` includes it, so this is a lookup and not a
+        guess."""
+        ordinals = {
+            int(s.device_group_ordinal) for s in rec.specs
+        } or {int(current_device_group())}
+        return self._gpu_permit_for_group(sorted(ordinals)[0])
 
     def _group_effective_spec(
         self, spec: EndpointSpec, group: int
@@ -4819,12 +4893,19 @@ class Executor:
         inside this target's before/after window and falsely certify it.
         These maintenance paths run before a job holds a permit themselves.
         """
+        # pgw#779: EVERY group's permit, each to its full depth — "exclusive"
+        # means no other job on this pod, and with per-group permits that is
+        # G x per-group, not a count of G.
+        all_permits = [
+            permit for permit in self._gpu_permits
+            for _ in range(self._gpu_permits_each)
+        ]
         acquired = 0
         try:
-            for _ in range(self._gpu_slots):
+            for permit in all_permits:
                 await self._intent_await(
                     intent_id,
-                    self._gpu_semaphore.acquire(),
+                    permit.acquire(),
                     operation="exclusive GPU permit",
                     status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
                     stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
@@ -4843,15 +4924,15 @@ class Executor:
                 pb.LIFECYCLE_INTENT_STATUS_CANCELED,
                 (
                     resume_stage
-                    if acquired == self._gpu_slots
+                    if acquired == len(all_permits)
                     else pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT
                 ),
                 detail="exclusive GPU wait canceled",
             )
             raise
         finally:
-            for _ in range(acquired):
-                self._gpu_semaphore.release()
+            for permit in all_permits[:acquired]:
+                permit.release()
 
     # ---- setup -------------------------------------------------------------
 
@@ -9839,7 +9920,11 @@ class Executor:
             # Same order as the tenant path (permit -> run_lock ->
             # turn_mutex): a tenant landing on ANOTHER instance mid-seed
             # waits one bounded seed instead of contending for the device.
-            await self._gpu_semaphore.acquire()
+            # pgw#779: the RECORD's group permit. A background turn on group 2
+            # must not consume group 0's slot - with a count it did, so a mint
+            # anywhere stalled a tenant everywhere.
+            permit = self._gpu_permit_for_record(rec)
+            await permit.acquire()
             try:
                 async with rec.run_lock:
                     await self._bg_locked(rec.turn_mutex, abort_check)
@@ -9850,7 +9935,7 @@ class Executor:
                         self._bg_charge_debt(
                             stole, time.monotonic() - turn_t0)
             finally:
-                self._gpu_semaphore.release()
+                permit.release()
         finally:
             self._bg_unit_mutex.release()
 
@@ -9932,7 +10017,16 @@ class Executor:
         # residency, admits, loads or sets a device. Contextvars propagate
         # into every coroutine and to_thread hop this job makes, so the whole
         # job — admission, staging, handler, teardown — speaks one group.
-        with device_group_scope(self._dispatch_group(run)):
+        try:
+            group = self._dispatch_group(run)
+        except DispatchGroupUnresolved as exc:
+            # pgw#779: reported here (not raised out of the task) so the job
+            # ends with a terminal state instead of going quiet.
+            logger.error("refusing %s: %s", run.request_id, exc)
+            await self._finish(
+                job, pb.JOB_STATUS_RETRYABLE, safe_message=_sanitize(str(exc)))
+            return
+        with device_group_scope(group):
             await self._run_job_grouped(job, run)
 
     async def _run_job_grouped(self, job: _Job, run: pb.RunJob) -> None:
@@ -10233,9 +10327,13 @@ class Executor:
         try:
             if needs_gpu:
                 permit_t0 = time.monotonic()
+                # pgw#779: THIS job's group permit, not one of G interchangeable
+                # tickets. The group was stamped from the dispatch before
+                # anything ran, so a permit and a card are the same fact.
+                gpu_permit = self._gpu_permit_for_group(current_device_group())
                 await self._intent_await(
                     job.intent_id,
-                    self._gpu_semaphore.acquire(),
+                    gpu_permit.acquire(),
                     operation=f"GPU permit for request {run.request_id}",
                     status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
                     stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
@@ -10245,7 +10343,7 @@ class Executor:
                 # handler window, so runtime_ms never saw it.
                 ctx._stages.record_pre("gpu_permit_wait", time.monotonic() - permit_t0)
                 self._loop = asyncio.get_running_loop()
-                lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
+                lease = _GpuSlotLease(gpu_permit, self._loop)
                 ctx._gpu_slot_lease = lease
                 # gw#516: the handler thread reports the terminal
                 # decode->finalize slot release so the hub sees the job as

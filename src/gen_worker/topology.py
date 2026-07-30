@@ -216,6 +216,24 @@ class ExecutionTopology:
             return ordinal
         return idx // self.group_degree
 
+    def group_ordinal_exact(self, gpu_index: int) -> int:
+        """``group_ordinal`` without the floor: a typed refusal instead.
+
+        The floor exists so a single-group pod cannot index off the end. On a
+        wide pod flooring is the silent bug (pgw#779): every dispatch the hub
+        got wrong lands on group 0, which is also the group that is always
+        busiest.
+        """
+        idx = int(gpu_index)
+        if idx < 0 or idx >= self.gpu_count or idx % self.group_degree != 0:
+            raise TopologyError(
+                "topology_dispatch_gpu_index_invalid",
+                f"gpu_index={idx} is not a rank-0 device of {self} "
+                f"(expected one of "
+                f"{[g * self.group_degree for g in range(self.groups)]})",
+            )
+        return idx // self.group_degree
+
     def device_group(self, gpu_index: int) -> DeviceGroup:
         """The DeviceGroup a job dispatched to ``gpu_index`` executes on."""
         return self.group(self.group_ordinal(gpu_index))

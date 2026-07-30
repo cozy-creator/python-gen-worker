@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#770 — native svdq decoded five of seven tensors in the wrong order; the
+  official nunchaku qwen-image artifact rendered noise.** In a nunchaku v1
+  checkpoint EVERY tensor is warp-fragment-permuted, not just
+  `qweight`/`wscales`. We read `proj_down`, `proj_up`, `smooth_factor`, `bias`
+  and `wcscales` verbatim, and `unpack_wscales` split a 128-channel tile
+  `(4, 8, 4)` where deepcompressor's `pack_micro_scale` splits it `(4, 4, 8)`.
+  Fixed: `unpack_vector`/`pack_vector` (deepcompressor `pack_scale`,
+  `group_size=-1`) and `unpack_lowrank`/`pack_lowrank` (`pack_lowrank_weight`)
+  added, the micro-scale row split corrected, `decode_linear` applies all of
+  them. Measured on the real artifact vs the true bf16 weight: `to_out.0`
+  rel-err **1.145 -> 0.070**, `img_mlp.net.0.proj` **1.251 -> 0.056**, fused
+  `to_qkv` **1.181 -> 0.063**, bias now exact. Both the blockwise buffers and
+  the dense fold reconstruct bit-identically. Evidence: te#137 Run 1b measured
+  the official artifact at lpips 0.8215 / psnr 4.64 dB / CLIP 15.26 through the
+  old decoder (th#1094's rig scored the same file 0.1050 / 25.20 dB).
+  `pack_wscales` also changes, so any artifact written by the te#137 producer
+  before this commit decodes wrong — the producer must swizzle the other five
+  on write before its next run.
+  New `tests/test_svdq_official_layout_pgw770.py` asserts every inverse against
+  deepcompressor's forward packers transcribed verbatim, never against our own
+  encode side: pgw#685's suite round-tripped our packers against our unpackers,
+  which is exactly why a shared wrong convention survived it.
+
 ## Unreleased (rides the next SDK train, with pgw#765) — pgw#772: the serving lane is deterministic; the voluntary bf16-resident upcast is REMOVED
 
 The gw#534 "rung 2" free-VRAM upgrade (`bf16_resident_fits` /

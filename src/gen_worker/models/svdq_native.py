@@ -10,8 +10,15 @@ an SVDQuant checkpoint needs (pgw#682 A3/G-C, the "contract v2" gw#540 named):
    vs the official svdq artifact's 0.105, th#1055/th#1094);
 3. ``smooth_factor``, which DIVIDES the activation feeding the 4-bit branch
    ONLY — the low-rank branch consumes RAW x, because deepcompressor
-   pre-divides ``proj_down`` by the smooth vector at export. Getting this
-   backwards silently corrupts every output.
+   pre-divides ``proj_down`` by the smooth vector at export (nunchaku
+   backend/nunchaku/convert.py L42-48). Getting this backwards silently
+   corrupts every output.
+
+Everything the module holds arrives fragment-packed: see ``svdq_layout``'s
+header for the per-tensor citations. pgw#770 is what happens when five of the
+seven are read verbatim — the official qwen-image artifact rendered noise
+(lpips 0.82, psnr 4.6 dB) through BOTH the blockwise and the dense lane, because
+both share ``decode_linear``.
 
 And one thing it must NOT do: an svdq checkpoint has NO ``input_scale``.
 nunchaku's activation quant is fully dynamic single-level per-16-block, so
