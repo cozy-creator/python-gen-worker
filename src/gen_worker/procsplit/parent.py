@@ -9,7 +9,8 @@ Supervision primitives are deliberately systemd's (Paul, 2026-07-29):
 ``Restart=on-failure`` (always respawn), ``StartLimitBurst``/
 ``StartLimitIntervalSec`` (loop DETECTION over a window — reported typed, never
 cap-and-brick), ``WatchdogSec``+``sd_notify`` (child frames are the liveness
-pings; a silent child is killed and respawned), socket activation (the hub
+pings; loop silence ARMS a hang verdict that the child's accounted work
+DECIDES — pgw#771), socket activation (the hub
 connection outlives the process doing the work). What systemd cannot do — and
 the reason this is not s6/supervisord in the container — is job attribution:
 "request X died of OOM, the release is healthy, the worker is alive, send the
@@ -33,7 +34,14 @@ from ..pb import worker_scheduler_pb2 as pb
 from ..transport import FatalTransportError, Transport
 from .. import postmortem
 from .. import worker_fatal
-from . import ENV_CHILD, ENV_CHILD_CMD, ENV_SOCKET, frames
+from . import (
+    ENV_CHILD,
+    ENV_CHILD_CMD,
+    ENV_LIVENESS_FD,
+    ENV_SOCKET,
+    ENV_WATCHDOG_PING_S,
+    frames,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +73,9 @@ _LINK_SETTLE_TIMEOUT_S = 3.0
 # call. Cancelling that wait RSTs the call and discards already-retired writes.
 _CLEAN_CLOSE_WAIT_S = 12.0
 _REPORTED_DEAD_CAP = 512
+# Minimum evidence advance that counts as life, mirroring activity._EVIDENCE_EPS
+# (not imported: the parent's import graph stays minimal and torch-free).
+_EVIDENCE_EPS = 0.05
 
 
 class _ChildLink:
@@ -135,6 +146,26 @@ class ParentControl:
         self._last_frame_at = time.monotonic()
         self._relaying = False
         self._watchdog_fired = False
+        # pgw#771 liveness (thread-sourced, loop-independent).
+        self._liveness_task: Optional[asyncio.Task] = None
+        self._last_liveness_at = 0.0
+        self._liveness_evidence: Optional[float] = None
+        self._liveness_evidence_at = 0.0
+        self._liveness_activity = ""
+        self._hang_armed_at: Optional[float] = None
+        self._hang_hold_reported = False
+        # How long an OPEN activity may go without accruing CPU/IO before its
+        # hold lapses: the child's ping cadence is the clock.
+        raw_ping = (
+            self._child_env.get(ENV_WATCHDOG_PING_S)
+            or os.environ.get(ENV_WATCHDOG_PING_S)
+            or ""
+        )
+        try:
+            ping_s = float(raw_ping) or 5.0
+        except ValueError:
+            ping_s = 5.0
+        self._evidence_hold_window = max(3.0 * ping_s, 2.0)
         self._draining = False
         self._terminating = False
         self._child_exited_clean = False
@@ -359,17 +390,75 @@ class ParentControl:
         env[ENV_SOCKET] = self._socket_path
         # The gw#640 flight-recorder fork is redundant under this parent.
         env["GEN_WORKER_SUPERVISOR"] = "0"
+        # pgw#771: a dedicated pipe for THREAD-sourced process liveness, so a
+        # compile that starves the child's event loop cannot look like a hang.
+        read_fd, write_fd = os.pipe()
+        env[ENV_LIVENESS_FD] = str(write_fd)
         self._spawn_count += 1
         logger.info(
             "spawning compute child #%d: %s", self._spawn_count, " ".join(self._child_cmd)
         )
-        return await asyncio.create_subprocess_exec(*self._child_cmd, env=env)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self._child_cmd, env=env, pass_fds=(write_fd,),
+            )
+        finally:
+            os.close(write_fd)   # the child owns it now
+        await self._start_liveness_reader(read_fd)
+        return proc
+
+    async def _start_liveness_reader(self, read_fd: int) -> None:
+        old = self._liveness_task
+        if old is not None and not old.done():
+            old.cancel()
+        self._last_liveness_at = 0.0
+        self._liveness_evidence = None
+        self._liveness_evidence_at = time.monotonic()
+        self._liveness_activity = ""
+        self._liveness_task = asyncio.create_task(
+            self._liveness_loop(read_fd), name="parent-liveness"
+        )
+
+    async def _liveness_loop(self, read_fd: int) -> None:
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        pipe = os.fdopen(read_fd, "rb", 0)
+        try:
+            transport, _ = await loop.connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(reader), pipe
+            )
+        except Exception:
+            logger.warning("liveness pipe unavailable; hang decisions fall back "
+                           "to loop silence alone", exc_info=True)
+            pipe.close()
+            return
+        try:
+            while True:
+                ftype, payload = await frames.read_frame(reader)
+                if ftype != frames.T_LIVENESS:
+                    continue
+                meta = frames.unpack_meta(payload)
+                self._last_liveness_at = time.monotonic()
+                # Sticky by design: the flag is a fact about the last time the
+                # child could speak. A GIL-starved thread stops speaking; the
+                # activity it last reported is still the one running.
+                self._liveness_activity = (
+                    str(meta.get("kind") or "") if meta.get("act") else ""
+                )
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            pass
+        except asyncio.CancelledError:
+            raise
+        finally:
+            transport.close()
 
     async def _child_loop(self) -> None:
         backoff = self._backoff_base
         while not self._stopping.is_set():
             self._watchdog_fired = False
             self._child_saw_hello = False
+            self._hang_armed_at = None
+            self._hang_hold_reported = False
             oom_before = postmortem.oom_kill_count()
             started = time.monotonic()
             self._last_frame_at = started
@@ -656,6 +745,25 @@ class ParentControl:
     # ---- watchdog (WatchdogSec) -----------------------------------------
 
     async def _watchdog_loop(self) -> None:
+        """Missed beats ARM the verdict; the open activity DECIDES it.
+
+        pgw#771 (th#1299 one layer down): the child's frame ping rides its event
+        loop, and an inductor compile starves that loop. Killing on frame
+        silence alone SIGKILLs a live compile and labels it ``watchdog_hang`` —
+        strictly worse than the hub-side bug it was meant to catch, because no
+        hub-side hold can rescue a child this parent already killed. So frame
+        silence only ARMS: the decision is the child tree's kernel-accounted
+        work, measured HERE from /proc (a child starved of the GIL cannot be a
+        witness for itself), plus which activity the child last reported open.
+        Tolerance is the activity clock — an open activity still accruing
+        CPU/IO — never no clock, the same shape as the hub half's
+        ActivityFreshnessWindow hold.
+
+        The boundary between the two halves of "alive": this parent kills only
+        what is provably NOT RUNNING. A child that runs but serves nothing is
+        the hub's stall/activity clock to reap, exactly as it was before the
+        split — so there is one verdict, not two that disagree.
+        """
         interval = max(0.25, self._watchdog_budget / 4.0)
         while not self._stopping.is_set():
             await asyncio.sleep(interval)
@@ -667,18 +775,114 @@ class ParentControl:
                 # allowed to be quiet; TimeoutStopSec bounds it instead. Killing
                 # it here would fabricate a watchdog_hang out of a clean drain.
                 continue
-            silent_for = time.monotonic() - self._last_frame_at
-            if silent_for > self._watchdog_budget:
-                logger.error(
-                    "compute child silent for %.1fs (budget %.1fs) — killing "
-                    "the wedged child (WatchdogSec analog)",
-                    silent_for, self._watchdog_budget,
-                )
-                self._watchdog_fired = True
+            now = time.monotonic()
+            silent_for = now - self._last_frame_at
+            if silent_for <= self._watchdog_budget:
+                self._hang_armed_at = None
+                continue
+            if self._hang_armed_at is None:
+                self._hang_armed_at = now
+                # Start the evidence clock at the arm edge, not at boot.
+                self._liveness_evidence = self._child_evidence(proc.pid)
+                self._liveness_evidence_at = now
+            else:
+                self._sample_child_evidence(proc.pid, now)
+            verdict = self._hang_verdict(now)
+            if verdict is None:
+                continue
+            if verdict == "held":
+                if not self._hang_hold_reported:
+                    self._hang_hold_reported = True
+                    logger.warning(
+                        "compute child loop silent for %.1fs but activity %r is "
+                        "alive (evidence advanced %.1fs ago) — hang verdict HELD",
+                        silent_for, self._liveness_activity,
+                        now - self._liveness_evidence_at,
+                    )
+                    await self._dial_detail(
+                        f"phase=compute_hang_verdict_held "
+                        f"loop_silent_s={silent_for:.0f} "
+                        f"activity={self._liveness_activity} "
+                        f"evidence_age_s={now - self._liveness_evidence_at:.1f} "
+                        f"evidence={self._liveness_evidence:.1f} "
+                        f"ping_age_s={now - self._last_liveness_at:.1f} "
+                        f"budget_s={self._watchdog_budget:.0f} — the child's event "
+                        "loop is starved by accounted work, not hung; not killing"
+                    )
+                continue
+            logger.error(
+                "compute child silent for %.1fs (budget %.1fs, verdict=%s) — "
+                "killing the wedged child (WatchdogSec analog)",
+                silent_for, self._watchdog_budget, verdict,
+            )
+            self._watchdog_fired = True
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+    def _child_evidence(self, pid: int) -> Optional[float]:
+        """The child tree's kernel-accounted work: process+LIVE-children CPU
+        seconds plus process disk I/O MB.
+
+        The same combination ``activity._default_evidence`` already trusts —
+        measured HERE, from /proc, because a child starved of the GIL (dynamo
+        tracing) cannot be a witness for itself. Either source advancing proves
+        genuine life: an inductor compile burns child CPU with the GPU idle and
+        I/O flat; an on-disk model load moves bytes while CPU-light; a true hang
+        advances neither.
+        """
+        try:
+            import psutil
+        except Exception:
+            return None
+        try:
+            proc = psutil.Process(pid)
+            times = proc.cpu_times()
+            total = float(times.user + times.system)
+            try:
+                io = proc.io_counters()
+                total += (io.read_bytes + io.write_bytes) / float(1 << 20)
+            except (psutil.Error, AttributeError, NotImplementedError):
+                pass
+            for child in proc.children(recursive=True):
                 try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                    ct = child.cpu_times()
+                except psutil.Error:
+                    continue
+                total += float(ct.user + ct.system)
+            return total
+        except psutil.Error:
+            return None
+
+    def _sample_child_evidence(self, pid: int, now: float) -> None:
+        evidence = self._child_evidence(pid)
+        if evidence is None:
+            return
+        previous = self._liveness_evidence
+        if previous is None or evidence - previous >= _EVIDENCE_EPS:
+            self._liveness_evidence = evidence
+            self._liveness_evidence_at = now
+
+    def _hang_verdict(self, now: float) -> Optional[str]:
+        """``None`` = no decision yet, ``"held"`` = alive-but-starved,
+        otherwise the reason the child is being killed."""
+        if self._liveness_evidence is None:
+            # No evidence source at all (/proc unreadable, psutil missing): the
+            # only signal left is loop silence, so fall back to it rather than
+            # never reaping a genuinely wedged child.
+            return "no_evidence_source"
+        if now - self._liveness_evidence_at > self._evidence_hold_window:
+            # The child tree has stopped accruing CPU and I/O: SIGSTOP, a kernel
+            # wedge, a native deadlock. This is the real hang — and it is the
+            # same non-advancement activity.watchdog stops heartbeating on.
+            return "no_work_accrued"
+        if not self._liveness_activity:
+            # Burning CPU with nothing open to justify it (a bare `while True`
+            # in a handler): alive as a process, useless as a worker, and no
+            # clock would ever end it.
+            return "loop_wedged_no_activity"
+        return "held"
 
     # ---- drain / signals -------------------------------------------------
 
@@ -812,8 +1016,9 @@ class ParentControl:
                     pass
             self.transport.stop()
             tasks = [transport_task, child_task, watchdog_task]
-            if self._stop_deadline_task is not None:
-                tasks.append(self._stop_deadline_task)
+            for extra in (self._stop_deadline_task, self._liveness_task):
+                if extra is not None:
+                    tasks.append(extra)
             for t in tasks:
                 if not t.done():
                     t.cancel()

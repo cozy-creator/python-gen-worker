@@ -36,7 +36,12 @@ T_HELLO = 20         # pb.Hello bytes
 T_WORKER_MSG = 21    # pb.WorkerMessage bytes
 T_PREPEND = 22       # msgpack [pb.WorkerMessage bytes, ...]
 T_FLUSH_REQ = 23     # msgpack {"timeout": float | None}
-T_WATCHDOG = 24      # msgpack {}  (sd_notify-style liveness ping)
+T_WATCHDOG = 24      # msgpack {}  (event-loop liveness: the loop is turning)
+# pgw#771: which activity is open, written by a THREAD over a dedicated pipe so
+# a starved event loop cannot silence it. Evidence is NOT carried here — the
+# parent measures the child's CPU/IO itself, because a GIL-starved thread
+# cannot be the decider of its own process's liveness.
+T_LIVENESS = 25      # msgpack {"act": bool, "kind": str}
 
 
 def pack_meta(obj: Any) -> bytes:
@@ -68,6 +73,12 @@ class FrameWriter:
             self._writer.close()
         except Exception:
             pass
+
+
+def frame_bytes(ftype: int, payload: bytes = b"") -> bytes:
+    """One frame as a single buffer — for callers that must write it with one
+    atomic ``os.write`` from a thread (pgw#771's liveness pipe)."""
+    return _HEADER.pack(ftype, len(payload)) + payload
 
 
 async def read_frame(reader: asyncio.StreamReader) -> Tuple[int, bytes]:

@@ -12,7 +12,7 @@ import time
 
 import msgspec
 
-from gen_worker import RequestContext, endpoint
+from gen_worker import RequestContext, activity, endpoint
 
 
 class ProbeIn(msgspec.Struct):
@@ -44,3 +44,20 @@ class SplitProbe:
         """SIGSTOP self: a wedge the WatchdogSec analog must detect."""
         os.kill(os.getpid(), signal.SIGSTOP)
         return ProbeOut(response="unfrozen")
+
+    async def starve_loop(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """pgw#771: an inductor compile's shape — an ASYNC handler that burns
+        CPU without yielding, so the event loop (and every ping riding it) goes
+        silent while the process is demonstrably alive and working.
+
+        Wrapped in the real activity + evidence watchdog bracket, because that
+        is what a self-mint compile does and it is what the parent's hang
+        verdict is required to defer to.
+        """
+        seconds = float(data.text or "8")
+        with activity.running("self_mint_compile") as act:
+            with activity.watchdog(act):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    pow(7, 4001, 10**9 + 7)   # real CPU, no await, no yield
+        return ProbeOut(response=f"compiled:{seconds:.0f}")

@@ -556,3 +556,40 @@ def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
         assert not inflight.exists()
     finally:
         h.close()
+
+
+def test_starved_compile_is_held_while_a_dead_child_is_still_killed(
+    tmp_path, captured_dials,
+):
+    """pgw#771: loop silence ARMS the hang verdict; the open activity DECIDES.
+
+    A self-mint compile starves the child's event loop, so the frame ping stops
+    — and stage 1's watchdog SIGKILLed exactly that, labelled watchdog_hang.
+    That is th#1299 one layer down and strictly worse, because no hub-side hold
+    can rescue a child the parent already killed. The thread-sourced liveness
+    pipe carries the same kernel-accounted evidence activity.watchdog trusts,
+    so the parent holds the verdict (typed) and the job completes.
+
+    The converse — a child where NO thread runs — is still killed: see
+    test_wedged_child_is_killed_by_watchdog_and_pod_recovers (SIGSTOP), which
+    shares this watchdog and this budget.
+    """
+    h = SplitHarness(tmp_path, watchdog_budget_s=3.0)
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn.send(run_job=pb.RunJob(
+            request_id="r-starve", attempt=1, function_name="starve-loop",
+            input_payload=_payload("9")))   # 3x the watchdog budget
+        res = conn.wait_for(is_result_for("r-starve"), timeout=90.0)
+        assert res.job_result.status == pb.JOB_STATUS_OK, res.job_result.safe_message
+        assert b"compiled:9" in res.job_result.inline
+        # The child was NOT killed and the pod never blinked.
+        assert h.pc._spawn_count == 1
+        assert not any("watchdog_hang" in d for d in captured_dials), captured_dials
+        assert not any("compute_process_exit" in d for d in captured_dials)
+        # ...and the hold is legible, not silent tolerance.
+        assert any("compute_hang_verdict_held" in d for d in captured_dials), captured_dials
+        assert any("activity=self_mint_compile" in d for d in captured_dials)
+    finally:
+        h.close()

@@ -13,16 +13,70 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+import time
 from typing import Any, List, Optional, Tuple
 
 from ..config import Settings
 from ..pb import worker_scheduler_pb2 as pb
 from ..transport import FatalTransportError
-from . import ENV_SOCKET, ENV_WATCHDOG_PING_S, frames
+from . import ENV_LIVENESS_FD, ENV_SOCKET, ENV_WATCHDOG_PING_S, frames
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WATCHDOG_PING_S = 5.0
+
+
+def _ping_interval() -> float:
+    try:
+        return float(os.environ.get(ENV_WATCHDOG_PING_S, "") or _DEFAULT_WATCHDOG_PING_S)
+    except ValueError:
+        return _DEFAULT_WATCHDOG_PING_S
+
+
+def start_liveness_thread() -> Optional[threading.Thread]:
+    """pgw#771: report WHAT IS OPEN on a thread, not on the event loop.
+
+    The frame ping in ``ChildTransport`` is an asyncio task, so an inductor
+    compile that starves the loop silences it — and a parent that kills on that
+    silence reproduces th#1299 one layer down, SIGKILLing a live compile and
+    labelling it ``watchdog_hang``. Loop silence may only ARM the verdict; the
+    open activity DECIDES it, the same discipline the hub half settled on
+    (ef890253).
+
+    This thread carries only that one fact — which activity is open — over a
+    dedicated pipe with one atomic ``os.write``. Deliberately NOT the evidence:
+    a CPU-bound Python phase (dynamo tracing) can starve a thread of the GIL
+    for seconds, so nothing the child says about its own liveness can be the
+    decider. The parent measures the evidence from /proc instead.
+    """
+    raw = os.environ.get(ENV_LIVENESS_FD, "").strip()
+    if not raw:
+        return None
+    try:
+        fd = int(raw)
+    except ValueError:
+        return None
+    interval = max(0.1, _ping_interval())
+    from .. import activity as activity_mod
+
+    def _run() -> None:
+        while True:
+            try:
+                act = activity_mod.current()
+                os.write(fd, frames.frame_bytes(frames.T_LIVENESS, frames.pack_meta({
+                    "act": act is not None,
+                    "kind": getattr(act, "kind", "") or "",
+                })))
+            except OSError:
+                return          # parent gone; the parent's waitpid is the truth
+            except Exception:
+                logger.debug("liveness ping sample failed", exc_info=True)
+            time.sleep(interval)
+
+    t = threading.Thread(target=_run, name="compute-liveness", daemon=True)
+    t.start()
+    return t
 
 
 class _QueueShim:
@@ -110,6 +164,7 @@ class ChildTransport:
         except OSError as exc:
             raise FatalTransportError(f"cannot reach control parent at {path}: {exc}") from exc
         self._writer = frames.FrameWriter(writer)
+        start_liveness_thread()
         ping = asyncio.create_task(self._watchdog_ping(), name="child-watchdog-ping")
         stop_task = asyncio.create_task(self._stopping.wait(), name="child-stop")
         recv = asyncio.create_task(self._recv_loop(reader), name="child-recv")
@@ -129,10 +184,10 @@ class ChildTransport:
             self._writer = None
 
     async def _watchdog_ping(self) -> None:
-        try:
-            interval = float(os.environ.get(ENV_WATCHDOG_PING_S, "") or _DEFAULT_WATCHDOG_PING_S)
-        except ValueError:
-            interval = _DEFAULT_WATCHDOG_PING_S
+        """EVENT-LOOP liveness (pgw#771): this proves the loop is turning, and
+        nothing more. Its silence ARMS the parent's hang verdict; the
+        thread-sourced liveness pipe is what decides it."""
+        interval = _ping_interval()
         payload = frames.pack_meta({})
         while not self._stopping.is_set():
             writer = self._writer
