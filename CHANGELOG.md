@@ -2,6 +2,91 @@
 
 ## Unreleased
 
+- **pgw#784 — a mint runs in its OWN OS process; the worker serves eager and
+  reports throughout.** th#1299 killed a live sd15 pod mid-mint and the hub was
+  right to. The mint's compile driver ran INSIDE the serving process, and
+  inductor's orchestration layer is long-running GIL-holding Python, so it
+  starved the one asyncio task carrying BOTH the 10s heartbeat and eager
+  serving: 72s of app-level silence, an activity counter frozen 126s, and —
+  read at source — a pod that resumed reporting 6 seconds after being declared
+  hung, with an evidence counter advancing at 500/s. It was STARVED, not hung.
+  The hub-side patience fix was REJECTED and reverted (`ef890253` ->
+  `755834a5`): a worker whose reporting its own compute can mute is a broken
+  worker, and this is the worker-side fix (WORKER-CONTRACTS.md §1-2).
+
+  **The shape:** on a cache miss, SPAWN a mint process — spawn, never fork,
+  because a CUDA context cannot survive `fork()` — which loads what it needs
+  itself, builds the cell, writes the artifact and exits. The serving process
+  never stops serving eager or beating; on artifact-ready it swaps through the
+  ordinary delivered-cell path. No keepalive, no held verdicts, no hub
+  tolerance, no magic numbers.
+
+  - `mint_process` — the loop-native supervisor. The whole boundary is one JSON
+    request in, one JSON report + one artifact out, so a failed mint is
+    reproducible by hand (`python -m gen_worker.mint_child request.json`).
+    Nothing live crosses, which is why `multiprocessing` is not used either.
+    Every child death is CLASSIFIED and the class drives the retry: a named
+    refusal is terminal (re-running it buys a second billed compile for the
+    same sentence), a resource shortfall or unclassified crash gets exactly one
+    more attempt. **No wall-clock cap anywhere** — liveness is MEASURED from the
+    child's process-tree CPU plus the bytes in its capture dir, so a 9.5-minute
+    mint is never killed and a wedge dies quickly. Abandonment reaps the process
+    GROUP, because inductor forks its own compile workers.
+  - `mint_child` — seals the environment as a boot does (a differently-sealed
+    child would stamp a cell the parent's own `verify()` rejects), caps its
+    VRAM, loads the endpoint's pipeline through the real standalone loader,
+    arms COLD and drives the endpoint's OWN derived warm plan. Never
+    `mint_artifact`'s producer-style warm call: that is gw#586/gw#587's whole
+    lesson, and a cell packed from the wrong graphs bricks every adopting boot.
+  - **VRAM co-residency** (`mint_budget.co_residency`) — the child holds its own
+    copy of what it compiles, so the ask is `resident weights + ONE activation
+    set + inductor workspace + one CUDA context`; in exchange the serving
+    process loses the entire in-process capture (`2 * activation + workspace`,
+    plus the retained dummy batches the tenant's next peak had to fit around).
+    Delegation is therefore CHEAPER for activation-heavy families and dearer for
+    weight-heavy ones, which DECLINE — pgw#737's policy, unchanged: eager
+    serving, cell absent, a roomier pod mints it. The ask is handed to the child
+    as a hard `set_per_process_memory_fraction` cap, so an under-estimate is the
+    CHILD's OOM and never the tenant's (the wan-2.2 failure); measured child
+    peaks are banked monotonically, so the second ask on a pod is a fact.
+  - **Failure inversion** — a dead mint process is a FAILED MINT reported by a
+    LIVE worker that keeps serving eager. Nothing raises out of the mint path;
+    the classification, the phase it died in and the child's own last words all
+    ride the wire as typed `self_mint_abort` / `self_mint_skipped` events,
+    because a serve pod exposes no logs.
+  - **Two restrictions lift**, both of which existed only because the capture
+    was in-process: one live capture per process, and gw#608's seeded-cell gate,
+    which had been leaving a slot whose own cell is missing eager for life
+    because an unrelated sibling got a delivered cell first.
+  - **Cell swap unchanged.** `fleet_cells.adopt_delegated_mint` runs exactly the
+    delivered-cell adoption the cache-HIT path runs; `verify()` semantics
+    untouched (th#1098 exact identity). In-process capture made the warmup proof
+    tautological — the artifact was byte-derived from the execution the proof
+    observed. A child-built cell must EARN adoption through the same gates a
+    hub-delivered cell does, so a parity gap degrades to eager-with-no-cell
+    instead of poisoning the store.
+  - Progress reporting comes free: the child's phase frames land on the SAME
+    `self_mint_compile` activity the hub already reads, and `activity.watchdog`
+    already sums live children's CPU recursively, so
+    `evidence:self_mint_compile` advances by itself. No protocol change either
+    side of the wire.
+
+  **Proof** — `tests/test_mint_liveness_pgw784.py` drives a real worker (real
+  `Lifecycle._heartbeat_loop`, real `Executor`, real gRPC socket) through a mint
+  longer than the hub's kill window, sampling beats from the HUB's vantage
+  point: the green arm keeps every gap inside 2 intervals against a 6-interval
+  kill line with eager jobs completing throughout; the red arm — the same work
+  on the loop — blows through the window and stops serving with it, which is
+  what makes the green arm believable. Scaled cadence by default, the literal
+  10s/140s numbers under `PGW784_REAL_CADENCE=1`.
+
+  A measurement worth keeping: on a 32-core box a pure-Python GIL-holding burn
+  in ONE thread stretches a 0.25s nominal beat to 0.256s, and needs ~16
+  contending threads to reach 1.17s (4.7x). The incident lost 72-126s. The live
+  mechanism is strictly worse than any pure-Python synthetic reproduces, which
+  is why the fix moves the compile out of the interpreter rather than trying to
+  make it yield.
+
 - **pgw#770 — native svdq decoded five of seven tensors in the wrong order; the
   official nunchaku qwen-image artifact rendered noise.** In a nunchaku v1
   checkpoint EVERY tensor is warp-fragment-permuted, not just
