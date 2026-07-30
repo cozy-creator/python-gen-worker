@@ -126,7 +126,15 @@ def signer_configured(es256_chain, fake_hub_signer, monkeypatch):
     cc.configure(settings)
     cc.configure_remote_signer(fake_hub_signer["base_url"], lambda: "worker-jwt-test")
     yield settings
-    _reset(monkeypatch)
+    # Plain assignment, NOT monkeypatch (pgw#772 release lane): this runs during
+    # finalization, and `monkeypatch`'s own undo -- which recorded the globals
+    # AFTER cc.configure() above had already armed them -- would restore the armed
+    # values right back. That leaked a configured signer, pointed at this
+    # now-shutdown fake hub, into every later test in the session; th#1307 made
+    # signing failures fatal, so 7 downstream tests went JOB_STATUS_FATAL.
+    cc._configured = False
+    cc._config = None
+    cc._remote = None
 
 
 def _reset(monkeypatch):
