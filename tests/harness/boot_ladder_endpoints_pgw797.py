@@ -21,7 +21,7 @@ from pathlib import Path
 
 import msgspec
 
-from gen_worker import Compile, Hub, RequestContext, endpoint
+from gen_worker import Compile, Hub, RequestContext, Resources, endpoint
 from gen_worker.families.base import GenerationDefaults, family
 
 
@@ -64,6 +64,10 @@ COMPILE_MODEL = Hub("harness/pgw797-compile-model", tag="prod")
     # `text_len=0` declares "no text conditioning" explicitly — the walk-time
     # lint requires every compile endpoint to state the axis.
     compile=Compile(family="harness-pgw797", shapes=((64, 64),), text_len=0),
+    # pgw#797: `warmup.plan` only schedules handlers whose spec declares a
+    # GPU (`resources.gpu`), so WITHOUT this the warm plan is empty and the
+    # per-iteration rows have no real-path coverage at all.
+    resources=Resources(gpu=True),
 )
 class CompileBoundEndpoint:
     def setup(self, model: ToyPipeline) -> None:

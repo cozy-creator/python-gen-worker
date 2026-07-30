@@ -236,6 +236,16 @@ def test_warmup_is_a_span_nested_inside_pipeline_load(ladder) -> None:
     assert nested[0].duration_ms <= load.duration_ms, (
         "a nested warmup cannot be longer than the load that contains it"
     )
+    # The POINT of the split: `pipeline_load` reads as weights->VRAM once its
+    # warmup children are subtracted. Before pgw#797 it was load+warmup as one
+    # number and this quantity did not exist.
+    load_only = load.duration_ms - sum(w.duration_ms for w in nested)
+    assert load_only >= 0
+    servable = _one(rows, boot_phases.PHASE_FIRST_REQUEST_SERVABLE)
+    assert f"class.load={load_only}" in servable.detail, (
+        "the reconciliation does not charge the warmup to the CHILD: expected "
+        f"class.load={load_only} in {servable.detail!r}"
+    )
 
 
 def test_a_warmup_row_says_whether_a_cell_was_armed(ladder) -> None:
@@ -256,12 +266,11 @@ def test_per_iteration_warm_cost_is_recorded(ladder) -> None:
     rows = ladder
     warms = _terminal(rows, boot_phases.PHASE_WARMUP)
     iters = _terminal(rows, boot_phases.PHASE_WARMUP_ITERATION)
-    if not iters:
-        # A warm plan can legitimately be empty (nothing declared for this
-        # handler). Then the warmup span must say so rather than leave the
-        # reader guessing.
-        assert warms and _detail(warms[0]).get("iterations") == "0"
-        return
+    assert iters, (
+        "no warmup_iteration rows — the harness endpoint declares "
+        "Resources(gpu=True) precisely so `warmup.plan` schedules a real warm "
+        "job; without them this issue's per-iteration question is unanswerable"
+    )
     warm_ordinals = {w.ordinal for w in warms}
     assert all(i.parent_ordinal in warm_ordinals for i in iters), (
         "warmup_iteration rows are not children of their warmup span"
