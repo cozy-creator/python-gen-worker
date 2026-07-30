@@ -451,6 +451,13 @@ def fast_hub_retries(monkeypatch) -> None:
     monkeypatch.setattr(hub, "_COMPLETE_SILENCE_WINDOW_S", 0.4)
     monkeypatch.setattr(hub, "_RETRY_BASE_DELAY_S", 0.01)
     monkeypatch.setattr(hub, "_RETRY_MAX_DELAY_S", 0.02)
+    # pgw#796: `_post` funnels through `_send_with_retries`, whose OWN silence
+    # window (pgw#738/#743, added after this fixture was written) was left at
+    # its 600s production value — so the dead-port tape below sat in that inner
+    # loop for ten real minutes before the outer loop ever saw a failure. One
+    # test was 600.0s of a 1341.7s publish gate. Scaling it with the other four
+    # changes nothing about the mechanism under test; only the clock it runs on.
+    monkeypatch.setattr(hub, "_SEND_SILENCE_WINDOW_S", 0.4)
 
 
 def _hub_client(base: str):
