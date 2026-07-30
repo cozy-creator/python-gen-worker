@@ -2491,6 +2491,14 @@ class _BackgroundMint:
     # lemon host (pgw#786).
     modules: Tuple[str, ...] = ()
     snapshot_paths: Dict[str, str] = dc_field(default_factory=dict)
+    # th#1299: WHY this mint was asked to stop. The abort event used to report
+    # "(adopt-on-arm / vacate / shutdown)" — three unrelated causes in one
+    # string — so a mint that died could not be told from a mint that was
+    # legitimately superseded without joining the hub's pod tables by hand.
+    # Set by abandon_background_mint before the signal, read by the terminal
+    # handler; a code (queryable) and the human sentence beside it.
+    abandon_code: str = "unspecified"
+    abandon_reason: str = ""
 
 
 def _mint_modules(spec: EndpointSpec) -> Tuple[str, ...]:
@@ -8369,7 +8377,8 @@ class Executor:
         }
 
     async def abandon_background_mint(
-        self, rec: _ClassRecord, *, reason: str, free_targets: bool = False,
+        self, rec: _ClassRecord, *, reason: str, code: str = "unspecified",
+        free_targets: bool = False,
     ) -> None:
         """Cleanly stop an in-flight background mint (adopt-on-arm, vacate,
         shutdown): signal, let the driver finish its current unit, then
@@ -8378,6 +8387,8 @@ class Executor:
         bg = rec.background_mint
         if bg is None:
             return
+        bg.abandon_code = code
+        bg.abandon_reason = reason
         bg.abandon.set()
         task = bg.task
         if task is not None and not task.done():
@@ -8486,14 +8497,16 @@ class Executor:
         except (_MintAbandoned, asyncio.CancelledError):
             self._abandon_mint_state(rec, bg)
             logger.info(
-                "background mint for %s abandoned cleanly; serving continues "
-                "at its current tier", bg.spec.name)
+                "background mint for %s abandoned cleanly (%s: %s); serving "
+                "continues at its current tier",
+                bg.spec.name, bg.abandon_code, bg.abandon_reason)
             activity_mod.emit_event(
                 "self_mint_abort",
                 f"background mint for {bg.spec.name} abandoned "
-                "(adopt-on-arm / vacate / shutdown); serving continues at "
-                "its current tier",
-                phase="abandoned",
+                f"({bg.abandon_code}"
+                + (f": {bg.abandon_reason}" if bg.abandon_reason else "")
+                + "); serving continues at its current tier",
+                phase=f"abandoned_{bg.abandon_code}",
             )
             act.completed()
         except Exception as exc:
@@ -9102,7 +9115,8 @@ class Executor:
 
     async def shutdown_instances(self) -> None:
         for rec in self._classes.values():
-            await self.abandon_background_mint(rec, reason="worker shutdown")
+            await self.abandon_background_mint(
+                rec, reason="worker shutdown", code="shutdown")
             inst, rec.instance, rec.ready = rec.instance, None, False
             rec.compile_targets.clear()
             shutdown = getattr(inst, "shutdown", None)
@@ -9430,7 +9444,8 @@ class Executor:
         # suspended so the adoption's proof warmup keeps its sequential
         # semantics (an eager route would falsify the proof).
         await self.abandon_background_mint(
-            expected_rec, reason=f"adopting peer cell {ref}")
+            expected_rec, reason=f"adopting peer cell {ref}",
+            code="adopt_on_arm")
         adopt_router = hot_swap_mod.router_of(expected_target.pipeline)
         if adopt_router is not None:
             adopt_router.suspend()
@@ -9789,7 +9804,8 @@ class Executor:
         """Tear an instance down and return refs whose owner was released."""
         # pgw#671: a departing instance takes its background mint with it —
         # stop the driver before any module teardown races a warm forward.
-        await self.abandon_background_mint(rec, reason="instance vacate")
+        await self.abandon_background_mint(
+            rec, reason="instance vacate", code="vacate")
         held_refs = self._record_refs(rec)
         held_objects = rec.held_objects
         released_refs: List[str] = []
@@ -11166,7 +11182,7 @@ class Executor:
             "(pgw#737)", spec.name)
         await self.abandon_background_mint(
             rec, reason="tenant OOM — the mint loses, the request wins",
-            free_targets=True)
+            code="tenant_oom", free_targets=True)
         activity_mod.emit_event(
             "self_mint_skipped",
             f"self-mint for {spec.name} evicted mid-flight: a tenant request "

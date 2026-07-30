@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **th#1299 (worker half of the visibility defect)** — an abandoned self-mint now names
+  its own cause. The abort event reported `phase="abandoned"` with the detail
+  `"(adopt-on-arm / vacate / shutdown)"` — three unrelated causes in one string on the
+  only wire record the hub keeps, so 41 such rows on the master stack could not be
+  triaged from worker evidence at all (the real cause, the hub retiring the pod
+  mid-mint, was found only by joining `worker_activity_events` to
+  `worker_pods.retire_reason` by hand). `abandon_background_mint` now takes a `code`
+  and the terminal handler reports `phase=abandoned_<code>`
+  (`adopt_on_arm` / `vacate` / `shutdown` / `tenant_oom`, `unspecified` for a caller
+  that omits it — a legible gap, never a plausible-looking wrong cause).
+
 - **pgw#773 residual / pgw#748 — multi-group sequence parallelism is SERVED, and proven on
   four real H100s.** A group's cards now come from the delivered topology instead of the group
   ordinal (at degree D group `g` owns `[g*D, (g+1)*D)`, so on a `2x2` pod group 1 owns cards 2-3
