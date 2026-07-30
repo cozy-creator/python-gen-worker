@@ -51,7 +51,11 @@ def _cuda_or_refuse():
     return torch
 
 
-@endpoint
+@endpoint(
+    # th#1087 declaration gate — see marco-polo's note: GEN_WORKER_PROCESS_SPLIT
+    # should be platform-reserved, not tenant-declared.
+    env=["GEN_WORKER_OOM_PROBE", "GEN_WORKER_PROCESS_SPLIT"],
+)
 class ProcSplitCudaProbe:
     def cuda_probe(self, ctx: RequestContext, data: ProbeInput) -> ProbeOutput:
         """Establish (or re-establish) a CUDA context and prove it computes."""

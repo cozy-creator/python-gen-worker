@@ -30,7 +30,17 @@ class MarcoAttachOutput(msgspec.Struct):
     local_path: str
 
 
-@endpoint
+@endpoint(
+    # th#1087: an org can only attach envs the RELEASE declares. GEN_WORKER_OOM_PROBE
+    # is genuinely this endpoint's own switch, so declaring it is correct.
+    #
+    # GEN_WORKER_PROCESS_SPLIT is NOT — it is a platform switch, and the fact that a
+    # tenant must declare it (and could therefore decline to, or set it to 0) is a
+    # pgw#763 driver-3 defect: it belongs in the RESERVED env namespace next to
+    # GEN_WORKER_C2PA_*, injected platform-side. Declared here only so stage 4 can
+    # enable the split through the real config path instead of a test hook.
+    env=["GEN_WORKER_OOM_PROBE", "GEN_WORKER_PROCESS_SPLIT"],
+)
 class MarcoPolo:
     def marco_polo(self, ctx: RequestContext, data: MarcoPoloInput) -> MarcoPoloOutput:
         """Returns 'polo' when input is 'marco'; otherwise raises so the request fails."""
