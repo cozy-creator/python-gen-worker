@@ -525,3 +525,59 @@ def test_snapshot_targets_read_the_digest_field_before_the_legacy_blake3(tmp_pat
     # And every ref the targets carry is readable by the prefix dispatcher.
     for t in targets:
         parse_cas_ref(t.ref)
+
+
+# ---------------------------------------------------------------- pgw#783 dedup
+
+
+def test_a_second_call_for_a_present_entry_skips_the_fetch(tmp_path):
+    """pgw#783: G children share one filesystem. Once the entry is materialised,
+    a sibling asking for the same dst must NOT re-fetch it (G x egress -> 1x).
+    Deterministic form: fetch once, then again — the server sees no new hits."""
+    data = make_file(CS * 3 + 5, seed=11)
+    parts = split(data)
+    srv = Server(dict(enumerate(parts)))
+    try:
+        dst = tmp_path / "shared.safetensors"
+        kw = dict(whole_digest="sha256:" + sha(data), total_size=len(data),
+                  chunk_size_bytes=CS, window=2)
+        download_chunked_file(specs_for(srv, parts), dst, **kw)
+        assert srv.hits == {i: 1 for i in range(len(parts))}
+        # The sibling call: present already, so ZERO new fetches.
+        download_chunked_file(specs_for(srv, parts), dst, **kw)
+        assert srv.hits == {i: 1 for i in range(len(parts))}, "re-fetched a present entry"
+        assert dst.read_bytes() == data
+    finally:
+        srv.close()
+
+
+def test_concurrent_callers_dedup_to_one_fetch_via_flock(tmp_path):
+    """The cross-process guarantee, exercised with threads (same flock code
+    path): four callers race for the same dst; the flock serialises them so the
+    entry is fetched ONCE total, not four times."""
+    import threading as _t
+
+    data = make_file(CS * 2 + 9, seed=13)
+    parts = split(data)
+    srv = Server(dict(enumerate(parts)))
+    try:
+        dst = tmp_path / "raced.safetensors"
+        kw = dict(whole_digest="sha256:" + sha(data), total_size=len(data),
+                  chunk_size_bytes=CS, window=2)
+        barrier = _t.Barrier(4)
+
+        def _go():
+            barrier.wait()
+            download_chunked_file(specs_for(srv, parts), dst, **kw)
+
+        threads = [_t.Thread(target=_go) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(30)
+        assert dst.read_bytes() == data
+        # Each chunk fetched exactly once across all four racers.
+        assert srv.hits == {i: 1 for i in range(len(parts))}, \
+            f"expected one fetch per chunk, got {srv.hits}"
+    finally:
+        srv.close()
