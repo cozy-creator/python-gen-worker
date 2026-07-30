@@ -797,6 +797,11 @@ class HubClient:
         and this deliberately does NOT fall back: a silent downgrade to blake3
         would make "did this publish v2?" unanswerable from the outside (and a
         404 from a PROXY is not a 404 from the hub — th#715).
+
+        ``provenance`` carries the WORKER-ADDABLE stamp subset only, exactly as
+        :meth:`commit` does — the hub resolves the authoritative stamp from the
+        capability token (th#606/th#1331), so lineage cannot be forged from here
+        and is identical whichever protocol published it.
         """
         from ..models import chunk_upload as _cu
         from ..models.chunk_upload import UploadGrant
@@ -810,23 +815,6 @@ class HubClient:
         if not files:
             raise HubPublishError("publish_v2 requires at least one file")
 
-        # THE v2 ROUTE CANNOT CARRY A PROVENANCE STAMP YET. `repo_publish_v2`
-        # writes `Provenance: []byte("{}")` unconditionally — deliberately, since
-        # the orchestrator token claim that feeds it is a v1 commit-create
-        # concept. Accepting the argument and dropping it would blank
-        # `upstream_revision` on every mirror, silently: exactly the field that
-        # pins WHICH upstream commit we copied, and the one th#1301's strongest
-        # check (compare our sha256 against upstream's published value) is
-        # computed against. A publish that quietly loses its lineage is the same
-        # failure shape as a verifier that quietly checks nothing, so this
-        # REFUSES instead. Remove this the commit the route learns the field.
-        if provenance and any(v for v in dict(provenance).values()):
-            raise HubPublishError(
-                "publish_v2 cannot carry a provenance stamp yet — the v2 route "
-                f"writes an empty one (fields offered: {sorted(dict(provenance))}). "
-                "Publishing this over v2 would silently drop upstream lineage; "
-                "use commit() until the route accepts provenance."
-            )
         repo_path = self._repo_path(destination_repo)
 
         # ONE streaming pass per file yields the whole-file sha256 AND every
@@ -880,6 +868,19 @@ class HubClient:
             body["deletions"] = list(deletions)
         if metadata:
             body["metadata"] = dict(metadata)
+        if provenance:
+            # th#1331: the v2 declare decodes this STRICTLY into the same
+            # `commitProvenanceInput` v1 uses, so the accepted subset is exactly
+            # `step_number | epoch_number | quantization_method |
+            # quantization_library | upstream_revision | upstream_attestation`.
+            # `parents` / `derivation_op` / `upstream_ref` / `job_id` are
+            # orchestrator-derived (signed into the capability token) and are a
+            # 400 that NAMES the field — deliberately, because a silent drop
+            # would leave the worker believing it had stamped lineage it had
+            # not. The merged stamp is captured at DECLARE, where the token is
+            # presented, and replayed through `resolvePublishProvenance` at
+            # completion, so v1 and v2 mirrors record identical lineage.
+            body["provenance"] = {k: v for k, v in dict(provenance).items() if v}
         for key in ("kind", "library_name", "model_family", "class_name",
                     "adapter_for_family"):
             val = str((repo_spec or {}).get(key) or "").strip()

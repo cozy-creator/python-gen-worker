@@ -397,29 +397,39 @@ def test_a_grant_for_something_never_declared_is_refused(hub, tmp_path, monkeypa
         t.join(timeout=5)
 
 
-def test_a_provenance_stamp_is_REFUSED_not_silently_dropped(hub, tmp_path):
-    """The v2 route writes `Provenance: []byte("{}")` unconditionally. Every
-    mirror publish carries `{"upstream_revision": <commit>}` — the field that
-    pins WHICH upstream commit we copied, and the one th#1301's strongest check
-    (our sha256 vs upstream's published value) is computed against. Accepting
-    and dropping it would blank lineage on every mirrored model, silently: the
-    same failure shape as a verifier that quietly checks nothing."""
-    with pytest.raises(HubPublishError, match="provenance"):
-        client(hub).publish_v2(
-            destination_repo="org/model",
-            files=[write(tmp_path, "config.json", payload(64))],
-            tags=["prod"],
-            provenance={"upstream_revision": "abc123"},
-        )
-    assert not hub.declared_bodies  # refused BEFORE the declare
+def test_the_worker_addable_provenance_subset_reaches_the_declare(hub, tmp_path):
+    """th#1331: the v2 declare now stamps lineage through v1's OWN resolver, so
+    a mirror's `upstream_revision` must actually arrive on the wire.
 
-
-def test_an_EMPTY_provenance_mapping_does_not_block(hub, tmp_path):
-    """The refusal is about losing DATA, not about the argument being present —
-    a caller that threads an empty stamp through is losing nothing."""
+    This test replaced one asserting the opposite. `publish_v2` used to REFUSE a
+    non-empty provenance, because the route wrote `Provenance: []byte("{}")`
+    unconditionally and accepting-then-dropping would have blanked, silently,
+    the field naming which upstream commit we copied. The route learned the
+    field; the refusal went with it."""
     res = client(hub).publish_v2(
         destination_repo="org/model",
         files=[write(tmp_path, "config.json", payload(64))],
-        tags=["prod"], provenance={"upstream_revision": ""},
+        tags=["prod"],
+        provenance={"upstream_revision": "abc123", "quantization_method": "",
+                    "step_number": 7},
     )
     assert res.checkpoint_id.startswith("sha256:")
+    sent = hub.declared_bodies[0]["provenance"]
+    assert sent == {"upstream_revision": "abc123", "step_number": 7}, sent
+
+
+def test_forgeable_lineage_fields_are_the_HUB_s_refusal_not_ours(hub, tmp_path):
+    """The client does not police this and must not pretend to. `parents` /
+    `derivation_op` / `upstream_ref` / `job_id` are orchestrator-derived and
+    signed into the capability token; the hub 400s them NAMING the field. A
+    client-side filter here would silently drop a forgery attempt instead of
+    surfacing it, which is strictly worse — the caller would believe it had
+    stamped what it sent."""
+    client(hub).publish_v2(
+        destination_repo="org/model",
+        files=[write(tmp_path, "config.json", payload(64))],
+        tags=["prod"], provenance={"upstream_ref": "hf:someone/else"},
+    )
+    assert hub.declared_bodies[0]["provenance"] == {"upstream_ref": "hf:someone/else"}
+
+
