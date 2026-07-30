@@ -159,7 +159,11 @@ def test_publish_flavors_is_observable(fake_hub: Any, tmp_path: Path) -> None:
     assert "publish: committing flavor fp8-w8a8" in joined
     assert "publish: uploading parts=" in joined
     assert "publish: flavor fp8-w8a8 committed" in joined
-    assert "checkpoint=blake3:abc" in joined
+    # th#1303 phase 3: this producer publishes v2, so the id it reports is the
+    # sha256 checkpoint the /publishes route mints, not v1's `blake3:abc`.
+    # Asserting the PREFIX (not just "checkpoint=") keeps this line honest —
+    # it still fails if the flip is reverted.
+    assert "checkpoint=sha256:" in joined
 
 
 def test_sdk_grant_lane_forwards_progress(
