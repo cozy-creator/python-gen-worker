@@ -51,6 +51,20 @@ _DEFAULT_RESPAWN_BACKOFF_CAP_S = 60.0
 _BACKOFF_RESET_AFTER_ALIVE_S = 60.0
 _CRASH_LOOP_REPORT_MIN_INTERVAL_S = 300.0
 _DEATH_FLUSH_GRACE_S = 2.0
+# TimeoutStopSec: after the parent forwards SIGTERM, a child that has not
+# exited is SIGKILLed rather than holding the pod open forever.
+_DEFAULT_STOP_TIMEOUT_S = 120.0
+# Bounded flush on a DELIBERATE exit (drain / stop): the queue's durable
+# results get a real chance to ship before the parent leaves.
+_STOP_FLUSH_TIMEOUT_S = 30.0
+# After the child process is reaped, its last frames may still be sitting in
+# the socket buffer (a JobResult written microseconds before death). Closing
+# the link before draining them loses the result AND mis-attributes the job.
+_LINK_SETTLE_TIMEOUT_S = 3.0
+# The transport's drain close half-closes and waits for the peer to end the
+# call. Cancelling that wait RSTs the call and discards already-retired writes.
+_CLEAN_CLOSE_WAIT_S = 12.0
+_REPORTED_DEAD_CAP = 512
 
 
 class _ChildLink:
@@ -75,6 +89,8 @@ class ParentControl:
         start_limit_burst: int = _DEFAULT_START_LIMIT_BURST,
         start_limit_interval_s: float = _DEFAULT_START_LIMIT_INTERVAL_S,
         watchdog_budget_s: float = _DEFAULT_WATCHDOG_BUDGET_S,
+        stop_timeout_s: float = _DEFAULT_STOP_TIMEOUT_S,
+        stop_flush_timeout_s: float = _STOP_FLUSH_TIMEOUT_S,
         transport_backoff_base_s: float = 1.0,
         transport_backoff_cap_s: float = 30.0,
     ) -> None:
@@ -92,6 +108,8 @@ class ParentControl:
         self._start_limit_burst = max(1, int(start_limit_burst))
         self._start_limit_interval = start_limit_interval_s
         self._watchdog_budget = watchdog_budget_s
+        self._stop_timeout = stop_timeout_s
+        self._stop_flush_timeout = stop_flush_timeout_s
         self.transport = Transport(
             settings,
             self,
@@ -118,9 +136,27 @@ class ParentControl:
         self._relaying = False
         self._watchdog_fired = False
         self._draining = False
+        self._terminating = False
         self._child_exited_clean = False
         self._last_crash_loop_report_at = 0.0
         self.crash_loop_reports = 0  # observability + tests
+        # Set once the child's link read loop has finished (EOF drained), so
+        # death attribution never races the child's last frames.
+        self._link_closed = asyncio.Event()
+        self._link_closed.set()
+        # Held CLEAR from the moment the child is reaped until its in-flight
+        # jobs have been attributed into the durable queue. A concurrent drain
+        # flush must not declare the queue empty before the death report is in
+        # it (the FATAL would be dropped by the flush's own stop).
+        self._death_report_done = asyncio.Event()
+        self._death_report_done.set()
+        # (request_id, attempt) already terminal-reported by the death path:
+        # a late cancel for one of these is dropped, not relayed to the fresh
+        # child that never heard of the request.
+        self._reported_dead: collections.OrderedDict = collections.OrderedDict()
+        self._stop_deadline_task: Optional[asyncio.Task] = None
+        self._reported_unretired = False
+        self.unretired_results_at_exit = 0  # observability + tests
 
     # ---- Transport handlers ---------------------------------------------
 
@@ -191,8 +227,11 @@ class ParentControl:
                 )))
             return
         if which == "cancel_job":
-            if link is None:
-                return  # job already terminal-reported by the death path
+            key = (msg.cancel_job.request_id, msg.cancel_job.attempt)
+            if link is None or key in self._reported_dead:
+                # Already terminal-reported by the death path: relaying it to a
+                # fresh child that never heard of the request is noise at best.
+                return
             await link.writer.frame(frames.T_SCHED, msg.SerializeToString())
             return
         if which == "drain":
@@ -241,6 +280,7 @@ class ParentControl:
         if old is not None:
             old.writer.close()
         self._last_frame_at = time.monotonic()
+        self._link_closed.clear()
         self._link_ready.set()
         logger.info("compute child connected on %s", self._socket_path)
         try:
@@ -258,6 +298,7 @@ class ParentControl:
             if waiter is not None and not waiter.done():
                 waiter.set_exception(ConnectionError("compute child link lost"))
             link.writer.close()
+            self._link_closed.set()
 
     async def _on_child_frame(self, link: _ChildLink, ftype: int, payload: bytes) -> None:
         if ftype == frames.T_WATCHDOG:
@@ -292,6 +333,11 @@ class ParentControl:
         if ftype == frames.T_FLUSH_REQ:
             meta = frames.unpack_meta(payload)
             timeout = meta.get("timeout")
+            # The child only asks for this at the END of its own drain, so the
+            # shutdown is deliberate however it was triggered (hub Drain,
+            # child-side signal). Recording it here is what stops the parent
+            # from respawning into a drain, or exiting 1 on a clean drain.
+            self._draining = True
             flushed = await self.transport.close_after_flush(
                 timeout=None if timeout is None else float(timeout)
             )
@@ -338,23 +384,34 @@ class ParentControl:
             rc = await proc.wait()
             lifetime = time.monotonic() - started
             self._proc = None
+            # From here until attribution is enqueued, a concurrent drain flush
+            # must not conclude the queue is empty.
+            self._death_report_done.clear()
             saw_hello = self._child_saw_hello
-            link = self._link
-            if link is not None:
-                link.writer.close()
-                self._link = None
-                self._link_ready.clear()
+            # Drain the child's LAST frames before touching the link: a
+            # JobResult written microseconds before death is still in the
+            # socket buffer, and closing the writer here would discard it and
+            # then mis-report that finished job as ComputeProcessDied.
+            await self._settle_link()
             if self._stopping.is_set():
+                self._death_report_done.set()
                 return
-            if rc == 0 and not self._watchdog_fired:
-                # Deliberate exit (drain / stop): the pod's work is done.
-                logger.info("compute child exited cleanly; parent exiting")
-                self._child_exited_clean = True
-                self.transport.stop()
+            deliberate = self._terminating or (rc == 0 and not self._watchdog_fired)
+            if deliberate:
+                await self._finish_deliberate_exit(rc, lifetime_s=lifetime)
                 return
             await self._handle_child_death(
                 rc, oom_before=oom_before, lifetime_s=lifetime, saw_hello=saw_hello,
             )
+            if self._draining:
+                # Restart=on-failure does not apply to a pod that has been told
+                # to go away: the death is reported and shipped, but respawning
+                # into a drain would re-advertise capacity the hub retired.
+                logger.info(
+                    "compute child died during drain; not respawning — flushing and exiting"
+                )
+                await self._finish_shutdown_flush(reason="death_during_drain")
+                return
             if lifetime >= _BACKOFF_RESET_AFTER_ALIVE_S:
                 backoff = self._backoff_base
             await self._sleep_or_stop(backoff)
@@ -365,6 +422,127 @@ class ParentControl:
             await asyncio.wait_for(self._stopping.wait(), delay)
         except asyncio.TimeoutError:
             pass
+
+    async def _settle_link(self) -> None:
+        """Let the reaped child's buffered frames finish relaying, then close."""
+        try:
+            await asyncio.wait_for(self._link_closed.wait(), _LINK_SETTLE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "compute child link did not settle within %.1fs after exit; "
+                "closing it (late frames may be lost)", _LINK_SETTLE_TIMEOUT_S,
+            )
+        link = self._link
+        if link is not None:
+            link.writer.close()
+            self._link = None
+            self._link_ready.clear()
+            self._link_closed.set()
+
+    async def _await_child_exit(self, timeout: float) -> bool:
+        """TimeoutStopSec: wait for a deliberate child exit, then SIGKILL."""
+        proc = self._proc
+        if proc is None:
+            return True
+        try:
+            await asyncio.wait_for(asyncio.shield(proc.wait()), timeout)
+            return True
+        except asyncio.TimeoutError:
+            logger.error(
+                "compute child did not exit within %.0fs of shutdown "
+                "(TimeoutStopSec) — SIGKILL", timeout,
+            )
+            await self._dial_detail(
+                f"phase=compute_stop_timeout timeout_s={timeout:.0f} "
+                f"spawns={self._spawn_count} — child SIGKILLed after a "
+                "deliberate shutdown request"
+            )
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            return False
+
+    async def _stop_deadline(self) -> None:
+        await self._await_child_exit(self._stop_timeout)
+
+    async def _report_in_flight_dead(self, cause: str) -> Dict[Tuple[str, int], str]:
+        """One typed FATAL per open job, into the DURABLE queue.
+
+        Ships on the live stream now, or survives to the next one — either way
+        the hub learns WHICH job died, not merely that a pod blinked.
+        """
+        died_jobs = dict(self._in_flight)
+        self._in_flight.clear()
+        try:
+            for (rid, att), fn in sorted(died_jobs.items()):
+                self._reported_dead[(rid, att)] = fn
+                while len(self._reported_dead) > _REPORTED_DEAD_CAP:
+                    self._reported_dead.popitem(last=False)
+                await self.transport.send(pb.WorkerMessage(job_result=pb.JobResult(
+                    request_id=rid,
+                    attempt=att,
+                    status=pb.JOB_STATUS_FATAL,
+                    safe_message=(
+                        f"{DEATH_LABEL}: cause={cause} function={fn or 'unknown'} "
+                        f"(handler process died; worker alive and respawning)"
+                    )[:512],
+                )))
+        finally:
+            self._death_report_done.set()
+        return died_jobs
+
+    async def _finish_shutdown_flush(self, *, reason: str) -> None:
+        """Bounded flush of the durable queue on a deliberate parent exit.
+
+        Unretired results at this point can only be lost, so the loss is
+        reported typed instead of vanishing with the process.
+        """
+        self._child_exited_clean = True   # the shutdown was deliberate, not a crash
+        # With no live stream there is no send loop to retire anything, so
+        # waiting the full budget would only delay the exit.
+        flushed = await self.transport.close_after_flush(
+            timeout=self._stop_flush_timeout if self.transport.connected else 1.0
+        )
+        self._reported_unretired = True
+        pending = list(self.transport.queue.pending_result_keys)
+        self.unretired_results_at_exit = len(pending)
+        if not flushed or pending:
+            await self._dial_detail(
+                f"phase=compute_parent_exit reason={reason} flushed={flushed} "
+                f"unretired_results={len(pending)} "
+                f"keys={sorted(f'{r}#{a}' for (r, a) in pending)[:16]} "
+                f"spawns={self._spawn_count}"
+            )
+        self._stopping.set()
+
+    async def _finish_deliberate_exit(self, rc: int, *, lifetime_s: float) -> None:
+        """The child left on purpose (drain, or a forwarded SIGTERM)."""
+        self._child_exited_clean = True
+        cause = f"exit:{rc}" if rc >= 0 else self._death_cause(rc, 0)[0]
+        died = await self._report_in_flight_dead(cause)
+        if died:
+            # A deliberate exit with jobs still open is a should-never-happen
+            # (drain finishes tenant work first) — report it, never swallow it.
+            logger.error(
+                "compute child exited deliberately (rc=%s) with %d job(s) still "
+                "in flight; attributed typed", rc, len(died),
+            )
+            await self._dial_detail(postmortem.format_detail(
+                phase="compute_process_exit",
+                verdict={"signaled": rc < 0, "exit_code": rc if rc >= 0 else 128 - rc},
+                limits=postmortem.container_limits(),
+                oom_kill_delta=0,
+                lifetime_s=lifetime_s,
+                extra={"cause": cause, "deliberate": True,
+                       "in_flight": sorted(f"{r}#{a}" for (r, a) in died)},
+            ))
+        else:
+            logger.info("compute child exited cleanly (rc=%s); parent exiting", rc)
+        postmortem.clear_inflight()   # nothing of this child may attribute the next
+        await self._finish_shutdown_flush(
+            reason="terminating" if self._terminating else "drain"
+        )
 
     def _death_cause(self, rc: int, oom_delta: int) -> Tuple[str, Dict[str, Any]]:
         if self._watchdog_fired:
@@ -395,22 +573,8 @@ class ParentControl:
         else:
             self._deaths_before_hello = 0
 
-        # 1) Attribution first: a typed FATAL per in-flight job, into the
-        # DURABLE queue (ships on the live stream now, or survives to the
-        # next one — either way the hub learns which job died, not merely
-        # that a pod blinked).
-        died_jobs = dict(self._in_flight)
-        self._in_flight.clear()
-        for (rid, att), fn in sorted(died_jobs.items()):
-            await self.transport.send(pb.WorkerMessage(job_result=pb.JobResult(
-                request_id=rid,
-                attempt=att,
-                status=pb.JOB_STATUS_FATAL,
-                safe_message=(
-                    f"{DEATH_LABEL}: cause={cause} function={fn or 'unknown'} "
-                    f"(handler process died; worker alive and respawning)"
-                )[:512],
-            )))
+        # 1) Attribution first (durable, before any flush can conclude).
+        died_jobs = await self._report_in_flight_dead(cause)
         logger.error(
             "compute child died: cause=%s rc=%s lifetime=%.1fs in_flight=%s "
             "(respawning; stream identity kept)",
@@ -418,6 +582,21 @@ class ParentControl:
         )
 
         # 2) Post-mortem dial (gw#640 typed exit capture, carried forward).
+        # pgw#676/pgw#714 parity: a signal death CONSUMES the child's on-disk
+        # in-flight markers, attaches the faulthandler tail, and records the
+        # per-function native-crash streak the respawned child's own boot gate
+        # refuses on. Skipping it would leave stale markers to misattribute the
+        # next death and would silently disarm that gate in split mode.
+        extra: Dict[str, Any] = {}
+        if verdict.get("signaled"):
+            try:
+                extra.update(postmortem.attribute_signal_death(
+                    signal_name=str(verdict.get("signal_name") or "")
+                ))
+            except Exception:
+                logger.warning("signal-death attribution failed", exc_info=True)
+        else:
+            postmortem.clear_inflight()
         detail = postmortem.format_detail(
             phase="compute_process_exit",
             verdict=verdict,
@@ -425,6 +604,7 @@ class ParentControl:
             oom_kill_delta=oom_delta,
             lifetime_s=lifetime_s,
             extra={
+                **extra,
                 "cause": cause,
                 "in_flight": sorted(f"{r}#{a}" for (r, a) in died_jobs),
                 "spawn_count": self._spawn_count,
@@ -457,6 +637,10 @@ class ParentControl:
             await self.transport.queue.wait_empty(timeout=_DEATH_FLUSH_GRACE_S)
         except Exception:
             pass
+        if self._draining or self._terminating or self._stopping.is_set():
+            # No child will follow, so no fresh Hello is owed. Cycling here
+            # would tear down the very stream the shutdown flush needs.
+            return
         self.transport.cycle_connection()
 
     async def _dial_detail(self, detail: str) -> None:
@@ -478,6 +662,11 @@ class ParentControl:
             proc = self._proc
             if proc is None or self._link is None or self._relaying:
                 continue
+            if self._draining or self._terminating:
+                # A deliberate teardown (unloading instances, final flush) is
+                # allowed to be quiet; TimeoutStopSec bounds it instead. Killing
+                # it here would fabricate a watchdog_hang out of a clean drain.
+                continue
             silent_for = time.monotonic() - self._last_frame_at
             if silent_for > self._watchdog_budget:
                 logger.error(
@@ -494,12 +683,28 @@ class ParentControl:
     # ---- drain / signals -------------------------------------------------
 
     async def _drain_without_child(self) -> None:
-        await self.transport.close_after_flush(timeout=30.0)
-        self._stopping.set()
+        # A child reaped moments ago may still be attributing its in-flight
+        # jobs. Flushing before that FATAL is enqueued would retire the queue
+        # empty and drop the report with the process.
+        try:
+            await asyncio.wait_for(
+                self._death_report_done.wait(), _LINK_SETTLE_TIMEOUT_S + 2.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("draining without waiting further for death attribution")
+        await self._finish_shutdown_flush(reason="drain_without_child")
 
     def _forward_signal(self, signum: int) -> None:
         proc = self._proc
         if proc is not None:
+            # Mark intent BEFORE the signal lands: the child's death by this
+            # signal is deliberate, so it must not respawn, must not count
+            # toward the crash-loop window, and must not exit the parent 1.
+            self._terminating = True
+            if self._stop_deadline_task is None:
+                self._stop_deadline_task = asyncio.create_task(
+                    self._stop_deadline(), name="parent-stop-deadline"
+                )
             try:
                 proc.send_signal(signum)
                 return
@@ -550,8 +755,54 @@ class ParentControl:
             )
             if transport_task in done:
                 transport_task.result()  # re-raise FatalTransportError
-            return 0 if (self._child_exited_clean or self._stopping.is_set()) else 1
+                # The stream ended first. On a DELIBERATE shutdown the child
+                # still owns the rest of it (instance teardown, last telemetry,
+                # its own exit code) — waiting for it is what makes a drain
+                # exit 0 instead of SIGKILLing a cleanly draining child and
+                # reporting 1.
+                if (self._draining or self._terminating) and not child_task.done():
+                    await self._await_child_exit(self._stop_timeout)
+                    try:
+                        await asyncio.wait_for(asyncio.shield(child_task), 15.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("child supervision loop did not settle after drain")
+                    except Exception:
+                        pass
+            else:
+                # The supervision loop finished first — a deliberate exit, and
+                # it has already retired the queue through the send loop. The
+                # transport is now inside its half-close (done_writing + wait
+                # for the peer to end the call): CANCELLING it here RSTs the
+                # call and discards writes the queue already retired, which is
+                # how a typed death FATAL gets lost after a drain. Let it end.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(transport_task), _CLEAN_CLOSE_WAIT_S
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "transport did not finish its clean close within %.0fs",
+                        _CLEAN_CLOSE_WAIT_S,
+                    )
+                except Exception:
+                    pass  # re-raised (or already logged) by the gather below
+            return 0 if (
+                self._child_exited_clean
+                or self._draining
+                or self._terminating
+                or self._stopping.is_set()
+            ) else 1
         finally:
+            if not self._reported_unretired:
+                pending = list(self.transport.queue.pending_result_keys)
+                self.unretired_results_at_exit = len(pending)
+                if pending:
+                    await self._dial_detail(
+                        f"phase=compute_parent_exit reason=abrupt "
+                        f"unretired_results={len(pending)} "
+                        f"keys={sorted(f'{r}#{a}' for (r, a) in pending)[:16]} "
+                        f"spawns={self._spawn_count}"
+                    )
             self._stopping.set()
             proc = self._proc
             if proc is not None:
@@ -560,12 +811,13 @@ class ParentControl:
                 except ProcessLookupError:
                     pass
             self.transport.stop()
-            for t in (transport_task, child_task, watchdog_task):
+            tasks = [transport_task, child_task, watchdog_task]
+            if self._stop_deadline_task is not None:
+                tasks.append(self._stop_deadline_task)
+            for t in tasks:
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(
-                transport_task, child_task, watchdog_task, return_exceptions=True
-            )
+            await asyncio.gather(*tasks, return_exceptions=True)
             server.close()
             try:
                 # py3.12 waits for handler completion; never hang shutdown on it.

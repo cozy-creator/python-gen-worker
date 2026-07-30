@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import sys
 import threading
 import time
@@ -45,8 +46,20 @@ from harness.hub_double import FakeScheduler, is_accept_for, is_ready, is_result
 TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = TESTS_DIR.parent / "src"
 CHILD_MAIN = TESTS_DIR / "harness" / "procsplit_child_main.py"
+FAKE_CHILD = TESTS_DIR / "harness" / "procsplit_fake_child.py"
 
 BOOT_TIMEOUT_S = 120.0  # child imports torch; generous but real
+
+_BOOT_RECORD_NAME = "gen-worker-boot-record.json"
+_INFLIGHT_NAME = "gen-worker-inflight.json"
+_CRASH_REGISTRY_NAME = "gen-worker-crash-streaks.json"
+_FAULT_DUMP_NAME = "gen-worker-fault-dump.txt"
+
+
+def postmortem_dir(tmp: Path) -> Path:
+    d = tmp / "postmortem"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 class _In(msgspec.Struct):
@@ -68,6 +81,9 @@ class SplitHarness:
         watchdog_budget_s: float = 60.0,
         start_limit_burst: int = 3,
         start_limit_interval_s: float = 600.0,
+        stop_timeout_s: float = 120.0,
+        stop_flush_timeout_s: float = 30.0,
+        extra_child_env: Optional[dict] = None,
     ) -> None:
         self.scheduler = FakeScheduler()
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
@@ -85,7 +101,12 @@ class SplitHarness:
             ),
             "TENSORHUB_CACHE_DIR": str(tmp / "cache"),
             "GEN_WORKER_CHILD_WATCHDOG_PING_S": "0.5",
+            # Test-scoped post-mortem markers: the parent consumes the child's
+            # in-flight file, so both sides must agree on a per-test dir and
+            # never touch the host's (or another test's) markers.
+            "GEN_WORKER_BOOT_RECORD": str(postmortem_dir(tmp) / _BOOT_RECORD_NAME),
         }
+        child_env.update(extra_child_env or {})
         self.pc = ParentControl(
             settings,
             child_cmd=child_cmd or [sys.executable, str(CHILD_MAIN)],
@@ -98,6 +119,8 @@ class SplitHarness:
             watchdog_budget_s=watchdog_budget_s,
             start_limit_burst=start_limit_burst,
             start_limit_interval_s=start_limit_interval_s,
+            stop_timeout_s=stop_timeout_s,
+            stop_flush_timeout_s=stop_flush_timeout_s,
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -110,10 +133,36 @@ class SplitHarness:
     def alive(self) -> bool:
         return self._thread.is_alive()
 
+    def signal(self, signum: int) -> None:
+        """Deliver a signal to the PARENT (the container's PID 1 in split
+        mode). The parent runs in this process, so the real handler is invoked
+        the way asyncio's signal handler would."""
+        loop = self.pc._loop
+        assert loop is not None
+        loop.call_soon_threadsafe(self.pc._forward_signal, signum)
+
+    def wait_exit(self, timeout: float) -> Optional[int]:
+        self._thread.join(timeout)
+        return self.exit_code
+
     def close(self) -> None:
         self.pc.stop()
         self._thread.join(20.0)
         self.server.stop(grace=0)
+
+
+@pytest.fixture(autouse=True)
+def isolated_postmortem(tmp_path, monkeypatch):
+    """The parent CONSUMES the dying child's markers (pgw#676 parity), so the
+    in-process parent must read the same per-test dir the child writes — never
+    the host's /tmp markers, and never another test's."""
+    from gen_worker import postmortem
+
+    d = postmortem_dir(tmp_path)
+    monkeypatch.setattr(postmortem, "INFLIGHT_PATH", d / _INFLIGHT_NAME)
+    monkeypatch.setattr(postmortem, "CRASH_REGISTRY_PATH", d / _CRASH_REGISTRY_NAME)
+    monkeypatch.setattr(postmortem, "FAULT_DUMP_PATH", d / _FAULT_DUMP_NAME)
+    return d
 
 
 @pytest.fixture()
@@ -310,3 +359,200 @@ def test_seam_cost_frame_rtt_and_throughput(tmp_path, capsys):
     # double-digit MB/s would change the product answer.
     assert results["rtt_ms"] < 5.0
     assert results["throughput_mb_s"] > 200.0
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: drain / stop hardening. Every row here is a race between the
+# DURABLE queue's retirement and the teardown of something that carries it —
+# the stream, the child link, or the parent process itself.
+# ---------------------------------------------------------------------------
+
+
+def test_hub_drain_exits_zero_and_lets_the_child_finish(split, captured_dials):
+    """A hub Drain is a DELIBERATE shutdown end to end.
+
+    The child's own drain flushes through the parent's queue and the child
+    exits 0. The parent must exit 0 too — and must not SIGKILL the child that
+    is still unloading instances just because the stream ended first.
+    """
+    conn = split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn.send(run_job=pb.RunJob(
+        request_id="r-pre-drain", attempt=1, function_name="echo",
+        input_payload=_payload("bye")))
+    ok = conn.wait_for(is_result_for("r-pre-drain"), timeout=30.0)
+    assert ok.job_result.status == pb.JOB_STATUS_OK
+
+    conn.send(drain=pb.Drain(deadline_ms=30_000))
+    assert split.wait_exit(60.0) == 0, "a drain must exit the parent 0"
+    assert split.pc._proc is None
+    # Nothing about a drain is a death: no typed exit capture, no stop-timeout
+    # escalation, and no ComputeProcessDied attribution.
+    assert not any("compute_process_exit" in d for d in captured_dials), captured_dials
+    assert not any("compute_stop_timeout" in d for d in captured_dials)
+    assert not any(
+        m.WhichOneof("msg") == "job_result" and DEATH_LABEL in m.job_result.safe_message
+        for m in conn.received
+    )
+    assert split.pc.unretired_results_at_exit == 0
+
+
+def test_child_death_during_drain_reports_the_job_and_does_not_respawn(
+    split, captured_dials,
+):
+    """The variant stage 1 left open: a child that dies MID-DRAIN.
+
+    Restart=on-failure must not apply to a pod the hub has already retired —
+    respawning would re-advertise capacity — but the in-flight job still has
+    to be attributed, and that FATAL has to survive the shutdown flush that
+    is running concurrently.
+    """
+    conn = split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn.send(run_job=pb.RunJob(
+        request_id="r-drain-victim", attempt=1, function_name="sleepy",
+        input_payload=_payload()))
+    conn.wait_for(is_accept_for("r-drain-victim"), timeout=30.0)
+    # Drain waits for tenant work, so the child stays alive draining...
+    conn.send(drain=pb.Drain(deadline_ms=120_000))
+    time.sleep(1.0)
+    assert split.pc._proc is not None
+    # ...and then the kernel takes it (the cgroup-OOM shape, mid-drain).
+    split.pc._proc.kill()
+
+    died = conn.wait_for(is_result_for("r-drain-victim"), timeout=30.0)
+    assert died.job_result.status == pb.JOB_STATUS_FATAL
+    assert DEATH_LABEL in died.job_result.safe_message
+    assert "function=sleepy" in died.job_result.safe_message
+
+    assert split.wait_exit(60.0) == 0, "the drain is still honored"
+    assert split.pc._spawn_count == 1, "no respawn into a drain"
+    assert len(split.scheduler.connections) == 1, "no fresh Hello after the drain"
+    assert split.pc.unretired_results_at_exit == 0, "the death FATAL shipped"
+    assert any("compute_process_exit" in d for d in captured_dials)
+
+
+def test_sigterm_forward_escalates_at_the_stop_deadline(tmp_path, captured_dials):
+    """TimeoutStopSec: a child that ignores SIGTERM is SIGKILLed on a budget.
+
+    Uses the frame-speaking child peer (see procsplit_fake_child) because the
+    real child handles SIGTERM correctly by design — the point here is the
+    parent's own deadline, not the child's cooperation.
+    """
+    h = SplitHarness(
+        tmp_path,
+        child_cmd=[sys.executable, str(FAKE_CHILD)],
+        stop_timeout_s=3.0,
+        extra_child_env={"PGW763_FAKE_MODE": "ignore_sigterm"},
+    )
+    try:
+        h.scheduler.wait_connection(0, timeout=30.0)
+        h.signal(signal.SIGTERM)
+        assert h.wait_exit(40.0) == 0, "a signal shutdown exits 0"
+        assert any("compute_stop_timeout" in d for d in captured_dials), captured_dials
+        assert h.pc._spawn_count == 1, "a forwarded-signal death is not a crash"
+    finally:
+        h.close()
+
+
+def test_result_written_just_before_death_is_neither_lost_nor_blamed(
+    tmp_path, captured_dials,
+):
+    """The child's LAST frames must land before attribution runs.
+
+    A JobResult written microseconds before the process dies is still in the
+    socket buffer when waitpid returns. Closing the link there discards it and
+    then reports the finished job as ComputeProcessDied — a FATAL for work
+    that actually succeeded. Uses the child peer so the write and the SIGKILL
+    are adjacent; the real child cannot make that timing deterministic.
+    """
+    h = SplitHarness(
+        tmp_path,
+        child_cmd=[sys.executable, str(FAKE_CHILD)],
+        extra_child_env={"PGW763_FAKE_MODE": "result_then_die"},
+    )
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=30.0)
+        conn.send(run_job=pb.RunJob(
+            request_id="r-last-frame", attempt=1, function_name="echo",
+            input_payload=_payload("x")))
+        res = conn.wait_for(is_result_for("r-last-frame"), timeout=30.0)
+        assert res.job_result.status == pb.JOB_STATUS_OK, res.job_result.safe_message
+        assert res.job_result.inline == b"fake-ok"
+        # The child did die, and the pod recovered from it...
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and h.pc._spawn_count < 2:
+            time.sleep(0.1)
+        assert h.pc._spawn_count >= 2
+        # ...but the completed job was never re-reported as a death.
+        assert not any(
+            m.WhichOneof("msg") == "job_result"
+            and m.job_result.request_id == "r-last-frame"
+            and m.job_result.status == pb.JOB_STATUS_FATAL
+            for m in conn.received
+        )
+    finally:
+        h.close()
+
+
+def test_parent_exit_with_unretired_results_is_reported_typed(
+    tmp_path, captured_dials,
+):
+    """Unshippable durable results die with the parent — but not silently.
+
+    The child peer writes a JobResult and exits 0 before the parent has any
+    stream at all (the handshake needs a Hello the dead child never answers),
+    so the result can only be lost. The parent must account for it typed
+    rather than exiting as if the queue had been empty.
+    """
+    h = SplitHarness(
+        tmp_path,
+        child_cmd=[sys.executable, str(FAKE_CHILD)],
+        stop_flush_timeout_s=2.0,
+        extra_child_env={"PGW763_FAKE_MODE": "spontaneous_result_then_exit"},
+    )
+    try:
+        assert h.wait_exit(60.0) == 0
+        assert h.pc.unretired_results_at_exit == 1, captured_dials
+        assert any(
+            "compute_parent_exit" in d and "unretired_results=1" in d
+            for d in captured_dials
+        ), captured_dials
+    finally:
+        h.close()
+
+
+def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
+    tmp_path, captured_dials, isolated_postmortem,
+):
+    """pgw#676/pgw#714 parity in split mode.
+
+    gw#640's supervisor consumed the dying child's in-flight marker, attached
+    the faulthandler tail, and recorded the per-function native-crash streak
+    that the NEXT boot's gate refuses on. The control parent must do the same
+    or the split silently disarms that gate and leaves stale markers to
+    misattribute the next death.
+    """
+    from gen_worker import postmortem
+
+    inflight = isolated_postmortem / _INFLIGHT_NAME
+    registry = isolated_postmortem / _CRASH_REGISTRY_NAME
+    h = SplitHarness(tmp_path)
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn.send(run_job=pb.RunJob(
+            request_id="r-marker", attempt=1, function_name="die-hard",
+            input_payload=_payload()))
+        died = conn.wait_for(is_result_for("r-marker"), timeout=30.0)
+        assert died.job_result.status == pb.JOB_STATUS_FATAL
+        exits = [d for d in captured_dials if "compute_process_exit" in d]
+        assert exits, captured_dials
+        assert "native_crash_streaks" in exits[0], exits[0]
+        assert "die-hard" in exits[0]
+        streaks = postmortem.native_crash_streaks(registry)
+        assert streaks.get("die-hard", {}).get("count") == 1, streaks
+        # Consumed: a stale marker would misattribute the next death.
+        assert not inflight.exists()
+    finally:
+        h.close()
