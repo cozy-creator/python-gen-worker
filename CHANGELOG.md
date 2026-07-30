@@ -11,8 +11,10 @@ without bricking the process. Errors scoped to advisory intents no longer
 reject the command at all: exactly those intents are declined (typed FAILED
 IntentState + `rejections` on an ACCEPTED receipt) and the rest applies, so a
 bad preposition or an unknown-function binding leaves the worker SERVING.
-First published release of the SDK-v2 chaos line since 0.76.x; adoption notes
-in th#1283 (conversion bump additionally rides pgw#740's merged declarations).
+NOT YET PUBLISHED: the v0.83.0 tag is held behind the pgw#740 registry fix —
+a fresh interpreter importing only the public entrypoint sees every family/
+convert/export registry EMPTY on this tree (verified 2026-07-29, th#1283).
+Publish rides after that fix lands, through its wheel-level publish gate.
 
 Live-named twice on the 0.76.7 canary: with bind fixed, in-contract calls EXECUTED the
 adopted artifact and the caller crashed downstream (4-vs-2 broadcast) because diffusers
