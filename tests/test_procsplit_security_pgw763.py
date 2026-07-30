@@ -369,6 +369,101 @@ def test_delta2_measurement_process_imports_no_endpoint_module():
 
 
 # ==========================================================================
+# DELTA 3 — billables the parent can observe are attested by the parent
+# ==========================================================================
+
+
+@pytest.fixture()
+def billing_split(tmp_path, captured_dials, monkeypatch):
+    monkeypatch.setenv("WORKER_JWT", WORKER_JWT)
+    h = SplitHarness(
+        tmp_path,
+        child_cmd=[sys.executable, str(FAKE_CHILD)],
+        extra_child_env={"PGW763_FAKE_MODE": "forge_metrics"},
+    )
+    try:
+        yield h
+    finally:
+        h.close()
+
+
+def test_delta3_forged_billables_are_replaced_by_the_parents_observation(
+    billing_split, captured_dials,
+):
+    """THE ATTACK: the child reports its own billing quantities (th#1309).
+
+    Here it claims three HOURS of runtime, queue, slot-held and finalize wall
+    for a job the parent watched take milliseconds, plus a fabricated
+    concurrency and a 999 GiB RSS. Everything the parent could observe from
+    outside the process comes back to what the parent observed.
+    """
+    from harness.procsplit_fake_child import (  # type: ignore
+        FORGED_CONCURRENCY,
+        FORGED_RSS_BYTES,
+        FORGED_RUNTIME_MS,
+    )
+
+    conn = billing_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn.send(run_job=pb.RunJob(
+        request_id="r-bill", attempt=1, function_name="echo",
+        input_payload=_payload()))
+    got = conn.wait_for(is_result_for("r-bill"), timeout=60.0)
+    m = got.job_result.metrics
+
+    assert m.runtime_ms < FORGED_RUNTIME_MS, (
+        f"runtime_ms={m.runtime_ms} survived: the code being billed set its own "
+        "billable wall clock (th#1309)"
+    )
+    assert m.runtime_ms < 60_000, "the clamp must be the OBSERVED wall, not a cap"
+    for name in ("queue_ms", "slot_held_ms", "finalize_wall_ms"):
+        assert getattr(m, name) < FORGED_RUNTIME_MS, f"{name} survived unattested"
+    assert m.concurrency_at_start != FORGED_CONCURRENCY
+    assert m.concurrency_at_start == 0, (
+        "concurrency_at_start must be the parent's own dispatch-time count"
+    )
+    assert m.rss_at_end_bytes != FORGED_RSS_BYTES, (
+        "rss_at_end_bytes is a /proc reading the parent takes; a process is not "
+        "the witness for its own resource use"
+    )
+    # The divergence is BANKED, not merely clamped away in silence.
+    assert billing_split.pc.metric_divergences >= 1
+    assert any("compute_billing_attestation" in d for d in captured_dials)
+    # ...and the quantity the parent CANNOT corroborate is named, not faked:
+    # output_media_duration_s=0 with outputs present is th#1309's $0 bill.
+    assert any("output_media_duration_s=0" in d for d in captured_dials)
+
+
+def test_delta3_an_honest_report_passes_through_unchanged():
+    """The other half: attestation is not a rewrite. A child whose numbers
+    agree with what the parent watched keeps them — including the quantities
+    the parent deliberately does not measure."""
+    from gen_worker.procsplit import attest
+
+    metrics = pb.JobMetrics(
+        runtime_ms=1200, queue_ms=30, slot_held_ms=1100, finalize_wall_ms=90,
+        concurrency_at_start=2, rss_at_end_bytes=4 << 30,
+        output_media_duration_s=8.5, output_count=1,
+        input_tokens=120, output_tokens=64, lane="fp8-w8a8-dynamic+compiled",
+    )
+    obs = attest.JobObservation(
+        function="generate",
+        relayed_at=0.0,
+        concurrency_at_relay=2,
+    )
+    divergences = attest.attest(
+        metrics, obs, now=1.6, child_rss_bytes=(4 << 30) + 1000, status_ok=True)
+
+    assert divergences == [], divergences
+    assert metrics.runtime_ms == 1200 and metrics.queue_ms == 30
+    assert metrics.concurrency_at_start == 2
+    # Untouched by design — measuring these parent-side would mean routing the
+    # data plane through the parent's interpreter (th#1309 owns the hub bound).
+    assert metrics.output_media_duration_s == 8.5
+    assert metrics.input_tokens == 120 and metrics.output_tokens == 64
+    assert metrics.lane == "fp8-w8a8-dynamic+compiled"
+
+
+# ==========================================================================
 # The allowlist itself — unit rows, because the table IS the policy
 # ==========================================================================
 

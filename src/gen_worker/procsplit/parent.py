@@ -42,6 +42,7 @@ from . import (
     ENV_SOCKET,
     ENV_WATCHDOG_PING_S,
     actions,
+    attest,
     frames,
 )
 
@@ -91,6 +92,10 @@ _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
 # The host canary is a real benchmark (memcpy/D2H/CPU); on a cold pod with a
 # large card it is seconds, not milliseconds. Generous, and bounded.
 _MEASURE_TIMEOUT_S = 180.0
+_ATTESTATION_REPORT_MIN_INTERVAL_S = 300.0
+# Bounded: an observation is dropped when its result passes back, so this only
+# has to survive jobs whose results never arrive (child deaths).
+_OBSERVATION_CAP = 512
 
 
 def _http_call(
@@ -250,6 +255,10 @@ class ParentControl:
         # the HelloAck it relays — the CHILD never names a host.
         self._file_base_url = ""
         self._identity_cache: Optional[Tuple[str, str]] = None
+        # delta 3: (request_id, attempt) -> what the parent watched.
+        self._observations: collections.OrderedDict = collections.OrderedDict()
+        self.metric_divergences = 0  # observability + tests
+        self._last_attestation_report_at = 0.0
         # delta 2: the parent's own pre-import host measurement.
         self._measure_cmd = list(
             measure_cmd
@@ -468,7 +477,18 @@ class ParentControl:
                     safe_message="compute process restarting",
                 )))
                 return
-            self._in_flight[(run.request_id, run.attempt)] = run.function_name
+            key = (run.request_id, run.attempt)
+            # delta 3: what the parent watched, recorded BEFORE the job exists
+            # in the child. The in-flight count is taken now, so it is the
+            # parent's own dispatch-time observation and not a child claim.
+            self._observations[key] = attest.JobObservation(
+                function=run.function_name,
+                relayed_at=time.monotonic(),
+                concurrency_at_relay=len(self._in_flight),
+            )
+            while len(self._observations) > _OBSERVATION_CAP:
+                self._observations.popitem(last=False)
+            self._in_flight[key] = run.function_name
             try:
                 await link.writer.frame(frames.T_SCHED, msg.SerializeToString())
             except (ConnectionError, OSError):
@@ -575,6 +595,9 @@ class ParentControl:
             if which == "job_result":
                 r = msg.job_result
                 self._in_flight.pop((r.request_id, r.attempt), None)
+                # delta 3: the billable numbers pass through the one component
+                # that watched this job from outside the process doing it.
+                await self._attest_result(r)
             elif which == "state_delta":
                 # The freshest truth the child published; the beat re-sends it.
                 self._last_state_delta = msg
@@ -622,6 +645,62 @@ class ParentControl:
                 pass
             return
         logger.warning("unknown child frame type %d ignored", ftype)
+
+    # ---- billing attestation (delta 3) -----------------------------------
+
+    async def _attest_result(self, result: pb.JobResult) -> None:
+        """Replace the child's self-reported billables with what the parent
+        observed, for the quantities the parent can observe.
+
+        See ``procsplit/attest.py`` for the rule and for what deliberately
+        stays child-reported (measuring output media seconds parent-side would
+        mean pulling the data plane through the parent's interpreter — the one
+        thing the seam must never carry).
+        """
+        obs = self._observations.pop((result.request_id, result.attempt), None)
+        if obs is None or not result.HasField("metrics"):
+            return
+        proc = self._proc
+        rss = self._child_rss(proc.pid) if proc is not None else 0
+        try:
+            divergences = attest.attest(
+                result.metrics, obs,
+                now=time.monotonic(),
+                child_rss_bytes=rss,
+                status_ok=result.status == pb.JOB_STATUS_OK,
+            )
+        except Exception:
+            logger.warning("metric attestation failed; relaying unattested",
+                           exc_info=True)
+            return
+        if not divergences:
+            return
+        self.metric_divergences += 1
+        logger.warning(
+            "job %s#%d: the child's billing self-report diverged from the "
+            "parent's observation: %s",
+            result.request_id, result.attempt, "; ".join(divergences),
+        )
+        now = time.monotonic()
+        if now - self._last_attestation_report_at < _ATTESTATION_REPORT_MIN_INTERVAL_S:
+            return
+        self._last_attestation_report_at = now
+        await self._dial_detail(
+            f"phase=compute_billing_attestation request={result.request_id} "
+            f"attempt={result.attempt} function={obs.function} "
+            f"divergences={len(divergences)} total={self.metric_divergences} "
+            f"detail={'; '.join(divergences)[:600]} — billable quantities are "
+            "attested by the control parent, not by the code being billed"
+        )
+
+    @staticmethod
+    def _child_rss(pid: int) -> int:
+        try:
+            import psutil
+
+            return int(psutil.Process(pid).memory_info().rss)
+        except Exception:
+            return 0
 
     # ---- parent-mediated actions (delta 1) -------------------------------
 

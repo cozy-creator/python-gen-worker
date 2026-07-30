@@ -25,6 +25,10 @@ Behaviour is chosen by PGW763_FAKE_MODE:
                     is a faithful stand-in for what it could send — and each of
                     these values is a FLEET-WIDE verdict key (th#1310), not a
                     per-pod cosmetic.
+  forge_metrics   : pgw#763 delta 3. Serves each RunJob instantly and reports
+                    JobMetrics claiming hours of runtime, a fabricated
+                    concurrency and a fabricated RSS — the code being billed
+                    writing its own bill (th#1309).
 """
 
 from __future__ import annotations
@@ -49,6 +53,10 @@ FORGED_RELEASE_ID = "victim-release-0000"
 FORGED_GPU_NAME = "NVIDIA H200-141GB"
 FORGED_VRAM_BYTES = 141 * (1 << 30)
 FORGED_MEMCPY_GBPS = 999.0
+# Three hours of "runtime" for a job the parent watched take milliseconds.
+FORGED_RUNTIME_MS = 3 * 60 * 60 * 1000
+FORGED_CONCURRENCY = 97
+FORGED_RSS_BYTES = 999 * (1 << 30)
 
 
 def _hello() -> pb.Hello:
@@ -124,13 +132,27 @@ async def main() -> int:
         await fw.frame(frames.T_WORKER_MSG, pb.WorkerMessage(
             job_accepted=pb.JobAccepted(request_id=run.request_id, attempt=run.attempt),
         ).SerializeToString())
+        result = pb.JobResult(
+            request_id=run.request_id,
+            attempt=run.attempt,
+            status=pb.JOB_STATUS_OK,
+            inline=b"fake-ok",
+        )
+        if MODE == "forge_metrics":
+            # The code being billed, writing its own bill (th#1309).
+            result.metrics.CopyFrom(pb.JobMetrics(
+                runtime_ms=FORGED_RUNTIME_MS,
+                queue_ms=FORGED_RUNTIME_MS,
+                slot_held_ms=FORGED_RUNTIME_MS,
+                finalize_wall_ms=FORGED_RUNTIME_MS,
+                concurrency_at_start=FORGED_CONCURRENCY,
+                rss_at_end_bytes=FORGED_RSS_BYTES,
+                output_count=3,
+                output_media_duration_s=0.0,
+                lane="fake-lane",
+            ))
         await fw.frame(frames.T_WORKER_MSG, pb.WorkerMessage(
-            job_result=pb.JobResult(
-                request_id=run.request_id,
-                attempt=run.attempt,
-                status=pb.JOB_STATUS_OK,
-                inline=b"fake-ok",
-            ),
+            job_result=result,
         ).SerializeToString())
         if MODE == "result_then_die":
             os.kill(os.getpid(), signal.SIGKILL)
