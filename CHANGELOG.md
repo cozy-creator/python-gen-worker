@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **th#1330 (th#1316 worker half) — a `disk_ref` the hub's own resolutions have
+  already replaced is no longer materialized.** The reconcile pass executed
+  `DesiredResidency.disk_refs` verbatim and serially, so a desired set carrying
+  BOTH `<ref>` and `<ref>#fp8` — with this worker's own `resolutions` mapping the
+  first onto the second — pulled the bf16 base ahead of the fp8 variant it was
+  meant to replace. Measured on prod (`tensorhub/sdxl` 0.2.23, L4): 6.94 GB at
+  +178 s ahead of 4.38 GB at +230 s, 144 s of a 270 s cold boot, for weights the
+  pod never loaded (`lane=fp8-w8a16`). The declared spelling is now skipped —
+  exactly when its resolved twin is desired in the SAME generation, so a
+  canonical-spelling lane override (th#913) is never skipped — and it is dropped
+  from `store.keep` so it cannot outrank cold refs in the GC preserve set. Each
+  skip emits a typed `residency_ref_superseded` activity event.
+
 - **pgw#795 — the v0.78.0 publish blockers: two tests that asserted the RUNNER,
   not the code.** Three consecutive publish jobs died on them, and no code under
   test had changed.

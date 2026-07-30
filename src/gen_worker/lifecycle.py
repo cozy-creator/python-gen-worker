@@ -290,6 +290,9 @@ class Lifecycle:
         self._reconcile_active: Optional[tuple] = None
         self._residency_restart: Optional[asyncio.Event] = None
         self._model_resolutions: Dict[str, Tuple[Any, ...]] = {}
+        # th#1330: declared -> resolved for every disk_ref already reported as
+        # superseded, so the typed event fires on transitions, not per ack.
+        self._superseded_reported: Dict[str, str] = {}
         self.executor.runtime_config.set_projection_callbacks(
             on_parameter_snapshot=self._config_snapshot_applied,
             on_snapshot_failure=self._config_snapshot_failed,
@@ -559,7 +562,12 @@ class Lifecycle:
             )
         else:
             self._observed_residency_generation = generation
-            self.executor.store.keep = list(dict.fromkeys(ref for ref in desired.disk_refs if ref))
+            # th#1330: a superseded declared spelling must not be GC-protected
+            # either — an unloaded base outranking genuinely cold refs in the
+            # preserve set is the same waste one eviction later.
+            _superseded = self._superseded_disk_refs(desired)
+            self.executor.store.keep = list(dict.fromkeys(
+                ref for ref in desired.disk_refs if ref and ref not in _superseded))
             self.executor.store.replace_desired_snapshots(
                 dict(desired.snapshots),
                 generation=generation,
@@ -636,6 +644,55 @@ class Lifecycle:
         if event is None:
             event = self._residency_restart = asyncio.Event()
         event.set()
+
+    def _superseded_disk_refs(self, desired: "pb.DesiredResidency") -> set:
+        """th#1330/th#1316: declared disk_refs the hub's OWN resolutions have
+        already replaced, and whose replacement is in the same list.
+
+        The hub addresses workers in resolved ref space (th#736), but a moment
+        with no pick — a transient flavor resolve, a refusal, an
+        unminted-cell gate — seeds the BARE spelling into desired.disk_refs,
+        and no hub path removes it once the pick returns (declared and
+        effective collapse to one key in the removal layer). The worker then
+        materializes both: measured on prod, a 6.94 GB bf16 base staged ahead
+        of the 4.38 GB fp8 variant it was meant to replace, ~144 s of a 270 s
+        cold boot, for weights that are never loaded.
+
+        Skipping is safe exactly when the resolved twin is ALSO listed: the
+        hub is already asking for the artifact this ref resolves to, so the
+        declared spelling can only add bytes. When the resolved twin is NOT
+        listed the ref is materialized normally — a lane override that keeps
+        the canonical spelling (th#913) is never skipped."""
+        resolutions = getattr(self, "_model_resolutions", {}) or {}
+        if not resolutions:
+            return set()
+        listed = {ref for ref in desired.disk_refs if ref}
+        superseded = set()
+        for ref in listed:
+            pick = resolutions.get(ref)
+            resolved = (pick[0] if pick else "") or ""
+            if resolved and resolved != ref and resolved in listed:
+                superseded.add(ref)
+        for ref in sorted(superseded):
+            resolved = resolutions[ref][0]
+            if self._superseded_reported.get(ref) == resolved:
+                continue
+            self._superseded_reported[ref] = resolved
+            logger.info(
+                "skipping superseded disk_ref %s (resolved to %s, also desired)",
+                ref, resolved,
+            )
+            activity_mod.emit_event(
+                "residency_ref_superseded",
+                f"declared disk_ref {ref} is superseded by its own resolution "
+                f"{resolved}, which is desired in the same generation — not "
+                f"materializing the declared spelling (th#1330)",
+                phase="skipped",
+            )
+        for ref in list(self._superseded_reported):
+            if ref not in superseded:
+                del self._superseded_reported[ref]
+        return superseded
 
     def _work_context(
         self,
@@ -724,8 +781,11 @@ class Lifecycle:
     ) -> None:
         """One convergence pass over ``desired`` in declared order."""
         snapshots = dict(desired.snapshots)
+        # th#1330: never materialize a declared spelling the hub's own
+        # resolutions have replaced with another ref in this same list.
+        superseded = self._superseded_disk_refs(desired)
         for ref in desired.disk_refs:
-            if not ref:
+            if not ref or ref in superseded:
                 continue
             if restart.is_set():
                 return
