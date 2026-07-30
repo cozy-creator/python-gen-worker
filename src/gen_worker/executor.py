@@ -2616,6 +2616,22 @@ _TRANSIENT_SETUP_ERRORS = (InsufficientDiskError, RetryableError, MissingSnapsho
 MAX_TRANSIENT_SETUP_ATTEMPTS = 5
 
 
+@contextmanager
+def _pipeline_load_span(spec: EndpointSpec):
+    """Open `pipeline_load` for one setup, or yield None outside the boot
+    window (pgw#797).
+
+    A plain `boot_mod.span(...)` cannot express "measure only during boot"
+    without an `if` at every call site, and the one call site that forgot it is
+    how steady-state work lands in a boot ladder.
+    """
+    if not boot_mod.in_boot():
+        yield None
+        return
+    with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD, function=spec.name) as sp:
+        yield sp
+
+
 def _setup_error_will_retry(exc: BaseException) -> bool:
     """Whether this setup loss is contractually re-attempted (gw#661).
 
@@ -2638,6 +2654,10 @@ class _ClassRecord:
     server: Any = None  # ServerHandle for runtime="vllm"/"llama-server"
     ready: bool = False
     failed: Optional[str] = None
+    # pgw#797: ordinal of the OPEN `pipeline_load` boot span covering the
+    # in-flight setup, 0 when not booting. The nested `warmup` span names it
+    # explicitly rather than inferring a parent from an implicit stack.
+    boot_load_ordinal: int = 0
     lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
     # pgw#647 concurrency contract: one live instance == one binding set with
     # mutable buffers (resident LoRA branches, adapter attach state), so
@@ -3161,6 +3181,8 @@ class Executor:
         # plan. Process-local by design — allocator pool, cuBLAS/cuDNN
         # heuristics and dynamo's code cache die with the process.
         self._warm_contract_runs: Dict[Any, set] = {}
+        # pgw#797: warm forwards counted by the in-flight `warmup` span.
+        self._warm_iterations: int = 0
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
         # Runtime compile failures are owned by the exact record/target that
@@ -5536,13 +5558,23 @@ class Executor:
                 activity_mod.PHASE_LOAD,
             )
             try:
-                with activity_mod.watchdog(act):
-                    instance = await self._setup_locked(
-                        spec,
-                        rec,
-                        snapshots,
-                        intent_id=intent_id,
-                    )
+                # pgw#797: THE `pipeline_load` span, and its only owner. Every
+                # setup — boot scan, hub-delivered `dynamic` spec, hot
+                # instance, RunJob — funnels through here, which is why the two
+                # `Lifecycle` sites pgw#789 used could not see a real load.
+                # `in_boot()` keeps steady-state re-setups out of the ladder.
+                # The ordinal is threaded to the nested `warmup` span so
+                # `pipeline_load` reads as weights->VRAM by subtraction.
+                with _pipeline_load_span(spec) as load_span:
+                    rec.boot_load_ordinal = (
+                        load_span.ordinal if load_span is not None else 0)
+                    with activity_mod.watchdog(act):
+                        instance = await self._setup_locked(
+                            spec,
+                            rec,
+                            snapshots,
+                            intent_id=intent_id,
+                        )
             except BaseException as exc:
                 # gw#661: a will-retry condition is not a failure. Only
                 # exhausting the budget is, and then the hub must see it.
@@ -5622,6 +5654,16 @@ class Executor:
                 )
             else:
                 act.completed()
+                # pgw#797: WARM-COMPLETE on the non-deferred paths. pgw#789 put
+                # this milestone in `_background_mint`'s finally only, and
+                # `rec.background_mint` is set ONLY under eager-first — so a
+                # boot that minted inline, adopted a delivered cell, or served
+                # eager without minting emitted no `warm_complete` at all. That
+                # is most boots, and it was read as "compiled serving never
+                # reached" when the truth was "never measured". Reached here,
+                # setup is done and no deferred mint will run, so this boot's
+                # serving tier is final NOW.
+                self._mark_warm_complete(rec, spec.name)
             self._intent_transition(
                 intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
@@ -5630,6 +5672,72 @@ class Executor:
             self._clear_recovered_compile_failures(rec)
             self._on_state_change()
             return instance
+
+    def _mark_warm_complete(self, rec: "_ClassRecord", function: str) -> None:
+        """Close the compiled-serving milestone once per process (pgw#797).
+
+        `outcome` says whether compiled serving was reached at all; `ref` names
+        the cell that got there. `mark_once` keeps the several owners — inline
+        setup here, the deferred background mint — from double-claiming it.
+        """
+        armed = next(
+            (t.active_compile_ref for t in rec.compile_targets.values()
+             if t.active_compile_ref), "")
+        boot_mod.mark_once(
+            boot_mod.PHASE_WARM_COMPLETE,
+            since_process_start=True,
+            function=function,
+            ref=armed,
+            outcome=(boot_mod.OUTCOME_OK if armed else boot_mod.OUTCOME_REFUSED),
+            reason="" if armed else "serving_eager",
+        )
+
+    @contextmanager
+    def _warmup_span(self, spec: EndpointSpec, rec: "_ClassRecord", inj: Any):
+        """`warmup`, nested under the open `pipeline_load` (pgw#797).
+
+        The armed/unarmed tag is the point of the row, not decoration: an
+        UNARMED warm pays the compile, an ARMED one pays only the call, and the
+        difference between the two IS what a cell saves on warmup. They are
+        separate ROWS here rather than two code paths that happen to share a
+        name, so the question is a `GROUP BY`.
+        """
+        if not boot_mod.in_boot():
+            yield None
+            return
+        armed_refs = sorted(
+            {sel.ref for sel in inj.active_compile_artifacts.values() if sel.ref}
+        )
+        armed = bool(armed_refs)
+        minting = bool(inj.pending_self_mints)
+        with boot_mod.span(
+            boot_mod.PHASE_WARMUP,
+            function=spec.name,
+            # An armed warm is a LOAD-class cost; unarmed it is COMPILE.
+            klass=boot_mod.CLASS_LOAD if armed else boot_mod.CLASS_COMPILE,
+            ref=armed_refs[0] if armed_refs else "",
+            parent=rec.boot_load_ordinal or None,
+        ) as sp:
+            t0 = time.monotonic()
+            try:
+                yield sp
+            finally:
+                warm_ms = int(round((time.monotonic() - t0) * 1000))
+                sp.note(
+                    f"armed={int(armed)} minting={int(minting)} "
+                    f"iterations={self._warm_iterations} "
+                    f"refs={','.join(armed_refs[:4])}"
+                )
+                # th#1322's numeric home, so the boot span and the activity
+                # stream agree on one number rather than two derivations.
+                activity_mod.emit_event(
+                    "warmup",
+                    f"boot warmup for {spec.name} "
+                    f"({'armed' if armed else 'unarmed'})",
+                    phase=activity_mod.PHASE_WARMUP_FORWARD,
+                    duration_ms=warm_ms,
+                )
+                self._warm_iterations = 0
 
     def _warmup_plan(
         self, spec: EndpointSpec, rec: _ClassRecord,
@@ -5872,6 +5980,26 @@ class Executor:
                         torch.cuda.empty_cache()
                     return False
             evidence.count += 1
+            # pgw#797: per-ITERATION warm cost. The first forward is typically
+            # far slower than the rest (allocator growth, CUDA module load,
+            # cuDNN/cuBLAS algorithm selection), so a warmup total without the
+            # shape of the sequence cannot say what a cell removes — a cell
+            # removes the compile inside the FIRST forward, not the whole pass.
+            # One nested span per forward: counts are small and bounded by the
+            # declared handler set, and `iteration=` orders them.
+            self._warm_iterations += 1
+            iter_ms = int(round((time.monotonic() - t0) * 1000))
+            if boot_mod.in_boot():
+                boot_mod.mark(
+                    boot_mod.PHASE_WARMUP_ITERATION,
+                    duration_ms=iter_ms,
+                    function=wj.spec.name,
+                    graph_class=str(getattr(wj, "graph_key", "") or "")[:200],
+                    detail=(
+                        f"iteration={self._warm_iterations} mode={mode} "
+                        f"armed={int(bool(objects))}"
+                    ),
+                )
             for obj in objects:
                 calls_before, trt_before, aot_before = before[id(obj)]
                 inductor_proven = (
@@ -6489,10 +6617,20 @@ class Executor:
                         await warmup()
                     else:
                         await _to_thread_complete(warmup)
-                    if spec.compile is not None:
-                        logger.info(
-                            "compile-cache warmup %s completed in %.1fs",
-                            spec.name, time.monotonic() - warm_t0)
+                    warm_ms = int(round((time.monotonic() - warm_t0) * 1000))
+                    # pgw#797: UNGATED. This was `if spec.compile is not None`
+                    # and log-only, so a release without a `Compile`
+                    # declaration did not even log its warmup, and one with it
+                    # logged to a hub-spawned pod's unreachable stdout. The
+                    # number now rides the wire on both paths.
+                    activity_mod.emit_event(
+                        "warmup_custom",
+                        f"custom warmup() for {spec.name}",
+                        phase=activity_mod.PHASE_WARMUP_FORWARD,
+                        duration_ms=warm_ms,
+                    )
+                    logger.info("custom warmup %s completed in %.1fs",
+                                spec.name, warm_ms / 1000.0)
                     return 1, {}, ""
 
                 # gw#470: no custom warmup() — run every declared handler of
@@ -6539,32 +6677,47 @@ class Executor:
             )
             compile_seconds_before = (
                 compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
-            if inj.active_compile_artifacts:
-                # Cache-hit counters are process-global. Hold every GPU permit
-                # so each exact guard window can belong to only this warmup.
-                async with self._exclusive_gpu(
-                    intent_id,
-                    resume_stage=warmup_stage,
-                ):
-                    # pgw#672 honesty: drop stale in-memory compiled code for
-                    # every object under proof so the warmup MUST go through
-                    # the real lookup path — a mint truly compiles into its
-                    # capture, an adoption truly hits its seeded FX entries.
-                    # In a warm process, dynamo's class-keyed code cache
-                    # otherwise serves these calls counter-silently (calls>0,
-                    # hits=0, misses=0) and the proof disproves a healthy
-                    # lane. No sibling GPU work runs inside this window, so
-                    # the per-code reset is race-free; siblings re-trace to
-                    # FX hits afterwards (additive live root).
-                    for _cand in inj.compile_objects:
-                        _sel = inj.active_compile_artifacts.get(
-                            id(_cand.pipeline))
-                        if _sel is not None and not trt_engine.is_engine_ref(
-                                _sel.ref):
-                            compile_cache.reset_target_code(_cand.pipeline)
+            # pgw#797: THE warmup split. `pipeline_load` used to be
+            # load+warmup as one number, so "what does a cell save on warmup"
+            # was only ever an estimate (`pipeline_load` minus a guessed
+            # load). This span nests under the open `pipeline_load` — parent
+            # named EXPLICITLY, not inferred — so the ladder still reconciles
+            # and `pipeline_load` reads as weights->VRAM by subtraction.
+            #
+            # armed=1 and armed=0 are the two rows the question needs, and
+            # they are the SAME quantity th#1329 records as `warmup_ms` on an
+            # adopt event: what a warm pass costs with a compiled artifact
+            # already armed. Unarmed, the pass pays the compile (CLASS_COMPILE);
+            # armed, it pays only the call (CLASS_LOAD).
+            with self._warmup_span(spec, rec, inj):
+                if inj.active_compile_artifacts:
+                    # Cache-hit counters are process-global. Hold every GPU
+                    # permit so each exact guard window belongs to only this
+                    # warmup.
+                    async with self._exclusive_gpu(
+                        intent_id,
+                        resume_stage=warmup_stage,
+                    ):
+                        # pgw#672 honesty: drop stale in-memory compiled code
+                        # for every object under proof so the warmup MUST go
+                        # through the real lookup path — a mint truly compiles
+                        # into its capture, an adoption truly hits its seeded
+                        # FX entries. In a warm process, dynamo's class-keyed
+                        # code cache otherwise serves these calls
+                        # counter-silently (calls>0, hits=0, misses=0) and the
+                        # proof disproves a healthy lane. No sibling GPU work
+                        # runs inside this window, so the per-code reset is
+                        # race-free; siblings re-trace to FX hits afterwards
+                        # (additive live root).
+                        for _cand in inj.compile_objects:
+                            _sel = inj.active_compile_artifacts.get(
+                                id(_cand.pipeline))
+                            if _sel is not None and not trt_engine.is_engine_ref(
+                                    _sel.ref):
+                                compile_cache.reset_target_code(_cand.pipeline)
+                        warmed, function_proofs, warm_aborted = await run_warmup()
+                else:
                     warmed, function_proofs, warm_aborted = await run_warmup()
-            else:
-                warmed, function_proofs, warm_aborted = await run_warmup()
             compile_seconds = (
                 compile_cache.compile_wall_seconds() - compile_seconds_before
                 if proves_inductor else 0.0)
@@ -8815,18 +8968,9 @@ class Executor:
             # process start (cumulative), it IS the "time to compiled serving"
             # number an AOT-vs-JIT comparison needs, and `outcome` says whether
             # compiled serving was reached at all.
-            armed = next(
-                (t.active_compile_ref for t in rec.compile_targets.values()
-                 if t.active_compile_ref), "")
-            boot_mod.mark(
-                boot_mod.PHASE_WARM_COMPLETE,
-                since_process_start=True,
-                function=bg.spec.name,
-                ref=armed,
-                outcome=(boot_mod.OUTCOME_OK if armed
-                         else boot_mod.OUTCOME_REFUSED),
-                reason="" if armed else "serving_eager",
-            )
+            # pgw#797: one owner, shared with the inline path in
+            # `ensure_setup` — see `_mark_warm_complete`.
+            self._mark_warm_complete(rec, bg.spec.name)
             self._on_state_change()
 
     async def _background_mint_run(
@@ -9926,6 +10070,21 @@ class Executor:
                     await rollback()
                     return await fail("warmup", f"{type(exc).__name__}: {exc}")
                 warmup_s = round(time.monotonic() - warm_t0, 3)
+                # pgw#797 / th#1329: warmup AFTER arming a cell. Same quantity
+                # the hub stores as `worker_activity_events.warmup_ms` on the
+                # adopt event, recorded here as a boot row too so the ladder
+                # and the adopt event answer "what does an armed cell still pay
+                # on warmup" identically instead of by two derivations. Always
+                # armed=1 by construction — this runs after the wrap.
+                if boot_mod.in_boot():
+                    boot_mod.mark(
+                        boot_mod.PHASE_WARMUP,
+                        duration_ms=int(round(warmup_s * 1000)),
+                        function=spec.name,
+                        ref=ref,
+                        klass=boot_mod.CLASS_LOAD,
+                        detail=f"armed=1 minting=0 iterations={warmed} adopt=1",
+                    )
                 hits = 0
                 misses = 0
 

@@ -1068,6 +1068,22 @@ class Lifecycle:
                 pb.WorkerMessage(state_delta=delta),
                 hello_ack=hello_ack,
             )
+            # pgw#797: THE boot close, and its only owner. "Servable" means the
+            # hub may dispatch to this worker, and the hub dispatches to
+            # `available_functions` — so the fact is "a StateDelta advertising
+            # at least one function has gone out on a connected stream", which
+            # is observable here and nowhere else.
+            #
+            # pgw#789 marked it from `Lifecycle.startup()` instead, once per
+            # code path. That missed the path EVERY real release takes: a spec
+            # declaring `Compile` (or slots) is routed to `dynamic` and set up
+            # on hub delivery, so `awaiting_hub` was empty, the milestone fired
+            # at the end of `startup()` — which `worker.arun` runs CONCURRENTLY
+            # with the transport — and the boot closed before `hello`. Live on
+            # chaos/0.78.0: ordinal 1 `first_request_servable` 8.9s, ordinal 2
+            # `hello` 13.2s, and every span after it suppressed by `in_boot()`.
+            if delta.available_functions and not self.draining:
+                self._mark_servable()
         await self._send_lifecycle_snapshot(
             hello_ack=hello_ack,
             force=force,
@@ -1254,13 +1270,16 @@ class Lifecycle:
                 awaiting_hub[spec.name] = missing
                 continue
             try:
-                # pgw#789: weights -> VRAM is a boot phase. Without this span
-                # the whole pipeline load landed in `residual_ms` and the
-                # cold-boot ladder could not say whether a slow boot was
-                # network-bound or load-bound.
-                with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
-                                   function=spec.name):
-                    await self.executor.ensure_setup(spec)
+                # pgw#797: the `pipeline_load` span moved INTO
+                # `Executor.ensure_setup`. It was here and at
+                # `_setup_awaiting_functions`, i.e. on the two boot paths a
+                # release declaring `Compile` never takes — those specs are
+                # routed to `dynamic` above and set up from hub delivery
+                # (`_ensure_hot_instance` / RunJob), so the span measured the
+                # paths that cost nothing and missed every real load. Same
+                # doctrine as pgw#789 moving `weights_fetch` into the
+                # materializer: instrument the layer all callers pass through.
+                await self.executor.ensure_setup(spec)
             except Exception as exc:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
         if dynamic:
@@ -1294,31 +1313,25 @@ class Lifecycle:
         # is the same quantity the autoscaler's cold-boot horizon prices
         # against, and everything after it is optimization, not boot.
         #
-        # pgw#789: EXCEPT when functions are still awaiting hub-supplied
-        # snapshots. READY with `awaiting_hub` non-empty advertises NO
-        # function, so the hub cannot dispatch — marking the milestone here
-        # measured "startup() returned", not "servable". Live proof (chaos
-        # stack, gen-worker 0.77.0, six boots): every recorded
-        # first_request_servable was 4.2-12.3s while the real boots were
-        # minutes, because the ~230s of tensorhub-ref weight fetching happens
-        # AFTER this line on exactly that path. `_setup_awaiting_functions`
-        # owns the milestone in that case; if the snapshots never arrive it is
-        # never marked, and a boot with no closing milestone is itself the
-        # finding (the same doctrine as an open mid-boot span).
-        if not awaiting_hub:
-            self._mark_servable()
+        # pgw#797: NOT marked here, on any path. pgw#789 special-cased
+        # `awaiting_hub` and left the `dynamic` (compile-cell / slot) path —
+        # i.e. every real release — closing the boot at the end of `startup()`,
+        # concurrently with and usually BEFORE the transport's own hello. The
+        # milestone now has exactly one owner, `maybe_send_state_delta`, which
+        # marks it on the fact itself: a StateDelta advertising a function went
+        # out. If no function is ever advertised the boot has no closing
+        # milestone, and that is the finding (same doctrine as an open span).
         await self.set_phase(pb.WORKER_PHASE_READY)
 
     def _mark_servable(self) -> None:
-        """Close the boot: mark first-request-servable from process start,
-        carrying the reconciliation (measured/residual/per-class) as detail.
-        `mark_once` makes the call idempotent across the two owners."""
+        """Close the boot: mark first-request-servable from process start.
+
+        `mark_once` keeps it once-per-process — it is called on every StateDelta
+        send. The reconciliation detail is filled by the recorder, which is the
+        only thing that knows the instant the row is actually released."""
         boot_mod.mark_once(
             boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
             since_process_start=True,
-            detail=" ".join(
-                f"{k}={v}" for k, v in sorted(boot_mod.reconciliation().items())
-            ),
         )
 
     async def _heartbeat_loop(self) -> None:
@@ -1349,9 +1362,8 @@ class Lifecycle:
                 if spec is None or fn in self.executor.unavailable:
                     continue
                 try:
-                    with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
-                                       function=fn):
-                        await self.executor.ensure_setup(spec)
+                    # pgw#797: span owned by `Executor.ensure_setup`.
+                    await self.executor.ensure_setup(spec)
                     logger.info(
                         "boot setup of %s completed after hub snapshot delivery (gw#591)", fn
                     )
@@ -1360,13 +1372,8 @@ class Lifecycle:
                 await self.maybe_send_state_delta()
             if pending:
                 await asyncio.sleep(_BOOT_SETUP_WATCH_INTERVAL_S)
-        # pgw#789: THIS is where a hub-snapshot-fed worker actually becomes
-        # servable — the functions it advertises are set up and the StateDelta
-        # carrying them has gone out. Deliberately outside the loop and after
-        # it: `pending` is empty here (or the worker is draining, in which case
-        # it never became servable and must not claim a boot number).
-        if not pending and not self.draining:
-            self._mark_servable()
+        # pgw#797: no mark here either. The `maybe_send_state_delta` above is
+        # the one that advertises these functions, and it owns the milestone.
 
     # ---- drain -------------------------------------------------------------------
 
