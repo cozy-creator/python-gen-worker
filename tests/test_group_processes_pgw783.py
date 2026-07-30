@@ -999,3 +999,28 @@ def test_a_single_child_keeps_the_default_inductor_dir(monkeypatch, tmp_path):
     monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
     _isolate_group_inductor_cache()
     assert "TORCHINDUCTOR_CACHE_DIR" not in _o.environ
+
+
+# ---------------------------------------------------------------------------
+# The seam accountant is WIRED into the live relay (control-not-data, demo)
+# ---------------------------------------------------------------------------
+
+
+def test_parent_accounts_relayed_frames_on_its_seam():
+    """The demo's acceptance reads parent.seam: a blob_ref job_result relays
+    kilobytes (under the ceiling, clean); the accountant is live on the parent,
+    not just an unused module."""
+    p = _parent(1)
+    assert p.seam.clean and p.seam.job_payload_bytes == 0
+    # Simulate the relay accounting a normal blob_ref result (what the child
+    # sends when its output left as a presigned PUT).
+    ok = pb.WorkerMessage(job_result=pb.JobResult(
+        request_id="r", status=pb.JOB_STATUS_OK,
+        safe_message="r2://bucket/out.webp"))
+    raw = ok.SerializeToString()
+    assert p.seam.record("job_result", len(raw), group=0) is True
+    assert p.seam.clean
+    assert p.seam.job_payload_bytes < 4096
+    # And the guard can fail: an inlined 8 MiB result trips it.
+    assert p.seam.record("job_result", 8 << 20, group=0) is False
+    assert not p.seam.clean

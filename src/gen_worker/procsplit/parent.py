@@ -65,6 +65,7 @@ from . import (
     merge,
 )
 from .group import ChildGroup, GroupPlan
+from .seam import SeamAccountant
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +343,11 @@ class _ChildSlot:
             try:
                 out = self.p._fan_in(self, msg)
                 if out is not None:
+                    # Account the relayed frame: the control-not-data invariant
+                    # is that job payload never crosses the parent. `len(payload)`
+                    # is the child's serialized WorkerMessage — the exact bytes
+                    # that crossed the seam.
+                    self.p.seam.record(which or "", len(payload), group=self.ordinal)
                     await self.p.transport.send(out)
             finally:
                 self.relaying = False
@@ -987,6 +993,11 @@ class ParentControl:
         self._activity_seq = 0
         self._group_fn_unavail: Dict[int, Dict[str, pb.FnUnavailable]] = {}
         self._group_fn_degraded: Dict[int, Dict[str, pb.FnDegraded]] = {}
+        # pgw#783 THE INVARIANT: account every relayed frame so a job whose DATA
+        # crosses the parent's interpreter is VISIBLE (a control ceiling on
+        # job_result bytes). If the seam ever carries data the GIL bottleneck
+        # pgw#782 measured reappears one layer up. Reported, never fatal.
+        self.seam = SeamAccountant()
 
     @property
     def groups(self) -> int:
