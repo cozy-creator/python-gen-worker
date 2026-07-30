@@ -1,0 +1,9 @@
+owner: claude-opus-5 (pgw#783 group-processes lane)
+issue: pgw#783 (a STAGE of pgw#763)
+purpose: data-parallelism half of the worker process split — one child per EXECUTION GROUP (G children, N GPUs)
+branch: agent/783-group-processes
+base: 06ab180c504aae41a4585d7fbaada417d48c77e3 (agent/763-process-split tip)
+note: deliberately a SEPARATE branch from agent/763-process-split, which the security-deltas
+      lane (deltas 0-5) is writing concurrently. parent.py is the contended file; this lane
+      rebases forward onto agent/763-process-split rather than sharing its worktree.
+      Announced in pgw#783 + pgw#763.
