@@ -161,7 +161,12 @@ ACTIONS: Dict[str, HubAction] = {
 ACTION_REPORT_DETAIL = "report.detail"
 
 _MAX_STR = 8192
+# The seam's control-body cap. pgw#783's job-result seam accountant
+# (procsplit/seam.py) reuses THIS constant as its ceiling so the two halves of
+# "the seam carries CONTROL, not DATA" — the delta-1 action broker and the
+# fan-in relay — cannot drift apart.
 _MAX_JSON_BYTES = 256 * 1024
+CONTROL_BODY_CEILING_BYTES = _MAX_JSON_BYTES
 
 
 def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, str], Optional[Dict[str, Any]]]:

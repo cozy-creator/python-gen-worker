@@ -30,6 +30,9 @@ from gen_worker.procsplit.merge import (
     merge_phase,
     merge_residency,
     merge_state_deltas,
+    reconcile_activity_kind,
+    worker_fn_degraded,
+    worker_fn_unavailable,
 )
 from gen_worker.procsplit.seam import (
     CONTROL_FRAME_CEILING_BYTES,
@@ -199,12 +202,14 @@ def test_routing_agrees_with_the_executors_own_dispatch_derivation(
 ):
     """The parent's route MUST be Executor._dispatch_group moved one process
     earlier — if the two ever disagree, a wide worker serves requests on a
-    card the hub did not pick."""
+    card the hub did not pick. Only rank-0 devices are dispatched by the hub;
+    the executor now typed-refuses anything else, and so does route()."""
     topo = ExecutionTopology(
         gpu_count=gpu_count, group_degree=degree, parallel=parallel
     )
     p = GroupPlan.for_topology(topo, socket_path=SOCK)
-    for gpu_index in range(gpu_count):
+    rank0_indices = [g * degree for g in range(topo.groups)]
+    for gpu_index in rank0_indices:
         run = pb.RunJob(request_id="r", compute=pb.ResolvedCompute(gpu_index=gpu_index))
         expected = Executor._dispatch_group(
             type("S", (), {"topology": topo})(), run
@@ -212,8 +217,23 @@ def test_routing_agrees_with_the_executors_own_dispatch_derivation(
         assert p.route(gpu_index) == expected
 
 
-def test_a_dispatch_without_a_compute_block_is_group_zero():
-    p = plan(4)
+def test_a_non_rank0_dispatch_is_refused_not_floored_at_G_gt_1():
+    """pgw#779 (security-deltas base): flooring a hub/worker packing
+    disagreement onto group 0 piles every mis-dispatch onto the busiest card.
+    route() refuses it, matching the executor."""
+    from gen_worker.topology import TopologyError
+
+    p = plan(4, degree=2, parallel="sequence")  # rank-0 devices are 0 and 2
+    assert p.route(0) == 0
+    assert p.route(2) == 1
+    with pytest.raises(TopologyError):
+        p.route(1)          # card 1 is a non-rank-0 device
+    with pytest.raises(ValueError):
+        p.route(None)       # no compute block on a wide pod
+
+
+def test_a_dispatch_without_compute_is_group_zero_only_on_a_single_group_pod():
+    p = plan(1)
     run = pb.RunJob(request_id="r")
     assert not run.HasField("compute")
     assert p.route(run.compute.gpu_index if run.HasField("compute") else None) == 0
@@ -236,17 +256,20 @@ def _delta(**kw) -> pb.StateDelta:
     return pb.StateDelta(**kw)
 
 
-def test_available_functions_intersect_and_loading_unions():
+def test_available_functions_UNION_and_loading_is_what_no_group_serves():
+    """Paul's ruling: the worker advertises ANY function ANY group can serve.
+    One group serving function-X is enough — the worker routes the dispatch to
+    that group."""
     merged = merge_state_deltas([
         _delta(available_functions=["a", "b", "c"], loading_functions=["d"]),
         _delta(available_functions=["a", "c"], loading_functions=["b"]),
-        _delta(available_functions=["a", "b", "c"]),
+        _delta(available_functions=["a"], loading_functions=["e"]),
     ])
-    assert list(merged.available_functions) == ["a", "c"]
-    # "b" is available in two groups and loading in one -> loading, never
-    # available: the hub picks the slot, so a union would invite dispatch into
-    # the group that cannot serve.
-    assert list(merged.loading_functions) == ["b", "d"]
+    # b and c are served by at least one group -> available for the worker.
+    assert list(merged.available_functions) == ["a", "b", "c"]
+    # "b" is loading in one group but AVAILABLE in another -> available wins,
+    # never loading. d and e load nowhere else.
+    assert list(merged.loading_functions) == ["d", "e"]
 
 
 def test_free_vram_and_finalizing_jobs_sum():
@@ -307,17 +330,21 @@ def test_compile_targets_union_and_cell_lookups_dedup():
     assert [cl.cell_key for cl in merged.cell_lookups] == ["ck1-a", "ck1-b"]
 
 
-def test_residency_counts_only_refs_every_group_holds():
+def test_residency_UNIONS_refs_and_takes_the_strongest_tier():
+    """A ref is resident on the WORKER while ANY group holds it (same union as
+    availability): the worker routes a dispatch to the group that has it."""
     merged = merge_residency([
         [pb.ModelResidency(ref="shared", tier=pb.RESIDENCY_TIER_VRAM, vram_bytes=100),
-         pb.ModelResidency(ref="only-here", tier=pb.RESIDENCY_TIER_VRAM)],
+         pb.ModelResidency(ref="only-here", tier=pb.RESIDENCY_TIER_VRAM, vram_bytes=7)],
         [pb.ModelResidency(ref="shared", tier=pb.RESIDENCY_TIER_DISK, vram_bytes=0)],
     ])
-    assert [m.ref for m in merged] == ["shared"]
-    # Weakest tier wins (the hub may dispatch to either group)...
-    assert merged[0].tier == pb.RESIDENCY_TIER_DISK
-    # ...but vram_bytes is a MEASURED pod footprint, so it sums.
-    assert merged[0].vram_bytes == 100
+    # BOTH refs appear — "only-here" is served by routing to group 0.
+    assert [m.ref for m in merged] == ["only-here", "shared"]
+    shared = next(m for m in merged if m.ref == "shared")
+    # Strongest tier wins — the best the worker can do for that ref.
+    assert shared.tier == pb.RESIDENCY_TIER_VRAM
+    # vram_bytes is a MEASURED pod footprint, so it sums across holders.
+    assert shared.vram_bytes == 100
 
 
 def test_hello_merges_state_residency_in_flight_and_cadence():
@@ -338,7 +365,7 @@ def test_hello_merges_state_residency_in_flight_and_cadence():
         worker_session_id="parent-session",
         extra_in_flight=[("r3", 2), ("r1", 1)],
     )
-    assert list(merged.state.available_functions) == ["a"]
+    assert list(merged.state.available_functions) == ["a", "b"]  # union
     assert merged.state.free_vram_bytes == 300
     assert merged.state.observed_config_generation == 3
     assert [m.vram_bytes for m in merged.models] == [300]
@@ -360,6 +387,117 @@ def test_worker_session_id_is_parent_minted():
     # And it applies at G == 1 too, where the same defect is latent.
     assert merge_hello([a], worker_session_id="parent-owns-this") \
         .worker_session_id == "parent-owns-this"
+
+
+# ---------------------------------------------------------------------------
+# Parent-side aggregation — ONE worker view, never N sub-units (ruling 2)
+# ---------------------------------------------------------------------------
+
+
+def _act(state, *, step=0, total=0, seq=0, counter="", done=0.0, ctotal=0.0,
+         stalled=False, stalled_ms=0, kind="self_mint_compile"):
+    return pb.ActivityUpdate(
+        kind=kind, state=state, step=step, total_steps=total, seq=seq,
+        counter=counter, counter_done=done, counter_total=ctotal,
+        self_stalled=stalled, stalled_for_ms=stalled_ms,
+    )
+
+
+def test_the_worker_is_minting_if_ANY_group_is():
+    """The hub folds ActivityUpdate into info.Activities[kind]; G children with
+    the same kind would overwrite each other and a group's mint would read as
+    the whole worker's. The parent reconciles to ONE worker-level activity."""
+    merged = reconcile_activity_kind(
+        {0: _act(pb.ACTIVITY_STATE_COMPLETED),
+         1: _act(pb.ACTIVITY_STATE_RUNNING, step=3, total=10),
+         2: _act(pb.ACTIVITY_STATE_COMPLETED)},
+        seq=42,
+    )
+    assert merged.state == pb.ACTIVITY_STATE_RUNNING
+    assert merged.seq == 42  # parent-minted, not any child's
+    assert merged.step == 3
+    assert merged.kind == "self_mint_compile"
+
+
+def test_activity_is_terminal_only_when_every_group_is():
+    done = reconcile_activity_kind(
+        {0: _act(pb.ACTIVITY_STATE_COMPLETED), 1: _act(pb.ACTIVITY_STATE_COMPLETED)},
+        seq=1,
+    )
+    assert done.state == pb.ACTIVITY_STATE_COMPLETED
+    # A failure in any group, once none are still running, surfaces as FAILED.
+    failed = reconcile_activity_kind(
+        {0: _act(pb.ACTIVITY_STATE_COMPLETED), 1: _act(pb.ACTIVITY_STATE_FAILED)},
+        seq=2,
+    )
+    assert failed.state == pb.ACTIVITY_STATE_FAILED
+
+
+def test_activity_progress_is_the_aggregate_so_one_group_cannot_mask_others():
+    """The hub judges liveness by counter advancement (gw#621). If the parent
+    forwarded one group's frozen counter the pod would be reaped while three
+    groups made progress. The worker-level counter is the SUM."""
+    merged = reconcile_activity_kind(
+        {0: _act(pb.ACTIVITY_STATE_RUNNING, counter="download:bytes", done=100, ctotal=400),
+         1: _act(pb.ACTIVITY_STATE_RUNNING, counter="download:bytes", done=250, ctotal=400)},
+        seq=7,
+    )
+    assert merged.counter_done == 350
+    assert merged.counter_total == 800
+
+
+def test_the_worker_is_stalled_only_when_EVERY_live_group_is():
+    """self_stalled is a confession the hub recycles the pod on. One group
+    advancing is the worker advancing, so the parent must not confess for it."""
+    one_moving = reconcile_activity_kind(
+        {0: _act(pb.ACTIVITY_STATE_RUNNING, stalled=True, stalled_ms=9000),
+         1: _act(pb.ACTIVITY_STATE_RUNNING, stalled=False)},
+        seq=1,
+    )
+    assert one_moving.self_stalled is False
+    assert one_moving.stalled_for_ms == 0
+    all_stuck = reconcile_activity_kind(
+        {0: _act(pb.ACTIVITY_STATE_RUNNING, stalled=True, stalled_ms=9000),
+         1: _act(pb.ACTIVITY_STATE_RUNNING, stalled=True, stalled_ms=5000)},
+        seq=2,
+    )
+    assert all_stuck.self_stalled is True
+    assert all_stuck.stalled_for_ms == 5000  # the least-stuck group's clock
+
+
+def test_a_function_is_unavailable_only_when_NO_group_serves_it():
+    """Ruling 2: one group losing a function must not retire it worker-wide if
+    another still serves it. The parent reports the single worker-level fact."""
+    fu = pb.FnUnavailable(function_name="f", reason="insufficient_vram")
+    # group 1 serves it (None) -> worker serves it, nothing reported.
+    assert worker_fn_unavailable({0: fu, 1: None}) is None
+    # every group unavailable -> the worker is unavailable, one reason carried.
+    every = worker_fn_unavailable({0: fu, 1: pb.FnUnavailable(
+        function_name="f", reason="setup_failed")})
+    assert every is not None
+    # a hardware-gating reason is preferred over a transient setup failure.
+    assert every.reason == "insufficient_vram"
+
+
+def test_a_function_is_degraded_only_when_no_group_serves_it_native():
+    """FnDegraded is 'give me a bigger card'. If one group serves native, the
+    worker routes there and is not degraded."""
+    big = pb.FnDegraded(function_name="f", ran="offload", est_latency_multiplier=3.0)
+    small = pb.FnDegraded(function_name="f", ran="fp8_storage", est_latency_multiplier=1.4)
+    # a native-serving group exists -> not degraded.
+    assert worker_fn_degraded({0: big}, served_native_somewhere=True) is None
+    # none native -> report the LEAST degraded (the worker's true best card).
+    best = worker_fn_degraded({0: big, 1: small}, served_native_somewhere=False)
+    assert best is not None and best.est_latency_multiplier == 1.4
+
+
+def test_aggregation_never_leaks_a_group_ordinal_to_the_wire():
+    """The proto has no group field and must never grow one — the whole point
+    of ruling 2. These reconcilers return plain worker-level messages."""
+    act = reconcile_activity_kind({3: _act(pb.ACTIVITY_STATE_RUNNING)}, seq=1)
+    assert "group" not in {f.name for f, _ in act.ListFields()}
+    fu = worker_fn_unavailable({2: pb.FnUnavailable(function_name="f", reason="x")})
+    assert "group" not in {f.name for f, _ in fu.ListFields()}
 
 
 # ---------------------------------------------------------------------------

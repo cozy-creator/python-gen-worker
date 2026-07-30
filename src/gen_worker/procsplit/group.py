@@ -89,12 +89,22 @@ class GroupPlan:
         ``ResolvedCompute.gpu_index`` names the group's RANK-0 PHYSICAL device
         (0, D, 2D, ...), so this is exactly ``Executor._dispatch_group``'s
         derivation moved one process earlier — the parent ROUTES, it never
-        schedules; the hub already picked the slot. A dispatch with no compute
-        block is group 0, matching the executor.
+        schedules; the hub already picked the slot.
+
+        Single-group pods keep the historical behaviour exactly (there is only
+        one group to mean). At G>1 a non-rank-0 or missing index is the same
+        typed refusal the executor now raises (pgw#779, security-deltas base):
+        flooring a hub/worker packing disagreement onto group 0 is the silent
+        bug that piles every mis-dispatch onto the busiest card.
         """
-        if gpu_index is None:
+        if self.topology.groups <= 1:
             return 0
-        return self.topology.group_ordinal(int(gpu_index))
+        if gpu_index is None:
+            raise ValueError(
+                f"dispatch carries no resolved compute on a {self.topology} "
+                "pod: the execution group cannot be derived"
+            )
+        return self.topology.group_ordinal_exact(int(gpu_index))
 
     def local_gpu_index(self, ordinal: int) -> int:
         """The ``gpu_index`` the CHILD must see.

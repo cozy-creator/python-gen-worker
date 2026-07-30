@@ -31,6 +31,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+from .actions import CONTROL_BODY_CEILING_BYTES
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["SeamAccountant", "SeamViolation", "CONTROL_FRAME_CEILING_BYTES",
@@ -38,8 +40,9 @@ __all__ = ["SeamAccountant", "SeamViolation", "CONTROL_FRAME_CEILING_BYTES",
 
 # A control message is small. 256 KiB is roomy for the largest legitimate
 # JobResult (refs, metrics, safe_message, a stage_ms map) and four orders of
-# magnitude below a single generated image.
-CONTROL_FRAME_CEILING_BYTES = 256 * 1024
+# magnitude below a single generated image. Shared verbatim with the delta-1
+# action broker's body cap so the two seam halves cannot drift.
+CONTROL_FRAME_CEILING_BYTES = CONTROL_BODY_CEILING_BYTES
 
 DIAL_PHASE = "procsplit_data_on_control_seam"
 
