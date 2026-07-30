@@ -30,6 +30,13 @@ ENV_WATCHDOG_PING_S = "GEN_WORKER_CHILD_WATCHDOG_PING_S"
 # layer down). A thread writes this fd instead, carrying the same kernel-
 # accounted evidence activity.watchdog already trusts.
 ENV_LIVENESS_FD = "GEN_WORKER_CHILD_LIVENESS_FD"
+# pgw#783: the PARENT mints the worker session id once and passes it to every
+# child. Child-minted (uuid4 in IntentRegistry) it changes on every respawn —
+# and the hub rejects cross-session shadow state, so a respawned child's shadow
+# state was silently invalidated (a latent defect even at G=1). The parent owns
+# the session, so the parent mints it, and it survives child respawns. At G>1
+# all children share it (the hub sees one worker, one session).
+ENV_SESSION_ID = "GEN_WORKER_SESSION_ID"
 
 # pgw#783: one child per EXECUTION GROUP. The hub's delivered packing is the
 # only source of G — there is no new knob to mis-set.
@@ -74,6 +81,7 @@ __all__ = [
     "ENV_GROUP_ORDINAL",
     "ENV_HOST_SIBLINGS",
     "ENV_LIVENESS_FD",
+    "ENV_SESSION_ID",
     "ENV_SOCKET",
     "ENV_SPLIT",
     "ENV_TOPOLOGY",

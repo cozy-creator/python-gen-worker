@@ -384,6 +384,10 @@ class _ChildSlot:
             env["WORKER_RELEASE_ID"] = release_id
         env[ENV_CHILD] = "1"
         env[ENV_SOCKET] = self.socket_path
+        # pgw#783: the parent's stable session id, so a respawned child keeps the
+        # worker's shadow-state session instead of minting a fresh uuid the hub
+        # would reject.
+        env[ENV_SESSION_ID] = self.p._worker_session_id
         # The gw#640 flight-recorder fork is redundant under this parent.
         env["GEN_WORKER_SUPERVISOR"] = "0"
         # pgw#771: a dedicated pipe for THREAD-sourced process liveness.
@@ -896,6 +900,13 @@ class ParentControl:
             _ChildSlot(self, group) for group in self._plan.children
         ]
 
+        # pgw#783: the worker session id is minted ONCE, here, and passed to
+        # every child — so it survives child respawns (child-minted it changed
+        # on each respawn and the hub rejected the cross-session shadow state, a
+        # latent defect even at G=1) and is shared across groups (one worker,
+        # one session).
+        self._worker_session_id = uuid.uuid4().hex
+
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stopping = asyncio.Event()
         self._beat_interval = beat_interval_s
@@ -1140,6 +1151,9 @@ class ParentControl:
             if hello is None:
                 return pb.Hello()
             self._apply_identity_and_resources(hello)
+            # pgw#783: the parent owns the session id (the child reads it from
+            # env, but assert it here too so a stale child can never regress it).
+            hello.worker_session_id = self._worker_session_id
             if self._beat_interval <= 0 and hello.heartbeat_interval_ms > 0:
                 self._beat_interval = hello.heartbeat_interval_ms / 1000.0
             seen = {(j.request_id, j.attempt) for j in hello.in_flight}
@@ -1161,7 +1175,11 @@ class ParentControl:
             return pb.Hello()
         extra = list(self.transport.queue.pending_result_keys)
         extra += list(self._all_in_flight().keys())
-        hello = merge.merge_hello(hellos, extra_in_flight=extra)
+        hello = merge.merge_hello(
+            hellos,
+            worker_session_id=self._worker_session_id,
+            extra_in_flight=extra,
+        )
         self._apply_identity_and_resources(hello)
         promised = [h.heartbeat_interval_ms for h in hellos if h.heartbeat_interval_ms]
         if self._beat_interval <= 0 and promised:

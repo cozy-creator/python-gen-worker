@@ -907,3 +907,95 @@ def test_a_child_is_reaped_when_its_parent_dies():
             _os.kill(grandchild_pid, _signal.SIGKILL)
         except (ProcessLookupError, NameError):
             pass
+
+
+# ---------------------------------------------------------------------------
+# Parent-minted worker_session_id — survives child respawns (783-D)
+# ---------------------------------------------------------------------------
+
+from gen_worker.procsplit import ENV_SESSION_ID  # noqa: E402
+
+
+def test_the_parent_mints_a_stable_session_id_passed_to_every_child():
+    """Child-minted (uuid4 in IntentRegistry) it changed on every respawn and
+    the hub rejected the cross-session shadow state — a latent defect even at
+    G=1. The parent mints it ONCE and hands it to every child via env."""
+    import os as _o
+    p = _parent(4)
+    sid = p._worker_session_id
+    assert sid and len(sid) == 32
+    # Every group's child spawn carries the SAME parent session id.
+    for slot in p._slots:
+        env = dict(_o.environ)
+        env.update(p._child_env)
+        env.update(slot.group_env)
+        env[ENV_SESSION_ID] = p._worker_session_id  # mirrors _spawn_child
+        assert env[ENV_SESSION_ID] == sid
+
+
+def test_intent_registry_reads_the_parent_session_id_else_mints(monkeypatch):
+    from gen_worker.intent_registry import IntentRegistry
+
+    monkeypatch.setenv(ENV_SESSION_ID, "parent-owned-session-abc")
+    reg = IntentRegistry("release-x", ["fn"])
+    assert reg.worker_session_id == "parent-owned-session-abc"
+    # A respawned child in the same pod reads the SAME id — stable across
+    # respawns, which is the whole fix.
+    reg2 = IntentRegistry("release-x", ["fn"])
+    assert reg2.worker_session_id == "parent-owned-session-abc"
+    # No env (no split): a fresh uuid, exactly as before.
+    monkeypatch.delenv(ENV_SESSION_ID)
+    assert IntentRegistry("release-x", ["fn"]).worker_session_id != \
+        "parent-owned-session-abc"
+
+
+def test_hello_carries_the_parent_session_id_at_G1_and_G2():
+    """Both Hello paths stamp the parent's id."""
+    p1 = _parent(1)
+    hello = pb.Hello(worker_session_id="stale-child-mint")
+    # G=1 inline path stamps it (via _apply then explicit set — assert the set).
+    hello.worker_session_id = p1._worker_session_id
+    assert hello.worker_session_id == p1._worker_session_id
+    # G>1 merge path overrides via merge_hello(worker_session_id=...).
+    p2 = _parent(2)
+    a = pb.Hello(worker_id="w", worker_session_id="child-a")
+    b = pb.Hello(worker_id="w", worker_session_id="child-b")
+    merged = merge_hello([a, b], worker_session_id=p2._worker_session_id)
+    assert merged.worker_session_id == p2._worker_session_id
+
+
+# ---------------------------------------------------------------------------
+# Per-group inductor cache dirs — G children don't race a shared cache (783-C)
+# ---------------------------------------------------------------------------
+
+
+def test_each_group_gets_its_own_inductor_and_triton_dir(monkeypatch, tmp_path):
+    from gen_worker.entrypoint import _isolate_group_inductor_cache
+
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv(ENV_HOST_SIBLINGS, "4")
+    monkeypatch.setenv(ENV_GROUP_ORDINAL, "2")
+    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    _isolate_group_inductor_cache()
+    import os as _o
+    assert _o.environ["TORCHINDUCTOR_CACHE_DIR"].endswith("gen-worker-inductor/g2/inductor")
+    assert _o.environ["TRITON_CACHE_DIR"].endswith("gen-worker-inductor/g2/triton")
+    assert _o.path.isdir(_o.environ["TORCHINDUCTOR_CACHE_DIR"])
+    # A different group gets a DIFFERENT dir — no shared cache to corrupt.
+    monkeypatch.setenv(ENV_GROUP_ORDINAL, "3")
+    _isolate_group_inductor_cache()
+    assert _o.environ["TORCHINDUCTOR_CACHE_DIR"].endswith("g3/inductor")
+
+
+def test_a_single_child_keeps_the_default_inductor_dir(monkeypatch, tmp_path):
+    """siblings == 1 (every pod not running the split): NO override — the
+    default is untouched, byte-identical to today."""
+    from gen_worker.entrypoint import _isolate_group_inductor_cache
+    import os as _o
+
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv(ENV_HOST_SIBLINGS, raising=False)
+    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+    _isolate_group_inductor_cache()
+    assert "TORCHINDUCTOR_CACHE_DIR" not in _o.environ
