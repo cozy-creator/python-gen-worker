@@ -1,6 +1,56 @@
 # Changelog
 
-## Unreleased
+## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, and the benchmark telemetry is finally connected
+
+Everything on chaos since 0.77.0. The headline trio, cut together because none of
+them is worth much alone:
+
+- **pgw#765** — AOT adoption is pinned to `sm`, never to the GPU SKU. `verify`
+  refuses on `("sm", "torch", "cuda")` + host ISA + family/contract hashes; `sku`
+  is recorded and never refused on, and `_candidates` turned the old SKU FILTER
+  into a SELECTION PREFERENCE (same-SKU first for autotune affinity, then stamped
+  `sm`, then newest, key digest as tie-break) so a cross-SKU same-arch cell is
+  always in the list, just behind. A second tier reads torch's own
+  `AOTI_COMPUTE_CAPABILITY` out of the `.pt2` and refuses `sm_mismatch` before
+  dlopen. An AST sweep over every adoption-path module fails the suite on a
+  live-code comparison against `"sku"` unless allow-listed with a reason (two
+  entries, both named).
+- **pgw#772** — the serving lane is deterministic; the voluntary bf16-resident
+  upcast is REMOVED. Detail section below.
+- **pgw#789** — the benchmark telemetry that was built and never connected.
+  `serving_mode` reached 0 of 416 request rows because the module was imported by
+  nothing but its own test; the `weights_fetch` / `pipeline_load` /
+  `warm_complete` boot spans were never emitted; and `first_request_servable` was
+  measuring "startup() returned", recording 4.2-12.3s for pods whose real cold
+  boots took minutes. Wired for real, so compile / cold-boot / inference numbers
+  reach the hub.
+
+pgw#765 + pgw#772 are the two halves of the same defect and only work together:
+pgw#765 removed the `sku` pin, pgw#772 removed the `lane` fork, and cross-SKU
+adoption is end-to-end only with both. pgw#789 is what makes the result
+measurable. **Consumers relocking for the AOT/JIT/eager benchmark matrix want
+this version or later** — `c87ea3d` (pgw#789) existed in no published tag before
+now.
+
+Also aboard, by issue (see each entry below where one exists): pgw#770 +
+follow-up (nunchaku svdq fragment packing; `qweight` k % 128), pgw#773 / #774 /
+#775 / #776 / #778 (per-group process groups and failure domains, rank-symmetric
+forwards, the pod's hub-facing VRAM truth, never advertising what dispatch will
+refuse), pgw#781 / th#1303 (chunked sha256 reassembly + the mandatory volume
+check), pgw#782 / th#1313 (the width-4 DP collapse root-caused to the shared
+interpreter; a worker refuses to materialize a snapshot containing pickle
+weights), pgw#784 (a mint runs in its own OS process, now wired), and **th#1307**
+(the C2PA private key never enters a pod — its detail section further down is
+still headed "Unreleased"; it ships HERE).
+
+One test-only fix was made by this release lane to get the train green:
+th#1307's `signer_configured` fixture reset the C2PA module globals with
+`monkeypatch.setattr` in its post-yield teardown, so monkeypatch's own finalizer
+restored the ARMED values right back and leaked a configured signer — pointed at
+an already-shut-down fake hub — into every later test that saves an image. Seven
+tests across `test_image_encoding_default`, `test_th1111_stage_timing`, and
+`test_th1130_deferred_tail` went `JOB_STATUS_FATAL`. Teardown now assigns plainly.
+No product path touched.
 
 - **pgw#784 — a mint runs in its OWN OS process; the worker serves eager and
   reports throughout.** th#1299 killed a live sd15 pod mid-mint and the hub was
@@ -127,7 +177,7 @@
   encode side: pgw#685's suite round-tripped our packers against our unpackers,
   which is exactly why a shared wrong convention survived it.
 
-## Unreleased (rides the next SDK train, with pgw#765) — pgw#772: the serving lane is deterministic; the voluntary bf16-resident upcast is REMOVED
+### 0.78.0 detail — pgw#772: the serving lane is deterministic; the voluntary bf16-resident upcast is REMOVED
 
 The gw#534 "rung 2" free-VRAM upgrade (`bf16_resident_fits` /
 `BF16_RESIDENT_MARGIN_GB`, and `load_from_pretrained`'s
