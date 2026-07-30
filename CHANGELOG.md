@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+- **pgw#791 — the AOT serve path now satisfies the artifact's ALIGNED-input contract at
+  ingress, once, instead of letting AOTInductor copy per call.** Inductor compiles its fast
+  path for 16-byte-aligned inputs and, when a pointer is not, its generated wrapper clones the
+  tensor on EVERY call and reports it with a C++ `TORCH_WARN` — i.e. on the worker's stderr,
+  which hub-spawned pods do not expose. diffusers hands the denoiser `timesteps[i]`, a scalar
+  VIEW at an odd element offset, so an armed SDXL cell paid it 28+ times per request:
+  measured on an RTX 4090 (production `w8a8-lora64`, gw 0.76.8), the request residual over
+  28x(per-forward) was 196 ms for the `.pt2` against 77 ms for the equivalent dynamo cell —
+  the whole AOT advantage, spent on a check the serve path never performed.
+  `aot_serve` now checks alignment and contiguity at ingress and realigns into an owned,
+  pointer-stable buffer allocated ONCE per input, and the residual fallback is a typed,
+  hub-visible `aot_input_realigned` event naming the input (coalesced to one per
+  (entry, input, reason), with every occurrence counted and surfaced by
+  `aot_serve.realigned_inputs(pipeline)`).
+
+  **Measured under control (RTX 4090, one artifact, one process, only the ingress differs):
+  the defect reproduces exactly — `timestep` is unaligned on 126 of 168 denoiser calls and the
+  pre-fix path logs 126 runner-side clone warnings against the fixed path's zero — but the COST
+  is +0.8 ms on a 3,373 ms request (+0.02%), not the ~119 ms the issue inferred from an
+  uncontrolled residual comparison.** So this is a contract fix and an OBSERVABILITY fix, not a
+  latency win: the warnings are written by C++ to fd 2, where even an in-process
+  `redirect_stderr` cannot see them, and the typed event is the only surface that reaches the
+  hub. WARM-INFERENCE-MATRIX §2c's 196-vs-77 ms residual gap needs another explanation.
+
+- **pgw#790 — a LoRA-bucket family now mints BOTH graph classes into one cell, and the serve
+  path routes adapter-free traffic to the branchless one.** gw#627's canonical zeroed
+  rank-bucket branch predicted "a small constant overhead" on non-LoRA requests; measured it is
+  **+31.8% of the compiled per-forward on a 4090 and +44.9-45.9% on a 5090**, with kernel
+  launches +54%/+114% — paid to compute zeros by the 95% of sdxl denoiser forwards that name no
+  adapter. The mint fans every branch-capable target's plan into `<target>/adapter=true/...`
+  and `<target>/adapter=false/...`; the branchless class declares `excluded_inputs` (the
+  NEGATIVE half of the ingress contract, without which both classes admit an attach call and
+  the dispatch refuses `entry_ambiguous`); and `aot_serve` omits the lifted pair from an
+  adapter-free call so only the branchless class admits it. Both classes are exported,
+  compiled and KEYED at mint — the arm is a fork coordinate like any other — so no program's
+  structure varies with runtime state, and the eager fallback still always receives the pair.
+  `range_digest` keys `excluded` only when non-empty, so published cells are not re-keyed.
+
+- **pgw#790 (P0 found while proving it) — a FLATTENED container argument shifted every
+  later declared input name, so an armed sdxl cell refused EVERY request.**
+  `aot_package.input_contract` zipped the caller-side parameter names against the exported
+  program's user inputs positionally, but a container argument occupies one parameter slot
+  and produces N placeholders. Measured on a real SDXL UNet: `added_cond_kwargs`
+  ({text_embeds, time_ids}) shifted everything after it, and the recorded contract came out
+  as `added_cond_kwargs` [2, 1280] at position 7 and `down_block_additional_residuals`
+  [2, 6] at position 8 — the two flattened leaves wearing the names of the parameters that
+  follow them. At serve time `bind_call_inputs` binds the pipeline's `added_cond_kwargs`
+  DICT to a declared tensor input and cannot find `down_block_additional_residuals` at all,
+  so every request refuses by name and the cell serves eager for life. `aot_mint.
+  flat_input_names` now derives one name per exported user input, mapping leaves taking
+  their bare key in sorted order (what torch's pytree does, and what the serve-side nested
+  resolution looks for).
+
+- **pgw#790 (prerequisite) — the lifted-LoRA call convention is now STATED, which is what makes
+  the branch-bearing class exportable at all.** `install_lifted_lora_forward` declared
+  `lora_a`/`lora_b` keyword-only, so the declared-input path refused them by name
+  (`_positionalize` rejects declared keyword-only inputs) while feeding them positionally — the
+  pgw#723 mint obligation — landed them in `*args` and died on `the lifted LoRA argument
+  'lora_a' is missing`. The wrapper now appends the pair to the denoiser's own positional
+  parameters via `__signature__` and accepts it either way.
+
 - **pgw#795 (sweep + guard) — the anti-pattern is now detected, not remembered.**
   `test_magic_timeouts_gw666`'s guard pinned five NAMED constants in five NAMED
   `src/` files, so it missed this twice over: it never looked at `tests/`, and a
@@ -167,67 +228,6 @@
   torch with a `sys.meta_path` finder (no second venv) and asserts the boot chain completes,
   and `publish.yml` now imports the public entrypoint and runs the seal **in the torch-free
   wheel-contract venv**, which is a real environment rather than a simulation.
-
-- **pgw#791 — the AOT serve path now satisfies the artifact's ALIGNED-input contract at
-  ingress, once, instead of letting AOTInductor copy per call.** Inductor compiles its fast
-  path for 16-byte-aligned inputs and, when a pointer is not, its generated wrapper clones the
-  tensor on EVERY call and reports it with a C++ `TORCH_WARN` — i.e. on the worker's stderr,
-  which hub-spawned pods do not expose. diffusers hands the denoiser `timesteps[i]`, a scalar
-  VIEW at an odd element offset, so an armed SDXL cell paid it 28+ times per request:
-  measured on an RTX 4090 (production `w8a8-lora64`, gw 0.76.8), the request residual over
-  28x(per-forward) was 196 ms for the `.pt2` against 77 ms for the equivalent dynamo cell —
-  the whole AOT advantage, spent on a check the serve path never performed.
-  `aot_serve` now checks alignment and contiguity at ingress and realigns into an owned,
-  pointer-stable buffer allocated ONCE per input, and the residual fallback is a typed,
-  hub-visible `aot_input_realigned` event naming the input (coalesced to one per
-  (entry, input, reason), with every occurrence counted and surfaced by
-  `aot_serve.realigned_inputs(pipeline)`).
-
-  **Measured under control (RTX 4090, one artifact, one process, only the ingress differs):
-  the defect reproduces exactly — `timestep` is unaligned on 126 of 168 denoiser calls and the
-  pre-fix path logs 126 runner-side clone warnings against the fixed path's zero — but the COST
-  is +0.8 ms on a 3,373 ms request (+0.02%), not the ~119 ms the issue inferred from an
-  uncontrolled residual comparison.** So this is a contract fix and an OBSERVABILITY fix, not a
-  latency win: the warnings are written by C++ to fd 2, where even an in-process
-  `redirect_stderr` cannot see them, and the typed event is the only surface that reaches the
-  hub. WARM-INFERENCE-MATRIX §2c's 196-vs-77 ms residual gap needs another explanation.
-
-- **pgw#790 — a LoRA-bucket family now mints BOTH graph classes into one cell, and the serve
-  path routes adapter-free traffic to the branchless one.** gw#627's canonical zeroed
-  rank-bucket branch predicted "a small constant overhead" on non-LoRA requests; measured it is
-  **+31.8% of the compiled per-forward on a 4090 and +44.9-45.9% on a 5090**, with kernel
-  launches +54%/+114% — paid to compute zeros by the 95% of sdxl denoiser forwards that name no
-  adapter. The mint fans every branch-capable target's plan into `<target>/adapter=true/...`
-  and `<target>/adapter=false/...`; the branchless class declares `excluded_inputs` (the
-  NEGATIVE half of the ingress contract, without which both classes admit an attach call and
-  the dispatch refuses `entry_ambiguous`); and `aot_serve` omits the lifted pair from an
-  adapter-free call so only the branchless class admits it. Both classes are exported,
-  compiled and KEYED at mint — the arm is a fork coordinate like any other — so no program's
-  structure varies with runtime state, and the eager fallback still always receives the pair.
-  `range_digest` keys `excluded` only when non-empty, so published cells are not re-keyed.
-
-- **pgw#790 (P0 found while proving it) — a FLATTENED container argument shifted every
-  later declared input name, so an armed sdxl cell refused EVERY request.**
-  `aot_package.input_contract` zipped the caller-side parameter names against the exported
-  program's user inputs positionally, but a container argument occupies one parameter slot
-  and produces N placeholders. Measured on a real SDXL UNet: `added_cond_kwargs`
-  ({text_embeds, time_ids}) shifted everything after it, and the recorded contract came out
-  as `added_cond_kwargs` [2, 1280] at position 7 and `down_block_additional_residuals`
-  [2, 6] at position 8 — the two flattened leaves wearing the names of the parameters that
-  follow them. At serve time `bind_call_inputs` binds the pipeline's `added_cond_kwargs`
-  DICT to a declared tensor input and cannot find `down_block_additional_residuals` at all,
-  so every request refuses by name and the cell serves eager for life. `aot_mint.
-  flat_input_names` now derives one name per exported user input, mapping leaves taking
-  their bare key in sorted order (what torch's pytree does, and what the serve-side nested
-  resolution looks for).
-
-- **pgw#790 (prerequisite) — the lifted-LoRA call convention is now STATED, which is what makes
-  the branch-bearing class exportable at all.** `install_lifted_lora_forward` declared
-  `lora_a`/`lora_b` keyword-only, so the declared-input path refused them by name
-  (`_positionalize` rejects declared keyword-only inputs) while feeding them positionally — the
-  pgw#723 mint obligation — landed them in `*args` and died on `the lifted LoRA argument
-  'lora_a' is missing`. The wrapper now appends the pair to the denoiser's own positional
-  parameters via `__signature__` and accepts it either way.
 
 - **th#1299 (worker half of the visibility defect)** — an abandoned self-mint now names
   its own cause. The abort event reported `phase="abandoned"` with the detail
