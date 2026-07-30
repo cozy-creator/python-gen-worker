@@ -1,27 +1,33 @@
 # Changelog
 
-## Unreleased
+## 0.79.0 (2026-07-30) — the v2 serving path actually works: the vendored proto is no longer stale, the chunked manifest parses against the REAL hub shape, and a publish refusal stops being retried as an outage
 
-> ### ⚠ 0.78.0 SHIPS A DEFECT THAT MAKES CHUNKED CHECKPOINTS UNRESOLVABLE — cut the next release promptly
+> ### ⚠ 0.79.0 IS THE FLOOR FOR SERVING ANY CHUNKED (v2) CHECKPOINT — 0.78.0 CANNOT
 >
-> **TWO defects, both live on chaos AND master (both at 0.78.0).**
+> **0.78.0 shipped two defects that made a v2 artifact unresolvable. Both are
+> fixed here. `0.79.0` is the minimum version for any worker that may be handed a
+> v2 snapshot.**
 >
-> **(1) The vendored proto is STALE, so the PRODUCTION gRPC path cannot carry a
-> v2 snapshot at all.** th#1303 checkpoint 3 added `digest`, `chunk_size_bytes`
+> **(1) The vendored proto was STALE, so the PRODUCTION gRPC path could not carry
+> a v2 snapshot at all.** th#1303 checkpoint 3 added `digest`, `chunk_size_bytes`
 > and `chunks` to `worker_scheduler.proto` and regenerated only the Go side;
 > 0.78.0's `SnapshotFile` stub has fields `['path','size_bytes','blake3','url']`
 > and no `ChunkRef` message. Production workers receive snapshots over gRPC, so
-> every v2 snapshot arrives with no digest and no chunks and the worker refuses
+> every v2 snapshot arrived with no digest and no chunks and the worker refused
 > the model. Fail-closed, but wholly dark.
 >
-> **(2)** `models/hub_client._parse_chunks` in 0.78.0 requires a `url` INSIDE each chunk
+> **(2)** `models/hub_client._parse_chunks` in 0.78.0 required a `url` INSIDE each chunk
 > object. The hub cannot put one there: `chunks: [{digest, len}]` IS the
 > content-addressed manifest identity, so resolve-time URLs ride in a SEPARATE
 > index-aligned `chunk_urls: []`. Against a real hub, EVERY chunked (>64 MiB)
-> checkpoint therefore fails to parse with `missing digest/url/len` and
-> `resolve_repo` refuses it. Fixed below. Impact is bounded only because no v2
-> artifact is in production yet — it lands the moment one is. Whole files and
-> every v1/blake3 checkpoint are unaffected.
+> checkpoint therefore failed to parse with `missing digest/url/len` and
+> `resolve_repo` refused it. Impact was bounded only because no v2 artifact is in
+> production yet. Whole files and every v1/blake3 checkpoint were unaffected.
+>
+> **The rollout order this implies:** producing v2 chunks is safe at any version
+> (a v2 artifact nobody resolves harms nothing), but **no tag may be repointed at
+> a v2 manifest, and no v2 artifact may be resolved, until the SERVING FLEET is on
+> 0.79.0.** The gate lifts on fleet version, not on this upload.
 
 - **pgw#781 / th#1303 — the vendored proto is synced and the stubs regenerated.**
   `SnapshotFile` now matches the hub byte-for-byte and `ChunkRef{sha256,url,len}`
@@ -220,6 +226,19 @@
   the harness's own `seed_forward_s` / `compile_delay_s` instead of 0.45s / 300ms
   / 400ms; and the auth-retry and permit-holder waits count progress through
   `await_count`.
+
+- **pgw#794 — a fail-closed adapter-fidelity gate: an adapter the serving dtype
+  DESTROYS is now refused instead of served silently.** Fusing a shipped adapter
+  into fp8-E4M3 weights does not erase the delta, it SUBSTITUTES for it
+  (measured: surviving-delta cosine 0.074 on qwen Lightning, 15x the true
+  delta's norm, 99.7% orthogonal to it). `_reject_zero_delta` catches an EMPTY
+  adapter, never an INERT one, and te#86's produce-time detector diffs in the
+  SOURCE dtype, so the fp8 cast — the whole hazard — was invisible to it.
+  `models/adapter_fidelity.py` scores the norm-weighted whole-adapter cosine
+  against the grid read off the REAL destination; refusal is the typed,
+  hub-visible `AdapterFidelityRefused` plus a `lora_fidelity` activity event.
+  Refused ONLY on the path that destroys it — the resident branch keeps A and B
+  separate and rides at 0.999999.
 
 ## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, the benchmark telemetry is connected, and the suite stops asserting the runner
 
