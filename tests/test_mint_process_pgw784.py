@@ -173,11 +173,23 @@ def test_every_child_death_is_classified_and_drives_the_retry(
     assert out.detail, "a failed mint must always name its reason"
 
 
+def test_a_signal_death_names_the_signal(tmp_path: Path) -> None:
+    out = asyncio.run(_run(tmp_path, "sigkill"))
+    assert out.exit_code is not None and out.exit_code < 0
+    assert "SIGKILL" in out.detail
+
+
 def test_a_crash_keeps_the_childs_stderr_for_diagnosis(tmp_path: Path) -> None:
     """A serve pod exposes no logs, so the child's last words have to ride
     back to the parent or they are lost."""
     out = asyncio.run(_run(tmp_path, "crash"))
     assert "stub child exploded" in out.stderr_tail
+
+
+def test_max_attempts_is_two_not_a_loop(tmp_path: Path) -> None:
+    """The retry policy is explicit and bounded. th#1288/ie#576: every retry
+    is a billed pod, so 'retry until it works' is not a policy."""
+    assert mp.MAX_ATTEMPTS == 2
 
 
 # ------------------------------------------- observe the machine, not a clock
@@ -256,6 +268,18 @@ def _fake_card(
     monkeypatch.setattr(torch.cuda, "memory_reserved", lambda dev=0: resident)
     monkeypatch.setattr(
         torch.cuda, "max_memory_allocated", lambda dev=0: int(peak_gib * GIB))
+
+
+def test_co_residency_asks_for_a_whole_second_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The child is its own process, so it holds its OWN weights. State that
+    honestly rather than pretending the boundary is free."""
+    _fake_card(monkeypatch, total_gib=24, resident_gib=6, peak_gib=8)
+    budget = mint_budget.co_residency(0, family="sdxl", weight_lane="fp8")
+    # resident 6 + activation (8-6=2) + 4 workspace + 1 context
+    assert budget.need_bytes == pytest.approx(13 * GIB, rel=0.01)
+    assert budget.fits
 
 
 def test_a_weight_heavy_family_declines_instead_of_oomacking_the_tenant(

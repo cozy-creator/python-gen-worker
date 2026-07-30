@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **th#1303 phase 3, producer class 2: the CONVERSION producer publishes v2.**
+  `publish_flavors` — the surface every quantize / fuse / cast / distil / produce
+  job in the conversion endpoint calls, and the highest-volume publisher after the
+  mirror — still called `commit()`, so the corpus repoint had a second tap filling
+  the blake3 CAS behind it. It now calls `HubClient.publish_v2`: chunked sha256,
+  each object's digest signed into its presigned PUT so R2 refuses bytes that do
+  not hash to the key. Sixteen of training-endpoints' seventeen publish entry
+  points reach the hub through this one call, so they flip with it.
+
+  Safe because every file is a real local file (`_flavor_files` walks the produced
+  tree) — v2's guarantee is that the digest is PROVEN from bytes in hand, which is
+  exactly why the mirror's by-reference BANK arm (`clone.py:556`) is deliberately
+  NOT flipped and stays on `commit()` until the phase-2 backfill.
+
+  No auto-select and no env knob: the protocol is named at the call site, so
+  "which producers are on v2 today?" is answerable by reading the code.
+
 - **pgw#805 — an AOT cell-discovery MISS never started a mint. The AOT lane was a
   pure consumer.** `aot_mint.mint()` was reachable only from
   `python -m gen_worker.aot_mint`: no module on the serving path imported it, so a

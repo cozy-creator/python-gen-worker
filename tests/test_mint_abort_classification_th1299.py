@@ -34,6 +34,8 @@ def _abort_events(h: _Harness) -> List[object]:
     "code,reason",
     [
         ("adopt_on_arm", "adopting peer cell repo/cell"),
+        ("vacate", "instance vacate"),
+        ("shutdown", "worker shutdown"),
         ("tenant_oom", "tenant OOM — the mint loses, the request wins"),
     ],
 )

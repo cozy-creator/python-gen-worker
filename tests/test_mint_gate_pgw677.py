@@ -28,6 +28,7 @@ mint work yields:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from pathlib import Path
@@ -528,3 +529,46 @@ def test_mint_completes_under_sustained_tenant_load(
     asyncio.run(_run())
 
 
+# ---------------------------------------------------------------------------
+# 4 — the seed-window routing contract, pinned at the Router
+# ---------------------------------------------------------------------------
+
+
+def test_mint_seed_window_forces_eager_enqueue_on_degraded_routers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inside the mint seed window a novel signature NEVER compiles inline:
+    EAGER + background enqueue even when the router is non-concurrent or
+    (turn-gated) short on headroom. Outside the window the legacy verdicts
+    stand."""
+    router = hot_swap.Router()
+
+    def compiled(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    # Non-concurrent router (never enabled): ordinary calls keep the
+    # sequential inline compile...
+    verdict, _sig = router.route("t", compiled, ("a",), {})
+    assert verdict == hot_swap.COMPILED
+    # ...a mint seed forces eager + enqueue.
+    with hot_swap.mint_seed_window():
+        verdict, sig = router.route("t", compiled, ("b",), {})
+    assert verdict == hot_swap.EAGER
+    with router.lock:
+        assert sig in router.pending
+
+    # Turn-gated router with tight headroom: the ordinary call no longer
+    # degrades to an inline compile either — the warm thread owns headroom
+    # inside its exclusive turn.
+    monkeypatch.setattr(hot_swap, "_headroom_ok", lambda device: False)
+    gated = hot_swap.Router()
+    gated.enable()
+    gated.set_turn_gate(lambda kind: contextlib.nullcontext())
+    verdict, sig = gated.route("t", compiled, ("c",), {})
+    assert verdict == hot_swap.EAGER
+    # Ungated legacy router with tight headroom keeps the pre-fix degrade
+    # (kill-switch parity).
+    legacy = hot_swap.Router()
+    legacy.enable()
+    verdict, _sig = legacy.route("t", compiled, ("d",), {})
+    assert verdict == hot_swap.COMPILED

@@ -26,6 +26,9 @@ from gen_worker.models.svdq_layout import (  # noqa: E402
     pack_qweight,
     pack_vector,
     pack_wscales,
+    split_decoded,
+    unpack_qweight,
+    unpack_wscales,
 )
 
 E2M1_MAX, FP8_MAX = 6.0, 448.0
@@ -87,13 +90,65 @@ def _synth_nunchaku_linear(out_f: int, in_f: int, *, second_key: str,
     return tensors, w
 
 
-# --- decode error contract -------------------------------------------------
-#
-# Layout correctness (pack/unpack inverses, weight recovery, fused-qkv split)
-# is pinned against the VENDORED UPSTREAM packers in
-# tests/test_svdq_official_layout_pgw770.py — the authoritative file for that
-# seam (own-packer round trips proved only bijectivity and hid the pgw#770
-# row-split defect).
+# --- layout inverses -------------------------------------------------------
+
+
+@pytest.mark.parametrize("name,out_f,in_f,second_key,rank", QWEN_CASES)
+def test_qweight_and_wscale_layouts_round_trip(
+    name: str, out_f: int, in_f: int, second_key: str, rank: int,
+) -> None:
+    """The fragment interleave and the lane swizzle are both bijective — the
+    decoder replays the packer backwards rather than re-deriving index math."""
+    gen = torch.Generator().manual_seed(1)
+    codes = torch.randint(0, 16, (out_f, in_f), dtype=torch.uint8, generator=gen)
+    assert torch.equal(unpack_qweight(pack_qweight(codes), out_f, in_f), codes)
+
+    # Build scales as real values then cast — random e4m3 BYTES would include
+    # the 0x7F/0xFF NaN patterns.
+    flat = (torch.rand(out_f, in_f // BLOCK, generator=gen) * 8 + 0.05).to(
+        torch.float8_e4m3fn)
+    back = unpack_wscales(pack_wscales(flat, out_f, in_f), out_f, in_f)
+    assert torch.equal(back.view(torch.uint8), flat.view(torch.uint8))
+
+
+def test_qweight_row_is_not_the_output_channel() -> None:
+    """Guards the finding that makes a naive 'just transpose it' converter
+    silently wrong: the packed row index is NOT the logical output channel.
+
+    At the real qwen shape, ``packed[1, 0]``'s low nibble is logical
+    ``(o=48, k=0)`` — and ``o=1`` lives out at column 64. (The mapping is
+    geometry-dependent: at a degenerate single-k-tile shape the same probe
+    lands elsewhere, so this is asserted at a shape the artifact actually
+    uses.)"""
+    out_f, in_f = 3072, 3072
+    codes = torch.zeros(out_f, in_f, dtype=torch.uint8)
+    codes[48, 0] = 7
+    packed = pack_qweight(codes).view(torch.uint8)
+    assert int(packed[1, 0]) & 0x0F == 7
+    assert int(packed[0, 0]) & 0x0F == 0
+
+    codes = torch.zeros(out_f, in_f, dtype=torch.uint8)
+    codes[1, 0] = 7
+    packed = pack_qweight(codes).view(torch.uint8)
+    assert int(packed[1, 0]) & 0x0F == 0
+    assert int(packed[0, 64]) & 0x0F == 7
+
+
+@pytest.mark.parametrize("name,out_f,in_f,second_key,rank", QWEN_CASES)
+def test_decode_recovers_the_weight_within_block_quant_error(
+    name: str, out_f: int, in_f: int, second_key: str, rank: int,
+) -> None:
+    tensors, w = _synth_nunchaku_linear(out_f, in_f, second_key=second_key,
+                                       rank=rank)
+    dec = decode_linear(tensors, out_f, in_f)
+    assert dec.rank == rank
+    assert dec.second_kind == ("per_channel" if second_key == "wcscales"
+                              else "per_tensor")
+    assert dec.smooth_factor is not None
+    deq = dequantize_decoded(dec)
+    assert deq.shape == (out_f, in_f)
+    rel = ((deq - w).norm() / w.norm()).item()
+    assert rel < 0.15, rel
 
 
 def test_decode_refuses_layouts_it_does_not_understand() -> None:
@@ -111,7 +166,53 @@ def test_decode_refuses_layouts_it_does_not_understand() -> None:
         decode_linear(half, 3072, 3072)
 
 
+def test_split_fused_qkv_is_exact() -> None:
+    """nunchaku fuses q/k/v; diffusers keeps them separate. Splitting in the
+    logical domain must reproduce the fused dequant row-block for row-block,
+    and partition proj_up while SHARING proj_down."""
+    out_f, in_f, rank = 9216, 3072, 128
+    tensors, _ = _synth_nunchaku_linear(out_f, in_f, second_key="wcscales",
+                                        rank=rank)
+    dec = decode_linear(tensors, out_f, in_f)
+    fused = dequantize_decoded(dec)
+    parts = split_decoded(dec, (3072, 3072, 3072))
+    assert len(parts) == 3
+    for i, part in enumerate(parts):
+        assert part.out_features == 3072
+        assert part.in_features == in_f
+        assert torch.equal(dequantize_decoded(part),
+                           fused[i * 3072:(i + 1) * 3072])
+        # proj_down is shared verbatim; proj_up is partitioned by rows.
+        assert part.proj_down is dec.proj_down
+        assert torch.equal(part.proj_up, dec.proj_up[i * 3072:(i + 1) * 3072])
+        assert part.smooth_factor is dec.smooth_factor
+    with pytest.raises(SvdqLayoutError, match="sum to"):
+        split_decoded(dec, (3072, 3072))
+
+
 # --- the folded bf16 fallback ---------------------------------------------
+
+
+def test_fold_to_dense_matches_the_two_branch_reference() -> None:
+    """The any-hardware fallback must be the WHOLE linear: the smoothing divide
+    and the low-rank branch folded in, not just the 4-bit weight. Reference is
+    the forward it replaces, computed branch by branch."""
+    out_f, in_f, rank = 3072, 3072, 128
+    tensors, _ = _synth_nunchaku_linear(out_f, in_f, second_key="wtscale",
+                                        rank=rank, seed=3)
+    dec = decode_linear(tensors, out_f, in_f)
+    lin = native.fold_to_dense(dec, compute_dtype=torch.float32)
+
+    torch.manual_seed(4)
+    x = torch.randn(8, in_f)
+    # y = (x / smooth) @ dequant(W).T + (x @ down) @ up.T + bias
+    xs = x / dec.smooth_factor.float()
+    want = (xs @ dequantize_decoded(dec).t()
+            + (x @ dec.proj_down.float()) @ dec.proj_up.float().t()
+            + dec.bias.float())
+    got = lin(x)
+    rel = ((got - want).norm() / want.norm()).item()
+    assert rel < 1e-5, rel
 
 
 def test_fold_to_dense_without_smoothing_or_low_rank() -> None:

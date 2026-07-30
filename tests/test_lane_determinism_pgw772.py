@@ -154,3 +154,15 @@ def test_involuntary_cant_fit_rung_still_engages(
     assert getattr(sl.obj, "_cozy_weight_lane", "") == "fp8-hooks"
     assert sl.rung == "fp8"
     assert "adaptive fit rung" in sl.rung_detail
+
+
+def test_voluntary_upcast_probe_stays_removed() -> None:
+    """Standing guard: the free-VRAM upcast probe must not come back. A
+    reintroduction under the old names trips here by name; one under a new
+    name trips the headline test by behavior."""
+    assert not hasattr(loading, "bf16_resident_fits")
+    assert not hasattr(loading, "BF16_RESIDENT_MARGIN_GB")
+    import inspect
+
+    src = inspect.getsource(loading.load_from_pretrained)
+    assert "bf16_resident" not in src

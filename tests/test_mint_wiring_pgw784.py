@@ -43,6 +43,7 @@ from gen_worker.executor import (
     _CompileTargetRecord,
     _MintAbandoned,
     _MintDeclined,
+    _delegated_pendings,
     _mint_modules,
 )
 from gen_worker.registry import CompileCell, extract_specs
@@ -79,6 +80,69 @@ def _pending(tmp_path: Path, *, delegated: bool = True) -> Any:
         publisher=None, cache_dir=tmp_path, delegated=delegated)
 
 
+# ------------------------------------------------- 1. the recording gate
+
+def test_a_delegated_pending_is_recorded_even_though_nothing_is_armed() -> None:
+    """The bug this wiring fixes.
+
+    `_delegated_pendings` is what the executor now asks instead of trusting
+    `armed`. A delegated arm reports armed=False *truthfully* — the live pipe
+    carries no wrappers and serves eager — so a gate keyed on `armed` drops the
+    obligation and the cell is never minted at all.
+    """
+    delegated = SimpleNamespace(delegated=True)
+    in_process = SimpleNamespace(delegated=False)
+    plain = SimpleNamespace()          # a finalized SelfMint has no such field
+    assert _delegated_pendings({1: delegated})
+    assert _delegated_pendings({1: in_process, 2: delegated})
+    assert not _delegated_pendings({1: in_process})
+    assert not _delegated_pendings({1: plain})
+    assert not _delegated_pendings({})
+
+
+def test_the_arm_returns_armed_false_with_a_delegated_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restating it from the other side, so the two halves cannot drift: the
+    arming brain really does hand back armed=False plus an obligation."""
+    monkeypatch.setattr(
+        fleet_cells.provision, "enable_compiled", lambda *a, **k: False)
+    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda *a, **k: True)
+    monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda pipe: False)
+    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
+    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(
+        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
+    monkeypatch.setattr(
+        fleet_cells.cell_key, "compute",
+        lambda *a, **k: SimpleNamespace(digest="ck5-wired"))
+    monkeypatch.delenv(mint_delegate.ENV_IN_PROCESS, raising=False)
+
+    outcome = fleet_cells.enable_compiled(_Pipe(), _cfg(), tmp_path)
+    assert not outcome.armed
+    assert _delegated_pendings({1: outcome.self_mint})
+
+
+def test_delegation_is_the_policy_not_a_caller_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`enable_compiled`'s signature is unchanged for callers.
+
+    Learned the hard way: threading a `delegate=` flag from the executor broke
+    every existing arming double in the suite (18 tests, `TypeError:
+    _fake_enable_compiled() got an unexpected keyword argument`). The decision
+    belongs to the arming brain — one place, no caller churn — and the
+    parameter survives only so tests can force either shape.
+    """
+    import inspect
+
+    params = inspect.signature(fleet_cells.enable_compiled).parameters
+    assert params["delegate"].default is None, (
+        "delegate must default to None = 'ask the policy', never to a value a "
+        "caller is expected to supply")
+
+
 # --------------------------------- 2. what the child cannot rediscover
 
 def test_mint_modules_derives_from_the_declaring_module() -> None:
@@ -88,6 +152,22 @@ def test_mint_modules_derives_from_the_declaring_module() -> None:
         s for s in extract_specs(toy_endpoints.Basics) if s.name == "echo"]
     assert _mint_modules(spec) == ("harness.toy_endpoints",)
     assert _mint_modules(SimpleNamespace(module="")) == ()
+
+
+def test_background_mint_carries_the_modules_and_snapshot_paths(
+    tmp_path: Path,
+) -> None:
+    bg = _BackgroundMint(
+        spec=SimpleNamespace(name="gen"), instance=None, snapshots=None,
+        pendings={}, pipes={}, selections={},
+        modules=("app",), snapshot_paths={"pipeline": "/cas/sdxl"})
+    assert bg.modules == ("app",)
+    assert bg.snapshot_paths == {"pipeline": "/cas/sdxl"}
+    # Defaulted, so the in-process route is untouched by their existence.
+    plain = _BackgroundMint(
+        spec=SimpleNamespace(name="gen"), instance=None, snapshots=None,
+        pendings={}, pipes={}, selections={})
+    assert plain.modules == () and plain.snapshot_paths == {}
 
 
 # ------------------------------------- 3 + 4. the route and its outcomes
