@@ -45,6 +45,27 @@ _PERMANENT_PRECONDITION_MARKERS = (
 )
 
 
+async def _terminal_rpc_error(stream: Any) -> BaseException:
+    """Recover the REAL status of a call grpc.aio reported as InvalidStateError.
+
+    A finished call still knows its code/details, so rebuild the AioRpcError the
+    caller would have seen had the write raced differently. Keeps the reconnect
+    classifier (auth ladder, not_leader, permanent refusals) working on a status
+    instead of a nameless `InvalidStateError`.
+    """
+    try:
+        code = await stream.code()
+        details = await stream.details()
+        return grpc.aio.AioRpcError(
+            code,
+            await stream.initial_metadata(),
+            await stream.trailing_metadata(),
+            details=details,
+        )
+    except Exception:
+        return ConnectionError("RPC finished before Hello could be written")
+
+
 class FatalTransportError(Exception):
     """Unrecoverable protocol mismatch or persistent registration rejection."""
 
@@ -680,20 +701,34 @@ class Transport:
         channel = self._make_channel(target, use_tls)
         try:
             stub = pb_grpc.WorkerSchedulerStub(channel)
-            stream = stub.Connect(metadata=self._metadata())
 
             async def _handshake() -> Any:
+                # The Hello is built BEFORE the RPC opens. grpc.aio turns the
+                # first write into `InvalidStateError: RPC already finished`
+                # whenever the call terminated during any await between
+                # `Connect()` and that write — which erases the status run()
+                # classifies on (UNAUTHENTICATED's fatal-exit ladder,
+                # not_leader redirects, permanent registration refusals).
+                # pgw#763 made build_hello awaitable (in split mode it is a
+                # seam round-trip to the child), so that await was always
+                # present and every refusal degraded to a nameless retry loop.
                 hello = self._handlers.build_hello()
                 if inspect.isawaitable(hello):
                     hello = await hello
-                await stream.write(pb.WorkerMessage(hello=hello))
-                return await stream.read()
+                stream = stub.Connect(metadata=self._metadata())
+                try:
+                    await stream.write(pb.WorkerMessage(hello=hello))
+                    return stream, await stream.read()
+                except asyncio.InvalidStateError:
+                    raise await _terminal_rpc_error(stream) from None
 
             # Deadline on the whole dial+Hello+HelloAck handshake: a hub that
             # accepts the stream but never answers must not hang the worker
             # forever (h2 keepalive is answered below the app layer).
             try:
-                first = await asyncio.wait_for(_handshake(), _HELLO_ACK_TIMEOUT_S)
+                stream, first = await asyncio.wait_for(
+                    _handshake(), _HELLO_ACK_TIMEOUT_S
+                )
             except asyncio.TimeoutError:
                 raise ConnectionError(
                     f"no HelloAck within {_HELLO_ACK_TIMEOUT_S:.0f}s"
