@@ -3692,6 +3692,16 @@ class Executor:
         rec.compile_targets = {}
         if cfg is None:
             return
+        # pgw#775: no targets at degree>1. A target is what routes a novel
+        # signature to the shared warm thread, which forwards the compile-
+        # capable OBJECT (not the gated pipeline) on rank 0 alone — the exact
+        # forward that hangs the group. No targets means no hot-swap routing,
+        # no background mint turn and no adoption for this record.
+        eager_only = self._eager_only_reason()
+        if eager_only:
+            logger.info(
+                "%s: no compile targets installed — %s", spec.name, eager_only)
+            return
         # Production injection supplies object-scoped slot ownership. Keep
         # bare objects accepted for focused unit construction only, deriving
         # their ownership from the record's already-frozen held bindings.
@@ -4299,6 +4309,28 @@ class Executor:
             "not this job's group. Refused rather than served on a sibling's "
             "card (pgw#748)."
         )
+
+    def _eager_only_reason(self) -> str:
+        """Non-empty when this pod's topology forbids compile arming (pgw#775).
+
+        Once ``enable_parallelism`` installs the CP hooks, EVERY forward
+        through the sharded modules issues collectives — and the only
+        participant-supplying seam is the pipeline-level SP gate. A hot-swap
+        warm compile, a mint seed, a proof warmup or an activation probe all
+        forward on rank 0 only, outside that gate, and hang the group. "Eager
+        only at degree>1" is therefore enforced by construction: no compile
+        selection is fetched, no arming scope opens, no targets install, no
+        cell adopts. This is the code the a08a3bd commit message claimed.
+        """
+        topo = self.topology
+        if topo.degree > 1 and topo.parallel == "sequence":
+            return (
+                f"eager only at {topo}: compile/hot-swap/self-mint are "
+                "disabled under context parallelism (pgw#775) — any forward "
+                "outside the sequence gate would hang the degree-"
+                f"{topo.degree} group"
+            )
+        return ""
 
     def _dispatch_group(self, run: "pb.RunJob") -> int:
         """Which execution group this dispatch names (pgw#748 / th#1285 §2a).
@@ -5637,7 +5669,13 @@ class Executor:
                 component_paths.setdefault(slot, {})[comp] = str(comp_mat.path)
                 if comp_mat.identity[0]:
                     override_digests[comp_ref] = comp_mat.identity[0]
-        compile_selection = await self._fetch_compile_snapshot(spec, snapshots)
+        eager_only = self._eager_only_reason()
+        if eager_only and spec.compile is not None:
+            logger.info("%s: %s", spec.name, eager_only)
+        compile_selection = (
+            None if eager_only
+            else await self._fetch_compile_snapshot(spec, snapshots)
+        )
         compile_artifact = compile_selection.path if compile_selection else None
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
@@ -5722,7 +5760,12 @@ class Executor:
                 # reaches the same cache-artifact-gated policy. No-op when
                 # spec.compile is None.
                 arming_scope = provision.ArmingScope(
-                    spec.compile_cell(), self.store._cache_dir, compile_artifact,
+                    # pgw#775: a None cell makes the scope a no-op, so an
+                    # endpoint's own `gen_worker.arm_compile(pipe)` inside
+                    # setup() cannot arm a compile — and cannot self-mint —
+                    # on a context-parallel pod.
+                    None if eager_only else spec.compile_cell(),
+                    self.store._cache_dir, compile_artifact,
                     enable=self._arming_enable,
                 )
                 with arming_scope:

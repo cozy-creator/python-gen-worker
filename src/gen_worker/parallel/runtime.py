@@ -43,6 +43,8 @@ from typing import Any, Optional, Tuple
 from .cp import (
     ContextParallelUnavailable,
     CpComms,
+    gated_call,
+    in_gated_call,
     install_context_parallel,
     refuse_unless_shard_invariant_quant,
 )
@@ -171,24 +173,9 @@ def _rehydrate(value: Any, device: int) -> Any:
     return value
 
 
-# ---------------------------------------------------------------------------
-# The gated-call flag: every forward through a CP-installed module must have
-# participants on every rank (pgw#775 uses this to refuse strays by name).
-# ---------------------------------------------------------------------------
-
-_tls = threading.local()
-
-
-class _gated_call:
-    def __enter__(self) -> None:
-        _tls.active = getattr(_tls, "active", 0) + 1
-
-    def __exit__(self, *exc: object) -> None:
-        _tls.active = max(0, getattr(_tls, "active", 1) - 1)
-
-
-def in_gated_call() -> bool:
-    return bool(getattr(_tls, "active", 0))
+# The gated-call flag lives with the hooks it guards (cp.py); re-exported here
+# because the gate is what enters it.
+_gated_call = gated_call
 
 
 # ---------------------------------------------------------------------------

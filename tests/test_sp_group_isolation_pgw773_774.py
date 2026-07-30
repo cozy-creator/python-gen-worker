@@ -95,7 +95,7 @@ def _make_toy_pipe() -> Any:
 
 def _rig_entry(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
     """A follower that mirrors sequence_rank_main against the toy pipe."""
-    from gen_worker.parallel.cp import CpComms, install_context_parallel
+    from gen_worker.parallel.cp import CpComms, gated_call, install_context_parallel
     from gen_worker.parallel.runtime import _rehydrate
 
     pg = init_rank(spec)
@@ -114,7 +114,9 @@ def _rig_entry(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cov
         if not isinstance(cmd, dict) or cmd.get("op") == "close":
             return
         args = tuple(_rehydrate(a, spec.device) for a in cmd.get("args", ()))
-        with torch.no_grad():
+        # Same gate `sequence_rank_main` enters: a follower's forward IS
+        # rank-symmetric, so it is inside the gate (pgw#775).
+        with torch.no_grad(), gated_call():
             pipe(*args)
 
 

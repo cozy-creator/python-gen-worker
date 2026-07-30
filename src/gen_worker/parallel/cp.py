@@ -32,10 +32,44 @@ armed together — a second, independent reason consumer multi-GPU is out.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# The gated-call flag (pgw#775).
+#
+# Installing CP puts split/all-to-all/gather hooks ON THE MODULES, so from that
+# moment EVERY forward through them issues collectives — and the only seam that
+# supplies participants on the other ranks is the pipeline-level ``__call__``
+# gate. A forward from anywhere else (a hot-swap warm compile, a mint seed, a
+# proof warmup, an activation/degraded probe, an endpoint calling a component
+# by hand) runs on rank 0 alone and HANGS the whole group in NCCL.
+#
+# The flag is thread-local because that is exactly the failure boundary: the
+# gate wraps the call on the requesting thread, while every stray forward comes
+# from a different thread (the shared shape-warm thread, a background mint turn)
+# or from outside the gate on the same one.
+# ---------------------------------------------------------------------------
+
+_tls = threading.local()
+
+
+class gated_call:
+    """Mark the dynamic extent in which collectives have participants."""
+
+    def __enter__(self) -> None:
+        _tls.active = getattr(_tls, "active", 0) + 1
+
+    def __exit__(self, *exc: object) -> None:
+        _tls.active = max(0, getattr(_tls, "active", 1) - 1)
+
+
+def in_gated_call() -> bool:
+    return bool(getattr(_tls, "active", 0))
 
 # Every module diffusers can shard declares a plan. No plan means the model was
 # never adapted for CP, and installing anyway would shard something whose
@@ -47,6 +81,12 @@ class ContextParallelUnavailable(RuntimeError):
     """This pipeline cannot be sharded, named exactly. A typed refusal — the
     hub demotes the pod; the worker never silently serves degree 1 against a
     degree-2 promise."""
+
+
+class UngatedShardedForward(ContextParallelUnavailable):
+    """A forward through a CP-sharded module outside the group's call gate
+    (pgw#775). Raised BY NAME, with the caller's thread, instead of hanging
+    the group in a collective no other rank will ever join."""
 
 
 @dataclass(frozen=True)
@@ -176,12 +216,48 @@ def install_context_parallel(
     installed: List[str] = []
     for name, comp in components:
         _install_on_component(comp, degree=int(degree), comms=comms)
+        _install_gate_guard(comp, name)
         installed.append(name)
     logger.info(
         "context parallelism installed: ulysses_degree=%d components=%s "
         "group_rank=%d", int(degree), installed, int(comms.rank),
     )
     return tuple(installed)
+
+
+_GUARD_ATTR = "_gen_worker_cp_gate_guard"
+
+
+def _install_gate_guard(comp: Any, name: str) -> None:
+    """Refuse an ungated forward through a sharded module BY NAME (pgw#775).
+
+    The hooks are on the module, so the module is where the failure domain is
+    knowable. A forward pre-hook is the cheapest possible check (one thread-
+    local read per call, no wrapper object, no change to the module's class, so
+    `torch.compile`'s class keying is untouched) and it fires on rank 0 exactly
+    where a stray forward would otherwise enter an unmatched collective and
+    hang every rank of the group.
+    """
+    if getattr(comp, _GUARD_ATTR, None) is not None:
+        return
+
+    def _guard(module: Any, args: Any, kwargs: Any = None) -> None:
+        if in_gated_call():
+            return
+        raise UngatedShardedForward(
+            f"forward through the context-parallel component {name!r} outside "
+            "the group's call gate: this rank would issue collectives no other "
+            "rank is in. Every forward at degree>1 must go through the gated "
+            "pipeline call (compile warmups, mint seeds, proof warmups, "
+            "activation/degraded probes and direct component calls are "
+            "disabled under context parallelism — pgw#775)"
+        )
+
+    handle = comp.register_forward_pre_hook(_guard, with_kwargs=True)
+    try:
+        setattr(comp, _GUARD_ATTR, handle)
+    except Exception:  # noqa: BLE001 - frozen modules keep the hook anyway
+        pass
 
 
 def _install_on_component(comp: Any, *, degree: int, comms: CpComms) -> None:
