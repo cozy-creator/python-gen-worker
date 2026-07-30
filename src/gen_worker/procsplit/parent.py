@@ -43,6 +43,7 @@ from . import (
     ENV_WATCHDOG_PING_S,
     actions,
     attest,
+    capability,
     frames,
 )
 
@@ -93,6 +94,7 @@ _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
 # large card it is seconds, not milliseconds. Generous, and bounded.
 _MEASURE_TIMEOUT_S = 180.0
 _ATTESTATION_REPORT_MIN_INTERVAL_S = 300.0
+_CAPABILITY_REPORT_MIN_INTERVAL_S = 300.0
 # Bounded: an observation is dropped when its result passes back, so this only
 # has to survive jobs whose results never arrive (child deaths).
 _OBSERVATION_CAP = 512
@@ -259,6 +261,10 @@ class ParentControl:
         self._observations: collections.OrderedDict = collections.OrderedDict()
         self.metric_divergences = 0  # observability + tests
         self._last_attestation_report_at = 0.0
+        # delta 4: per-job grant decisions (observability + tests).
+        self.capability_withheld = 0
+        self.capability_notes = 0
+        self._last_capability_report_at = 0.0
         # delta 2: the parent's own pre-import host measurement.
         self._measure_cmd = list(
             measure_cmd
@@ -477,6 +483,10 @@ class ParentControl:
                     safe_message="compute process restarting",
                 )))
                 return
+            # delta 4: the parent DECIDES on the per-job grant before it
+            # reaches tenant code — forward, or withhold and refuse.
+            if not await self._authorize_run_job(run, msg):
+                return
             key = (run.request_id, run.attempt)
             # delta 3: what the parent watched, recorded BEFORE the job exists
             # in the child. The in-flight count is taken now, so it is the
@@ -646,6 +656,70 @@ class ParentControl:
             return
         logger.warning("unknown child frame type %d ignored", ftype)
 
+    # ---- per-job capability policy (delta 4) -----------------------------
+
+    async def _authorize_run_job(
+        self, run: pb.RunJob, msg: pb.SchedulerMessage,
+    ) -> bool:
+        """Decide on this job's capability token. False = refused, not relayed.
+
+        A per-job, short-TTL, least-authority grant is the one credential the
+        child may hold — but which grant reaches which job is the parent's
+        call, and it was making none.
+        """
+        worker_id, _release_id = self._identity()
+        decision = capability.decide(
+            run.capability_token,
+            request_id=run.request_id,
+            attempt=run.attempt,
+            function_name=run.function_name,
+            worker_id=worker_id,
+        )
+        if decision.note:
+            logger.warning(
+                "job %s#%d: %s", run.request_id, run.attempt, decision.note
+            )
+            self.capability_notes += 1
+        if decision.forward:
+            return True
+        self.capability_withheld += 1
+        logger.error(
+            "WITHHELD the capability token for %s#%d: %s",
+            run.request_id, run.attempt, decision.reason,
+        )
+        # Strip it from the parent's own copy too — nothing downstream of this
+        # decision may recover the value.
+        run.capability_token = ""
+        await self.transport.send(pb.WorkerMessage(job_result=pb.JobResult(
+            request_id=run.request_id,
+            attempt=run.attempt,
+            status=(
+                pb.JOB_STATUS_RETRYABLE if decision.retryable
+                else pb.JOB_STATUS_FATAL
+            ),
+            safe_message=(
+                f"CapabilityWithheld: {decision.reason} (the control parent "
+                "refused to hand this grant to handler code)"
+            )[:512],
+        )))
+        await self._report_capability_withheld(run, decision)
+        return False           # answered typed; never relayed
+
+    async def _report_capability_withheld(
+        self, run: pb.RunJob, decision: "capability.Decision",
+    ) -> None:
+        now = time.monotonic()
+        if now - self._last_capability_report_at < _CAPABILITY_REPORT_MIN_INTERVAL_S:
+            return
+        self._last_capability_report_at = now
+        await self._dial_detail(
+            f"phase=compute_capability_withheld request={run.request_id} "
+            f"attempt={run.attempt} function={run.function_name} "
+            f"withheld={self.capability_withheld} retryable={decision.retryable} "
+            f"reason={decision.reason[:400]} — the control parent decides which "
+            "per-job grant reaches handler code"
+        )
+
     # ---- billing attestation (delta 3) -----------------------------------
 
     async def _attest_result(self, result: pb.JobResult) -> None:
@@ -798,8 +872,30 @@ class ParentControl:
     def _post_action(
         self, action: "actions.HubAction", status: int, text: str,
     ) -> Dict[str, Any]:
-        """Last look at a response before it crosses back. Delta 4 narrows the
-        capability token here."""
+        """Last look at a response before it crosses back (delta 4).
+
+        A renewal returns a NEW grant, so the decision made at dispatch has to
+        be made again: a re-mint that came back scoped to a different request
+        is the same confused deputy arriving by the other door.
+        """
+        if action.name != "capability.renew" or status != 200:
+            return {"status": int(status), "body": text}
+        try:
+            renewed = str((json.loads(text or "{}") or {}).get("capability_token") or "")
+        except ValueError:
+            renewed = ""
+        if renewed:
+            rid, attempt = capability.scope_of(renewed)
+            if rid and (rid, attempt) not in self._in_flight:
+                self.capability_withheld += 1
+                logger.error(
+                    "WITHHELD a renewed capability token scoped to %s#%d, which "
+                    "is not in flight on this worker", rid, attempt,
+                )
+                raise actions.ActionRefused(
+                    f"the hub returned a capability token scoped to {rid}#{attempt}, "
+                    "which this worker is not running — not handing it to the child"
+                )
         return {"status": int(status), "body": text}
 
     async def _report_action_refusal(self, detail: str) -> None:

@@ -464,6 +464,148 @@ def test_delta3_an_honest_report_passes_through_unchanged():
 
 
 # ==========================================================================
+# DELTA 4 — the parent DECIDES on the per-job capability token
+# ==========================================================================
+
+
+def _cap_token(**claims: Any) -> str:
+    """An unsigned-shaped JWT carrying the hub's real capability claims. The
+    parent reads claims unverified by design — it is deciding whether the grant
+    matches the job, which no signature can answer."""
+    import base64
+
+    def seg(obj: Dict[str, Any]) -> str:
+        raw = json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    body: Dict[str, Any] = {
+        "cap_kind": "worker_capability",
+        "iat": int(__import__("time").time()),
+        "exp": int(__import__("time").time()) + 900,
+        "grants": [{"resource": "media", "actions": ["write"]}],
+    }
+    body.update(claims)
+    return f"{seg({'alg': 'RS256'})}.{seg(body)}.sig"
+
+
+def test_delta4_a_grant_for_another_request_is_withheld(split_for_capability):
+    """THE ATTACK (or the hub bug that looks like one): a job arrives carrying a
+    capability token minted for a DIFFERENT caller's request.
+
+    The token was relayed verbatim, so handler code would have run under
+    authority derived from someone else's request. The parent now refuses,
+    strips the value, and answers the job typed instead of letting the child
+    discover it mid-upload.
+    """
+    pc, conn = split_for_capability
+    conn.send(run_job=pb.RunJob(
+        request_id="r-mine", attempt=1, function_name="echo",
+        capability_token=_cap_token(
+            request_id="r-someone-else", attempt=1, worker_id="split-parent"),
+        input_payload=_payload()))
+    got = conn.wait_for(is_result_for("r-mine"), timeout=30.0)
+    assert got.job_result.status == pb.JOB_STATUS_FATAL
+    assert "CapabilityWithheld" in got.job_result.safe_message
+    assert "scoped to request r-someone-else" in got.job_result.safe_message
+    assert pc.capability_withheld >= 1
+    # Never dispatched: no accounting for a job the parent refused.
+    assert ("r-mine", 1) not in pc._in_flight
+
+
+def test_delta4_an_expired_grant_is_withheld_retryable(split_for_capability):
+    """A grant that is already dead cannot upload the job's output. Refusing at
+    dispatch turns a mid-job auth failure into a legible retry."""
+    import time as _t
+
+    pc, conn = split_for_capability
+    conn.send(run_job=pb.RunJob(
+        request_id="r-stale", attempt=1, function_name="echo",
+        capability_token=_cap_token(
+            request_id="r-stale", attempt=1, worker_id="split-parent",
+            iat=int(_t.time()) - 7200, exp=int(_t.time()) - 600),
+        input_payload=_payload()))
+    got = conn.wait_for(is_result_for("r-stale"), timeout=30.0)
+    assert got.job_result.status == pb.JOB_STATUS_RETRYABLE
+    assert "expired" in got.job_result.safe_message
+
+
+def test_delta4_a_correctly_scoped_grant_is_forwarded(split_for_capability):
+    """The other half: a grant that names this job on this worker goes through
+    untouched — least authority in the child is explicitly allowed, and the
+    child genuinely needs it (inputs and outputs go child -> object store)."""
+    pc, conn = split_for_capability
+    token = _cap_token(request_id="r-ok", attempt=1, function_name="echo",
+                       worker_id="split-parent")
+    conn.send(run_job=pb.RunJob(
+        request_id="r-ok", attempt=1, function_name="echo",
+        capability_token=token, input_payload=_payload()))
+    got = conn.wait_for(is_result_for("r-ok"), timeout=30.0)
+    assert got.job_result.status == pb.JOB_STATUS_OK
+    assert pc.capability_withheld == 0
+
+
+@pytest.fixture()
+def split_for_capability(tmp_path, captured_dials, monkeypatch):
+    monkeypatch.setenv("WORKER_JWT", WORKER_JWT)
+    h = SplitHarness(
+        tmp_path,
+        child_cmd=[sys.executable, str(FAKE_CHILD)],
+        extra_child_env={"PGW763_FAKE_MODE": "result_then_exit"},
+    )
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+        yield h.pc, conn
+    finally:
+        h.close()
+
+
+@pytest.mark.parametrize(
+    "claims,forward",
+    [
+        ({"request_id": "r-1", "attempt": 1, "worker_id": "w-1"}, True),
+        ({"request_id": "r-2", "attempt": 1, "worker_id": "w-1"}, False),
+        ({"request_id": "r-1", "attempt": 2, "worker_id": "w-1"}, False),
+        ({"request_id": "r-1", "attempt": 1, "worker_id": "w-other"}, False),
+        ({"request_id": "r-1", "attempt": 1, "worker_id": "w-1",
+          "function_name": "other-fn"}, False),
+        ({"request_id": "r-1", "attempt": 1, "worker_id": "w-1",
+          "cap_kind": "org_access_token"}, False),
+    ],
+)
+def test_capability_policy_matrix(claims, forward):
+    from gen_worker.procsplit import capability
+
+    d = capability.decide(
+        _cap_token(**claims),
+        request_id="r-1", attempt=1, function_name="generate", worker_id="w-1")
+    assert d.forward is forward, d.reason
+
+
+def test_capability_policy_reports_an_over_long_ttl_without_refusing():
+    """Only the hub can shorten a TTL, so refusing legitimate work over one
+    would trade a real outage for a theoretical exposure. Report it."""
+    import time as _t
+
+    from gen_worker.procsplit import capability
+
+    d = capability.decide(
+        _cap_token(request_id="r-1", attempt=1, worker_id="w-1",
+                   iat=int(_t.time()),
+                   exp=int(_t.time()) + capability.MAX_EXPECTED_TTL_S + 3600),
+        request_id="r-1", attempt=1, worker_id="w-1")
+    assert d.forward is True
+    assert "TTL" in d.note
+
+
+def test_capability_policy_passes_a_job_with_no_grant():
+    """Jobs with no file authority legitimately exist; a missing token is not a
+    withheld one."""
+    from gen_worker.procsplit import capability
+
+    assert capability.decide("", request_id="r", attempt=1).forward is True
+
+
+# ==========================================================================
 # The allowlist itself — unit rows, because the table IS the policy
 # ==========================================================================
 
