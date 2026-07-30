@@ -607,28 +607,62 @@ def take_inflight(path: Optional[Path] = None) -> list[Dict[str, Any]]:
         active, list) else []
 
 
+#: How many contributing request ids a streak row remembers. Only needs to
+#: outlive one request's retry ladder.
+_CRASH_REQUEST_MEMORY = 8
+
+
 def record_native_crash(
     function: str, *, kind: str = "", signal_name: str = "",
-    path: Optional[Path] = None,
+    request_id: str = "", path: Optional[Path] = None,
 ) -> int:
     """Count one signal death attributed to ``function``; returns the new
     streak. The registry lives on the pod's container fs, so it survives
     process restarts and dies with the pod — per-SKU-instance by
-    construction."""
+    construction.
+
+    The streak counts DISTINCT REQUESTS, not attempts. pgw#763 stage 4
+    measured why on a live pod: the hub's blame ladder re-ran one
+    deterministically fatal payload on the same pod, each attempt killed a
+    child, the streak reached the refuse threshold, and a perfectly healthy
+    pod was condemned `worker_native_crash_loop` — a verdict manufactured
+    entirely by retries of a SINGLE request. The gate exists for a function
+    that keeps killing this pod across DIFFERENT work (pgw#676's real case,
+    six SIGSEGVs on two A4500s), and that case is untouched: distinct
+    requests still accumulate. A death with no request id (a background
+    compile, pgw#714) still counts every time, as before.
+    """
     path = path or CRASH_REGISTRY_PATH
     streaks = native_crash_streaks(path)
     row = streaks.get(function) or {"count": 0}
+    request_id = str(request_id or "").strip()
+    seen = [str(r) for r in (row.get("requests") or []) if r]
+    if request_id and request_id in seen:
+        # Same request, another attempt: one fault, already counted.
+        row["last_kind"] = kind
+        row["last_signal"] = signal_name
+        row["last_unix"] = time.time()
+        streaks[function] = row
+        _write_streaks(path, streaks)
+        return int(row.get("count") or 0)
     row["count"] = int(row.get("count") or 0) + 1
+    if request_id:
+        seen.append(request_id)
+        row["requests"] = seen[-_CRASH_REQUEST_MEMORY:]
     row["last_kind"] = kind
     row["last_signal"] = signal_name
     row["last_unix"] = time.time()
     streaks[function] = row
+    _write_streaks(path, streaks)
+    return int(row["count"])
+
+
+def _write_streaks(path: Path, streaks: Dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(streaks, default=str))
     except OSError:
         pass
-    return int(row["count"])
 
 
 def native_crash_streaks(
@@ -703,7 +737,9 @@ def attribute_signal_death(
             if fn:
                 streaks[fn] = record_native_crash(
                     fn, kind=str(row.get("kind") or ""),
-                    signal_name=signal_name, path=registry_path)
+                    signal_name=signal_name,
+                    request_id=str(row.get("request_id") or ""),
+                    path=registry_path)
         if streaks:
             extra["native_crash_streaks"] = streaks
     tail = fault_dump_tail(dump_path)

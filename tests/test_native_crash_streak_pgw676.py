@@ -202,3 +202,51 @@ def test_inflight_markers_stack_and_clear_by_token(
     assert [r["request_id"] for r in left] == ["r2"]
     assert not path.exists()
     postmortem.clear_inflight()
+
+
+def test_streak_counts_distinct_requests_not_attempts_of_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pgw#763 stage 4, measured on a live pod: the hub's blame ladder re-ran
+    ONE deterministically fatal payload on the same pod, each attempt killed a
+    child, the streak hit the refuse threshold, and a healthy pod was condemned
+    `worker_native_crash_loop` — a verdict manufactured entirely by retries of a
+    single request. The gate exists for a function that keeps killing this pod
+    across DIFFERENT work (the A4500 case above), and that must stay armed.
+    """
+    registry = tmp_path / "streaks.json"
+    monkeypatch.setattr(postmortem, "CRASH_REGISTRY_PATH", registry)
+    ex = _executor()
+
+    # The live shape: attempts 1, 2 and 3 of request r-oom, same pod.
+    for _ in range(3):
+        postmortem.record_native_crash(
+            "generate", kind="request", signal_name="SIGKILL", request_id="r-oom")
+    ex.gate_functions(_GPU)
+    assert "generate" not in ex.unavailable, (
+        "one request's retry ladder refused the function and would condemn the "
+        "pod: " + json.dumps(postmortem.native_crash_streaks(registry))
+    )
+    assert postmortem.native_crash_streaks(registry)["generate"]["count"] == 1
+
+    # The guard rail: a DIFFERENT request crashing the same function is the
+    # real signal, and it still trips exactly as before.
+    postmortem.record_native_crash(
+        "generate", kind="request", signal_name="SIGSEGV", request_id="r-other")
+    ex.gate_functions(_GPU)
+    code, _detail, axes = ex.unavailable["generate"]
+    assert code == "native_crash_streak" and axes["streak"] == "2"
+
+
+def test_compile_deaths_still_count_every_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A background compile carries no request id (pgw#714), so distinct-request
+    counting must not silently disarm it — every death still counts."""
+    registry = tmp_path / "streaks.json"
+    monkeypatch.setattr(postmortem, "CRASH_REGISTRY_PATH", registry)
+    marker = postmortem.compile_marker("unet")
+    for expected in (1, 2, 3):
+        got = postmortem.record_native_crash(
+            marker, kind=postmortem.COMPILE_KIND, signal_name="SIGSEGV")
+        assert got == expected
