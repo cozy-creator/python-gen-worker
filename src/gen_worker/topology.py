@@ -61,12 +61,44 @@ def set_device_group(ordinal: int) -> contextvars.Token:
     return _current_group.set(int(ordinal))
 
 
-def group_cuda_device(ordinal: Optional[int] = None) -> str:
-    """The device string a group's weights belong on. ``cuda`` (thread-current)
-    for group 0, so a single-group worker is byte-identical to every placement
-    it has ever done."""
+# The delivered packing, published process-wide so the ambient group ordinal
+# can be TRANSLATED into the cards that group actually owns. An ordinal is not
+# a device index — at degree D group g owns ``[g*D, (g+1)*D)`` — and the
+# contextvar above carries only the ordinal, so the translation needs the
+# topology. One pod has exactly one delivered topology, which is why this is a
+# module fact and not a parameter on every placement call. Absent (harness
+# attach, `cli serve`, every test that builds none) ⇒ the identity mapping,
+# which is what a one-device-per-group worker has always done.
+_installed: Optional["ExecutionTopology"] = None
+
+
+def install_topology(topo: Optional["ExecutionTopology"]) -> None:
+    """Publish the delivered packing for the ordinal -> device translation."""
+    global _installed
+    _installed = topo
+
+
+def installed_topology() -> Optional["ExecutionTopology"]:
+    return _installed
+
+
+def group_devices(ordinal: Optional[int] = None) -> Tuple[int, ...]:
+    """The CUDA device indices a group owns, from the DELIVERED topology.
+
+    ``(ordinal,)`` when no topology describes that group: at degree 1 the
+    ordinal IS the device, which is every pod that has ever shipped.
+    """
     g = current_device_group() if ordinal is None else int(ordinal)
-    return "cuda" if g == 0 else f"cuda:{g}"
+    topo = _installed
+    if topo is None or g < 0 or g >= topo.groups:
+        return (max(0, g),)
+    return topo.group(g).devices
+
+
+def group_rank0_device(ordinal: Optional[int] = None) -> int:
+    """The group's rank-0 card — the device its weights and its rank-0 work
+    belong on, and the index the hub dispatches as ``gpu_index``."""
+    return group_devices(ordinal)[0]
 
 
 def pin_cuda_device_for_group() -> None:
@@ -79,19 +111,23 @@ def pin_cuda_device_for_group() -> None:
     at — card 0. Measured live on a 4xL40S pod: `current_device` was correctly
     cuda:0..3 per group while the WEIGHTS sat on cuda:0,0,0,3 (pgw#748 DP
     width-4 acceptance). Cheap and idempotent; a no-op without CUDA and for
-    group 0.
+    the group whose rank-0 card is 0.
+
+    The card comes from the delivered topology, never from the ordinal: on a
+    ``2x2`` pod group 1 owns cards 2-3, so pinning to device 1 would place
+    group 1's weights on group 0's follower card (pgw#773 residual).
     """
-    ordinal = current_device_group()
-    if ordinal <= 0:
+    device = group_rank0_device()
+    if device <= 0:
         return
     try:
         import torch
 
-        if torch.cuda.is_available() and ordinal < torch.cuda.device_count():
-            torch.cuda.set_device(ordinal)
+        if torch.cuda.is_available() and device < torch.cuda.device_count():
+            torch.cuda.set_device(device)
     except Exception:  # noqa: BLE001 - placement is best-effort here; the
         # residency promote still targets `cuda:N` explicitly.
-        logger.warning("could not pin thread to device %d", ordinal, exc_info=True)
+        logger.warning("could not pin thread to device %d", device, exc_info=True)
 
 
 class device_group_scope:
@@ -365,9 +401,17 @@ def delivered_topology(
     groups are never demoted — the devices are the model's, not the platform's.
 
     ``interconnect`` defaults to the shipped boot canary's measurement.
+
+    Reading the REAL environment (``env is None``, i.e. every production and
+    boot call) also PUBLISHES the result: the placement helpers translate a
+    group ordinal into the cards that group owns, and only the delivered —
+    possibly fabric-demoted — packing can do that. An explicit ``env`` is a
+    caller asking a question about some other pod, so it publishes nothing.
     """
     topo = ExecutionTopology.from_env(env)
     if not topo.platform_parallel:
+        if env is None:
+            install_topology(topo)
         return topo
     if interconnect is None:
         from .host_canary import get_host_canary
@@ -382,34 +426,38 @@ def delivered_topology(
             "%s -> %s (the sharded tier is sold on a fabric this pod does "
             "not have)", interconnect or "", topo, demoted,
         )
+        if env is None:
+            install_topology(demoted)
         return demoted
     refuse_unless_groups_can_coexist(topo)
+    if env is None:
+        install_topology(topo)
     return topo
 
 
 def refuse_unless_groups_can_coexist(topo: ExecutionTopology) -> None:
-    """pgw#773: refuse ``groups>1 AND degree>1`` by name.
+    """Refuse a multi-device group the worker cannot actually execute, by name.
 
-    The original reason is FIXED: each group now owns a non-default process
-    group over its own store, so two groups can no longer corrupt each other's
-    collectives (proved on the gloo rig at the exact `gpu_count=4,
-    group_degree=2` shape). The refusal stays for a second, narrower reason
-    that is still live: ``group_cuda_device``/``pin_cuda_device_for_group``
-    treat the group ORDINAL as a device index, which is only true at D == 1.
-    At `G>1 ∧ D>1` group 1 of a 2x2 pod owns cards 2-3 while both helpers say
-    `cuda:1` — a placement bug, silent, on every load and bookkeeping path.
-    Refused at boot so the hub re-packs, never wedged.
+    ``G>1 ∧ D>1`` is SERVED now (pgw#773 residual, lifted). Both original
+    reasons are closed: each group owns a non-default process group over its
+    own store (so two groups cannot corrupt each other's collectives), and
+    placement no longer reads the group ordinal as a device index — every card
+    is derived from this topology, so group 1 of a `2x2` pod places on its own
+    cards 2-3. Live-accepted on 4xH100-80 SXM NVLink: degree 2, degree 4 and
+    two concurrent degree-2 groups, each bit-identical to degree 1.
 
-    Lifting it needs the ordinal -> rank-0-device translation everywhere those
-    two helpers are read, plus a live NCCL run of two concurrent degree-2
-    groups (the CPU rig proves isolation, not NVLink behaviour).
+    What is still refused is a degree>1 group whose sharding NOTHING in this
+    worker installs — at boot that is ``cfg`` (the other platform-sharded
+    mechanism the wire can carry). It would hold D cards for one slot and then
+    serve it unsharded: a fraction of the tier that was sold, silently. A boot
+    refusal is the only thing that makes the hub re-pack.
     """
-    if topo.groups > 1 and topo.degree > 1:
-        raise TopologyError(
-            "topology_multi_group_sequence_unsupported",
-            f"{topo}: group placement derives the card from the group ORDINAL, "
-            f"which is only the rank-0 device at degree 1 — {topo.groups} "
-            f"degree-{topo.degree} groups would place weights on cards they do "
-            "not own (pgw#773); refusing at boot so the hub re-packs instead "
-            "of serving silently wrong",
-        )
+    if topo.degree <= 1 or topo.parallel == PARALLEL_SEQUENCE:
+        return
+    raise TopologyError(
+        "topology_group_parallel_unsupported",
+        f"{topo}: parallel={topo.parallel!r} has no degree-{topo.degree} "
+        "runtime in this worker — only 'sequence' shards a group's work. "
+        "Refusing at boot so the hub re-packs, rather than holding "
+        f"{topo.degree} cards per slot and serving one card's worth",
+    )

@@ -26,13 +26,14 @@ def _env(gpu_count: int, degree: int, parallel: str = "sequence") -> dict:
     return {"WORKER_EXECUTION_TOPOLOGY": json.dumps(body)}
 
 
-def test_multi_group_degree_is_refused_typed_at_boot() -> None:
-    # 4x H100 delivered as two degree-2 groups: a legal hub decision the
-    # process cannot serve yet. Must be a NAMED refusal, never a silent
-    # default-PG collision.
-    with pytest.raises(TopologyError) as exc:
-        delivered_topology(_env(4, 2), interconnect="nvlink")
-    assert exc.value.code == "topology_multi_group_sequence_unsupported"
+def test_multi_group_degree_is_served() -> None:
+    # 4x H100 delivered as two degree-2 groups: a legal hub decision, and now
+    # a SERVED one — per-group process groups (pgw#773/#774) plus
+    # topology-derived placement (the residual, see
+    # test_group_device_map_pgw773.py) leave nothing to refuse.
+    topo = delivered_topology(_env(4, 2), interconnect="nvlink")
+    assert (topo.groups, topo.degree) == (2, 2)
+    assert [topo.group(g).devices for g in range(2)] == [(0, 1), (2, 3)]
 
 
 def test_single_group_and_pure_dp_shapes_are_untouched() -> None:
@@ -56,6 +57,9 @@ def test_refusal_helper_is_exact() -> None:
     refuse_unless_groups_can_coexist(ExecutionTopology(4, 1))
     refuse_unless_groups_can_coexist(
         ExecutionTopology(2, 2, parallel="sequence"))
+    refuse_unless_groups_can_coexist(
+        ExecutionTopology(4, 2, parallel="sequence"))
+    # Reachable, and typed, for a degree this worker has no runtime for.
     with pytest.raises(TopologyError):
         refuse_unless_groups_can_coexist(
-            ExecutionTopology(4, 2, parallel="sequence"))
+            ExecutionTopology(4, 2, parallel="cfg"))
