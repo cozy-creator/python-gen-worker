@@ -76,6 +76,36 @@ class MarcoPolo:
         time.sleep(1800)
         return MarcoPoloOutput(response="unreachable")
 
+    def marco_polo_oom(
+        self, ctx: RequestContext, data: MarcoPoloInput
+    ) -> MarcoPoloOutput:
+        """pgw#763 stage 4: the UNCATCHABLE death, caused for real.
+
+        Allocates host RAM in 256MB touched chunks until the kernel's cgroup
+        OOM killer takes this process. There is no exception, no finally, and
+        no Python left to report it — which is the entire premise of the
+        control/compute split: the surviving control parent is the only thing
+        that can tell the hub which request died and keep the pod serving.
+
+        te#138's shape without te#138's call site (layer 2's host-RAM move
+        guard now refuses the oversized `.to("cpu")` typed, so a REAL cgroup
+        kill has to be provoked directly). Only reachable when
+        GEN_WORKER_OOM_PROBE=1 is set on the endpoint version, so no tenant
+        traffic can trip it.
+        """
+        if os.environ.get("GEN_WORKER_OOM_PROBE", "").strip() != "1":
+            raise ValidationError(
+                "marco-polo-oom is a pgw#763 resilience probe; it is refused "
+                "unless the endpoint version sets GEN_WORKER_OOM_PROBE=1")
+        ctx.log("pgw#763 OOM probe: allocating until the cgroup killer fires")
+        chunks = []
+        for i in range(4096):          # 1 TiB ceiling: the cgroup lands first
+            chunks.append(bytearray(256 * 1024 * 1024))
+            chunks[-1][::4096] = b"\x01" * (len(chunks[-1]) // 4096)  # touch
+            if i % 4 == 0:
+                ctx.log(f"pgw#763 OOM probe: {(i + 1) * 256} MB resident")
+        return MarcoPoloOutput(response="unreachable: the cgroup never fired")
+
     async def marco_polo_attach(
         self, ctx: RequestContext, data: MarcoAttachInput
     ) -> MarcoAttachOutput:
