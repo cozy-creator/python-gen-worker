@@ -382,14 +382,21 @@ def test_tenant_serves_at_serving_latency_during_mint_and_red_verifies(
             res, wall = await h_on.dispatch(f"r-{i}", aspect="16:9")
             assert res.status == pb.JOB_STATUS_OK, res.safe_message
             walls.append(wall)
-        assert max(walls) < 0.45, (
-            f"tenant latencies not at serving levels during mint: {walls}")
+        # pgw#795: anchored to the harness's OWN configured quantities rather
+        # than a 0.45s guess. If the tenant were serialized behind the mint it
+        # would wait out a seed unit; beating one is the property, and both
+        # numbers are induced sleeps, so neither moves with the runner.
+        assert max(walls) < h_on.seed_forward_s, (
+            f"tenant latencies not at serving levels during mint: {walls} "
+            f"(a seed unit is {h_on.seed_forward_s}s)")
         # runtime_ms never absorbs gate contention: the handler runs
         # ~tenant_forward_s, so reported runtime stays near it.
         results = [m.job_result for m in h_on.sent
                    if m.WhichOneof("msg") == "job_result"]
         assert results
-        assert all(r.metrics.runtime_ms < 300 for r in results)
+        assert all(
+            r.metrics.runtime_ms < h_on.seed_forward_s * 1000 for r in results), (
+            [r.metrics.runtime_ms for r in results], h_on.seed_forward_s)
         # The mint still finishes once the stream drains.
         await h_on.wait_mint()
         assert h_on.ex.serving_tiers() == {"generate": "compiled"}
@@ -456,7 +463,11 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
         assert wall >= 0.1
         # ...the wait is attributed, and runtime_ms excludes it.
         assert _stage_ms(res, "instance_gate_wait") >= 100
-        assert res.metrics.runtime_ms < 400
+        # pgw#795: the gate wait it must EXCLUDE is the compile it waited on,
+        # so that is the anchor — a runtime that absorbed the wait could not
+        # come in under it.
+        assert res.metrics.runtime_ms < h_on.compile_delay_s * 1000, (
+            res.metrics.runtime_ms, h_on.compile_delay_s)
         # th#1111 invariant survives the new pre-handler stage: the map
         # still closes against runtime_ms with a large gate wait present.
         from gen_worker.stage_timing import reconciliation

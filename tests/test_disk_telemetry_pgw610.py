@@ -205,9 +205,14 @@ def test_state_delta_never_blocks_event_loop_on_a_stalled_mount(
             "to_thread call")
         # Meanwhile _state_delta() (the hot path) must also stay non-
         # blocking and cheap: it only reads the (still-empty) cache.
-        t0 = time.monotonic()
+        # pgw#795: the proof is STRUCTURAL, not a 0.1s budget — the hot path
+        # answered while the 5s statvfs was demonstrably still running, which
+        # is the property, and is true at any runner speed. A wall-clock
+        # budget here asserts the runner's scheduler instead.
         report = store.disk_usage_report()
-        assert time.monotonic() - t0 < 0.1
+        assert not refresh_task.done(), (
+            "the stalled measurement finished first — this no longer proves "
+            "the hot path skipped it")
         assert report == pb.DiskUsageReport()
 
         await heartbeat_task

@@ -42,6 +42,8 @@ from gen_worker import RequestContext, Resources, endpoint, worker_function
 from gen_worker import cpu_budget, video_encode
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
+
+from harness.progress_wait import Cadence, await_count
 from gen_worker.registry import extract_specs
 from gen_worker.topology import ENV_VAR, ExecutionTopology
 
@@ -317,10 +319,19 @@ def test_the_semaphore_actually_admits_two_per_group(
     workers = [threading.Thread(target=_hold, daemon=True) for _ in range(8)]
     for w in workers:
         w.start()
-    deadline = time.monotonic() + 5.0
-    while len(held) < 8 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # pgw#795: holders arriving is the progress signal; the give-up is "no
+    # holder has arrived in a staleness window", not a 5s budget for eight
+    # thread starts on a shared runner.
     try:
+        await_count(
+            lambda: len(held), 8,
+            what="permit holders (2 per group at G=4)",
+            cadence=Cadence(),
+            gone=lambda: (
+                None if any(w.is_alive() for w in workers)
+                else "every holder thread exited"
+            ),
+        )
         assert len(held) == 8, "8 = 2 per group at G=4; a flat 2 would block 6"
     finally:
         done.set()

@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#795 (sweep + guard) — the anti-pattern is now detected, not remembered.**
+  `test_magic_timeouts_gw666`'s guard pinned five NAMED constants in five NAMED
+  `src/` files, so it missed this twice over: it never looked at `tests/`, and a
+  freshly-invented wall clock walks past a regression pin even in `src/`. "Tests
+  are exempt" does not survive the evidence — the publish workflow runs
+  `pytest tests/` as the gate on every PyPI upload, so a test that fails on the
+  runner's mood is a release-blocking defect (three publish jobs, each ~4.6 h
+  queued and ~22 min run, three lanes blocked). Three kinds of fixed duration in
+  tests remain legitimate and are NOT flagged: induced durations (the fake
+  handler's sleep IS the stimulus), absence probes (`timeout=2.0` inside
+  `except TimeoutError`, whose expiry makes the test PASS), and hang bounds with
+  an order of magnitude of headroom. The flagged shape is the fourth: a fixed
+  duration whose EXPIRY FAILS the test.
+
+  Guards added: `tests/harness/` may hold no fixed deadline at all (one there is
+  one in ~37 files), and the remaining sites in test modules — 6 deadline waits,
+  5 elapsed-vs-constant assertions — are pinned as burn-down inventories that may
+  shrink but not grow. Fixed in this pass: `disk_usage_report` proves it skipped
+  the stalled statvfs structurally (`refresh_task` still pending) instead of by a
+  0.1s budget; `_close_sequence_group` proves it returned before the 0.5s close
+  finished instead of by a 0.4s budget; pgw#677's tenant-latency budgets anchor to
+  the harness's own `seed_forward_s` / `compile_delay_s` instead of 0.45s / 300ms
+  / 400ms; and the auth-retry and permit-holder waits count progress through
+  `await_count`.
+
 ## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, the benchmark telemetry is connected, and the suite stops asserting the runner
 
 - **th#1330 (th#1316 worker half) — a `disk_ref` the hub's own resolutions have

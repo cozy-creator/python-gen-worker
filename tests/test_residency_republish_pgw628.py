@@ -56,8 +56,8 @@ def _count_on_disk(conn: Conn) -> int:
 def _wait_on_disk_count(conn: Conn, harness: WorkerHarness, want: int) -> float:
     """Wait for ``want`` ON_DISK re-reports — on PROGRESS, never on a clock.
 
-    pgw#795: this wait used to be ``deadline = time.monotonic() + 15.0``, and
-    on 2026-07-30 it failed the v0.78.0 publish job twice, after seeing 2 of 3
+    pgw#795: this wait used to be a fixed 15-second deadline, and on
+    2026-07-30 it failed the v0.78.0 publish job twice, after seeing 2 of 3
     re-reports. The deadline was the messenger (see ``_MODEL_REF`` for the
     disease), and a wall clock is a bad messenger: it reports "slow" for
     everything, including "this can never happen now". What ends the wait now
