@@ -17,6 +17,16 @@ from typing import Any, Dict, List, Optional
 
 import msgspec
 
+from .hardware_report_hub import closed_port_addr
+
+#: An unroutable RFC 5737 TEST-NET-1 address: a dial to it is SILENT, so the
+#: caller pays the boot's full hardware-report budget (~7s: two 3s RPC deadlines
+#: plus backoff) before the process exits. That is the right stimulus for a test
+#: whose subject is "an unreachable, silent hub does not hang the boot", and
+#: pure waste for one whose subject is the startup phase contract — pgw#796
+#: measured it at 7.0s of each 13.9s boot, paid three times over.
+BLACKHOLE_ADDR = "192.0.2.1:1"
+
 
 def write_manifest(path: Path, functions: List[Dict[str, Any]]) -> None:
     path.write_bytes(msgspec.toml.encode({"functions": functions}))
@@ -46,11 +56,11 @@ def run_entrypoint(
     env = {
         "PATH": "/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
-        # Unroutable (RFC 5737 TEST-NET-1): any escape to the network hello
-        # connects fail-fast/hangs rather than reaching a real host — the
-        # timeout is the backstop, but reaching here at all already fails
-        # the assertions below.
-        "ORCHESTRATOR_PUBLIC_ADDR": "192.0.2.1:1",
+        # Nothing is listening here (bind, read port, close): any escape to the
+        # network hello is REFUSED instantly, and reaching it at all already
+        # fails the assertions below. Callers whose subject is a silent hub pass
+        # ``BLACKHOLE_ADDR`` explicitly.
+        "ORCHESTRATOR_PUBLIC_ADDR": closed_port_addr(),
         "TENSORHUB_CACHE_DIR": str(tmp_path / "cache"),
         "ENDPOINT_LOCK_PATH": str(manifest_path),
         # gw#640: the supervisor's boot record must not be shared between runs
