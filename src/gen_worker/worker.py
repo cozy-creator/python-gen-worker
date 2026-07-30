@@ -100,6 +100,11 @@ class Worker:
         if not (settings.orchestrator_public_addr or "").strip():
             raise ValueError("Settings.orchestrator_public_addr is required")
         self.settings = settings
+        # pgw#763: an endpoint-authored oversized `.to("cpu")` becomes a typed
+        # job error instead of a cgroup OOM SIGKILL of the whole worker.
+        from .host_move_guard import install as _install_host_move_guard
+
+        _install_host_move_guard()
         # pgw#748 / th#1285: the delivered `G×D` packing. Absent env == one
         # slot, which is every pod that exists today. A malformed one is a
         # typed refusal raised here — booting one slot on a pod the hub is

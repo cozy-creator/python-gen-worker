@@ -305,3 +305,29 @@ class ChildCallTimeoutError(ChildCallError):
         super().__init__(
             f"child request {self.request_id} did not finish within {self.timeout_s:.0f}s"
         )
+
+
+class HostRamMoveRefusedError(WorkerError):
+    """pgw#763: a ``module.to("cpu")`` that cannot fit the container's RAM
+    budget, refused BEFORE allocating. Host-RAM exhaustion is a cgroup SIGKILL
+    (uncatchable — te#138 lost a worker to one endpoint line), so the only
+    honest failure is this typed error before the copy starts. Maps FATAL on
+    the wire under this class label."""
+
+    def __init__(
+        self, *, incoming_bytes: int, available_bytes: int,
+        floor_bytes: int, limit_bytes: int | None,
+    ) -> None:
+        self.incoming_bytes = int(incoming_bytes)
+        self.available_bytes = int(available_bytes)
+        self.floor_bytes = int(floor_bytes)
+        self.limit_bytes = limit_bytes
+        gib = float(1 << 30)
+        limit = f"{limit_bytes / gib:.1f}GiB" if limit_bytes else "uncapped"
+        super().__init__(
+            f"host-RAM move refused: ~{incoming_bytes / gib:.1f}GiB of weights "
+            f"into {available_bytes / gib:.1f}GiB available (floor "
+            f"{floor_bytes / gib:.1f}GiB, cgroup limit {limit}); completing it "
+            f"would OOM-kill the worker. Free the model instead of copying it "
+            f"to CPU (del + cleanup), or run on a pod with more host RAM"
+        )
