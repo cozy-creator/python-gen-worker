@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **pgw#783 — the process split generalises to N execution groups: the parent supervises
+  one compute child PER GPU (flag `GEN_WORKER_PROCESS_SPLIT` still default-OFF).** pgw#782
+  measured that one CPython process cannot multiplex N GPUs (four groups in one interpreter
+  served 0.94x of serial at 21% per card; four PROCESSES one group each served **4.00x** at
+  91-93%), so the child of pgw#763's split is the EXECUTION GROUP. `ParentControl` now holds
+  one `_ChildSlot` per group; each child is a single-group worker scoped to its own cards
+  (`CUDA_VISIBLE_DEVICES`), with its own CUDA context, inductor cache and mint. The parent
+  routes each dispatch to the group owning the hub-picked rank-0 device (rewriting `gpu_index`
+  to the child-local 0; a mis-dispatch is refused, never floored), and aggregates N children
+  into ONE worker the hub sees: `available_functions`/residency UNION, `state_delta` merged,
+  `activity_update`/`fn_unavailable`/`fn_degraded` reconciled to a single worker-level truth,
+  one parent-originated beat, per-group liveness/watchdog so a single child's death is
+  attributed to ITS request and respawns ITS group while siblings serve. Per-group resource
+  correctness: the CPU intra-op divisor is `groups x host_siblings()`, the host-RAM guard/floor
+  divide the cgroup by the sibling count, each child gets its own inductor/triton dir, a
+  cross-process `flock` dedups a CAS fetch across children, and `PR_SET_PDEATHSIG` makes every
+  child die with the parent so a crashed group cannot strand VRAM. `worker_session_id` is now
+  parent-minted (survives child respawns; a latent defect even at G=1). **At G=1 the whole thing
+  is byte-identical to the pgw#763 single-child parent** — every worker-level aggregation point
+  takes an explicit `groups==1` fast path, and the pgw#763 procsplit integration suite passes
+  unchanged. The 4x is proven in the two/four-process arms of pgw#782; a live 4xGPU
+  demonstration of the split driving them is the remaining acceptance. Merges dark; the
+  default-on decision is deferred.
+
 - **pgw#763 driver 3 — the process split becomes an AUTHORIZATION boundary, not just a
   fault boundary (flag still default-OFF).** Stages 1-4 built the parent/child seam for
   resilience; the premise of the whole design is that tenant endpoint code is imported into
