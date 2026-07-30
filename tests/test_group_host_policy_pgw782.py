@@ -46,7 +46,10 @@ from gen_worker.registry import extract_specs
 from gen_worker.topology import ENV_VAR, ExecutionTopology
 
 GROUPS = 4
-CALL_S = 0.35
+#: The four handlers rendezvous instead of sleeping a fixed time: "all four
+#: were inside the model call at once" is then a fact, not a wall-clock
+#: inference that a loaded box can flake.
+BARRIER_TIMEOUT_S = 5.0
 
 
 @pytest.fixture(autouse=True)
@@ -88,8 +91,11 @@ class _GroupHarness:
     def __init__(self, tmp_path: Path) -> None:
         # (gpu_index, start, end) per model call, from inside the handler.
         self.calls: List[Tuple[int, float, float]] = []
+        # Which groups met all their siblings INSIDE the model call.
+        self.rendezvous: List[int] = []
         self.sent: List[pb.WorkerMessage] = []
         lock = threading.Lock()
+        barrier = threading.Barrier(GROUPS)
         harness = self
 
         @endpoint(resources=Resources(gpu=False))
@@ -99,14 +105,23 @@ class _GroupHarness:
 
             @worker_function()
             def generate(self, ctx: RequestContext, payload: _In) -> _Out:
+                group = int(payload.prompt)
                 t0 = time.monotonic()
-                # Real work would be kernel launches; a sleep is the honest
-                # stand-in for "this call occupies its group for a while".
-                time.sleep(CALL_S)
+                # Real work would be kernel launches. The rendezvous stands in
+                # for "this call occupies its group" AND proves concurrency
+                # without a timing assumption: it can only trip if all four
+                # groups are inside the model call simultaneously. A serialized
+                # executor breaks the barrier instead (that is the RED tape).
+                try:
+                    barrier.wait(timeout=BARRIER_TIMEOUT_S)
+                    met = True
+                except threading.BrokenBarrierError:
+                    met = False
                 with lock:
-                    harness.calls.append(
-                        (int(payload.prompt), t0, time.monotonic()))
-                return _Out(group=int(payload.prompt))
+                    harness.calls.append((group, t0, time.monotonic()))
+                    if met:
+                        harness.rendezvous.append(group)
+                return _Out(group=group)
 
         self.specs = extract_specs(GroupEndpoint)
         (self.spec,) = [s for s in self.specs if s.name == "generate"]
@@ -149,15 +164,14 @@ def _max_overlap(calls: List[Tuple[int, float, float]]) -> int:
 
 def test_four_groups_model_calls_overlap(tmp_path: Path) -> None:
     h = _GroupHarness(tmp_path)
-    t0 = time.monotonic()
     results = asyncio.run(h.burst())
-    wall = time.monotonic() - t0
 
     assert [int(r.status) for r in results] == [pb.JOB_STATUS_OK] * GROUPS
     assert sorted(g for g, _s, _e in h.calls) == list(range(GROUPS))
+    # The rendezvous tripped: all four groups were inside the model call at the
+    # same instant. No wall-clock threshold, so a loaded box cannot flake it.
+    assert sorted(h.rendezvous) == list(range(GROUPS)), h.rendezvous
     assert _max_overlap(h.calls) == GROUPS, h.calls
-    # Concurrent, not queued: four 0.35 s calls inside well under 4 x 0.35 s.
-    assert wall < CALL_S * GROUPS * 0.75, wall
     # Four groups => four instances, and each key carries its ordinal.
     ordinals = sorted(
         next((int(p[1]) for p in key[2:]
@@ -180,6 +194,8 @@ def test_four_groups_serialize_if_the_group_leaves_instance_identity(
     results = asyncio.run(h.burst())
 
     assert [int(r.status) for r in results] == [pb.JOB_STATUS_OK] * GROUPS
+    # Nobody met a sibling: the four calls took turns.
+    assert h.rendezvous == [], h.rendezvous
     assert _max_overlap(h.calls) == 1, h.calls
     assert len(h.ex._classes) == 1
 
