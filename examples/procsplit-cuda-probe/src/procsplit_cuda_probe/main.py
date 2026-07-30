@@ -16,7 +16,7 @@ import os
 from typing import List
 
 import msgspec
-from gen_worker import RequestContext, Resources, ValidationError, endpoint
+from gen_worker import NoWarmup, RequestContext, Resources, ValidationError, endpoint
 
 
 class ProbeInput(msgspec.Struct):
@@ -60,6 +60,12 @@ def _cuda_or_refuse():
     # attempt: `[compute-class] resolved function=cuda-probe class=cpu`, then
     # the handler correctly refused with "requires a CUDA device".
     resources=Resources(gpu=True),
+    # The platform BOOT-WARMS every declared function, and it warmed
+    # `cuda_oom` — which allocated host RAM until the kernel killed the
+    # child before a single request was served. GEN_WORKER_OOM_PROBE gates
+    # TENANT traffic; it does not gate the platform's own warmup, so an
+    # env gate alone cannot keep a deliberately-fatal probe safe.
+    warmup=NoWarmup(reason="pgw#763 resilience probe: cuda_oom deliberately dies; warming it kills the pod at boot"),
     # th#1087 declaration gate — see marco-polo's note: GEN_WORKER_PROCESS_SPLIT
     # should be platform-reserved, not tenant-declared.
     env=["GEN_WORKER_OOM_PROBE", "GEN_WORKER_PROCESS_SPLIT"],
