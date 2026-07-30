@@ -257,13 +257,12 @@ def _put_one(
 
 
 class _put_slot:
-    def __enter__(self):
+    def __enter__(self) -> "_put_slot":
         _put_slots.acquire()
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> None:
         _put_slots.release()
-        return False
 
 
 def upload_grants(
