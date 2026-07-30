@@ -4,7 +4,17 @@
 
 > ### ⚠ 0.78.0 SHIPS A DEFECT THAT MAKES CHUNKED CHECKPOINTS UNRESOLVABLE — cut the next release promptly
 >
-> `models/hub_client._parse_chunks` in 0.78.0 requires a `url` INSIDE each chunk
+> **TWO defects, both live on chaos AND master (both at 0.78.0).**
+>
+> **(1) The vendored proto is STALE, so the PRODUCTION gRPC path cannot carry a
+> v2 snapshot at all.** th#1303 checkpoint 3 added `digest`, `chunk_size_bytes`
+> and `chunks` to `worker_scheduler.proto` and regenerated only the Go side;
+> 0.78.0's `SnapshotFile` stub has fields `['path','size_bytes','blake3','url']`
+> and no `ChunkRef` message. Production workers receive snapshots over gRPC, so
+> every v2 snapshot arrives with no digest and no chunks and the worker refuses
+> the model. Fail-closed, but wholly dark.
+>
+> **(2)** `models/hub_client._parse_chunks` in 0.78.0 requires a `url` INSIDE each chunk
 > object. The hub cannot put one there: `chunks: [{digest, len}]` IS the
 > content-addressed manifest identity, so resolve-time URLs ride in a SEPARATE
 > index-aligned `chunk_urls: []`. Against a real hub, EVERY chunked (>64 MiB)
@@ -12,6 +22,21 @@
 > `resolve_repo` refuses it. Fixed below. Impact is bounded only because no v2
 > artifact is in production yet — it lands the moment one is. Whole files and
 > every v1/blake3 checkpoint are unaffected.
+
+- **pgw#781 / th#1303 — the vendored proto is synced and the stubs regenerated.**
+  `SnapshotFile` now matches the hub byte-for-byte and `ChunkRef{sha256,url,len}`
+  exists. ADDITIVE (fields 5/6/7 on an existing message; `blake3`=3 and `url`=4
+  untouched), so this is not a protocol break and needs no th#1282 floor bump.
+  `_snapshot_to_resolved` drops its `getattr(f, "digest", "")` defaults for
+  direct field access: reading a possibly-absent proto field with a default is
+  how "the stub does not have this field" became "the hub sent an empty value",
+  which is the same absent-becomes-empty class as guarding a digest check on a
+  legacy field's truthiness. A missing field is now an AttributeError at the
+  wire boundary. Guarded by tests that assert the STUB's fields (naming
+  `task proto` in the failure) and one that drives the real conversion over a
+  real protobuf message with three chunks — the previous tests all built the
+  dataclass directly and so never crossed the wire, which is why this survived a
+  green suite.
 
 - **pgw#781 / th#1303 — the live acceptance, and the three defects it found.**
   `v2 publish -> promoted -> resolve -> worker fill -> byte-identical` now runs
