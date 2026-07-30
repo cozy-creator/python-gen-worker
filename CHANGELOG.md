@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **pgw#773 residual / pgw#748 — multi-group sequence parallelism is SERVED, and proven on
+  four real H100s.** A group's cards now come from the delivered topology instead of the group
+  ordinal (at degree D group `g` owns `[g*D, (g+1)*D)`, so on a `2x2` pod group 1 owns cards 2-3
+  while the old helper pinned card 1 — group 0's follower card, silently, on every load-thread
+  hop). With that, the `G>1 ∧ D>1` boot refusal is lifted for `sequence`; it stays typed and
+  reachable for a degree>1 group whose sharding nothing here installs (`cfg`).
+
+  Live acceptance on 4xH100-80GB-HBM3 SXM (NVLink `NV18`, real Wan2.2-A14B transformer,
+  32,760 tokens / 40 heads): degree 2 **1.80x**, degree 4 **3.42x**, and two concurrent degree-2
+  groups at **1.71x / 1.70x** each — every arm **bit-identical** to degree 1 at the same seed
+  (`max|Δ| = 0.0` in fp64, 0 of 2,096,640 elements differ). Group 1's weights landed on card 2.
+
+  Found live and fixed on the way: NCCL enables NVLink SHARP (NVLS) multicast by default on
+  NVSwitch hosts and our containers cannot bind it, so EVERY SP collective died with
+  `ncclUnhandledCudaError ... CUDA error 401`. `init_rank` now decides `NCCL_NVLS_ENABLE=0`
+  before any communicator exists; Ulysses is all-to-all, which NVLS does not accelerate.
+
+  Found live and NOT fixed (pgw#792, filed): killing a rank mid-call does not fail the group
+  typed — the collective runs to the full 300 s ceiling and NCCL then takes the worker process
+  down. Evidence and the re-runnable probe: `~/cozy/samples/spaccept/`.
+
 - **th#1322** — compile duration is a NUMBER on the wire, for both mint routes.
   `ActivityUpdate.duration_ms` (proto field 17) carries the worker's own
   monotonic span, and a new typed `jit_compile` event gives the JIT path the same
