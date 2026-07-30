@@ -487,7 +487,7 @@ class ParentControl:
                 return
             # delta 4: the parent DECIDES on the per-job grant before it
             # reaches tenant code — forward, or withhold and refuse.
-            if not await self._authorize_run_job(run, msg):
+            if not await self._authorize_run_job(run):
                 return
             key = (run.request_id, run.attempt)
             # delta 3: what the parent watched, recorded BEFORE the job exists
@@ -660,9 +660,7 @@ class ParentControl:
 
     # ---- per-job capability policy (delta 4) -----------------------------
 
-    async def _authorize_run_job(
-        self, run: pb.RunJob, msg: pb.SchedulerMessage,
-    ) -> bool:
+    async def _authorize_run_job(self, run: pb.RunJob) -> bool:
         """Decide on this job's capability token. False = refused, not relayed.
 
         A per-job, short-TTL, least-authority grant is the one credential the
@@ -858,9 +856,10 @@ class ParentControl:
     def _narrow_job_scoped_action(
         self, action: "actions.HubAction", body: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Hook for the per-job authority policy (delta 4). Delta 1 enforces the
-        one check that needs no token parsing: the parent will not renew a
-        capability for a request it never dispatched."""
+        """The narrowing that needs PARENT STATE rather than a path pattern:
+        the parent will not renew a capability for a request it never
+        dispatched. A path allowlist alone would have forwarded it and left the
+        hub to decide with less context than the parent has."""
         if action.name != "capability.renew":
             return body
         rid = str(body.get("request_id") or "")
