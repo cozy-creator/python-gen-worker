@@ -12,11 +12,12 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 from .cozy_cas import _blake3_file, _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
 from .download import components_present, select_component_paths
+from .errors import PickleWeightRefused
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
 from .. import activity as _activity
@@ -227,6 +228,28 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 # shape — each wire boundary parses into it; no dict-or-object duck typing).
 # ---------------------------------------------------------------------------
 
+# pgw#782 / th#1313: pickle serialisation formats a worker REFUSES to
+# materialize, mirroring tensorhub's publish-time ban
+# (catalog.PickleWeightExtensions). Defence in depth, and the depth is the
+# point: the hub now refuses these at publish, but blobs already in the shared
+# CAS predate that refusal, and a worker is where unpickling would actually
+# execute — `torch.load` / `from_pretrained` on a hostile `.bin` runs the
+# attacker's code inside a pod holding our hub credentials and other tenants'
+# work. Refusing at RESOLVE means the bytes are never even downloaded.
+#
+# Paul, 2026-07-30: "definitely ban all of these."
+PICKLE_WEIGHT_EXTENSIONS = (".bin", ".ckpt", ".pt", ".pth", ".pkl", ".pickle")
+
+
+def first_pickle_weight_path(paths: Iterable[str]) -> str:
+    """First path naming a pickle serialisation format, or "" if none."""
+    for raw in paths:
+        base = (raw or "").strip().lower().rsplit("/", 1)[-1]
+        if base.endswith(PICKLE_WEIGHT_EXTENSIONS):
+            return raw
+    return ""
+
+
 def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> WorkerResolvedRepo:
     """Normalize digest prefixes and reject unusable manifests."""
     snapshot_digest = (resolved.snapshot_digest or "").strip()
@@ -256,6 +279,13 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
 
     if not files:
         raise ValueError("resolved model has empty files list")
+
+    if bad := first_pickle_weight_path(f.path for f in files):
+        raise PickleWeightRefused(
+            f"refusing snapshot {snapshot_digest[:16]} of {ref.canonical()}: "
+            f"{bad!r} is a pickle-format weight. Unpickling executes arbitrary "
+            f"code in this process; republish the repo with safetensors."
+        )
 
     return WorkerResolvedRepo(snapshot_digest=snapshot_digest, files=files)
 
