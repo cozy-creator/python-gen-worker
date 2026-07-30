@@ -365,4 +365,27 @@ def delivered_topology(
             "not have)", interconnect or "", topo, demoted,
         )
         return demoted
+    refuse_unless_groups_can_coexist(topo)
     return topo
+
+
+def refuse_unless_groups_can_coexist(topo: ExecutionTopology) -> None:
+    """pgw#773: refuse ``groups>1 AND degree>1`` by name.
+
+    The hub is already allowed to deliver ``gpu_count=4, group_degree=2``,
+    but every rank-0 lives in the ONE worker process and the current rank
+    plumbing installs the DEFAULT torch.distributed process group — so the
+    second group's broadcasts land in the first group's world: group 0's
+    follower executes group 1's calls and group 1's follower parks forever.
+    Silent corruption. Until per-group non-default process groups are
+    live-proven on NCCL, this is a typed boot refusal the hub can re-pack
+    against, never a wedge.
+    """
+    if topo.groups > 1 and topo.degree > 1:
+        raise TopologyError(
+            "topology_multi_group_sequence_unsupported",
+            f"{topo}: {topo.groups} degree-{topo.degree} execution groups in "
+            "one worker process would share one default process group and "
+            "corrupt each other's collectives (pgw#773); refusing at boot so "
+            "the hub re-packs instead of serving silently wrong",
+        )
