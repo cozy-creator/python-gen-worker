@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import json
 import logging
 import os
 import shlex
@@ -87,6 +88,9 @@ _CHILD_FORBIDDEN_ENVS = ("WORKER_JWT",)
 # A mediated hub call must not hold the parent's control loop open forever.
 _ACTION_HARD_TIMEOUT_S = 120.0
 _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
+# The host canary is a real benchmark (memcpy/D2H/CPU); on a cold pod with a
+# large card it is seconds, not milliseconds. Generous, and bounded.
+_MEASURE_TIMEOUT_S = 180.0
 
 
 def _http_call(
@@ -130,6 +134,7 @@ class ParentControl:
         child_cmd: Optional[List[str]] = None,
         child_env: Optional[Dict[str, str]] = None,
         socket_path: Optional[str] = None,
+        measure_cmd: Optional[List[str]] = None,
         respawn_backoff_base_s: float = _DEFAULT_RESPAWN_BACKOFF_BASE_S,
         respawn_backoff_cap_s: float = _DEFAULT_RESPAWN_BACKOFF_CAP_S,
         start_limit_burst: int = _DEFAULT_START_LIMIT_BURST,
@@ -245,6 +250,100 @@ class ParentControl:
         # the HelloAck it relays — the CHILD never names a host.
         self._file_base_url = ""
         self._identity_cache: Optional[Tuple[str, str]] = None
+        # delta 2: the parent's own pre-import host measurement.
+        self._measure_cmd = list(
+            measure_cmd
+            if measure_cmd is not None
+            else [sys.executable, "-m", "gen_worker.procsplit.measure"]
+        )
+        self._measurement: Optional[Dict[str, Any]] = None
+        self._measured = asyncio.Event()
+        self._measure_task: Optional[asyncio.Task] = None
+
+    # ---- hardware + canary (parent-owned, PRE-IMPORT) ---------------------
+
+    async def _measure_host(self) -> None:
+        """Measure the silicon in a process that has imported no tenant code.
+
+        Runs once, at boot, concurrently with the first child spawn — the child
+        cannot produce a Hello before this finishes anyway (it has models to
+        find), so the measurement is off the critical path in practice and
+        bounded here regardless.
+        """
+        cmd = list(self._measure_cmd)
+        env = dict(os.environ)
+        for name in _CHILD_FORBIDDEN_ENVS:
+            env.pop(name, None)   # it measures hardware; it needs no credential
+        env.pop(ENV_CHILD, None)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, env=env, stdout=asyncio.subprocess.PIPE,
+            )
+            raw, _ = await asyncio.wait_for(
+                proc.communicate(), _MEASURE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "host measurement did not finish within %.0fs; the Hello will "
+                "ship without parent-measured resources", _MEASURE_TIMEOUT_S,
+            )
+            return
+        except Exception:
+            logger.warning("host measurement subprocess failed", exc_info=True)
+            return
+        finally:
+            self._measured.set()
+        try:
+            self._measurement = json.loads(raw.decode() or "{}")
+        except ValueError:
+            logger.warning("host measurement produced no usable JSON")
+            return
+        hw = self._measurement.get("hardware") or {}
+        logger.info(
+            "parent-measured host: gpu=%s x%s sm=%s torch=%s canary=%s "
+            "(measured before any endpoint import)",
+            hw.get("gpu_name") or "-", hw.get("gpu_count") or 0,
+            hw.get("gpu_sm") or "-", hw.get("torch_version") or "-",
+            "yes" if self._measurement.get("canary") else "no",
+        )
+
+    def _parent_resources(self) -> Optional[pb.WorkerResources]:
+        """``Hello.resources`` built from the PARENT's own measurement."""
+        m = self._measurement
+        if m is None:
+            return None
+        hw = m.get("hardware") or {}
+        canary = None
+        c = m.get("canary")
+        if isinstance(c, dict):
+            canary = pb.HostCanary(
+                memcpy_gbps=float(c.get("memcpy_gbps") or 0.0),
+                d2h_gbps=float(c.get("d2h_gbps") or 0.0),
+                pinned_alloc_ok=bool(c.get("pinned_alloc_ok")),
+                cpu_single_mbps=float(c.get("cpu_single_mbps") or 0.0),
+                cpu_multi_mbps=float(c.get("cpu_multi_mbps") or 0.0),
+                vcpus=int(c.get("vcpus") or 0),
+                ram_total_gb=float(c.get("ram_total_gb") or 0.0),
+                duration_ms=int(c.get("duration_ms") or 0),
+                interconnect=str(c.get("interconnect") or ""),
+                peer_gbps=float(c.get("peer_gbps") or 0.0),
+                peer_access=bool(c.get("peer_access")),
+                topo_link=str(c.get("topo_link") or ""),
+            )
+        return pb.WorkerResources(
+            host_canary=canary,
+            gpu_count=int(hw.get("gpu_count") or 0),
+            vram_total_bytes=int(hw.get("gpu_total_mem") or 0),
+            gpu_name=str(hw.get("gpu_name") or ""),
+            gpu_sm=str(hw.get("gpu_sm") or ""),
+            torch_version=str(hw.get("torch_version") or ""),
+            installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
+            gen_worker_version=str(m.get("gen_worker_version") or ""),
+            # Platform-delivered facts: they identify the pod to the hub, so
+            # they belong to the process holding the pod's credential.
+            image_digest=self._settings.worker_image_digest,
+            instance_id=self._settings.runpod_pod_id or "",
+        )
 
     # ---- identity (parent-owned) -----------------------------------------
 
@@ -278,6 +377,13 @@ class ParentControl:
         """Fetch the CHILD's fresh Hello, then merge the parent's durable
         pending-result keys so the hub's in-flight reconcile sees results that
         outlived a child (or a stream)."""
+        # delta 2: never assemble a Hello before the parent's own measurement
+        # has had its chance — a first Hello that shipped the child's numbers
+        # would be exactly the forgery this closes, arriving once per boot.
+        try:
+            await asyncio.wait_for(self._measured.wait(), _MEASURE_TIMEOUT_S + 5.0)
+        except asyncio.TimeoutError:
+            pass
         while True:
             link = self._link
             if link is not None:
@@ -303,6 +409,23 @@ class ParentControl:
                     hello.worker_id = worker_id
                 if release_id:
                     hello.release_id = release_id
+                # delta 2: and the HARDWARE the Hello asserts. Every field here
+                # is a fleet-wide verdict key (th#1310) — HardwareUnsuitable
+                # machine fences, HostCanary SKU condemnation, the gpu_name that
+                # chooses which key gets written — and the child measured them
+                # after importing tenant code. Replace, don't merge: a partial
+                # overwrite leaves whichever axis we forgot forgeable.
+                resources = self._parent_resources()
+                if resources is not None:
+                    hello.resources.CopyFrom(resources)
+                elif hello.HasField("resources"):
+                    logger.error(
+                        "no parent-side host measurement is available; DROPPING "
+                        "the child's self-reported resources rather than "
+                        "relaying tenant-reachable numbers the fleet condemns "
+                        "SKUs on (pgw#763 delta 2 / th#1310)"
+                    )
+                    hello.ClearField("resources")
                 if self._beat_interval <= 0 and hello.heartbeat_interval_ms > 0:
                     # The child's own promise is the cadence the parent keeps.
                     self._beat_interval = hello.heartbeat_interval_ms / 1000.0
@@ -1292,6 +1415,11 @@ class ParentControl:
         server = await asyncio.start_unix_server(
             self._on_child_connect, path=self._socket_path
         )
+        # delta 2: measure the host BEFORE any endpoint import can have
+        # happened — the first child has not been spawned yet.
+        self._measure_task = asyncio.create_task(
+            self._measure_host(), name="parent-measure"
+        )
         transport_task = asyncio.create_task(self.transport.run(), name="parent-transport")
         child_task = asyncio.create_task(self._child_loop(), name="parent-child-loop")
         watchdog_task = asyncio.create_task(self._watchdog_loop(), name="parent-watchdog")
@@ -1359,7 +1487,8 @@ class ParentControl:
                     pass
             self.transport.stop()
             tasks = [transport_task, child_task, watchdog_task, beat_task]
-            for extra in (self._stop_deadline_task, self._liveness_task):
+            for extra in (self._stop_deadline_task, self._liveness_task,
+                          self._measure_task):
                 if extra is not None:
                     tasks.append(extra)
             for t in tasks:

@@ -17,6 +17,14 @@ Behaviour is chosen by PGW763_FAKE_MODE:
                   : write one JobResult on connect and exit 0 immediately, so
                     the parent owns a durable result it can never ship (the
                     stream needs a Hello this child never answers).
+  forge_hello     : pgw#763 delta 1+2. Answers T_HELLO_REQ with a Hello that
+                    lies about everything a compute child must not be trusted
+                    to assert: another worker's id and release, a fabricated
+                    gpu_name/gpu_sm/VRAM, and a HostCanary of invented floats.
+                    Tenant code reaches the real child's Hello builder, so this
+                    is a faithful stand-in for what it could send — and each of
+                    these values is a FLEET-WIDE verdict key (th#1310), not a
+                    per-pod cosmetic.
 """
 
 from __future__ import annotations
@@ -36,7 +44,43 @@ MODE = os.environ.get("PGW763_FAKE_MODE", "result_then_die")
 WORKER_ID = os.environ.get("PGW763_WORKER_ID", "split-fake-child")
 
 
+FORGED_WORKER_ID = "victim-worker-0000"
+FORGED_RELEASE_ID = "victim-release-0000"
+FORGED_GPU_NAME = "NVIDIA H200-141GB"
+FORGED_VRAM_BYTES = 141 * (1 << 30)
+FORGED_MEMCPY_GBPS = 999.0
+
+
 def _hello() -> pb.Hello:
+    if MODE == "forge_hello":
+        return pb.Hello(
+            worker_id=FORGED_WORKER_ID,
+            release_id=FORGED_RELEASE_ID,
+            protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+            resources=pb.WorkerResources(
+                gpu_count=8,
+                vram_total_bytes=FORGED_VRAM_BYTES,
+                gpu_name=FORGED_GPU_NAME,
+                gpu_sm="90",
+                torch_version="9.9.9",
+                gen_worker_version="0.0.0-forged",
+                image_digest="sha256:forged",
+                instance_id="pod-belonging-to-someone-else",
+                host_canary=pb.HostCanary(
+                    memcpy_gbps=FORGED_MEMCPY_GBPS,
+                    d2h_gbps=FORGED_MEMCPY_GBPS,
+                    cpu_single_mbps=FORGED_MEMCPY_GBPS,
+                    cpu_multi_mbps=FORGED_MEMCPY_GBPS,
+                    pinned_alloc_ok=True,
+                    vcpus=256,
+                    ram_total_gb=2048.0,
+                    interconnect="nvlink",
+                    peer_gbps=FORGED_MEMCPY_GBPS,
+                    peer_access=True,
+                    topo_link="NV18",
+                ),
+            ),
+        )
     return pb.Hello(
         worker_id=WORKER_ID,
         protocol_version=pb.PROTOCOL_VERSION_CURRENT,
@@ -66,6 +110,8 @@ async def main() -> int:
             return 0
         if ftype == frames.T_HELLO_REQ:
             await fw.frame(frames.T_HELLO, _hello().SerializeToString())
+            continue
+        if MODE == "forge_hello":
             continue
         if ftype != frames.T_SCHED:
             continue

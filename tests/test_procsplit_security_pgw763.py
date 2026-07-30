@@ -236,6 +236,139 @@ def _ask(pc, req: Dict[str, Any]) -> Tuple[int, str]:
 
 
 # ==========================================================================
+# DELTA 2 — hardware and the canary are measured by the PARENT, pre-import
+# ==========================================================================
+
+
+FAKE_CHILD = Path(__file__).resolve().parent / "harness" / "procsplit_fake_child.py"
+
+
+@pytest.fixture()
+def forging_split(tmp_path, captured_dials, monkeypatch):
+    """A hostile compute child: it answers the Hello request with fabricated
+    identity, silicon and canary numbers. The real child's Hello builder is
+    reachable by tenant code, so this is what that code could send."""
+    monkeypatch.setenv("WORKER_JWT", WORKER_JWT)
+    h = SplitHarness(
+        tmp_path,
+        child_cmd=[sys.executable, str(FAKE_CHILD)],
+        extra_child_env={"PGW763_FAKE_MODE": "forge_hello"},
+    )
+    h.pc._settings = msgspec.structs.replace(
+        h.pc._settings, worker_jwt=WORKER_JWT, worker_image_digest="sha256:real")
+    h.pc.transport._settings = h.pc._settings
+    try:
+        yield h
+    finally:
+        h.close()
+
+
+def test_delta2_parent_measurement_replaces_a_forged_hello(forging_split):
+    """THE ATTACK: the child reports the hardware and the boot canary.
+
+    Each of these is a fleet-wide verdict key — HardwareUnsuitable fences a
+    machine, HostCanary condemns a SKU on the SPFabricLedger, and gpu_name
+    chooses which key gets written — and they were measured in
+    `Lifecycle.build_resources`, i.e. AFTER `Worker.__init__` imported the
+    tenant's modules. The parent measures them in a subprocess that imports no
+    endpoint code and stamps its own numbers onto the Hello.
+    """
+    from harness.procsplit_fake_child import (  # type: ignore
+        FORGED_GPU_NAME,
+        FORGED_MEMCPY_GBPS,
+        FORGED_RELEASE_ID,
+        FORGED_VRAM_BYTES,
+        FORGED_WORKER_ID,
+    )
+
+    conn = forging_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    hello = conn.hello
+    assert hello is not None
+
+    # Identity (delta 1): asserted by the credential holder, not the child.
+    assert hello.worker_id != FORGED_WORKER_ID, (
+        "the child named another worker and the hub believed it"
+    )
+    assert hello.release_id != FORGED_RELEASE_ID
+
+    # Silicon + canary (delta 2): the parent's measurement, or nothing at all.
+    res = hello.resources
+    assert res.gpu_name != FORGED_GPU_NAME, (
+        f"gpu_name={res.gpu_name!r} came from the child — a forged SKU picks "
+        "the fleet-wide verdict key (th#1310)"
+    )
+    assert res.vram_total_bytes != FORGED_VRAM_BYTES
+    assert res.gpu_sm != "90"
+    assert res.torch_version != "9.9.9"
+    assert res.gen_worker_version != "0.0.0-forged"
+    assert res.host_canary.memcpy_gbps != FORGED_MEMCPY_GBPS, (
+        "a fabricated HostCanary reached the hub; it condemns SKUs"
+    )
+    assert res.host_canary.d2h_gbps != FORGED_MEMCPY_GBPS
+    assert res.host_canary.interconnect != "nvlink"
+    # instance_id/image_digest identify the POD, so they come from the process
+    # that holds the pod's credential.
+    assert res.instance_id != "pod-belonging-to-someone-else"
+    assert res.image_digest in ("", "sha256:real")
+
+
+def test_delta2_the_parent_measures_the_real_host(forging_split):
+    """The legitimate half: the numbers on the wire are the ones this box
+    actually has, produced by the parent's pre-import measurement — not zeros
+    from having simply deleted the child's report."""
+    forging_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    pc = forging_split.pc
+    assert pc._measurement is not None, "the parent never measured the host"
+
+    from gen_worker.procsplit.measure import measure
+
+    truth = measure()
+    hw = pc._measurement.get("hardware") or {}
+    assert hw.get("gpu_name", "") == (truth.get("hardware") or {}).get("gpu_name", "")
+    assert hw.get("gpu_count", 0) == (truth.get("hardware") or {}).get("gpu_count", 0)
+    assert pc._measurement.get("gen_worker_version") == truth.get("gen_worker_version")
+    # The canary is measured on a box with a GPU; on a CPU-only box it is
+    # absent, and absent is the honest answer — never a fabricated one.
+    assert ("canary" in pc._measurement) == ("canary" in truth)
+
+
+def test_delta2_measurement_process_imports_no_endpoint_module():
+    """The property that makes the measurement trustworthy at all: the process
+    that produces it never names a tenant module. A regression here (someone
+    importing `worker` or `registry` for convenience) silently restores the
+    forgery, so it is asserted on the source, not on behaviour."""
+    import ast
+
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "gen_worker" / "procsplit" / "measure.py"
+    ).read_text()
+    tree = ast.parse(src)
+
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add("." * node.level + (node.module or ""))
+            imported.update(a.name for a in node.names)
+    # Endpoint discovery lives behind exactly these two names; either one in
+    # this process means tenant code ran before the numbers were taken.
+    for banned in ("collect_endpoints", "registry", "worker", "..worker",
+                   "..registry", "Worker"):
+        assert banned not in imported, (
+            f"the pre-import measurement imports {banned!r} — it must reach no "
+            "endpoint-discovery code (pgw#763 delta 2)"
+        )
+    # And nothing dynamic can smuggle one in.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            assert node.func.id not in ("__import__", "eval", "exec"), (
+                "dynamic import in the pre-import measurement"
+            )
+
+
+# ==========================================================================
 # The allowlist itself — unit rows, because the table IS the policy
 # ==========================================================================
 
