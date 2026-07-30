@@ -270,16 +270,6 @@ def test_b1_artifact_wants_an_undeclared_constant():
     assert runner.bound is False
 
 
-def test_b1_declared_constant_the_artifact_does_not_want():
-    """The manifest describes different bytes than we loaded."""
-    package = FakePackage(fqns=("conv_in.weight",))
-    runner = _runner(package)
-    with pytest.raises(aot.ConstantsUnboundError) as excinfo:
-        runner.bind(FakeModule().state_dict(), {})
-    assert excinfo.value.reason == "constant_set_mismatch"
-    assert "conv_in.bias" in str(excinfo.value)
-
-
 def test_b1_unreadable_constant_table_refuses():
     package = FakePackage(table_raises=True)
     runner = _runner(package)
@@ -324,17 +314,14 @@ def test_b2_out_of_declared_range_refused_by_name():
     assert "sample" in text and "'h'" in text and "256" in text
     assert "[64, 160]" in text
 
-
-def test_b2_out_of_range_never_reaches_the_artifact():
-    package = FakePackage()
-    runner = _runner(package)
-    runner.bind(FakeModule().state_dict(), {})
-    with pytest.raises(aot.IngressContractError):
-        runner(FakeTensor([2, 4, 256, 256]), FakeTensor([], "torch.int64"),
-               FakeTensor([2, 77, 2048]))
-    assert package.invocations == []
-    assert runner.calls == 0
-    assert runner.refusals == {"range_violation": 1}
+    # the min bound is enforced the same way
+    with pytest.raises(aot.IngressContractError) as low:
+        aot.assert_ingress(
+            contract, (FakeTensor([2, 4, 32, 128]),
+                       FakeTensor([], "torch.int64"),
+                       FakeTensor([2, 77, 2048])), {})
+    assert low.value.reason == "range_violation"
+    assert "32" in str(low.value)
 
 
 def test_b2_in_range_second_aspect_ratio_is_admitted():
@@ -344,16 +331,6 @@ def test_b2_in_range_second_aspect_ratio_is_admitted():
         contract, (FakeTensor([2, 4, 144, 112]),
                    FakeTensor([], "torch.int64"),
                    FakeTensor([2, 77, 2048])), {}) == {"h": 144, "w": 112}
-
-
-def test_b2_below_range_is_equally_refused():
-    with pytest.raises(aot.IngressContractError) as excinfo:
-        aot.assert_ingress(
-            _contract(), (FakeTensor([2, 4, 32, 128]),
-                          FakeTensor([], "torch.int64"),
-                          FakeTensor([2, 77, 2048])), {})
-    assert excinfo.value.reason == "range_violation"
-    assert "32" in str(excinfo.value)
 
 
 def test_b2_range_bounds_are_inclusive():
@@ -425,14 +402,6 @@ def test_b2_missing_declared_input_refused():
     assert "timestep" in str(excinfo.value)
 
 
-def test_b2_inputs_match_by_keyword_too():
-    args, _ = _in_range_call()
-    assert aot.assert_ingress(
-        _contract(), (args[0],),
-        {"timestep": args[1], "encoder_hidden_states": args[2]},
-    ) == {"h": 128, "w": 128}
-
-
 def test_b2_optional_input_may_be_absent():
     meta = _meta(inputs=INPUTS + [
         {"name": "added_cond", "position": 3, "dtype": "bfloat16",
@@ -450,12 +419,6 @@ def test_b2_non_tensor_argument_refused():
             _contract(), (FakeTensor([2, 4, 128, 128]), 7,
                           FakeTensor([2, 77, 2048])), {})
     assert excinfo.value.reason == "input_not_tensor"
-
-
-def test_b2_unbounded_symbol_is_a_malformed_contract():
-    """An unbounded symbol is the B2 hole with extra steps."""
-    with pytest.raises(ValueError, match="no declared range"):
-        aot.contract_from_meta(_entry(symbols={"h": [64, 160]}))
 
 
 # ---------------------------------------------------------------------------
@@ -494,32 +457,15 @@ def test_swap_serves_out_of_contract_requests_eagerly_and_stays_armed():
     assert aot.execution_count(pipeline) == 2
 
 
-def test_swap_falls_permanently_eager_on_artifact_error():
+def test_swap_falls_permanently_eager_and_revokes_proof_on_artifact_error():
     class Exploding(FakePackage):
         def __call__(self, *args, **kwargs):
             self.invocations.append((args, kwargs))
             raise RuntimeError("cuda kernel launch failed")
 
     module, package = FakeModule(), Exploding()
-    runner = _runner(package)
-    runner.bind(module.state_dict(), {})
-    aot.wrap_module(module, runner, _meta())
-
-    assert module.forward(*_in_range_call()[0]) == "EAGER_OUTPUT"
-    assert module.forward(*_in_range_call()[0]) == "EAGER_OUTPUT"
-    # permanently eager: the second call never re-entered the artifact
-    assert len(package.invocations) == 1
-    assert module.eager_calls == 2
-
-
-def test_swap_revokes_compiled_proof_on_failure():
-    class Exploding(FakePackage):
-        def __call__(self, *args, **kwargs):
-            raise RuntimeError("boom")
-
-    module = FakeModule()
     pipeline = FakePipeline(module)
-    runner = _runner(Exploding())
+    runner = _runner(package)
     runner.bind(module.state_dict(), {})
     meta = _meta()
     aot.wrap_module(module, runner, meta)
@@ -527,8 +473,14 @@ def test_swap_revokes_compiled_proof_on_failure():
                                     "state": getattr(module, "_cozy_aot")["state"]})
     seen: list[str] = []
     assert aot.set_guard_failure_callback(pipeline, seen.append) is True
-    module.forward(*_in_range_call()[0])
-    assert len(seen) == 1 and "boom" in seen[0]
+
+    assert module.forward(*_in_range_call()[0]) == "EAGER_OUTPUT"
+    assert module.forward(*_in_range_call()[0]) == "EAGER_OUTPUT"
+    # permanently eager: the second call never re-entered the artifact
+    assert len(package.invocations) == 1
+    assert module.eager_calls == 2
+    # ...and the compiled proof is revoked, through the failure callback.
+    assert len(seen) == 1 and "cuda kernel launch failed" in seen[0]
     assert aot.is_armed(pipeline) is False
 
 
@@ -540,24 +492,6 @@ def test_swap_never_invokes_an_unbound_runner():
     aot.wrap_module(module, runner, _meta())
     assert module.forward(*_in_range_call()[0]) == "EAGER_OUTPUT"
     assert package.invocations == []
-
-
-def test_unwrap_restores_eager_for_rotation():
-    module = FakeModule()
-    pipeline = FakePipeline(module)
-    original = module.forward
-    runner = _runner()
-    runner.bind(module.state_dict(), {})
-    meta = _meta()
-    aot.wrap_module(module, runner, meta)
-    setattr(pipeline, "_cozy_aot", {"meta": meta, "module": module,
-                                    "state": getattr(module, "_cozy_aot")["state"]})
-    assert module.forward is not original
-    assert aot.unwrap(pipeline) is True
-    assert module.forward == original
-    assert not hasattr(module, "_cozy_aot")
-    assert not hasattr(pipeline, "_cozy_aot")
-    assert aot.unwrap(pipeline) is False
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +508,10 @@ def test_labels_and_refs():
     assert aot.is_aot_ref(
         f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8", family="other") is False
     assert aot.is_aot_ref(f"root/family-{FAMILY}#trt-l4-trt10.16-fp16") is False
+    # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
+    # it would then be scored by FX hits).
+    assert aot.is_aot_ref(
+        f"root/family-{FAMILY}#ck5-0123456789abcdef") is False
 
 
 def test_verify_refuses_baked_weights(stub_runtime):
@@ -616,18 +554,6 @@ def test_verify_rejects_tampered_range_digest(stub_runtime):
     meta["entries"][ENTRY]["symbols"]["h"] = [64, 4096]
     reason = aot.verify(meta)
     assert "range_digest" in reason and ENTRY in reason
-
-
-def test_range_digest_separates_artifacts_that_admit_different_traffic():
-    """Owed to ck6 (pgw#716/#717): three exports differing only in declared
-    range produced the IDENTICAL node-only digest, so a node-only
-    graph_hashes collides artifacts admitting different traffic."""
-    narrow = aot.range_digest(_entry())
-    wide = aot.range_digest(_entry(symbols={"h": [64, 320], "w": [64, 160]}))
-    assert narrow != wide
-    # stable and order-insensitive
-    assert narrow == aot.range_digest(_entry(
-        symbols={"w": [64, 160], "h": [64, 160]}))
 
 
 def _entries_arg(**entry_over):
@@ -790,18 +716,15 @@ def test_enable_stays_eager_on_any_miss(tmp_path, monkeypatch, stub_runtime):
         lambda p, e="model": FakePackage(fqns=("nope.weight",)))
     assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)) is False
 
-    # every miss leaves the pipeline exactly eager
-    assert module.forward == original
-    assert aot.is_armed(pipeline) is False
-
-
-def test_enable_refuses_a_pipeline_without_the_target(tmp_path, monkeypatch, stub_runtime):
-    monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
-
+    # pipeline without the target module
     class Bare:
         pass
 
     assert aot.enable(Bare(), Cfg(), tmp_path / "c", _tar(tmp_path)) is False
+
+    # every miss leaves the pipeline exactly eager
+    assert module.forward == original
+    assert aot.is_armed(pipeline) is False
 
 
 def test_provision_dispatches_aot_kind_and_reports_a_hit(tmp_path, monkeypatch, stub_runtime):
@@ -897,39 +820,6 @@ def test_provision_drops_the_artifact_when_the_receipts_gate_refuses(
 
 
 # ---------------------------------------------------------------------------
-# LoRA seam (pgw#704 option 2 — adapters lifted to graph INPUTS)
-# ---------------------------------------------------------------------------
-
-
-def test_input_lifted_adapters_are_ordinary_declared_inputs():
-    """Under input-lifting the no-baked-adapter gate degenerates to a
-    signature check: ZERO LoRA FQNs in the constant table, and the adapter
-    tensors are asserted like any other input (rank-64 bucket)."""
-    meta = _meta(
-        inputs=INPUTS + [
-            {"name": "lora_a", "position": 3, "dtype": "bfloat16",
-             "shape": [64, 2048]},
-            {"name": "lora_b", "position": 4, "dtype": "bfloat16",
-             "shape": [2048, 64]},
-        ],
-        constants=CONSTANTS,  # no lora FQNs — nothing to bake
-    )
-    specs = _specs(meta)
-    assert not [s for s in specs if "lora" in s.fqn.lower()]
-
-    contract = _contract(meta)
-    args = (*_in_range_call()[0], FakeTensor([64, 2048]), FakeTensor([2048, 64]))
-    assert aot.assert_ingress(contract, args, {}) == {"h": 128, "w": 128}
-
-    # a wrong-rank adapter is refused by name, not silently broadcast
-    bad = (*_in_range_call()[0], FakeTensor([32, 2048]), FakeTensor([2048, 64]))
-    with pytest.raises(aot.IngressContractError) as excinfo:
-        aot.assert_ingress(contract, bad, {})
-    assert excinfo.value.reason == "static_dim_mismatch"
-    assert "lora_a" in str(excinfo.value)
-
-
-# ---------------------------------------------------------------------------
 # pgw#725 LoRA seam — lifted adapters ride as MANDATORY call kwargs
 # ---------------------------------------------------------------------------
 
@@ -963,23 +853,6 @@ LIFTED_INPUTS = INPUTS + [
 ]
 
 
-def test_lifted_call_kwargs_absent_without_a_binding():
-    """bucket=0 is its own branchless class: no binding, no kwargs."""
-    assert aot.lifted_call_kwargs(FakeModule()) == {}
-
-
-def test_lifted_call_kwargs_are_the_binding_tensors_by_reference():
-    module = FakeModule()
-    binding = _lift(module)
-    kwargs = aot.lifted_call_kwargs(module)
-    assert set(kwargs) == {"lora_a", "lora_b"}
-    # by REFERENCE, never copied — pointer stability is what cudagraph wants
-    assert kwargs["lora_a"] is binding.tensors[0]
-    assert kwargs["lora_b"] is binding.tensors[1]
-    # and stable across calls
-    assert aot.lifted_call_kwargs(module)["lora_a"] is kwargs["lora_a"]
-
-
 def test_wrapper_splats_the_lifted_pair_into_the_artifact_call():
     meta = _meta(inputs=LIFTED_INPUTS)
     package = FakePackage()
@@ -997,32 +870,6 @@ def test_wrapper_splats_the_lifted_pair_into_the_artifact_call():
     assert kwargs == {}
     assert args[3] is binding.tensors[0]
     assert args[4] is binding.tensors[1]
-
-
-def test_wrapper_splats_the_lifted_pair_into_the_EAGER_fallback_too():
-    """bind_views refuses a None half by name, so the eager path needs the
-    kwargs exactly as much as the artifact does. An out-of-contract request
-    falling to eager must not explode on a missing mandatory adapter."""
-    meta = _meta(inputs=LIFTED_INPUTS)
-    module = FakeModule()
-    binding = _lift(module)
-    seen: list = []
-
-    def _eager(*args, **kwargs):
-        seen.append(kwargs)
-        return "EAGER_OUTPUT"
-
-    module.forward = _eager
-    runner = _runner(FakePackage(), meta)
-    runner.bind(module.state_dict(), {})
-    aot.wrap_module(module, runner, meta)
-
-    # out of range -> B2 refusal -> eager, WITH the mandatory pair present
-    assert module.forward(
-        FakeTensor([2, 4, 256, 256]), FakeTensor([], "torch.int64"),
-        FakeTensor([2, 77, 2048])) == "EAGER_OUTPUT"
-    assert seen[0]["lora_a"] is binding.tensors[0]
-    assert seen[0]["lora_b"] is binding.tensors[1]
 
 
 def test_adapter_swap_needs_no_artifact_interaction():

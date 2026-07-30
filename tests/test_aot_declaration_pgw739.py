@@ -663,22 +663,3 @@ def test_fork_and_row_reach_the_cell_identity() -> None:
     d1 = _identity([], [["H_lat", 128], ["W_lat", 128]])
     d2 = _identity([], [["H_lat", 112], ["W_lat", 144]])
     assert d1 != d2
-
-
-def test_load_spec_refuses_the_coordinate() -> None:
-    """A request naming a fork/class coordinate would mint a SUBSET of the
-    contract the key advertises — refused by name (pgw#758)."""
-    import json
-    import tempfile
-    from pathlib import Path
-
-    body = {
-        "family": "sdxl-shaped",
-        "fork": {"cfg": True},
-        "class_dims": {"H_lat": 128, "W_lat": 128, "B": 2, "T_txt": 77},
-    }
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "req.json"
-        path.write_text(json.dumps(body))
-        with pytest.raises(MintRefused, match="WHOLE declared class set"):
-            aot_mint._load_spec(path)

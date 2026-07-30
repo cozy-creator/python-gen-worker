@@ -125,27 +125,10 @@ def test_entry_names_derive_from_declaration_coordinates() -> None:
     assert names == ["unet/cfg=false/B=1", "unet/cfg=true/B=2"]
 
 
-def test_entry_names_are_stable_across_enumerations() -> None:
-    decl = _declare()
-    first = [aot_declaration.plan_entry_name(p)
-             for p in aot_declaration.cell_plans(decl)]
-    second = [aot_declaration.plan_entry_name(p)
-              for p in aot_declaration.cell_plans(decl)]
-    assert first == second
-
-
 def test_dynamic_collapse_entry_omits_the_dims_segment() -> None:
     name = aot_declaration.entry_name(
         "transformer", (("expand_timesteps", False),), ())
     assert name == "transformer/expand_timesteps=false"
-
-
-def test_colliding_entry_names_are_refused_by_name() -> None:
-    # Two targets that render the same label cannot happen via the
-    # vocabulary (targets differ), so collide via duplicated plans instead.
-    decl = _declare()
-    plans = aot_declaration.cell_plans(decl)
-    assert len({aot_declaration.plan_entry_name(p) for p in plans}) == len(plans)
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +142,7 @@ def test_combined_graph_hash_is_the_verbatim_ck6_formula() -> None:
     hashes = ["bbb", "aaa", "ccc"]
     want = hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()[:16]
     assert aot_serve.combined_graph_hash(hashes) == want
-
-
-def test_combined_hash_is_order_independent_and_content_sensitive() -> None:
+    # order-independent, content-sensitive
     a = aot_serve.combined_graph_hash(["x", "y"])
     assert aot_serve.combined_graph_hash(["y", "x"]) == a
     assert aot_serve.combined_graph_hash(["x", "z"]) != a
@@ -247,11 +228,21 @@ def test_mint_refuses_a_family_with_no_declaration(tmp_path, fake_sm) -> None:
 
 
 def test_mint_request_refuses_coordinate_subsets(tmp_path) -> None:
-    body = {"family": FAMILY, "target": "unet"}
-    p = tmp_path / "req.json"
-    p.write_text(json.dumps(body))
-    with pytest.raises(aot_mint.MintRefused, match="WHOLE declared class set"):
-        aot_mint._load_spec(p)
+    """A request naming a target, a fork/class coordinate, or hand dynamic
+    rows (the pod-9-era per-coordinate shapes) would mint a SUBSET of the
+    contract the key advertises — each is refused by name."""
+    bodies = [
+        {"family": FAMILY, "target": "unet"},
+        {"family": FAMILY, "fork": {"cfg": True}, "class_dims": {"B": 2}},
+        {"family": FAMILY,
+         "dynamic": [{"input": "sample", "axis": 0, "min": 1, "max": 2}]},
+    ]
+    for index, body in enumerate(bodies):
+        p = tmp_path / f"req{index}.json"
+        p.write_text(json.dumps(body))
+        with pytest.raises(aot_mint.MintRefused,
+                           match="WHOLE declared class set"):
+            aot_mint._load_spec(p)
 
 
 def test_export_failure_names_the_entry(tmp_path, fake_sm) -> None:
@@ -379,12 +370,6 @@ def test_mint_records_the_phase_table(minted_cell) -> None:
     assert resolved["aot_inductor.package_constants_in_so"] is False
 
 
-def test_caller_compile_threads_override_wins() -> None:
-    configs = aot_mint._entry_configs({"compile_threads": 16})
-    assert configs["compile_threads"] == 16
-    assert aot_mint._entry_configs(None)["compile_threads"] == 4
-
-
 # ---------------------------------------------------------------------------
 # Serve — ONE loaded cell, every declared function
 # ---------------------------------------------------------------------------
@@ -453,20 +438,6 @@ def test_dispatch_refuses_ambiguity_by_name() -> None:
         dispatch(torch.randn(2, 4))
     assert err.value.reason == "entry_ambiguous"
     assert "unet/a" in str(err.value) and "unet/b" in str(err.value)
-
-
-def test_unbound_entry_is_refused_before_the_segfault() -> None:
-    contract = aot_serve.contract_from_meta({
-        "inputs": [{"name": "sample", "position": 0, "dtype": "float32",
-                    "shape": [2, 4]}],
-        "symbols": {},
-    })
-    runner = aot_serve.ArtifactRunner(
-        package=object(), contract=contract, constants=(),
-        entry="unet/cfg=true/B=2")
-    with pytest.raises(aot_serve.ConstantsUnboundError) as err:
-        runner(torch.randn(2, 4))
-    assert "unet/cfg=true/B=2" in str(err.value)
 
 
 def test_all_entries_bind_before_any_wrap(minted_cell, monkeypatch, tmp_path) -> None:

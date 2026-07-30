@@ -28,49 +28,27 @@ def _arm(pipe, *, calls: int, failed: bool = False) -> None:
     })
 
 
-def test_executed_and_armed_is_proof():
+def test_proven_since_requires_new_successful_calls_and_no_revocation():
     pipe = _Pipe()
+    assert not aot_serve.proven_since(pipe, 0)   # unarmed is never proven
     _arm(pipe, calls=0)
     assert not aot_serve.proven_since(pipe, 0)
     _arm(pipe, calls=3)
     assert aot_serve.proven_since(pipe, 0)
     assert aot_serve.proven_since(pipe, 2)
-
-
-def test_no_execution_since_the_sample_is_not_proof():
-    """The delta matters, not the absolute count: a previous boot's calls
-    cannot prove THIS warmup exercised the artifact."""
-    pipe = _Pipe()
+    # The delta matters, not the absolute count: a previous boot's calls
+    # cannot prove THIS warmup exercised the artifact.
     _arm(pipe, calls=7)
     assert not aot_serve.proven_since(pipe, 7)
     assert not aot_serve.proven_since(pipe, 9)
-
-
-def test_executed_then_revoked_is_not_proof():
-    """An artifact that ran and then revoked (a B1/B2 refusal) has proven
-    nothing — fail closed, exactly like a dynamo cell with zero hits."""
-    pipe = _Pipe()
+    # An artifact that ran and then revoked (a B1/B2 refusal) has proven
+    # nothing — fail closed, exactly like a dynamo cell with zero hits.
     _arm(pipe, calls=5, failed=True)
     assert aot_serve.execution_count(pipe) == 5
     assert not aot_serve.proven_since(pipe, 0)
 
 
-def test_unarmed_object_is_never_proven():
-    assert not aot_serve.proven_since(_Pipe(), 0)
-
-
-def test_exported_refs_are_recognised_as_their_own_kind():
-    """The executor admits three artifact kinds; an exported ref must not be
-    mistaken for a dynamo cache ref (it would then be scored by FX hits)."""
-    exported = "root/family-sdxl#" + aot_serve.flavor_label(
-        "l4", "2.13.0+cu130", "w8a8")
-    assert aot_serve.is_aot_ref(exported)
-    assert aot_serve.is_aot_ref(exported, "sdxl")
-    assert not aot_serve.is_aot_ref(exported, "flux2")
-    assert not aot_serve.is_aot_ref("root/family-sdxl#ck5-0123456789abcdef")
-
-
-def test_exported_cell_key_refusal_names_the_kind_and_the_stamped_path():
+def test_exported_kind_cell_key_refusals_are_named():
     """cell_key.from_artifact_metadata recomputes INDUCTOR-cache axes. An
     exported cell rides the same ck5 key space but its key is STAMPED at mint,
     so the refusal must say so by name instead of failing opaquely."""
@@ -86,8 +64,6 @@ def test_exported_cell_key_refusal_names_the_kind_and_the_stamped_path():
         cell_key.from_artifact_metadata({"kind": "aot-inductor"})
     assert "MISSING" in str(missing.value)
 
-
-def test_unknown_kind_refusal_is_unchanged():
-    with pytest.raises(cell_key.CellKeyError) as exc:
+    with pytest.raises(cell_key.CellKeyError) as unknown:
         cell_key.from_artifact_metadata({"kind": "trt-engine"})
-    assert "no cell-key identity" in str(exc.value)
+    assert "no cell-key identity" in str(unknown.value)
