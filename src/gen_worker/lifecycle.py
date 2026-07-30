@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
+from . import boot_phases as boot_mod
 from . import receipts
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
@@ -367,6 +368,20 @@ class Lifecycle:
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
+        # pgw#764: the stream exists now, so bind the boot-phase sink and FLUSH
+        # everything recorded before it did. This is the earliest point a boot
+        # row can reach the hub at all: activity's own sink is not bound until
+        # Executor.ensure_setup, which is after weights are on disk, and the
+        # send queue drops queued events on every reconnect. Binding here also
+        # re-flushes after a reconnect, and the hub upserts on
+        # (boot_id, ordinal), so a duplicate delivery is harmless.
+        try:
+            boot_mod.bind_sink(self.executor._send, asyncio.get_running_loop())
+            # process start -> hello: the first boot number, and the one the
+            # hub could previously only infer from pod create -> connect.
+            boot_mod.mark(boot_mod.PHASE_HELLO, since_process_start=True)
+        except Exception:  # telemetry must never break the handshake
+            logger.debug("boot phase sink bind failed", exc_info=True)
         desired_command: Optional[pb.DesiredStateCommand] = None
         if ack.HasField("desired_state_command"):
             desired_command = ack.desired_state_command
@@ -1038,7 +1053,12 @@ class Lifecycle:
             await self.set_phase(pb.WORKER_PHASE_DOWNLOADING_MODELS)
             for ref in prefetch_refs:
                 try:
-                    await self.executor.store.ensure_local(ref)
+                    # pgw#764: per-checkpoint boot fetch span. Bytes and source
+                    # are stamped by the CAS layer (models/cozy_snapshot), which
+                    # is the only place that knows whether they came off a warm
+                    # volume, the local CAS, or a cold R2 pull.
+                    with boot_mod.span(boot_mod.PHASE_WEIGHTS_FETCH, ref=ref):
+                        await self.executor.store.ensure_local(ref)
                 except Exception as exc:
                     # pgw#655: this used to log and walk on to READY with an
                     # unmaterialized model, so the failure resurfaced as a
@@ -1118,6 +1138,19 @@ class Lifecycle:
                 self._setup_awaiting_functions(awaiting_hub), name="boot-setup-watch"
             )
 
+        # pgw#764: FIRST-REQUEST-SERVABLE. Boot is over here — READY is the
+        # moment the hub may dispatch to this worker, whether it got there
+        # eager (pgw#671 eager-first boot, mint still running in the
+        # background) or fully compiled. Measured from OS process start, so it
+        # is the same quantity the autoscaler's cold-boot horizon prices
+        # against, and everything after it is optimization, not boot.
+        boot_mod.mark(
+            boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
+            since_process_start=True,
+            detail=" ".join(
+                f"{k}={v}" for k, v in sorted(boot_mod.reconciliation().items())
+            ),
+        )
         await self.set_phase(pb.WORKER_PHASE_READY)
 
     async def _heartbeat_loop(self) -> None:

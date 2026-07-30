@@ -331,7 +331,7 @@ ACTIVITY_STATE_COMPLETED: ActivityState
 ACTIVITY_STATE_FAILED: ActivityState
 
 class WorkerMessage(_message.Message):
-    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded", "activity_update", "hardware_unsuitable", "goal_receipt", "lifecycle_snapshot")
+    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded", "activity_update", "hardware_unsuitable", "goal_receipt", "lifecycle_snapshot", "boot_phase")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     STATE_DELTA_FIELD_NUMBER: _ClassVar[int]
     JOB_ACCEPTED_FIELD_NUMBER: _ClassVar[int]
@@ -344,6 +344,7 @@ class WorkerMessage(_message.Message):
     HARDWARE_UNSUITABLE_FIELD_NUMBER: _ClassVar[int]
     GOAL_RECEIPT_FIELD_NUMBER: _ClassVar[int]
     LIFECYCLE_SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
+    BOOT_PHASE_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     state_delta: StateDelta
     job_accepted: JobAccepted
@@ -356,7 +357,8 @@ class WorkerMessage(_message.Message):
     hardware_unsuitable: HardwareUnsuitable
     goal_receipt: GoalReceipt
     lifecycle_snapshot: LifecycleSnapshot
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ..., hardware_unsuitable: _Optional[_Union[HardwareUnsuitable, _Mapping]] = ..., goal_receipt: _Optional[_Union[GoalReceipt, _Mapping]] = ..., lifecycle_snapshot: _Optional[_Union[LifecycleSnapshot, _Mapping]] = ...) -> None: ...
+    boot_phase: BootPhase
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ..., hardware_unsuitable: _Optional[_Union[HardwareUnsuitable, _Mapping]] = ..., goal_receipt: _Optional[_Union[GoalReceipt, _Mapping]] = ..., lifecycle_snapshot: _Optional[_Union[LifecycleSnapshot, _Mapping]] = ..., boot_phase: _Optional[_Union[BootPhase, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
     __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh")
@@ -1101,7 +1103,7 @@ class Adjustment(_message.Message):
     def __init__(self, field: _Optional[str] = ..., requested: _Optional[str] = ..., applied: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
-    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms", "stage_ms")
+    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms", "stage_ms", "serving_mode", "served_cell_ref", "served_eager_fallback", "fallback_reason", "sm", "steps", "width", "height")
     class RuntimeTermsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -1131,6 +1133,14 @@ class JobMetrics(_message.Message):
     LANE_FIELD_NUMBER: _ClassVar[int]
     RUNTIME_TERMS_FIELD_NUMBER: _ClassVar[int]
     STAGE_MS_FIELD_NUMBER: _ClassVar[int]
+    SERVING_MODE_FIELD_NUMBER: _ClassVar[int]
+    SERVED_CELL_REF_FIELD_NUMBER: _ClassVar[int]
+    SERVED_EAGER_FALLBACK_FIELD_NUMBER: _ClassVar[int]
+    FALLBACK_REASON_FIELD_NUMBER: _ClassVar[int]
+    SM_FIELD_NUMBER: _ClassVar[int]
+    STEPS_FIELD_NUMBER: _ClassVar[int]
+    WIDTH_FIELD_NUMBER: _ClassVar[int]
+    HEIGHT_FIELD_NUMBER: _ClassVar[int]
     runtime_ms: int
     queue_ms: int
     rss_at_end_bytes: int
@@ -1146,7 +1156,15 @@ class JobMetrics(_message.Message):
     lane: str
     runtime_terms: _containers.ScalarMap[str, float]
     stage_ms: _containers.ScalarMap[str, int]
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ...) -> None: ...
+    serving_mode: str
+    served_cell_ref: str
+    served_eager_fallback: bool
+    fallback_reason: str
+    sm: str
+    steps: int
+    width: int
+    height: int
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ..., serving_mode: _Optional[str] = ..., served_cell_ref: _Optional[str] = ..., served_eager_fallback: _Optional[bool] = ..., fallback_reason: _Optional[str] = ..., sm: _Optional[str] = ..., steps: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ...) -> None: ...
 
 class JobProgress(_message.Message):
     __slots__ = ("request_id", "attempt", "seq", "data", "content_type")
@@ -1263,6 +1281,48 @@ class ActivityUpdate(_message.Message):
     self_stalled: bool
     stalled_for_ms: int
     def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ...) -> None: ...
+
+class BootPhase(_message.Message):
+    __slots__ = ("boot_id", "ordinal", "parent_ordinal", "phase", "terminal", "started_at_unix_ms", "duration_ms", "process_uptime_ms", "bytes", "source", "ref", "artifact_kind", "artifact_key", "function", "graph_class", "outcome", "reason", "detail", "cumulative")
+    BOOT_ID_FIELD_NUMBER: _ClassVar[int]
+    ORDINAL_FIELD_NUMBER: _ClassVar[int]
+    PARENT_ORDINAL_FIELD_NUMBER: _ClassVar[int]
+    PHASE_FIELD_NUMBER: _ClassVar[int]
+    TERMINAL_FIELD_NUMBER: _ClassVar[int]
+    STARTED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    DURATION_MS_FIELD_NUMBER: _ClassVar[int]
+    PROCESS_UPTIME_MS_FIELD_NUMBER: _ClassVar[int]
+    BYTES_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_KIND_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_KEY_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_FIELD_NUMBER: _ClassVar[int]
+    GRAPH_CLASS_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    CUMULATIVE_FIELD_NUMBER: _ClassVar[int]
+    boot_id: str
+    ordinal: int
+    parent_ordinal: int
+    phase: str
+    terminal: bool
+    started_at_unix_ms: int
+    duration_ms: int
+    process_uptime_ms: int
+    bytes: int
+    source: str
+    ref: str
+    artifact_kind: str
+    artifact_key: str
+    function: str
+    graph_class: str
+    outcome: str
+    reason: str
+    detail: str
+    cumulative: bool
+    def __init__(self, boot_id: _Optional[str] = ..., ordinal: _Optional[int] = ..., parent_ordinal: _Optional[int] = ..., phase: _Optional[str] = ..., terminal: _Optional[bool] = ..., started_at_unix_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., process_uptime_ms: _Optional[int] = ..., bytes: _Optional[int] = ..., source: _Optional[str] = ..., ref: _Optional[str] = ..., artifact_kind: _Optional[str] = ..., artifact_key: _Optional[str] = ..., function: _Optional[str] = ..., graph_class: _Optional[str] = ..., outcome: _Optional[str] = ..., reason: _Optional[str] = ..., detail: _Optional[str] = ..., cumulative: _Optional[bool] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")
