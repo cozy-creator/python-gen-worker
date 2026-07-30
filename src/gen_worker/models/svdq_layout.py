@@ -58,6 +58,7 @@ _FWD_PERM = (0, 5, 6, 1, 3, 8, 2, 7, 4, 9)
 
 _WARP_N = 128
 _INSN_K = 64
+_NUM_K_UNROLLS = 2   # NunchakuWeightPacker.__init__ (nunchaku/utils.py L19)
 
 # pack_micro_scale (nunchaku/utils.py L149-151), warp_n=128 => s_pack_size=4,
 # num_s_lanes=32, num_s_packs=1. The 128 output channels of a tile split
@@ -143,10 +144,14 @@ def unpack_qweight(qweight: Any, out_features: int, in_features: int) -> Any:
 
     g = _FRAG
     n, k = int(out_features), int(in_features)
-    if n % g["mem_n"] or k % g["mem_k"]:
+    # pack_weight asserts k % (mem_k * num_k_unrolls) with num_k_unrolls = 2
+    # (nunchaku/utils.py L26-29), and pad_weight pads to that (L221), so a
+    # real checkpoint is always [%128, %128]. We accepted k % 64, which admits
+    # a shape the exporter cannot emit and the vector swizzles cannot express.
+    if n % g["mem_n"] or k % (g["mem_k"] * _NUM_K_UNROLLS):
         raise SvdqLayoutError(
-            f"svdq qweight [{n}, {k}] is not a multiple of the fragment tile "
-            f"({g['mem_n']}x{g['mem_k']})")
+            f"svdq qweight [{n}, {k}] is not a multiple of the padded "
+            f"fragment tile ({g['mem_n']}x{g['mem_k'] * _NUM_K_UNROLLS})")
     n_tiles, k_tiles = n // g["mem_n"], k // g["mem_k"]
     words = qweight.reshape(-1).view(torch.int32)
     nib = (words.unsqueeze(-1)
