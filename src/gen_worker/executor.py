@@ -545,7 +545,11 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     """pb.Snapshot -> the typed resolved-manifest struct (gw#497): the ONE
     wire-boundary conversion; everything downstream (ensure_local,
     ensure_snapshot_async) is typed — no dict laundering."""
-    from .models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
+    from .models.hub_client import (
+        WorkerResolvedChunk,
+        WorkerResolvedRepo,
+        WorkerResolvedRepoFile,
+    )
 
     return WorkerResolvedRepo(
         snapshot_digest=snap.digest,
@@ -555,6 +559,19 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
                 size_bytes=int(f.size_bytes),
                 blake3=f.blake3,
                 url=f.url or None,
+                # th#1303 manifest v2: the algorithm-tagged digest and the
+                # ordered chunk list. Dropping these here is what would make
+                # every chunked snapshot look like a whole file with no URL.
+                digest=getattr(f, "digest", "") or "",
+                chunks=tuple(
+                    WorkerResolvedChunk(
+                        sha256=(c.sha256 or "").strip().lower(),
+                        url=c.url,
+                        length=int(c.len),
+                    )
+                    for c in getattr(f, "chunks", ())
+                ),
+                chunk_size_bytes=int(getattr(f, "chunk_size_bytes", 0) or 0),
             )
             for f in snap.files
         ],
@@ -2106,12 +2123,13 @@ class ModelStore:
         """Integrity of a materialized snapshot (worker thread; blocking IO).
 
         With a resolved manifest every regular file is checked against its
-        declared size AND blake3 digest; files the manifest cannot cover
-        (reassembled chunked originals, merged single-file checkpoints) plus
-        manifest-less trees (hf/civitai) get the structural safetensors check
-        (header parses + every declared tensor byte present). Returns
-        ``(ok, bad_digests)`` — the digests name blobs to quarantine."""
-        from .models.cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
+        declared size AND their CONTENT DIGEST, hashed under the algorithm the
+        manifest named; files the manifest cannot cover (reassembled chunked
+        originals, merged single-file checkpoints) plus manifest-less trees
+        (hf/civitai) get the structural safetensors check (header parses +
+        every declared tensor byte present). Returns ``(ok, bad_digests)`` —
+        the digests name blobs to quarantine."""
+        from .models.cozy_snapshot import _norm_rel_path
         from .models.loading import safetensors_file_valid
         from .models.volume_verify import snapshot_verify_targets, verify_files
 
