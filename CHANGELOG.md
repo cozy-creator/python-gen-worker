@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- **pgw#795 — the v0.78.0 publish blockers: two tests that asserted the RUNNER,
+  not the code.** Three consecutive publish jobs died on them, and no code under
+  test had changed.
+
+  `test_residency_republish_pgw628` waited on a fixed 15 s deadline for its third
+  ON_DISK re-report and reported "saw 2 of 3". The clock was the messenger, and it
+  lied about the cause: the real defect is that `harness/residency-tiny` is a ref a
+  toy endpoint DECLARES, so ~2 s after boot the eager first boot promotes it to RAM
+  and every later re-sent plan re-announces the held identity as IN_RAM instead of
+  ON_DISK. The test needed three ON_DISK re-reports inside a ~2 s window and was
+  racing a worker-side timer; a loaded runner loses that race. Measured directly:
+  with the declared ref the re-announce stops at t~=2.03 s regardless of ack
+  spacing; with an UNDECLARED ref it holds at 0.5 s and 5 s spacing alike. A wall
+  clock cannot tell "slow" from "this can never happen now", which is why raising
+  the timeout would have bought a fourth failed release rather than a fix.
+
+  `test_th1130_deferred_tail` asserted `encode_ms >= 10` — a claim about the
+  runner's spare CPU. It had already been lowered from `>= 100` (failed at 83 ms)
+  and from `>= 0.5 * total.tail` (failed at 76 vs 77). Lowering the constant each
+  time is the anti-pattern with a smaller number: the quantity is the machine's
+  speed. It now proves the encode by its PRODUCT — a 1024^2 WEBP frame on the wire
+  plus an attributed `image_encode` stage — and the slot-exclusion inequality takes
+  its slack from the stage map's own unattributed residual instead of a hard-coded
+  15 ms, so the tolerance grows with the noise it exists to absorb.
+
+  New `tests/harness/progress_wait.py` gives the suite the give-up rule
+  `gen_worker.stall` already gives production code: a wait ends when the thing
+  happens, when the peer is provably gone (definitive, no clock), or when the
+  awaited observable has not advanced for a staleness window this run MEASURED
+  (`Cadence`: 10x the slowest advance seen, session-shared, floored). Only the
+  awaited observable counts as progress — peer liveness and unrelated chatter do
+  not reset the window, because a window that resets on them never closes (both
+  hangs measured while authoring this). `hub_double`'s `wait_for` /
+  `wait_for_count` / `wait_connection` drop their 15 s wall clocks onto the same
+  rule for all ~37 files that use them, while an EXPLICIT `timeout=` keeps its old
+  meaning for the callers that probe for absence. Expiry now names what it waited
+  on, what it last saw, and how the window was derived.
+
 - **pgw#781 / th#1303 — the chunked sha256 CAS is WIRED, in both directions.** The
   primitives landed with nothing calling them: `models/chunk_upload.py` had zero
   production callers, and `models/cozy_snapshot.py` — the real fill path — never

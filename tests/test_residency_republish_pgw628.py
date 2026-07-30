@@ -15,9 +15,20 @@ import time
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.blob_host import BlobHost
-from harness.hub_double import Conn, hub_double, is_model_event, is_ready
+from harness.hub_double import Conn, WorkerHarness, hub_double, is_model_event, is_ready
+from harness.progress_wait import await_count
 
-_MODEL_REF = "harness/residency-tiny"
+# pgw#795 (the v0.78.0 release blocker): this ref must NOT be one a toy
+# endpoint declares. It used to be `harness/residency-tiny`, which
+# harness/toy_endpoints.py binds — so ~2 s after boot the eager first-boot
+# promoted the ref to RAM, and from that moment every re-sent plan
+# re-announced the held identity as IN_RAM instead of ON_DISK. The test was
+# therefore racing a worker-side timer: it needed its three ON_DISK
+# re-reports inside a ~2 s window, which a loaded CI runner does not grant.
+# That, not the 15 s deadline it died on, is why v0.78.0 failed twice. With
+# an UNDECLARED ref nothing promotes it, the tier stays DISK, and the
+# property holds at any spacing (verified at 0.5 s and 5 s gaps).
+_MODEL_REF = "harness/republish-tiny"
 
 
 def _disk_only_ack(snapshot: pb.Snapshot, generation: int) -> pb.HelloAck:
@@ -42,14 +53,48 @@ def _count_on_disk(conn: Conn) -> int:
         )
 
 
-def _wait_on_disk_count(conn: Conn, want: int, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout
-    while _count_on_disk(conn) < want:
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"expected {want} ON_DISK re-reports, saw {_count_on_disk(conn)}"
-            )
-        time.sleep(0.05)
+def _wait_on_disk_count(conn: Conn, harness: WorkerHarness, want: int) -> float:
+    """Wait for ``want`` ON_DISK re-reports — on PROGRESS, never on a clock.
+
+    pgw#795: this wait used to be ``deadline = time.monotonic() + 15.0``, and
+    on 2026-07-30 it failed the v0.78.0 publish job twice, after seeing 2 of 3
+    re-reports. The deadline was the messenger (see ``_MODEL_REF`` for the
+    disease), and a wall clock is a bad messenger: it reports "slow" for
+    everything, including "this can never happen now". What ends the wait now
+    is evidence, not duration:
+
+    * the worker ended the stream, or its thread exited — no further re-report
+      is possible, so fail at once;
+    * the re-report count has not moved for a staleness window this run
+      measured for itself. Only that count counts as progress: the worker being
+      alive, or busy, or chattering about other things is not evidence that the
+      answer is coming, and a window that resets on those never closes.
+    """
+    started = time.monotonic()
+    await_count(
+        lambda: _count_on_disk(conn),
+        want,
+        what=f"ON_DISK re-reports of {_MODEL_REF}",
+        cadence=conn.cadence,
+        gone=lambda: (
+            "the worker ended the stream" if conn.client_done.is_set()
+            else None if harness.alive
+            else "the worker thread exited"
+        ),
+    )
+    return time.monotonic() - started
+
+
+def _settle(answered_in_s: float) -> None:
+    """Let a runaway re-announce loop, if there is one, show itself.
+
+    A fixed sleep here is sound where a fixed deadline was not: its expiry
+    makes the test PASS, so a slow runner weakens the check instead of failing
+    the release. It still scales with the machine — the quiet period is a
+    multiple of how long the re-announce it is checking actually took on this
+    machine.
+    """
+    time.sleep(max(0.5, 10 * answered_in_s))
 
 
 def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
@@ -60,7 +105,7 @@ def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
     blobs = BlobHost(tmp_path)
     try:
         snapshot = blobs.one_file_snapshot("snap-1", "blob", b"tiny-weights")
-        with hub_double() as (scheduler, _harness):
+        with hub_double() as (scheduler, harness):
             conn = scheduler.wait_connection(0)
             conn.wait_for(is_ready)
 
@@ -76,7 +121,7 @@ def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
             # its identity dedupe.
             baseline = _count_on_disk(conn)
             conn.send(hello_ack=_disk_only_ack(snapshot, generation=1))
-            _wait_on_disk_count(conn, baseline + 1)
+            answered_in = _wait_on_disk_count(conn, harness, baseline + 1)
             events = [
                 m.model_event
                 for m in conn.received
@@ -88,13 +133,13 @@ def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
             assert events[-1].residency_generation == 1
 
             # And exactly one per applied plan: no runaway re-announce loop.
-            time.sleep(0.5)
+            _settle(answered_in)
             assert _count_on_disk(conn) == baseline + 1
 
             # A third re-send opens a third epoch: one more re-report.
             conn.send(hello_ack=_disk_only_ack(snapshot, generation=1))
-            _wait_on_disk_count(conn, baseline + 2)
-            time.sleep(0.5)
+            answered_in = _wait_on_disk_count(conn, harness, baseline + 2)
+            _settle(answered_in)
             assert _count_on_disk(conn) == baseline + 2
     finally:
         blobs.shutdown()
