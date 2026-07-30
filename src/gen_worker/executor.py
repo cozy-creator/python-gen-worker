@@ -5987,9 +5987,12 @@ class Executor:
             # removes the compile inside the FIRST forward, not the whole pass.
             # One nested span per forward: counts are small and bounded by the
             # declared handler set, and `iteration=` orders them.
-            self._warm_iterations += 1
             iter_ms = int(round((time.monotonic() - t0) * 1000))
             if boot_mod.in_boot():
+                # Counted INSIDE the gate: a steady-state warm hours later has
+                # no `warmup` span to belong to, and letting it bump the counter
+                # would misreport the next boot span's iteration total.
+                self._warm_iterations += 1
                 boot_mod.mark(
                     boot_mod.PHASE_WARMUP_ITERATION,
                     duration_ms=iter_ms,
