@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- **pgw#788 — a TORCHLESS worker could not boot. torch is a CAPABILITY now, and its
+  absence is a sealed FACT.** `entrypoint.py` calls `env_seal.establish()` on every boot
+  regardless of `accelerator`, and from **0.70.3** onward that chain bare-imported torch at
+  three call sites with no guard — `env_seal.establish_config()` (and `effective_config()`),
+  `host_isa.impose()`, `guard_closure.establish_posture()` — so a torchless image died at
+  `phase=env_seal` before advertising a single function, with no env knob to skip it. The
+  window is 0.70.3 / 0.70.4 / 0.70.5 / 0.75.x / 0.76.x / 0.77.0 / **0.78.0**; the last safe
+  line is 0.70.2. `task e2e`'s marco-polo J2/J3/DelegatedSpend have been unbootable that
+  whole time, and ie#578 has already relocked `dj-utils`, `quality-benchmark` and
+  `dj-pipeline` onto pins inside it — they break on their next BUILD, not on the relock.
+
+  New `torch_capability.torch_or_none()` is the one probe all three use. When torch is
+  absent the seal RECORDS it: `config` carries `torch: "absent"` (plus the torch-free
+  interpreter facts), `inductor` is `"absent"`, `posture` is `{"torch": "absent"}`, and the
+  ISA clamp and guard posture no-op, logged once. That is a *stronger* seal than one that
+  cannot be computed — "this pod had no torch" is a real, keyable environment fact, so the
+  digest stays meaningful for CPU cells. **Adding torch to the CPU images was rejected**: a
+  ~2-3 GB dependency on pods whose entire value is being cheap inverts the point and encodes
+  an SDK defect as a fleet requirement (`accelerator='none'` is a first-class shape, th#721).
+  A DECLARED config knob on a torchless worker still refuses by name — every canonical knob
+  is a torch flag, and honouring one silently would fork cell identity.
+
+  **With torch present the seal is byte-identical**, verified rather than asserted: the same
+  `seal_digest` (`6eda4772...`) before and after on this box. A changed seal shape would have
+  stranded every published cell.
+
+  `tests/test_torchless_boot_pgw788.py` is the guard that did not exist — it import-blocks
+  torch with a `sys.meta_path` finder (no second venv) and asserts the boot chain completes,
+  and `publish.yml` now imports the public entrypoint and runs the seal **in the torch-free
+  wheel-contract venv**, which is a real environment rather than a simulation.
+
 - **pgw#791 — the AOT serve path now satisfies the artifact's ALIGNED-input contract at
   ingress, once, instead of letting AOTInductor copy per call.** Inductor compiles its fast
   path for 16-byte-aligned inputs and, when a pointer is not, its generated wrapper clones the
@@ -30,6 +61,21 @@
   compiled and KEYED at mint — the arm is a fork coordinate like any other — so no program's
   structure varies with runtime state, and the eager fallback still always receives the pair.
   `range_digest` keys `excluded` only when non-empty, so published cells are not re-keyed.
+
+- **pgw#790 (P0 found while proving it) — a FLATTENED container argument shifted every
+  later declared input name, so an armed sdxl cell refused EVERY request.**
+  `aot_package.input_contract` zipped the caller-side parameter names against the exported
+  program's user inputs positionally, but a container argument occupies one parameter slot
+  and produces N placeholders. Measured on a real SDXL UNet: `added_cond_kwargs`
+  ({text_embeds, time_ids}) shifted everything after it, and the recorded contract came out
+  as `added_cond_kwargs` [2, 1280] at position 7 and `down_block_additional_residuals`
+  [2, 6] at position 8 — the two flattened leaves wearing the names of the parameters that
+  follow them. At serve time `bind_call_inputs` binds the pipeline's `added_cond_kwargs`
+  DICT to a declared tensor input and cannot find `down_block_additional_residuals` at all,
+  so every request refuses by name and the cell serves eager for life. `aot_mint.
+  flat_input_names` now derives one name per exported user input, mapping leaves taking
+  their bare key in sorted order (what torch's pytree does, and what the serve-side nested
+  resolution looks for).
 
 - **pgw#790 (prerequisite) — the lifted-LoRA call convention is now STATED, which is what makes
   the branch-bearing class exportable at all.** `install_lifted_lora_forward` declared
