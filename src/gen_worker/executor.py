@@ -595,16 +595,26 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
                 # th#1303 manifest v2: the algorithm-tagged digest and the
                 # ordered chunk list. Dropping these here is what would make
                 # every chunked snapshot look like a whole file with no URL.
-                digest=getattr(f, "digest", "") or "",
+                #
+                # DIRECT FIELD ACCESS, deliberately — not `getattr(f, "digest",
+                # "")`. These were read defensively at first, and the default
+                # turned "the generated stub does not have this field" into
+                # "the hub sent an empty value": the vendored proto WAS stale
+                # (no `digest`/`chunks` at all), so every v2 snapshot arrived
+                # blank on the production gRPC path and nothing said why. A
+                # missing field must be an AttributeError at import-adjacent
+                # code, not a silent empty string — same class as guarding a
+                # digest check on the legacy field's truthiness.
+                digest=f.digest or "",
                 chunks=tuple(
                     WorkerResolvedChunk(
                         sha256=(c.sha256 or "").strip().lower(),
                         url=c.url,
                         length=int(c.len),
                     )
-                    for c in getattr(f, "chunks", ())
+                    for c in f.chunks
                 ),
-                chunk_size_bytes=int(getattr(f, "chunk_size_bytes", 0) or 0),
+                chunk_size_bytes=int(f.chunk_size_bytes or 0),
             )
             for f in snap.files
         ],

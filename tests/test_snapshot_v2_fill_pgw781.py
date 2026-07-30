@@ -424,3 +424,58 @@ def test_a_chunk_with_no_url_anywhere_is_fatal():
     e["chunk_urls"] = None
     with pytest.raises(HubResolveError, match="missing digest/url/len"):
         _parse(e)
+
+
+# ---------------------------------------------------------------------------
+# The generated stubs must actually carry v2. This is the guard for the defect
+# that made the PRODUCTION path silently non-functional: the hub's proto grew
+# `digest`/`chunk_size_bytes`/`chunks` at th#1303 checkpoint 3 and only the GO
+# side was regenerated, so the worker's vendored copy still described the v1
+# message. Every v2 snapshot then arrived over gRPC with no digest and no
+# chunks — fail-closed, but entirely dark, and no test noticed because the
+# tests built the dataclass directly and never crossed the wire.
+# ---------------------------------------------------------------------------
+
+
+def test_the_generated_snapshotfile_stub_carries_v2():
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    names = [f.name for f in pb.SnapshotFile().DESCRIPTOR.fields]
+    for want in ("digest", "chunk_size_bytes", "chunks"):
+        assert want in names, (
+            f"SnapshotFile has no {want!r} — proto/worker_scheduler.proto is stale "
+            f"against the hub. Run `task proto`. Fields: {names}"
+        )
+
+
+def test_the_chunk_message_carries_digest_url_and_len():
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    chunks = next(f for f in pb.SnapshotFile().DESCRIPTOR.fields if f.name == "chunks")
+    names = [f.name for f in chunks.message_type.fields]
+    assert names == ["sha256", "url", "len"], names
+
+
+def test_the_grpc_conversion_carries_chunks_through():
+    """Drive the REAL wire-boundary conversion on a REAL protobuf message.
+
+    `_snapshot_to_resolved` is the only place production snapshots are typed,
+    and it is exactly where a stale stub is invisible."""
+    from gen_worker.executor import _snapshot_to_resolved
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    snap = pb.Snapshot(digest="sha256:" + "c" * 64)
+    f = snap.files.add()
+    f.path, f.size_bytes, f.digest, f.chunk_size_bytes = (
+        "w.safetensors", 130, "sha256:" + "d" * 64, 64)
+    for i, (h, n) in enumerate(((("a" * 64), 64), (("b" * 64), 64), (("c" * 64), 2))):
+        c = f.chunks.add()
+        c.sha256, c.url, c.len = h, f"https://r2.invalid/{i}", n
+
+    out = _snapshot_to_resolved(snap)
+    got = out.files[0]
+    assert got.digest == "sha256:" + "d" * 64
+    assert got.cas_ref() == "sha256:" + "d" * 64
+    assert [c.length for c in got.chunks] == [64, 64, 2]
+    assert [c.url for c in got.chunks] == [f"https://r2.invalid/{i}" for i in range(3)]
+    assert got.chunk_size_bytes == 64
