@@ -20,6 +20,17 @@ hub-double) with a REAL mint child:
 * **the red arm** — the same work on the worker's loop: gaps blow past the
   6-miss window, which is what proves this instrument can see the defect.
 
+MEASURED at Paul's literal numbers (``PGW784_REAL_CADENCE=1``, 10.00s beat,
+140s mint, 60.00s kill line)::
+
+    GREEN  beats=229  worst_gap=10.16s   eager_completed=14
+    RED    beats=13   worst_gap=90.02s   eager_completed=0
+
+The green arm's worst gap is one nominal interval plus 160ms across a mint more
+than twice the kill window. The red arm reproduces th#1299 to the second — the
+incident measured 72s of silence; this measures 90s — and shows the half the
+incident also reported: jobs did not merely crawl, none finished at all.
+
 A measurement worth recording, taken while authoring this (32-core box, CPython
 3.12): a pure-Python GIL-holding burn in ONE thread stretches a 0.25s nominal
 beat to 0.256s — no starvation at all — and it takes ~16 contending threads to
