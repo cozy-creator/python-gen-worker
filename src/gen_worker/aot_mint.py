@@ -760,6 +760,7 @@ class _MintedEntry:
     owner: Any
     program: Any
     input_names: Tuple[str, ...]
+    flat_names: Tuple[str, ...]
     files: List[Any]
     timings: Dict[str, Any]
 
@@ -918,6 +919,7 @@ def _export_entry(
         timings["warm_s"] = _run_declared_warm(module, args, entry)
 
     input_names = _input_names(module, args, kwargs)
+    flat_names = flat_input_names(module, args, kwargs)
     dynamic = dynamic_shapes_spec(espec.dynamic, input_names) \
         if espec.dynamic else None
 
@@ -967,7 +969,8 @@ def _export_entry(
 
     return _MintedEntry(
         name=entry, spec=espec, module=module, owner=owner, program=program,
-        input_names=input_names, files=files, timings=timings)
+        input_names=input_names, flat_names=flat_names, files=files,
+        timings=timings)
 
 
 def adapter_arm_plans(
@@ -1187,7 +1190,7 @@ def _gate_and_declare_entry(
             "(e.g. %s)", entry, len(fused), fused[:3])
     try:
         inputs, symbols = aot_package.input_contract(
-            row.program, row.input_names)
+            row.program, row.flat_names)
         constants = aot_package.constants_manifest(package, entry)
     except aot_package.PackageIntrospectionError as exc:
         raise MintRefused(f"entry {entry!r}: declaration: {exc}") from exc
@@ -1544,6 +1547,57 @@ def _input_names(
     positional = params[:len(args)]
     keyword = [name for name in kwargs if name not in positional]
     return tuple(positional) + tuple(keyword)
+
+
+def flat_input_names(
+    module: Any, args: Tuple[Any, ...], kwargs: Mapping[str, Any],
+) -> Tuple[str, ...]:
+    """ONE name per EXPORTED user input — containers FLATTENED the way export
+    flattens them.
+
+    MEASURED (pgw#790 lane, real sdxl UNet, torch 2.13): `aot_package.
+    input_contract` zips the caller-side parameter names against the exported
+    program's user inputs positionally, and a container argument occupies ONE
+    parameter slot but produces N placeholders. sdxl's `added_cond_kwargs`
+    ({text_embeds, time_ids}) therefore shifted every later name by one and the
+    recorded contract came out as
+
+        position 7  name 'added_cond_kwargs'                shape [2, 1280]
+        position 8  name 'down_block_additional_residuals'  shape [2, 6]
+
+    i.e. text_embeds and time_ids wearing the names of the parameters that
+    follow them. At serve time `bind_call_inputs` then binds the pipeline's
+    `added_cond_kwargs` DICT to a declared tensor input (`input_not_tensor`)
+    and cannot find `down_block_additional_residuals` at all
+    (`input_missing`) — every request refuses by name and the armed cell
+    serves eager for life. That is the field symptom `bind_call_inputs`'
+    own docstring records from pod ae2uc81yub0gyq; the nested-lookup patch
+    treated the symptom, but a nested lookup cannot help when the NAMES it
+    searches for are the wrong ones.
+
+    Mapping leaves take their BARE KEY, which is exactly what the serve-side
+    nested resolution looks for, and dicts flatten in SORTED key order because
+    that is what torch's pytree does. Sequence leaves take `<param>.<index>`.
+    ``_input_names`` is deliberately left alone: `dynamic_shapes_spec` keys on
+    top-level PARAMETER names and mirrors containers structurally.
+    """
+    names = _input_names(module, args, kwargs)
+    values = list(args) + [kwargs[n] for n in names[len(args):] if n in kwargs]
+    out: List[str] = []
+
+    def walk(name: str, value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key in sorted(value):
+                walk(str(key), value[key])
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                walk(f"{name}.{index}", item)
+        else:
+            out.append(str(name))
+
+    for name, value in zip(names, values):
+        walk(str(name), value)
+    return tuple(out)
 
 
 def _specialization_facts(spec: ExportSpec) -> Dict[str, Any]:
