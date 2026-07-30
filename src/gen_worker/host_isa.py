@@ -35,6 +35,8 @@ import platform
 from functools import lru_cache
 from typing import Dict, FrozenSet, Mapping, Optional, Tuple, Union
 
+from . import torch_capability
+
 logger = logging.getLogger(__name__)
 
 #: The fleet-wide mint target on x86-64 hosts at or above it (psABI level).
@@ -133,7 +135,10 @@ def mint_simdlen(march: Optional[str]) -> Optional[int]:
 def impose() -> Dict[str, str]:
     """Clamp torch's inductor codegen target to the portable mint target and
     verify the read-back. Called from ``env_seal.establish`` at boot, before
-    any compile. No-op (empty dict) on non-x86 machines."""
+    any compile. No-op (empty dict) on non-x86 machines, and on a torchless
+    worker — there is no inductor codegen to clamp (pgw#788)."""
+    if not torch_capability.present():
+        return {}
     march = mint_march()
     if march is None:
         return {}
@@ -156,7 +161,10 @@ def impose() -> Dict[str, str]:
 
 
 def effective() -> Dict[str, str]:
-    """Read-back of the live codegen target (seal fact; never assumed)."""
+    """Read-back of the live codegen target (seal fact; never assumed).
+    Empty on a torchless worker: no codegen target exists to read (pgw#788)."""
+    if not torch_capability.present():
+        return {}
     import torch._inductor.config as inductor_config
 
     return {
