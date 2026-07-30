@@ -141,3 +141,65 @@ def test_keepalive_measures_recovery(fake_hub: Any) -> None:
     assert ka.longest_outage_s == 1500.0
     assert ka.unreachable_since is None
     assert any("reachable again after 1500s" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# th#1303: the PUBLISH envelope is a second hub shape, and missing it converted
+# a diagnosable refusal into a different, later error.
+# ---------------------------------------------------------------------------
+
+
+class _Resp:
+    """Minimal response stand-in: only what the origin predicates read."""
+
+    def __init__(self, code: int, body: Any, ctype: str = "application/json") -> None:
+        self.status_code = code
+        self.headers = {"Content-Type": ctype}
+        self._body = body
+
+    def json(self) -> Any:
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+def test_the_publish_error_envelope_is_recognised_as_a_hub_verdict() -> None:
+    """`publishError.body()` (tensorhub `internal/api/repo_publish.go`) emits
+    `{"error": "<code>", "message": ...}` — the code as a STRING, not an object.
+
+    MEASURED LIVE on a v2 publish (th#1303): a 422 from
+    `/publishes/{id}/complete` was classified proxy-shaped, retried under the
+    silence window, and the retry hit the now-terminal session and returned 409
+    `publish_repudiated`. The original 422 — the only response that said WHY —
+    was discarded. A retry loop that turns a diagnosable refusal into a
+    different, later error is worse than one that does not retry at all.
+    """
+    from gen_worker.http_origin import is_definite_hub_answer, response_is_from_hub
+
+    pub = _Resp(422, {"error": "audit_findings", "message": "component missing"})
+    assert response_is_from_hub(pub)
+    assert is_definite_hub_answer(pub)
+
+
+def test_the_object_envelope_still_wins() -> None:
+    from gen_worker.http_origin import response_is_from_hub
+
+    assert response_is_from_hub(
+        _Resp(409, {"error": {"code": "publish_repudiated", "message": "x"}}))
+
+
+def test_proxy_shapes_are_STILL_not_verdicts() -> None:
+    """The bias that pgw#743 exists for must survive: an unrecognised body is
+    proxy-shaped, because mis-terminating an outage throws away paid-for work
+    while mis-retrying a refusal costs a bounded backoff."""
+    from gen_worker.http_origin import response_is_from_hub
+
+    for body, ctype in (
+        ("<!DOCTYPE html><h1>tunnel offline</h1>", "text/html"),
+        ({"error": "gateway"}, "application/json"),          # no message
+        ({"message": "gateway"}, "application/json"),        # no error
+        ({"error": "", "message": "x"}, "application/json"),  # empty code
+        ({"error": ["a"], "message": "x"}, "application/json"),
+        (ValueError("unparseable"), "application/json"),
+    ):
+        assert not response_is_from_hub(_Resp(503, body, ctype)), (body, ctype)
