@@ -546,6 +546,12 @@ def mark(
         detail=detail[:2000],
         cumulative=bool(since_process_start),
     ))
+    if phase == PHASE_HELLO:
+        # The gate opens on the hello ROW existing, not on which helper wrote
+        # it. Hooking this to `mark_once` instead left `mark(PHASE_HELLO)` — a
+        # real call shape, used in the committed pgw#764 suite — recording hello
+        # without opening the gate, so a later close stayed held forever.
+        note_hello()
 
 
 def note_hello() -> None:
@@ -587,12 +593,7 @@ def mark_once(phase: str, **kw: Any) -> bool:
             seen = True  # already requested, still held behind `hello`
     if seen:
         return False
-    mark(phase, **kw)
-    if phase == PHASE_HELLO:
-        # AFTER the hello row, never before: the release emits the boot close,
-        # and a close that landed ahead of its own precondition would rebuild
-        # the very inversion this gate exists to make unrepresentable.
-        note_hello()
+    mark(phase, **kw)  # `mark` opens the ordering gate on a hello row itself
     return True
 
 
