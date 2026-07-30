@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, the benchmark telemetry is connected, and the suite stops asserting the runner
 
 - **th#1330 (th#1316 worker half) — a `disk_ref` the hub's own resolutions have
   already replaced is no longer materialized.** The reconcile pass executed
@@ -240,7 +240,7 @@
   parseable out of the free-text `detail` and JIT duration existed nowhere off
   the pod. Hub half: tensorhub migration 0070 + `GET /v1/admin/compile-duration`.
 
-## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, and the benchmark telemetry is finally connected
+### 0.78.0 detail — the cross-SKU adoption trio (pgw#765 + pgw#772 + pgw#789)
 
 Everything on chaos since 0.77.0. The headline trio, cut together because none of
 them is worth much alone:
