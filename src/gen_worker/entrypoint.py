@@ -282,7 +282,47 @@ def _establish_env_seal() -> Dict[str, Any]:
         config=seal.get("config"),
     )
     _impose_group_host_policy()
+    _isolate_group_inductor_cache()
     return seal
+
+
+def _isolate_group_inductor_cache() -> None:
+    """pgw#783: give each compute child its OWN inductor + triton cache dir when
+    G children share this pod, so concurrent minting/compilation does not race a
+    process-global cache dir.
+
+    Set AFTER the seal — env_seal scrubs the whole ``TORCH*``/``TRITON*``
+    namespace at boot, and the sanctioned window to point the SDK's own capture
+    redirects is after that scrub (same as cell ``capture_env``). A per-group
+    PATH is plumbing, not a behaviour flag, so it does not touch the ck4 seal
+    digest or minted kernels (inductor keys are content-addressed).
+
+    Gated on ``host_siblings() > 1``: a single child (or no split) keeps torch's
+    default dir untouched — byte-identical to today. A respawned child of the
+    same group reuses its group dir, so cache hits survive a respawn.
+    """
+    import tempfile
+
+    from .procsplit import group_ordinal, host_siblings
+
+    if host_siblings() <= 1:
+        return
+    ordinal = group_ordinal()
+    base = (os.environ.get("TENSORHUB_CACHE_DIR") or tempfile.gettempdir())
+    root = os.path.join(base, "gen-worker-inductor", f"g{ordinal}")
+    try:
+        for sub, var in (("inductor", "TORCHINDUCTOR_CACHE_DIR"),
+                         ("triton", "TRITON_CACHE_DIR")):
+            d = os.path.join(root, sub)
+            os.makedirs(d, exist_ok=True)
+            os.environ[var] = d
+    except OSError:
+        logger.warning("could not isolate the group inductor cache under %s; "
+                       "the child keeps the shared default", root, exc_info=True)
+        return
+    _log_startup_phase(
+        "group_inductor_isolation", status="ok", ordinal=ordinal, root=root,
+    )
 
 
 def _impose_group_host_policy() -> None:
