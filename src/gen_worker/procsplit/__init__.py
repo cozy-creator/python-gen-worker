@@ -6,6 +6,13 @@ handler code). On child death the parent reports typed FATALs for in-flight
 jobs, keeps the pod's connection identity alive, and respawns the child.
 
 Off by default: ``GEN_WORKER_PROCESS_SPLIT=1`` enables the split.
+
+Delta 0: every name in this module is PLATFORM-RESERVED hub-side (tensorhub
+``internal/api/endpoint_env_reserved.go`` + the orchestrator twin) and injected
+at pod-launch. A tenant can neither attach them as org envs nor bake them into a
+release: the boundary exists to contain tenant code, so it must not be that
+code's option — and ``GEN_WORKER_CHILD_CMD`` is the argv the control parent
+execs, which tenant-settable would make control-plane RCE.
 """
 
 from __future__ import annotations

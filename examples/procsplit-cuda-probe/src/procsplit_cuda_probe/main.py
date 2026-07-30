@@ -52,9 +52,9 @@ def _cuda_or_refuse():
 
 
 @endpoint(
-    # th#1087 declaration gate — see marco-polo's note: GEN_WORKER_PROCESS_SPLIT
-    # should be platform-reserved, not tenant-declared.
-    env=["GEN_WORKER_OOM_PROBE", "GEN_WORKER_PROCESS_SPLIT"],
+    # th#1087 declaration gate — the endpoint's own switch only. The split flag is
+    # platform-injected (pgw#763 delta 0), never declared here.
+    env=["GEN_WORKER_OOM_PROBE"],
 )
 class ProcSplitCudaProbe:
     def cuda_probe(self, ctx: RequestContext, data: ProbeInput) -> ProbeOutput:
