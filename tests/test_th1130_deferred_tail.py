@@ -69,8 +69,15 @@ def test_the_permit_is_released_before_the_deferred_encode_runs() -> None:
     # about the property under test. Measurable, and dominating the tail, is
     # the honest form of the same requirement.
     assert encode_ms >= 10, f"the 1024^2 webp encode should be visible: {stages}"
-    assert encode_ms >= 0.5 * stages["total.tail"], (
-        f"the deferred encode should dominate the tail: {stages}")
+    # There is deliberately NO claim here about the encode's SHARE of the tail.
+    # `>= 100` was replaced by `>= 0.5 * total.tail` for exactly this reason and
+    # then failed the same way (76 vs 0.5*155 — `resid.tail` was 79ms of runner
+    # noise), which burned a release attempt. Both forms assert a property of
+    # the RUNNER's spare capacity, not of the code: a busy machine inflates the
+    # unattributed residual and the ratio moves without anything under test
+    # changing. The real property — the encode runs slotless, entirely after the
+    # permit is released — is asserted DIRECTLY below and below that, in terms
+    # that are true at any speed.
 
     # The whole encode fits inside the post-release window: the GPU was free
     # for every millisecond of it.

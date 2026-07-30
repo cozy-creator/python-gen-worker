@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+- **pgw#781 / th#1303 — the chunked sha256 CAS is WIRED, in both directions.** The
+  primitives landed with nothing calling them: `models/chunk_upload.py` had zero
+  production callers, and `models/cozy_snapshot.py` — the real fill path — never
+  imported `models/chunk_cas.py` at all. So a v2 publish was unconsumable and a v2
+  publish was unproducible, which made "publish v2" untestable as an outcome
+  rather than merely unproven.
+
+  **Download.** `WorkerResolvedRepoFile` carries `digest` / `chunks[]` /
+  `chunk_size_bytes`, and `cas_ref()` is the ONE place the v1/v2 dual-read is
+  expressed for a resolved entry — it RAISES on an entry with no readable digest
+  instead of returning `""`, because every caller of it is an integrity check.
+  Both wire boundaries (gRPC `pb.Snapshot`, HTTP resolve) carry the new fields,
+  and neither requires a whole-file URL any more — a chunked entry legitimately
+  has none. Local CAS becomes `blobs/<algo>/aa/bb/<hex>`, so legacy trees keep
+  their exact paths while sha256 blobs cannot collide with blake3 ones. Chunked
+  files reassemble through `chunk_cas.download_chunked_file` (bounded
+  out-of-order fetch, in-order commit, fused whole-file hash, per-chunk progress
+  floor — pgw#786's lemon-host pathology now solved on the real path, at chunk
+  granularity, because the retry unit is 64 MiB and completed chunks are
+  durable).
+
+  **Upload.** `convert.hub.HubClient.publish_v2()` implements the hub's v2
+  contract: declare -> `{have, need}` -> PUT the granted objects with the hub's
+  headers VERBATIM -> complete. The checksum is inside the presigned signature,
+  so R2 refuses wrong bytes (400, and the object does not exist afterwards) and
+  refuses a substituted claim (403) — a claimed digest stops being assertable,
+  which kills th#1305's inherit/overwrite class structurally. Resume needs no
+  client state: re-plan and the need set comes back smaller. There is NO protocol
+  auto-select and no env knob — the caller names the protocol, so flipping a
+  producer class is a code change plus a deploy, and a hub without the v2 routes
+  FAILS rather than silently downgrading to blake3.
+
+  **Two silent defects fixed on the way, both of the same family as the executor
+  gate.** `_verify_materialized_tree` read `f.blake3` and guarded on it being
+  non-empty, so a reused v2 tree was reported CLEAN having hashed ZERO bytes; and
+  quarantine/`delete_blobs` STRIPPED the algorithm tag, aiming the unlink at
+  `blobs/blake3/<sha256hex>` — at nothing — leaving the corrupt blob to be
+  re-linked by the very next fill. Separately, `NetworkBytesScope`'s sink was read
+  through a contextvar per call, and chunk fetches run on a `ThreadPoolExecutor`
+  that does not propagate contextvars, so every chunked transfer would have
+  reported ZERO network bytes — th#850's "volume-attached boot => ~0 network
+  bytes" assertion reads that counter, so a cold boot would have looked warm.
+
+  23 new tests, all over real localhost HTTP servers with real sockets, threads
+  and files. The download side asserts BYTES HASHED, never merely "ok" — "ok" is
+  exactly what the old code got right while doing nothing. The upload side runs
+  against a stub that ENFORCES LIKE R2, because that enforcement is the design.
+
+- **test hygiene (release-train blocker)** — `test_th1130_deferred_tail` asserted
+  that the deferred encode occupies at least half the request tail. That is a
+  claim about the RUNNER's spare capacity, not about the code: a busy machine
+  inflates the unattributed residual and the ratio moves with nothing under test
+  changing. It failed a release attempt at `76 >= 0.5 * 155`, having already been
+  weakened once from an absolute `>= 100` that failed the same way. Removed; the
+  property it was reaching for (the encode runs slotless, entirely after the
+  permit is released) is asserted directly and remains true at any speed.
+
 - **pgw#788 — a TORCHLESS worker could not boot. torch is a CAPABILITY now, and its
   absence is a sealed FACT.** `entrypoint.py` calls `env_seal.establish()` on every boot
   regardless of `accelerator`, and from **0.70.3** onward that chain bare-imported torch at
