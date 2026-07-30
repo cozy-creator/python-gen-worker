@@ -94,6 +94,7 @@ _MAX_CONCURRENT_ACTIONS = 16
 # The host canary is a real benchmark (memcpy/D2H/CPU); on a cold pod with a
 # large card it is seconds, not milliseconds. Generous, and bounded.
 _MEASURE_TIMEOUT_S = 180.0
+_MEASURE_BEFORE_SPAWN_S = 60.0
 _ATTESTATION_REPORT_MIN_INTERVAL_S = 300.0
 _CAPABILITY_REPORT_MIN_INTERVAL_S = 300.0
 # Bounded: an observation is dropped when its result passes back, so this only
@@ -1005,6 +1006,20 @@ class ParentControl:
 
     async def _child_loop(self) -> None:
         backoff = self._backoff_base
+        # delta 2: let the host measurement finish before the FIRST child
+        # exists. Two processes initialising CUDA at once costs a second
+        # context and makes the canary contend with the child's model load —
+        # and "measured before any endpoint import" is a stronger claim when
+        # nothing has been spawned at all. Bounded: a measurement that hangs
+        # delays serving, which is worse than an unmeasured Hello, so the
+        # spawn proceeds and build_hello keeps its own (longer) wait.
+        try:
+            await asyncio.wait_for(self._measured.wait(), _MEASURE_BEFORE_SPAWN_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "host measurement still running after %.0fs; spawning the "
+                "compute child anyway", _MEASURE_BEFORE_SPAWN_S,
+            )
         while not self._stopping.is_set():
             self._watchdog_fired = False
             self._child_saw_hello = False
