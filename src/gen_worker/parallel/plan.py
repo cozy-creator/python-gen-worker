@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,16 @@ class GroupPlan:
             )
 
     def assert_agrees(self, other: "GroupPlan", *, rank: int) -> None:
-        """A follower's local view against the broadcast plan."""
+        """A follower's locally-derived view against rank 0's delivered plan.
+
+        Live in production since pgw#774: every follower derives its own
+        group facts from its own materialized pipeline and holds them against
+        the plan the arm command carried — a disagreement (mismatched card,
+        different toolchain) fails the group loudly. The old
+        ``broadcast_plan`` collective is gone: the plan rides the command
+        channel with the BootPlan, so plan delivery can neither hang nor
+        desynchronize a process group.
+        """
         mine, theirs = asdict(self), asdict(other)
         for key in sorted(mine):
             if mine[key] != theirs[key]:
@@ -113,60 +122,3 @@ class GroupPlan:
                     f"{mine[key]!r} — the group fails; a rank NEVER adapts "
                     "locally",
                 )
-
-
-def broadcast_plan(
-    plan: Optional[GroupPlan],
-    *,
-    rank: int,
-    group: Any = None,
-) -> GroupPlan:
-    """Rank 0's plan, delivered to every rank.
-
-    Followers pass ``None``; they receive rank 0's. Implemented over a byte
-    tensor rather than ``broadcast_object_list`` so the payload is explicit
-    and the same code path works on gloo (the CPU test rig) and NCCL.
-    """
-    import torch
-    import torch.distributed as dist
-
-    if not dist.is_available() or not dist.is_initialized():
-        # Degree 1: the plan is whatever rank 0 decided, unbroadcast.
-        if plan is None:
-            raise RankDivergence(rank, "-", "no plan and no process group")
-        plan.refuse_unless_cp_safe()
-        return plan
-
-    device = None
-    if dist.get_backend(group) == "nccl":
-        device = torch.device("cuda", torch.cuda.current_device())
-
-    if rank == 0:
-        assert plan is not None, "rank 0 must decide the plan"
-        plan.refuse_unless_cp_safe()
-        payload = plan.encode()
-        size = torch.tensor([len(payload)], dtype=torch.int64, device=device)
-    else:
-        size = torch.tensor([0], dtype=torch.int64, device=device)
-    dist.broadcast(size, src=0, group=group)
-
-    n = int(size.item())
-    if rank == 0:
-        buf = torch.frombuffer(bytearray(payload), dtype=torch.uint8).clone()
-        if device is not None:
-            buf = buf.to(device)
-    else:
-        buf = torch.empty(n, dtype=torch.uint8, device=device)
-    dist.broadcast(buf, src=0, group=group)
-
-    decided = GroupPlan.decode(bytes(buf.cpu().numpy().tobytes()))
-    if rank != 0 and plan is not None:
-        # A follower that formed its own opinion says so, loudly, once — the
-        # disagreement is evidence about the fleet (a mismatched card, a
-        # different toolchain), not a reason to serve two graphs.
-        try:
-            plan.assert_agrees(decided, rank=rank)
-        except RankDivergence as exc:
-            logger.error("%s", exc)
-            raise
-    return decided

@@ -1,5 +1,353 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#788 — a TORCHLESS worker could not boot. torch is a CAPABILITY now, and its
+  absence is a sealed FACT.** `entrypoint.py` calls `env_seal.establish()` on every boot
+  regardless of `accelerator`, and from **0.70.3** onward that chain bare-imported torch at
+  three call sites with no guard — `env_seal.establish_config()` (and `effective_config()`),
+  `host_isa.impose()`, `guard_closure.establish_posture()` — so a torchless image died at
+  `phase=env_seal` before advertising a single function, with no env knob to skip it. The
+  window is 0.70.3 / 0.70.4 / 0.70.5 / 0.75.x / 0.76.x / 0.77.0 / **0.78.0**; the last safe
+  line is 0.70.2. `task e2e`'s marco-polo J2/J3/DelegatedSpend have been unbootable that
+  whole time, and ie#578 has already relocked `dj-utils`, `quality-benchmark` and
+  `dj-pipeline` onto pins inside it — they break on their next BUILD, not on the relock.
+
+  New `torch_capability.torch_or_none()` is the one probe all three use. When torch is
+  absent the seal RECORDS it: `config` carries `torch: "absent"` (plus the torch-free
+  interpreter facts), `inductor` is `"absent"`, `posture` is `{"torch": "absent"}`, and the
+  ISA clamp and guard posture no-op, logged once. That is a *stronger* seal than one that
+  cannot be computed — "this pod had no torch" is a real, keyable environment fact, so the
+  digest stays meaningful for CPU cells. **Adding torch to the CPU images was rejected**: a
+  ~2-3 GB dependency on pods whose entire value is being cheap inverts the point and encodes
+  an SDK defect as a fleet requirement (`accelerator='none'` is a first-class shape, th#721).
+  A DECLARED config knob on a torchless worker still refuses by name — every canonical knob
+  is a torch flag, and honouring one silently would fork cell identity.
+
+  **With torch present the seal is byte-identical**, verified rather than asserted: the same
+  `seal_digest` (`6eda4772...`) before and after on this box. A changed seal shape would have
+  stranded every published cell.
+
+  `tests/test_torchless_boot_pgw788.py` is the guard that did not exist — it import-blocks
+  torch with a `sys.meta_path` finder (no second venv) and asserts the boot chain completes,
+  and `publish.yml` now imports the public entrypoint and runs the seal **in the torch-free
+  wheel-contract venv**, which is a real environment rather than a simulation.
+
+- **pgw#791 — the AOT serve path now satisfies the artifact's ALIGNED-input contract at
+  ingress, once, instead of letting AOTInductor copy per call.** Inductor compiles its fast
+  path for 16-byte-aligned inputs and, when a pointer is not, its generated wrapper clones the
+  tensor on EVERY call and reports it with a C++ `TORCH_WARN` — i.e. on the worker's stderr,
+  which hub-spawned pods do not expose. diffusers hands the denoiser `timesteps[i]`, a scalar
+  VIEW at an odd element offset, so an armed SDXL cell paid it 28+ times per request:
+  measured on an RTX 4090 (production `w8a8-lora64`, gw 0.76.8), the request residual over
+  28x(per-forward) was 196 ms for the `.pt2` against 77 ms for the equivalent dynamo cell —
+  the whole AOT advantage, spent on a check the serve path never performed.
+  `aot_serve` now checks alignment and contiguity at ingress and realigns into an owned,
+  pointer-stable buffer allocated ONCE per input, and the residual fallback is a typed,
+  hub-visible `aot_input_realigned` event naming the input (coalesced to one per
+  (entry, input, reason), with every occurrence counted and surfaced by
+  `aot_serve.realigned_inputs(pipeline)`).
+
+- **pgw#790 — a LoRA-bucket family now mints BOTH graph classes into one cell, and the serve
+  path routes adapter-free traffic to the branchless one.** gw#627's canonical zeroed
+  rank-bucket branch predicted "a small constant overhead" on non-LoRA requests; measured it is
+  **+31.8% of the compiled per-forward on a 4090 and +44.9-45.9% on a 5090**, with kernel
+  launches +54%/+114% — paid to compute zeros by the 95% of sdxl denoiser forwards that name no
+  adapter. The mint fans every branch-capable target's plan into `<target>/adapter=true/...`
+  and `<target>/adapter=false/...`; the branchless class declares `excluded_inputs` (the
+  NEGATIVE half of the ingress contract, without which both classes admit an attach call and
+  the dispatch refuses `entry_ambiguous`); and `aot_serve` omits the lifted pair from an
+  adapter-free call so only the branchless class admits it. Both classes are exported,
+  compiled and KEYED at mint — the arm is a fork coordinate like any other — so no program's
+  structure varies with runtime state, and the eager fallback still always receives the pair.
+  `range_digest` keys `excluded` only when non-empty, so published cells are not re-keyed.
+
+- **pgw#790 (P0 found while proving it) — a FLATTENED container argument shifted every
+  later declared input name, so an armed sdxl cell refused EVERY request.**
+  `aot_package.input_contract` zipped the caller-side parameter names against the exported
+  program's user inputs positionally, but a container argument occupies one parameter slot
+  and produces N placeholders. Measured on a real SDXL UNet: `added_cond_kwargs`
+  ({text_embeds, time_ids}) shifted everything after it, and the recorded contract came out
+  as `added_cond_kwargs` [2, 1280] at position 7 and `down_block_additional_residuals`
+  [2, 6] at position 8 — the two flattened leaves wearing the names of the parameters that
+  follow them. At serve time `bind_call_inputs` binds the pipeline's `added_cond_kwargs`
+  DICT to a declared tensor input and cannot find `down_block_additional_residuals` at all,
+  so every request refuses by name and the cell serves eager for life. `aot_mint.
+  flat_input_names` now derives one name per exported user input, mapping leaves taking
+  their bare key in sorted order (what torch's pytree does, and what the serve-side nested
+  resolution looks for).
+
+- **pgw#790 (prerequisite) — the lifted-LoRA call convention is now STATED, which is what makes
+  the branch-bearing class exportable at all.** `install_lifted_lora_forward` declared
+  `lora_a`/`lora_b` keyword-only, so the declared-input path refused them by name
+  (`_positionalize` rejects declared keyword-only inputs) while feeding them positionally — the
+  pgw#723 mint obligation — landed them in `*args` and died on `the lifted LoRA argument
+  'lora_a' is missing`. The wrapper now appends the pair to the denoiser's own positional
+  parameters via `__signature__` and accepts it either way.
+
+- **th#1299 (worker half of the visibility defect)** — an abandoned self-mint now names
+  its own cause. The abort event reported `phase="abandoned"` with the detail
+  `"(adopt-on-arm / vacate / shutdown)"` — three unrelated causes in one string on the
+  only wire record the hub keeps, so 41 such rows on the master stack could not be
+  triaged from worker evidence at all (the real cause, the hub retiring the pod
+  mid-mint, was found only by joining `worker_activity_events` to
+  `worker_pods.retire_reason` by hand). `abandon_background_mint` now takes a `code`
+  and the terminal handler reports `phase=abandoned_<code>`
+  (`adopt_on_arm` / `vacate` / `shutdown` / `tenant_oom`, `unspecified` for a caller
+  that omits it — a legible gap, never a plausible-looking wrong cause).
+
+- **pgw#773 residual / pgw#748 — multi-group sequence parallelism is SERVED, and proven on
+  four real H100s.** A group's cards now come from the delivered topology instead of the group
+  ordinal (at degree D group `g` owns `[g*D, (g+1)*D)`, so on a `2x2` pod group 1 owns cards 2-3
+  while the old helper pinned card 1 — group 0's follower card, silently, on every load-thread
+  hop). With that, the `G>1 ∧ D>1` boot refusal is lifted for `sequence`; it stays typed and
+  reachable for a degree>1 group whose sharding nothing here installs (`cfg`).
+
+  Live acceptance on 4xH100-80GB-HBM3 SXM (NVLink `NV18`, real Wan2.2-A14B transformer,
+  32,760 tokens / 40 heads): degree 2 **1.80x**, degree 4 **3.42x**, and two concurrent degree-2
+  groups at **1.71x / 1.70x** each — every arm **bit-identical** to degree 1 at the same seed
+  (`max|Δ| = 0.0` in fp64, 0 of 2,096,640 elements differ). Group 1's weights landed on card 2.
+
+  Found live and fixed on the way: NCCL enables NVLink SHARP (NVLS) multicast by default on
+  NVSwitch hosts and our containers cannot bind it, so EVERY SP collective died with
+  `ncclUnhandledCudaError ... CUDA error 401`. `init_rank` now decides `NCCL_NVLS_ENABLE=0`
+  before any communicator exists; Ulysses is all-to-all, which NVLS does not accelerate.
+
+  Found live and NOT fixed (pgw#792, filed): killing a rank mid-call does not fail the group
+  typed — the collective runs to the full 300 s ceiling and NCCL then takes the worker process
+  down. Evidence and the re-runnable probe: `~/cozy/samples/spaccept/`.
+
+- **th#1322** — compile duration is a NUMBER on the wire, for both mint routes.
+  `ActivityUpdate.duration_ms` (proto field 17) carries the worker's own
+  monotonic span, and a new typed `jit_compile` event gives the JIT path the same
+  event shape `aot_mint_phases` has: `phase=minted` for the roll-up,
+  `phase=entry:<graph class>` / `shape:<WxH>` / `child:<phase>` for the spans
+  inside it. `aot_mint._emit_phase_event` now stamps `total_s` numerically and
+  emits a per-graph-class event; `compile_cache.emit_jit_compile_event` retires
+  the log-only `"compiled %s in %.0fs"` line at `compile_cache.py:3803`;
+  `mint_child` measures per-phase spans through its own `frame()` funnel and
+  `mint_delegate` turns the child's report into hub events (`phase=aborted` when
+  no cell came out, so a failed mint's real seconds are recorded without
+  polluting an AOT-vs-JIT comparison). Before this, AOT durations were only
+  parseable out of the free-text `detail` and JIT duration existed nowhere off
+  the pod. Hub half: tensorhub migration 0070 + `GET /v1/admin/compile-duration`.
+
+## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, and the benchmark telemetry is finally connected
+
+Everything on chaos since 0.77.0. The headline trio, cut together because none of
+them is worth much alone:
+
+- **pgw#765** — AOT adoption is pinned to `sm`, never to the GPU SKU. `verify`
+  refuses on `("sm", "torch", "cuda")` + host ISA + family/contract hashes; `sku`
+  is recorded and never refused on, and `_candidates` turned the old SKU FILTER
+  into a SELECTION PREFERENCE (same-SKU first for autotune affinity, then stamped
+  `sm`, then newest, key digest as tie-break) so a cross-SKU same-arch cell is
+  always in the list, just behind. A second tier reads torch's own
+  `AOTI_COMPUTE_CAPABILITY` out of the `.pt2` and refuses `sm_mismatch` before
+  dlopen. An AST sweep over every adoption-path module fails the suite on a
+  live-code comparison against `"sku"` unless allow-listed with a reason (two
+  entries, both named).
+- **pgw#772** — the serving lane is deterministic; the voluntary bf16-resident
+  upcast is REMOVED. Detail section below.
+- **pgw#789** — the benchmark telemetry that was built and never connected.
+  `serving_mode` reached 0 of 416 request rows because the module was imported by
+  nothing but its own test; the `weights_fetch` / `pipeline_load` /
+  `warm_complete` boot spans were never emitted; and `first_request_servable` was
+  measuring "startup() returned", recording 4.2-12.3s for pods whose real cold
+  boots took minutes. Wired for real, so compile / cold-boot / inference numbers
+  reach the hub.
+
+pgw#765 + pgw#772 are the two halves of the same defect and only work together:
+pgw#765 removed the `sku` pin, pgw#772 removed the `lane` fork, and cross-SKU
+adoption is end-to-end only with both. pgw#789 is what makes the result
+measurable. **Consumers relocking for the AOT/JIT/eager benchmark matrix want
+this version or later** — `c87ea3d` (pgw#789) existed in no published tag before
+now.
+
+Also aboard, by issue (see each entry below where one exists): pgw#770 +
+follow-up (nunchaku svdq fragment packing; `qweight` k % 128), pgw#773 / #774 /
+#775 / #776 / #778 (per-group process groups and failure domains, rank-symmetric
+forwards, the pod's hub-facing VRAM truth, never advertising what dispatch will
+refuse), pgw#781 / th#1303 (chunked sha256 reassembly + the mandatory volume
+check), pgw#782 / th#1313 (the width-4 DP collapse root-caused to the shared
+interpreter; a worker refuses to materialize a snapshot containing pickle
+weights), pgw#784 (a mint runs in its own OS process, now wired), and **th#1307**
+(the C2PA private key never enters a pod — its detail section further down is
+still headed "Unreleased"; it ships HERE).
+
+One test-only fix was made by this release lane to get the train green:
+th#1307's `signer_configured` fixture reset the C2PA module globals with
+`monkeypatch.setattr` in its post-yield teardown, so monkeypatch's own finalizer
+restored the ARMED values right back and leaked a configured signer — pointed at
+an already-shut-down fake hub — into every later test that saves an image. Seven
+tests across `test_image_encoding_default`, `test_th1111_stage_timing`, and
+`test_th1130_deferred_tail` went `JOB_STATUS_FATAL`. Teardown now assigns plainly.
+No product path touched.
+
+- **pgw#784 — a mint runs in its OWN OS process; the worker serves eager and
+  reports throughout.** th#1299 killed a live sd15 pod mid-mint and the hub was
+  right to. The mint's compile driver ran INSIDE the serving process, and
+  inductor's orchestration layer is long-running GIL-holding Python, so it
+  starved the one asyncio task carrying BOTH the 10s heartbeat and eager
+  serving: 72s of app-level silence, an activity counter frozen 126s, and —
+  read at source — a pod that resumed reporting 6 seconds after being declared
+  hung, with an evidence counter advancing at 500/s. It was STARVED, not hung.
+  The hub-side patience fix was REJECTED and reverted (`ef890253` ->
+  `755834a5`): a worker whose reporting its own compute can mute is a broken
+  worker, and this is the worker-side fix (WORKER-CONTRACTS.md §1-2).
+
+  **The shape:** on a cache miss, SPAWN a mint process — spawn, never fork,
+  because a CUDA context cannot survive `fork()` — which loads what it needs
+  itself, builds the cell, writes the artifact and exits. The serving process
+  never stops serving eager or beating; on artifact-ready it swaps through the
+  ordinary delivered-cell path. No keepalive, no held verdicts, no hub
+  tolerance, no magic numbers.
+
+  - `mint_process` — the loop-native supervisor. The whole boundary is one JSON
+    request in, one JSON report + one artifact out, so a failed mint is
+    reproducible by hand (`python -m gen_worker.mint_child request.json`).
+    Nothing live crosses, which is why `multiprocessing` is not used either.
+    Every child death is CLASSIFIED and the class drives the retry: a named
+    refusal is terminal (re-running it buys a second billed compile for the
+    same sentence), a resource shortfall or unclassified crash gets exactly one
+    more attempt. **No wall-clock cap anywhere** — liveness is MEASURED from the
+    child's process-tree CPU plus the bytes in its capture dir, so a 9.5-minute
+    mint is never killed and a wedge dies quickly. Abandonment reaps the process
+    GROUP, because inductor forks its own compile workers.
+  - `mint_child` — seals the environment as a boot does (a differently-sealed
+    child would stamp a cell the parent's own `verify()` rejects), caps its
+    VRAM, loads the endpoint's pipeline through the real standalone loader,
+    arms COLD and drives the endpoint's OWN derived warm plan. Never
+    `mint_artifact`'s producer-style warm call: that is gw#586/gw#587's whole
+    lesson, and a cell packed from the wrong graphs bricks every adopting boot.
+  - **VRAM co-residency** (`mint_budget.co_residency`) — the child holds its own
+    copy of what it compiles, so the ask is `resident weights + ONE activation
+    set + inductor workspace + one CUDA context`; in exchange the serving
+    process loses the entire in-process capture (`2 * activation + workspace`,
+    plus the retained dummy batches the tenant's next peak had to fit around).
+    Delegation is therefore CHEAPER for activation-heavy families and dearer for
+    weight-heavy ones, which DECLINE — pgw#737's policy, unchanged: eager
+    serving, cell absent, a roomier pod mints it. The ask is handed to the child
+    as a hard `set_per_process_memory_fraction` cap, so an under-estimate is the
+    CHILD's OOM and never the tenant's (the wan-2.2 failure); measured child
+    peaks are banked monotonically, so the second ask on a pod is a fact.
+  - **Failure inversion** — a dead mint process is a FAILED MINT reported by a
+    LIVE worker that keeps serving eager. Nothing raises out of the mint path;
+    the classification, the phase it died in and the child's own last words all
+    ride the wire as typed `self_mint_abort` / `self_mint_skipped` events,
+    because a serve pod exposes no logs.
+  - **Two restrictions lift**, both of which existed only because the capture
+    was in-process: one live capture per process, and gw#608's seeded-cell gate,
+    which had been leaving a slot whose own cell is missing eager for life
+    because an unrelated sibling got a delivered cell first.
+  - **Cell swap unchanged.** `fleet_cells.adopt_delegated_mint` runs exactly the
+    delivered-cell adoption the cache-HIT path runs; `verify()` semantics
+    untouched (th#1098 exact identity). In-process capture made the warmup proof
+    tautological — the artifact was byte-derived from the execution the proof
+    observed. A child-built cell must EARN adoption through the same gates a
+    hub-delivered cell does, so a parity gap degrades to eager-with-no-cell
+    instead of poisoning the store.
+  - Progress reporting comes free: the child's phase frames land on the SAME
+    `self_mint_compile` activity the hub already reads, and `activity.watchdog`
+    already sums live children's CPU recursively, so
+    `evidence:self_mint_compile` advances by itself. No protocol change either
+    side of the wire.
+
+  **Proof** — `tests/test_mint_liveness_pgw784.py` drives a real worker (real
+  `Lifecycle._heartbeat_loop`, real `Executor`, real gRPC socket) through a mint
+  longer than the hub's kill window, sampling beats from the HUB's vantage
+  point: the green arm keeps every gap inside 2 intervals against a 6-interval
+  kill line with eager jobs completing throughout; the red arm — the same work
+  on the loop — blows through the window and stops serving with it, which is
+  what makes the green arm believable. Scaled cadence by default, the literal
+  10s/140s numbers under `PGW784_REAL_CADENCE=1`.
+
+  A measurement worth keeping: on a 32-core box a pure-Python GIL-holding burn
+  in ONE thread stretches a 0.25s nominal beat to 0.256s, and needs ~16
+  contending threads to reach 1.17s (4.7x). The incident lost 72-126s. The live
+  mechanism is strictly worse than any pure-Python synthetic reproduces, which
+  is why the fix moves the compile out of the interpreter rather than trying to
+  make it yield.
+
+  **Wired into the executor**, which is what makes any of the above run: a
+  compile-cell miss on a delegating boot now reaches `mint_delegate.build_cell`
+  instead of the in-process capture. The wiring exposed a defect that would have
+  made the feature a no-op — the pending-self-mint recording gate was `if armed
+  and selection is not None`, and a delegated arm reports `armed=False`
+  truthfully (nothing IS armed; the pipe serves eager), so the mint obligation
+  was silently dropped. Delegated pendings are recorded on their own merits and
+  deliberately kept OUT of `active_compile_artifacts` — that pipe serves eager,
+  and claiming an active artifact for it would advertise bytes it does not serve
+  (gw#586) — while still advertising the claimed key ref for th#910's
+  self-attested fence. Sibling pipes sharing a key mint their union in ONE child.
+  Delegation is eager-first by construction (the two switches move together) and
+  `fleet_cells.delegatable()` keeps mandatory quantized lanes and regional
+  targets on the in-process capture, since those cannot serve eager meanwhile.
+  Delegation is a POLICY of the arming brain, not a caller argument: threading a
+  `delegate=` flag from the executor broke every arming double in the suite.
+
+- **pgw#770 — native svdq decoded five of seven tensors in the wrong order; the
+  official nunchaku qwen-image artifact rendered noise.** In a nunchaku v1
+  checkpoint EVERY tensor is warp-fragment-permuted, not just
+  `qweight`/`wscales`. We read `proj_down`, `proj_up`, `smooth_factor`, `bias`
+  and `wcscales` verbatim, and `unpack_wscales` split a 128-channel tile
+  `(4, 8, 4)` where deepcompressor's `pack_micro_scale` splits it `(4, 4, 8)`.
+  Fixed: `unpack_vector`/`pack_vector` (deepcompressor `pack_scale`,
+  `group_size=-1`) and `unpack_lowrank`/`pack_lowrank` (`pack_lowrank_weight`)
+  added, the micro-scale row split corrected, `decode_linear` applies all of
+  them. Measured on the real artifact vs the true bf16 weight: `to_out.0`
+  rel-err **1.145 -> 0.070**, `img_mlp.net.0.proj` **1.251 -> 0.056**, fused
+  `to_qkv` **1.181 -> 0.063**, bias now exact. Both the blockwise buffers and
+  the dense fold reconstruct bit-identically. Evidence: te#137 Run 1b measured
+  the official artifact at lpips 0.8215 / psnr 4.64 dB / CLIP 15.26 through the
+  old decoder (th#1094's rig scored the same file 0.1050 / 25.20 dB).
+  `pack_wscales` also changes, so any artifact written by the te#137 producer
+  before this commit decodes wrong — the producer must swizzle the other five
+  on write before its next run.
+  New `tests/test_svdq_official_layout_pgw770.py` asserts every inverse against
+  deepcompressor's forward packers transcribed verbatim, never against our own
+  encode side: pgw#685's suite round-tripped our packers against our unpackers,
+  which is exactly why a shared wrong convention survived it.
+
+### 0.78.0 detail — pgw#772: the serving lane is deterministic; the voluntary bf16-resident upcast is REMOVED
+
+The gw#534 "rung 2" free-VRAM upgrade (`bf16_resident_fits` /
+`BF16_RESIDENT_MARGIN_GB`, and `load_from_pretrained`'s
+`allow_bf16_resident_upgrade=` parameter) is deleted — REMOVED outright, not
+default-off: any knob that can flip it back per-pod re-forks cell identity,
+and a release that genuinely wants plain bf16 residency declares it (bind the
+bf16 flavor / `storage_dtype=""`) instead of probing for it. A declared fp8
+storage lane is now served as fp8 storage on every card, so the serving lane
+— and with it the ck5 `lane` axis, the ONLY GPU-dependent axis in the key —
+is a pure function of (release × declared config), never of the individual
+card's free VRAM.
+
+Why (th#1198 CP-D wire evidence + pgw#727 numbers): on the same release,
+image, and sm_89, an RTX 4090's ~1.5 GiB `mem_get_info` surplus over an L4
+passed the probe and silently moved it to base lane `""` — a lane nothing
+mints for — so it missed all 144 published checkpoints INCLUDING its own
+same-SKU cell and served eager for life (the L4 armed and banked −21%
+request-level). The cast tax the upgrade dodged re-measured **+1.9%** for the
+structural storage lane (pgw#727; the +44–73% that justified it measured the
+retired hook form), so VRAM-rich cards were paying ~2x weight VRAM and
+forfeiting the compiled win for a 1.9% saving.
+
+Unblocks BOTH halves th#1198 found broken: JIT cross-SKU key convergence
+(pull-by-key can now match across cards) and production-path AOT adoption on
+higher-VRAM cards (pgw#765 removed the `sku` pin; this removes the `lane`
+fork — together they make cross-SKU adoption real end-to-end). Lane
+populations converge; NO key-scheme change (identity axes untouched — cells
+minted at the declared lane become adoptable by every card of that config).
+
+Involuntary transitions are PRESERVED and red-tested: the fit ladder's
+can't-fit rungs (runtime fp8-E4M3, emergency nf4) and the w8a8/w4a4
+dequant-on-unsupported-host lanes are declared rungs, structurally reported —
+degradation is fine; a probe deciding identity was the bug.
+`tests/test_lane_determinism_pgw772.py` carries the standing guard: same
+declared config under 4 GiB vs 999 GiB of mocked free VRAM must compute
+identical requested cell keys (red on the pre-fix tree), and no adoption or
+identity path may take a live device measurement as a hash input.
+
 ## 0.77.0 (2026-07-29) — everything since 0.76.8: the 0.77–0.83 chaos span ships as ONE release
 
 MAPPING: the chaos labels 0.77.0–0.83.0 below (entries re-marked "stamp — SHIPPED IN
@@ -366,6 +714,22 @@ yet"), plus the flip-critical AOT serve seams.
   lane; the flip smoke notes the gap until it ships).
 
 
+
+## Unreleased — C2PA signing moves hub-side (th#1307)
+
+- **The C2PA private key never enters a pod (th#1307).** The hub used to inject
+  `GEN_WORKER_C2PA_KEY_PEM` into every tenant pod and this process signed
+  in-process — tenant code shares the process, so one `print(os.environ[...])`
+  leaked the platform-wide leaf signing key. Now the worker holds only the PUBLIC
+  chain and signs through the hub: `content_credentials` installs a c2pa-rs
+  callback signer that POSTs the claim's COSE to-be-signed octets to
+  `/v1/worker/c2pa/sign` (worker-JWT authenticated, armed at HelloAck alongside
+  the cell-receipt gate). No media leaves the pod; a claim is ~1 KiB regardless
+  of asset size. `GEN_WORKER_C2PA_KEY_PEM` / `_KEY_PATH` are now REFUSED at
+  configure() and no longer exist as Settings fields, so a hub regression kills
+  the pod loudly instead of quietly re-creating the leak. Every failure mode
+  (unarmed signer, hub refusal, hub unreachable) RAISES: the request fails
+  rather than shipping media that looks signed and isn't.
 
 ## Unreleased (ck5 interim -> ck6 design) — exact recipe identity; equivalence machinery deleted
 

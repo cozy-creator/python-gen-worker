@@ -53,7 +53,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from . import guard_closure, host_isa
+from . import guard_closure, host_isa, torch_capability
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +147,18 @@ def effective_config() -> Dict[str, str]:
     declared knobs) — no env var can reach them. The hash-seed facts
     record interpreter-level ordering entropy (pgw#719): canonical
     enforcement (PYTHONHASHSEED=0 pre-exec) is the entrypoint's wiring;
-    until then the facts make a divergent seed VISIBLE in the key."""
-    import torch
+    until then the facts make a divergent seed VISIBLE in the key.
+
+    pgw#788: a torchless worker has no matmul/cudnn surface to read back, so it
+    seals the ABSENCE as a fact instead of crashing on the import."""
+    torch = torch_capability.torch_or_none()
+    if torch is None:
+        return {
+            "torch": torch_capability.ABSENT,
+            "python_hash_seed": os.environ.get("PYTHONHASHSEED", ""),
+            "hash_randomization": str(sys.flags.hash_randomization),
+            **host_isa.effective(),
+        }
 
     return {
         "float32_matmul_precision": str(torch.get_float32_matmul_precision()),
@@ -171,9 +181,14 @@ def establish_config(
     APIs, then verify the read-back. ``overrides`` is the typed-knob
     surface (pgw#718): keys must exist in :data:`CANONICAL_CONFIG` — the
     only route to non-canonical behavior is a declared knob, which is
-    sealed and therefore keyed. An unknown knob refuses, named."""
-    import torch
+    sealed and therefore keyed. An unknown knob refuses, named.
 
+    pgw#788: on a torchless worker there is nothing to impose. The knob names are
+    still validated (that contract is torch-free) and the seal records
+    ``torch: "absent"``. A DECLARED knob is a different matter: every canonical
+    knob is a torch flag, so an endpoint that declares one in a torchless image
+    is misconfigured, and honouring it silently would fork cell identity — so
+    that refuses, named."""
     table = dict(CANONICAL_CONFIG)
     if overrides:
         unknown = sorted(set(overrides) - set(table))
@@ -183,6 +198,16 @@ def establish_config(
                 "table (env_seal.CANONICAL_CONFIG) — declare the knob "
                 "there first (one-way door: knobs in, env vars never)")
         table.update({k: str(v) for k, v in overrides.items()})
+    torch = torch_capability.torch_or_none()
+    if torch is None:
+        if overrides:
+            raise EnvSealError(
+                f"config knob(s) {sorted(overrides)!r} declared on a TORCHLESS "
+                "worker: every canonical knob is a torch flag, so there is "
+                "nothing to impose them on. Either ship torch in this image or "
+                "drop the knob — honouring it silently would fork cell "
+                "identity (pgw#788)")
+        return effective_config()
     torch.set_float32_matmul_precision(table["float32_matmul_precision"])
     torch.backends.cuda.matmul.allow_tf32 = (
         table["cuda_matmul_allow_tf32"] == "True")
@@ -202,7 +227,10 @@ def establish_config(
 def inductor_config_digest() -> str:
     """Digest of torch's PORTABLE inductor config — the codegen surface a
     cell's kernels were minted under (machine-specific entries excluded by
-    torch itself)."""
+    torch itself). ``"absent"`` on a torchless worker (pgw#788) — a declared
+    fact, so the seal digest stays meaningful for CPU cells."""
+    if not torch_capability.present():
+        return torch_capability.ABSENT
     import torch._inductor.config as inductor_config
 
     portable = inductor_config.save_config_portable()

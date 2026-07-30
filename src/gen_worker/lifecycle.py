@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
+from . import content_credentials
 from . import receipts
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
@@ -56,7 +57,18 @@ _DISK_REPORT_TTL_S = 30.0
 
 
 def probe_hardware() -> Dict[str, Any]:
-    """Static hardware facts + gate inputs. torch is optional."""
+    """Static hardware facts + gate inputs. torch is optional.
+
+    ``gpu_free_mem`` is the input `gate_functions` turns into `unavailable` +
+    `serve_plans` for EVERY function, so on a wide pod it must be the free pool
+    of the group with the LEAST room, not card 0's (pgw#776/DPA-7). Card 0 is
+    always the least free card in practice — it carries group 0's weights plus
+    the allocator cache (measured: qwen 96.5 GiB on card 0 vs ~68 on 1-3) — so
+    reading it planned offload/fp8-fallback rungs for groups 1..G-1 from a card
+    they will never touch, and a genuinely-unfit card 0 refused functions the
+    other three could serve. The MIN is the honest single scalar until the fit
+    ladder is per-rank: it never promises a group room it does not have.
+    """
     info: Dict[str, Any] = {
         "gpu_count": 0,
         "gpu_total_mem": 0,
@@ -76,6 +88,13 @@ def probe_hardware() -> Dict[str, Any]:
             free_mem, total_mem = torch.cuda.mem_get_info(0)
             info["gpu_total_mem"] = int(total_mem)
             info["gpu_free_mem"] = int(free_mem)
+            worst = _worst_group_free_vram_bytes()
+            if worst and worst != int(free_mem):
+                logger.info(
+                    "fit inputs: gating on the least-free group (%d bytes) "
+                    "instead of card 0 (%d bytes) — pgw#776",
+                    int(worst), int(free_mem))
+                info["gpu_free_mem"] = int(worst)
     except Exception:
         pass
     try:
@@ -91,26 +110,51 @@ def probe_hardware() -> Dict[str, Any]:
     return info
 
 
+_MULTI_GPU_NO_TOPOLOGY_WARNED = False
+
+
+def _worst_group_free_vram_bytes() -> int:
+    """The free pool of the least-roomy execution group, or 0 if unknowable.
+
+    Reads the DELIVERED topology (pgw#776/DPA-5): on a pod this worker itself
+    demoted for a non-NVLink fabric, ``from_env`` describes a packing that is
+    not being served, so reporting from it makes the reported and served
+    topologies disagree.
+    """
+    from .topology import delivered_topology
+
+    groups = delivered_topology().all_groups()
+    return int(min((g.free_vram_bytes() for g in groups), default=0))
+
+
 def free_vram_bytes() -> int:
-    """Free VRAM for the BEST placement this worker can offer one job
-    (``StateDelta.free_vram_bytes``).
+    """Free VRAM the hub may admit against (``StateDelta.free_vram_bytes``).
 
     This used to be the sum across every CUDA device, which is the reporting
     half of the bug pgw#648 fixed in the accounting half: VRAM is not fungible
     between cards, so a 2x24GB pod that reports 48GB invites the hub to admit
-    a 30GB model that fits on neither. One job runs on one execution group, so
-    the honest number is the largest single group's free pool — MIN within a
-    replicated group (every member holds a full copy), MAX across groups
-    (the job goes to whichever group is roomiest). Single-GPU pods, which is
-    every pod today, are unchanged.
+    a 30GB model that fits on neither.
+
+    It then became the MAX across groups, which is honest PER JOB and dishonest
+    per POD (pgw#776/DPA-5): the hub admits against a single scalar and can
+    admit G concurrent jobs whose sum is G times what any one group has. With
+    one scalar on the wire the only safe answer is the MIN across groups — MIN
+    within a replicated group too, since every member holds a full copy — so
+    every one of the G jobs the hub may admit fits where it lands. At G == 1,
+    which is every pod today, MIN and MAX are the same number.
+
+    Multi-GPU host with NO delivered topology (every harness attach and
+    `cli serve`): the worker has ONE slot which places on the thread-current
+    device, so card 0 is the honest number and the other cards are invisible to
+    the hub. That is a real behaviour change from the historical all-device sum
+    (the pgw#748 G=1 invariant's one exception), so it is named and logged once
+    rather than left to be rediscovered.
     """
     try:
-        from .topology import ExecutionTopology
-
-        groups = ExecutionTopology.from_env().all_groups()
-        best = max((g.free_vram_bytes() for g in groups), default=0)
-        if best:
-            return int(best)
+        worst = _worst_group_free_vram_bytes()
+        if worst:
+            _warn_once_if_gpus_are_invisible()
+            return int(worst)
     except Exception:
         pass
     try:
@@ -121,6 +165,30 @@ def free_vram_bytes() -> int:
     except Exception:
         pass
     return 0
+
+
+def _warn_once_if_gpus_are_invisible() -> None:
+    global _MULTI_GPU_NO_TOPOLOGY_WARNED
+    if _MULTI_GPU_NO_TOPOLOGY_WARNED:
+        return
+    try:
+        import torch
+
+        from .topology import ENV_VAR, delivered_topology
+
+        if os.environ.get(ENV_VAR):
+            return
+        count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if count > 1 and delivered_topology().gpu_count == 1:
+            _MULTI_GPU_NO_TOPOLOGY_WARNED = True
+            logger.warning(
+                "this host has %d CUDA devices and NO delivered %s: the worker "
+                "serves ONE slot on card 0 and reports card 0's free VRAM. The "
+                "other %d card(s) are invisible to the hub (they are not "
+                "summed — VRAM is not fungible across cards). pgw#776",
+                count, ENV_VAR, count - 1)
+    except Exception:
+        pass
 
 
 def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
@@ -416,6 +484,14 @@ class Lifecycle:
         # before it may arm. Same wiring moment as the CellPublisher's.
         if self.executor.file_base_url:
             receipts.configure(
+                base_url=self.executor.file_base_url,
+                worker_jwt=self.executor.worker_jwt_provider,
+            )
+            # th#1307: arm the hub-side C2PA signer at the same moment. The
+            # platform private key never enters this pod — the hub signs the
+            # claim bytes. Until this call lands, a signing-configured worker
+            # FAILS media requests rather than shipping them unsigned.
+            content_credentials.configure_remote_signer(
                 base_url=self.executor.file_base_url,
                 worker_jwt=self.executor.worker_jwt_provider,
             )
@@ -1056,12 +1132,16 @@ class Lifecycle:
             await self.set_phase(pb.WORKER_PHASE_DOWNLOADING_MODELS)
             for ref in prefetch_refs:
                 try:
-                    # pgw#764: per-checkpoint boot fetch span. Bytes and source
-                    # are stamped by the CAS layer (models/cozy_snapshot), which
-                    # is the only place that knows whether they came off a warm
-                    # volume, the local CAS, or a cold R2 pull.
-                    with boot_mod.span(boot_mod.PHASE_WEIGHTS_FETCH, ref=ref):
-                        await self.executor.store.ensure_local(ref)
+                    # pgw#789: the weights_fetch boot span lives in
+                    # `ModelStore._materialize_local`, NOT here. This call site
+                    # only covers hf/civitai prefetch refs; the tensorhub refs
+                    # that own the ~230s of a real cold boot arrive later via
+                    # DesiredResidency/RunJob and never pass through here, so a
+                    # span here measured the cheap path and left the expensive
+                    # one invisible. The materializer is also the only layer
+                    # that can stamp bytes AND source (network vs warm volume
+                    # vs local CAS), which is what the fetch rate needs.
+                    await self.executor.store.ensure_local(ref)
                 except Exception as exc:
                     # pgw#655: this used to log and walk on to READY with an
                     # unmaterialized model, so the failure resurfaced as a
@@ -1114,7 +1194,13 @@ class Lifecycle:
                 awaiting_hub[spec.name] = missing
                 continue
             try:
-                await self.executor.ensure_setup(spec)
+                # pgw#789: weights -> VRAM is a boot phase. Without this span
+                # the whole pipeline load landed in `residual_ms` and the
+                # cold-boot ladder could not say whether a slow boot was
+                # network-bound or load-bound.
+                with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
+                                   function=spec.name):
+                    await self.executor.ensure_setup(spec)
             except Exception as exc:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
         if dynamic:
@@ -1147,14 +1233,33 @@ class Lifecycle:
         # background) or fully compiled. Measured from OS process start, so it
         # is the same quantity the autoscaler's cold-boot horizon prices
         # against, and everything after it is optimization, not boot.
-        boot_mod.mark(
+        #
+        # pgw#789: EXCEPT when functions are still awaiting hub-supplied
+        # snapshots. READY with `awaiting_hub` non-empty advertises NO
+        # function, so the hub cannot dispatch — marking the milestone here
+        # measured "startup() returned", not "servable". Live proof (chaos
+        # stack, gen-worker 0.77.0, six boots): every recorded
+        # first_request_servable was 4.2-12.3s while the real boots were
+        # minutes, because the ~230s of tensorhub-ref weight fetching happens
+        # AFTER this line on exactly that path. `_setup_awaiting_functions`
+        # owns the milestone in that case; if the snapshots never arrive it is
+        # never marked, and a boot with no closing milestone is itself the
+        # finding (the same doctrine as an open mid-boot span).
+        if not awaiting_hub:
+            self._mark_servable()
+        await self.set_phase(pb.WORKER_PHASE_READY)
+
+    def _mark_servable(self) -> None:
+        """Close the boot: mark first-request-servable from process start,
+        carrying the reconciliation (measured/residual/per-class) as detail.
+        `mark_once` makes the call idempotent across the two owners."""
+        boot_mod.mark_once(
             boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
             since_process_start=True,
             detail=" ".join(
                 f"{k}={v}" for k, v in sorted(boot_mod.reconciliation().items())
             ),
         )
-        await self.set_phase(pb.WORKER_PHASE_READY)
 
     async def _heartbeat_loop(self) -> None:
         """th#965 layer 2 + pgw#610: force-send the full StateDelta (which
@@ -1184,7 +1289,9 @@ class Lifecycle:
                 if spec is None or fn in self.executor.unavailable:
                     continue
                 try:
-                    await self.executor.ensure_setup(spec)
+                    with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
+                                       function=fn):
+                        await self.executor.ensure_setup(spec)
                     logger.info(
                         "boot setup of %s completed after hub snapshot delivery (gw#591)", fn
                     )
@@ -1193,6 +1300,13 @@ class Lifecycle:
                 await self.maybe_send_state_delta()
             if pending:
                 await asyncio.sleep(_BOOT_SETUP_WATCH_INTERVAL_S)
+        # pgw#789: THIS is where a hub-snapshot-fed worker actually becomes
+        # servable — the functions it advertises are set up and the StateDelta
+        # carrying them has gone out. Deliberately outside the loop and after
+        # it: `pending` is empty here (or the worker is draining, in which case
+        # it never became servable and must not claim a boot number).
+        if not pending and not self.draining:
+            self._mark_servable()
 
     # ---- drain -------------------------------------------------------------------
 

@@ -64,7 +64,9 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple,
+)
 
 import inspect
 import pickle
@@ -3657,10 +3659,11 @@ def build(
     pipe = load_from_pretrained(
         load_cls, str(model_path), dtype=dtype,
         storage_dtype=storage_dtype,
-        # Producer/consumer LANE parity (ie#381): the serving worker decides
-        # the bf16-resident upgrade against its function's declared envelope;
-        # the producer must decide with the same input or it traces the
-        # other lane and the cell never adopts.
+        # Producer/consumer LANE parity is now structural (pgw#772): the
+        # voluntary free-VRAM bf16-resident upgrade is removed, so both
+        # sides land the lane the declared config names. declared_vram_gb
+        # is dead plumbing pending the coordinated wire sweep (pgw#772
+        # follow-up in the tracker).
         declared_vram_gb=declared_vram_gb)
     # Producer/consumer graph parity (gw#391): the worker prepares pipelines
     # with place_pipeline (placement + vae/attention low-VRAM flags), and
@@ -3705,6 +3708,12 @@ def build(
         key = "x".join(str(v) for v in shape)
         timings[key] = round(time.monotonic() - t, 2)
         logger.info("compile-cache build: warmed %s in %.1fs", key, timings[key])
+
+    # th#1322: the same numbers, on the wire. The log line above is for whoever
+    # is watching the producer run; the event is for whoever asks the hub next
+    # week how long a JIT mint takes.
+    emit_jit_compile_event(
+        timings, family=family, lane=pipeline_weight_lane(pipe), route="build")
 
     captured = [p for p in (capture_root / "inductor").rglob("*") if p.is_file()]
     if not captured:
@@ -3776,6 +3785,59 @@ def build(
     return artifact, meta, timings
 
 
+def emit_jit_compile_event(
+    timings: Mapping[str, float],
+    *,
+    family: str,
+    lane: str = "",
+    route: str = "",
+    n_graphs: int = 0,
+) -> None:
+    """th#1322: report a JIT (dynamo/inductor) compile as typed NUMERIC events.
+
+    ``timings`` maps one warm-shape key ("1024x1024") to its measured seconds.
+    Emits one ``phase=shape:<key>`` event per shape plus a ``phase=minted``
+    roll-up carrying the sum — the same shape ``aot_mint_phases`` uses, so
+    "AOT mint vs JIT mint duration" is one grouped query over
+    ``worker_activity_events`` instead of a regex over one side's free text and
+    a grep of the other side's pod log (which a serve pod does not even
+    expose, pgw#760).
+
+    Telemetry must never fail the compile it reports on.
+    """
+    try:
+        from . import activity as activity_mod
+
+        total_s = sum(float(v or 0.0) for v in timings.values())
+        head = f"family={family or '(unset)'}"
+        if lane:
+            head += f" lane={lane}"
+        if route:
+            head += f" route={route}"
+        for key, seconds in timings.items():
+            value = float(seconds or 0.0)
+            if value <= 0:
+                continue
+            activity_mod.emit_event(
+                activity_mod.KIND_JIT_COMPILE,
+                f"{head} shape={key} compile_s={round(value, 2)}",
+                phase=f"shape:{key}",
+                duration_ms=int(round(value * 1000)),
+            )
+        if total_s <= 0:
+            return
+        activity_mod.emit_event(
+            activity_mod.KIND_JIT_COMPILE,
+            f"{head} n_shapes={len(timings)} n_graphs={n_graphs} "
+            f"total_s={round(total_s, 2)} shapes={dict(timings)}",
+            phase=activity_mod.PHASE_MINTED,
+            duration_ms=int(round(total_s * 1000)),
+        )
+    except Exception:  # pragma: no cover — telemetry never fails the work
+        logger.debug("compile-cache: jit_compile event emission failed",
+                     exc_info=True)
+
+
 def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -> None:
     """Cold-compile ``pipe`` over the declared shape table (the only part of
     a mint that needs CUDA + a toolchain). ``guard=False``: a failing warm
@@ -3786,6 +3848,7 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -
     import torch
 
     decode = any(t.startswith("vae") for t in cfg.targets)
+    timings: Dict[str, float] = {}
     for shape in cfg.shapes:
         torch.cuda.synchronize()
         t0 = time.monotonic()
@@ -3799,7 +3862,15 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -
             )
         torch.cuda.synchronize()
         shape_key = "x".join(str(v) for v in shape)
-        _say(f"  compiled {shape_key} in {time.monotonic() - t0:.0f}s")
+        timings[shape_key] = round(time.monotonic() - t0, 2)
+        _say(f"  compiled {shape_key} in {timings[shape_key]:.0f}s")
+    # th#1322: this line WAS the only record of JIT compile duration anywhere
+    # (compile_cache.py:3803, "compiled %s in %.0fs") — a log-only important
+    # metric, which is a defect class, not a style choice. Now it is a number in
+    # a column too.
+    emit_jit_compile_event(
+        timings, family=getattr(cfg, "family", "") or "",
+        lane=pipeline_weight_lane(pipe), route="compile_and_warm")
 
 
 def mint_artifact(

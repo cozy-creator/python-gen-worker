@@ -296,7 +296,38 @@ def _establish_env_seal() -> Dict[str, Any]:
         digest=env_seal.seal_digest(seal),
         config=seal.get("config"),
     )
+    _impose_group_host_policy()
     return seal
+
+
+def _impose_group_host_policy() -> None:
+    """pgw#782: the host-side posture that depends on HOW MANY execution groups
+    share this process — today, the intra-op thread budget.
+
+    Ordered here, right after the seal and before the CUDA probe, for the same
+    reason the seal is: the decision belongs to CODE, and every group this
+    process ever runs must have been started under it. The executor re-asserts
+    it from its authoritative slot count for the cli/serve and harness paths;
+    the imposition is idempotent and de-escalation-only.
+
+    Reads the DELIVERED env, deliberately not ``delivered_topology()``, whose
+    fabric gate consults the host canary and therefore measures the device —
+    this hook runs before anything touches CUDA. The gate only ever demotes
+    ``D`` (raising ``G``), so the rare demoted-sharding pod picks its true group
+    count up from the executor's re-assertion instead.
+    """
+    from . import cpu_budget
+    from .topology import ExecutionTopology
+
+    try:
+        groups = ExecutionTopology.from_env().groups
+    except Exception:  # noqa: BLE001  (an illegal topology refuses later, typed)
+        return
+    threads = cpu_budget.impose_intra_op_threads(groups)
+    _log_startup_phase(
+        "group_host_policy", status="ok", groups=groups,
+        intra_op_threads=threads.get("imposed"),
+    )
 
 
 def _run_main() -> int:

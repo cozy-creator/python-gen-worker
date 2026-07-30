@@ -110,6 +110,21 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _in_process_mint_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pgw#784: this module covers the IN-PROCESS capture shape, pinned.
+
+    Out-of-process minting is the production DEFAULT now (a mint that compiles
+    inside the serving process starves the 10s beat — th#1299), but the
+    in-process capture is still the shape that runs whenever a pipeline cannot
+    serve eager meanwhile: a mandatory quantized lane or regional targets, per
+    ``fleet_cells.delegatable``. So this coverage stays load-bearing rather
+    than legacy — it just has to say which shape it is testing. The delegated
+    shape has its own tests in ``test_mint_delegate_pgw784.py``.
+    """
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
+
+
 def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
     calls: list = []
     monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: True)

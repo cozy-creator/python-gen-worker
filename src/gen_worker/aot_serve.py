@@ -106,6 +106,20 @@ ARTIFACT_KIND = "aot-inductor"
 #: hub-side; ``detail`` names the candidate cell. Hub-spawned workers expose
 #: no stdout, so a reason that only reaches the logger does not exist.
 ADOPT_EVENT = "aot_adopt"
+#: pgw#791: an input the artifact was compiled for as 16-byte aligned arrived
+#: unaligned (or non-contiguous) and this ingress realigned it. Typed and
+#: hub-visible because the ALTERNATIVE is what shipped: AOTInductor's own
+#: ``run_impl`` copies the input on EVERY call and says so on the worker's
+#: stderr, which is unreachable on hub-spawned pods — a fleet paying the tax
+#: was indistinguishable from one that was not. Coalesced: once per
+#: (entry, input, reason).
+REALIGN_EVENT = "aot_input_realigned"
+#: AOTInductor generates its aligned-input fast path at 16 bytes
+#: (``torch._inductor.codegen.aoti_runtime``'s ALIGNMENT). An input whose
+#: ``data_ptr()`` is not a multiple of this — diffusers hands the denoiser
+#: ``timesteps[i]``, a scalar VIEW at an odd element offset — makes the
+#: runner clone it per call. Not a knob: it is the compiler's constant.
+AOTI_ALIGNMENT = 16
 #: Format 2 = multi-graph cells (pgw#758): the envelope carries an
 #: ``entries`` map instead of one flat contract. Format-1 cells are RETIRED
 #: (ck5 exact identity: a recipe change strands old cells, which is fine).
@@ -291,6 +305,15 @@ class ArtifactContract:
     #: symbol -> (min, max), inclusive. Mint packs this from
     #: ``ep.range_constraints``.
     symbols: Mapping[str, Tuple[int, int]]
+    #: Inputs this graph class REFUSES to be given (pgw#790). The positive
+    #: contract says what a graph takes; a multi-class cell also needs the
+    #: negative one, because "input absent" is what discriminates a
+    #: BRANCHLESS class from a branch-bearing one whose extra inputs a
+    #: name-keyed bind would simply ignore. Without it both classes admit an
+    #: adapter-bearing call and :class:`EntryDispatch` refuses
+    #: ``entry_ambiguous`` — a declaration that cannot discriminate two graph
+    #: classes by ingress, which its own contract calls a defect.
+    excluded: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -361,7 +384,24 @@ def contract_from_meta(meta: Mapping[str, Any]) -> ArtifactContract:
                 raise ValueError(
                     f"input {spec.name!r} dim {pos} references symbol "
                     f"{dim!r} with no declared range")
-    return ArtifactContract(inputs=tuple(inputs), symbols=symbols)
+
+    raw_excluded = meta.get("excluded_inputs") or []
+    if not isinstance(raw_excluded, (list, tuple)):
+        raise ValueError("excluded_inputs is not a list")
+    excluded: List[str] = []
+    declared_names = {spec.name for spec in inputs}
+    for value in raw_excluded:
+        name = str(value or "").strip()
+        if not name:
+            raise ValueError("excluded_inputs carries an empty name")
+        if name in declared_names:
+            raise ValueError(
+                f"input {name!r} is declared AND excluded — a graph class "
+                f"cannot both take an input and refuse it")
+        excluded.append(name)
+    return ArtifactContract(
+        inputs=tuple(inputs), symbols=symbols,
+        excluded=tuple(sorted(set(excluded))))
 
 
 def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
@@ -424,6 +464,15 @@ def range_digest(meta: Mapping[str, Any]) -> str:
         ],
         "symbols": {k: list(v) for k, v in sorted(contract.symbols.items())},
     }
+    # pgw#790: the NEGATIVE half of the declared admissible traffic. Two
+    # classes that differ only in what they REFUSE admit different traffic,
+    # so the digest must see it or the ck6 collision this function exists to
+    # close reopens for adapter forks. Keyed only when non-empty: a contract
+    # that excludes nothing is the contract every already-published cell
+    # declares, and re-keying the fleet's 144 live checkpoints to add a field
+    # that says "unchanged" would strand every one of them.
+    if contract.excluded:
+        canon["excluded"] = list(contract.excluded)
     blob = json.dumps(canon, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()[:32]
 
@@ -980,6 +1029,138 @@ def marshal_positional(
     return feeds
 
 
+def excluded_inputs_present(
+    contract: ArtifactContract, kwargs: Mapping[str, Any],
+) -> Tuple[str, ...]:
+    """The contract's EXCLUDED inputs this call actually carries (pgw#790).
+
+    Keyword and nested-mapping only, mirroring :func:`bind_call_inputs`'
+    resolution order minus the positional leg: an excluded input has no
+    position in this graph's signature, so a positional index would name a
+    different argument entirely. A ``None`` value does not count as carrying
+    it — that is how a diffusers pipeline says "absent".
+    """
+    if not contract.excluded:
+        return ()
+    found: List[str] = []
+    for name in contract.excluded:
+        value = kwargs.get(name, None)
+        if value is None:
+            value = next(
+                (v[name] for v in kwargs.values()
+                 if isinstance(v, Mapping) and v.get(name) is not None),
+                None)
+        if value is not None:
+            found.append(name)
+    return tuple(found)
+
+
+def alignment_gap(value: Any) -> str:
+    """'' when a feed satisfies the artifact's aligned-input contract, else
+    the named reason (pgw#791).
+
+    AOTInductor compiles the fast path for 16-byte-aligned, contiguous
+    inputs. When the run-time pointer is not aligned its ``run_impl`` copies
+    the tensor to an aligned buffer ON EVERY CALL and reports it with a C++
+    ``TORCH_WARN`` — i.e. on the worker's stderr, which hub-spawned pods do
+    not expose. Measured on an RTX 4090 (WARM-INFERENCE-MATRIX §2c): the
+    request residual over 28x(per-forward) is 196 ms for the armed AOT
+    artifact against 77 ms for the equivalent dynamo cell, and diffusers'
+    ``timesteps[i]`` scalar view is the offending input. So the check the
+    serve path never performed cost more than the artifact kind was worth.
+    """
+    ptr = getattr(value, "data_ptr", None)
+    if not callable(ptr):
+        return ""
+    is_contig = getattr(value, "is_contiguous", None)
+    if callable(is_contig) and not is_contig():
+        return "non_contiguous"
+    try:
+        if int(ptr()) % AOTI_ALIGNMENT:
+            return "unaligned_16b"
+    except (RuntimeError, ValueError):  # pragma: no cover — meta/fake tensors
+        return ""
+    return ""
+
+
+class FeedAligner:
+    """Owned aligned staging buffers for one runner's declared inputs.
+
+    The fix pgw#791 asks for is "align once at ingress rather than copying
+    per call", and for a value that CHANGES every call (the timestep does)
+    the honest reading is: allocate once, copy the value. The allocation —
+    which is what the runner repeats, along with a stderr write and an ATen
+    dispatch — happens exactly once per (input, shape, dtype, device); after
+    that the feed is a pointer-stable, correctly aligned buffer the call
+    writes into. Pointer stability is also what cudagraph static inputs want,
+    so this cannot cost the lane a capture later.
+    """
+
+    __slots__ = ("_buffers",)
+
+    def __init__(self) -> None:
+        self._buffers: Dict[str, Any] = {}
+
+    def staged(self, name: str, value: Any) -> Any:
+        """A 16-byte-aligned contiguous copy of ``value`` in an owned buffer."""
+        import torch
+
+        buf = self._buffers.get(name)
+        if (buf is None or buf.dtype is not value.dtype
+                or buf.device != value.device
+                or tuple(buf.shape) != tuple(value.shape)):
+            buf = torch.empty(
+                tuple(value.shape), dtype=value.dtype, device=value.device)
+            if int(buf.data_ptr()) % AOTI_ALIGNMENT:
+                # torch's caching allocator hands out 512-byte-aligned blocks
+                # (CPU: 64). If that ever stops being true, realigning by
+                # allocation is not a fix and this must fail loudly rather
+                # than quietly hand the runner another unaligned pointer.
+                raise IngressContractError(
+                    "realign_unavailable",
+                    f"a freshly allocated buffer for input {name!r} is itself "
+                    f"not {AOTI_ALIGNMENT}-byte aligned "
+                    f"(ptr%{AOTI_ALIGNMENT}="
+                    f"{int(buf.data_ptr()) % AOTI_ALIGNMENT}); the artifact's "
+                    f"aligned-input contract cannot be satisfied here")
+            self._buffers[name] = buf
+        buf.copy_(value)
+        return buf
+
+    def buffered(self) -> Tuple[str, ...]:
+        return tuple(sorted(self._buffers))
+
+
+def aligned_feeds(
+    contract: ArtifactContract,
+    feeds: Sequence[Any],
+    aligner: FeedAligner,
+    report: Optional[Callable[[str, str], None]] = None,
+) -> List[Any]:
+    """``feeds`` with every out-of-contract input realigned in place (pgw#791).
+
+    ``feeds`` is :func:`marshal_positional`'s output, so it is one value per
+    declared input in ``position`` order — the same order this walks, which is
+    what lets a reason NAME the input instead of an index.
+    """
+    specs = sorted(contract.inputs, key=lambda s: s.position)
+    if len(specs) != len(feeds):
+        raise IngressContractError(
+            "feed_arity_mismatch",
+            f"{len(feeds)} marshalled feed(s) for {len(specs)} declared "
+            f"input(s); an aligned-ingress pass that cannot name its inputs "
+            f"would realign the wrong slot")
+    out = list(feeds)
+    for idx, (spec, value) in enumerate(zip(specs, feeds)):
+        reason = alignment_gap(value)
+        if not reason:
+            continue
+        out[idx] = aligner.staged(spec.name, value)
+        if report is not None:
+            report(spec.name, reason)
+    return out
+
+
 def assert_ingress(
     contract: ArtifactContract,
     args: Sequence[Any],
@@ -1001,6 +1182,14 @@ def assert_ingress(
       graph requires it, so a mismatch is out-of-contract even when both
       values are individually in range.
     """
+    present = excluded_inputs_present(contract, kwargs)
+    if present:
+        raise IngressContractError(
+            "input_excluded",
+            f"this graph class REFUSES input(s) {list(present)!r}: the call "
+            f"carries them, so it must be served by the class that declares "
+            f"them (pgw#790 — a branchless class fed an adapter would return "
+            f"the base model and look correct)")
     bound = bind_call_inputs(contract, args, kwargs)
     symbols: Dict[str, int] = {}
     owner: Dict[str, str] = {}
@@ -1169,9 +1358,21 @@ class ArtifactRunner:
     bound_fqns: Tuple[str, ...] = ()
     calls: int = 0
     refusals: Dict[str, int] = field(default_factory=dict)
+    #: pgw#791. ``"<input>/<reason>" -> count``; the typed event fires on the
+    #: first of each, the count keeps the whole tax countable afterwards.
+    realigned: Dict[str, int] = field(default_factory=dict)
+    aligner: FeedAligner = field(default_factory=FeedAligner)
+    #: Set by :func:`load_and_wrap` so the typed realignment event can name
+    #: the cell it belongs to.
+    family: str = ""
 
     def declared_fqns(self) -> Tuple[str, ...]:
         return tuple(s.fqn for s in self.constants)
+
+    def excludes(self, names: Sequence[str]) -> bool:
+        """True when this class refuses every one of ``names`` (pgw#790)."""
+        wanted = set(str(n) for n in names)
+        return bool(wanted) and wanted <= set(self.contract.excluded)
 
     def bind(
         self, state_dict: Mapping[str, Any], literals: Mapping[str, Any],
@@ -1229,11 +1430,42 @@ class ArtifactRunner:
                 f"{len(self.constants)} unbound constant(s): calling before "
                 f"load_constants segfaults the worker process")
 
+    def _report_realigned(self, name: str, reason: str) -> None:
+        """First occurrence of an (input, reason) is a typed hub-visible
+        event; every occurrence is counted (pgw#791).
+
+        Coalesced deliberately: the defect fires 28+ times per request, and a
+        per-call event would be the stderr spam it replaces, on a wire that
+        costs money. One event names the input; the counter carries the rest.
+        """
+        key = f"{name}/{reason}"
+        seen = self.realigned.get(key, 0)
+        self.realigned[key] = seen + 1
+        if seen:
+            return
+        logger.warning(
+            "aot-serve: input %r arrived %s for entry %r; realigning into an "
+            "owned aligned buffer at ingress (the artifact would otherwise "
+            "copy it on every call and report only on stderr)",
+            name, reason, self.entry or self.module_name)
+        activity_mod.emit_event(
+            REALIGN_EVENT,
+            f"family={self.family} entry={self.entry or self.module_name} "
+            f"target={self.module_name} input={name}: {reason} — realigned at "
+            f"ingress into an owned {AOTI_ALIGNMENT}-byte aligned buffer "
+            f"(AOTInductor would otherwise copy it on every call)",
+            phase=reason,
+        )
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.assert_ready()
         try:
             assert_ingress(self.contract, args, kwargs)
             feeds = marshal_positional(self.contract, args, kwargs)
+            # pgw#791: satisfy the artifact's ALIGNED-input contract here,
+            # once, instead of letting the runner discover it per call.
+            feeds = aligned_feeds(
+                self.contract, feeds, self.aligner, self._report_realigned)
         except IngressContractError as exc:
             self.refusals[exc.reason] = self.refusals.get(exc.reason, 0) + 1
             raise
@@ -1297,6 +1529,30 @@ class EntryDispatch:
                 out[reason] = out.get(reason, 0) + count
         return out
 
+    def realignment_counts(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for _n, runner in self.runners:
+            for key, count in runner.realigned.items():
+                out[key] = out.get(key, 0) + count
+        return out
+
+    def entry_calls(self) -> Dict[str, int]:
+        """Per-entry served-call counts — which graph class actually served."""
+        return {name: runner.calls for name, runner in self.runners}
+
+    def excludes(self, names: Sequence[str]) -> bool:
+        """True when some packaged entry REFUSES every one of ``names``.
+
+        The adapter-free routing question, asked of the declaration rather
+        than of a flag: is there a class in this cell that serves calls
+        WITHOUT these inputs? (pgw#790)
+        """
+        wanted = set(str(n) for n in names)
+        if not wanted:
+            return False
+        return any(wanted <= set(runner.contract.excluded)
+                   for _n, runner in self.runners)
+
 
 # ---------------------------------------------------------------------------
 # Serve — module swap behind a fail-soft guard
@@ -1326,6 +1582,39 @@ def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
     return binding.call_kwargs() if binding is not None else {}
 
 
+def adapter_call_kwargs(
+    module: Any, runner: "ArtifactRunner | EntryDispatch",
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """``(artifact kwargs, eager kwargs)`` for one call's adapter inputs.
+
+    pgw#790's routing rule, in one place. The two differ in exactly one case:
+    the denoiser carries a lifted adapter, NO adapter is currently active, and
+    the cell packages a class that REFUSES the adapter inputs. Then the
+    artifact call omits the pair so the BRANCHLESS class admits it, while the
+    eager fallback still receives it — ``bind_views`` refuses a ``None`` half
+    by name, so the eager path needs the pair exactly as much as a
+    branch-bearing artifact does.
+
+    Nothing here is a new piece of state. "Is an adapter active" is
+    ``w8a8_lora``'s own ``_cozy_lora_active``, written by the per-request
+    attach/clear path (``utils.lora``) since gw#627; this only reads it. And
+    it decides only WHICH pre-compiled class serves the call — never the
+    shape of a program, never a baked constant. Both classes return the same
+    tensor for adapter-free traffic (a zeroed B adds exactly 0), so the
+    routing is a cost decision whose correctness does not depend on it.
+    """
+    lifted = lifted_call_kwargs(module)
+    if not lifted:
+        return {}, {}
+    if lora_lifted.adapter_active(module):
+        return lifted, lifted
+    if not runner.excludes(lora_lifted.LIFTED_INPUT_NAMES):
+        # One branch-bearing class only: it declares the pair as MANDATORY,
+        # so withholding it would refuse every request by name.
+        return lifted, lifted
+    return {}, lifted
+
+
 def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
     """The module's lifted state and the artifact's signature must AGREE.
 
@@ -1339,6 +1628,12 @@ def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
     declared = {spec.name for spec in contract.inputs}
     wanted = set(lora_lifted.LIFTED_INPUT_NAMES)
     lifted = lora_lifted.lifted_binding(module) is not None
+    if lifted and wanted <= set(contract.excluded):
+        # pgw#790: the BRANCHLESS arm of an adapter-forked cell. It says so
+        # explicitly — the adapter inputs are refused, not forgotten — so the
+        # dispatch can never route adapter-bearing traffic to it and "the
+        # branch was traced away" is impossible to reach silently.
+        return
     if lifted and not wanted <= declared:
         raise AdoptError(
             "lifted_inputs_undeclared",
@@ -1407,9 +1702,15 @@ def wrap_module(
         # the LoRA lane may install/remove lifting independently of arming,
         # and a stale capture would either starve the graph of a mandatory
         # input or feed one to a forward that no longer takes it.
-        kwargs = {**kwargs, **lifted_call_kwargs(module)}
+        # pgw#790: an adapter-FREE call omits the pair when the cell packages
+        # a branchless class, so the dispatch routes it to the graph that does
+        # not spend 32-45% of its compiled forward on arithmetic over zeros.
+        # The eager fallback always receives it.
+        artifact_lora, eager_lora = adapter_call_kwargs(module, runner)
+        eager_kwargs = {**kwargs, **eager_lora}
+        kwargs = {**kwargs, **artifact_lora}
         if state["failed"]:
-            return original(*args, **kwargs)
+            return original(*args, **eager_kwargs)
         try:
             out = runner(*args, **kwargs)
             # Envelope parity (live-named on the 0.76.x rerun line,
@@ -1436,7 +1737,7 @@ def wrap_module(
                 f"family={meta.get('family')} target={label}: {exc}",
                 phase=exc.reason,
             )
-            return original(*args, **kwargs)
+            return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
             # Reaching here means the arm order was violated. The gate did
             # its job (no segfault); the lane is structurally unusable.
@@ -1450,7 +1751,7 @@ def wrap_module(
                 phase=exc.reason,
             )
             _revoke(state, f"constants unbound: {exc}")
-            return original(*args, **kwargs)
+            return original(*args, **eager_kwargs)
         except Exception as exc:  # noqa: BLE001 — ANY artifact problem => eager
             state["failed"] = True
             detail = (
@@ -1460,7 +1761,7 @@ def wrap_module(
             logger.warning(
                 "aot-serve: %s failed (%s: %s); eager for the rest of this "
                 "process", label, type(exc).__name__, exc)
-            return original(*args, **kwargs)
+            return original(*args, **eager_kwargs)
 
     def _counted_forward(*args: Any, **kwargs: Any) -> Any:
         out = aot_forward(*args, **kwargs)
@@ -1585,7 +1886,7 @@ def load_and_wrap(
                 package = _load_package(staged.root / PACKAGE_NAME, name)
                 runner = ArtifactRunner(
                     package=package, contract=contract, constants=constants,
-                    module_name=target, entry=name)
+                    module_name=target, entry=name, family=family)
                 try:
                     runner.bind(state_dict, literals_by_entry.get(name, {}))
                 except ConstantsUnboundError as exc:
@@ -1716,6 +2017,40 @@ def ingress_refusals(pipeline: Any) -> int:
     return sum(
         int(state.get("ingress_refusals", 0))
         for state in _marker_states(pipeline))
+
+
+def realigned_inputs(pipeline: Any) -> Dict[str, int]:
+    """``"<input>/<reason>" -> count`` of ingress realignments (pgw#791).
+
+    Zero is the contract holding. Non-zero is the tax MEASURED rather than
+    inferred from a stderr line nobody can read — and it is paid at ingress
+    into an owned buffer, not by the runner per call.
+    """
+    out: Dict[str, int] = {}
+    for state in _marker_states(pipeline):
+        runner = state.get("runner")
+        counts = getattr(runner, "realignment_counts", None)
+        rows = counts() if callable(counts) else getattr(runner, "realigned", {})
+        for key, count in dict(rows or {}).items():
+            out[key] = out.get(key, 0) + int(count)
+    return out
+
+
+def served_entry_calls(pipeline: Any) -> Dict[str, int]:
+    """``entry -> served calls`` across every wrapped target (pgw#790).
+
+    Which GRAPH CLASS served, not just that something did: an adapter-forked
+    cell is only doing its job when adapter-free traffic lands on the
+    branchless entry.
+    """
+    out: Dict[str, int] = {}
+    for state in _marker_states(pipeline):
+        runner = state.get("runner")
+        getter = getattr(runner, "entry_calls", None)
+        rows = getter() if callable(getter) else {}
+        for name, count in dict(rows or {}).items():
+            out[name] = out.get(name, 0) + int(count)
+    return out
 
 
 def proven_since(pipeline: Any, before: int) -> bool:

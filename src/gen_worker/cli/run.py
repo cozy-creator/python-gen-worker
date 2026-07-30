@@ -547,9 +547,15 @@ def instantiate_class(cls: Optional[type]) -> Any:
 
 def run_setup(
     instance: Any, resolved_models: Dict[str, str], *, device: str = "",
-) -> None:
+    arm_compile: bool = True, return_loaded: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Call ``instance.setup(...)`` once, passing exactly the resolved model
     slots its signature declares.
+
+    ``arm_compile=False`` loads the slots WITHOUT arming any compiled path
+    (pgw#784): the mint child drives its own cold arm + capture and must not
+    have a cell armed under it. ``return_loaded=True`` returns the loaded slot
+    objects so a caller can reach the pipeline it just built.
 
     A bare ``def setup(self)`` is legitimate (#337 model-selectable endpoints
     receive their model per-request in the handler instead), so unclaimed
@@ -560,7 +566,7 @@ def run_setup(
     """
     setup_fn = getattr(instance, "setup", None)
     if instance is None or setup_fn is None:
-        return
+        return {} if return_loaded else None
     try:
         params = inspect.signature(setup_fn).parameters
     except (TypeError, ValueError):
@@ -570,10 +576,10 @@ def run_setup(
             setup_fn(**resolved_models)
         except TypeError:
             setup_fn()
-        return
+        return {} if return_loaded else None
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         setup_fn(**resolved_models)
-        return
+        return {} if return_loaded else None
     wanted = {
         name for name, p in params.items()
         if p.kind in (
@@ -604,7 +610,9 @@ def run_setup(
         hints = {}
     decl = getattr(type(instance), _ENDPOINT_ATTR, None)
     loaded = {
-        k: _load_injected_model(hints.get(k), v, decl=decl, slot=k, device=device)
+        k: _load_injected_model(
+            hints.get(k), v, decl=decl, slot=k, device=device,
+            arm_compile=arm_compile)
         for k, v in resolved_models.items()
         if k in wanted
     }
@@ -613,6 +621,7 @@ def run_setup(
     warmup_fn = getattr(instance, "warmup", None)
     if callable(warmup_fn):
         warmup_fn()
+    return loaded if return_loaded else None
 
 
 _INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}
@@ -621,7 +630,7 @@ _ENDPOINT_ATTR = "__gen_worker_endpoint__"
 
 def _load_injected_model(
     annotation: Any, local_path: str, *, decl: Any = None, slot: str = "",
-    device: str = "",
+    device: str = "", arm_compile: bool = True,
 ) -> Any:
     """Load one setup slot via the shared core, with a per-process warm cache
     (so ``serve`` and repeated local dispatches never reload weights)."""
@@ -654,7 +663,11 @@ def _load_injected_model(
             guidance_scales=(),
             text_lens=(),
         )
-    if compile_cfg is not None and device.strip().lower() != "cpu":
+    if (
+        arm_compile
+        and compile_cfg is not None
+        and device.strip().lower() != "cpu"
+    ):
         from ..local_cells import enable_compiled as enable_compiled_local
         from ..models.cache_paths import tensorhub_cas_dir
 

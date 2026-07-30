@@ -41,7 +41,18 @@ logger = logging.getLogger(__name__)
 ENCODER_ENV = "GEN_WORKER_VIDEO_ENCODER"
 #: Max concurrent buffered CPU finalize encodes (gw#516 host-RAM bound).
 ENCODE_CONCURRENCY_ENV = "GEN_WORKER_VIDEO_ENCODE_CONCURRENCY"
-DEFAULT_ENCODE_CONCURRENCY = 2
+#: PER EXECUTION GROUP (pgw#782). The bound exists so raw frame buffers do not
+#: pile up in host RAM — and host RAM is bought per pod, not per process. A
+#: flat process-global 2 made a G-group worker's tail serialize across
+#: unrelated cards: at G=4 two of four groups always waited for a sibling's
+#: encode before their own could start. Groups multiply it; a single-group
+#: worker keeps exactly 2.
+#:
+#: Scope, measured: immaterial for images (sdxl's whole tail is a 150 ms webp
+#: encode, 0.5 s of a 72 s request — samples/dpfix), material for video, where
+#: the buffered x264 finalize is seconds. This is a cross-group serializer
+#: removed on principle, NOT the width-4 throughput fix (that is pgw#783).
+DEFAULT_ENCODE_CONCURRENCY_PER_GROUP = 2
 
 # Fast presets tuned for short, high-bitrate-tolerant generated clips.
 X264_OPTIONS: Dict[str, str] = {"preset": "veryfast", "crf": "18"}
@@ -136,16 +147,31 @@ _finalize_sem: Optional[threading.BoundedSemaphore] = None
 _finalize_sem_lock = threading.Lock()
 
 
+def finalize_concurrency() -> int:
+    """Concurrent buffered CPU encodes this PROCESS allows: two per execution
+    group (pgw#782). The bound is a host-RAM bound and host RAM is bought per
+    pod, so it scales with the number of groups the pod runs — a flat 2 made
+    two of four groups wait on an unrelated card's encode."""
+    raw = os.environ.get(ENCODE_CONCURRENCY_ENV, "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    try:
+        from .topology import delivered_topology
+
+        groups = max(1, int(delivered_topology().groups))
+    except Exception:  # noqa: BLE001
+        groups = 1
+    return DEFAULT_ENCODE_CONCURRENCY_PER_GROUP * groups
+
+
 def _finalize_semaphore() -> threading.BoundedSemaphore:
     global _finalize_sem
     with _finalize_sem_lock:
         if _finalize_sem is None:
-            raw = os.environ.get(ENCODE_CONCURRENCY_ENV, "").strip()
-            try:
-                n = max(1, int(raw)) if raw else DEFAULT_ENCODE_CONCURRENCY
-            except ValueError:
-                n = DEFAULT_ENCODE_CONCURRENCY
-            _finalize_sem = threading.BoundedSemaphore(n)
+            _finalize_sem = threading.BoundedSemaphore(finalize_concurrency())
         return _finalize_sem
 
 

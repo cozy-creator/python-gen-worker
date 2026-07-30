@@ -101,6 +101,7 @@ from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Tuple)
 
 from . import activity as activity_mod
+from . import torch_capability
 
 logger = logging.getLogger(__name__)
 
@@ -763,8 +764,11 @@ CANONICAL_POSTURE: Dict[str, str] = {
 
 
 def posture_snapshot() -> Dict[str, str]:
-    """The live process posture in canonical string form."""
-    import torch
+    """The live process posture in canonical string form. On a torchless
+    worker the only honest fact is the absence itself (pgw#788)."""
+    torch = torch_capability.torch_or_none()
+    if torch is None:
+        return {"torch": torch_capability.ABSENT}
 
     return {
         "grad_enabled": str(torch.is_grad_enabled()),
@@ -795,8 +799,13 @@ def establish_posture() -> Dict[str, str]:
     SET (grad mode, deterministic algos); ambient contexts that library code
     must not pop from under the embedding process (an active autocast, a
     foreign torch-function mode, a moved default device) REFUSE with a named
-    :class:`PostureError` instead."""
-    import torch
+    :class:`PostureError` instead.
+
+    pgw#788: a torchless worker has no grad mode, no autocast stack and no
+    default device to set or refuse. It seals the absence and boots."""
+    torch = torch_capability.torch_or_none()
+    if torch is None:
+        return {"torch": torch_capability.ABSENT}
 
     torch.set_grad_enabled(True)
     torch.use_deterministic_algorithms(False)

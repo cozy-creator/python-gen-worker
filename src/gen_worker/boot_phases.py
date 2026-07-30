@@ -480,6 +480,20 @@ def servable_ms() -> Optional[int]:
         return _servable_ms
 
 
+def in_boot() -> bool:
+    """True until :data:`PHASE_FIRST_REQUEST_SERVABLE` is marked.
+
+    The gate for instrumenting a call site that runs BOTH during boot and in
+    steady state — the weights materializer is the load-bearing case (pgw#789):
+    it owns the ~230s of a cold boot, and it also runs every time the hub
+    delivers a new ref hours later. Recording the steady-state calls would put
+    non-boot spans in a boot ladder (so `residual_ms` stops reconciling) and
+    grow the table without bound. Boot ends where the boot number ends.
+    """
+    with _lock:
+        return _servable_ms is None
+
+
 def reconciliation() -> Dict[str, int]:
     """Boot totals, per the th#1111 rule that an instrument must close.
 
@@ -542,6 +556,7 @@ __all__ = [
     "BOOT_ID",
     "BootSpan",
     "bind_sink",
+    "in_boot",
     "unbind_sink",
     "span",
     "open_span",

@@ -22,7 +22,9 @@ from gen_worker.models.svdq_layout import (  # noqa: E402
     SvdqLayoutError,
     decode_linear,
     dequantize_decoded,
+    pack_lowrank,
     pack_qweight,
+    pack_vector,
     pack_wscales,
     split_decoded,
     unpack_qweight,
@@ -62,22 +64,29 @@ def _synth_nunchaku_linear(out_f: int, in_f: int, *, second_key: str,
     q = blocks / (bs.float().unsqueeze(-1) * second_bcast.unsqueeze(-1))
     codes = cast_e2m1(q.reshape(out_f, in_f))
 
+    # pgw#770: EVERY tensor is fragment-packed on disk, so the fixture packs
+    # every one of them. wtscale is the sole exception (it is a scalar).
     tensors: dict[str, Any] = {
         "qweight": pack_qweight(codes),
         "wscales": pack_wscales(bs, out_f, in_f),
-        second_key: second.to(torch.bfloat16),
     }
+    tensors[second_key] = (pack_vector(second.to(torch.bfloat16), out_f)
+                           if second_key == "wcscales"
+                           else second.to(torch.bfloat16))
     if rank:
-        tensors["proj_down"] = (torch.randn(in_f, rank, generator=gen)
-                                * (in_f ** -0.5)).to(torch.bfloat16)
-        tensors["proj_up"] = (torch.randn(out_f, rank, generator=gen)
-                              * (rank ** -0.5)).to(torch.bfloat16)
+        tensors["proj_down"] = pack_lowrank(
+            (torch.randn(rank, in_f, generator=gen)
+             * (in_f ** -0.5)).to(torch.bfloat16), down=True)
+        tensors["proj_up"] = pack_lowrank(
+            (torch.randn(out_f, rank, generator=gen)
+             * (rank ** -0.5)).to(torch.bfloat16), down=False)
     if smooth:
-        tensors["smooth_factor"] = (
-            torch.rand(in_f, generator=gen) + 0.5).to(torch.bfloat16)
+        tensors["smooth_factor"] = pack_vector(
+            (torch.rand(in_f, generator=gen) + 0.5).to(torch.bfloat16), in_f)
         # Provenance only — the decoder must never read this.
         tensors["smooth_factor_orig"] = torch.zeros(in_f, dtype=torch.bfloat16)
-    tensors["bias"] = torch.randn(out_f, generator=gen).to(torch.bfloat16)
+    tensors["bias"] = pack_vector(
+        torch.randn(out_f, generator=gen).to(torch.bfloat16), out_f)
     return tensors, w
 
 

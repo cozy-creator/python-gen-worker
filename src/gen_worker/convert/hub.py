@@ -689,6 +689,238 @@ class HubClient:
             response=final,
         )
 
+    # ---- v2: chunked sha256 CAS (th#1303 / pgw#781) ----
+
+    def publish_v2(
+        self,
+        *,
+        destination_repo: str,
+        files: list[CommitFile],
+        tags: list[str] | None = None,
+        mode: str = "merge",
+        flavor: str = "",
+        flavors: list[str] | None = None,
+        default_flavor: str = "",
+        dtype: str = "",
+        file_layout: str = "",
+        file_type: str = "",
+        display_label: str = "",
+        objective: str = "",
+        distilled: Optional[bool] = None,
+        required_paths: list[str] | None = None,
+        declared_tensors: Mapping[str, Any] | None = None,
+        deletions: list[str] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        repo_spec: Mapping[str, str] | None = None,
+        progress: Any = None,
+        part_progress: Optional[Callable[[int, int, int], None]] = None,
+    ) -> CommitResult:
+        """Publish one checkpoint over the CHUNKED SHA-256 CAS (th#1303).
+
+        Declare -> `{have, need}` -> PUT the needed objects -> complete. What
+        makes this different from :meth:`commit` is not the transport but WHO
+        GUARANTEES INTEGRITY: each object's sha256 is signed into its presigned
+        PUT, so R2 refuses bytes that do not hash to the key (400, and the
+        object does not exist afterwards) and refuses a substituted claim (403).
+        A claimed digest stops being assertable, which is what kills th#1305's
+        inherit/overwrite class structurally rather than by guard.
+
+        Files > 64 MiB become an ordered list of enforced chunks, so a retry
+        costs one chunk instead of a 2 GB shard and progress is monotone across
+        retries — the pgw#786 lemon-host pathology, fixed by the unit of work
+        rather than by a new watchdog.
+
+        THERE IS NO PROTOCOL AUTO-SELECT AND NO ENV KNOB. The caller names the
+        protocol, so flipping a producer class to sha256 is a code change and a
+        deploy — which is exactly the controlled, blast-radius-ordered producer
+        flip th#1303 phase 3 asks for. A hub without these routes answers 404,
+        and this deliberately does NOT fall back: a silent downgrade to blake3
+        would make "did this publish v2?" unanswerable from the outside (and a
+        404 from a PROXY is not a 404 from the hub — th#715).
+        """
+        from ..models import chunk_upload as _cu
+        from ..models.chunk_upload import UploadGrant
+
+        # Read the constant off the module at CALL time rather than binding a
+        # default: it must equal the hub's `storage.CASChunkSizeBytes`, and a
+        # call-time read keeps that single source of truth substitutable in
+        # tests without exposing a tuning knob on this method.
+        chunk_size = _cu.CAS_CHUNK_SIZE_BYTES
+
+        if not files:
+            raise HubPublishError("publish_v2 requires at least one file")
+        repo_path = self._repo_path(destination_repo)
+
+        # ONE streaming pass per file yields the whole-file sha256 AND every
+        # per-chunk sha256. A by-reference add has no local bytes and therefore
+        # cannot be declared under a protocol whose whole point is that the
+        # digest is proven from the bytes.
+        decls = []
+        sources: dict[str, tuple[Path, int, int]] = {}
+        for f in files:
+            if f.local_path is None:
+                raise HubPublishError(
+                    f"publish_v2: {f.path!r} is a by-reference add; v2 declares "
+                    "digests computed from local bytes (use commit() or supply bytes)"
+                )
+            local = Path(f.local_path)
+            decl = _cu.hash_file_and_chunks(
+                local, chunk_size=chunk_size, rel_path=f.path)
+            decls.append(decl)
+            if decl.chunks:
+                for c in decl.chunks:
+                    sources["sha256:" + c.sha256] = (local, c.offset, c.length)
+            else:
+                sources[decl.digest] = (local, 0, decl.size_bytes)
+
+        body: dict[str, Any] = {
+            "mode": mode,
+            "files": [d.to_wire() for d in decls],
+        }
+        if tags:
+            df = _token(default_flavor)
+            body["tags"] = [
+                {"tag": t, **({"default_flavor": df} if df else {})} for t in tags
+            ]
+        for key, val in (
+            ("flavor", _token(flavor)), ("default_flavor", _token(default_flavor)),
+            ("dtype", _token(dtype)), ("file_layout", file_layout),
+            ("file_type", file_type), ("display_label", display_label),
+            ("objective", objective),
+        ):
+            if val:
+                body[key] = val
+        if flavors:
+            body["flavors"] = [_token(f) for f in flavors]
+        if distilled is not None:
+            body["distilled"] = bool(distilled)
+        if required_paths:
+            body["required_paths"] = list(required_paths)
+        if declared_tensors:
+            body["declared_tensors"] = dict(declared_tensors)
+        if deletions:
+            body["deletions"] = list(deletions)
+        if metadata:
+            body["metadata"] = dict(metadata)
+        for key in ("kind", "library_name", "model_family", "class_name",
+                    "adapter_for_family"):
+            val = str((repo_spec or {}).get(key) or "").strip()
+            if val:
+                body[key] = val
+
+        resp = self._post(f"{repo_path}/publishes", body)
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise HubPublishError(
+                f"publish declare failed ({resp.status_code}): {resp.text[:800]}")
+        session = self._json(resp)
+        publish_id = str(session.get("publish_id") or "").strip()
+        if not publish_id:
+            raise HubPublishError("publish response missing publish_id")
+
+        distinct = int(session.get("distinct_objects") or 0)
+        resident = int(session.get("resident_objects") or 0)
+        uploaded_objects = 0
+        total_bytes = sum(d.size_bytes for d in decls)
+
+        def _grants_of(payload: Mapping[str, Any]) -> list["UploadGrant"]:
+            out = []
+            for g in payload.get("need") or []:
+                if not isinstance(g, dict):
+                    continue
+                out.append(UploadGrant(
+                    digest=str(g.get("digest") or "").strip().lower(),
+                    size_bytes=int(g.get("size_bytes") or 0),
+                    put_url=str(g.get("put_url") or ""),
+                    headers={str(k): str(v) for k, v in (g.get("headers") or {}).items()},
+                    staging_key=str(g.get("staging_key") or ""),
+                ))
+            return out
+
+        def _source_for(digest: str) -> tuple[Path, int, int]:
+            span = sources.get(digest.strip().lower())
+            if span is None:
+                raise ValueError(
+                    f"hub granted {digest[:20]}… which this publish never declared"
+                )
+            return span
+
+        try:
+            grants = _grants_of(session)
+            for attempt in range(_REUPLOAD_ATTEMPTS + 1):
+                if not grants:
+                    break
+                report = _cu.upload_grants(
+                    grants, _source_for,
+                    on_bytes=(lambda n: part_progress(0, 0, n))
+                    if callable(part_progress) else None,
+                )
+                uploaded_objects += report.uploaded
+                if callable(progress):
+                    progress(resident + uploaded_objects, distinct or len(grants))
+                if report.ok:
+                    break
+                if attempt == _REUPLOAD_ATTEMPTS:
+                    raise HubPublishError(
+                        f"publish {publish_id}: {len(report.failures)} object(s) failed to "
+                        f"upload after {_REUPLOAD_ATTEMPTS + 1} passes: "
+                        + "; ".join(report.failures[:5])
+                    )
+                # RESUME NEEDS NO CLIENT STATE: re-plan and the need set comes
+                # back smaller, because what landed is now resident. A kill
+                # mid-upload costs the in-flight objects and nothing else.
+                again = self._post(f"{repo_path}/publishes/"
+                                   f"{urllib.parse.quote(publish_id, safe='')}/grants")
+                if again.status_code < 200 or again.status_code >= 300:
+                    raise HubPublishError(
+                        f"publish re-plan failed ({again.status_code}): {again.text[:500]}")
+                grants = _grants_of(self._json(again))
+
+            done = self._post(
+                f"{repo_path}/publishes/{urllib.parse.quote(publish_id, safe='')}/complete")
+        except Exception:
+            # Abort so the staging prefix is reclaimed and the session lands in
+            # a TERMINAL state rather than looking forever in-flight.
+            try:
+                _http_session().delete(
+                    f"{self.base_url}{repo_path}/publishes/"
+                    f"{urllib.parse.quote(publish_id, safe='')}",
+                    headers=self._headers(), timeout=30,
+                )
+            except Exception:
+                pass
+            raise
+
+        if done.status_code < 200 or done.status_code >= 300:
+            raise HubPublishError(
+                f"publish complete failed ({done.status_code}): {done.text[:800]}")
+        final = self._json(done)
+        ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
+        checkpoint_id = str((ckpt or {}).get("checkpoint_id") or "").strip()
+        if not checkpoint_id:
+            raise HubPublishError(
+                f"publish {publish_id} completed without a checkpoint id: "
+                f"{json.dumps(final)[:500]}")
+        # Surfaced, not swallowed: the hub names which canonical th#1301 checks
+        # it did NOT run. A list that promises 19 and silently runs 14 is worse
+        # than one promising 14.
+        skipped = final.get("checks_unavailable") or []
+        if skipped:
+            logger.info("publish %s checks_unavailable=%s", publish_id, skipped)
+        logger.info(
+            "publish_v2 done repo=%s publish=%s objects=%d resident=%d uploaded=%d "
+            "checkpoint=%s",
+            destination_repo, publish_id, distinct, resident, uploaded_objects,
+            checkpoint_id[:24],
+        )
+        return CommitResult(
+            revision_id=publish_id,
+            uploaded=uploaded_objects,
+            deduped=resident,
+            total_bytes=total_bytes,
+            checkpoint_id=checkpoint_id,
+            response=final,
+        )
+
     def lookup_clone_manifests(
         self, destination_repo: str, keys: list[str],
     ) -> dict[str, dict[str, Any]]:

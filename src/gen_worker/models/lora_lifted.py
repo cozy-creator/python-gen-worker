@@ -48,6 +48,7 @@ import logging
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from ..api.errors import ValidationError
+from . import w8a8_lora
 from .w8a8_lora import (
     apply_branch_adapter_set,
     apply_branch_adapters,
@@ -324,6 +325,51 @@ class LiftedLoraBinding:
             self.unbind(prior)
 
 
+def _positional_arity(forward: Any) -> int:
+    """How many positional parameters the denoiser's OWN forward takes."""
+    import inspect
+
+    try:
+        params = inspect.signature(forward).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover — exotic callables
+        return -1
+    return sum(
+        1 for p in params
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        and p.name != "self")
+
+
+def _lifted_signature(forward: Any) -> Any:
+    """The denoiser's signature with ``lora_a``/``lora_b`` APPENDED as
+    ordinary positional parameters.
+
+    The mint reads this (``aot_declaration._positionalize``,
+    ``aot_mint._input_names``) to bind example inputs to positional slots.
+    Before pgw#790 the wrapper declared them KEYWORD-ONLY, which made the
+    lifted lane unmintable in BOTH directions: `_positionalize` refuses a
+    declared keyword-only input by name, and feeding the pair positionally
+    landed it in ``*args`` while the branch bound ``None`` and refused. So the
+    call convention is stated in the signature instead of being implied.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(forward)
+    except (TypeError, ValueError):  # pragma: no cover — exotic callables
+        return None
+    params = [p for p in sig.parameters.values()
+              if p.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                                inspect.Parameter.VAR_KEYWORD)]
+    keyword_only = [p for p in params
+                    if p.kind == inspect.Parameter.KEYWORD_ONLY]
+    positional = [p for p in params
+                  if p.kind != inspect.Parameter.KEYWORD_ONLY]
+    lifted = [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                default=None)
+              for name in LIFTED_INPUT_NAMES]
+    return sig.replace(parameters=positional + lifted + keyword_only)
+
+
 def install_lifted_lora_forward(model: Any, bucket: int = 0) -> LiftedLoraBinding:
     """Give one ARMED denoiser the lifted call signature. Idempotent.
 
@@ -345,15 +391,26 @@ def install_lifted_lora_forward(model: Any, bucket: int = 0) -> LiftedLoraBindin
     binding = LiftedLoraBinding(model, plan, device)
     orig = model.forward
     resolved = binding.resolved
+    arity = _positional_arity(orig)
 
-    def _lifted_forward(*args: Any, lora_a: Any = None, lora_b: Any = None,
-                        **kwargs: Any) -> Any:
+    def _lifted_forward(*args: Any, **kwargs: Any) -> Any:
+        lora_a = kwargs.pop("lora_a", None)
+        lora_b = kwargs.pop("lora_b", None)
+        if lora_a is None and lora_b is None and len(args) == arity + 2:
+            # The all-positional MINT feed (pgw#723 residuals / pod 9): an
+            # AOTI package's call convention mirrors the traced args/kwargs
+            # split, so the pair must be traceable positionally. It fills
+            # exactly the two slots this wrapper appends to the denoiser's own
+            # signature, and `_positionalize` fills every slot before them —
+            # so the arity is exact, never a guess about a trailing tensor.
+            args, lora_a, lora_b = args[:-2], args[-2], args[-1]
         prior = bind_views(resolved, plan, lora_a, lora_b)
         try:
             return orig(*args, **kwargs)
         finally:
             unbind_views(resolved, prior)
 
+    _lifted_forward.__signature__ = _lifted_signature(orig)  # type: ignore[attr-defined]
     setattr(model, _ORIG_FORWARD_ATTR, orig)
     model.forward = _lifted_forward
     setattr(model, _BINDING_ATTR, binding)
@@ -381,6 +438,23 @@ def lifted_binding(model: Any) -> Optional[LiftedLoraBinding]:
     """The installed binding, or ``None``."""
     found = getattr(model, _BINDING_ATTR, None)
     return found if isinstance(found, LiftedLoraBinding) else None
+
+
+def adapter_active(model: Any) -> bool:
+    """Whether an adapter is CURRENTLY placed on this denoiser's branch.
+
+    Reads ``w8a8_lora``'s own active flag — the one the per-request
+    attach/clear path already maintains (``apply_branch_adapters`` sets it,
+    ``clear_branch_adapters`` unsets it, and the lifted lane goes through both
+    by construction). Adds no state, and deliberately does NOT inspect the
+    flat pair's values: a ``lora_b.any()`` read would be a device
+    synchronisation on every request.
+
+    pgw#790's serve-side routing question: with a zeroed branch the
+    branch-bearing graph and the branchless graph return the same tensor, so
+    "no adapter is active" is the licence to serve the cheaper one.
+    """
+    return bool(w8a8_lora.branches_active(model))
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +638,7 @@ def assert_no_baked_adapter(compiled: Any, *, label: str = "") -> None:
 
 __all__ = [
     "LIFTED_INPUT_NAMES",
+    "adapter_active",
     "LiftedLoraBinding",
     "LiftedLoraPlan",
     "ResolvedSlots",

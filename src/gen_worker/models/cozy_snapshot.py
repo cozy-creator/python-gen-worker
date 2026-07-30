@@ -12,11 +12,21 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
-from .cozy_cas import _blake3_file, _download_one_file as _download_one_file
+from .chunk_cas import (
+    CAS_CHUNK_SIZE_BYTES,
+    ChunkSpec,
+    DigestMismatch,
+    download_chunked_file,
+    hash_file,
+    parse_cas_ref,
+    verify_file_digest,
+)
+from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
 from .download import components_present, select_component_paths
+from .errors import PickleWeightRefused
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
 from .. import activity as _activity
@@ -127,11 +137,27 @@ _SNAP_ENTRIES: Dict[str, _SnapshotEntry] = {}
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _blob_path(blobs_root: Path, digest: str) -> Path:
-    digest = (digest or "").strip().lower()
-    if len(digest) < 4:
-        raise ValueError(f"invalid blake3 digest: {digest!r}")
-    return blobs_root / "blake3" / digest[:2] / digest[2:4] / digest
+def _blob_path(blobs_root: Path, ref: str) -> Path:
+    """Local CAS path for an algorithm-tagged ref: ``blobs/<algo>/aa/bb/<hex>``.
+
+    The algorithm is a PATH SEGMENT, mirroring the hub's `blobs/<algo>/` layout,
+    so a sha256 blob and a blake3 blob of different bytes can never collide on
+    one name and a legacy blake3 tree keeps its exact existing paths. A bare
+    hex ref reads as legacy blake3 (`parse_cas_ref`'s read-path rule).
+    """
+    algo, hexpart = parse_cas_ref(ref)
+    return blobs_root / algo / hexpart[:2] / hexpart[2:4] / hexpart
+
+
+def _verify_or_unlink(dst: Path, ref: str) -> None:
+    """Verify a freshly-downloaded whole blob against its tagged ref, and
+    remove the file if it does not match — bytes that failed their digest must
+    never survive at a CAS path where the next reader would trust the name."""
+    try:
+        verify_file_digest(dst, ref)
+    except DigestMismatch:
+        dst.unlink(missing_ok=True)
+        raise
 
 
 _PART_FILE_RE = re.compile(r"\.part\d{4}$")
@@ -153,15 +179,22 @@ def _is_parts_manifest(path: str) -> bool:
     return path.endswith(".parts.json")
 
 
-def _copy_verified_blob(src: Path, dst: Path, digest: str, expected_size: int) -> bool:
+def _copy_verified_blob(src: Path, dst: Path, ref: str, expected_size: int) -> bool:
     """Copy one immutable CAS blob through a writer-unique atomic stage,
-    verifying declared size and BLAKE3 before publishing (th#850 managed-tier
-    ruling, gw#599). Used both to fill local CAS from the volume fill source
-    and to write a fresh R2 fetch through to the volume. The final path is
-    digest-only; readers never observe partial bytes, and racing writers may
-    replace the same final name only after each independently verifies size
-    and BLAKE3 (mirrors the multi-writer discipline gw#597 established for
-    ordinary downloads)."""
+    verifying declared size and the CONTENT DIGEST before publishing (th#850
+    managed-tier ruling, gw#599). Used both to fill local CAS from the volume
+    fill source and to write a fresh R2 fetch through to the volume. The final
+    path is digest-only; readers never observe partial bytes, and racing
+    writers may replace the same final name only after each independently
+    verifies size and digest (mirrors the multi-writer discipline gw#597
+    established for ordinary downloads).
+
+    ``ref`` is ALGORITHM-TAGGED and the hash dispatches on it (th#1303): a
+    sha256 blob checked with blake3 fails every honest copy, and an empty
+    digest must never reduce this to a size-only check.
+    """
+    algo, want_hex = parse_cas_ref(ref)
+    digest = want_hex
     try:
         if not src.is_file():
             return False
@@ -187,9 +220,9 @@ def _copy_verified_blob(src: Path, dst: Path, digest: str, expected_size: int) -
                     src, digest[:16], expected_size, tmp.stat().st_size,
                 )
                 return False
-            if digest and _blake3_file(tmp).lower() != digest.lower():
+            if hash_file(tmp, algo).lower() != want_hex:
                 _log.warning(
-                    "blob_fill_corrupt source=%s digest=%s reason=blake3", src, digest[:16],
+                    "blob_fill_corrupt source=%s digest=%s reason=%s", src, digest[:16], algo,
                 )
                 return False
             os.replace(tmp, dst)
@@ -227,6 +260,28 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 # shape — each wire boundary parses into it; no dict-or-object duck typing).
 # ---------------------------------------------------------------------------
 
+# pgw#782 / th#1313: pickle serialisation formats a worker REFUSES to
+# materialize, mirroring tensorhub's publish-time ban
+# (catalog.PickleWeightExtensions). Defence in depth, and the depth is the
+# point: the hub now refuses these at publish, but blobs already in the shared
+# CAS predate that refusal, and a worker is where unpickling would actually
+# execute — `torch.load` / `from_pretrained` on a hostile `.bin` runs the
+# attacker's code inside a pod holding our hub credentials and other tenants'
+# work. Refusing at RESOLVE means the bytes are never even downloaded.
+#
+# Paul, 2026-07-30: "definitely ban all of these."
+PICKLE_WEIGHT_EXTENSIONS = (".bin", ".ckpt", ".pt", ".pth", ".pkl", ".pickle")
+
+
+def first_pickle_weight_path(paths: Iterable[str]) -> str:
+    """First path naming a pickle serialisation format, or "" if none."""
+    for raw in paths:
+        base = (raw or "").strip().lower().rsplit("/", 1)[-1]
+        if base.endswith(PICKLE_WEIGHT_EXTENSIONS):
+            return raw
+    return ""
+
+
 def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> WorkerResolvedRepo:
     """Normalize digest prefixes and reject unusable manifests."""
     snapshot_digest = (resolved.snapshot_digest or "").strip()
@@ -239,11 +294,31 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
         path = (f.path or "").strip()
         if not path:
             continue
-        blake3_hex = _strip_blake3_prefix((f.blake3 or "").strip().lower())
+        # th#1303: the algorithm-tagged ref FIRST. `cas_ref()` raises on an
+        # entry that carries no readable digest, so an unreadable manifest can
+        # never degrade into "download it unverified".
+        try:
+            ref_tagged = f.cas_ref()
+        except ValueError as exc:
+            raise ValueError(f"resolved model file {path}: {exc}") from exc
+        algo, hex_only = parse_cas_ref(ref_tagged)
+        blake3_hex = hex_only if algo == "blake3" else ""
         url = (f.url or "").strip() or None
         transfer_grant = f.transfer_grant if isinstance(f.transfer_grant, dict) else None
-        if not blake3_hex or (not url and transfer_grant is None):
-            raise ValueError(f"resolved model file missing blake3/transfer: {path}")
+        chunks = tuple(f.chunks or ())
+        # A chunked entry's bytes exist ONLY as chunks — it legitimately has no
+        # whole-file url. Requiring one is how every v2 snapshot would be
+        # rejected as untransferable.
+        if not chunks and not url and transfer_grant is None:
+            raise ValueError(f"resolved model file missing transfer: {path}")
+        if chunks:
+            declared = sum(int(c.length) for c in chunks)
+            size = int(f.size_bytes or 0)
+            if size and declared != size:
+                raise ValueError(
+                    f"resolved model file {path}: chunk lengths sum to {declared}, "
+                    f"manifest says {size}"
+                )
         files.append(
             WorkerResolvedRepoFile(
                 path=path,
@@ -251,11 +326,21 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
                 blake3=blake3_hex,
                 url=url,
                 transfer_grant=transfer_grant,
+                digest=ref_tagged if algo != "blake3" else "",
+                chunks=chunks,
+                chunk_size_bytes=int(f.chunk_size_bytes or 0),
             )
         )
 
     if not files:
         raise ValueError("resolved model has empty files list")
+
+    if bad := first_pickle_weight_path(f.path for f in files):
+        raise PickleWeightRefused(
+            f"refusing snapshot {snapshot_digest[:16]} of {ref.canonical()}: "
+            f"{bad!r} is a pickle-format weight. Unpickling executes arbitrary "
+            f"code in this process; republish the repo with safetensors."
+        )
 
     return WorkerResolvedRepo(snapshot_digest=snapshot_digest, files=files)
 
@@ -474,10 +559,11 @@ class CozySnapshotDownloader:
         seen: Set[str] = set()
         unique: List[WorkerResolvedRepoFile] = []
         for f in files:
-            digest = (f.blake3 or "").strip().lower()
-            if not digest:
-                raise ValueError(f"missing blake3 for {f.path}")
-            if not f.url and not f.transfer_grant:
+            # th#1303: dedupe on the ALGORITHM-TAGGED ref. Two different
+            # algorithms' hex could otherwise collide in this set and one
+            # blob would stand in for the other.
+            digest = f.cas_ref()
+            if not f.url and not f.transfer_grant and not f.chunks:
                 raise ValueError(f"missing transfer for {f.path}")
             if digest not in seen:
                 seen.add(digest)
@@ -486,12 +572,12 @@ class CozySnapshotDownloader:
         _log.info("ensure_blobs total_entries=%d unique_blobs=%d", len(files), len(unique))
 
         cached_digests = {
-            f.blake3.strip().lower() for f in unique
-            if _blob_path(blobs_root, f.blake3.strip().lower()).exists()
+            f.cas_ref() for f in unique
+            if _blob_path(blobs_root, f.cas_ref()).exists()
         }
         missing_bytes = sum(
             int(f.size_bytes or 0) for f in unique
-            if f.blake3.strip().lower() not in cached_digests
+            if f.cas_ref() not in cached_digests
         )
         self._check_disk_headroom(blobs_root, missing_bytes)
 
@@ -502,6 +588,16 @@ class CozySnapshotDownloader:
         # the signal a "volume-attached boot ⇒ ~0 network bytes" runtime
         # assertion needs. Only _dl_locked's real fetch increments it.
         done_lock = threading.Lock()
+        # Captured HERE, in the caller's context, not looked up per call.
+        # Chunked fetches run on a ThreadPoolExecutor created inside
+        # chunk_cas, and a bare ThreadPoolExecutor does NOT propagate
+        # contextvars — so a per-call `_NETWORK_BYTES_SINK.get()` returns the
+        # default None on every chunk and the whole transfer reports ZERO
+        # network bytes. th#850's "volume-attached boot ⇒ ~0 network bytes"
+        # assertion reads this counter, so that would make every cold chunked
+        # boot look warm. The sink is a shared mutable list; binding the
+        # reference once is both correct and cheaper.
+        _sink = _NETWORK_BYTES_SINK.get()
 
         def _on_bytes(n: int, *, network: bool = False) -> None:
             nonlocal done, network_bytes
@@ -517,9 +613,8 @@ class CozySnapshotDownloader:
                     # genuinely-running total. tensorhub reads network_bytes
                     # off the DOWNLOADING events' running value, the same
                     # way it reads bytes_done/bytes_total.
-                    sink = _NETWORK_BYTES_SINK.get()
-                    if sink is not None:
-                        sink[0] += n
+                    if _sink is not None:
+                        _sink[0] += n
                     # ie#522: a real network byte is honest proof the
                     # activity (self-mint compile's load phase, etc.) is
                     # alive — heartbeat it directly, independent of the
@@ -548,21 +643,26 @@ class CozySnapshotDownloader:
 
         async def _blob_trusted(dst: Path, f: WorkerResolvedRepoFile, digest: str) -> bool:
             """Reusable AND digest-trusted (gw#598): size gate as before, plus
-            a full BLAKE3 check once per (root, digest) per process — reused
-            bytes on a shared volume root are another pod's writes of any age
-            and must earn the same trust as a fresh verified download."""
+            a full content-hash check once per (root, digest) per process —
+            reused bytes on a shared volume root are another pod's writes of
+            any age and must earn the same trust as a fresh verified download.
+
+            The hash DISPATCHES on the ref's algorithm (th#1303); it is never
+            skipped, because a check that does not run is indistinguishable
+            from one that passes."""
             if not self._blob_usable(dst, f):
                 return False
             vkey = (blobs_root_id, digest)
             if vkey in _VERIFIED_BLOBS:
                 return True
-            got = await asyncio.to_thread(_blake3_file, dst)
-            if got.lower() == digest:
+            algo, want_hex = parse_cas_ref(digest)
+            got = await asyncio.to_thread(hash_file, dst, algo)
+            if got.lower() == want_hex:
                 _mark_trusted(_VERIFIED_BLOBS, vkey)
                 return True
             _log.warning(
-                "blob_corrupt path=%s digest=%s blake3 mismatch on reuse; re-downloading",
-                f.path, digest[:16],
+                "blob_corrupt path=%s digest=%s %s mismatch on reuse; re-downloading",
+                f.path, digest[:24], algo,
             )
             dst.unlink(missing_ok=True)
             return False
@@ -607,7 +707,7 @@ class CozySnapshotDownloader:
             )
 
         async def _dl(f: WorkerResolvedRepoFile) -> None:
-            digest = f.blake3.strip().lower()
+            digest = f.cas_ref()
             dst = _blob_path(blobs_root, digest)
             dst.parent.mkdir(parents=True, exist_ok=True)
             if await _blob_trusted(dst, f, digest):
@@ -627,32 +727,68 @@ class CozySnapshotDownloader:
             async with sem:
                 if await _blob_trusted(dst, f, digest):
                     return
-                _log.info("blob_download_start path=%s size=%s digest=%s",
-                          f.path, f.size_bytes, digest[:16])
-                if f.transfer_grant:
-                    grant = S3TransferGrant.from_mapping(f.transfer_grant)
-                    await asyncio.get_running_loop().run_in_executor(
-                        None,
-                        lambda: download_file_with_grant(
-                            grant=grant,
-                            dest_path=dst,
-                            expected_size_bytes=int(f.size_bytes or 0) or None,
-                            expected_blake3=digest,
-                        ),
-                    )
-                    _on_bytes(int(f.size_bytes or 0), network=True)
-                else:
-                    assert f.url is not None  # validated above in _ensure_blobs loop
-                    await _download_one_file(
-                        f.url,
+                _log.info("blob_download_start path=%s size=%s digest=%s chunks=%d",
+                          f.path, f.size_bytes, digest[:24], len(f.chunks))
+                if f.chunks:
+                    # th#1303 v2: bounded out-of-order fetch, IN-ORDER commit,
+                    # whole-file hash fused into the commit stream. Only the
+                    # chunks are store-enforced, so this is the one place a
+                    # wrong whole-file label is caught — it fails closed.
+                    specs = [
+                        ChunkSpec(sha256=c.sha256, url=c.url, length=int(c.length))
+                        for c in f.chunks
+                    ]
+                    await asyncio.to_thread(
+                        download_chunked_file,
+                        specs,
                         dst,
-                        expected_size=int(f.size_bytes or 0),
-                        expected_blake3=digest,
+                        whole_digest=digest,
+                        total_size=int(f.size_bytes or 0),
+                        chunk_size_bytes=int(f.chunk_size_bytes or 0)
+                        or CAS_CHUNK_SIZE_BYTES,
                         on_bytes=lambda n: _on_bytes(n, network=True),
                     )
-                # Both download paths verified size+BLAKE3 before publishing.
+                else:
+                    # A WHOLE file, either algorithm. The legacy transports
+                    # verify blake3 INLINE; they know nothing about sha256, so
+                    # a sha256 whole file is verified explicitly below. The
+                    # inline expectation is passed only when it is the right
+                    # algorithm — handing a sha256 hex to a blake3 checker is
+                    # the mirror-image of the bug this program keeps finding.
+                    algo, want_hex = parse_cas_ref(digest)
+                    inline_b3 = want_hex if algo == "blake3" else ""
+                    if f.transfer_grant:
+                        grant = S3TransferGrant.from_mapping(f.transfer_grant)
+                        await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda: download_file_with_grant(
+                                grant=grant,
+                                dest_path=dst,
+                                expected_size_bytes=int(f.size_bytes or 0) or None,
+                                expected_blake3=inline_b3,
+                            ),
+                        )
+                        _on_bytes(int(f.size_bytes or 0), network=True)
+                    else:
+                        assert f.url is not None  # validated in _ensure_blobs
+                        await _download_one_file(
+                            f.url,
+                            dst,
+                            expected_size=int(f.size_bytes or 0),
+                            expected_blake3=inline_b3,
+                            on_bytes=lambda n: _on_bytes(n, network=True),
+                        )
+                    if not inline_b3:
+                        # MANDATORY, not conditional: nothing else checked
+                        # these bytes. Fail closed and leave nothing behind.
+                        try:
+                            await asyncio.to_thread(_verify_or_unlink, dst, digest)
+                        except DigestMismatch:
+                            raise
+                # Every path above verified size + the content digest under the
+                # algorithm the manifest named, before publishing.
                 _mark_trusted(_VERIFIED_BLOBS, (blobs_root_id, digest))
-                _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
+                _log.info("blob_download_done path=%s digest=%s", f.path, digest[:24])
 
         await asyncio.gather(*(_dl(f) for f in unique))
         # th#850 managed-tier runtime-assertion signal: on a volume-attached
@@ -679,7 +815,7 @@ class CozySnapshotDownloader:
             if expected and dst.stat().st_size != expected:
                 _log.warning(
                     "blob_corrupt path=%s digest=%s size=%d expected=%d; re-downloading",
-                    f.path, f.blake3[:16], dst.stat().st_size, expected,
+                    f.path, (f.digest or f.blake3)[:24], dst.stat().st_size, expected,
                 )
                 dst.unlink(missing_ok=True)
                 return False
@@ -718,7 +854,7 @@ class CozySnapshotDownloader:
                 continue
 
             _log.info("reassemble_start manifest=%s", f.path)
-            manifest_blob = _blob_path(blobs_root, f.blake3)
+            manifest_blob = _blob_path(blobs_root, f.cas_ref())
             manifest = json.loads(manifest_blob.read_bytes())
 
             original_path = str(manifest.get("original_path") or "").strip()
@@ -765,7 +901,7 @@ class CozySnapshotDownloader:
                 continue
             dst = tmp / _norm_rel_path(f.path)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            src = _blob_path(blobs_root, f.blake3)
+            src = _blob_path(blobs_root, f.cas_ref())
             _try_hardlink_or_copy(src, dst)
 
 
@@ -775,10 +911,15 @@ def _verify_materialized_tree(
 ) -> tuple:
     """Integrity of a reused materialized snapshot (worker thread, blocking).
 
-    Manifest-covered regular files are checked against declared size AND
-    BLAKE3; reassembled chunked originals (which the manifest digests only
-    part-wise) get the structural safetensors check. Returns
-    ``(ok, bad)`` — hex digests in ``bad`` name blobs to quarantine."""
+    Manifest-covered regular files are checked against declared size AND their
+    CONTENT DIGEST, hashed under the algorithm the manifest named (th#1303);
+    reassembled chunked originals (which the manifest digests only part-wise)
+    get the structural safetensors check. Returns ``(ok, bad)`` — algorithm-
+    tagged refs in ``bad`` name blobs to quarantine.
+
+    The digest check is MANDATORY. It used to read `f.blake3` and guard on that
+    field being non-empty, which under manifest v2 is always empty — so a v2
+    tree was reported clean having hashed nothing."""
 
     bad: List[str] = []
     covered: Set[Path] = set()
@@ -790,17 +931,17 @@ def _verify_materialized_tree(
         except ValueError:
             continue
         covered.add(dst)
-        digest = _strip_blake3_prefix((f.blake3 or "").strip().lower())
+        ref = ""
         try:
+            ref = f.cas_ref()
             if not dst.exists():
                 raise ValueError("missing")
             if f.size_bytes and dst.stat().st_size != int(f.size_bytes):
                 raise ValueError("size mismatch")
-            if digest and _blake3_file(dst).lower() != digest:
-                raise ValueError("blake3 mismatch")
+            verify_file_digest(dst, ref)
         except (OSError, ValueError) as exc:
             _log.warning("snapshot reuse file %s/%s corrupt: %s", snap_dir.name, f.path, exc)
-            bad.append(digest or f.path)
+            bad.append(ref or f.path)
     try:
         candidates = sorted(snap_dir.rglob("*.safetensors"))
     except OSError:
@@ -819,13 +960,13 @@ def _quarantine_materialized(snap_dir: Path, blobs_root: Path, bad: Any) -> None
     rebuild re-downloads clean bytes instead of re-linking the same rot."""
     shutil.rmtree(snap_dir, ignore_errors=True)
     for raw in bad or ():
-        digest = _strip_blake3_prefix(str(raw or "")).strip().lower()
-        if "/" in digest or "." in digest or len(digest) < 4:
-            continue  # path-shaped entry (structural failure), not a digest
+        # Keep the ALGORITHM TAG: stripping it here would aim the unlink at
+        # blobs/blake3/<sha256hex>, i.e. at nothing, and leave the corrupt
+        # blob in place to be re-linked by the next materialization.
         try:
-            _blob_path(blobs_root, digest).unlink(missing_ok=True)
-        except OSError:
-            continue
+            _blob_path(blobs_root, str(raw or "")).unlink(missing_ok=True)
+        except (OSError, ValueError):
+            continue  # path-shaped entry (structural failure), not a digest
     fsync_dir(snap_dir.parent)
 
 
@@ -835,12 +976,9 @@ def delete_blobs(base_dir: Path, digests: Any) -> None:
     the same corrupt bytes."""
     blobs_root = Path(base_dir) / "blobs"
     for raw in digests or ():
-        digest = _strip_blake3_prefix(str(raw or "")).strip().lower()
-        if len(digest) < 4:
-            continue
         try:
-            _blob_path(blobs_root, digest).unlink(missing_ok=True)
-        except OSError:
+            _blob_path(blobs_root, str(raw or "")).unlink(missing_ok=True)
+        except (OSError, ValueError):
             continue
 
 

@@ -57,13 +57,13 @@ def test_no_shared_components_never_forces():
 # ---------------------------------------------------------------------------
 # th#1043 second layer (found live, pod 4xh4m999n26u5f): the gw#534
 # bf16-resident upcast made a SINGLE-lane fit call against current free VRAM
-# and silently un-forced the group's fp8 decision — the first lane loaded
-# full bf16 again and re-starved its sibling. A forced group fit must
-# disable the local upgrade.
+# and silently un-forced the group's fp8 decision. pgw#772 removed that
+# voluntary upcast entirely (it also forked the ck5 `lane` axis per-card);
+# both the unforced and the forced load now stay on the fp8 storage lane.
 # ---------------------------------------------------------------------------
 
 
-def test_forced_group_fp8_survives_the_resident_upcast_check(tmp_path, monkeypatch):
+def test_fp8_lane_holds_with_and_without_group_forcing(tmp_path):
     import pytest
 
     pytest.importorskip("torch")
@@ -71,7 +71,6 @@ def test_forced_group_fp8_survives_the_resident_upcast_check(tmp_path, monkeypat
     pytest.importorskip("accelerate")
     from diffusers import DDPMPipeline, DDPMScheduler, UNet2DModel
 
-    from gen_worker.models import loading
     from gen_worker.models.provision import load_slot
 
     root = tmp_path / "src"
@@ -83,20 +82,18 @@ def test_forced_group_fp8_survives_the_resident_upcast_check(tmp_path, monkeypat
     )
     DDPMPipeline(unet=unet, scheduler=DDPMScheduler()).save_pretrained(str(root))
 
-    # A card with plenty of free VRAM for ONE lane: the single-lane check
-    # says "upgrade to bf16-resident".
-    monkeypatch.setattr(loading, "bf16_resident_fits", lambda *a, **k: True)
-
-    # Unforced fp8: the upgrade applies (existing gw#534 behavior).
+    # Unforced declared fp8: served as fp8 storage regardless of headroom
+    # (pgw#772 — the lane is declared, never free-VRAM-probed).
     sl = load_slot(DDPMPipeline, str(root), slot="t2i", device="cpu",
                    binding=type("B", (), {"dtype": "", "storage_dtype": "fp8"})())
-    assert getattr(sl.obj, "_cozy_weight_lane", "") == "bf16-resident"
+    assert getattr(sl.obj, "_cozy_weight_lane", "") == "fp8-hooks"
+    assert getattr(sl.obj, "_cozy_fp8_storage_requested", False) is True
 
-    # Forced group fp8 (th#1043): the upgrade must NOT fire — fp8 storage
-    # hooks stay armed so sibling lanes keep their budgeted headroom.
+    # Forced group fp8 (th#1043): identical lane outcome, reported
+    # structurally as the group-fit downgrade it is.
     sl = load_slot(DDPMPipeline, str(root), slot="t2i", device="cpu",
                    force_storage_dtype="fp8")
-    assert getattr(sl.obj, "_cozy_weight_lane", "") != "bf16-resident"
+    assert getattr(sl.obj, "_cozy_weight_lane", "") == "fp8-hooks"
     assert getattr(sl.obj, "_cozy_fp8_storage_requested", False) is True
     # th#1043 (0.48.2): the forced downgrade is reported structurally, not
     # served silently as a native bf16 plan.

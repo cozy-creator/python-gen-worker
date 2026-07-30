@@ -24,7 +24,9 @@ without a pipeline, a GPU, or a hub.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Optional, Tuple
 
 from . import aot_serve
@@ -96,12 +98,19 @@ def normalize_sm(raw: str) -> str:
     return token
 
 
+@lru_cache(maxsize=1)
 def detect_sm() -> str:
     """This device's compute capability, or "" when there is no CUDA device.
 
     Reads ``compile_cache.runtime_key()`` — the same source the cell key is
     built from, so a request's ``sm`` and the cell it ran is keyed by can never
     disagree.
+
+    Memoized (pgw#789): this is called on every request terminal now, and
+    ``runtime_key()`` probes torch, the device capability AND the libcuda driver
+    version on each call — and logs a warning on every failure. A device's
+    compute capability cannot change within a process, so probing it once is not
+    a cache with a staleness question. ``detect_sm.cache_clear()`` for tests.
     """
     try:
         return normalize_sm(str(compile_cache.runtime_key().get("sm") or ""))
@@ -110,19 +119,25 @@ def detect_sm() -> str:
         return ""
 
 
-def fallback_of(router: Any, target: Any) -> str:
-    """The eager-fallback reason class for ``target`` on ``router``, or "".
+def fallback_of(router: Any, sig: Any) -> str:
+    """The eager-fallback reason class for input signature ``sig``, or "".
 
-    ``hot_swap.Router`` records a heal/volatile verdict per target after a
-    pgw#680 guard miss; either verdict routes the next calls EAGER while the
-    serving tier stays compiled.
+    ``hot_swap.Router.healing`` / ``.volatile`` are sets of input SIGNATURES
+    (not target names — pgw#789 corrected this: a caller that passed a target
+    name got "" for every request and the axis read clean while requests were
+    silently falling back). Either verdict routes the next calls for that
+    signature EAGER while the serving tier stays compiled.
+
+    A caller that does not know the request's sig must NOT probe here — use
+    ``resolve(guard_missed=...)`` / ``resolve(verdict=...)``, which carry the
+    per-request fact the guard-miss callback observed directly.
     """
-    if router is None or target is None:
+    if router is None or sig is None:
         return ""
     try:
-        if target in (getattr(router, "volatile", None) or ()):
+        if sig in (getattr(router, "volatile", None) or ()):
             return FALLBACK_VOLATILE
-        if target in (getattr(router, "healing", None) or ()):
+        if sig in (getattr(router, "healing", None) or ()):
             return FALLBACK_HEALING
     except Exception:
         logger.debug("router fallback probe failed", exc_info=True)
@@ -134,26 +149,35 @@ def resolve(
     active_compile_ref: str = "",
     pipeline: Any = None,
     router: Any = None,
-    target: Any = None,
+    sig: Any = None,
     guard_missed: bool = False,
     ingress_refused: bool = False,
+    verdict: str = "",
     sm: Optional[str] = None,
 ) -> ServedIdentity:
     """The full dimension set for one request.
 
     ``guard_missed`` / ``ingress_refused`` are per-REQUEST facts the caller
     observes (pgw#680's ``_compile_guard_missed`` / ``aot_serve``'s ingress
-    refusal); the router verdicts are per-target state. Any of them means this
-    request was served eager by a compiled lane, which is exactly the sample
-    that must not be counted as compiled.
+    refusal); ``verdict`` is the router's own heal verdict for THIS request
+    (``healing`` | ``volatile``, as reported on ``GuardMiss.heal``) and outranks
+    the generic guard-miss class because it says whether the fallback is
+    transient or permanent. ``router``+``sig`` is the state-probe fallback for
+    callers that know the signature. Any of them means this request was served
+    eager by a compiled lane, which is exactly the sample that must not be
+    counted as compiled.
     """
     mode = classify_mode(active_compile_ref, pipeline)
-    if guard_missed:
+    named = str(verdict or "").strip()
+    if named in (FALLBACK_HEALING, FALLBACK_VOLATILE, FALLBACK_GUARD_MISS,
+                 FALLBACK_INGRESS_REFUSED):
+        reason = named
+    elif guard_missed:
         reason = FALLBACK_GUARD_MISS
     elif ingress_refused:
         reason = FALLBACK_INGRESS_REFUSED
     else:
-        reason = fallback_of(router, target)
+        reason = fallback_of(router, sig)
     return ServedIdentity(
         serving_mode=mode,
         served_cell_ref=str(active_compile_ref or "").strip(),
@@ -166,12 +190,21 @@ def resolve(
 def _first_int(payload: Any, defaults: Any, names: Tuple[str, ...]) -> int:
     """The first present, positive, int-valued field among ``names``, taking
     the EXECUTED value (payload) and falling back to the endpoint's defaults —
-    the same precedence ``RuntimeFormula.term_values_from_struct`` uses."""
+    the same precedence ``RuntimeFormula.term_values_from_struct`` uses.
+
+    Either source may be an ATTRIBUTE holder (the decoded msgspec payload,
+    which already has struct defaults applied) or a MAPPING (the executor's
+    ``_effective_config`` values). Accepting both is what lets one call site
+    pass the pair it actually has instead of adapting one into the other.
+    """
     for source in (payload, defaults):
         if source is None:
             continue
         for name in names:
-            value = getattr(source, name, None)
+            if isinstance(source, Mapping):
+                value = source.get(name)
+            else:
+                value = getattr(source, name, None)
             if isinstance(value, bool) or value is None:
                 continue
             if isinstance(value, (int, float)):

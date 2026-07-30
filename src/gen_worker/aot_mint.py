@@ -104,6 +104,27 @@ CODE_ONLY_CONFIGS: Dict[str, Any] = {
 }
 
 
+#: pgw#790: the SDK-owned fork coordinate of a LoRA-bucket family — one graph
+#: class WITH the lifted adapter inputs and one WITHOUT.
+#:
+#: gw#627 gave every branch-capable leaf a canonical zeroed rank-bucket branch
+#: so a curated attach is a buffer copy instead of a recompile. Measured
+#: (WARM-INFERENCE-MATRIX §2b, 4090+5090, n=28 warm): those zeroed branches
+#: cost **+31.8% / +44.9% of the compiled per-forward** and roughly DOUBLE the
+#: kernel-launch count, and adapter-free traffic pays all of it to compute
+#: zeros. On the hub's own record 95% of sdxl denoiser forwards name no
+#: adapter, so the branch-bearing graph was the minority case wearing the
+#: majority's clothes.
+#:
+#: This is a FORK, not a flag: both classes are exported, compiled, keyed and
+#: shipped in the same cell (Paul: "worst case compile 2x more graphs, one with
+#: LoRAs and one without"), and the serve path picks between them by the
+#: DECLARED ingress contract. Nothing about a program varies with Python state
+#: — the arm is a mint coordinate that lands in the class hash, exactly like
+#: any other fork.
+ADAPTER_FORK = "adapter"
+
+
 class MintRefused(RuntimeError):
     """A named, terminal refusal to produce or publish an artifact.
 
@@ -739,8 +760,36 @@ class _MintedEntry:
     owner: Any
     program: Any
     input_names: Tuple[str, ...]
+    flat_names: Tuple[str, ...]
     files: List[Any]
     timings: Dict[str, Any]
+
+
+def adapter_arm(fork: Sequence[Tuple[str, Any]]) -> Optional[bool]:
+    """The pgw#790 adapter arm a fork coordinate states, or ``None`` when the
+    coordinate does not carry one (a bucket-0 family, or a target that carries
+    no branch-capable module — wan's ``vae.decode`` in a bucket-128 cell)."""
+    value = dict(fork).get(ADAPTER_FORK, None)
+    return None if value is None else bool(value)
+
+
+def declared_fork(fork: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
+    """The coordinate MINUS the SDK-synthesized adapter arm — what the
+    ENDPOINT declared, and therefore the only part its declaration can be
+    asserted against."""
+    return {str(n): v for n, v in fork if str(n) != ADAPTER_FORK}
+
+
+def with_adapter_arm(plan: Any, arm: bool) -> Any:
+    """One mint plan pinned to an adapter arm (a fork coordinate, so it names
+    the entry and lands in the class hash like every other fork)."""
+    from dataclasses import replace
+
+    return replace(
+        plan,
+        fork=tuple(sorted(
+            tuple(plan.fork) + ((ADAPTER_FORK, bool(arm)),),
+            key=lambda pair: str(pair[0]))))
 
 
 def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
@@ -756,7 +805,7 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     for name, value in plan.fork:
         specialization.setdefault(f"fork.{name}", value)
     fork, dims = _decl.entry_coordinates(plan)
-    return replace(
+    espec = replace(
         spec,
         target=str(plan.target),
         fork=fork,
@@ -764,6 +813,13 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
         dynamic=tuple(plan.dynamic),
         specialization=specialization,
     )
+    if adapter_arm(plan.fork) is False:
+        # pgw#790's branchless class: no bucket, no lifted pair, nothing for
+        # the adapter gates to assert. The CELL still declares its bucket —
+        # the fork is what says this graph has no branch, and the specialization
+        # block records both, so a reader can see which arm they are holding.
+        espec = replace(espec, lora_bucket=0, lifted_inputs=(), lora_fqns=())
+    return espec
 
 
 def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
@@ -814,7 +870,7 @@ def _export_entry(
     owner, attr, _fn = resolved
     if decl.forks:
         gaps = _decl.fork_gaps(
-            decl, dict(espec.fork), target=espec.target,
+            decl, declared_fork(espec.fork), target=espec.target,
             pipeline=pipeline, module=owner)
         if gaps:
             raise MintRefused(
@@ -863,6 +919,7 @@ def _export_entry(
         timings["warm_s"] = _run_declared_warm(module, args, entry)
 
     input_names = _input_names(module, args, kwargs)
+    flat_names = flat_input_names(module, args, kwargs)
     dynamic = dynamic_shapes_spec(espec.dynamic, input_names) \
         if espec.dynamic else None
 
@@ -912,7 +969,70 @@ def _export_entry(
 
     return _MintedEntry(
         name=entry, spec=espec, module=module, owner=owner, program=program,
-        input_names=input_names, files=files, timings=timings)
+        input_names=input_names, flat_names=flat_names, files=files,
+        timings=timings)
+
+
+def adapter_arm_plans(
+    plans: Sequence[Any], pipeline: Any, spec: ExportSpec,
+) -> List[Tuple[Any, Optional[bool]]]:
+    """``[(plan, arm)]`` — every branch-capable target's plan forked into an
+    adapter-bearing and a branchless graph class (pgw#790).
+
+    Scoped by COMPOSED truth, not vocabulary: a cell's non-branch targets
+    (wan's ``vae.decode``) fork into nothing, because there is no adapter for
+    them to carry and a second identical graph would be pure mint bill. A
+    bucket-0 family forks into nothing either — its cell IS the branchless
+    class already.
+
+    Adapter-bearing rows come FIRST so the composed pipeline, which arrives
+    lifted from :func:`aot_inputs.compose`, is disarmed exactly once.
+    """
+    if not int(spec.lora_bucket or 0):
+        return [(plan, None) for plan in plans]
+    from .models import lora_lifted
+
+    branch_owners = {
+        id(m) for m in lora_lifted.branch_targets(pipeline).values()}
+    rows: List[Tuple[Any, Optional[bool]]] = []
+    for plan in plans:
+        resolved = _resolve_target(pipeline, str(plan.target))
+        owner = resolved[0] if resolved else None
+        if owner is None or id(owner) not in branch_owners:
+            rows.append((plan, None))
+            continue
+        rows.append((with_adapter_arm(plan, True), True))
+        rows.append((with_adapter_arm(plan, False), False))
+    rows.sort(key=lambda row: row[1] is False)   # stable: order within a group
+    return rows
+
+
+def _disarm_branches(pipeline: Any) -> None:
+    """Take the pipeline back to the BRANCHLESS graph family (pgw#790).
+
+    Both halves are required: removing the lifted forward alone would leave
+    the zeroed branch containers on every leaf, and the trace would still emit
+    the branch — the exact arithmetic-over-zeros this fork exists to delete.
+    """
+    from .models import lora_lifted, w8a8_lora
+
+    lora_lifted.remove_lifted_lora_lanes(pipeline)
+    w8a8_lora.disable_branch_lanes(pipeline)
+    logger.info(
+        "aot-mint: branch containers dropped — exporting the adapter=false "
+        "graph class(es)")
+
+
+def _rearm_branches(pipeline: Any, bucket: int) -> None:
+    """Restore canonical placement + the lifted signature after the
+    branchless exports. The mint process may go on to serve or re-mint, and
+    a pipeline left branchless would silently be a different graph family."""
+    if not bucket:
+        return
+    from .models import lora_lifted, w8a8_lora
+
+    w8a8_lora.enable_branch_lanes(pipeline, int(bucket))
+    lora_lifted.install_lifted_lora_lanes(pipeline, int(bucket))
 
 
 def mint(
@@ -959,11 +1079,23 @@ def mint(
 
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
-    plans = _decl.cell_plans(decl)
+    rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
     minted: List[_MintedEntry] = []
-    for plan in plans:
-        minted.append(_export_entry(
-            pipeline, spec, plan, decl, inductor_configs=inductor_configs))
+    disarmed = False
+    try:
+        for plan, arm in rows:
+            if arm is False and not disarmed:
+                # ONE toggle for the whole branchless group (the rows are
+                # ordered adapter-bearing first): disable/enable reallocates
+                # every leaf's branch container, and doing it per entry would
+                # be N times the VRAM churn for the same graphs.
+                _disarm_branches(pipeline)
+                disarmed = True
+            minted.append(_export_entry(
+                pipeline, spec, plan, decl, inductor_configs=inductor_configs))
+    finally:
+        if disarmed:
+            _rearm_branches(pipeline, int(spec.lora_bucket or 0))
 
     t0 = time.monotonic()
     package = package_cell(
@@ -1058,11 +1190,11 @@ def _gate_and_declare_entry(
             "(e.g. %s)", entry, len(fused), fused[:3])
     try:
         inputs, symbols = aot_package.input_contract(
-            row.program, row.input_names)
+            row.program, row.flat_names)
         constants = aot_package.constants_manifest(package, entry)
     except aot_package.PackageIntrospectionError as exc:
         raise MintRefused(f"entry {entry!r}: declaration: {exc}") from exc
-    return {
+    block: Dict[str, Any] = {
         "target": row.spec.target,
         "fork": [[str(n), v] for n, v in sorted(row.spec.fork)],
         "class_dims": [
@@ -1072,6 +1204,17 @@ def _gate_and_declare_entry(
         "constants": constants,
         "graph": entry_graph_block(row.program, package, row.name, row.spec),
     }
+    if adapter_arm(row.spec.fork) is False:
+        # pgw#790: the NEGATIVE half of this class's contract. Without it the
+        # branchless entry silently ADMITS an adapter-bearing call (a
+        # name-keyed bind ignores inputs it does not declare), the dispatch
+        # sees two admitting entries and refuses `entry_ambiguous` — and the
+        # cell serves the whole attach lane eagerly. Declared, so the refusal
+        # is the right one and it names the input.
+        from .models import lora_lifted
+
+        block["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
+    return block
 
 
 def _mint_phase_table(
@@ -1119,21 +1262,65 @@ def _mint_phase_table(
     }
 
 
+MINT_PHASES_KIND = "aot_mint_phases"
+
+
+def _entry_duration_s(timings: Mapping[str, Any]) -> float:
+    """One graph-class entry's own compile cost: export + compile + warm.
+
+    The package/declare/pack phases are per-MINT, not per-entry, so they belong
+    to the roll-up only — summing the entry rows must never reproduce
+    ``total_s`` or a reader would double-count.
+    """
+    return sum(
+        float(timings.get(key) or 0.0)
+        for key in ("export_s", "compile_s", "warm_s")
+    )
+
+
 def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
     """Typed telemetry event — the phase table must reach observability,
-    never only a pod log."""
+    never only a pod log.
+
+    th#1322: the mint's TOTAL now rides the numeric ``duration_ms`` field, and
+    each graph-class entry gets its own event under ``phase=entry:<name>``. The
+    interpolated table stays in ``detail`` as the breakdown you read per event
+    (exactly as ``stage_ms`` stays in the request payload), but every number a
+    measurement lane groups, percentiles or trends on is now a column.
+
+    Paul's question — "why is AOT mint so much slower than JIT mint?" — needs
+    the per-entry rows: an AOT mint compiles N graph classes where a JIT mint
+    compiles the graphs one real warm plan happens to trace, and the answer is
+    which entries the extra minutes are in, not just that there are more.
+    """
     try:
         from . import activity as activity_mod
 
         totals = dict(table.get("totals") or {})
+        lane = spec.lane_label() or "plain"
+        total_s = float(totals.get("total_s") or 0.0)
         activity_mod.emit_event(
-            "aot_mint_phases",
-            f"family={spec.family} lane={spec.lane_label() or 'plain'} "
+            MINT_PHASES_KIND,
+            f"family={spec.family} lane={lane} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
-            phase="minted",
+            phase=activity_mod.PHASE_MINTED,
+            duration_ms=int(round(total_s * 1000)),
         )
+        for name, timings in sorted((table.get("entries") or {}).items()):
+            if not isinstance(timings, Mapping):
+                continue
+            entry_s = _entry_duration_s(timings)
+            if entry_s <= 0:
+                continue
+            activity_mod.emit_event(
+                MINT_PHASES_KIND,
+                f"family={spec.family} lane={lane} entry={name} "
+                f"timings={dict(timings)}",
+                phase=f"entry:{name}",
+                duration_ms=int(round(entry_s * 1000)),
+            )
     except Exception:  # pragma: no cover — telemetry must never fail a mint
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
 
@@ -1360,6 +1547,57 @@ def _input_names(
     positional = params[:len(args)]
     keyword = [name for name in kwargs if name not in positional]
     return tuple(positional) + tuple(keyword)
+
+
+def flat_input_names(
+    module: Any, args: Tuple[Any, ...], kwargs: Mapping[str, Any],
+) -> Tuple[str, ...]:
+    """ONE name per EXPORTED user input — containers FLATTENED the way export
+    flattens them.
+
+    MEASURED (pgw#790 lane, real sdxl UNet, torch 2.13): `aot_package.
+    input_contract` zips the caller-side parameter names against the exported
+    program's user inputs positionally, and a container argument occupies ONE
+    parameter slot but produces N placeholders. sdxl's `added_cond_kwargs`
+    ({text_embeds, time_ids}) therefore shifted every later name by one and the
+    recorded contract came out as
+
+        position 7  name 'added_cond_kwargs'                shape [2, 1280]
+        position 8  name 'down_block_additional_residuals'  shape [2, 6]
+
+    i.e. text_embeds and time_ids wearing the names of the parameters that
+    follow them. At serve time `bind_call_inputs` then binds the pipeline's
+    `added_cond_kwargs` DICT to a declared tensor input (`input_not_tensor`)
+    and cannot find `down_block_additional_residuals` at all
+    (`input_missing`) — every request refuses by name and the armed cell
+    serves eager for life. That is the field symptom `bind_call_inputs`'
+    own docstring records from pod ae2uc81yub0gyq; the nested-lookup patch
+    treated the symptom, but a nested lookup cannot help when the NAMES it
+    searches for are the wrong ones.
+
+    Mapping leaves take their BARE KEY, which is exactly what the serve-side
+    nested resolution looks for, and dicts flatten in SORTED key order because
+    that is what torch's pytree does. Sequence leaves take `<param>.<index>`.
+    ``_input_names`` is deliberately left alone: `dynamic_shapes_spec` keys on
+    top-level PARAMETER names and mirrors containers structurally.
+    """
+    names = _input_names(module, args, kwargs)
+    values = list(args) + [kwargs[n] for n in names[len(args):] if n in kwargs]
+    out: List[str] = []
+
+    def walk(name: str, value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key in sorted(value):
+                walk(str(key), value[key])
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                walk(f"{name}.{index}", item)
+        else:
+            out.append(str(name))
+
+    for name, value in zip(names, values):
+        walk(str(name), value)
+    return tuple(out)
 
 
 def _specialization_facts(spec: ExportSpec) -> Dict[str, Any]:
