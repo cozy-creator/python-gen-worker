@@ -842,3 +842,68 @@ def test_cpu_divisor_is_unchanged_without_siblings(monkeypatch):
     assert facts["concurrency"] == 4                # groups, unmultiplied
     # And the per-group threads use that effective divisor.
     assert cpu_budget.per_group_threads(32.0, 4) == 8
+
+
+# ---------------------------------------------------------------------------
+# PR_SET_PDEATHSIG — a compute child dies with its parent (VRAM reap, 783-C)
+# ---------------------------------------------------------------------------
+
+import os as _os  # noqa: E402
+import signal as _signal  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+import sys as _sys  # noqa: E402
+import time as _time  # noqa: E402
+
+
+@pytest.mark.skipif(_sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux-only")
+def test_a_child_is_reaped_when_its_parent_dies():
+    """The mechanism that stops a crashed group from stranding VRAM: with
+    PR_SET_PDEATHSIG the child dies when its parent dies. Proven with CPU
+    processes — killing the process is exactly what frees its CUDA context and
+    all its VRAM, so a reaped child is a reaped GPU allocation.
+
+    An intermediate parent spawns a long-sleeping grandchild with the same
+    preexec the real spawn uses, prints its pid, then is SIGKILLed. The
+    grandchild must die on its own (no one kills it directly)."""
+    from gen_worker.procsplit.parent import _set_pdeathsig
+
+    # The intermediate parent: spawn a grandchild with pdeathsig, print its pid,
+    # then sleep forever (until WE kill this parent).
+    driver = (
+        "import subprocess,sys,time,os;"
+        "from gen_worker.procsplit.parent import _set_pdeathsig;"
+        "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],"
+        "preexec_fn=_set_pdeathsig);"
+        "print(p.pid,flush=True);"
+        "time.sleep(120)"
+    )
+    src_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "src")
+    env = dict(_os.environ)
+    env["PYTHONPATH"] = _os.pathsep.join([src_dir, env.get("PYTHONPATH", "")])
+    parent = _subprocess.Popen(
+        [_sys.executable, "-c", driver], stdout=_subprocess.PIPE, env=env,
+    )
+    try:
+        grandchild_pid = int(parent.stdout.readline().decode().strip())
+        # The grandchild is alive while its parent lives.
+        _os.kill(grandchild_pid, 0)
+        # Kill the intermediate parent; PR_SET_PDEATHSIG must reap the grandchild.
+        parent.kill()
+        parent.wait(timeout=10)
+        deadline = _time.monotonic() + 10.0
+        reaped = False
+        while _time.monotonic() < deadline:
+            try:
+                _os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                reaped = True
+                break
+            _time.sleep(0.1)
+        assert reaped, f"grandchild {grandchild_pid} survived its parent's death"
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+        try:
+            _os.kill(grandchild_pid, _signal.SIGKILL)
+        except (ProcessLookupError, NameError):
+            pass

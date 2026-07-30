@@ -42,6 +42,7 @@ import shlex
 import signal
 import sys
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import Settings
@@ -54,6 +55,7 @@ from . import (
     ENV_CHILD,
     ENV_CHILD_CMD,
     ENV_LIVENESS_FD,
+    ENV_SESSION_ID,
     ENV_SOCKET,
     ENV_WATCHDOG_PING_S,
     actions,
@@ -141,6 +143,31 @@ def _http_call(
         timeout=timeout,
     )
     return resp.status_code, resp.text
+
+
+# pgw#783: PR_SET_PDEATHSIG — make every compute child die with the parent.
+_PR_SET_PDEATHSIG = 1
+
+
+def _set_pdeathsig() -> None:
+    """preexec (post-fork, pre-exec) in the child: ask the kernel to SIGKILL
+    this process when its parent dies.
+
+    At G>1 a crashed or abruptly-killed control parent would otherwise leave G
+    orphaned compute children EACH holding tens of GB of VRAM — a real leak, and
+    exactly the kind of stranded-VRAM anomaly the quant lane is chasing. With
+    this, the parent's death reaps every child (and the child's death frees its
+    CUDA context and all its VRAM). Linux-only; a no-op elsewhere.
+    """
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except Exception:
+        # Best-effort: a platform without prctl keeps the pre-pgw#783 behaviour
+        # (the container's own death took the child with it at G=1).
+        pass
 
 
 class _ChildLink:
@@ -371,6 +398,9 @@ class _ChildSlot:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self.p._child_cmd, env=env, pass_fds=(write_fd,),
+                # pgw#783: die with the parent so a crashed group never strands
+                # its VRAM as an orphaned torch process.
+                preexec_fn=_set_pdeathsig if sys.platform == "linux" else None,
             )
         finally:
             os.close(write_fd)   # the child owns it now
