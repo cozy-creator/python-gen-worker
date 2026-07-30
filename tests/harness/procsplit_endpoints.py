@@ -29,6 +29,16 @@ class SplitProbe:
     def echo(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         return ProbeOut(response=f"echo:{data.text}")
 
+    def whoami(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """Report which execution GROUP this child is (pgw#783 G>1 routing
+        proof): the ordinal the parent stamped and the cards it was scoped to.
+        A single-group worker reports g0 with no CUDA_VISIBLE_DEVICES."""
+        return ProbeOut(response=(
+            f"g={os.environ.get('GEN_WORKER_GROUP_ORDINAL', '0')}"
+            f" cvd={os.environ.get('CUDA_VISIBLE_DEVICES', '-')}"
+            f" sib={os.environ.get('GEN_WORKER_HOST_SIBLINGS', '1')}"
+        ))
+
     # ---- driver-3 probes: TENANT CODE going after platform credentials -----
     # These handlers do what the threat model says untrusted endpoint code can
     # do — it runs in this process, so every one of these is reachable. The

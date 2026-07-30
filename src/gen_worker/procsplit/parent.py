@@ -279,6 +279,21 @@ class _ChildSlot:
         self.link_closed.clear()
         self.link_ready.set()
         logger.info("compute child %s connected on %s", self.label, self.socket_path)
+        # pgw#783: at G>1 a RESPAWNED child (not the first boot) comes up empty
+        # and needs the hub to re-drive its desired residency. The death path
+        # deliberately did NOT cycle the shared stream (siblings kept serving);
+        # now that this group's link is back and every slot is connected, cycle
+        # to re-sync the whole worker via a fresh, re-aggregated Hello. The
+        # hub's reconcile is idempotent, so the siblings are undisturbed. (At
+        # G==1 the death path already cycled — never double-cycle here.)
+        if (self.p.groups > 1 and self.spawn_count > 1
+                and not (self.p._draining or self.p._terminating
+                         or self.p._stopping.is_set())):
+            try:
+                self.p.transport.cycle_connection()
+            except Exception:
+                logger.debug("re-sync cycle on %s reconnect failed", self.label,
+                             exc_info=True)
         try:
             while True:
                 ftype, payload = await frames.read_frame(reader)
@@ -693,17 +708,23 @@ class _ChildSlot:
                 "advertises no serving capacity while its child is down"
             )
 
-        # 4) Give the live stream a moment to ship the FATALs, then cycle the
-        # connection so the whole worker re-syncs via a fresh (re-aggregated)
-        # Hello. The hub's reconcile is idempotent, so siblings' residency is
-        # unaffected; their in-flight rides Hello.in_flight + the durable queue.
+        # 4) Give the live stream a moment to ship the FATALs.
         try:
             await p.transport.queue.wait_empty(timeout=_DEATH_FLUSH_GRACE_S)
         except Exception:
             pass
         if p._draining or p._terminating or p._stopping.is_set():
             return
-        p.transport.cycle_connection()
+        # Re-sync the desired state to the respawned child. At G==1 this is the
+        # proven path: cycle the connection NOW so the fresh Hello re-drives
+        # residency (byte-identical to the single-child parent). At G>1 the
+        # OTHER groups are still serving on this same stream — cycling here would
+        # stall the healthy siblings until this group reboots, and build_hello
+        # would block on the down slot. So DON'T cycle on death; the re-sync
+        # happens when THIS group's respawned child reconnects (_on_child_connect
+        # triggers the cycle then, with every slot's link back up).
+        if p.groups == 1:
+            p.transport.cycle_connection()
 
     # ---- watchdog (WatchdogSec), per child -------------------------------
 
