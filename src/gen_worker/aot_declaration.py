@@ -36,6 +36,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from . import aot_mint
 from .aot_mint import DynamicDim, ExportSpec, MintRefused
 from .api.decorators import Compile
 from .api.export_contract import (
@@ -279,7 +280,13 @@ def select_plan(
     """The mint plan for one requested coordinate, refused by name when the
     coordinate is not declared — reading only declared facts, never family
     knowledge."""
-    want_fork = tuple(sorted((str(k), v) for k, v in dict(fork).items()))
+    # pgw#790: the adapter arm is an SDK-synthesized coordinate — the endpoint
+    # never declared it, so it can never select a DECLARED plan. Stripped here
+    # (rather than at each call site) because every reader of a spec's fork
+    # goes through this function.
+    want_fork = tuple(sorted(
+        (str(k), v) for k, v in dict(fork).items()
+        if str(k) != aot_mint.ADAPTER_FORK))
     plans = [p for p in mint_plans(decl, target) if p.fork == want_fork]
     if not plans:
         have = sorted({str(dict(p.fork)) for p in mint_plans(decl, target)})

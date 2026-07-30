@@ -48,6 +48,7 @@ import logging
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from ..api.errors import ValidationError
+from . import w8a8_lora
 from .w8a8_lora import (
     apply_branch_adapter_set,
     apply_branch_adapters,
@@ -383,6 +384,23 @@ def lifted_binding(model: Any) -> Optional[LiftedLoraBinding]:
     return found if isinstance(found, LiftedLoraBinding) else None
 
 
+def adapter_active(model: Any) -> bool:
+    """Whether an adapter is CURRENTLY placed on this denoiser's branch.
+
+    Reads ``w8a8_lora``'s own active flag — the one the per-request
+    attach/clear path already maintains (``apply_branch_adapters`` sets it,
+    ``clear_branch_adapters`` unsets it, and the lifted lane goes through both
+    by construction). Adds no state, and deliberately does NOT inspect the
+    flat pair's values: a ``lora_b.any()`` read would be a device
+    synchronisation on every request.
+
+    pgw#790's serve-side routing question: with a zeroed branch the
+    branch-bearing graph and the branchless graph return the same tensor, so
+    "no adapter is active" is the licence to serve the cheaper one.
+    """
+    return bool(w8a8_lora.branches_active(model))
+
+
 # ---------------------------------------------------------------------------
 # Set level (gw#679): every branch-capable denoiser the pipeline carries gets
 # its OWN flat pair — the module sets differ, so the layouts do — and they
@@ -564,6 +582,7 @@ def assert_no_baked_adapter(compiled: Any, *, label: str = "") -> None:
 
 __all__ = [
     "LIFTED_INPUT_NAMES",
+    "adapter_active",
     "LiftedLoraBinding",
     "LiftedLoraPlan",
     "ResolvedSlots",
