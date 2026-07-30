@@ -50,8 +50,18 @@ ENV_IN_PROCESS = "GEN_WORKER_MINT_IN_PROCESS"
 
 
 def delegated() -> bool:
-    return os.environ.get(ENV_IN_PROCESS, "").strip().lower() not in (
-        "1", "true", "yes", "on")
+    """Whether a compile-cell miss should be minted out of process.
+
+    Delegation IS eager-first: the live pipeline is never armed, so a boot that
+    has eager-first turned off has no route to serve while a child compiles.
+    The two switches therefore move together rather than combining into a
+    fourth, undefined shape.
+    """
+    if os.environ.get(ENV_IN_PROCESS, "").strip().lower() in (
+        "1", "true", "yes", "on"
+    ):
+        return False
+    return os.environ.get("GEN_WORKER_EAGER_FIRST_BOOT", "1").strip() != "0"
 
 
 @dataclass(frozen=True)

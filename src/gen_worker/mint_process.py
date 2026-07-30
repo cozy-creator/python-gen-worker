@@ -59,7 +59,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import signal
@@ -207,6 +206,14 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     peak_vram_bytes: int = 0
     peak_rss_bytes: int = 0
     elapsed_s: float = 0.0
+    #: th#1322: per-phase seconds, measured by the CHILD (`load`,
+    #: `warmup_forward`, `inductor_compile`, `seal_publish`, `finalize`). The
+    #: parent turns these into `jit_compile` events so a JIT mint's cost is a
+    #: numeric hub record with the same shape as an AOT mint's — the child owns
+    #: the clock, so deriving spans from the parent's frame receipts would
+    #: measure pipe latency instead of work. Empty from a child that died before
+    #: writing its report, which is honest: no measurement, not zero.
+    phases: Dict[str, float] = msgspec.field(default_factory=dict)
 
 
 @dataclass(frozen=True)

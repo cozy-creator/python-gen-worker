@@ -373,13 +373,37 @@ def _publish_async(publisher: CellPublisher, family: str, artifact: Path, meta: 
     return t
 
 
+def delegatable(pipe: Any, cfg: Any) -> bool:
+    """pgw#784: may this pipeline's mint be DELEGATED to a child process?
+
+    Only if the pipeline can serve EAGER meanwhile, because that is the entire
+    premise: nothing is armed here, so a pipe that must serve compiled has
+    nothing to serve at all until the child finishes. Two refusals:
+
+    * a mandatory quantized lane (w8a8/w4a4) never serves eager (gw#586), and
+      ``mandatory_serving`` is the ONE serveability brain (hub execution lane
+      first, weight-lane stamp as fallback — pgw#677's live break);
+    * regional targets have no separable eager callable to route to.
+
+    Both keep today's in-process capture. They are the same two exclusions
+    ``_eager_first_eligible`` applies, asserted at the arm instead of after it,
+    because by then the choice is already made.
+    """
+    if bool(getattr(cfg, "regional", False)):
+        return False
+    try:
+        return not cc.mandatory_serving(pipe)
+    except Exception:  # noqa: BLE001 — an unanswerable lane keeps the old path
+        return False
+
+
 def enable_compiled(
     pipe: Any,
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
     publisher: Optional[CellPublisher] = None,
-    delegate: bool = False,
+    delegate: Optional[bool] = None,
 ) -> ArmOutcome:
     """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
 
@@ -405,6 +429,15 @@ def enable_compiled(
     """
     family = str(getattr(cfg, "family", "") or "")
     selection_bug: Optional[cc.CellSelectionBugError] = None
+    if delegate is None:
+        # pgw#784: whether a miss mints out of process is a POLICY of the
+        # arming brain, not an argument its callers thread through. Keeping it
+        # here means the executor's call is unchanged, every existing arming
+        # double keeps working, and there is exactly one place the decision
+        # lives. The parameter stays for tests that need to force either shape.
+        from . import mint_delegate
+
+        delegate = mint_delegate.delegated()
 
     # pgw#722 F1 (flag-gated, default OFF): PREFER a published aot-inductor
     # cell over the delivered dynamo artifact. Discovery is fetch-and-filter
@@ -634,6 +667,12 @@ def enable_compiled(
             loading.pipeline_weight_lane(pipe))
         target = mint_root / f"{label}.tar.gz"
 
+    if delegate and not delegatable(pipe, cfg):
+        logger.info(
+            "fleet-cells: %s cannot serve eager while a child mints "
+            "(mandatory lane or regional targets) — minting in-process "
+            "instead (pgw#784)", family)
+        delegate = False
     if delegate:
         # pgw#784: NOTHING is armed on the live pipeline. It keeps serving
         # plain eager — no guarded wrappers, no branch containers, no
@@ -1068,6 +1107,7 @@ __all__ = [
     "PendingSelfMint",
     "SelfMint",
     "abandon_self_mint",
+    "delegatable",
     "enable_compiled",
     "finalize_self_mint",
     "finalized_in_process",

@@ -2483,6 +2483,31 @@ class _BackgroundMint:
     # (idle-granted turns only — stolen turns run to completion). A tenant
     # admission cancels it; the driver re-queues the unit.
     seed_ctx: Optional[Any] = None
+    # pgw#784: the two facts a DELEGATED mint's child process needs and cannot
+    # rediscover for itself — the endpoint module(s) to walk (the child re-runs
+    # discovery in a fresh interpreter) and the ALREADY-materialized local
+    # snapshot path per setup slot. The paths matter: a mint is compute, and a
+    # mint process that could download is a mint process that can stall on a
+    # lemon host (pgw#786).
+    modules: Tuple[str, ...] = ()
+    snapshot_paths: Dict[str, str] = dc_field(default_factory=dict)
+
+
+def _mint_modules(spec: EndpointSpec) -> Tuple[str, ...]:
+    """The module list a mint child re-runs discovery over (pgw#784).
+
+    The spec's own declaring module — which is what the baked manifest named
+    for this function. ``registry.collect_endpoints`` walks it and its
+    submodules, so the child rediscovers this class AND its sibling functions
+    (the warm plan is class-scoped, pgw#654) without the parent serializing
+    anything live.
+    """
+    module = str(getattr(spec, "module", "") or "").strip()
+    return (module,) if module else ()
+
+
+def _delegated_pendings(pendings: typing.Mapping[int, Any]) -> bool:
+    return any(getattr(p, "delegated", False) for p in pendings.values())
 
 
 def _eager_first_boot_enabled() -> bool:
@@ -6015,7 +6040,11 @@ class Executor:
                     inj.add_compile_object(pipe, self_loaded_slots)
                     mint = scope_mints.get(id(pipe))
                     selection = _selection_for(compile_selection, mint)
-                    if armed and selection is not None:
+                    if getattr(mint, "delegated", False):
+                        # pgw#784: see the slot path above — recorded, but
+                        # never advertised as an active artifact.
+                        inj.pending_self_mints[id(pipe)] = mint
+                    elif armed and selection is not None:
                         inj.active_compile_artifacts[id(pipe)] = selection
                         if trt_engine.is_engine_ref(selection.ref):
                             inj.trt_execution_before[id(pipe)] = (
@@ -6040,7 +6069,16 @@ class Executor:
             # selection, no proof loop, targets registered active-less
             # (advertising the requested cell key for peer adoption).
             eager_first = self._eager_first_eligible(spec, inj)
-            if eager_first and not self._mint_budget_ok(spec, inj):
+            delegated_mints = _delegated_pendings(inj.pending_self_mints)
+            if eager_first and delegated_mints:
+                # pgw#784: _mint_budget_ok gates an IN-PROCESS capture that
+                # will never exist here — nothing is armed on these pipes. The
+                # child's own co-residency ask (its weights + one activation
+                # set + inductor workspace + a CUDA context) is budgeted per
+                # attempt by mint_delegate, against the card as it actually is
+                # at spawn time rather than as it was at boot.
+                pass
+            elif eager_first and not self._mint_budget_ok(spec, inj):
                 # pgw#737: THE gate. It sits here and not only in the driver
                 # because arming + enabling the routers is already the first
                 # allocation of the capture — the boot warm's own forwards
@@ -6051,6 +6089,26 @@ class Executor:
                 # (never the foreground compile-then-serve mint, which is
                 # strictly worse for the tenant).
                 eager_first = False
+            if delegated_mints and not eager_first:
+                # pgw#784: nothing is armed on these pipes, so the foreground
+                # compile-then-serve path below cannot drive them. Discard the
+                # obligation and serve eager with the cell absent — the honest
+                # miss policy — rather than run a warmup proof against an
+                # unarmed pipeline. (fleet_cells.delegatable already refused to
+                # delegate anything that MUST serve compiled, so this is the
+                # custom-warmup / mixed-delivered-artifact remainder.)
+                from . import fleet_cells as _fc_undelegate
+
+                for _pid, _mint in list(inj.pending_self_mints.items()):
+                    if not getattr(_mint, "delegated", False):
+                        continue
+                    logger.info(
+                        "%s: delegated mint discarded — this boot is not "
+                        "eager-first, so there is no eager tier to serve "
+                        "from while a child compiles; serving eager with the "
+                        "cell absent", spec.name)
+                    _fc_undelegate.abandon_self_mint(_mint)
+                    inj.pending_self_mints.pop(_pid, None)
             if eager_first:
                 from . import hot_swap
 
@@ -6061,6 +6119,14 @@ class Executor:
                     if pid not in inj.pending_self_mints:
                         continue
                     sel = inj.active_compile_artifacts.pop(pid, None)
+                    if sel is None:
+                        # pgw#784: a DELEGATED pending never entered
+                        # active_compile_artifacts (nothing is armed on its
+                        # pipe), but its claimed key ref is computable now from
+                        # static axes, and th#910's self-attested dispatch
+                        # fence wants it advertised while the child compiles.
+                        sel = _selection_for(
+                            None, inj.pending_self_mints.get(pid))
                     if sel is not None:
                         mint_selections[pid] = sel
                     mint_pipes[pid] = candidate.pipeline
@@ -6076,6 +6142,8 @@ class Executor:
                     pendings=dict(inj.pending_self_mints),
                     pipes=mint_pipes,
                     selections=mint_selections,
+                    modules=_mint_modules(spec),
+                    snapshot_paths=dict(paths),
                 )
                 logger.info(
                     "eager-first boot for %s (pgw#671): READY at eager tier "
@@ -7979,7 +8047,16 @@ class Executor:
                         if compile_cache.has_compile_target(pipe, spec.compile):
                             result.add_compile_object(pipe, (slot,))
                             selection = _selection_for(compile_selection, pipe_mint)
-                            if armed and selection is not None:
+                            # pgw#784: a DELEGATED mint arms NOTHING, so it
+                            # reports armed=False and must still be recorded —
+                            # the obligation is real, it is just owed to a
+                            # child process. It deliberately does NOT enter
+                            # active_compile_artifacts: this pipe serves eager,
+                            # and claiming an active artifact for it would
+                            # advertise bytes it does not serve (gw#586).
+                            if getattr(pipe_mint, "delegated", False):
+                                result.pending_self_mints[id(pipe)] = pipe_mint
+                            elif armed and selection is not None:
                                 result.active_compile_artifacts[id(pipe)] = selection
                                 from . import trt_engine
 
@@ -8472,6 +8549,15 @@ class Executor:
         from . import warmup as warmup_mod
 
         spec = bg.spec
+        if _delegated_pendings(bg.pendings):
+            # pgw#784: the compile leaves this interpreter. Everything below
+            # runs the mint INSIDE the serving process, which is th#1299's
+            # contract violation — long-running GIL-holding inductor Python on
+            # the one asyncio task that carries both the 10s beat and eager
+            # serving. It stays reachable only to red-verify that
+            # (GEN_WORKER_MINT_IN_PROCESS=1).
+            await self._delegated_mint_run(rec, bg, act)
+            return
         # pgw#737: the capture's VRAM pre-budget, BEFORE any seed touches
         # the card. The boot warm has already run one real eager forward on
         # these shapes, so the peak high-water is a measured anchor, not a
@@ -8783,10 +8869,35 @@ class Executor:
                 "background mint finalization produced no advertisable "
                 "cell; serving stays eager")
 
-        # Phase 4 — HOT-SWAP the advertisement: activate the finalized
-        # identity on the live targets (state stays READY throughout — the
-        # tier flips eager->compiled in the next capability projection) and
-        # keep pgw#622 alive for post-mint novel shapes.
+        # Phase 4 — HOT-SWAP the advertisement (shared with the delegated
+        # route, pgw#784: an adopted cell is advertised the same way whichever
+        # process built it).
+        self._advertise_minted_cells(rec, bg, act, finalized)
+        # Contract-keyed warm memory (pgw#654): the full plan executed in
+        # this process — compiled — so later checkpoint instances of this
+        # contract may inherit down to one verification run.
+        memory = self._warm_contract_runs.setdefault(
+            self._warm_contract_key(spec), set())
+        memory.update(wj.graph_key for wj in jobs)
+        logger.info(
+            "background mint for %s armed: %d compile object(s) hot-swapped "
+            "to compiled (tier flips in the next capability projection)",
+            spec.name, len(finalized))
+
+    def _advertise_minted_cells(
+        self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
+        finalized: Dict[int, Any],
+    ) -> None:
+        """Activate a finalized self-mint identity on the live targets.
+
+        State stays READY throughout — the tier flips eager->compiled in the
+        next capability projection — and pgw#622 stays alive for post-mint
+        novel shapes. Shared by the in-process and delegated routes (pgw#784):
+        the artifact SOURCE differs, what it means to advertise one does not.
+        """
+        from . import hot_swap
+
+        spec = bg.spec
         act.phase(activity_mod.PHASE_FINALIZE)
         for pid, outcome in finalized.items():
             pipe = bg.pipes[pid]
@@ -8816,15 +8927,102 @@ class Executor:
                 pipe,
                 on_warmed=hot_swap.Debounce(
                     self._shape_warm_republisher(spec, pipe)))
-        # Contract-keyed warm memory (pgw#654): the full plan executed in
-        # this process — compiled — so later checkpoint instances of this
-        # contract may inherit down to one verification run.
-        memory = self._warm_contract_runs.setdefault(
-            self._warm_contract_key(spec), set())
-        memory.update(wj.graph_key for wj in jobs)
+
+    async def _delegated_mint_run(
+        self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
+    ) -> None:
+        """pgw#784: build every owed cell in a CHILD PROCESS, then advertise.
+
+        The delegated twin of ``_background_mint_run``, and far shorter,
+        because the phases that used to live here — seed, drain the queued
+        compiles, prove, pack — are the child's now. What stays is what only a
+        serving worker can do: keep serving eager and beating while it happens,
+        adopt the result through the DELIVERED-cell path, decide publish on
+        gw#612's sibling-coverage rule, and advertise the identity.
+
+        Raises exactly what ``_background_mint_run`` raises, so
+        ``_background_mint``'s outcome handling is untouched: ``_MintDeclined``
+        (an OUTCOME — tier stays eager, cell absent), ``_MintAbandoned``
+        (adopt-on-arm / vacate / shutdown), or a plain ``Exception`` (a failed
+        mint). Serving continues in every branch: the worker never dies with
+        its mint.
+        """
+        from . import compile_cache
+        from . import fleet_cells as fleet_cells_mod
+        from . import mint_delegate
+
+        spec = bg.spec
+        # One child per DISTINCT pending: sibling pipes of one record whose
+        # axes compute the same key share ONE cell (the qwen edit shape), and
+        # the child mints their union exactly once.
+        sharers: Dict[int, List[int]] = {}
+        for pid, pending in bg.pendings.items():
+            sharers.setdefault(id(pending), []).append(pid)
+        if not sharers:
+            raise RuntimeError("delegated mint has no pending cell to build")
+
+        finalized: Dict[int, Any] = {}
+        declined: Optional[_MintDeclined] = None
+        for pids in sharers.values():
+            pending = bg.pendings[pids[0]]
+            pipe = bg.pipes[pids[0]]
+            result = await mint_delegate.build_cell(
+                mint_delegate.MintTask(
+                    pending=pending,
+                    pipe=pipe,
+                    function=spec.name,
+                    modules=bg.modules or _mint_modules(spec),
+                    snapshots=dict(bg.snapshot_paths),
+                    weight_lane=compile_cache.cell_base_lane(pipe),
+                    lane=self._served_lane(spec),
+                    configs={spec.name: self._effective_config(spec)},
+                    device=mint_budget.device_of(pipe),
+                ),
+                act=act, abandon=bg.abandon)
+            if result.status == mint_delegate.ABANDONED:
+                raise _MintAbandoned()
+            if result.declined:
+                # Remembered, not raised yet: another pending may still fit.
+                declined = _MintDeclined(
+                    "insufficient_vram",
+                    result.budget or mint_budget.probe(),
+                    result.detail)
+                continue
+            if not result.ok:
+                logger.warning(
+                    "delegated mint for %s produced no adoptable cell (%s); "
+                    "that object stays eager", spec.name, result.detail)
+                continue
+            for pid in pids:
+                finalized[pid] = result.minted
+            compile_cache.record_cell_proven(str(result.minted.ref))
+
+        if not finalized:
+            if declined is not None:
+                raise declined
+            raise RuntimeError(
+                "delegated mint produced no advertisable cell; serving stays "
+                "eager")
+
+        # Publish per shared cell on gw#612's rule: a family cell ships only
+        # when EVERY sharer is covered by it — a partial pack bricks every
+        # adopting boot at the gw#607 per-object proof.
+        for pids in sharers.values():
+            pending = bg.pendings[pids[0]]
+            gap = [pid for pid in pids if pid not in finalized]
+            if gap:
+                fleet_cells_mod.withhold_self_mint_publish(
+                    pending,
+                    f"{len(gap)}/{len(pids)} cell-sharing compile object(s) "
+                    "were not covered by the delegated mint")
+            else:
+                fleet_cells_mod.publish_self_mint(pending)
+
+        self._advertise_minted_cells(rec, bg, act, finalized)
         logger.info(
-            "background mint for %s armed: %d compile object(s) hot-swapped "
-            "to compiled (tier flips in the next capability projection)",
+            "delegated mint for %s armed: %d compile object(s) hot-swapped to "
+            "compiled — this worker served eager and beat at its normal "
+            "cadence for the whole mint (pgw#784)",
             spec.name, len(finalized))
 
     async def _report_cell_selection_bug(
