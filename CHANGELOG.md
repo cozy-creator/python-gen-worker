@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.82.0 (unreleased)
+## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
+
+> ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`
+>
+> 0.81.0 made the delegated route reachable (pgw#813) and the first `aot_mint_phases`
+> rows in platform history were written on it — then the child died at `phase=load` in
+> ~8.5 s, twice, on a tree the serving process in the same pod was loading and answering
+> requests from. The dynamo/JIT mint is delegated on 0.81.0 too and died identically in
+> 13 s, so that release has NO working mint route. This one fixes the boundary both
+> routes cross: a directory path does not describe a composition.
 
 - **pgw#816 — the delegated mint child could not load the pipeline the serving process
   was serving, so the first AOT mint in platform history crashed at `phase=load`.** On
