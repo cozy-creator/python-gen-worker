@@ -1601,7 +1601,8 @@ class ModelStore:
     def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
         ``{top_level_subfolder: content_set_digest}``. Weight/data files use
-        the wire snapshot's per-file blake3; small JSON sidecars use
+        the wire snapshot's per-file digest (v2 tagged ``digest``, v1 legacy
+        ``blake3`` mirror); small JSON sidecars use
         CANONICAL digests read from ``local_path`` (save-era serialization —
         provenance stamps, explicit defaults, torch_dtype/dtype vocabulary —
         must not break sharing of byte-identical weights; see
@@ -1617,12 +1618,19 @@ class ModelStore:
         groups: Dict[str, Dict[str, str]] = {}
         for f in snap.files:
             rel = str(f.path).strip().lstrip("/")
-            if not rel or not f.blake3:
+            # th#1303 empty-guard class: this read `f.blake3`, which is EMPTY
+            # on every v2 entry, so every file of a v2 snapshot was skipped
+            # and component sharing was silently OFF fleet-wide — the
+            # fail-CLOSED half of the class (the fail-open half is
+            # `if want and got != want`). Read the tagged digest first; the
+            # legacy mirror read dies with S1.
+            digest = (str(getattr(f, "digest", "") or "").strip()
+                      or str(getattr(f, "blake3", "") or "").strip())
+            if not rel or not digest:
                 continue
             comp, _, rest = rel.partition("/")
             if not rest:
                 comp, rest = "", rel
-            digest = str(f.blake3)
             if (local_path is not None and comp
                     and rest.endswith(".json")
                     and int(f.size_bytes) <= CANONICAL_JSON_MAX_BYTES):
