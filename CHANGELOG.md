@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#812 D1 + D2 — the two defects that make flux2 unmintable, and neither is
+  about regional compilation.** D1: `dynamic_shapes_spec` minted one torch symbol per
+  (input, axis), so a declared `Dim` with several carriers became several INDEPENDENT
+  symbols and strict export refused the declaration —
+  `Constraints violated (img_ids_1)!`. flux2 binds `T_img` to BOTH `hidden_states[1]`
+  and `img_ids[1]` deliberately, so the edit lane cannot let `img_ids` specialize and
+  silently pin the artifact to generate; the most careful declaration in the fleet was
+  the one that could not mint, and ie#571 recorded it "READY — no open mint blockers".
+  `DynamicDim` now carries the declared dim NAME and every carrier of one dim shares
+  one symbol; rows with no declared name keep a symbol each, which the hand-registered
+  builder path requires (latent H and W are two independent axes of one input).
+
+  D2: the ie#566 G3 range gate then refused the mint on
+  `Eq(Mod(3072*s + 1572864, 48*s + 24576), 0)` — which is `Mod(64*X, X) == 0`,
+  identically true, pinning nothing. The gate matched "an Eq guard mentioning a
+  declared symbol" without asking whether the guard was satisfiable-for-all, so a
+  vacuous divisibility fact read as a specialization. It now admits a guard sympy can
+  PROVE is a tautology and keeps refusing everything else, so it still fails closed on
+  a guard it cannot reduce.
+
 ## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
 
 > ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`

@@ -149,6 +149,16 @@ class DynamicDim:
     factor rather than a comment. Without it export 0/1-specializes or produces
     a guard it cannot express, and the "one artifact serves every aspect ratio"
     headline quietly stops holding.
+
+    ``dim`` is the DECLARED ``Compile.Dim`` this row came from, and it is what
+    makes a multi-carrier dim expressible (pgw#812 D1). A declaration may bind
+    ONE logical axis to several inputs — flux2 declares
+    ``Dim("T_img", carried_by=(("hidden_states", 1), ("img_ids", 1)))``
+    precisely so the edit lane cannot let ``img_ids`` specialize while
+    ``hidden_states`` stays free. Every carrier of one declared dim must
+    therefore share ONE torch symbol; rows that carry no declared name (the
+    hand-registered builder path, where latent H and W are genuinely
+    independent axes of one input) keep a symbol each.
     """
 
     input_name: str
@@ -156,6 +166,7 @@ class DynamicDim:
     min: int
     max: int
     multiple_of: int = 1
+    dim: str = ""
 
     def as_row(self) -> Dict[str, Any]:
         return {
@@ -278,28 +289,53 @@ def dynamic_shapes_spec(
     mirror a combined args+kwargs structure. Inputs with no declared dynamic
     axis map to ``None`` — fully static — so an input the spec forgot cannot
     accidentally acquire a symbolic dim.
+
+    Rows carrying the same :attr:`DynamicDim.dim` share ONE torch symbol
+    (pgw#812 D1). Minting a symbol per (input, axis) instead makes a declared
+    multi-carrier dim into several INDEPENDENT symbols, and strict export
+    refuses the declaration outright::
+
+        Constraints violated (img_ids_1)! The values of
+        img_ids_1 = L['img_ids'].size()[1] and
+        hidden_states_1 = L['hidden_states'].size()[1] must always be equal.
+
+    So the most careful declaration in the fleet — flux2's, which binds
+    ``T_img`` to both carriers so the edit lane cannot silently pin
+    ``img_ids`` — was the one that could not export at all. Rows with no
+    declared name keep today's per-(input, axis) symbol, which is required by
+    the hand-registered builder path (``aot_inputs.latent_hw_dims``: latent H
+    and W are two independent axes of ONE input and must NOT share a symbol).
     """
     from torch.export import Dim
 
     by_input: Dict[str, Dict[int, Any]] = {}
+    shared: Dict[Tuple[str, int, int, int], Any] = {}
     for d in dims:
         if d.min < 1 or d.max < d.min:
             raise MintRefused(
                 f"declared dim {d.input_name}[{d.axis}] has an empty range "
                 f"[{d.min}, {d.max}]")
-        if d.multiple_of > 1:
-            if d.min % d.multiple_of or d.max % d.multiple_of:
-                raise MintRefused(
-                    f"declared dim {d.input_name}[{d.axis}] bounds "
-                    f"[{d.min}, {d.max}] are not multiples of "
-                    f"{d.multiple_of}; export cannot express that guard")
-            base = Dim(
-                f"{d.input_name}_{d.axis}_u",
-                min=d.min // d.multiple_of, max=d.max // d.multiple_of)
-            by_input.setdefault(d.input_name, {})[d.axis] = d.multiple_of * base
-        else:
-            by_input.setdefault(d.input_name, {})[d.axis] = Dim(
-                f"{d.input_name}_{d.axis}", min=d.min, max=d.max)
+        # Carriers only share when the declaration says they are the SAME dim
+        # AND the bounds agree; a name reused at different bounds is two
+        # symbols, not one silently-widened one.
+        key = (d.dim, int(d.multiple_of), int(d.min), int(d.max))
+        symbol = shared.get(key) if d.dim else None
+        if symbol is None:
+            base_name = d.dim or f"{d.input_name}_{d.axis}"
+            if d.multiple_of > 1:
+                if d.min % d.multiple_of or d.max % d.multiple_of:
+                    raise MintRefused(
+                        f"declared dim {d.input_name}[{d.axis}] bounds "
+                        f"[{d.min}, {d.max}] are not multiples of "
+                        f"{d.multiple_of}; export cannot express that guard")
+                symbol = d.multiple_of * Dim(
+                    f"{base_name}_u",
+                    min=d.min // d.multiple_of, max=d.max // d.multiple_of)
+            else:
+                symbol = Dim(base_name, min=d.min, max=d.max)
+            if d.dim:
+                shared[key] = symbol
+        by_input.setdefault(d.input_name, {})[d.axis] = symbol
     unknown = sorted(set(by_input) - set(input_names))
     if unknown:
         raise MintRefused(
@@ -488,6 +524,34 @@ def declared_range_gaps(
     return gaps
 
 
+def _is_tautology(expr: Any) -> bool:
+    """``True`` only when the guard is provably true for EVERY value (pgw#812 D2).
+
+    A gate that cannot tell "pinned" from "trivially true" refuses correct
+    mints, which is the expensive direction of the error. flux2 is refused
+    today on::
+
+        Eq(Mod(3072*s50 + 1572864, 48*s50 + 24576), 0)
+
+    and ``3072*s + 1572864 == 64 * (48*s + 24576)``, so that is
+    ``Mod(64*X, X) == 0`` — identically true, pinning nothing. The algebra
+    comes from attention's ``unflatten``/``flatten`` over the concatenated
+    image+text stream, so it appears on the whole-graph AND the block export;
+    regional does not dodge it.
+
+    Only a PROOF admits: anything sympy cannot reduce to ``true`` keeps
+    refusing, so the gate still fails closed on an unrecognised guard.
+    """
+    try:
+        import sympy
+
+        return sympy.simplify(expr) is sympy.true
+    except Exception:  # noqa: BLE001 — an unprovable guard stays refused
+        logger.debug("range gate: could not simplify guard %s", expr,
+                     exc_info=True)
+        return False
+
+
 def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
     """Equality guards that pin a declared-dynamic symbol (ie#566 G3).
 
@@ -549,6 +613,8 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
                 not (getattr(side, "free_symbols", None) or set())
                 for side in sides
             ):
+                continue
+            if _is_tautology(expr):
                 continue
             text = str(expr)
             if text in seen:
