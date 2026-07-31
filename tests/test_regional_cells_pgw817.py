@@ -742,3 +742,204 @@ def test_the_regional_recipe_rides_the_pgw816_COMPOSITION(
     assert setup_at < recipe_at, \
         "the recipe must be chosen AFTER the parent's composition is loaded"
     assert source.count("run_setup(") == 1
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO 6 — THE REAL PATH: an actual regional mint, end to end
+# ---------------------------------------------------------------------------
+#
+# Real `torch.export` + real AOTInductor compiles on CPU. No mocks anywhere
+# on the mint path, because the mint path IS what this issue changes: block
+# discovery -> feed capture -> positional marshal -> export -> the declared
+# range gate -> packaging -> per-entry class hashes -> the stamped identity.
+
+
+class _TinyBlock(nn.Module):
+    """One repeated block, shaped like a transformer block's signature: a
+    positional hidden state plus an optional kwarg the shell does not always
+    pass. That optional is the whole reason `positional_feed` exists."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.lin = nn.Linear(width, width)
+
+    def forward(self, hidden_states: Any, temb: Any = None) -> Any:
+        out = torch.tanh(self.lin(hidden_states))
+        return out if temb is None else out + temb
+
+
+class _TinyRegionalUNet(nn.Module):
+    """A model that declares its repeated blocks the way diffusers does."""
+
+    _repeated_blocks = ["_TinyBlock"]
+
+    def __init__(self, layers: int = 3, width: int = 4) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList([_TinyBlock(width) for _ in range(layers)])
+        self.head = nn.Linear(width, width)
+        self.config = {"layers": layers, "width": width}
+
+    def forward(self, sample: Any) -> Any:
+        for block in self.blocks:
+            sample = block(sample)
+        return self.head(sample)
+
+
+@pytest.fixture
+def _registry():
+    from gen_worker.api.export_contract import reset_export_declarations
+
+    reset_export_declarations()
+    yield
+    reset_export_declarations()
+
+
+@pytest.fixture
+def _fake_sm(monkeypatch: pytest.MonkeyPatch):
+    """A CPU box has no sm, and identity requires one (the pgw#723/#758
+    convention). Mint and consumer probes must agree."""
+    from gen_worker import aot_serve, compile_cache
+
+    full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__),
+            "cuda": ""}
+    monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
+    monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(full))
+    return full
+
+
+def _register_regional(family: str, *, regional: bool) -> Any:
+    from gen_worker.api.export_contract import (
+        Fork, GraphClass, Input, register_export_declaration)
+
+    return register_export_declaration(Compile(
+        family=family,
+        targets=("unet",),
+        dims=(Dim("B", carried_by=(("sample", 0),)),),
+        forks=(Fork("cfg", served=(True, False)),),
+        classes=(GraphClass(dims={"B": 2}, fork={"cfg": True}),
+                 GraphClass(dims={"B": 1}, fork={"cfg": False})),
+        inputs=(Input("sample", shape=("B", 4)),),
+        shape_strategy="static-rows",
+        warm_changes_key=False,
+        regional=regional,
+    ))
+
+
+@pytest.mark.integration
+def test_a_REAL_regional_mint_packages_block_entries(
+    tmp_path, _registry, _fake_sm,
+) -> None:
+    """The headline. One real mint of a 3-block model produces ONE .pt2
+    whose entries are BLOCK classes — 2 declared plans x 1 block class = 2
+    entries where whole-graph produced 2 whole-forward graphs — and the
+    stamped key says `mode=regional` and binds the shell.
+
+    RED before pgw#817 in the only way that matters: `Compile(regional=True)`
+    reached `aot_mint` nowhere at all (D4 — 'nothing in aot_mint / aot_serve
+    / aot_declaration reads it'), so this mint produced whole-forward graphs
+    and a key claiming `mode: ""`."""
+    import types
+
+    from gen_worker.api.export_contract import export_declaration
+
+    _register_regional("tiny817", regional=True)
+    pipe = types.SimpleNamespace(unet=_TinyRegionalUNet(layers=3))
+    spec = aot_mint.ExportSpec(family="tiny817", target="")
+    result = aot_mint.mint(
+        pipe, spec, tmp_path / "out", allow_regressed_lanes=True,
+        entry_workers=1)
+
+    entries = dict(result.metadata["entries"])
+    assert sorted(entries) == [
+        "unet/block=_TinyBlock#0,cfg=false/B=1",
+        "unet/block=_TinyBlock#0,cfg=true/B=2",
+    ], "entries must enumerate BLOCK classes in the existing entry grammar"
+
+    # The identity: mode set, shell bound, and both recorded on the artifact
+    # so a consumer can recompute rather than trust the stamp.
+    assert result.metadata["mode"] == "regional"
+    shell = result.metadata["shell_digest"]
+    assert shell, "a regional cell must record the shell it was minted for"
+    # Recomputable from the artifact's OWN facts — the standing ck5
+    # discipline: a stamp can never disagree with the axes it summarizes.
+    assert result.metadata["cell_key"] == aot_mint.cell_identity(
+        result.metadata,
+        aot_mint.replace_spec(spec, regional=True, shell_digest=shell)).digest
+    # And it genuinely binds THIS assembly: a model with the same block class
+    # and a different layer count digests differently.
+    assert shell != aot_mint._cell_shell_digest(
+        types.SimpleNamespace(unet=_TinyRegionalUNet(layers=4)),
+        export_declaration("tiny817"))
+
+    # The compiled thing really is ONE BLOCK, not the model: the block has one
+    # Linear, the model has four.
+    decl = export_declaration("tiny817")
+    assert decl is not None and decl.regional is True
+    # The compile bill, which is the whole point: a block entry's constant
+    # table is ONE block's, not the model's. (Each Linear's bias is folded
+    # into the matmul epilogue by the compiler on both arms, so what is left
+    # is the weights — 1 here against the whole-graph arm's 4 below.)
+    per_entry_constants = {
+        name: len(block["constants"]) for name, block in entries.items()}
+    assert set(per_entry_constants.values()) == {1}, \
+        f"a block entry binds ONE block's constants: {per_entry_constants}"
+    assert {c["fqn"] for b in entries.values() for c in b["constants"]} == \
+        {"lin.weight"}, \
+        "a block entry's constant FQNs are BLOCK-relative (S4's template)"
+
+
+@pytest.mark.integration
+def test_the_same_declaration_WHOLE_GRAPH_keys_differently_and_is_bigger(
+    tmp_path, _registry, _fake_sm,
+) -> None:
+    """The A/B, on one model and one toolchain: flipping only `regional`
+    changes the entry axis, the constant count, and the cell key — and the
+    two cells can never be confused for each other, which is what the `mode`
+    axis is for."""
+    import types
+
+    _register_regional("tiny817w", regional=False)
+    pipe = types.SimpleNamespace(unet=_TinyRegionalUNet(layers=3))
+    spec = aot_mint.ExportSpec(family="tiny817w", target="")
+    whole = aot_mint.mint(
+        pipe, spec, tmp_path / "whole", allow_regressed_lanes=True,
+        entry_workers=1)
+
+    assert sorted(whole.metadata["entries"]) == ["unet/cfg=false/B=1",
+                                                 "unet/cfg=true/B=2"]
+    assert whole.metadata["mode"] == ""
+    # 3 block weights + the head's = 4 constants per entry, against the block
+    # entry's 1. This is the compile bill regional removes, and on the real
+    # sdxl w8a8 cell the same ratio is 2,423 constants against one block's
+    # (pgw#812 RESULT 5: 274.7 s -> 19.4 s).
+    whole_constants = {
+        len(b["constants"]) for b in whole.metadata["entries"].values()}
+    assert whole_constants == {4}
+    assert {c["fqn"] for b in whole.metadata["entries"].values()
+            for c in b["constants"]} == {
+        "blocks.0.lin.weight", "blocks.1.lin.weight", "blocks.2.lin.weight",
+        "head.weight"}
+
+
+@pytest.mark.integration
+def test_a_regional_mint_REFUSES_a_model_with_no_repeated_blocks(
+    tmp_path, _registry, _fake_sm,
+) -> None:
+    """Refused by name at the declaration/model seam, not discovered as an
+    empty entry set three phases later."""
+    import types
+
+    class _Flat(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, sample: Any) -> Any:
+            return self.lin(sample)
+
+    _register_regional("tiny817f", regional=True)
+    pipe = types.SimpleNamespace(unet=_Flat())
+    spec = aot_mint.ExportSpec(family="tiny817f", target="")
+    with pytest.raises(aot_mint.MintRefused, match="_repeated_blocks"):
+        aot_mint.mint(pipe, spec, tmp_path / "out", allow_regressed_lanes=True,
+                      entry_workers=1)

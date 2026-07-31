@@ -1206,8 +1206,16 @@ def _export_regional_entries(
             if phases:
                 timings["phases"] = phases
 
+        # `owner` is the state_dict TEMPLATE the bindability gate compares the
+        # artifact's constant table against — and pgw#812 S4 is explicit that
+        # for a block entry that template is the BLOCK, not the target: the
+        # entry's FQNs are block-relative (`attn.to_q.weight`), and at serve
+        # time the values come from `transformer_blocks[i].state_dict()`, once
+        # per instance. Handing the gate the whole target here would compare
+        # `lin.weight` against `blocks.0.lin.weight` and refuse every correct
+        # regional mint by name.
         out.append(_MintedEntry(
-            name=entry, spec=bspec, module=block, owner=owner,
+            name=entry, spec=bspec, module=block, owner=block,
             program=program, input_names=tuple(names), flat_names=tuple(names),
             files=files, timings=timings))
     return out
