@@ -63,12 +63,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-import requests
 
 from . import activity as activity_mod
 from . import aot_cells, cell_key
 from . import compile_cache as cc
 from . import guard_closure
+from . import topology as topology_mod
 from .convert.hub import blake3_file
 from .procsplit import broker
 # module import (not `from .loading import pipeline_weight_lane`): tests
@@ -827,6 +827,30 @@ def enable_compiled(
         )
         return ArmOutcome(
             armed=False, self_mint=pending, selection_bug=selection_bug)
+
+    # pgw#777 / DPA-8: the IN-PROCESS capture moves the process-global
+    # TORCHINDUCTOR_CACHE_DIR and clears inductor's latch for the whole
+    # interpreter — under G in-process execution groups that lands mid-compile
+    # or mid-serve on G-1 sibling cards (a mint published from bytes another
+    # group produced, or a sibling's seeded FX entries going invisible). The
+    # delegated route dissolves this (its capture lives in the mint child's
+    # own process); when delegation was refused, a multi-group worker REFUSES
+    # the in-process capture rather than arbitrating a control plane that was
+    # never per-group. Typed, and scoped by the miss policy like every other
+    # decline here.
+    topo = topology_mod.installed_topology()
+    if topo is not None and int(getattr(topo, "groups", 1) or 1) > 1:
+        logger.warning(
+            "fleet-cells: in-process self-mint refused for %s key=%s — this "
+            "worker runs %d execution groups in one process and the inductor "
+            "capture env is process-global (pgw#777)", family, key, topo.groups)
+        if bucket:
+            cc.drop_lora_lane(pipe)
+        return _fail_closed(
+            pipe,
+            f"in-process mint refused at groups={topo.groups}: the inductor "
+            "capture env is process-global (pgw#777/DPA-8)",
+            selection_bug)
 
     try:
         cc.begin_fleet_mint(pipe, cfg, capture_dir)

@@ -83,6 +83,18 @@
   disables) are recorded as dissolved by the pgw#783 split — each child IS one group — and
   stay open only for the in-process multi-group interim (see the tracker).
 
+- **pgw#777/DPA-8 — the in-process capture is REFUSED at G>1, never arbitrated.**
+  `capture_env` moves the process-global `TORCHINDUCTOR_CACHE_DIR` and clears inductor's
+  latch for the whole interpreter; under G in-process groups that lands mid-compile or
+  mid-serve on G-1 sibling cards (a mint published from bytes another group produced, or a
+  sibling's seeded FX entries going invisible). The delegated mint (pgw#784) dissolves this
+  — its capture lives in the mint child's own process — so the residual is exactly the
+  typed refusal the dpharden ruling called for: when delegation is refused on a multi-group
+  in-process worker, the mint declines through the ordinary miss policy (plain lanes serve
+  eager, mandatory lanes keep their typed refusal) instead of pretending a process-global
+  control plane is per-group. G==1 — every pod today — keeps the exact in-process fallback
+  path. The mint-once-adopt-N story belongs to the pgw#783 split world.
+
 ## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
 
 > ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`
