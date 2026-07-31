@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.81.0 (2026-07-31) — the w8a8 lane can mint again and a mint can no longer publish nothing silently: the two refusals that kept `aot_mint_phases` empty platform-wide are gone, every publish terminus is typed, and `run_impl` splits K ways for a 12.6x host compile
+
+> ### ⚠ 0.81.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN ACTUALLY REACH A MINT
+>
+> 0.80.0 wired the serving-pod mint (pgw#805) but nothing could travel it: the plain lane
+> is held on dynamo by pgw#730, and the w8a8 lane refused `aot_requires_delegation` for
+> reasons that were false on the pod — while the delegated route it named had never once
+> run, because `_eager_first_eligible` demanded a hot-swap router that a delegated pending
+> never has. Both are fixed here (pgw#813). pgw#815 then makes the far end honest: a mint
+> that publishes nothing now says so. An EMPTY `aot_mint_phases` on a 0.81.0 w8a8 pod is a
+> real finding; on anything earlier it only meant the SDK could not get there.
 
 - **pgw#813 — the w8a8 lane can mint AOT again: "executes quantized activations"
   stops meaning "cannot serve eager".** Measured on a real 0.80.0 L4: the plain lane
