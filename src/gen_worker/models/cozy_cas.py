@@ -11,17 +11,17 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 import requests
-from blake3 import blake3
 
 from ..capability import InsufficientDiskError
 from ..stall import ProgressFloor
+from .chunk_cas import DigestMismatch, verify_file_digest
 from .errors import UrlExpiredError
 
 _log = logging.getLogger(__name__)
 
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
-# Retry policy. Verification failures (size/blake3 mismatch) mean the source
+# Retry policy. Verification failures (size/digest mismatch) mean the source
 # blob is likely corrupt — 2 re-downloads, then give up. UrlExpiredError /
 # ENOSPC never retry.
 #
@@ -64,9 +64,19 @@ async def _download_one_file(
     url: str,
     dst: Path,
     expected_size: int,
-    expected_blake3: str,
+    expected_digest: str,
     on_bytes: Optional[Callable[[int], None]] = None,
 ) -> None:
+    """th#1303 S1: ``expected_digest`` is ALGORITHM-TAGGED and MANDATORY.
+
+    It used to be a bare blake3 hex guarded by ``if expected_blake3:`` — the
+    vacuous-guard shape: a v2 entry carries no blake3, so the guard was false
+    and the file was published unverified. There is no unverified path through
+    this function any more; an empty or untagged digest raises before a single
+    byte is fetched.
+    """
+    if not str(expected_digest or "").strip():
+        raise ValueError(f"download of {dst.name}: no expected digest — refusing")
     loop = asyncio.get_running_loop()
     transient_failures = 0
     verify_failures = 0
@@ -93,7 +103,7 @@ async def _download_one_file(
             await loop.run_in_executor(
                 None,
                 lambda: _download_one_file_sync(
-                    url, dst, expected_size, expected_blake3,
+                    url, dst, expected_size, expected_digest,
                     on_bytes=_count_bytes, writer_id=writer_id,
                 ),
             )
@@ -128,11 +138,16 @@ def _download_one_file_sync(
     url: str,
     dst: Path,
     expected_size: int,
-    expected_blake3: str,
+    expected_digest: str,
     on_bytes: Optional[Callable[[int], None]] = None,
     writer_id: Optional[str] = None,
 ) -> None:
-    """Download a single file with HTTP Range resume, size + blake3 validation.
+    """Download a single file with HTTP Range resume, size + digest validation.
+
+    The digest is algorithm-tagged and the hash DISPATCHES on it; this call
+    site never chooses an algorithm. Every early-return path below (already
+    cached, partial already complete) verifies before returning — a shortcut
+    that skips the hash is how a corrupt blob becomes permanent.
 
     Caller runs this in a worker thread; the transfer itself uses the same
     requests stack as the Tensorhub control plane fallback path.
@@ -159,10 +174,7 @@ def _download_one_file_sync(
         try:
             if expected_size and dst.stat().st_size != expected_size:
                 raise ValueError("size mismatch")
-            if expected_blake3:
-                got = _blake3_file(dst)
-                if got.lower() != expected_blake3.lower():
-                    raise ValueError("blake3 mismatch")
+            verify_file_digest(dst, expected_digest)
             log.info("download_cached path=%s size=%s", dst.name, _human_size(dst.stat().st_size))
             return
         except Exception:
@@ -185,9 +197,10 @@ def _download_one_file_sync(
 
     # Partial file already complete? Validate and finalize.
     if offset and expected_size and offset == expected_size:
-        got = _blake3_file(tmp)
-        if expected_blake3 and got.lower() != expected_blake3.lower():
-            log.warning("partial_corrupt path=%s (blake3 mismatch, restarting)", dst.name)
+        try:
+            verify_file_digest(tmp, expected_digest)
+        except DigestMismatch:
+            log.warning("partial_corrupt path=%s (digest mismatch, restarting)", dst.name)
             tmp.unlink(missing_ok=True)
             offset = 0
         else:
@@ -204,9 +217,9 @@ def _download_one_file_sync(
                  dst.name, offset, expected_size,
                  _human_size(offset), _human_size(expected_size))
     else:
-        log.info("download_start path=%s size=%s blake3=%s",
+        log.info("download_start path=%s size=%s digest=%s",
                  dst.name, _human_size(expected_size) if expected_size else "unknown",
-                 (expected_blake3 or "n/a")[:16])
+                 expected_digest[:24])
 
     def _stream(resp: requests.Response, *, write_mode: str, start: int) -> None:
         downloaded = start
@@ -254,13 +267,13 @@ def _download_one_file_sync(
         tmp.unlink(missing_ok=True)
         raise ValueError(f"size mismatch (expected {expected_size}, got {actual_size})")
 
-    if expected_blake3:
-        got = _blake3_file(tmp)
-        if got.lower() != expected_blake3.lower():
-            log.error("download_blake3_mismatch path=%s expected=%s got=%s",
-                      dst.name, expected_blake3[:16], got[:16])
-            tmp.unlink(missing_ok=True)
-            raise ValueError("blake3 mismatch")
+    try:
+        verify_file_digest(tmp, expected_digest)
+    except DigestMismatch as exc:
+        log.error("download_digest_mismatch path=%s expected=%s (%s)",
+                  dst.name, expected_digest[:24], exc)
+        tmp.unlink(missing_ok=True)
+        raise ValueError("digest mismatch") from exc
 
     # Durable atomic finalize (gw#408): rename is only atomic in the
     # NAMESPACE — a pod hard-kill after the rename but before writeback
@@ -303,14 +316,3 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _blake3_file(path: Path, chunk_size: int = _DOWNLOAD_CHUNK_BYTES) -> str:
-    # Fan BLAKE3 across cores via AUTO threading (issue #269). Used on
-    # download-verify path; same throughput win as the upload-side hash.
-    h = blake3(max_threads=blake3.AUTO)
-    with open(path, "rb") as f:
-        while True:
-            b = f.read(chunk_size)
-            if not b:
-                break
-            h.update(b)
-    return h.hexdigest()

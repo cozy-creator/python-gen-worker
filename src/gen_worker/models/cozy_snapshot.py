@@ -17,7 +17,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 from .chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
     ChunkSpec,
-    DigestMismatch,
     download_chunked_file,
     hash_file,
     parse_cas_ref,
@@ -149,26 +148,7 @@ def _blob_path(blobs_root: Path, ref: str) -> Path:
     return blobs_root / algo / hexpart[:2] / hexpart[2:4] / hexpart
 
 
-def _verify_or_unlink(dst: Path, ref: str) -> None:
-    """Verify a freshly-downloaded whole blob against its tagged ref, and
-    remove the file if it does not match — bytes that failed their digest must
-    never survive at a CAS path where the next reader would trust the name."""
-    try:
-        verify_file_digest(dst, ref)
-    except DigestMismatch:
-        dst.unlink(missing_ok=True)
-        raise
-
-
 _PART_FILE_RE = re.compile(r"\.part\d{4}$")
-
-
-def _strip_blake3_prefix(digest: str) -> str:
-    """'blake3:abcd...' -> 'abcd...'"""
-    d = (digest or "").strip().lower()
-    if d.startswith("blake3:"):
-        return d[7:]
-    return d
 
 
 def _is_part_file(path: str) -> bool:
@@ -287,7 +267,6 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
     snapshot_digest = (resolved.snapshot_digest or "").strip()
     if not snapshot_digest:
         raise ValueError("resolved model missing snapshot_digest")
-    snapshot_digest = _strip_blake3_prefix(snapshot_digest) or snapshot_digest
 
     files: List[WorkerResolvedRepoFile] = []
     for f in resolved.files:
@@ -301,8 +280,7 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
             ref_tagged = f.cas_ref()
         except ValueError as exc:
             raise ValueError(f"resolved model file {path}: {exc}") from exc
-        algo, hex_only = parse_cas_ref(ref_tagged)
-        blake3_hex = hex_only if algo == "blake3" else ""
+        parse_cas_ref(ref_tagged)  # shape-check; the tag travels with the ref
         url = (f.url or "").strip() or None
         transfer_grant = f.transfer_grant if isinstance(f.transfer_grant, dict) else None
         chunks = tuple(f.chunks or ())
@@ -323,10 +301,9 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
             WorkerResolvedRepoFile(
                 path=path,
                 size_bytes=int(f.size_bytes or 0),
-                blake3=blake3_hex,
                 url=url,
                 transfer_grant=transfer_grant,
-                digest=ref_tagged if algo != "blake3" else "",
+                digest=ref_tagged,
                 chunks=chunks,
                 chunk_size_bytes=int(f.chunk_size_bytes or 0),
             )
@@ -793,14 +770,14 @@ class CozySnapshotDownloader:
                         on_bytes=lambda n: _on_bytes(n, network=True),
                     )
                 else:
-                    # A WHOLE file, either algorithm. The legacy transports
-                    # verify blake3 INLINE; they know nothing about sha256, so
-                    # a sha256 whole file is verified explicitly below. The
-                    # inline expectation is passed only when it is the right
-                    # algorithm — handing a sha256 hex to a blake3 checker is
-                    # the mirror-image of the bug this program keeps finding.
-                    algo, want_hex = parse_cas_ref(digest)
-                    inline_b3 = want_hex if algo == "blake3" else ""
+                    # A WHOLE file. th#1303 S1: BOTH transports now take the
+                    # algorithm-tagged digest and verify it themselves, so
+                    # there is exactly ONE verification and no call site picks
+                    # an algorithm. The old shape passed a bare blake3 hex to
+                    # whichever transport understood it and re-hashed the file
+                    # afterwards for the other — with an `if` in front of each,
+                    # i.e. two vacuous guards guarding one set of bytes.
+                    parse_cas_ref(digest)  # refuse an undigestable entry early
                     if f.transfer_grant:
                         grant = S3TransferGrant.from_mapping(f.transfer_grant)
                         await asyncio.get_running_loop().run_in_executor(
@@ -809,7 +786,7 @@ class CozySnapshotDownloader:
                                 grant=grant,
                                 dest_path=dst,
                                 expected_size_bytes=int(f.size_bytes or 0) or None,
-                                expected_blake3=inline_b3,
+                                expected_digest=digest,
                             ),
                         )
                         _on_bytes(int(f.size_bytes or 0), network=True)
@@ -819,16 +796,9 @@ class CozySnapshotDownloader:
                             f.url,
                             dst,
                             expected_size=int(f.size_bytes or 0),
-                            expected_blake3=inline_b3,
+                            expected_digest=digest,
                             on_bytes=lambda n: _on_bytes(n, network=True),
                         )
-                    if not inline_b3:
-                        # MANDATORY, not conditional: nothing else checked
-                        # these bytes. Fail closed and leave nothing behind.
-                        try:
-                            await asyncio.to_thread(_verify_or_unlink, dst, digest)
-                        except DigestMismatch:
-                            raise
                 # Every path above verified size + the content digest under the
                 # algorithm the manifest named, before publishing.
                 _mark_trusted(_VERIFIED_BLOBS, (blobs_root_id, digest))
@@ -859,7 +829,7 @@ class CozySnapshotDownloader:
             if expected and dst.stat().st_size != expected:
                 _log.warning(
                     "blob_corrupt path=%s digest=%s size=%d expected=%d; re-downloading",
-                    f.path, (f.digest or f.blake3)[:24], dst.stat().st_size, expected,
+                    f.path, f.digest[:24], dst.stat().st_size, expected,
                 )
                 dst.unlink(missing_ok=True)
                 return False
@@ -916,7 +886,10 @@ class CozySnapshotDownloader:
             total_written = 0
             with open(dst, "wb") as out_f:
                 for i, part in enumerate(parts):
-                    part_digest = _strip_blake3_prefix(str(part.get("digest") or ""))
+                    # Keep the ALGORITHM TAG — `_blob_path` parses it. Stripping
+                    # one algorithm's prefix here is how a sha256 part would be
+                    # looked up under blobs/blake3/, i.e. at nothing.
+                    part_digest = str(part.get("digest") or "").strip().lower()
                     if not part_digest:
                         raise ValueError(f"part[{i}] in {f.path} missing digest")
                     part_blob = _blob_path(blobs_root, part_digest)

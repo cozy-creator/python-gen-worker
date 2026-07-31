@@ -159,30 +159,27 @@ def sha256_file(path: Path, chunk_size: int = _READ_CHUNK_BYTES) -> str:
 
 def hash_file(path: Path, algo: str) -> str:
     """Hash a file with the named algorithm. No default: the caller must have
-    read the algorithm off the digest, never assumed it."""
+    read the algorithm off the digest, never assumed it.
+
+    th#1303 S1: ``blake3`` is no longer hashable here. `parse_cas_ref` still
+    RECOGNISES a blake3 ref (that grammar dies at S2, with the shared
+    cross-language vectors), so a v1 ref reaching a verifier lands here and
+    RAISES. That asymmetry is deliberate: after the repoint no tag resolves to
+    a v1 manifest, so the only way to arrive with one is a stale pointer, and
+    the safe answer to "I cannot check these bytes" is a refusal, never a skip.
+    """
     if algo == "sha256":
         return sha256_file(path)
-    if algo == "blake3":
-        from blake3 import blake3  # local: the dep leaves at phase 4
-
-        h = blake3(max_threads=blake3.AUTO)
-        with open(path, "rb") as f:
-            while True:
-                b = f.read(_READ_CHUNK_BYTES)
-                if not b:
-                    break
-                h.update(b)
-        return h.hexdigest()
     raise ValueError(f"unsupported hash algorithm {algo!r}")
 
 
 def verify_file_digest(path: Path, ref: str) -> None:
     """Verify a file against an algorithm-tagged ref, DISPATCHING ON THE PREFIX.
 
-    This is the whole dual-read window on the worker side. Hardcoding the
-    algorithm per call site — which is what the 198 blake3 references did — is
-    how a sha256 digest gets checked with blake3 and every honest file looks
-    corrupt.
+    Hardcoding the algorithm per call site — which is what the 198 blake3
+    references did — is how a sha256 digest gets checked with blake3 and every
+    honest file looks corrupt. An empty or undigestable ref RAISES out of
+    `parse_cas_ref`; there is no "nothing to check" path through this function.
     """
     algo, want = parse_cas_ref(ref)
     got = hash_file(path, algo)

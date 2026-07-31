@@ -192,7 +192,7 @@ def _warn_once_if_gpus_are_invisible() -> None:
 
 
 def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
-    """Snapshot CONTENT identity: digest + per-file (path, size, blake3).
+    """Snapshot CONTENT identity: digest + per-file (path, size, digest).
 
     Presigned URL bytes are deliberately excluded — the hub refreshes
     expiring snapshot URLs on every release-config rebuild (~15s TTL) and
@@ -204,7 +204,7 @@ def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
         return ()
     return (
         snap.digest,
-        tuple(sorted((f.path, f.size_bytes, f.blake3) for f in snap.files)),
+        tuple(sorted((f.path, f.size_bytes, f.digest) for f in snap.files)),
     )
 
 

@@ -533,7 +533,6 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
             WorkerResolvedRepoFile(
                 path=f.path,
                 size_bytes=int(f.size_bytes),
-                blake3=f.blake3,
                 url=f.url or None,
                 # th#1303 manifest v2: the algorithm-tagged digest and the
                 # ordered chunk list. Dropping these here is what would make
@@ -1268,8 +1267,11 @@ class ModelStore:
             return {}
         sizes: Dict[str, int] = {}
         for f in snap.files:
-            digest = (str(getattr(f, "digest", "") or "").strip()
-                      or str(getattr(f, "blake3", "") or "").strip())
+            # th#1303 S1: the tagged digest and nothing else. The legacy
+            # `blake3` fallback was empty on every v2 entry, so this used to
+            # bail to {} — sizes unknown — on exactly the manifests it was
+            # written for. Zero entries is a REFUSAL ({}), never a silent 0.
+            digest = str(getattr(f, "digest", "") or "").strip()
             if not digest:
                 return {}
             sizes[digest.lower()] = int(f.size_bytes)
@@ -1577,8 +1579,7 @@ class ModelStore:
     def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
         ``{top_level_subfolder: content_set_digest}``. Weight/data files use
-        the wire snapshot's per-file digest (v2 tagged ``digest``, v1 legacy
-        ``blake3`` mirror); small JSON sidecars use
+        the wire snapshot's per-file tagged digest; small JSON sidecars use
         CANONICAL digests read from ``local_path`` (save-era serialization —
         provenance stamps, explicit defaults, torch_dtype/dtype vocabulary —
         must not break sharing of byte-identical weights; see
@@ -1594,14 +1595,13 @@ class ModelStore:
         groups: Dict[str, Dict[str, str]] = {}
         for f in snap.files:
             rel = str(f.path).strip().lstrip("/")
-            # th#1303 empty-guard class: this read `f.blake3`, which is EMPTY
-            # on every v2 entry, so every file of a v2 snapshot was skipped
-            # and component sharing was silently OFF fleet-wide — the
-            # fail-CLOSED half of the class (the fail-open half is
-            # `if want and got != want`). Read the tagged digest first; the
-            # legacy mirror read dies with S1.
-            digest = (str(getattr(f, "digest", "") or "").strip()
-                      or str(getattr(f, "blake3", "") or "").strip())
+            # th#1303: this read `f.blake3`, which is EMPTY on every v2
+            # entry, so every file of a v2 snapshot was skipped and component
+            # sharing was silently OFF fleet-wide — the fail-CLOSED half of
+            # the empty-guard class (the fail-open half is
+            # `if want and got != want`). pgw#821 made it a dual-read; S1
+            # retires the legacy mirror arm, leaving the tagged digest alone.
+            digest = str(getattr(f, "digest", "") or "").strip()
             if not rel or not digest:
                 continue
             comp, _, rest = rel.partition("/")
@@ -2356,9 +2356,9 @@ class ModelStore:
         if files and p.is_dir():
             # pgw#769/#781 (th#1303): the hash algorithm comes from the DIGEST,
             # never from this call site. This used to read `f.blake3` and hash
-            # with blake3 -- but under manifest v2 that field is EMPTY and the
-            # digest lives in `f.digest` as "sha256:<hex>", so `digest` was ""
-            # and BOTH the size check and the hash check were skipped. The tree
+            # with blake3 -- but under manifest v2 that field is EMPTY, so
+            # `digest` was "" and BOTH the size and hash checks were skipped
+            # (the legacy fallback is gone at S1). The tree
             # was then reported CLEAN WITHOUT BEING HASHED. On a volume shared
             # across releases and pods that is a security hole, not a cosmetic
             # gap, and it is the same false-clean shape as reading
@@ -2458,7 +2458,7 @@ class ModelStore:
         text = str(exc).lower()
         if "expired" in text or "403" in text:
             return "url_expired"
-        if "digest" in text or "blake3" in text or "hash" in text:
+        if "digest" in text or "hash" in text:
             return "digest_mismatch"
         if "no space" in text or "disk" in text:
             return "insufficient_disk"
@@ -2498,7 +2498,7 @@ class _CompileTargetRecord:
     active_compile_ref: str = ""
     active_compile_snapshot_digest: str = ""
     # gw#604: True when the active artifact is this worker's OWN mint (the
-    # advertised digest is then the self-attested tar blake3, not the store's
+    # advertised digest is then the self-attested tar digest, not the store's
     # snapshot manifest digest — same bytes, different transport form).
     active_self_mint: bool = False
     function_names: Tuple[str, ...] = ()
@@ -5566,7 +5566,7 @@ class Executor:
                         # it — the desired cell is the SAME cell this live
                         # object already proved, published, and serves; the
                         # digests differ only in transport FORM
-                        # (self-attested tar blake3 vs the store's snapshot
+                        # (self-attested tar digest vs the store's snapshot
                         # manifest digest, th#910 ruling). A passed proof on
                         # a live object stays valid for that object's
                         # lifetime; a warm-process re-proof cannot produce
@@ -11751,7 +11751,7 @@ class Executor:
                 ensure_ms = int((time.monotonic() - t0) * 1000)
                 snap = snapshots.get(ref)
                 # gw#491: normalize to the bare-hex spelling — snap.digest may
-                # carry an algo prefix ("blake3:<hex>") while path.name is the
+                # carry an algo prefix ("sha256:<hex>") while path.name is the
                 # bare hex; one adapter must never mint two cache identities.
                 digest = (snap.digest if snap is not None else "") or path.name
                 digest = digest.split(":", 1)[-1].strip().lower()
