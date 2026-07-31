@@ -659,7 +659,9 @@ def test_the_pool_is_RE_PRICED_for_the_many_small_compiles_shape() -> None:
     pipe = _Pipe()
     targets = aot_mint._regional_targets(pipe, decl)
     assert set(targets) == {"unet"}
-    assert sum(g.count for g in targets["unet"]) == 10
+    owner, groups = targets["unet"]
+    assert owner is model
+    assert sum(g.count for g in groups) == 10
 
     plans = [(type("P", (), {"target": "unet"})(), None)] * 3
     # 3 plans x 2 block classes = 6 entries, where whole-graph had 3.

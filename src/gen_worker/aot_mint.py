@@ -1461,10 +1461,17 @@ def mint(
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
 
 
-def _regional_targets(pipeline: Any, decl: Any) -> Dict[str, Tuple[Any, ...]]:
-    """``{target: block groups}`` for every declared target with repeated
-    blocks — the regional mint's own view of the declaration."""
-    out: Dict[str, Tuple[Any, ...]] = {}
+def _regional_targets(
+    pipeline: Any, decl: Any,
+) -> Dict[str, Tuple[Any, Tuple[aot_regional.BlockGroup, ...]]]:
+    """``{target: (module, block groups)}`` for every declared target with
+    repeated blocks — the regional mint's own view of the declaration.
+
+    The resolved MODULE rides along because every caller needs it (the shell
+    digest reads its config, the device re-price reads its parameter count)
+    and re-resolving per caller is how the two would drift apart.
+    """
+    out: Dict[str, Tuple[Any, Tuple[aot_regional.BlockGroup, ...]]] = {}
     for target in tuple(getattr(decl, "targets", ()) or ()):
         resolved = _resolve_target(pipeline, str(target))
         if resolved is None:
@@ -1474,7 +1481,7 @@ def _regional_targets(pipeline: Any, decl: Any) -> Dict[str, Tuple[Any, ...]]:
             continue
         groups = aot_regional.repeated_block_groups(owner)
         if groups:
-            out[str(target)] = groups
+            out[str(target)] = (owner, groups)
     return out
 
 
@@ -1487,8 +1494,8 @@ def _cell_shell_digest(pipeline: Any, decl: Any) -> str:
     axis exists to close.
     """
     facts = {
-        target: aot_regional.shell_facts(_resolve_target(pipeline, target)[0])
-        for target in _regional_targets(pipeline, decl)}
+        target: aot_regional.shell_facts(owner)
+        for target, (owner, _groups) in _regional_targets(pipeline, decl).items()}
     if not facts:
         raise MintRefused(
             f"family {getattr(decl, 'family', '?')!r} declares regional=True "
@@ -1512,7 +1519,8 @@ def _regional_entry_count(pipeline: Any, decl: Any, rows: Sequence[Any]) -> int:
     by_target = _regional_targets(pipeline, decl)
     total = 0
     for plan, _arm in rows:
-        total += len(by_target.get(str(getattr(plan, "target", "")), ()) or ())
+        entry = by_target.get(str(getattr(plan, "target", "")))
+        total += len(entry[1]) if entry is not None else 0
     return max(total, len(rows))
 
 
@@ -1529,11 +1537,7 @@ def _block_device_fraction(pipeline: Any, decl: Any) -> float:
     blocks) would license a pool the card cannot hold.
     """
     biggest = 0.0
-    for target, groups in _regional_targets(pipeline, decl).items():
-        resolved = _resolve_target(pipeline, target)
-        if resolved is None:
-            continue
-        owner = resolved[0]
+    for _target, (owner, groups) in _regional_targets(pipeline, decl).items():
         total = float(sum(p.numel() for p in owner.parameters()))
         if total <= 0.0:
             continue
