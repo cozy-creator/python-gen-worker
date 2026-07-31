@@ -257,7 +257,14 @@ async def build_cell(
         if outcome.report is not None and outcome.report.peak_vram_bytes:
             mint_budget.record_child_peak(
                 family, task.weight_lane, outcome.report.peak_vram_bytes)
-        if str(getattr(pending, "recipe", "")) == "aot":
+        # pgw#817: BOTH AOT recipes report through `aot_mint_phases`. A
+        # string-literal `== "aot"` here would have sent every regional mint's
+        # phase table down the `jit_compile` kind instead — and
+        # `aot_mint_phases` is the channel the minutes-scale acceptance is
+        # measured on, so the one number the whole issue turns on would have
+        # been recorded under the wrong kind.
+        if str(getattr(pending, "recipe", "")) in (
+                fleet_cells.RECIPE_AOT, fleet_cells.RECIPE_AOT_REGIONAL):
             _emit_aot_phases(outcome, family=family, lane=task.weight_lane)
         else:
             _emit_jit_compile(

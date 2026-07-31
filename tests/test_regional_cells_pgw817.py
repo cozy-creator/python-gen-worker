@@ -698,3 +698,47 @@ def test_mint_recipe_selects_the_regional_shape_from_the_DECLARATION(
         cfg = _decl(regional=regional)
         assert fleet_cells.mint_recipe(
             object(), cfg, delegate=True, emit=False) == want
+
+
+def test_both_AOT_recipes_report_through_aot_mint_phases() -> None:
+    """The acceptance channel. `aot_mint_phases` is where the minutes-scale
+    claim is MEASURED end-to-end (not harness arithmetic), and the delegation
+    tail chose its reporting kind with a string-literal `recipe == "aot"` —
+    which would have sent every regional mint's phase table down the
+    `jit_compile` kind instead, recording the one number the whole issue
+    turns on under the wrong name."""
+    import inspect
+
+    from gen_worker import fleet_cells, mint_delegate
+
+    source = inspect.getsource(mint_delegate.build_cell)
+    assert 'recipe", "")) == "aot"' not in source
+    assert "RECIPE_AOT_REGIONAL" in source
+    # The child echoes the recipe it was ASKED for, so the parent's grouping
+    # and the child's report cannot disagree.
+    from gen_worker import mint_child
+
+    assert mint_child.RECIPE_AOT_REGIONAL == fleet_cells.RECIPE_AOT_REGIONAL
+    assert "recipe=request.recipe" in inspect.getsource(mint_child._mint_aot)
+
+
+def test_the_regional_recipe_rides_the_pgw816_COMPOSITION(
+) -> None:
+    """pgw#816 (landed as `8acceda`): a directory path does not describe a
+    composition, so the child now loads through the parent's resolved
+    `component_paths`. The regional recipe must ride the SAME seam — it is a
+    label on one `MintRequest`, not a second code path — because the blocks
+    it discovers and the shell it digests have to be the ones the parent is
+    actually SERVING. A regional mint that composed differently would export
+    blocks the serving pod cannot adopt, silently."""
+    import inspect
+
+    from gen_worker import mint_child
+
+    source = inspect.getsource(mint_child.mint)
+    # ONE composition, built before the recipe is consulted.
+    setup_at = source.index("component_paths=overrides")
+    recipe_at = source.index("if request.recipe in (")
+    assert setup_at < recipe_at, \
+        "the recipe must be chosen AFTER the parent's composition is loaded"
+    assert source.count("run_setup(") == 1
