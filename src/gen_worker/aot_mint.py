@@ -82,7 +82,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    aot_compile_pool, aot_package, aot_serve, aot_wrapper_split, cell_key)
+    aot_compile_pool, aot_package, aot_regional, aot_serve, aot_wrapper_split,
+    cell_key)
 from .compile_cache import (
     _resolve_target,
     lane_bucket,
@@ -214,6 +215,17 @@ class ExportSpec:
     source_ref: str = ""
     source_digest: str = ""
     closure_roots: Tuple[str, ...] = ()
+    #: pgw#817: this cell's entries are BLOCK CLASSES of the target, not shape
+    #: coordinates of its whole forward. Keys the ck5 ``mode`` axis, so a
+    #: regional cell can never be confused with a whole-graph cell of the same
+    #: family x lane x sm.
+    regional: bool = False
+    #: pgw#812 S3.3, MANDATORY for a regional cell. A regional artifact
+    #: describes a PART of the model, so ``combined_graph_hash`` — which is a
+    #: proxy for "the graph the fleet serves" — no longer covers the assembly.
+    #: Two models with identical blocks and different shells must not collide.
+    #: Computed by :func:`aot_regional.shell_digest` off the resolved module.
+    shell_digest: str = ""
 
     def lane_label(self) -> str:
         base, observed = lane_bucket(self.weight_lane)
@@ -842,6 +854,26 @@ class _MintedEntry:
     timings: Dict[str, Any]
 
 
+def _regional_dynamic(
+    declared: Sequence[DynamicDim], block_inputs: Sequence[str],
+) -> Tuple[DynamicDim, ...]:
+    """The declared dynamic rows that SURVIVE into a block's own inputs.
+
+    A block's inputs are internal and captured, never declared (pgw#812 S5) —
+    but a declared carrier frequently reaches the block under its own name
+    (flux2's ``hidden_states`` is the block's first argument). Those rows ride;
+    a carrier the block never sees is dropped, because marking an axis on an
+    input that does not exist is a mint error and inventing a range for an
+    input the declaration never described would be worse.
+
+    The result is that ``regional + dynamic`` is expressible without a second,
+    deeper contract for the endpoint to maintain — the inner gate is derived
+    from the artifact's OWN recorded ranges (S5), not from a new declaration.
+    """
+    names = set(str(n) for n in block_inputs)
+    return tuple(d for d in declared if str(d.input_name) in names)
+
+
 def adapter_arm(fork: Sequence[Tuple[str, Any]]) -> Optional[bool]:
     """The pgw#790 adapter arm a fork coordinate states, or ``None`` when the
     coordinate does not carry one (a bucket-0 family, or a target that carries
@@ -1058,6 +1090,137 @@ def _export_entry(
         timings=timings)
 
 
+def _export_regional_entries(
+    pipeline: Any,
+    spec: ExportSpec,
+    plan: Any,
+    decl: Any,
+    *,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+    compile_now: bool = True,
+) -> List[_MintedEntry]:
+    """Export one mint plan's target as BLOCK entries instead of one graph.
+
+    pgw#817, implementing pgw#812 S1: the cell is still one ``.pt2`` and the
+    entry grammar is unchanged — ``<target>/block=<class>#<n>/<dims>`` — but
+    the entries enumerate BLOCK CLASSES of the target instead of shape
+    coordinates of its whole forward. sdxl's 70 UNet blocks collapse to 2
+    entries; flux2's 25+25 to 2.
+
+    The shell stays EAGER (S2), which is the honest bound on the win: the
+    compiled fraction of the model equals the repeated-block fraction. The
+    alternative — exporting the shell with the blocks elided — is not
+    expressible in ``torch.export`` today, because blocks are inlined at
+    trace time.
+
+    Everything before and after this function is unchanged: the same
+    per-entry gates, the same class hashes, the same packaging, the same
+    pool. Only the module being exported and the feed it is exported on
+    change.
+    """
+    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
+    from . import aot_inputs
+
+    espec = _entry_spec(spec, plan, decl)
+    label = _decl.plan_entry_name(plan)
+
+    resolved = _resolve_target(pipeline, espec.target)
+    if resolved is None:
+        raise MintRefused(
+            f"entry {label!r}: pipeline {type(pipeline).__name__} has no "
+            f"compile target {espec.target!r}")
+    owner, attr, _fn = resolved
+    if attr != "forward":
+        raise MintRefused(
+            f"entry {label!r}: regional export needs a MODULE with declared "
+            f"repeated blocks; target {espec.target!r} resolves to a callable "
+            f"attribute ({attr!r}), which has no block structure to compile "
+            f"per class")
+    groups = aot_regional.repeated_block_groups(owner)
+    if not groups:
+        raise MintRefused(
+            f"entry {label!r}: {type(owner).__name__} declares no "
+            f"`_repeated_blocks`, so there is no repeated structure to "
+            f"compile once and reuse — mint this target whole-graph "
+            f"(regional=False) or fix the model class")
+
+    module = owner
+    builder = aot_inputs.builder_for(espec.family, espec.target)
+    args, kwargs = builder(owner, espec)
+    if kwargs:
+        raise MintRefused(
+            f"entry {label!r}: example feed carries keyword argument(s) "
+            f"{sorted(kwargs)!r} — all-positional feeds are a mint obligation")
+
+    import torch
+
+    def _run() -> None:
+        with torch.no_grad():
+            module(*args)
+
+    t0 = time.monotonic()
+    feeds = aot_regional.capture_block_feeds(groups, _run)
+    capture_s = round(time.monotonic() - t0, 2)
+
+    out: List[_MintedEntry] = []
+    for group in groups:
+        block_args, block_kwargs = feeds[group.key]
+        block = group.prototype
+        pos, names = aot_regional.positional_feed(
+            block, block_args, block_kwargs)
+        bspec = replace_spec(
+            espec,
+            fork=tuple(sorted(
+                tuple(espec.fork) + aot_regional.block_entry_fork(group.key),
+                key=lambda kv: str(kv[0]))),
+            dynamic=_regional_dynamic(espec.dynamic, names),
+            regional=True,
+        )
+        entry = _decl.entry_name(espec.target, bspec.fork, bspec.class_dims)
+        timings: Dict[str, Any] = {
+            "capture_s": capture_s, "instances": group.count}
+        t0 = time.monotonic()
+        dynamic = dynamic_shapes_spec(bspec.dynamic, names) \
+            if bspec.dynamic else None
+        try:
+            program = export_program(
+                block, tuple(pos), {}, dynamic_shapes=dynamic,
+                strict=bspec.strict)
+        except MintRefused as exc:
+            raise MintRefused(f"entry {entry!r}: {exc}") from exc
+        timings["export_s"] = round(time.monotonic() - t0, 2)
+
+        gaps = declared_range_gaps(program, bspec.dynamic)
+        if gaps:
+            raise MintRefused(
+                f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
+
+        files: List[Any] = []
+        if compile_now:
+            before = _phase_snapshot()
+            t0 = time.monotonic()
+            files = compile_entry_files(
+                program, entry, inductor_configs=inductor_configs)
+            timings["compile_s"] = round(time.monotonic() - t0, 2)
+            phases = _phase_delta(before, _phase_snapshot())
+            if phases:
+                timings["phases"] = phases
+
+        out.append(_MintedEntry(
+            name=entry, spec=bspec, module=block, owner=owner,
+            program=program, input_names=tuple(names), flat_names=tuple(names),
+            files=files, timings=timings))
+    return out
+
+
+def replace_spec(spec: ExportSpec, **changes: Any) -> ExportSpec:
+    """``dataclasses.replace`` on an :class:`ExportSpec`, named so the
+    deferred-import dance does not have to repeat at every call site."""
+    from dataclasses import replace
+
+    return replace(spec, **changes)
+
+
 def adapter_arm_plans(
     plans: Sequence[Any], pipeline: Any, spec: ExportSpec,
 ) -> List[Tuple[Any, Optional[bool]]]:
@@ -1170,15 +1333,40 @@ def mint(
 
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
+    # pgw#817: the declaration decides the mint SHAPE. `regional=True` means
+    # this family's entries are block classes of each target rather than shape
+    # coordinates of its whole forward — the same plans, the same forks, the
+    # same class rows, exported one block deep.
+    regional = bool(getattr(decl, "regional", False))
+    if regional:
+        spec = replace_spec(
+            spec, regional=True, shell_digest=_cell_shell_digest(pipeline, decl))
+        logger.info(
+            "aot-mint: REGIONAL cell for %s — entries are block classes; the "
+            "shell stays eager (pgw#812 S2), shell_digest=%s",
+            spec.family, spec.shell_digest)
+
     rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
     # pgw#809: how wide this pod may compile. Derived from the pod's REAL
     # budget (cgroup-aware vCPUs minus serving headroom, and available host
     # RAM over the measured per-entry peak) — never os.cpu_count, never a
     # constant. K=1 IS the pre-#809 serial in-process path, which is the
     # honest answer on a narrow pod.
+    # pgw#817 / pgw#812 S7 — pgw#809 RE-PRICED, not assumed. Regional changes
+    # BOTH of the pool's inputs, in opposite directions:
+    #   * the entry COUNT goes up (one entry per block class per plan, not one
+    #     per plan), which is what K parallelises over;
+    #   * the per-entry DEVICE ask goes down by roughly the block fraction of
+    #     the model, and VRAM is the bound that actually binds K.
+    # Multiplying the two levers instead of re-pricing them would size the
+    # pool for a whole-model child that regional never runs.
+    entry_count = _regional_entry_count(pipeline, decl, rows) if regional \
+        else len(rows)
     width = aot_compile_pool.entry_workers(
-        len(rows), limit=int(entry_workers or 0),
-        device_bytes=_entry_device_bytes(spec))
+        entry_count, limit=int(entry_workers or 0),
+        device_bytes=_entry_device_bytes(
+            spec, block_fraction=_block_device_fraction(pipeline, decl)
+            if regional else 1.0))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
 
@@ -1194,9 +1382,16 @@ def mint(
                 # be N times the VRAM churn for the same graphs.
                 _disarm_branches(pipeline)
                 disarmed = True
-            minted.append(_export_entry(
-                pipeline, spec, plan, decl, inductor_configs=inductor_configs,
-                compile_now=not parallel))
+            if regional:
+                minted.extend(_export_regional_entries(
+                    pipeline, spec, plan, decl,
+                    inductor_configs=inductor_configs,
+                    compile_now=not parallel))
+            else:
+                minted.append(_export_entry(
+                    pipeline, spec, plan, decl,
+                    inductor_configs=inductor_configs,
+                    compile_now=not parallel))
     finally:
         if disarmed:
             _rearm_branches(pipeline, int(spec.lora_bucket or 0))
@@ -1266,7 +1461,89 @@ def mint(
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
 
 
-def _entry_device_bytes(spec: ExportSpec) -> int:
+def _regional_targets(pipeline: Any, decl: Any) -> Dict[str, Tuple[Any, ...]]:
+    """``{target: block groups}`` for every declared target with repeated
+    blocks — the regional mint's own view of the declaration."""
+    out: Dict[str, Tuple[Any, ...]] = {}
+    for target in tuple(getattr(decl, "targets", ()) or ()):
+        resolved = _resolve_target(pipeline, str(target))
+        if resolved is None:
+            continue
+        owner, attr, _fn = resolved
+        if attr != "forward":
+            continue
+        groups = aot_regional.repeated_block_groups(owner)
+        if groups:
+            out[str(target)] = groups
+    return out
+
+
+def _cell_shell_digest(pipeline: Any, decl: Any) -> str:
+    """The cell-level shell digest: every regional target's shell, together.
+
+    A cell can carry more than one regional target, so the contract fact binds
+    ALL of them — binding only the first would leave a second target's shell
+    free to drift under an unchanged key, which is the collision class this
+    axis exists to close.
+    """
+    facts = {
+        target: aot_regional.shell_facts(_resolve_target(pipeline, target)[0])
+        for target in _regional_targets(pipeline, decl)}
+    if not facts:
+        raise MintRefused(
+            f"family {getattr(decl, 'family', '?')!r} declares regional=True "
+            f"but no declared target resolves to a module with "
+            f"`_repeated_blocks` — there is no repeated structure to compile "
+            f"once and reuse")
+    encoded = json.dumps(
+        facts, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        default=str).encode()
+    import hashlib
+
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _regional_entry_count(pipeline: Any, decl: Any, rows: Sequence[Any]) -> int:
+    """How many ENTRIES a regional mint of these plans will produce.
+
+    One per (plan, block class), which is what the compile pool parallelises
+    over. sdxl: 18 plans x 2 block classes; the whole-graph shape was 18.
+    """
+    by_target = _regional_targets(pipeline, decl)
+    total = 0
+    for plan, _arm in rows:
+        total += len(by_target.get(str(getattr(plan, "target", "")), ()) or ())
+    return max(total, len(rows))
+
+
+def _block_device_fraction(pipeline: Any, decl: Any) -> float:
+    """The fraction of the model's DEVICE footprint one block-entry child
+    holds, read off the resolved module.
+
+    A whole-graph entry child loads the whole target and benchmarks kernels
+    against it; a regional child needs one BLOCK's weights and one block's
+    activation set. Measured off the module rather than assumed: the largest
+    block class's parameter count over the target's, floored at 0.1 because
+    the CUDA context, torch's own allocator arenas and the activation set do
+    NOT shrink with the block — a fraction that reads 0.014 (one of 70 sdxl
+    blocks) would license a pool the card cannot hold.
+    """
+    biggest = 0.0
+    for target, groups in _regional_targets(pipeline, decl).items():
+        resolved = _resolve_target(pipeline, target)
+        if resolved is None:
+            continue
+        owner = resolved[0]
+        total = float(sum(p.numel() for p in owner.parameters()))
+        if total <= 0.0:
+            continue
+        for group in groups:
+            block = float(sum(p.numel() for p in group.prototype.parameters()))
+            biggest = max(biggest, block / total)
+    return max(0.1, min(1.0, biggest)) if biggest > 0.0 else 1.0
+
+
+def _entry_device_bytes(spec: ExportSpec, *, block_fraction: float = 1.0) -> int:
     """One entry child's DEVICE ask, from this process rather than a constant.
 
     An AOTI compile benchmarks kernels on the card, so an entry child holds
@@ -1286,7 +1563,9 @@ def _entry_device_bytes(spec: ExportSpec) -> int:
             weight_lane=str(spec.lane_label() or ""))
     except Exception:  # noqa: BLE001
         return 0
-    return int(budget.need_bytes) if budget.probed else 0
+    if not budget.probed:
+        return 0
+    return int(int(budget.need_bytes) * max(0.0, min(1.0, block_fraction)))
 
 
 def _compile_entries_parallel(
@@ -1571,6 +1850,12 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
 
     return {
         "weight_lane": str(spec.weight_lane or ""),
+        # pgw#817: recorded so a CONSUMER can recompute the identity from the
+        # artifact's own facts — the standing ck5 discipline — instead of
+        # trusting the stamp. `mode` also tells the serve path which arm to
+        # take without re-deriving it from entry names.
+        "mode": aot_regional.MODE_REGIONAL if spec.regional else "",
+        "shell_digest": str(spec.shell_digest or ""),
         "sm": str(cc.runtime_key().get("sm") or ""),
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
@@ -1634,6 +1919,13 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
     CONTRACT-FACTS SHAPE CHANGE (v1 -> v2, pgw#758): this re-keys every
     published ``aot-inductor`` cell; single-graph format-1 cells are RETIRED —
     correct and expected under ck5 exact identity.
+
+    CONTRACT-FACTS SHAPE CHANGE (v2 -> v3, pgw#817): ``shell_digest`` joins the
+    facts and the ``mode`` axis stops being hardcoded ``""``. This re-keys
+    every published ``aot-inductor`` cell again — correct and expected: a v2
+    key does not bind the assembly around the graphs, so a v2 REGIONAL cell
+    could collide across shells, and there is no way to add the binding
+    without moving the key.
     """
     from . import env_seal
 
@@ -1656,9 +1948,27 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         raise MintRefused(
             f"entries {unhashed[:4]!r} carry no class_hash; a class the key "
             f"cannot name is a class a mismatch cannot name (pgw#716)")
+    # pgw#812 S3.3 / pgw#817: the shell digest is a CONTRACT FACT, not an
+    # annotation. `combined_graph_hash` describes the graphs the cell carries;
+    # for a regional cell those are BLOCKS, so nothing else in the key covers
+    # the assembly around them — a different num_layers, a different rope
+    # construction or a diffusers minor that rewrites the outer forward would
+    # produce the same key and serve different math. Mandatory rather than
+    # optional: an absent digest is exactly the collision the axis exists to
+    # prevent, and a key that is sometimes assembly-bound and sometimes not is
+    # worse than either.
+    mode = aot_regional.MODE_REGIONAL if spec.regional else ""
+    shell = str(spec.shell_digest or meta.get("shell_digest") or "")
+    if mode and not shell:
+        raise MintRefused(
+            "a regional cell must carry a shell_digest: its entries are "
+            "BLOCKS, so the combined graph hash covers only the parts and two "
+            "models with identical blocks and different shells would key "
+            "identically while serving different math (pgw#812 S3.3)")
     contract_facts: Dict[str, Any] = {
-        "v": 2,
+        "v": 3,
         "combined_graph_hash": combined,
+        "shell_digest": shell,
         "targets": sorted({
             str((block or {}).get("target") or "") for block in entries.values()}),
         "shapes": sorted([int(v) for v in row] for row in spec.shapes),
@@ -1673,9 +1983,14 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         "kind": aot_serve.ARTIFACT_KIND,
         "family": str(meta.get("family") or ""),
         "lane": spec.lane_label(),
-        # An exported cell is always whole-graph: "regional" is a dynamo
-        # partitioning strategy with no export counterpart.
-        "mode": "",
+        # pgw#817/D4. This used to hardcode "" under the comment "an exported
+        # cell is always whole-graph: 'regional' is a dynamo partitioning
+        # strategy with no export counterpart". pgw#812 falsified it by
+        # measurement — an exported regional cell exists, is 1.37 MB, and
+        # serves. The ck5 `mode` axis already existed and already fed the
+        # digest; setting it is the minimal change that makes a regional cell
+        # unconfusable with a whole-graph cell of the same family x lane x sm.
+        "mode": mode,
         "sm": sm,
         "contract": contract,
         "env_seal": env_seal.seal_digest(dict(meta.get(env_seal.SEAL_KEY) or {})),

@@ -102,6 +102,27 @@ CPUS_PER_ENTRY_WORKER = 2
 #: inductor cache, the page cache and the disk holding N saved programs stop
 #: behaving, and the remaining serial terms (export, package, pack) dominate
 #: anyway: at 18 entries, K=8 is already ceil(18/8)=3 rounds against K=6's 3.
+#:
+#: RE-PRICED for regional (pgw#817 / pgw#812 S7). Regional does NOT multiply
+#: with K — it changes what K is dividing:
+#:
+#: * The entry COUNT goes UP, not down: one entry per (plan, block class), so
+#:   sdxl's 18 whole-graph entries become 18 x 2 = 36 block entries. #812 S7's
+#:   worry ("once a family's cell is 2 entries instead of 18, K > 2 buys
+#:   nothing") describes a cell whose SHAPE rows also collapse; on a
+#:   static-rows family like sdxl the rows stay and the classes multiply.
+#: * Each entry is ~14x cheaper (19.4 s vs 274.7 s measured), so the SERIAL
+#:   terms this ceiling was defending against — export, package, pack — are a
+#:   much larger fraction of a regional mint. Widening past 8 buys
+#:   proportionally less than it did for whole-graph.
+#: * The binding resource moves. Whole-graph, K is VRAM-bound because each
+#:   child holds the whole model; a block child holds one block, so
+#:   ``aot_mint._block_device_fraction`` shrinks the per-entry device ask and
+#:   K becomes vCPU-bound again on a fat card.
+#:
+#: The ceiling therefore stays at 8 deliberately: it is no longer the binding
+#: constraint on the shape that matters, and raising it would be sizing for a
+#: term that regional already made small.
 MAX_ENTRY_WORKERS = 8
 
 #: Host RAM the pool must leave alone: the serving process's own resident set

@@ -83,6 +83,12 @@ logger = logging.getLogger(__name__)
 #: serving pod has ever produced because nothing on this path called it.
 RECIPE_DYNAMO = "dynamo"
 RECIPE_AOT = "aot"
+#: pgw#817: the AOT mint, one block class deep. Same exporter, same gates,
+#: same packaging; the entries are block classes of each target instead of
+#: shape coordinates of its whole forward. Named separately because a reader
+#: grouping `self_mint_started` by phase must be able to tell a 6-minute mint
+#: from a 2-hour one without reading the artifact.
+RECIPE_AOT_REGIONAL = "aot-regional"
 
 
 @dataclass(frozen=True)
@@ -452,7 +458,6 @@ def _publish_async(
 
 #: Typed PIPELINE-side refusals of out-of-process minting (pgw#813). The
 #: operator-side half lives in ``mint_delegate.delegation_refusal``.
-REFUSAL_REGIONAL_TARGETS = "regional_targets"
 REFUSAL_NO_EAGER_TIER = "no_eager_tier"
 
 
@@ -475,11 +480,16 @@ def delegation_refusal(pipe: Any, cfg: Any) -> str:
     loudly rather than raise). ``compile_cache.eager_tier_available`` is the
     honest predicate and this is now its only caller-side use.
 
-    Regional targets keep their refusal: the family's mint is per-block and
-    the adopt/serve half is still gated behind pgw#812/#814.
+    pgw#817 CORRECTION. Regional targets used to keep a blanket refusal here
+    ("the family's mint is per-block and the adopt/serve half is still gated
+    behind pgw#812/#814"). That hold is discharged: the per-block mint, the
+    bind-by-reference arm and the assembled-vs-eager adoption gate all exist
+    now, and a regional mint is exactly the one that MOST wants delegating —
+    it is the shape that finishes in single-digit minutes. The refusal
+    survives only where it is still true: a family that declares regional but
+    registered no EXPORT declaration cannot mint an aot-inductor cell at all,
+    and ``mint_recipe`` declines that by its own name.
     """
-    if bool(getattr(cfg, "regional", False)):
-        return REFUSAL_REGIONAL_TARGETS
     try:
         if not cc.eager_tier_available(pipe):
             return REFUSAL_NO_EAGER_TIER
@@ -998,7 +1008,7 @@ def adopt_delegated_mint(
         except OSError:
             shutil.copy2(artifact, pending.target)
     try:
-        if pending.recipe == RECIPE_AOT:
+        if pending.recipe in (RECIPE_AOT, RECIPE_AOT_REGIONAL):
             # pgw#805: an exported cell arms through the AOT gates
             # (lifted-binding install -> aot_serve.enable -> rollback), not
             # the inductor seed path. Same gates a hub-delivered `.pt2`
@@ -1277,7 +1287,6 @@ def _unregister(pending: "PendingSelfMint") -> None:
 _DELEGATION_DECLINE_PHASE = {
     "mint_in_process_forced": "aot_mint_forced_in_process",
     "eager_first_disabled": "aot_eager_first_disabled",
-    "regional_targets": "aot_regional_targets",
     "no_eager_tier": "aot_no_eager_tier",
     "caller_forced_in_process": "aot_mint_forced_in_process",
 }
@@ -1289,9 +1298,6 @@ _DELEGATION_DECLINE_DETAIL = {
     "eager_first_disabled":
         "GEN_WORKER_EAGER_FIRST_BOOT=0 turned eager-first off, and delegation "
         "IS eager-first — there is no route to serve while a child compiles",
-    "regional_targets":
-        "this endpoint declares regional (per-block) compile targets, whose "
-        "delegated mint+adopt half is still held (pgw#812/#814)",
     "no_eager_tier":
         "an armed non-eager backend (AOTI cell or TRT engine) has replaced "
         "this pipeline's forward, so there is no eager tier to serve from",
@@ -1371,6 +1377,15 @@ def mint_recipe(
     refusal = aot_mint.lifted_torch_gap(spec)
     if refusal:
         return _decline("aot_lifted_torch_gap", refusal)
+
+    # pgw#817: the declaration decides the mint SHAPE. `regional=True` on the
+    # EXPORT declaration is a per-family opt-in, not a fleet default — pgw#812
+    # ranked it that way deliberately: on a small-table DiT regional is a 2x
+    # that costs a serve-path change, while pgw#811 buys a comparable win with
+    # no serve-path change at all. Where the constant table IS large it is
+    # 14.2x, which is the whole reason this lane exists.
+    if bool(getattr(export_declaration(family), "regional", False)):
+        return RECIPE_AOT_REGIONAL
     return RECIPE_AOT
 
 

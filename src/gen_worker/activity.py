@@ -75,6 +75,15 @@ KIND_LORA_HYGIENE = "lora_hygiene"
 # the worst per-module rows, so a release shipping an adapter its own serving
 # dtype destroys is countable hub-side without the pod's stdout.
 KIND_LORA_FIDELITY = "lora_fidelity"
+# pgw#817: the ADOPTION numerics gate — a cell about to arm is run against the
+# eager forward it replaces and judged on the shared verdict ladder. Same two
+# phases and the same fail-closed shape as `lora_fidelity`, one population
+# down: `phase=refused` means the cell did NOT arm and this pod serves eager;
+# `phase=degraded` means it armed inside the gray band. pgw#814 measured a
+# real DEGRADED artifact (flux2 w8a8 whole-graph, cos 0.931-0.973 against
+# eager) that nothing in the worker would have noticed, which is why the
+# verdict has to reach the hub whether or not it refuses.
+KIND_CELL_NUMERICS = "cell_numerics"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"
