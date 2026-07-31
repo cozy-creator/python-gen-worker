@@ -457,9 +457,14 @@ def test_the_grpc_conversion_carries_chunks_through():
 def test_a_v1_blake3_entry_is_now_REFUSED_not_filled(tmp_path, store):
     """The corpus is repointed: a blake3 ref can only be a stale pointer.
 
-    Reverting S1 (restoring `hash_file`'s blake3 arm) makes this fill succeed,
-    which is exactly the coverage this replaces the deleted
-    `test_v1_blake3_snapshot_still_fills_unchanged` with.
+    WHICH ARM THIS PINS, stated because a guard whose claim is untested is this
+    program's own defect one level up. It pins `cozy_cas`'s ALGORITHM PRE-CHECK
+    (`hash_algo != "sha256"`, before the retry loop) and NOT `hash_file`'s
+    deleted arm — verified by execution: restoring `hash_file`'s arm alone
+    leaves this GREEN, because the pre-check refuses first. `hash_file` has its
+    own guard (`test_hash_file_refuses_blake3_instead_of_hashing_it`). Two
+    independent arms refuse a v1 entry and each is pinned separately; this
+    replaces the deleted `test_v1_blake3_snapshot_still_fills_unchanged`.
     """
     data = body(900, seed=5)
     entry = WorkerResolvedRepoFile(
@@ -501,3 +506,23 @@ def test_hash_file_refuses_blake3_instead_of_hashing_it(tmp_path):
     # And through the dispatcher a v1 ref is a refusal, never a silent pass.
     with pytest.raises(ValueError, match="unsupported hash algorithm"):
         verify_file_digest(f, "blake3:" + "a" * 64)
+
+
+def test_the_downloader_refuses_an_ABSENT_digest_before_fetching(tmp_path, store):
+    """The vacuous guard, pinned at the transport itself.
+
+    `_download_one_file` used to take `expected_blake3: str = ""` and compare
+    only `if expected_blake3:` — so an entry naming no digest was downloaded
+    and published with no check at all. The precondition is now mandatory and
+    fires BEFORE a byte moves. Deleting it turns this red.
+    """
+    import asyncio
+
+    from gen_worker.models.cozy_cas import _download_one_file
+
+    data = body(64)
+    url = put(store, data)
+    dst = tmp_path / "x.bin"
+    with pytest.raises(ValueError, match="no expected digest"):
+        asyncio.run(_download_one_file(url, dst, len(data), "", None))
+    assert not dst.exists(), "nothing may be published under no digest at all"
