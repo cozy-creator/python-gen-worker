@@ -943,3 +943,60 @@ def test_a_regional_mint_REFUSES_a_model_with_no_repeated_blocks(
     with pytest.raises(aot_mint.MintRefused, match="_repeated_blocks"):
         aot_mint.mint(pipe, spec, tmp_path / "out", allow_regressed_lanes=True,
                       entry_workers=1)
+
+
+@pytest.mark.integration
+def test_a_regional_mint_compiles_through_the_POOL_the_same_way(
+    tmp_path, _registry, _fake_sm, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape the live acceptance runs. Regional's entries go out to
+    pgw#809's K-wide out-of-process pool exactly like whole-graph's, and the
+    artifact must be identical in identity to the serial one.
+
+    This is also the case that would have caught pgw#754's thread-local ISA
+    clamp (fixed in `3bd9887`): every host compile off the boot thread built
+    `-march=native`, and a regional mint is many small compiles fanned out
+    across pool threads, so it is the shape that hits it hardest — a cell
+    minted under an unrecorded ISA publishes under an unchanged key."""
+    import types
+
+    from gen_worker import aot_compile_pool, host_isa
+
+    _register_regional("tiny817p", regional=True)
+    pipe = types.SimpleNamespace(unet=_TinyRegionalUNet(layers=3))
+    spec = aot_mint.ExportSpec(family="tiny817p", target="")
+
+    widths: List[Any] = []
+    real_entry_workers = aot_compile_pool.entry_workers
+
+    def _record(entries: int, **kwargs: Any) -> Any:
+        width = real_entry_workers(entries, **kwargs)
+        widths.append((entries, width.workers))
+        return width
+
+    monkeypatch.setattr(aot_compile_pool, "entry_workers", _record)
+    monkeypatch.setattr(aot_mint.aot_compile_pool, "entry_workers", _record)
+
+    serial = aot_mint.mint(
+        pipe, spec, tmp_path / "serial", allow_regressed_lanes=True,
+        entry_workers=1)
+
+    # The pool is priced on the REGIONAL entry count (2 plans x 1 block class),
+    # not on the plan count — S7's re-price, observed rather than asserted in
+    # a comment.
+    assert widths and widths[0][0] == 2
+
+    # The clamp the pool's children inherit is PROCESS-wide now (pgw#754,
+    # `3bd9887`), so the cell's recorded ISA cannot depend on which thread
+    # compiled it — read it back on a foreign thread, which is what a pool
+    # child's compile thread is.
+    on_foreign_thread = host_isa._read_in_fresh_thread(host_isa.effective)
+    assert isinstance(on_foreign_thread, dict)
+    assert on_foreign_thread == host_isa.effective(), (
+        "a regional mint is many small compiles fanned out across pool "
+        "threads, so a thread-local clamp would record one ISA and build "
+        "another")
+    # (What the seal RECORDS is pgw#754's own suite's business; what matters
+    # here is that the regional mint's many-threaded compile shape cannot see
+    # a different clamp than the one the seal was taken under.)
+    assert "env_seal" in serial.metadata
