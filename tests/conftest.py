@@ -128,6 +128,32 @@ def _fresh_boot_seal():
 
 
 @pytest.fixture(autouse=True)
+def _boot_isa_clamp():
+    """pgw#754's codegen clamp, imposed the way every real boot imposes it.
+
+    Production host-compiles ONLY ever happen in a process that ran
+    ``env_seal.establish`` — ``entrypoint`` (line 262), ``mint_child`` (399)
+    and ``aot_compile_child`` (74) all do, and ``establish`` calls
+    ``host_isa.impose``. The suite host-compiles without any of those, so
+    every real AOTI compile a test drove was built ``-march=native``: an
+    unclamped, unportable object, silently unlike anything a pod produces.
+
+    pgw#811's ``assert_command_is_clamped`` made that visible by refusing it
+    at the argv level. The honest answer is to give the suite the boot
+    precondition production has, not to soften the assert — pgw#754 is a
+    SIGILL-class defect. Tests that exercise the clamp itself monkeypatch
+    ``inductor_config.cpp`` directly and are unaffected (monkeypatch restores).
+    """
+    from gen_worker import host_isa as _isa
+
+    try:
+        _isa.impose()
+    except Exception:  # torchless/non-x86 runner: nothing to clamp
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _fresh_receipt_gate():
     """pgw#709's receipt gate is armed once at HelloAck and stays configured
     for the process — correct in production, poison in a suite: any test that
