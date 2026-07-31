@@ -82,6 +82,13 @@ _DEFAULT_RESPAWN_BACKOFF_BASE_S = 1.0
 _DEFAULT_RESPAWN_BACKOFF_CAP_S = 60.0
 _BACKOFF_RESET_AFTER_ALIVE_S = 60.0
 _CRASH_LOOP_REPORT_MIN_INTERVAL_S = 300.0
+# "no report has ever been sent" — NOT 0.0. Every throttle below compares
+# against time.monotonic(), which on Linux is time since BOOT, so a 0.0
+# sentinel means "reported at boot" and silently swallows the FIRST report of
+# each class on any host whose uptime is under the interval. That is every
+# freshly-started worker pod, and the first five minutes is exactly when a
+# crash loop or an allowlist probe most needs to reach the hub.
+_NEVER_REPORTED = float("-inf")
 _DEATH_FLUSH_GRACE_S = 2.0
 # TimeoutStopSec: after the parent forwards SIGTERM, a child that has not
 # exited is SIGKILLed rather than holding the pod open forever.
@@ -227,7 +234,7 @@ class _ChildSlot:
         # re-sends the merge of all groups'.
         self.last_state_delta: Optional[pb.WorkerMessage] = None
         self.last_state_delta_at = 0.0
-        self.last_crash_loop_report_at = 0.0
+        self.last_crash_loop_report_at = _NEVER_REPORTED
         # Set once the link read loop has finished (EOF drained), so death
         # attribution never races the child's last frames.
         self.link_closed = asyncio.Event()
@@ -966,18 +973,18 @@ class ParentControl:
         self._jwt_rotations = 0
         self.actions_performed = 0
         self.actions_refused = 0
-        self._last_action_refusal_report_at = 0.0
+        self._last_action_refusal_report_at = _NEVER_REPORTED
         self._action_slots = asyncio.Semaphore(_MAX_CONCURRENT_ACTIONS)
         self._file_base_url = ""
         self._identity_cache: Optional[Tuple[str, str]] = None
         # delta 3: (request_id, attempt) -> what the parent watched.
         self._observations: collections.OrderedDict = collections.OrderedDict()
         self.metric_divergences = 0  # observability + tests
-        self._last_attestation_report_at = 0.0
+        self._last_attestation_report_at = _NEVER_REPORTED
         # delta 4: per-job grant decisions (observability + tests).
         self.capability_withheld = 0
         self.capability_notes = 0
-        self._last_capability_report_at = 0.0
+        self._last_capability_report_at = _NEVER_REPORTED
         # delta 2: the parent's own pre-import host measurement.
         self._measure_cmd = list(
             measure_cmd

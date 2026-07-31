@@ -119,6 +119,20 @@
   control plane is per-group. G==1 — every pod today — keeps the exact in-process fallback
   path. The mint-once-adopt-N story belongs to the pgw#783 split world.
 
+- **pgw#763 follow-on (found by this release's CI gate) — the parent's four report throttles
+  swallowed their FIRST report on every freshly-booted pod.** `last_*_report_at` was seeded to
+  `0.0` and compared against `time.monotonic()`, which on Linux is time since BOOT — so the
+  sentinel did not mean "never reported", it meant "reported at boot", and every throttle stayed
+  closed for the host's first 300 seconds. That silently dropped the first crash-loop report,
+  action refusal, billing-attestation divergence and capability withholding of a pod's life,
+  which is precisely the window in which a child that cannot boot or is probing the action
+  allowlist most needs to reach the hub — the pgw#763 security deltas are only a boundary if the
+  refusal is BANKED, and this made the first one log-only. Now `_NEVER_REPORTED = float("-inf")`,
+  so the first report of each class always goes out and the interval throttles only the ones
+  after it. **This box could never have caught it** (uptime in days); a CI runner boots minutes
+  before the suite, which is why three procsplit rows went red on the release tree and green
+  locally. A sweep test pins all four fields and fails on any new `_report_at = 0.0`.
+
 - **pgw#821 (th#1303 empty-guard class) — component sharing was silently OFF fleet-wide on
   every manifest-v2 snapshot.** `component_digests` read `f.blake3`, which is EMPTY on every
   v2 entry, so every file of a v2 snapshot was skipped and gw#479 component sharing never
