@@ -363,6 +363,12 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     detail: str = ""
     elapsed_s: float = 0.0
     peak_rss_bytes: int = 0
+    #: Inductor's own phase split (lowering / codegen / host C++ compile+link)
+    #: MEASURED IN THE CHILD. pgw#757's instrument-first deliverable is read
+    #: from dynamo's in-process counters, which do not move in the parent once
+    #: the compile leaves it — so without this the phase table silently goes
+    #: dark the moment the pool turns on. Caught by pgw#758's own test.
+    phases: Dict[str, float] = {}
 
 
 COMPILED = "compiled"
@@ -551,7 +557,9 @@ class EntryCompilePool:
         self.device_lock_path = self.workdir / aot_device_lock.LOCK_NAME
         self.python = python
         self.peak_rss_bytes = 0
+        self.peak_concurrency = 0
         self.entry_seconds: Dict[str, float] = {}
+        self.entry_phases: Dict[str, Dict[str, float]] = {}
 
     # -- staging ----------------------------------------------------------
 
@@ -652,6 +660,9 @@ class EntryCompilePool:
         return {name: done[name] for name in sorted(done)}
 
     def _reap(self, running: Sequence[_Running]) -> Optional[_Running]:
+        # Observed concurrency, not intended: the ONLY load-independent
+        # evidence that the pool actually overlapped rather than looping.
+        self.peak_concurrency = max(self.peak_concurrency, len(running))
         for row in running:
             # Sample while it is alive: /proc vanishes at exit, and VmHWM is
             # the only free high-water mark the kernel keeps.
@@ -681,6 +692,7 @@ class EntryCompilePool:
                     f"compiled file(s) but {len(missing)} do not exist "
                     f"(first: {missing[0]}) — the pool's shared inductor cache "
                     f"dir {self.cache_dir!r} is not visible to this process")
+            self.entry_phases[row.entry] = dict(report.phases or {})
             logger.info(
                 "aot-pool: entry %r compiled in %.1fs (%d file(s))",
                 row.entry, elapsed, len(report.files))

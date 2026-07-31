@@ -121,11 +121,15 @@ def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
                 f"{name}: {path} is not visible to the parent — the pool's "
                 f"shared TORCHINDUCTOR_CACHE_DIR is how loose files travel")
 
-    serial = sum(box.entry_seconds.values())
     assert set(box.entry_seconds) == set(out)
-    assert wall < serial, (
-        f"K=2 wall {wall:.1f}s did not beat the serial sum {serial:.1f}s — "
-        f"the pool ran, but nothing overlapped")
+    # Concurrency is asserted from OBSERVED overlap, never from wall clock:
+    # this suite runs on a box shared with other agent lanes, where a
+    # `wall < serial_sum` assertion is a coin flip under load. Two children
+    # alive at once is the invariant that actually says "the pool overlapped".
+    assert box.peak_concurrency == width.workers, (
+        f"pool never reached its own width: saw {box.peak_concurrency} "
+        f"concurrent children, K={width.workers}")
+    assert wall > 0
     assert box.peak_rss_bytes > 0, (
         "per-entry peak RSS is what bounds K by memory; an unmeasured peak "
         "makes the width policy a guess")

@@ -1264,6 +1264,11 @@ def _compile_entries_parallel(
     for row in minted:
         row.files = list(by_entry[row.name])
         row.timings["compile_s"] = pool.entry_seconds.get(row.name, 0.0)
+        # Measured in the child; folded in here so the roll-up reads the same
+        # whether a cell was minted serially or K-wide.
+        phases = pool.entry_phases.get(row.name) or {}
+        if phases:
+            row.timings["phases"] = dict(phases)
     logger.info(
         "aot-mint: pgw#809 pool compiled %d entr%s at K=%d in %.0fs "
         "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",

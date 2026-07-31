@@ -87,6 +87,9 @@ def run(job: EntryJob) -> int:
             peak_rss_bytes=_peak_rss()))
         return EXIT_REFUSED
 
+    # pgw#757's phase split is read from dynamo's IN-PROCESS counters, so it
+    # has to be measured here, in the process that does the compiling.
+    before = aot_mint._phase_snapshot()
     try:
         files = aot_mint.compile_entry_files(
             program, job.entry, inductor_configs=job.inductor_configs)
@@ -97,8 +100,10 @@ def run(job: EntryJob) -> int:
             peak_rss_bytes=_peak_rss()))
         return EXIT_REFUSED
 
+    phases = aot_mint._phase_delta(before, aot_mint._phase_snapshot())
     _write(report_path, EntryReport(
         entry=job.entry, status=COMPILED, files=[str(f) for f in files],
+        phases=dict(phases or {}),
         detail=f"{len(files)} loose file(s)",
         elapsed_s=round(time.monotonic() - started, 2),
         peak_rss_bytes=_peak_rss()))
