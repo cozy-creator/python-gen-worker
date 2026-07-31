@@ -169,6 +169,14 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     report: str          # typed terminal report the child writes
     cfg: CompileCellSpec
     snapshots: Dict[str, str] = {}
+    #: pgw#816: slot -> component -> the OVERRIDE component's own local tree
+    #: (pgw#617 hierarchical bindings). A directory path alone does not
+    #: describe the composition: th#1330 B2 EXCLUDES an overridden
+    #: component's files from the base fetch, so the base tree the parent
+    #: hands over is narrowed (`<digest>__x<fp>`) and is not loadable on its
+    #: own. The parent resolved these; the child must load the same ones or
+    #: it is not compiling the pipeline the parent serves.
+    component_paths: Dict[str, Dict[str, str]] = {}
     device: int = -1     # CUDA ordinal; -1 = leave the child's default
     vram_cap_bytes: int = 0   # 0 = uncapped (see mint_budget.co_residency)
     #: The hub-resolved execution lane (``ctx.lane``) and the effective
@@ -253,12 +261,26 @@ class MintOutcome:
 
         ``RESOURCE``: the shortfall may have been the tenant's peak, which
         has since passed — retry, but only after re-budgeting (the caller's
-        job; see ``mint_budget``). ``CRASHED``: an unclassified death, worth
+        job; see ``mint_budget``). ``CRASHED``: an UNCLASSIFIED death, worth
         exactly one more attempt. ``ABANDONED`` is not a failure at all, and
         ``REFUSED`` is deterministic — re-running it buys a second billed
         compile for the same named refusal.
+
+        pgw#816: a crash the child CLASSIFIED for itself is deterministic too.
+        A ``status="failed"`` report means the child caught the exception,
+        named it, and wrote it down — from the same request file against the
+        same on-disk inputs, so attempt 2 re-runs the identical failure (the
+        first delegated mint in production burned two 8.5 s attempts on one
+        load error this way). Only a death the child could NOT classify — no
+        report at all: signal, OOM-killer, the parent's stall kill, a spawn
+        failure — can plausibly differ next time. Resource shortfalls exit
+        ``EXIT_RESOURCE`` and never reach here.
         """
-        return self.status in (RESOURCE, CRASHED)
+        if self.status == RESOURCE:
+            return True
+        if self.status != CRASHED:
+            return False
+        return self.report is None or self.report.status != "failed"
 
     def line(self) -> str:
         """The one structured line this outcome logs and puts on the wire."""

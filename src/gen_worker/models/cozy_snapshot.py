@@ -345,6 +345,22 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
     return WorkerResolvedRepo(snapshot_digest=snapshot_digest, files=files)
 
 
+#: Directory-key narrowing markers. Written by :func:`snapshot_dir_key` and
+#: READ BACK by anyone handed a materialized path who must know whether that
+#: path is the whole composition: ``__c`` is a component-scoped subset (the
+#: declared components plus root config — loadable on its own), ``__x`` is an
+#: override EXCLUSION (th#1330 B2) and is NOT — the excluded component's
+#: subfolder is absent by construction, so the tree only loads together with
+#: the override trees it was narrowed for (pgw#816).
+SUBSET_MARKER = "__c"
+EXCLUDE_MARKER = "__x"
+
+
+def dir_key_excludes_components(path: str | Path) -> bool:
+    """Whether a materialized snapshot path is an override-narrowed tree."""
+    return EXCLUDE_MARKER in Path(str(path)).name
+
+
 def snapshot_dir_key(
     snapshot_digest: str,
     components: Sequence[str] = (),
@@ -365,9 +381,11 @@ def snapshot_dir_key(
     drop = sorted({c.strip() for c in exclude if c and str(c).strip()})
     key = snapshot_digest
     if comps:
-        key += "__c" + hashlib.sha1("+".join(comps).encode()).hexdigest()[:12]
+        key += SUBSET_MARKER + hashlib.sha1(
+            "+".join(comps).encode()).hexdigest()[:12]
     if drop:
-        key += "__x" + hashlib.sha1("+".join(drop).encode()).hexdigest()[:12]
+        key += EXCLUDE_MARKER + hashlib.sha1(
+            "+".join(drop).encode()).hexdigest()[:12]
     return key
 
 

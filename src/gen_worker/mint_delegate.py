@@ -94,6 +94,11 @@ class MintTask:
     function: str
     modules: Tuple[str, ...]
     snapshots: Dict[str, str] = field(default_factory=dict)
+    # pgw#816: the parent's RESOLVED component overrides, slot -> comp ->
+    # local tree. Part of the composition, not a detail: the base snapshot is
+    # fetched with these components EXCLUDED (th#1330 B2), so a child handed
+    # only `snapshots` is handed a tree that cannot load.
+    component_paths: Dict[str, Dict[str, str]] = field(default_factory=dict)
     weight_lane: str = ""
     lane: str = ""
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -171,6 +176,10 @@ def build_request(
         report=str(Path(workdir) / mint_process.REPORT_NAME),
         cfg=cfg_spec(pending.cfg),
         snapshots=dict(task.snapshots),
+        component_paths={
+            slot: dict(comps)
+            for slot, comps in task.component_paths.items() if comps
+        },
         device=-1 if task.device is None else int(task.device),
         vram_cap_bytes=int(cap_bytes),
         lane=task.lane,
@@ -401,8 +410,9 @@ def _emit_abort(
         f"family={family} key={key}: the mint PROCESS ended "
         f"{outcome.status} on attempt {attempt} "
         f"(phase={outcome.last_phase or 'unknown'}, "
-        f"exit={outcome.exit_code}) — this worker kept serving eager "
-        f"throughout: {outcome.detail[:600]}",
+        f"exit={outcome.exit_code}, "
+        f"{'retryable' if outcome.retryable else 'deterministic'}) — this "
+        f"worker kept serving eager throughout: {outcome.detail[:600]}",
         phase=f"delegated_{outcome.status}",
     )
 

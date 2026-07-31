@@ -213,6 +213,39 @@ def select_specs(
     return chosen, siblings
 
 
+def assert_composable(
+    snapshots: Dict[str, str], overrides: Dict[str, Dict[str, str]],
+) -> None:
+    """pgw#816: refuse a request that describes a tree this child cannot load.
+
+    A materialized snapshot path is not self-describing except in one
+    direction: ``snapshot_dir_key`` stamps ``__x`` on a tree fetched with an
+    overridden component EXCLUDED (th#1330 B2). Handed such a path and no
+    override for it, diffusers walks into the absent subfolder and reports
+    ``no file named config.json found in directory <the tree's ROOT>`` — which
+    names neither the component nor the cause, and cost the first delegated
+    mint in production two attempts to say nothing.
+
+    So the wiring gap is caught HERE, before a single weight is read, as a
+    named REFUSAL: deterministic, terminal, and it points at the parent that
+    built the request rather than at the loader that tripped over it.
+    """
+    from .models.cozy_snapshot import dir_key_excludes_components
+
+    bad = sorted(
+        slot for slot, path in snapshots.items()
+        if dir_key_excludes_components(path) and not overrides.get(slot)
+    )
+    if not bad:
+        return
+    raise MintChildRefused(
+        f"slot(s) {bad} were materialized as override-narrowed trees "
+        f"(the overridden component's files were excluded from the fetch) "
+        f"but this request carries no component override for them, so the "
+        f"composition cannot be rebuilt: "
+        + "; ".join(f"{slot}={snapshots[slot]}" for slot in bad))
+
+
 def _pick_compile_target(loaded: Dict[str, Any], cfg: Any) -> Tuple[str, Any]:
     from . import compile_cache as cc
 
@@ -384,6 +417,15 @@ def _mint_aot(
 
 def mint(request: MintRequest) -> MintReport:
     """Build the cell. Raises ``MintChildRefused`` for a named refusal."""
+    overrides = {
+        slot: dict(comps)
+        for slot, comps in request.component_paths.items() if comps
+    }
+    # pgw#816: the request's SHAPE is checked before anything heavy is
+    # imported or a single weight is read — a composition this child cannot
+    # rebuild is a wiring refusal, not a load crash eight seconds in.
+    assert_composable(dict(request.snapshots), overrides)
+
     from . import compile_cache as cc
     from . import env_seal
     from .cli.run import run_setup
@@ -410,11 +452,14 @@ def mint(request: MintRequest) -> MintReport:
     spec, siblings = select_specs(specs, request.function)
     cfg = compile_cfg(request.cfg)
 
-    frame(phase="load", note=f"setup {spec.cls.__name__}")
+    frame(phase="load", note=(
+        f"setup {spec.cls.__name__}"
+        + (f" (+{sum(len(c) for c in overrides.values())} component "
+           f"override(s))" if overrides else "")))
     instance = spec.cls()
     loaded = run_setup(
         instance, dict(request.snapshots), arm_compile=False,
-        return_loaded=True) or {}
+        return_loaded=True, component_paths=overrides) or {}
     slot, pipe = _pick_compile_target(loaded, cfg)
     frame(phase="load", note=f"compile target on slot {slot!r}")
 
@@ -555,5 +600,5 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
 
 
-__all__ = ["MintChildRefused", "cap_vram", "compile_cfg", "frame", "main",
-           "mint", "select_specs"]
+__all__ = ["MintChildRefused", "assert_composable", "cap_vram", "compile_cfg",
+           "frame", "main", "mint", "select_specs"]

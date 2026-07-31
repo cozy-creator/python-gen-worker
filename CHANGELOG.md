@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.82.0 (unreleased)
+
+- **pgw#816 — the delegated mint child could not load the pipeline the serving process
+  was serving, so the first AOT mint in platform history crashed at `phase=load`.** On
+  the first production run of the delegated route (0.81.0, real L4, sdxl `w8a8`,
+  `cyberrealistic-xl:fp8-linearonly-review`) the child died twice at ~8.5 s with
+  `OSError: Error no file named config.json found in directory
+  …/cas/snapshots/sha256:32fa2ba6…__x76b2ae62d32f`, while the serving process in the same
+  pod loaded that exact directory and answered requests from it throughout.
+
+  The `__x76b2ae62d32f` suffix is the diagnosis, and our own `snapshot_dir_key` wrote it:
+  `__x` marks a tree materialized with an overridden component EXCLUDED from the fetch
+  (th#1330 B2), and `sha1("vae")[:12] == 76b2ae62d32f`. That tree has no `vae/` by
+  construction — it is loadable only TOGETHER with the override tree it was narrowed for.
+  The parent had resolved that override and injected it through
+  `from_pretrained(components=…)`; the child was handed `Dict[slot, path]` and nothing
+  else, so it re-composed a pipeline with a component missing, and diffusers reported it
+  as a missing `config.json` at the tree's ROOT — naming neither the component nor the
+  cause. The boundary was the bug: **a directory path does not describe a composition.**
+
+  `MintRequest`/`MintTask`/`_BackgroundMint` now carry the parent's resolved
+  `component_paths` (slot -> component -> local tree), and `cli.run.run_setup` grew the
+  same `components=` seam the executor uses, so the child loads through the identical
+  `load_component_override` -> `load_slot` -> `from_pretrained` path. Nothing is
+  re-fetched (minimum-fetch is intact) and the B2 exclusion stands. New
+  `mint_child.assert_composable` refuses a request whose slot is override-narrowed but
+  carries no override — by name, before discovery, the toolchain probe or a single weight
+  read. This unblocks BOTH mint routes: on 0.81.0 the dynamo/JIT mint is delegated too and
+  died in the same child load.
+
+- **pgw#816 — a crash the child CLASSIFIED is not retried.** Those two identical 8.5 s
+  attempts bought nothing. A `status="failed"` report means the child caught its own
+  exception and named it, from the same request file against the same on-disk inputs, so
+  attempt 2 re-runs it exactly; `MintOutcome.retryable` now holds only for a death the
+  child could NOT classify (no report: signal, OOM-killer, the parent's stall kill) and
+  for `EXIT_RESOURCE`, which was always the case a retry exists for. The abort event says
+  `deterministic` or `retryable` so the wire states why there was no second attempt.
+
 ## 0.81.0 (2026-07-31) — the w8a8 lane can mint again and a mint can no longer publish nothing silently: the two refusals that kept `aot_mint_phases` empty platform-wide are gone, every publish terminus is typed, and `run_impl` splits K ways for a 12.6x host compile
 
 > ### ⚠ 0.81.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN ACTUALLY REACH A MINT

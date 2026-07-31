@@ -2798,6 +2798,12 @@ class _BackgroundMint:
     # lemon host (pgw#786).
     modules: Tuple[str, ...] = ()
     snapshot_paths: Dict[str, str] = dc_field(default_factory=dict)
+    # pgw#816: and the THIRD fact, which the first delegated mint in
+    # production died without — the resolved component overrides (pgw#617),
+    # slot -> comp -> local tree. th#1330 B2 excludes an overridden
+    # component's files from the base fetch, so `snapshot_paths` alone names
+    # a narrowed tree (`<digest>__x<fp>`) that no loader can open.
+    component_paths: Dict[str, Dict[str, str]] = dc_field(default_factory=dict)
     # th#1299: WHY this mint was asked to stop. The abort event used to report
     # "(adopt-on-arm / vacate / shutdown)" — three unrelated causes in one
     # string — so a mint that died could not be told from a mint that was
@@ -6592,6 +6598,10 @@ class Executor:
                     selections=mint_selections,
                     modules=_mint_modules(spec),
                     snapshot_paths=dict(paths),
+                    component_paths={
+                        slot: dict(comps)
+                        for slot, comps in component_paths.items() if comps
+                    },
                 )
                 logger.info(
                     "eager-first boot for %s (pgw#671): READY at eager tier "
@@ -9536,6 +9546,10 @@ class Executor:
                     function=spec.name,
                     modules=bg.modules or _mint_modules(spec),
                     snapshots=dict(bg.snapshot_paths),
+                    component_paths={
+                        slot: dict(comps)
+                        for slot, comps in bg.component_paths.items()
+                    },
                     weight_lane=compile_cache.cell_base_lane(pipe),
                     lane=self._served_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
