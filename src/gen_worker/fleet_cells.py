@@ -1418,6 +1418,21 @@ def mint_recipe(
     if refusal:
         return _decline("aot_lifted_torch_gap", refusal)
 
+    # pgw#822: the LAST thing checkable without renting anything. Every
+    # declared graph class's input names against its target module's own
+    # forward signature — per class, because the adapter fork's two halves
+    # declare different contracts. A mismatch is a DECLARATION defect: no
+    # child, no pod and no compile can resolve it, so spending one to
+    # rediscover the sentence is pure waste. Declines only the mint; the
+    # pipeline serves eager exactly as it did.
+    decl_gaps = aot_mint.declaration_module_gaps(
+        pipe, spec, export_declaration(family))
+    if decl_gaps:
+        return _decline(
+            "declaration_module_mismatch",
+            f"family {family!r}'s export declaration does not fit the "
+            f"composed pipeline: " + "; ".join(decl_gaps))
+
     # pgw#817: the declaration decides the mint SHAPE. `regional=True` on the
     # EXPORT declaration is a per-family opt-in, not a fleet default — pgw#812
     # ranked it that way deliberately: on a small-table DiT regional is a 2x

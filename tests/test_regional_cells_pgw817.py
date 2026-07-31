@@ -687,6 +687,11 @@ def test_mint_recipe_selects_the_regional_shape_from_the_DECLARATION(
     monkeypatch.setattr(aot_cells, "prefer_aot", lambda: True)
     monkeypatch.setattr(aot_mint, "lane_admitted", lambda *a, **k: "")
     monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda *a, **k: "")
+    # pgw#822's pre-spawn declaration/module gate, stubbed like every other
+    # gate above it: this test asks which SHAPE the declaration selects, and
+    # the double carries no class rows for a real class set to be derived
+    # from. Its own coverage is test_aot_lifted_arm_pgw822.py.
+    monkeypatch.setattr(aot_mint, "declaration_module_gaps", lambda *a, **k: [])
     monkeypatch.setattr(
         fleet_cells, "aot_export_spec", lambda *a, **k: object())
 

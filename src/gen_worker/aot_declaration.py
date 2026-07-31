@@ -34,7 +34,7 @@ import importlib.util
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import aot_mint
 from .aot_mint import DynamicDim, ExportSpec, MintRefused
@@ -501,20 +501,25 @@ def declared_inputs(
     return _positionalize(module, spec.target, decl.family, values), {}
 
 
-def _positionalize(
-    module: Any, target: str, family: str, values: Dict[str, Any],
-) -> Tuple[Any, ...]:
-    """Bind named values to their slots in the traced signature, all-positional.
+def target_attr(target: str) -> str:
+    """The callable a compile target names on its resolved module."""
+    return target.rsplit(".", 1)[1] if "." in target else "forward"
 
-    Undeclared slots BETWEEN declared ones are filled with their signature
-    defaults; trailing undeclared slots are omitted. Refusals by name: a
-    declared name that is not a parameter (declaration/module drift), a
-    keyword-only declared name (cannot meet the positional serve marshal),
-    and a required in-between parameter with no default and no declaration.
+
+def call_signature(module: Any, target: str, family: str) -> Tuple[List[Any], Set[str]]:
+    """``(positional parameters, keyword-only names)`` of the callable
+    ``target`` names on ``module``, refused by name when unreadable.
+
+    ONE read for two callers (pgw#822): :func:`_positionalize`, which binds
+    the declared feed to positional slots at mint time, and
+    :func:`gen_worker.aot_mint.declaration_module_gaps`, which asks the same
+    question on the PARENT before a child is spawned or a pod is rented.
+    Two implementations of "what does this forward take" would diverge, and
+    the whole value of the pre-spawn check is that it predicts the mint.
     """
     import inspect
 
-    attr = target.rsplit(".", 1)[1] if "." in target else "forward"
+    attr = target_attr(target)
     fn = getattr(module, attr, None)
     if fn is None:
         raise MintRefused(
@@ -533,6 +538,24 @@ def _positionalize(
         and p.name != "self"
     ]
     keyword_only = {p.name for p in params if p.kind == p.KEYWORD_ONLY}
+    return positional, keyword_only
+
+
+def _positionalize(
+    module: Any, target: str, family: str, values: Dict[str, Any],
+) -> Tuple[Any, ...]:
+    """Bind named values to their slots in the traced signature, all-positional.
+
+    Undeclared slots BETWEEN declared ones are filled with their signature
+    defaults; trailing undeclared slots are omitted. Refusals by name: a
+    declared name that is not a parameter (declaration/module drift), a
+    keyword-only declared name (cannot meet the positional serve marshal),
+    and a required in-between parameter with no default and no declaration.
+    """
+    import inspect
+
+    attr = target_attr(target)
+    positional, keyword_only = call_signature(module, target, family)
 
     hit = sorted(keyword_only & set(values))
     if hit:
@@ -616,6 +639,7 @@ def load_declaration(request: Mapping[str, Any], request_path: Optional[Path] = 
 
 __all__ = [
     "MintPlan",
+    "call_signature",
     "cell_plans",
     "declared_inputs",
     "derived_dynamic",
@@ -629,6 +653,7 @@ __all__ = [
     "plan_entry_name",
     "select_plan",
     "target_args",
+    "target_attr",
     "target_forks",
     "target_inputs",
 ]

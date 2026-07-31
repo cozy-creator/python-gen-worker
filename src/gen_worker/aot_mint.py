@@ -1008,6 +1008,21 @@ def _export_entry(
         if id(owner) not in branch_owners:
             espec = replace(
                 espec, lora_bucket=0, lifted_inputs=(), lora_fqns=())
+        elif espec.lifted_inputs \
+                and lora_lifted.lifted_binding(owner) is None:
+            # pgw#822: the ARM, asserted where it is needed rather than
+            # assumed. Without this the miss surfaces as `_positionalize`
+            # refusing the DECLARATION ("lora_a/lora_b are not parameters of
+            # forward") — a true sentence about the wrong thing, which is
+            # what sent the first real mint attempt looking at the endpoint's
+            # contract instead of at the pipeline's preparation.
+            raise MintRefused(
+                f"entry {entry!r}: this class declares lifted adapter "
+                f"input(s) {list(espec.lifted_inputs)!r} but "
+                f"{type(owner).__name__} carries no lifted forward — the "
+                f"branch containers are armed and the lifted signature is "
+                f"not, so the module about to be exported cannot take the "
+                f"adapter (lora_lifted.arm_lifted_lora_lanes installs both)")
 
     builder = aot_inputs.builder_for(espec.family, espec.target)
     args, kwargs = builder(owner, espec)
@@ -1263,6 +1278,117 @@ def adapter_arm_plans(
     return rows
 
 
+def declaration_module_gaps(
+    pipeline: Any, spec: ExportSpec, decl: Any,
+) -> List[str]:
+    """Every declared input name a graph class's target module cannot take —
+    the mint's own signature refusal, asked BEFORE anything is rented
+    (pgw#822).
+
+    pgw#822 cost a real L4 pod to learn a sentence a signature comparison
+    could have produced locally: the ``lora64`` bucket declares two lifted
+    adapter inputs and the module handed to ``torch.export`` did not take
+    them. Nothing about that needed a GPU, a child process, or a weight read.
+
+    PER CLASS, because the fork's two halves ask different questions
+    (pgw#790): the ``adapter=true`` class is exported from the LIFTED
+    forward, so ``lora_a``/``lora_b`` are admissible on a target the mint
+    will lift; the ``adapter=false`` class is exported from the PLAIN module
+    and declares no adapter at all (``_entry_spec`` zeroes its bucket). A
+    single one-size check would either refuse the branchless class or admit a
+    lifted declaration on a module that can never carry one.
+
+    ``lora_a``/``lora_b`` are admitted on the strength of the target being
+    LIFT-CAPABLE (``lora_lifted.branch_targets``), not of it being lifted
+    right now: the caller is a serving parent, and the lift is installed by
+    :func:`_arm_branches` inside the mint. That is the same COMPOSED-truth
+    scoping ``_export_entry`` applies, so this check predicts the mint rather
+    than describing the parent.
+
+    Returns gap sentences; empty means every declared class fits its module.
+    Never raises — an unreadable declaration is itself a gap, and the caller
+    is deciding whether to mint, not whether to serve.
+    """
+    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
+    from .models import lora_lifted
+
+    gaps: List[str] = []
+    try:
+        rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+        branch_owners = {
+            id(m) for m in lora_lifted.branch_targets(pipeline).values()}
+    except MintRefused as exc:
+        # A refused declaration is PROVEN unmintable — the mint would raise
+        # the same sentence, so say it now.
+        return [f"the declaration's class set is unmintable ({exc})"]
+    except Exception as exc:  # noqa: BLE001
+        # Anything else means this check could not READ the composed
+        # pipeline. A gate that declines when it cannot see is a new
+        # silent-decline (the pgw#813/#815 class in a new hat) — it reports
+        # what it can PROVE and abstains otherwise. The mint's own gates stay
+        # load-bearing either way.
+        logger.debug(
+            "aot-mint: declaration/module check not applicable (%s: %s)",
+            type(exc).__name__, exc)
+        return []
+
+    for plan, _arm in rows:
+        entry = _decl.plan_entry_name(plan)
+        try:
+            espec = _entry_spec(spec, plan, decl)
+            resolved = _resolve_target(pipeline, espec.target)
+            if resolved is None:
+                # Not this gate's question. "The pipeline carries no such
+                # target" is a different condition with its own owners
+                # (`compile_cache.has_compile_target` on the way in,
+                # `_export_entry` on the way out); with no module there is no
+                # signature to compare a declaration against, and claiming
+                # one would make this check refuse every pipeline shape it
+                # merely does not recognise.
+                continue
+            owner, _attr, _fn = resolved
+            positional, keyword_only = _decl.call_signature(
+                owner, espec.target, decl.family)
+            takes = {p.name for p in positional}
+            declared = {i.top_name for i in _decl.target_inputs(
+                decl, espec.target)}
+            declared |= {a.name for a in _decl.target_args(decl, espec.target)}
+            if espec.lifted_inputs and id(owner) in branch_owners:
+                # The mint lifts this target; the pair is admissible even
+                # though the resident forward does not take it yet.
+                declared |= set(espec.lifted_inputs)
+                takes |= set(espec.lifted_inputs)
+            elif espec.lifted_inputs:
+                gaps.append(
+                    f"entry {entry!r}: the class declares lifted adapter "
+                    f"input(s) {list(espec.lifted_inputs)!r} but "
+                    f"{type(owner).__name__} carries no branch-capable "
+                    f"module, so no lifted forward can be installed on it")
+                continue
+        except MintRefused as exc:
+            gaps.append(f"entry {entry!r}: {exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001 — see the abstain note above
+            logger.debug(
+                "aot-mint: entry %r not checkable (%s: %s)",
+                entry, type(exc).__name__, exc)
+            continue
+        blocked = sorted(declared & keyword_only)
+        if blocked:
+            gaps.append(
+                f"entry {entry!r}: declared input(s) {blocked!r} are "
+                f"KEYWORD-ONLY on {type(owner).__name__}."
+                f"{_decl.target_attr(espec.target)} — the mint feeds every "
+                f"input positionally")
+        missing = sorted(declared - takes - keyword_only)
+        if missing:
+            gaps.append(
+                f"entry {entry!r}: declared input(s) {missing!r} are not "
+                f"parameters of {_decl.target_attr(espec.target)!r} on "
+                f"{type(owner).__name__} (parameters: {sorted(takes)!r})")
+    return gaps
+
+
 def _disarm_branches(pipeline: Any) -> None:
     """Take the pipeline back to the BRANCHLESS graph family (pgw#790).
 
@@ -1279,16 +1405,30 @@ def _disarm_branches(pipeline: Any) -> None:
         "graph class(es)")
 
 
-def _rearm_branches(pipeline: Any, bucket: int) -> None:
-    """Restore canonical placement + the lifted signature after the
-    branchless exports. The mint process may go on to serve or re-mint, and
-    a pipeline left branchless would silently be a different graph family."""
-    if not bucket:
-        return
-    from .models import lora_lifted, w8a8_lora
+def _arm_branches(pipeline: Any, bucket: int) -> None:
+    """Put the pipeline on the LIFTED branch-bearing graph family — canonical
+    branch containers first, lifted call signature second (pgw#822).
 
-    w8a8_lora.enable_branch_lanes(pipeline, int(bucket))
-    lora_lifted.install_lifted_lora_lanes(pipeline, int(bucket))
+    The SAME two shipped calls, in the SAME order, as the serving arm
+    (``models.provision.arm_aot``): a lifted class exports the denoiser's
+    lifted forward, so the module must carry it before ``builder()`` binds
+    ``lora_a``/``lora_b`` to positional slots. pgw#822 is what happens when
+    it does not — the child armed the DYNAMO lane (containers only) and the
+    declaration was refused against the bare ``UNet2DConditionModel``.
+
+    Owned HERE rather than left to the caller because this function already
+    owns the other half of the fork (:func:`_disarm_branches`): an arm state
+    machine with one end enforced and the other a convention is how the
+    convention gets skipped. Idempotent, so a caller that already composed
+    lifted (:func:`aot_inputs.compose`) pays nothing.
+
+    Also the RE-arm after the branchless exports: the mint process may go on
+    to serve or re-mint, and a pipeline left branchless would silently be a
+    different graph family.
+    """
+    from .models import lora_lifted
+
+    lora_lifted.arm_lifted_lora_lanes(pipeline, int(bucket or 0))
 
 
 def mint(
@@ -1380,6 +1520,10 @@ def mint(
 
     minted: List[_MintedEntry] = []
     disarmed = False
+    # pgw#822: the adapter-BEARING classes are exported from the lifted
+    # forward. Arming it is this function's job, not the caller's — see
+    # `_arm_branches`.
+    _arm_branches(pipeline, int(spec.lora_bucket or 0))
     t_export = time.monotonic()
     try:
         for plan, arm in rows:
@@ -1402,7 +1546,7 @@ def mint(
                     compile_now=not parallel))
     finally:
         if disarmed:
-            _rearm_branches(pipeline, int(spec.lora_bucket or 0))
+            _arm_branches(pipeline, int(spec.lora_bucket or 0))
 
     if parallel:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
@@ -2458,6 +2602,7 @@ __all__ = [
     "cell_identity",
     "compile_entry_files",
     "compose_for_mint",
+    "declaration_module_gaps",
     "declared_range_gaps",
     "dynamic_shapes_spec",
     "emit_phase_events",
