@@ -1,25 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- **th#1303/pgw#807 — cell receipts are ALGORITHM-AGNOSTIC, which is what the cell
-  self-mint flip was actually blocked on.** Arming compares `receipt.artifact_blake3`
-  inside a signed JWS that can never be edited, and the receipt is fetched by
-  `?blake3=<hex>`. Publish a cell over v2 and the lookup answers "no receipt", every
-  worker refuses to arm, and the fleet re-mints — silently, looking exactly like a
-  cold cache. The canonical binding is now `artifact.digest`, always algorithm-tagged,
-  and verification DISPATCHES on that tag: an untagged bare-hex digest is refused
-  rather than read as some assumed algorithm, and a receipt binding no digest at all
-  is refused rather than compared against nothing.
-
-  Dual-read, deliberately: `crv` stays `cell-receipt-v1` (the deployed fleet refuses
-  any other version outright, so a bump would make every hub-minted receipt
-  unverifiable on first deploy), and a legacy bare-hex `blake3` claim still verifies —
-  every cell the fleet holds today was published over v1. Both arms die at phase 4.
-  `fleet_cells.py`'s self-mint stays on `commit()` with its two remaining gates named
-  in code: the hub's v2 route mints no cell receipt at all (th#1340), and the serving
-  fleet must be past the release carrying this reader.
-
 ## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
 
 > ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL
@@ -55,6 +35,24 @@
 
   No auto-select and no env knob: the protocol is named at the call site, so
   "which producers are on v2 today?" is answerable by reading the code.
+
+- **th#1303/pgw#807 — cell receipts are ALGORITHM-AGNOSTIC, which is what the cell
+  self-mint flip was actually blocked on.** Arming compares `receipt.artifact_blake3`
+  inside a signed JWS that can never be edited, and the receipt is fetched by
+  `?blake3=<hex>`. Publish a cell over v2 and the lookup answers "no receipt", every
+  worker refuses to arm, and the fleet re-mints — silently, looking exactly like a
+  cold cache. The canonical binding is now `artifact.digest`, always algorithm-tagged,
+  and verification DISPATCHES on that tag: an untagged bare-hex digest is refused
+  rather than read as some assumed algorithm, and a receipt binding no digest at all
+  is refused rather than compared against nothing.
+
+  Dual-read, deliberately: `crv` stays `cell-receipt-v1` (the deployed fleet refuses
+  any other version outright, so a bump would make every hub-minted receipt
+  unverifiable on first deploy), and a legacy bare-hex `blake3` claim still verifies —
+  every cell the fleet holds today was published over v1. Both arms die at phase 4.
+  `fleet_cells.py`'s self-mint stays on `commit()` with its two remaining gates named
+  in code: the hub's v2 route mints no cell receipt at all (th#1340), and the serving
+  fleet must be past the release carrying this reader.
 
 - **pgw#809 — a cell's entries compile K-wide, out of process.** `aot_mint` exported
   and compiled a pgw#758 cell's graph classes one at a time; an sdxl cell is 18 entries
