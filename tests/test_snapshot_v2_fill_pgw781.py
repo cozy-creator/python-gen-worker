@@ -381,10 +381,9 @@ def _entry(n_chunks=2, **over):
 
 
 def _parse(entry):
-    from gen_worker.models.hub_client import _parse_chunks
-    from gen_worker.models.refs import TensorhubRef
-    return _parse_chunks(TensorhubRef(owner="o", repo="r"), entry["path"],
-                         entry.get("chunks"), entry.get("chunk_urls"))
+    from gen_worker.models.hub_client import parse_chunk_list
+    return parse_chunk_list("tensorhub resolve for o/r", entry["path"],
+                            entry.get("chunks"), entry.get("chunk_urls"))
 
 
 def test_chunk_urls_is_a_SEPARATE_index_aligned_array():

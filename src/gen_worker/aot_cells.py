@@ -55,6 +55,14 @@ from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .config import get_settings
 from .convert.hub import blake3_file
+from .models.chunk_cas import (
+    CAS_CHUNK_SIZE_BYTES,
+    ChunkSpec,
+    DigestMismatch,
+    download_chunked_file,
+    verify_file_digest,
+)
+from .models.hub_client import parse_chunk_list, resolved_entry_digest
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +208,7 @@ def _download_artifact(
     cache_dir: Optional[Path],
 ) -> Optional[Path]:
     """Resolve the checkpoint's manifest and fetch its artifact tarball,
-    blake3-verified against the manifest entry. Cached by cell key.
+    digest-verified against the manifest entry. Cached by cell key.
 
     pgw#764: bracketed as the ``cell_fetch`` boot phase. Whether this was a
     cold pull or a cache hit — and how many bytes it cost — is the difference
@@ -256,29 +264,73 @@ def _download_artifact_inner(
         _emit("resolve_failed",
               f"family={family} key={key}: manifest has no artifact tarball")
         return None
-    want_b3 = str(entry.get("blake3") or "").strip().lower()
-    if want_b3.startswith("blake3:"):
-        want_b3 = want_b3[7:]
-    if dest.is_file() and want_b3 and blake3_file(dest) == want_b3:
-        fetch.bytes_moved(dest.stat().st_size, boot_mod.SOURCE_LOCAL)
-        return dest
+    # th#1303: read the ALGORITHM-TAGGED digest, and REFUSE when there is
+    # none. The old code read `entry["blake3"]` — absent on every manifest v2
+    # entry — and then guarded both integrity checks on its truthiness, so a
+    # v2 cell was installed and executed with no verification at all while
+    # reporting success. A cell artifact is compiled code: an unreadable
+    # digest must fail closed, never degrade into "no check".
+    try:
+        want_ref = resolved_entry_digest(
+            entry, what=f"family={family} key={key}: manifest entry")
+    except ValueError as exc:
+        _emit("resolve_failed", str(exc))
+        return None
 
+    if dest.is_file():
+        try:
+            verify_file_digest(dest, want_ref)
+        except DigestMismatch:
+            dest.unlink(missing_ok=True)  # stale cache — refetch below
+        except ValueError as exc:
+            _emit("resolve_failed", f"family={family} key={key}: {exc}")
+            return None
+        else:
+            fetch.bytes_moved(dest.stat().st_size, boot_mod.SOURCE_LOCAL)
+            return dest
+
+    try:
+        chunks = parse_chunk_list(
+            f"family={family} key={key}", str(entry.get("path") or ""),
+            entry.get("chunks"), entry.get("chunk_urls"))
+    except Exception as exc:  # noqa: BLE001 — a malformed list is a typed miss
+        _emit("resolve_failed",
+              f"family={family} key={key}: unreadable chunk list: {exc}")
+        return None
     url = str(entry.get("url") or "")
-    if not url:
+    if not chunks and not url:
+        # A chunked entry has no whole-file URL; a whole entry has no chunks.
         _emit("resolve_failed",
               f"family={family} key={key}: manifest entry has no URL")
         return None
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".part")
-    with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
-        dl.raise_for_status()
-        with open(tmp, "wb") as f:
-            for chunk in dl.iter_content(1 << 20):
-                f.write(chunk)
-    if want_b3 and blake3_file(tmp) != want_b3:
+    try:
+        if chunks:
+            # Every chunk's sha256 AND the whole-file digest are verified
+            # inside the commit stream — one pass, no second read.
+            download_chunked_file(
+                [ChunkSpec(sha256=c.sha256, url=c.url, length=c.length)
+                 for c in chunks],
+                tmp,
+                whole_digest=want_ref,
+                total_size=int(entry.get("size_bytes") or 0),
+                chunk_size_bytes=(
+                    int(entry.get("chunk_size_bytes") or 0)
+                    or CAS_CHUNK_SIZE_BYTES),
+            )
+        else:
+            with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
+                dl.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in dl.iter_content(1 << 20):
+                        f.write(chunk)
+            verify_file_digest(tmp, want_ref)
+    except (ValueError, RuntimeError) as exc:
         tmp.unlink(missing_ok=True)
         _emit("digest_mismatch",
-              f"family={family} key={key}: downloaded bytes != manifest blake3")
+              f"family={family} key={key}: downloaded bytes refused "
+              f"against {want_ref[:20]}…: {exc}")
         return None
     tmp.replace(dest)
     fetch.bytes_moved(dest.stat().st_size, boot_mod.SOURCE_R2)
