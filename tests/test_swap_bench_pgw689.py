@@ -195,29 +195,58 @@ def test_lanes_without_a_component_loader_refuse_by_name(
         load_component(tree, "transformer")
 
 
-def test_the_identical_typeerror_retry_is_gone() -> None:
-    """Defect 2: the retry could not help (it re-ran the failing path) and
-    it destroyed the evidence. A loader TypeError now propagates, and the
-    torch_dtype question is answered by INSPECTION instead."""
-    import inspect as _inspect
+def test_a_loader_typeerror_propagates_with_its_evidence(
+    tiny_tree: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defect 2, by outcome. The old ``except TypeError: retry without
+    torch_dtype`` idiom caught a TypeError raised deep inside diffusers'
+    quantization-config reconstruction, re-ran a path that failed
+    identically, and reported the SECOND failure — so the real cause never
+    surfaced. What matters to a caller: the original error arrives intact,
+    and the loader is entered exactly once."""
+    from diffusers import UNet2DModel
 
-    from gen_worker.models import loading
+    from gen_worker.models.loading import load_component
 
-    src = _inspect.getsource(loading.load_component)
-    assert "except TypeError" not in src
+    calls: List[Any] = []
 
-    class _NoDtype:
-        @staticmethod
-        def from_pretrained(path: str) -> str:
-            return path
+    def _boom(path: str, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        raise TypeError("NVIDIAModelOptConfig.__init__() missing 'quant_type'")
 
-    class _AnyKwargs:
-        @staticmethod
-        def from_pretrained(path: str, **kwargs: Any) -> str:
-            return path
+    monkeypatch.setattr(UNet2DModel, "from_pretrained", staticmethod(_boom))
+    with pytest.raises(TypeError, match="quant_type"):
+        load_component(tiny_tree, "unet")
+    assert len(calls) == 1, "the loader was retried — the evidence is gone"
 
-    assert loading._accepts_kwarg(_NoDtype.from_pretrained, "torch_dtype") is False
-    assert loading._accepts_kwarg(_AnyKwargs.from_pretrained, "torch_dtype") is True
+
+def test_torch_dtype_is_offered_only_to_loaders_that_take_it(
+    tiny_tree: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement for that retry, also by outcome: whether the loader
+    can take ``torch_dtype`` is settled BEFORE the call, so a loader that
+    cannot take it still loads rather than raising."""
+    from diffusers import UNet2DModel
+
+    from gen_worker.models.loading import load_component
+
+    seen: List[Any] = []
+
+    def _any_kwargs(path: str, **kwargs: Any) -> str:
+        seen.append(kwargs)
+        return "loaded"
+
+    def _no_dtype(path: str) -> str:
+        seen.append({})
+        return "loaded"
+
+    monkeypatch.setattr(UNet2DModel, "from_pretrained", staticmethod(_any_kwargs))
+    assert load_component(tiny_tree, "unet", dtype="bf16") == "loaded"
+    assert "torch_dtype" in seen[0]
+
+    monkeypatch.setattr(UNet2DModel, "from_pretrained", staticmethod(_no_dtype))
+    assert load_component(tiny_tree, "unet", dtype="bf16") == "loaded"
+    assert seen[1] == {}
 
 
 # ---------------------------------------------------------------------------

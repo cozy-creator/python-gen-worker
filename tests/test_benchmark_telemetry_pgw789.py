@@ -166,6 +166,10 @@ def test_in_boot_closes_at_the_servable_milestone() -> None:
     ladder. Without it a ref delivered hours later appends a `weights_fetch`
     span to a finished boot, and `residual_ms` stops reconciling."""
     assert boot_phases.in_boot() is True
+    # pgw#797: the close now has a PRECONDITION — `hello`. A worker the hub
+    # cannot reach is not servable, and closing the boot before the stream
+    # existed is what suppressed every span on 0.78.0.
+    boot_phases.mark_once(boot_phases.PHASE_HELLO, since_process_start=True)
     boot_phases.mark(
         boot_phases.PHASE_FIRST_REQUEST_SERVABLE, since_process_start=True)
     assert boot_phases.in_boot() is False
@@ -175,6 +179,7 @@ def test_in_boot_closes_at_the_servable_milestone() -> None:
 def test_the_boot_ladder_reconciles_with_the_new_phases() -> None:
     """th#1111's rule at boot scale: measured + residual == the boot window,
     and the cumulative milestone is the total, never a part of the sum."""
+    boot_phases.mark_once(boot_phases.PHASE_HELLO, since_process_start=True)
     with boot_phases.span(boot_phases.PHASE_WEIGHTS_FETCH, ref="repo/sdxl") as f:
         f.bytes_moved(1_000, boot_phases.SOURCE_VOLUME)
     with boot_phases.span(boot_phases.PHASE_PIPELINE_LOAD, function="render"):
@@ -197,6 +202,17 @@ def test_servable_is_deferred_until_awaited_functions_are_set_up() -> None:
     dispatch to — so the number measured "startup() returned", not "servable",
     and the ~230s of tensorhub-ref weight fetching happens AFTER it on exactly
     that path. Drives the real `Lifecycle` methods.
+
+    pgw#797 CORRECTED THE OWNERSHIP this test originally pinned. Deferring the
+    mark into `_setup_awaiting_functions` fixed one path and left the one every
+    real release takes (a `Compile`/`Slot` spec is routed to `dynamic`, never
+    reaches `awaiting_hub`, and closed the boot at the end of `startup()`
+    anyway). The milestone now has ONE owner — `maybe_send_state_delta`, which
+    marks it on the fact itself: a StateDelta advertising a function went out.
+    So what this test can still pin is the NEGATIVE half — awaiting functions
+    do not close the boot — and that `_setup_awaiting_functions` is no longer an
+    owner. The positive half is only assertable on a real boot, and lives in
+    `test_boot_span_ladder_pgw797.py`, off the wire.
     """
     from gen_worker.lifecycle import Lifecycle
 
@@ -240,12 +256,16 @@ def test_servable_is_deferred_until_awaited_functions_are_set_up() -> None:
         await watch
 
     asyncio.run(_drive())
-    # Snapshot delivered, setup finished, functions advertised: NOW it is
-    # servable, and the number runs from process start.
-    assert boot_phases.servable_ms() is not None
-    row = _row(boot_phases.recorded_rows(), boot_phases.PHASE_FIRST_REQUEST_SERVABLE)
-    assert row is not None
-    assert row.cumulative is True
+    # Snapshot delivered, setup finished — and the boot is STILL open, because
+    # `maybe_send_state_delta` is stubbed here and nothing has advertised a
+    # function. That is the corrected contract, not a regression: the close
+    # follows the advertisement, never the setup call that enabled it.
+    assert boot_phases.servable_ms() is None
+    assert boot_phases.in_boot() is True
+    assert not [
+        r for r in boot_phases.recorded_rows()
+        if r.phase == boot_phases.PHASE_FIRST_REQUEST_SERVABLE
+    ], "_setup_awaiting_functions is no longer an owner of the boot close"
 
 
 def test_a_draining_worker_never_claims_a_boot_number() -> None:

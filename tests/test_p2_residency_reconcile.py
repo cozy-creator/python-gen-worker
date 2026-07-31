@@ -23,6 +23,7 @@ import msgspec
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.blob_host import BlobHost, CorruptingBlobHost
+from harness.progress_wait import Cadence, await_progress
 from harness.hub_double import (
     hub_double,
     is_exact_model_event,
@@ -182,7 +183,17 @@ def test_mutable_tag_move_fences_events_by_digest_and_generation(tmp_path) -> No
             assert priority_a.status == pb.JOB_STATUS_OK
             assert _decode(priority_a.inline).response == payload_a.decode()
             conn.wait_for_count(resumed_b, b_events_before + 1)
-            assert harness.worker.executor.store.resident_identity(_MODEL_REF) == ("snap-b", 2)
+            # pgw#795: the event and the store update are not the same instant,
+            # so read the store on PROGRESS rather than sampling it once and
+            # hoping. Sampling failed a full-suite run at ('snap-a', 0) — the
+            # resumed pass had announced B but not yet rebased the identity.
+            await_progress(
+                lambda: harness.worker.executor.store.resident_identity(_MODEL_REF),
+                lambda seen: seen == ("snap-b", 2),
+                what=f"the resident identity of {_MODEL_REF} to rebase to (snap-b, 2)",
+                cadence=Cadence(),
+                gone=lambda: None if harness.alive else "the worker thread exited",
+            )
     finally:
         blobs.shutdown()
 

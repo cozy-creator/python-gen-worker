@@ -2,9 +2,11 @@
 
 A conversion / dataset / training endpoint writes files locally, calls
 ``publish_flavors(ctx, flavors)``, and returns a result struct. Each flavor's
-``path`` (file or directory) becomes ONE Tensorhub commit against the
+``path`` (file or directory) becomes ONE Tensorhub publish against the
 destination repo (explicit ``destination_repo=`` or the job payload's
 reserved ``destination.repo`` field). Nothing publishes implicitly.
+
+Publishes over the chunked sha256 CAS (th#1303 ``HubClient.publish_v2``).
 """
 
 from __future__ import annotations
@@ -114,7 +116,23 @@ def publish_flavors(
             meta.pop(k, None)
         if placement:
             meta["placement"] = placement
-        results.append(client.commit(
+        # th#1303 phase 3, producer class 2 of N: the CONVERSION producer.
+        # `publish_flavors` is what every quantize / fuse / cast / distil job
+        # calls, so it is the highest-volume publisher after the mirror — and
+        # it is in the SAME class the mirror flip already crossed (clone.py's
+        # full-clone arm), which is why it goes second and not last.
+        #
+        # Safe here for the reason v2 requires: every file is a real local
+        # file (`_flavor_files` walks the produced tree), so each digest is
+        # PROVEN from bytes in hand rather than asserted. There is no
+        # auto-select and no env knob — naming the protocol at the call site
+        # is what makes "which producers are on v2 today?" answerable by
+        # reading the code instead of by sampling traffic.
+        #
+        # A `merge` onto a prior blake3 manifest is a typed refusal
+        # (`mixed_algorithm_manifest`), not a silent partial; `mode` here
+        # defaults to "replace" (th#597 C2), so the common path is unaffected.
+        results.append(client.publish_v2(
             destination_repo=dest,
             files=_flavor_files(flavor),
             tags=list(tags or []),

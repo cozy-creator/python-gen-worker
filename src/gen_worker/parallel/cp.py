@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, cast
 
 logger = logging.getLogger(__name__)
 
@@ -324,7 +324,7 @@ def _install_on_component(comp: Any, *, degree: int, comms: CpComms) -> None:
 
     device = comms.device if isinstance(comms.device, torch.device) else torch.device(str(comms.device))
     mesh = _GroupMesh(comms.pg, int(degree), int(comms.rank))
-    config.setup(int(comms.rank), int(degree), device, mesh=mesh)
+    config.setup(int(comms.rank), int(degree), device, mesh=cast(Any, mesh))
     comp._parallel_config = config
     for module in comp.modules():
         if not isinstance(module, attention_classes):

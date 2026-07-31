@@ -40,7 +40,7 @@ import logging
 import os
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterator, Optional, Sequence
@@ -409,10 +409,10 @@ def _download_chunked_locked(
         # ONLY case where bytes are read twice, and it is bounded by what a
         # previous process already committed — never by the whole file on a
         # fresh download.
-        with open(tmp, "rb") as f:
+        with open(tmp, "rb") as seed:
             remaining = committed
             while remaining > 0:
-                b = f.read(min(_READ_CHUNK_BYTES, remaining))
+                b = seed.read(min(_READ_CHUNK_BYTES, remaining))
                 if not b:
                     raise OSError(f"{tmp}: short read while seeding the resume hash")
                 hasher.update(b)
@@ -441,7 +441,7 @@ def _download_chunked_locked(
     session = session_factory()
     try:
         with open(tmp, "ab") as out, ThreadPoolExecutor(max_workers=max_inflight) as pool:
-            inflight: Dict[int, "object"] = {}
+            inflight: Dict[int, "Future[bytes]"] = {}
             cursor = start_index
 
             def _submit_until_full() -> None:

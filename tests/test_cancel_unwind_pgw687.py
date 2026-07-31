@@ -60,7 +60,13 @@ def _wedge_state() -> Any:
     grace = executor_mod._CANCEL_UNWIND_GRACE_S
     recycle = executor_mod._CANCEL_UNWIND_RECYCLE_S
     yield
-    # Always let a wedged handler thread go, or the worker cannot shut down.
+    # Backstop only. A wedged handler holds the executor, so the worker cannot
+    # drain — and ``hub_double``'s exit runs ``harness.stop()``, whose thread
+    # join is a 15s bound that is then SILENTLY IGNORED. This fixture's teardown
+    # runs after that exit, so releasing here alone bought nothing: pgw#796
+    # measured the four wedge tapes at 15.5-19.0s each, ~60s of the suite, all
+    # of it that ignored join. Every tape now sets STUBBORN_RELEASE as its last
+    # statement INSIDE the ``with``, once its assertions have all run.
     wedge.STUBBORN_RELEASE.set()
     executor_mod._CANCEL_UNWIND_GRACE_S = grace
     executor_mod._CANCEL_UNWIND_RECYCLE_S = recycle
@@ -95,6 +101,7 @@ def test_wedge_shape_without_the_guard_is_silent_absorption() -> None:
         assert _result(conn, "r-wedge-b", timeout=2.0) is None, (
             "pre-fix shape: job B is absorbed with no result and no event")
         assert "polite" not in wedge.CALLS, "job B never reached its handler"
+        wedge.STUBBORN_RELEASE.set()  # see _wedge_state: release INSIDE the block
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +125,7 @@ def test_stuck_cancel_refuses_the_parked_next_job() -> None:
         assert res.status == pb.JOB_STATUS_RETRYABLE
         assert "cancel_unwind_stuck" in res.safe_message
         assert "polite" not in wedge.CALLS
+        wedge.STUBBORN_RELEASE.set()  # see _wedge_state: release INSIDE the block
 
 
 def test_quarantine_stops_advertising_and_refuses_new_assignments() -> None:
@@ -140,6 +148,7 @@ def test_quarantine_stops_advertising_and_refuses_new_assignments() -> None:
         res = _result(conn, "r-quar-c", timeout=10.0)
         assert res is not None and res.status == pb.JOB_STATUS_RETRYABLE
         assert "cancel_unwind_stuck" in res.safe_message
+        wedge.STUBBORN_RELEASE.set()  # see _wedge_state: release INSIDE the block
 
 
 def test_late_unwind_re_advertises_and_the_next_job_runs() -> None:
@@ -187,6 +196,7 @@ def test_thread_that_never_unwinds_recycles_the_process() -> None:
         assert exits == [70], (
             "a handler thread that never honours a cancel cannot be reclaimed "
             "in-process — the pod must be replaced")
+        wedge.STUBBORN_RELEASE.set()  # see _wedge_state: release INSIDE the block
 
 
 # ---------------------------------------------------------------------------

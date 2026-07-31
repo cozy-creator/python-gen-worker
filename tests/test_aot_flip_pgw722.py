@@ -165,11 +165,15 @@ class _StubHub:
     def __init__(self, items: List[Dict[str, Any]],
                  artifacts: Dict[str, bytes], *,
                  refuse_bearer: bool = False,
-                 fail_all: bool = False) -> None:
+                 fail_all: bool = False,
+                 entry_for: Optional[Any] = None) -> None:
         self.items = items
         self.artifacts = artifacts  # checkpoint_id -> tarball bytes
         self.refuse_bearer = refuse_bearer
         self.fail_all = fail_all
+        # (digest, blob, blob_url) -> the manifest file entry to serve. The
+        # default is a manifest v1 entry; th#1303 tests hand in v2 shapes.
+        self.entry_for = entry_for or _v1_entry
         self.requests: List[Tuple[str, bool]] = []
         outer = self
 
@@ -200,12 +204,10 @@ class _StubHub:
                         self.send_response(404)
                         self.end_headers()
                         return
-                    body = json.dumps({"files": [{
-                        "path": f"{digest}.tar.gz",
-                        "size_bytes": len(blob),
-                        "blake3": _blake3_bytes(blob),
-                        "url": f"http://{self.headers['Host']}/blob/{digest}",
-                    }]}).encode()
+                    body = json.dumps({"files": [outer.entry_for(
+                        digest, blob,
+                        f"http://{self.headers['Host']}/blob/{digest}",
+                    )]}).encode()
                 elif parsed.path.startswith("/blob/"):
                     body = outer.artifacts.get(parsed.path[len("/blob/"):], b"")
                 else:
@@ -232,6 +234,24 @@ def _blake3_bytes(blob: bytes) -> str:
     import blake3
 
     return str(blake3.blake3(blob).hexdigest())
+
+
+def _sha256_bytes(blob: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _v1_entry(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
+    """A manifest v1 file entry: the bare-hex ``blake3`` mirror, no ``digest``."""
+    return {"path": f"{digest}.tar.gz", "size_bytes": len(blob),
+            "blake3": _blake3_bytes(blob), "url": url}
+
+
+def _v2_entry(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
+    """A manifest v2 file entry: algorithm-tagged ``digest``, NO ``blake3``."""
+    return {"path": f"{digest}.tar.gz", "size_bytes": len(blob),
+            "digest": "sha256:" + _sha256_bytes(blob), "url": url}
 
 
 def _tarball(meta: Dict[str, Any], tmp_path: Path) -> bytes:
@@ -297,9 +317,20 @@ def test_discover_downloads_newest_and_registers_key(
         hub.close()
 
 
-def test_discover_retries_anonymously_on_401(
+def test_discover_names_a_refusal_and_never_retries_anonymously(
     tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    monkeypatch: Any,
 ) -> None:
+    """th#1335 (was: test_discover_retries_anonymously_on_401).
+
+    The anonymous retry is retired. th#1310 made the family cell repos private
+    and named the retry as the hazard that would turn one visibility flip into
+    unauthenticated cross-tenant enumeration; the worker JWT now carries a
+    hub-issued read grant instead. So a 401/403 must (a) NOT be re-issued
+    without the bearer, and (b) surface as a NAMED refusal — th#1230's lesson:
+    an authorization outcome the worker cannot tell apart from "this family has
+    no cells" is silently fatal to the whole lane.
+    """
     key = _key("8")
     meta = _pilot_meta(key)
     blob = _tarball(meta, tmp_path)
@@ -307,14 +338,25 @@ def test_discover_retries_anonymously_on_401(
         [{"checkpoint_id": "cafe02", "updated_at": "2026-07-28T00:00:00Z",
           "metadata": meta}],
         {"cafe02": blob}, refuse_bearer=True)
+    seen: List[Tuple[str, str]] = []
+    monkeypatch.setattr(
+        aot_cells, "_emit",
+        lambda phase, detail: seen.append((phase, detail)))
     try:
         adopted = aot_cells.discover(
             _FakePipe(), _Cfg(),
             base_url=hub.base_url, worker_jwt=lambda: "jwt-token",
             cache_dir=tmp_path / "cache")
-        assert adopted is not None and adopted.cell_key == key
+        assert adopted is None
     finally:
         hub.close()
+    phases = [p for p, _ in seen]
+    assert "not_authorized" in phases, seen
+    assert "list_failed" not in phases, (
+        "an authz refusal must not be laundered into the generic listing "
+        f"failure the worker treats as absence: {seen}")
+    # Not one request went out without the credential.
+    assert all(has_auth for _path, has_auth in hub.requests), hub.requests
 
 
 def test_discover_never_raises(
@@ -330,24 +372,139 @@ def test_discover_never_raises(
         hub.close()
 
 
-def test_discover_digest_mismatch_is_a_miss(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    key = _key("7")
+def _discover_against(
+    entry_for: Any, tmp_path: Path, *, key_seed: str,
+    seen: Optional[List[Tuple[str, str]]] = None,
+    monkeypatch: Optional[pytest.MonkeyPatch] = None,
+) -> Tuple[Optional[aot_cells.AdoptedAotCell], Path]:
+    """Run one discovery against a stub hub serving ``entry_for`` manifests.
+
+    Returns the adoption (or None) and the path the artifact would cache at,
+    so a test can assert about BYTES ON DISK — the only assertion that can
+    tell a real verification from one that never ran.
+    """
+    key = _key(key_seed)
     meta = _pilot_meta(key)
     blob = _tarball(meta, tmp_path)
+    cache = tmp_path / "cache"
     hub = _StubHub(
         [{"checkpoint_id": "cafe03", "updated_at": "2026-07-28T00:00:00Z",
           "metadata": meta}],
-        {"cafe03": blob})
-    # Corrupt the manifest digest: the download must be refused by name.
-    monkeypatch.setattr(aot_cells, "blake3_file", lambda p: "0" * 64)
+        {"cafe03": blob}, entry_for=entry_for)
+    if seen is not None and monkeypatch is not None:
+        monkeypatch.setattr(
+            aot_cells, "_emit",
+            lambda phase, detail: seen.append((phase, detail)))
     try:
-        assert aot_cells.discover(
+        adopted = aot_cells.discover(
             _FakePipe(), _Cfg(),
             base_url=hub.base_url, worker_jwt=lambda: "jwt",
-            cache_dir=tmp_path / "cache") is None
+            cache_dir=cache)
+    finally:
+        hub.close()
+    return adopted, cache / "aot-cells" / f"{key}.tar.gz"
+
+
+def test_discover_digest_mismatch_is_a_miss(
+    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+) -> None:
+    """v1: a manifest whose blake3 does not name the served bytes is refused."""
+    def wrong_v1(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
+        ent = _v1_entry(digest, blob, url)
+        ent["blake3"] = "0" * 64
+        return ent
+
+    adopted, dest = _discover_against(wrong_v1, tmp_path, key_seed="7")
+    assert adopted is None
+    assert not dest.exists() and not dest.with_suffix(".part").exists()
+
+
+def test_discover_refuses_a_v2_cell_whose_bytes_do_not_match_th1303(
+    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """th#1303 landmine 2 — the empty-guard class, on EXECUTABLE bytes.
+
+    A manifest v2 entry carries ``digest: "sha256:…"`` and NO ``blake3`` key.
+    The old code read ``entry["blake3"]``, got "", and both integrity guards
+    (``if want_b3 and …``) evaporated — so a v2 cell artifact was written to
+    the arming cache having been checked against nothing, and reported as a
+    successful fetch. Assert about the bytes, not about "ok": a happy path
+    returning a Path is exactly what the broken code also did.
+    """
+    def wrong_v2(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
+        ent = _v2_entry(digest, blob, url)
+        ent["digest"] = "sha256:" + "0" * 64
+        return ent
+
+    seen: List[Tuple[str, str]] = []
+    adopted, dest = _discover_against(
+        wrong_v2, tmp_path, key_seed="6", seen=seen, monkeypatch=monkeypatch)
+    assert adopted is None, "a v2 cell that hashes wrong must never arm"
+    assert not dest.exists() and not dest.with_suffix(".part").exists()
+    assert "digest_mismatch" in [p for p, _ in seen], seen
+
+
+def test_discover_verifies_a_v2_cell_with_sha256_th1303(
+    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+) -> None:
+    """The green half: a correct v2 entry is verified UNDER SHA-256 and armed.
+
+    Hashing a sha256 digest with blake3 is the mirror-image defect, so the
+    honest v2 path has to be pinned alongside the refusal.
+    """
+    adopted, dest = _discover_against(_v2_entry, tmp_path, key_seed="5")
+    assert adopted is not None
+    assert adopted.artifact == dest and dest.is_file()
+
+
+def test_discover_refuses_an_entry_with_no_digest_at_all_th1303(
+    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No digest is a REFUSAL, never a skip. A cell artifact is compiled code
+    the pod will execute; "the manifest didn't say" is not permission."""
+    def no_digest(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
+        ent = _v1_entry(digest, blob, url)
+        ent.pop("blake3")
+        return ent
+
+    seen: List[Tuple[str, str]] = []
+    adopted, dest = _discover_against(
+        no_digest, tmp_path, key_seed="4", seen=seen, monkeypatch=monkeypatch)
+    assert adopted is None
+    assert not dest.exists()
+    assert "resolve_failed" in [p for p, _ in seen], seen
+
+
+def test_discover_refetches_a_cached_artifact_that_stopped_matching_th1303(
+    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+) -> None:
+    """The cache-hit guard is the SECOND site the empty digest disarmed.
+
+    A corrupted (or substituted) cache file must be re-fetched, not served —
+    under v2, where the old ``dest.is_file() and want_b3 and …`` short-circuit
+    would have taken neither branch and fallen through to a re-download by
+    accident rather than by rule.
+    """
+    key = _key("3")
+    meta = _pilot_meta(key)
+    blob = _tarball(meta, tmp_path)
+    cache = tmp_path / "cache"
+    dest = cache / "aot-cells" / f"{key}.tar.gz"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"not the cell you published")
+    hub = _StubHub(
+        [{"checkpoint_id": "cafe03", "updated_at": "2026-07-28T00:00:00Z",
+          "metadata": meta}],
+        {"cafe03": blob}, entry_for=_v2_entry)
+    try:
+        adopted = aot_cells.discover(
+            _FakePipe(), _Cfg(), base_url=hub.base_url,
+            worker_jwt=lambda: "jwt", cache_dir=cache)
+        assert adopted is not None
+        assert dest.read_bytes() == blob, "the poisoned cache file was served"
+        assert [p for p, _ in hub.requests if p.startswith("/blob/")]
     finally:
         hub.close()
 

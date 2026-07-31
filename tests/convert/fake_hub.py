@@ -1,4 +1,4 @@
-"""Shared fake of tensorhub's /commits API (threaded HTTP server)."""
+"""Shared fake of tensorhub's publish APIs — v1 /commits AND th#1303 v2 /publishes."""
 
 from __future__ import annotations
 
@@ -7,6 +7,15 @@ from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 from gen_worker.convert.hub import HubClient
+
+
+import base64 as _base64
+import hashlib as _hashlib
+
+
+def _b64_sha(hexdigest: str) -> str:
+    """R2's `x-amz-checksum-sha256` is the base64 of the RAW digest."""
+    return _base64.b64encode(bytes.fromhex(hexdigest)).decode()
 
 
 class _FakeHub(BaseHTTPRequestHandler):
@@ -99,6 +108,42 @@ class _FakeHub(BaseHTTPRequestHandler):
                 manifests[key] = payload
                 results.append({"key": key, "status": "recorded"})
             self._send(200, {"results": results})
+            return
+        # ---- th#1303 v2: chunked sha256 CAS -------------------------------
+        # The clone/mirror path publishes over these now (clone.py:1192), so a
+        # fake that only knows /commits would make every clone test exercise a
+        # protocol the product no longer uses. Deliberately ENFORCES like R2 on
+        # the PUT: bytes that do not hash to the key are refused and nothing is
+        # stored, because that enforcement IS the v2 design.
+        if self.path.endswith("/publishes"):
+            req = self._read_json()
+            st["publish_request"] = req
+            st.setdefault("publish_requests", []).append(req)
+            st["auth"] = self.headers.get("Authorization", "")
+            pid = f"pub-{len(st.setdefault('publishes', {})) + 1}"
+            st["publishes"][pid] = req
+            self._send(201, {"publish_id": pid, "stage": "uploading",
+                             "declared_files": len(req.get("files") or []),
+                             **self._v2_plan(req)})
+            return
+        if "/publishes/" in self.path and self.path.endswith("/grants"):
+            pid = self.path.split("/publishes/")[1].split("/")[0]
+            self._send(200, self._v2_plan(st["publishes"][pid]))
+            return
+        if "/publishes/" in self.path and self.path.endswith("/complete"):
+            pid = self.path.split("/publishes/")[1].split("/")[0]
+            req = st["publishes"][pid]
+            plan = self._v2_plan(req)
+            if plan["need"]:
+                self._send(409, {"error": {"code": "upload_incomplete",
+                                           "message": "objects still awaiting upload"}})
+                return
+            st.setdefault("v2_manifests", {})[pid] = req.get("files") or []
+            self._send(200, {
+                "status": {"publish_id": pid, "stage": "promoted", "terminal": True},
+                "checkpoint": {"checkpoint_id": "sha256:" + "ab" * 32},
+                "checks_unavailable": ["15", "16", "17", "18", "19"],
+            })
             return
         if self.path.endswith("/commits"):
             if st.get("fail_commit_posts", 0) > 0:
@@ -241,6 +286,34 @@ class _FakeHub(BaseHTTPRequestHandler):
         # pgw#738's discrimination.
         self._send(404, {"error": {"code": "not_found", "message": "no route"}})
 
+
+    def _v2_plan(self, req: dict) -> dict:
+        """`{have, need}` answered from the fake CAS — residency comes from the
+        STORE, never from a client claim (th#634)."""
+        st = _FakeHub.state
+        cas = st.setdefault("v2_cas", set())
+        base = f"http://127.0.0.1:{self.server.server_port}"
+        have, need, seen = [], [], set()
+        for f in req.get("files") or []:
+            objs = ([(c["digest"], int(c["len"])) for c in f["chunks"]]
+                    if f.get("chunks")
+                    else [(str(f["digest"]).split(":", 1)[-1], int(f["size_bytes"]))])
+            for d, n in objs:
+                if d in seen:
+                    continue
+                seen.add(d)
+                if d in cas:
+                    have.append("sha256:" + d)
+                    continue
+                need.append({
+                    "digest": "sha256:" + d, "size_bytes": n,
+                    "staging_key": f"staging/sha256/{d}",
+                    "put_url": f"{base}/v2put/{d}",
+                    "headers": {"x-amz-checksum-sha256": _b64_sha(d)},
+                })
+        return {"have": have, "need": need, "distinct_objects": len(seen),
+                "resident_objects": len(have)}
+
     def do_PUT(self) -> None:  # noqa: N802
         st = _FakeHub.state
         if st.get("reset_puts", 0) > 0:
@@ -254,6 +327,23 @@ class _FakeHub(BaseHTTPRequestHandler):
             return
         n = int(self.headers.get("Content-Length") or 0)
         data = self.rfile.read(n) if n else b""
+        if self.path.startswith("/v2put/"):
+            key = self.path.rsplit("/", 1)[-1]
+            st.setdefault("put_counts", {})[self.path] = (
+                st.setdefault("put_counts", {}).get(self.path, 0) + 1)
+            if self.headers.get("x-amz-checksum-sha256") != _b64_sha(key):
+                self._send(403, {"error": {"code": "SignatureDoesNotMatch",
+                                           "message": "claim substituted"}})
+                return
+            if _hashlib.sha256(data).hexdigest() != key:
+                self._send(400, {"error": {"code": "BadDigest",
+                                           "message": "bytes do not hash to the key"}})
+                return
+            st.setdefault("v2_cas", set()).add(key)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         counts = st.setdefault("put_counts", {})
         counts[self.path] = counts.get(self.path, 0) + 1
         fail_paths = st.get("fail_put_paths") or {}

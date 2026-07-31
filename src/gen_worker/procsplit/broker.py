@@ -16,7 +16,11 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+
+# A hub query: a mapping (single-valued) or a sequence of pairs (pgw#807 sends
+# repeated ``artifact_digest`` keys, which a mapping cannot represent).
+QueryParams = Union[Mapping[str, Any], Sequence[Tuple[str, Any]]]
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,7 @@ def request(
     *,
     base_url: str = "",
     bearer: str = "",
-    params: Optional[Dict[str, Any]] = None,
+    params: Optional[QueryParams] = None,
     json: Optional[Dict[str, Any]] = None,
     timeout: float = 30.0,
 ) -> HubResponse:
@@ -72,6 +76,18 @@ def request(
     """
     broker = _broker
     if broker is not None:
+        if params is not None and not isinstance(params, Mapping):
+            # pgw#807 sends repeated query keys (several ``artifact_digest``);
+            # the delta-1 action seam (actions.authorize / _http_call) still
+            # enumerates single-valued keys, so a sequence of pairs cannot cross
+            # it yet. Refuse rather than silently collapse the repeats — the
+            # receipt gate fails CLOSED to a self-mint, never a wrong digest.
+            # Teaching the seam to carry repeated keys is the flip precondition
+            # (see pgw#783 tracker + actions.ACTIONS['cells.receipt']).
+            raise BrokerError(
+                f"{method} {path}: repeated query keys are not yet carried over "
+                "the parent-mediated control seam"
+            )
         return broker.call(method, path, params=params, json=json, timeout=timeout)
     from . import is_compute_child
 
@@ -165,7 +181,7 @@ class ChildBroker:
         method: str,
         path: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[Mapping[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
         timeout: float = 30.0,
     ) -> HubResponse:

@@ -66,9 +66,24 @@ def response_is_from_hub(resp: Any) -> bool:
         return False
     if not isinstance(body, dict):
         return False
-    # The hub always wraps failures as {"error": {"code": ..., ...}}.
     err = body.get("error")
-    return isinstance(err, dict) and "code" in err
+    # Shape 1, the common envelope: {"error": {"code": ..., ...}}.
+    if isinstance(err, dict) and "code" in err:
+        return True
+    # Shape 2, the PUBLISH envelope: {"error": "<code>", "message": ...}.
+    # `publishError.body()` (tensorhub `internal/api/repo_publish.go`) emits the
+    # code as a STRING, not an object — so every publish refusal was read as
+    # proxy-shaped and RETRIED under the silence window. Measured live on a v2
+    # publish (th#1303): a 422 from `/publishes/{id}/complete` was retried, the
+    # retry hit the now-terminal session and returned 409 `publish_repudiated`,
+    # and the ORIGINAL 422 — the only response that said WHY — was discarded.
+    # A retry loop that converts a diagnosable refusal into a different, later
+    # error is worse than one that does not retry at all.
+    # A proxy does not synthesise a string `error` alongside a `message` either,
+    # so this stays a hub-only signature. The hub-side fix is to emit the object
+    # envelope everywhere; this must keep working regardless, because old hubs
+    # exist and the client cannot require a deploy to classify an answer.
+    return isinstance(err, str) and bool(err.strip()) and "message" in body
 
 
 def is_proxy_outage(resp: Any) -> bool:

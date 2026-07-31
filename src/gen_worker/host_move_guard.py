@@ -53,11 +53,11 @@ def _target_is_cpu(args: tuple, kwargs: dict) -> bool:
         device, _, _, _ = torch._C._nn._parse_to(*args, **kwargs)
         return device is not None and device.type == "cpu"
     except Exception:
-        device = kwargs.get("device", args[0] if args else None)
+        raw = kwargs.get("device", args[0] if args else None)
         try:
             import torch
 
-            return device is not None and torch.device(device).type == "cpu"
+            return raw is not None and torch.device(raw).type == "cpu"
         except Exception:
             return False
 

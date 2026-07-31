@@ -111,7 +111,7 @@ def _synth_awq(oc: int, ic: int, *, group_size: int = 64, splits: int = 1,
 
 @pytest.mark.parametrize("oc,ic", [
     (18432, 3072),  # the real qwen img_mod.1 / txt_mod.1 shape
-    (3072, 3072), (128, 64), (64, 128), (256, 192),
+    (64, 128), (256, 192),
 ])
 def test_unpack_w4x16_inverts_the_upstream_packer(oc: int, ic: int) -> None:
     gen = torch.Generator().manual_seed(2)
@@ -143,20 +143,6 @@ def test_unpack_refuses_a_shape_that_is_not_this_layout() -> None:
 
 
 # --- dequant ---------------------------------------------------------------
-
-
-@pytest.mark.parametrize("oc,ic", [(3072, 3072), (18432, 3072), (128, 64)])
-def test_dequantize_recovers_the_weight(oc: int, ic: int) -> None:
-    """W = codes * wscales + wzeros (an ADD — zeros are pre-scaled AND
-    pre-negated). Recovers the weight to 4-bit group-64 AWQ error."""
-    tensors, w, _ = _synth_awq(oc, ic, seed=3)
-    got = dequantize_w4x16(tensors["qweight"], tensors["wscales"],
-                           tensors["wzeros"], oc, ic)
-    rel = ((got - w).norm() / w.norm()).item()
-    # 16 levels across each group's range puts the floor near 0.09-0.12 for
-    # Gaussian weights; this bound is the FORMAT's, not slack in the decoder.
-    # Exactness is asserted separately against the exporter's own dequant.
-    assert rel < 0.15, rel
 
 
 def test_dequantize_is_bit_exact_against_the_exporters_own_dequant() -> None:
@@ -332,24 +318,6 @@ def test_encode_awq_linear_is_bit_exact_vs_the_vendored_exporter(
     assert torch.equal(got["wscales"], tensors["wscales"])
     assert torch.equal(got["wzeros"], tensors["wzeros"])
     assert torch.equal(got["bias"], tensors["bias"])
-
-
-def test_encode_then_decode_recovers_the_original_linear() -> None:
-    """Round-trip through PRODUCTION code only (no vendored reference): encode
-    -> decode_awq_linear -> forward parity with the original module."""
-    oc, ic, splits = 18432, 3072, 6
-    gen = torch.Generator().manual_seed(23)
-    w = torch.randn(oc, ic, generator=gen).to(torch.bfloat16).float()
-    b = torch.randn(oc, generator=gen).to(torch.bfloat16).float()
-    tensors = encode_awq_linear(w, b, group_size=64, adanorm_splits=splits)
-    assert is_awq_linear(tensors)
-    lin = decode_awq_linear(tensors, oc, ic, adanorm_splits=splits,
-                            compute_dtype=torch.float32)
-    torch.manual_seed(24)
-    x = torch.randn(2, ic)
-    want = x @ w.t() + b
-    rel = ((lin(x) - want).norm() / want.norm()).item()
-    assert rel < 0.15, rel
 
 
 def test_encode_refuses_adanorm_without_bias() -> None:

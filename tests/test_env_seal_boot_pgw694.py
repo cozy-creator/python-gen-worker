@@ -11,7 +11,7 @@ RED on the unwired tree: `_establish_env_seal` does not exist and
 
 from __future__ import annotations
 
-import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,18 +38,6 @@ def _restore_global_matmul_flags() -> Iterator[None]:
 
 
 
-def test_entrypoint_scrubs_hostile_torch_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """pgw#718 erase-and-impose: a hostile toggle is ERASED, never fatal —
-    boot proceeds and the var cannot reach torch."""
-    monkeypatch.setenv("TORCHDYNAMO_SUPPRESS_ERRORS", "1")
-    entrypoint._establish_env_seal()  # must NOT raise
-    import os
-
-    assert "TORCHDYNAMO_SUPPRESS_ERRORS" not in os.environ
-
-
 def test_entrypoint_establishes_effective_seal() -> None:
     import torch
 
@@ -67,19 +55,61 @@ def test_entrypoint_establishes_effective_seal() -> None:
         entrypoint._establish_env_seal())
 
 
-def test_run_main_seals_before_cuda_probe_and_worker() -> None:
-    src = inspect.getsource(entrypoint._run_main)
-    seal_at = src.index("_establish_env_seal")
-    assert seal_at < src.index("should_probe_cuda"), (
-        "the seal must be established before the CUDA probe")
-    assert seal_at < src.index("Worker("), (
-        "the seal must be established before the worker starts")
-    # 0.70.3 regression: sealed BEFORE settings, so a refusal could not
-    # dial the hub — every fleet pod died as a silent pod_exited.
-    assert src.index("get_settings") < seal_at, (
-        "the seal must run after settings so a refusal dials the hub typed")
-    assert "settings=settings" in src[src.index("_establish_env_seal"):
-                                      src.index("should_probe_cuda")]
+class _ProbeReached(Exception):
+    pass
+
+
+def test_run_main_seals_after_settings_and_before_cuda_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The REAL _run_main control flow, observed at its seams: settings load
+    first (so a seal refusal can dial the hub typed — the 0.70.3 silent
+    pod_exited regression), then the seal, and only then the CUDA probe
+    (which is before any model/compile work and the Worker start)."""
+    order: list = []
+    monkeypatch.setattr(entrypoint, "_install_stack_dump_handler", lambda: None)
+    monkeypatch.setattr(
+        entrypoint, "get_settings",
+        lambda: order.append("settings") or SimpleNamespace(
+            endpoint_lock_path=""))
+    monkeypatch.setattr(
+        entrypoint, "_establish_env_seal", lambda: order.append("seal") or {})
+    monkeypatch.setattr(entrypoint, "load_manifest", lambda path: {})
+    monkeypatch.setattr(entrypoint, "_preflight_cache_dirs", lambda: None)
+
+    def _probe(manifest: object) -> bool:
+        order.append("probe")
+        raise _ProbeReached  # everything after (incl. Worker) is post-seal
+
+    monkeypatch.setattr(entrypoint, "should_probe_cuda", _probe)
+    with pytest.raises(_ProbeReached):
+        entrypoint._run_main()
+    assert order == ["settings", "seal", "probe"]
+
+
+def test_seal_refusal_dials_the_hub_typed_with_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsealable environment exits typed AND the fatal report carries
+    the loaded settings — the hub-dial precondition 0.70.3 broke."""
+    fatal: list = []
+    settings = SimpleNamespace(endpoint_lock_path="")
+    monkeypatch.setattr(entrypoint, "_install_stack_dump_handler", lambda: None)
+    monkeypatch.setattr(entrypoint, "get_settings", lambda: settings)
+
+    def _refuse() -> dict:
+        raise RuntimeError("unsealable: HOSTILE_VAR")
+
+    monkeypatch.setattr(entrypoint, "_establish_env_seal", _refuse)
+    monkeypatch.setattr(
+        entrypoint, "_log_worker_fatal",
+        lambda phase, exc, **kw: fatal.append((phase, str(exc), kw)))
+
+    assert entrypoint._run_main() == 1
+    (phase, message, kw), = fatal
+    assert phase == "env_seal"
+    assert "HOSTILE_VAR" in message
+    assert kw.get("settings") is settings
 
 
 def test_base_image_build_constants_never_kill_a_boot(

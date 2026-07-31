@@ -63,25 +63,705 @@
   whole time, and ie#578 has already relocked `dj-utils`, `quality-benchmark` and
   `dj-pipeline` onto pins inside it — they break on their next BUILD, not on the relock.
 
-  New `torch_capability.torch_or_none()` is the one probe all three use. When torch is
-  absent the seal RECORDS it: `config` carries `torch: "absent"` (plus the torch-free
-  interpreter facts), `inductor` is `"absent"`, `posture` is `{"torch": "absent"}`, and the
-  ISA clamp and guard posture no-op, logged once. That is a *stronger* seal than one that
-  cannot be computed — "this pod had no torch" is a real, keyable environment fact, so the
-  digest stays meaningful for CPU cells. **Adding torch to the CPU images was rejected**: a
-  ~2-3 GB dependency on pods whose entire value is being cheap inverts the point and encodes
-  an SDK defect as a fleet requirement (`accelerator='none'` is a first-class shape, th#721).
-  A DECLARED config knob on a torchless worker still refuses by name — every canonical knob
-  is a torch flag, and honouring one silently would fork cell identity.
+## 0.83.0 (2026-07-31) — REGIONAL CELLS: the minutes-scale mint. A cell's entries become BLOCK CLASSES, and flux2 can mint at all again
+> ### ⚠ TWO THINGS TO READ BEFORE UPGRADING
+>
+> **1. The contract-facts bump v2 -> v3 RE-KEYS EVERY PUBLISHED `aot-inductor` CELL.**
+> `shell_digest` is mandatory from this release, and a mandatory fact is part of the
+> key — so every cell published under v2 is unreachable to a 0.83.0 worker and every
+> family re-mints once. This is deliberate and there is no smaller way to do it: a v2
+> key describes the PARTS and does not bind the ASSEMBLY, which is exactly the
+> cache-poisoning class regional would otherwise introduce. **The cost is being paid
+> now on purpose**: the fleet holds ~zero published `aot-inductor` cells today (leg 4
+> has never completed a mint — `aot_mint_phases` has been empty on both stacks since
+> th#1322), so the re-key is free at this instant and would not be at any later one.
+> Recorded here as a decision, not left to be discovered by a re-minting fleet.
+>
+> **2. sdxl's regional opt-in is deliberately NOT in this train, and the ORDER is
+> forced.** `Compile(regional=True)` is honoured by the export lane only from 0.83.0;
+> on any earlier SDK the same declaration reaches `fleet_cells.delegation_refusal`,
+> which declines `aot_regional_targets`, and **sdxl stops AOT-minting altogether**. So
+> the flag and its `gen-worker==0.79.0 -> ==0.83.0` pin bump are ONE commit on
+> inference-endpoints branch `agent/817-sdxl-regional-optin` (`75712ba`), which merges
+> only AFTER this release is on PyPI. The sequence is: publish 0.83.0 -> merge the
+> opt-in with the pin bump -> only then can a pod mint a regional cell. Until the opt-in
+> lands a pod mints whole-graph, correctly.
 
-  **With torch present the seal is byte-identical**, verified rather than asserted: the same
-  `seal_digest` (`6eda4772...`) before and after on this box. A changed seal shape would have
-  stranded every published cell.
+- **pgw#817 — REGIONAL CELLS: a cell whose entries are BLOCK CLASSES, so the sdxl
+  w8a8 mint is 19.4 s of graph compile instead of 274.7 s.** A DiT — and sdxl's
+  UNet — is one block repeated N times, and a whole-graph mint traces, lowers,
+  codegens and g++-compiles all N. pgw#812 measured compiling ONE block per class
+  and reusing it on our own path: **14.2x on the real sdxl w8a8 mint** with serve
+  parity **+0.24%**, artifact 4.7 MB instead of 18.2 MB, and numerics CLEANER than
+  whole-graph on fp8 (cos 0.989-0.993 against the pgw#814 whole-graph degradation).
+  bf16 is 7.7x, and there regional serves 5.7% FASTER than the whole-graph
+  artifact. This is the adoption.
 
-  `tests/test_torchless_boot_pgw788.py` is the guard that did not exist — it import-blocks
-  torch with a `sys.meta_path` finder (no second venv) and asserts the boot chain completes,
-  and `publish.yml` now imports the public entrypoint and runs the seal **in the torch-free
-  wheel-contract venv**, which is a real environment rather than a simulation.
+  **It is still ONE `.pt2` and the entry grammar is unchanged** —
+  `unet/block=BasicTransformerBlock#0,cfg=true/B=2`. What inverts is the entry
+  AXIS: entries enumerate block classes of a target instead of shape coordinates
+  of its whole forward. No new artifact class, no hub change, no `cell_store`
+  change. The shell stays EAGER (exporting it with the blocks elided is not
+  expressible in `torch.export` today), so the compiled fraction of the model
+  equals the repeated-block fraction — stated here rather than discovered later.
+
+  **`shell_digest` is now a mandatory contract fact (v2 -> v3), and it is the
+  load-bearing part.** Regionally `combined_graph_hash` describes only the PARTS,
+  so two models with identical blocks and a different shell — a different
+  `num_layers`, a different rope construction, a diffusers minor that rewrites the
+  outer forward — would key identically while serving different math. Without it
+  regional trades compile time for a cache-poisoning class we do not have today.
+  This re-keys every published `aot-inductor` cell; correct and expected, since a
+  v2 key does not bind the assembly and there is no way to add the binding without
+  moving the key. `cell_identity`'s `"mode": ""` hardcode goes with it, along with
+  its comment that "regional is a dynamo partitioning strategy with no export
+  counterpart" — falsified by measurement.
+
+  **Binding is now BY REFERENCE, and it had to be.** `user_managed` appeared
+  nowhere in the SDK: `ArtifactRunner.bind` copied every constant. Whole-graph
+  that is a one-off duplicate; regionally it is N copies of the block weights in
+  VRAM — for flux2, a second whole model. `bind(..., user_managed=True)` binds by
+  reference (the resident pipeline keeps the tensors alive by construction); the
+  whole-graph call shape is byte-identical to what pgw#721/#723 measured on a pod,
+  and a torch whose `load_constants` lacks the parameter is a NAMED refusal rather
+  than a silent copy that would OOM the card N blocks later. Arming is
+  per-INSTANCE and **all-or-nothing per target** — a model with 24 of 25 blocks
+  armed is a silently half-eager model — and the unbound-call gate runs before the
+  FIRST call of EVERY instance, because that segfault surface multiplies by N.
+
+  **A cell that degrades its output now REFUSES to arm, typed.** pgw#800's verdict
+  ladder is lifted into a shared `numerics_ladder` primitive — the rungs, the
+  norm-weighted aggregate rule (never a per-row median: a few destroyed high-norm
+  outputs must not hide behind many intact ones), the evidence formatting and the
+  fail-closed gate shape — with `adapter_fidelity` as one caller. The
+  output-comparison population gets its own O(n) evaluator and its own DERIVED
+  band, because pgw#814 says in as many words that the adapter floors are
+  calibrated for adapter deltas and must not be inherited: floor **0.98** =
+  sqrt(0.9890 x 0.9730), worst accepted being flux2 w8a8 REGIONAL vs eager and
+  best refused being the flux2 w8a8 whole-graph artifact pgw#814 ruled
+  unadoptable; warn **0.999**, since everything anyone has called healthy measures
+  0.9998+. A magnitude bound (**0.95**, symmetric in the log) is new and not
+  decoration — cosine is scale-invariant, so an artifact reproducing eager's
+  direction exactly at 0.9x the magnitude scores a PERFECT cosine while serving a
+  systematically dimmer image. Families declare their own tolerance
+  (`Compile(numerics_floor=, numerics_warn=)`). New `cell_numerics` activity kind,
+  `phase=refused|degraded|armed`.
+
+  **`Compile(regional=True)` + `dynamic=(...)` is admitted**, and the old refusal's
+  content survives where it is still true: the DYNAMO regional branch calls
+  `compile_repeated_blocks(dynamic=None)` and cannot honour the marks, so it
+  declines by name and the target takes the whole-forward branch, which does mark.
+  The export lane implements it directly — measured FREE on a conv-free region
+  (+0.2% bf16 / 0.0% w8a8, against pgw#730's +7.2% for the same axis on sdxl's
+  conv lane).
+
+  **`mint_recipe` gains `aot-regional`**, selected from the family's own export
+  declaration — per-family, never a fleet default, because on a small-table DiT
+  regional is a 2x that costs a serve-path change while pgw#811 buys a comparable
+  win with none. The blanket `regional_targets` delegation refusal is discharged
+  and deleted: regional is the shape that most wants delegating, being the one
+  that finishes in minutes. pgw#809's pool is RE-PRICED rather than assumed —
+  regional moves the entry count UP (one per plan x block class; sdxl's 18 become
+  36) and the per-entry DEVICE ask DOWN by the measured block fraction, and VRAM
+  is the bound that actually binds K, so multiplying the two levers would have
+  sized the pool for a whole-model child regional never runs.
+
+  Two defects found while building, both of which would have been silent: the
+  delegation tail chose its reporting kind with a string-literal `recipe == "aot"`
+  and would have sent every regional mint's phase table down `jit_compile` — the
+  one channel the minutes-scale claim is measured on — and a block entry's
+  bindability template was the target rather than the block, which refused every
+  correct regional mint by name and only a real-path mint could catch.
+
+  A third was caught by the release gate's full suite, which the lane's 351-test
+  regression ring did not cover: `test_regional_dynamic_refusal_pgw746.py` still
+  asserted the DECLARATION-side refusal D4 relocated, so the tree was two tests
+  red. Relocated rather than deleted — the file now pins what pgw#746 was right
+  about (the dynamo branch cannot honour the marks, so it declines BY NAME and
+  the target falls through to the whole-forward branch, which does mark; a
+  decline that read as a skip would be an uncompiled target) and drops the two
+  premises pgw#812 measured away. Red-verified against the v0.82.0 source: 4 of
+  the 8 fail there.
+
+- **pgw#812 D1 + D2 — the two defects that make flux2 unmintable, and neither is
+  about regional compilation.** D1: `dynamic_shapes_spec` minted one torch symbol per
+  (input, axis), so a declared `Dim` with several carriers became several INDEPENDENT
+  symbols and strict export refused the declaration —
+  `Constraints violated (img_ids_1)!`. flux2 binds `T_img` to BOTH `hidden_states[1]`
+  and `img_ids[1]` deliberately, so the edit lane cannot let `img_ids` specialize and
+  silently pin the artifact to generate; the most careful declaration in the fleet was
+  the one that could not mint, and ie#571 recorded it "READY — no open mint blockers".
+  `DynamicDim` now carries the declared dim NAME and every carrier of one dim shares
+  one symbol; rows with no declared name keep a symbol each, which the hand-registered
+  builder path requires (latent H and W are two independent axes of one input).
+
+  D2: the ie#566 G3 range gate then refused the mint on
+  `Eq(Mod(3072*s + 1572864, 48*s + 24576), 0)` — which is `Mod(64*X, X) == 0`,
+  identically true, pinning nothing. The gate matched "an Eq guard mentioning a
+  declared symbol" without asking whether the guard was satisfiable-for-all, so a
+  vacuous divisibility fact read as a specialization. It now admits a guard sympy can
+  PROVE is a tautology and keeps refusing everything else, so it still fails closed on
+  a guard it cannot reduce.
+
+## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
+
+> ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`
+>
+> 0.81.0 made the delegated route reachable (pgw#813) and the first `aot_mint_phases`
+> rows in platform history were written on it — then the child died at `phase=load` in
+> ~8.5 s, twice, on a tree the serving process in the same pod was loading and answering
+> requests from. The dynamo/JIT mint is delegated on 0.81.0 too and died identically in
+> 13 s, so that release has NO working mint route. This one fixes the boundary both
+> routes cross: a directory path does not describe a composition.
+
+- **pgw#816 — the delegated mint child could not load the pipeline the serving process
+  was serving, so the first AOT mint in platform history crashed at `phase=load`.** On
+  the first production run of the delegated route (0.81.0, real L4, sdxl `w8a8`,
+  `cyberrealistic-xl:fp8-linearonly-review`) the child died twice at ~8.5 s with
+  `OSError: Error no file named config.json found in directory
+  …/cas/snapshots/sha256:32fa2ba6…__x76b2ae62d32f`, while the serving process in the same
+  pod loaded that exact directory and answered requests from it throughout.
+
+  The `__x76b2ae62d32f` suffix is the diagnosis, and our own `snapshot_dir_key` wrote it:
+  `__x` marks a tree materialized with an overridden component EXCLUDED from the fetch
+  (th#1330 B2), and `sha1("vae")[:12] == 76b2ae62d32f`. That tree has no `vae/` by
+  construction — it is loadable only TOGETHER with the override tree it was narrowed for.
+  The parent had resolved that override and injected it through
+  `from_pretrained(components=…)`; the child was handed `Dict[slot, path]` and nothing
+  else, so it re-composed a pipeline with a component missing, and diffusers reported it
+  as a missing `config.json` at the tree's ROOT — naming neither the component nor the
+  cause. The boundary was the bug: **a directory path does not describe a composition.**
+
+  `MintRequest`/`MintTask`/`_BackgroundMint` now carry the parent's resolved
+  `component_paths` (slot -> component -> local tree), and `cli.run.run_setup` grew the
+  same `components=` seam the executor uses, so the child loads through the identical
+  `load_component_override` -> `load_slot` -> `from_pretrained` path. Nothing is
+  re-fetched (minimum-fetch is intact) and the B2 exclusion stands. New
+  `mint_child.assert_composable` refuses a request whose slot is override-narrowed but
+  carries no override — by name, before discovery, the toolchain probe or a single weight
+  read. This unblocks BOTH mint routes: on 0.81.0 the dynamo/JIT mint is delegated too and
+  died in the same child load.
+
+- **pgw#754/pgw#811 follow-on — the host-ISA clamp was THREAD-LOCAL, so every host
+  compile off the boot thread was built `-march=native`.** Found by this release's CI
+  gate and root-caused to torch's own config semantics: `inductor_config.cpp.march = x`
+  writes the `user_override` layer, which torch documents as thread-local (it is a
+  `ContextVar`). `env_seal.establish` imposes on the BOOT thread, so the clamp reached
+  nothing else — and two threads that host-compile are squarely on the production path:
+  `hot_swap`'s process-global background shape-warm/heal worker, and pgw#811's K-way
+  `run_impl` splitter pool (which is exactly what a serving-pod AOT mint drives).
+
+  Before pgw#811 that silently produced unclamped, unportable objects — the pgw#754
+  SIGILL class, on the background-warm path specifically. Since pgw#811's
+  `assert_command_is_clamped` landed in 0.81.0 it is louder and worse: those compiles
+  RAISE `HostIsaError`, so on 0.81.0 every background shape-warm compile fails, and per
+  pgw#680's doctrine two failed heals mark the signature permanently `volatile` (eager
+  forever). `impose()` now writes the process-wide `default` layer as well, and — the
+  part that was actually missing — **verifies the read-back on a FOREIGN thread**, which
+  is the only place the defect was ever visible. A torch internals change that puts the
+  process-wide layer out of reach now refuses loudly at boot instead of silently
+  reverting to per-thread clamping.
+
+- **pgw#816 — a crash the child CLASSIFIED is not retried.** Those two identical 8.5 s
+  attempts bought nothing. A `status="failed"` report means the child caught its own
+  exception and named it, from the same request file against the same on-disk inputs, so
+  attempt 2 re-runs it exactly; `MintOutcome.retryable` now holds only for a death the
+  child could NOT classify (no report: signal, OOM-killer, the parent's stall kill) and
+  for `EXIT_RESOURCE`, which was always the case a retry exists for. The abort event says
+  `deterministic` or `retryable` so the wire states why there was no second attempt.
+
+## 0.81.0 (2026-07-31) — the w8a8 lane can mint again and a mint can no longer publish nothing silently: the two refusals that kept `aot_mint_phases` empty platform-wide are gone, every publish terminus is typed, and `run_impl` splits K ways for a 12.6x host compile
+
+> ### ⚠ 0.81.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN ACTUALLY REACH A MINT
+>
+> 0.80.0 wired the serving-pod mint (pgw#805) but nothing could travel it: the plain lane
+> is held on dynamo by pgw#730, and the w8a8 lane refused `aot_requires_delegation` for
+> reasons that were false on the pod — while the delegated route it named had never once
+> run, because `_eager_first_eligible` demanded a hot-swap router that a delegated pending
+> never has. Both are fixed here (pgw#813). pgw#815 then makes the far end honest: a mint
+> that publishes nothing now says so. An EMPTY `aot_mint_phases` on a 0.81.0 w8a8 pod is a
+> real finding; on anything earlier it only meant the SDK could not get there.
+
+- **pgw#813 — the w8a8 lane can mint AOT again: "executes quantized activations"
+  stops meaning "cannot serve eager".** Measured on a real 0.80.0 L4: the plain lane
+  declined `aot_lane_regressed` (correct, #730's hold) and the w8a8 lane declined
+  `aot_requires_delegation` naming two causes that were both FALSE on that pod — no
+  env was set. The operative refusal was `fleet_cells.delegatable` reading
+  `mandatory_serving(pipe)` as a serveability answer. It is not one:
+  `_Fp8ScaledLinear.forward` / `_W4A4Linear.forward` are complete `torch._scaled_mm`
+  eager forwards, the fleet's cold-boot ladder measures w8a8 eager serving all day,
+  and pgw#672/#673 already retired the "mandatory lanes raise instead of degrade"
+  posture inside `_guard`. With the plain lane held, that left NO lane on which a
+  serving pod could mint an AOT cell — the reason `aot_mint_phases` has zero rows
+  platform-wide. New `compile_cache.eager_tier_available` answers the honest question
+  ("can this object answer a forward with nothing armed?") and is false only when an
+  AOTI export or TRT engine has REPLACED the callable; `mandatory_serving` keeps its
+  real job (router fail-closed: the compiled tier is the intended production tier).
+
+  A second, independent blocker went with it: `_eager_first_eligible` demanded a
+  hot-swap ROUTER on every pending pipe, and a DELEGATED pending never has one
+  because nothing is armed on its pipe by construction — so every delegated mint
+  failed the predicate and was discarded, and pgw#784's out-of-process route could
+  not run on ANY lane. The delegated arm now asks for an eager tier, not a router;
+  the in-process arm is unchanged. The stamp-based `_mandatory_lane_of_bound`
+  early-out (a model ref's `#fp8-w8a8` STORAGE flavor read as serveability — the
+  same proxy pgw#677's reopen removed one layer down) is gone.
+
+  Every delegation refusal is now typed and named on the wire from its true cause:
+  `aot_mint_forced_in_process`, `aot_eager_first_disabled`, `aot_regional_targets`,
+  `aot_no_eager_tier` — instead of one phase carrying a hand-written either/or.
+
+- **pgw#815 — a self-mint can no longer reach `finalize completed` having published
+  nothing.** A real 24m22s L4 mint walked `seal_publish -> finalize completed` and
+  left zero cells, zero receipts, no local arm, no `self_mint_publish`, no abort and
+  no error. Three structural silences made that indistinguishable from success and
+  all three are closed: (1) NO success event existed at any publish terminus, so a
+  completed publish and a publish thread killed mid-upload when the pod retired were
+  the same observation — `self_mint_publish` now fires at `sealed`, `started` and
+  `published`, carrying the cell key and the byte count, and in-flight publishes are
+  an observable fact (`fleet_cells.publishes_in_flight`); (2) `publish_self_mint` and
+  `withhold_self_mint_publish` both returned BARE when nothing was packed — both now
+  emit `self_mint_publish_withheld phase=nothing_to_publish`; (3) the executor's
+  whole publish gate lived inside `if proves_inductor or proves_exported:`, so a boot
+  that answered "nothing proves by FX or export" walked past every terminus in
+  silence — `_assert_mint_termini` now runs OUTSIDE that block and on every
+  background-driver exit, confessing `self_mint_abort phase=no_terminus` and
+  discarding the phantom capture so the next pod re-mints. A delegated child that
+  produces no adoptable cell while a sibling succeeds is resolved too, instead of
+  being dropped by a bare `continue`.
+
+- **pgw#811 — `run_impl` is split across K translation units, the largest measured
+  compile-speed win on the board.** Two independent compiler profiles of the real
+  banked SDXL w8a8 wrapper agree that parse is 3-5% of the compile and that
+  `AOTInductorModel::run_impl` ALONE is 68% of it, because the cost is superlinear
+  (measured n^1.57) in ONE function's size: 10,032 declarations and 4,231 dispatch
+  calls in a single body, burning in stack-slot conflict colouring and CFG-wide block
+  placement. No flag fixes that (best -19%, most NEGATIVE) and no bigger machine
+  fixes it (32-core i9: 140 s vs a 4-vCPU pod's 180.6 s — one process, one core,
+  either way). Measured here on the real TU with torch's own flags and the production
+  march clamp: **120.0 s -> 38.7 s of total CPU (3.1x, so it wins even serially) and
+  121.8 s -> 9.7 s wall at K=8 (12.6x)**, with peak RSS 2.02 GB -> 0.63 GB. The
+  4-vCPU pod emulation is 16.1 s.
+
+  It is a continuation CHAIN, not K calls from `run_impl`: each part ends by calling
+  the next with the live set by reference, so **no declaration is rewritten and every
+  statement is byte-identical to what inductor emitted**, and every local's lifetime
+  and destruction order is unchanged. Each part is a member function of a generated
+  `_pgw811_run_ctx` carrying `constants_`/`kernels_`/`device_idx_`/`cubin_dir_` under
+  their original names, which is what buys zero body rewriting. Real liveness, not
+  the research prototype's fresh defaults: on the real TU only 386 of 8,590 compute
+  declarations (4.5%) cross a K=8 boundary; the rest stay part-local, and the ones
+  that are pure re-derivations (`constants_->at(n)` bindings, const `int_array_N`)
+  are copied rather than threaded.
+
+  FAIL-CLOSED, as v1 is, and by the same architecture: a self-contained mechanical
+  inverse reads ONLY the split output and must reproduce the input byte for byte.
+  It consumes no side table, so the transform cannot fool it — RED-verified against
+  seven corruption classes (statement deleted / reordered / inserted / argument
+  changed / disguised as generated / disguised as a re-derivation / re-derived
+  binding altered). The last one found a real hole: re-derivations were being dropped
+  blindly, so a mutated `constants_->at(n)` survived; they now carry their own marker
+  and must be found verbatim in the reconstruction they claim to copy. Equivalence is
+  also proved by EXECUTION — a shape-faithful wrapper is compiled both ways, partial-
+  linked exactly as the mint does it, run, and required to print the same bytes.
+  Anything unrecognised, unbalanced or untypable declines; if a part will not build,
+  the whole wrapper is recompiled unmodified. A slow mint beats a wrong artifact.
+
+  No cell is re-keyed: all three digests (inductor config, env seal, toolchain) are
+  asserted unmoved, and neither module is reachable from the static code closure. The
+  split adds compiler INVOCATIONS, not a compiler or a flag. Kill switches:
+  `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` for v2 alone, `GEN_WORKER_AOT_WRAPPER_SPLIT_OFF`
+  for both. Concurrency comes from `GEN_WORKER_AOT_HOST_COMPILE_JOBS` so pgw#809's
+  pool owns the pod budget across entries while this fans out within one.
+
+- **pgw#754's march clamp is now asserted at the ARGV level, not just the config
+  level.** `host_isa.impose()` verified `config.cpp.march` and nothing ever read the
+  command line torch actually built — and pgw#793's research harness is a live
+  example of a path that mints `-march=native` objects because it never booted
+  through `env_seal.establish`. `host_isa.assert_command_is_clamped` now runs on
+  torch's single host-compile funnel and RAISES: an unclamped object is not slower,
+  it is unportable, and pgw#754 is a SIGILL-class defect. (The harness itself was
+  fixed to boot through `env_seal.establish` and record `mint_march`.)
+
+## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
+
+> ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL
+>
+> Every release up to and including 0.79.0 was a pure AOT *consumer*: discovery
+> missed, nothing was minted, and the next pod missed identically — with no
+> refusal on the wire. That wire is connected here. Two consequences for
+> whoever runs the first proof:
+>
+> - **The lane matters.** pgw#730 holds the PLAIN lane on dynamo, so a
+>   plain-lane release (e.g. `d9d9bf2691d0e1f89e23999d`, `sdxl` 0.2.93) now
+>   correctly declines with `self_mint_skipped phase=aot_lane_regressed`
+>   instead of minting. A serving-pod AOT mint proof needs the **w8a8** lane.
+> - **`aot_mint_phases` was empty on both stacks since th#1322 shipped**, because
+>   the child process that fills it holds no orchestrator session. The parent
+>   now re-emits the child's phase table, so that column starts carrying rows
+>   from this version — an empty column on 0.80.0 means no mint ran, which is
+>   information the previous releases could not give.
+
+- **th#1303 phase 3, producer class 2: the CONVERSION producer publishes v2.**
+  `publish_flavors` — the surface every quantize / fuse / cast / distil / produce
+  job in the conversion endpoint calls, and the highest-volume publisher after the
+  mirror — still called `commit()`, so the corpus repoint had a second tap filling
+  the blake3 CAS behind it. It now calls `HubClient.publish_v2`: chunked sha256,
+  each object's digest signed into its presigned PUT so R2 refuses bytes that do
+  not hash to the key. Sixteen of training-endpoints' seventeen publish entry
+  points reach the hub through this one call, so they flip with it.
+
+  Safe because every file is a real local file (`_flavor_files` walks the produced
+  tree) — v2's guarantee is that the digest is PROVEN from bytes in hand, which is
+  exactly why the mirror's by-reference BANK arm (`clone.py:556`) is deliberately
+  NOT flipped and stays on `commit()` until the phase-2 backfill.
+
+  No auto-select and no env knob: the protocol is named at the call site, so
+  "which producers are on v2 today?" is answerable by reading the code.
+
+- **th#1303/pgw#807 — cell receipts are ALGORITHM-AGNOSTIC, which is what the cell
+  self-mint flip was actually blocked on.** Arming compares `receipt.artifact_blake3`
+  inside a signed JWS that can never be edited, and the receipt is fetched by
+  `?blake3=<hex>`. Publish a cell over v2 and the lookup answers "no receipt", every
+  worker refuses to arm, and the fleet re-mints — silently, looking exactly like a
+  cold cache. The canonical binding is now `artifact.digest`, always algorithm-tagged,
+  and verification DISPATCHES on that tag: an untagged bare-hex digest is refused
+  rather than read as some assumed algorithm, and a receipt binding no digest at all
+  is refused rather than compared against nothing.
+
+  Dual-read, deliberately: `crv` stays `cell-receipt-v1` (the deployed fleet refuses
+  any other version outright, so a bump would make every hub-minted receipt
+  unverifiable on first deploy), and a legacy bare-hex `blake3` claim still verifies —
+  every cell the fleet holds today was published over v1. Both arms die at phase 4.
+  `fleet_cells.py`'s self-mint stays on `commit()` with its two remaining gates named
+  in code: the hub's v2 route mints no cell receipt at all (th#1340), and the serving
+  fleet must be past the release carrying this reader.
+
+- **pgw#809 — a cell's entries compile K-wide, out of process.** `aot_mint` exported
+  and compiled a pgw#758 cell's graph classes one at a time; an sdxl cell is 18 entries
+  at ~420 s, so a mint was ~2 h of which almost all was independent, embarrassingly
+  parallel work. Export stays serial (one pipeline, one card, one branch-arm toggle),
+  and the compiles now run in a bounded pool of `gen_worker.aot_compile_child`
+  processes.
+
+  **Processes, because threads are wrong here — measured, not assumed.** Four
+  concurrent `aot_compile` calls in one process returned one usable result and three
+  distinct internal failures (`CURRENT_PATCHER is None`, `KeyError: 'custom'` in
+  `fx.traceback.annotate`, a fake-tensor crash): inductor's compile path keeps
+  process-global mutable state. The exported program travels on disk, and that
+  roundtrip is byte-exact — a compile after `torch.export.save`/`load` produces a
+  `wrapper.cpp` identical to the in-process compile, under the same inductor cache
+  hash.
+
+  **K is derived, never configured**, as the min of three bounds the pod actually
+  has: free VRAM over one entry child's device footprint (`mint_budget.co_residency`,
+  the bound that binds — an AOTI compile benchmarks kernels ON THE CARD),
+  `effective_cpu_count()` minus serving headroom, and available host RAM; ceiling 8.
+  A 4-vCPU pod gets K=1, which is the previous serial path exactly.
+
+  **The safety interlock is the point, not the speed.** Kernel configs are chosen by
+  timing kernels on the device, and the cell key does not move when a config changes —
+  so two entries benchmarking at once could publish a slower cell under a good cell's
+  identity. `aot_device_lock` registers a cross-process `flock` on torch's own
+  `set_gpu_benchmark_lock_context` hook, so no two entries ever time a kernel at the
+  same moment; a torch without that hook forces K=1 rather than benchmarking against
+  itself. Entry children carry `PR_SET_PDEATHSIG` so an abandoned mint cannot orphan
+  a compile onto a serving pod.
+
+  Cell identity is untouched: `env_seal.inductor_config_digest()` is unmoved across K
+  and across the pool's cache dir, and assembly is ordered by entry NAME, never by
+  completion. `mint_phases.pool` records the K a mint ran at and every input that
+  chose it.
+
+
+- **pgw#805 — an AOT cell-discovery MISS never started a mint. The AOT lane was a
+  pure consumer.** `aot_mint.mint()` was reachable only from
+  `python -m gen_worker.aot_mint`: no module on the serving path imported it, so a
+  `prefer_aot` pod's miss fell through to the DYNAMO self-mint, whose artifact kind
+  `aot_cells._candidates` rejects — every pod missed, "re-minted" the wrong kind, and
+  the next pod missed identically. Measured on five real 0.78.0 L4 pods with every
+  precondition present: discovery missed honestly and then nothing happened, for the
+  rest of each pod's life, with **no refusal of any kind** on the wire. A miss now
+  chooses a RECIPE (`fleet_cells.mint_recipe`) and an AOT miss mints out of process
+  (pgw#784's route — an AOTI export has no router to yield through, so in-process
+  would break eager-first outright), exporting the family's whole declared class set
+  as one multi-graph cell against the pipeline the child already loaded through the
+  endpoint's own `setup()`. A self-minted `.pt2` adopts through the AOT gates
+  (`provision.arm_aot`, extracted), not the inductor seed path.
+
+  Two more wires were missing behind it. **The declaration**: `export_declaration`
+  registered only when a mint REQUEST named a module, which a serving pod has no
+  access to — a `compile=` block carrying graph classes is now registered as its
+  family's export declaration at endpoint-collection time. **The telemetry**:
+  `aot_mint` emits `aot_mint_phases` from the mint CHILD, which holds no orchestrator
+  session, so th#1322's column has been empty on both stacks since it shipped; the
+  parent now re-emits the child's phase table (`phase=minted` roll-up,
+  `phase=entry:<class>` rows, `phase=aborted` when no cell came out).
+
+  And the silence is gone. `_fail_closed`'s plain-lane eager degrade was a bare
+  `logger.info` on a pod that exposes no logs (pgw#760); every decline now names
+  itself — `self_mint_started phase=<recipe>`, `self_mint_skipped` with
+  `no_export_declaration` / `aot_lane_regressed` / `aot_lifted_torch_gap` /
+  `aot_requires_delegation` / `mint_unavailable`, and a
+  `boot_ended_uncompiled` backstop when a declared compile target ends a boot
+  unarmed with no mint in flight. Note the five measured pods were on the PLAIN
+  lane, which #730 holds on dynamo: they must decline. The hold was right; being
+  unable to say so was the defect.
+
+- **pgw#797 — the boot spans pgw#789 shipped never ran on the real path.** Three real
+  hub-spawned L4 boots on 0.78.0 recorded two rows each, `first_request_servable` at
+  ordinal 1 and `hello` at ordinal 2 — the boot closing seconds before the stream to
+  the hub existed, and `in_boot()` then suppressing `weights_fetch`, `pipeline_load`
+  and `warm_complete` for the rest of the process. One cause: `Worker.arun` runs
+  `Lifecycle.startup()` concurrently with the transport, and every real release
+  declares `Compile`/`Slot`, so its specs go to `dynamic`, `awaiting_hub` is empty,
+  and pgw#789's guarded mark fired anyway. The milestone now has ONE owner —
+  `maybe_send_state_delta`, marking on the fact that a StateDelta advertising a
+  function went out — and the recorder HOLDS a close that arrives before `hello`, so
+  the inversion is unrepresentable rather than unlikely. Cumulative rows can no
+  longer be a span's child, and the span stack is a ContextVar so interleaved
+  setup/mint/adopt tasks nest against their own creator.
+
+- **pgw#797 — warmup is its own phase.** `warmup` split out of `pipeline_load` as a
+  nested span tagged `armed=0|1` (so "what does a cell save on warmup" is a GROUP BY,
+  not an estimate), one `warmup_iteration` row per forward because the first
+  dominates, the eager custom-`warmup()` duration ungated from `spec.compile is not
+  None` and put on `ActivityUpdate.duration_ms` instead of a logger no hub-spawned pod
+  can read, and the post-arm warm recorded as a boot row matching th#1329's
+  `warmup_ms` by construction. `pipeline_load` now means weights->VRAM.
+
+- **pgw#797 — the test that would have caught it.** `test_boot_span_ladder_pgw797.py`
+  drives the REAL entrypoint sequence (real Worker, real gRPC socket, hub-stamped
+  DesiredInstance, rows read off the wire) instead of calling the emitters, which is
+  what pgw#789's suite did while production emitted nothing.
+
+- **pgw#793 — AOT mint host compile is 7-9 % cheaper, with no cell re-key.** pgw#793
+  measured that an AOTI mint's whole host cost is ONE `g++ -O1 -c wrapper.cpp` (46 % of
+  the AOTI compile; linking is 0.5 %), and that the largest function in that TU is
+  inductor's `constants_info_` table written as 26,642 straight-line statements — data
+  compiled as code, executed once at model construction. `gen_worker.aot_wrapper_split`
+  regroups exactly that run into chunked `noinline`/`optimize("O0")` helpers before the
+  compiler sees the source: **−20 % on the wrapper object on an idle host** (−14 % under
+  heavy load), which is ~8-11 minutes off an 18-entry sdxl cell. It verifies itself by
+  re-inlining its output to the original byte for byte and declines unmodified on any
+  wrapper shape it does not recognise, emitting a typed `aot_wrapper_split` event either
+  way. `GEN_WORKER_AOT_WRAPPER_SPLIT_OFF=1` disables it. No compiler, flag, inductor
+  config or library changes, so no cell is re-keyed.
+
+- **th#1335 — cell discovery names an authorization refusal.** th#1310 made the
+  platform's `root/family-*` cell repos private, and the worker's checkpoint
+  listing then answered 404: indistinguishable from "this family has no cells",
+  so one boot's discovery was abandoned and the pod served eager for life. The
+  worker JWT now carries a hub-issued `read_repo` grant for exactly the families
+  its release declares, 401/403 surface as a NAMED `not_authorized` phase on the
+  `aot_cell_discovery` event (distinct from `list_failed`), and the anonymous
+  retry on 401/403 is deleted — it was th#1310's own recorded hazard, one
+  visibility flip away from unauthenticated cross-tenant enumeration.
+
+- **pgw#795 (round 4) — the fix's own defect: a flake traded for a 13-minute hang.**
+  `Cadence` shared its slowest sample session-wide with a `10x` window, so one slow
+  advance anywhere multiplied every later wait and a wait with NO progress could sit
+  for many minutes where the old code flaked at 15s. That is a worse release gate,
+  not a better one: a flake costs one re-run and names itself; a hang costs the whole
+  job and says nothing. A cadence is now scoped to ONE wait, so the bound is
+  `max(floor, headroom x this wait's own slowest advance)` — a wait that never
+  advances dies at the floor, always, and only a wait that IS advancing may extend
+  itself. `test_residency_republish_pgw628` went 62.1s -> 2.5s with the same
+  correction (its `_settle()` scaled a quiet period to `10x` a measured latency;
+  a runaway re-announce loop re-announces immediately or not at all, so waiting
+  longer catches nothing).
+
+  Also: `WorkerHarness.stop()` discarded its 15s join result, so a worker that never
+  exited passed teardown in silence — the one outcome nothing asserted. It is now a
+  loud failure (red-verified: a wedged worker is caught, a clean exit returns in
+  0.2s). `run_entrypoint`'s silence floor is a FLOOR on a caller's number, never a
+  cap, and its expiry now says "produced no output for Ns (a SILENCE window, not a
+  time budget)" instead of `TimeoutExpired`'s misleading stock message.
+  `hardware_report_hub.wait_for_message()` is progress-gated only when the caller
+  passes no bound — widening every call site at once was measured breaking six
+  unrelated tests, so a must-happen wait opts in.
+
+- **pgw#795 / th#1314 — the publish gate asserts PROVENANCE instead of re-deriving it.**
+  `publish.yml` no longer re-runs the suite `ci.yml` already ran green on the same
+  tree with the same `--locked` resolution; a second identical run cannot produce new
+  information, only flake, and it produced three in a row for v0.78.0. It now asserts
+  that some successful CI run carries this exact TREE (trees, not commit SHAs — a
+  release branch, a squash merge and a cherry-pick all give different commits for
+  identical content), then runs only the artifact-facing steps. STRICT: an unproven
+  tree refuses to publish, with a message naming the two one-run ways to satisfy it.
+  It also gains `timeout-minutes: 20` — it had none, so a hang ran to GitHub's 6-hour
+  cap. Validated against the live API on both paths. **Finding it surfaced: v0.78.0's
+  published tree was never itself CI-green** — the promotion PR tested master plus
+  cherry-picks, a different tree from the chaos commit the tag pointed at.
+
+- **pgw#680 follow-on — a background warm/heal now compiles under the REQUESTING thread's
+  intra-op count, so the entry it produces is servable by the thread that asked for it.**
+  Dynamo's `GLOBAL_STATE` guard snapshots `torch.get_num_threads()` on the thread that
+  COMPILES, and the OpenMP intra-op ICV is per-thread and sticky once initialized.
+  `hot_swap` runs ONE process-global shape-warm thread, so if it is created before anything
+  narrows the serving thread's count, every entry it compiles carries a guard the serving
+  thread can never satisfy — `GLOBAL_STATE changed: num_threads`. The pgw#622 hot-swap path
+  then never swaps, and a pgw#680 guard-miss heal marks the signature warm while its entry is
+  unservable, so the next request misses again and `_GUARD_MISS_HEAL_LIMIT` makes the
+  signature permanently `volatile` — the outcome the doctrine exists to prevent.
+
+  **Latent rather than live on today's ordering, and stated that way deliberately:** both
+  `cpu_budget.impose_intra_op_threads()` call sites run at boot, before any warm job exists
+  (`entrypoint._impose_group_host_policy` and `Executor.__init__`), so the warm thread
+  inherits the imposed value and no shipped pod is known to have hit this. It goes live the
+  moment anything imposes AFTER serving starts — a second `Executor` in one process, a
+  topology re-assert, a harness path. The warm job already carried the requesting thread's
+  grad-mode and autocast state; the intra-op count is the same class of state and was simply
+  missed, so it is now carried and imposed the same way. Found by the release gate rather
+  than by a pod, and red/green-verified through the real `Router` and the real
+  process-global warm thread.
+
+- **pgw#806 / pgw#802 / pgw#738+#764 — suite minimization and test health (no library
+  behaviour change).** The publish gate is the suite, so a test that fails on the
+  runner's mood is a release-blocking defect. Source-text handcuffs (tests asserting the
+  presence or ABSENCE of a string in `src/`) are deleted in favour of behavioural
+  assertions; four issue-labelled satellite files that were four views of one seam
+  collapse into the e2e file that already drives it; pgw#802's postmortem carriers are
+  redirected in `conftest.py` on the SUBPROCESS half too, so a child that records a
+  native crash can no longer poison the host's machine-global crash registry and fail
+  six of every other lane's tests; and four untracked tests that were red for every lane
+  are adjudicated against a clean archive rather than the shared worktree — none of them
+  was actually broken. One production-visible line rides along: pgw#797's warm-iteration
+  counter advances only inside the boot window, so a steady-state warm cannot misreport
+  a later boot span's iteration total.
+
+- **Correction to the 0.79.0 entry (the tag cannot change, so it is recorded here).**
+  0.79.0's `publish_v2` bullet says the route REFUSES a provenance stamp and that "the
+  mirror flip is blocked on the route (th#1331)". `f50dae2` landed in that same release
+  and deleted the guard: as shipped in 0.79.0, `publish_v2` WRITES `body["provenance"]`
+  and the mirror publishes v2. The 0.79.0 bullet describes an intermediate state no
+  published artifact has.
+
+## 0.79.0 (2026-07-30) — the v2 serving path actually works: the vendored proto is no longer stale, the chunked manifest parses against the REAL hub shape, and a publish refusal stops being retried as an outage
+
+> ### ⚠ 0.79.0 IS THE FLOOR FOR SERVING ANY CHUNKED (v2) CHECKPOINT — 0.78.0 CANNOT
+>
+> **0.78.0 shipped two defects that made a v2 artifact unresolvable. Both are
+> fixed here. `0.79.0` is the minimum version for any worker that may be handed a
+> v2 snapshot.**
+>
+> **(1) The vendored proto was STALE, so the PRODUCTION gRPC path could not carry
+> a v2 snapshot at all.** th#1303 checkpoint 3 added `digest`, `chunk_size_bytes`
+> and `chunks` to `worker_scheduler.proto` and regenerated only the Go side;
+> 0.78.0's `SnapshotFile` stub has fields `['path','size_bytes','blake3','url']`
+> and no `ChunkRef` message. Production workers receive snapshots over gRPC, so
+> every v2 snapshot arrived with no digest and no chunks and the worker refused
+> the model. Fail-closed, but wholly dark.
+>
+> **(2)** `models/hub_client._parse_chunks` in 0.78.0 required a `url` INSIDE each chunk
+> object. The hub cannot put one there: `chunks: [{digest, len}]` IS the
+> content-addressed manifest identity, so resolve-time URLs ride in a SEPARATE
+> index-aligned `chunk_urls: []`. Against a real hub, EVERY chunked (>64 MiB)
+> checkpoint therefore failed to parse with `missing digest/url/len` and
+> `resolve_repo` refused it. Impact was bounded only because no v2 artifact is in
+> production yet. Whole files and every v1/blake3 checkpoint were unaffected.
+>
+> **The rollout order this implies:** producing v2 chunks is safe at any version
+> (a v2 artifact nobody resolves harms nothing), but **no tag may be repointed at
+> a v2 manifest, and no v2 artifact may be resolved, until the SERVING FLEET is on
+> 0.79.0.** The gate lifts on fleet version, not on this upload.
+
+- **pgw#781 / th#1303 — the vendored proto is synced and the stubs regenerated.**
+  `SnapshotFile` now matches the hub byte-for-byte and `ChunkRef{sha256,url,len}`
+  exists. ADDITIVE (fields 5/6/7 on an existing message; `blake3`=3 and `url`=4
+  untouched), so this is not a protocol break and needs no th#1282 floor bump.
+  `_snapshot_to_resolved` drops its `getattr(f, "digest", "")` defaults for
+  direct field access: reading a possibly-absent proto field with a default is
+  how "the stub does not have this field" became "the hub sent an empty value",
+  which is the same absent-becomes-empty class as guarding a digest check on a
+  legacy field's truthiness. A missing field is now an AttributeError at the
+  wire boundary. Guarded by tests that assert the STUB's fields (naming
+  `task proto` in the failure) and one that drives the real conversion over a
+  real protobuf message with three chunks — the previous tests all built the
+  dataclass directly and so never crossed the wire, which is why this survived a
+  green suite.
+
+- **pgw#781 / th#1303 — the live acceptance, and the three defects it found.**
+  `v2 publish -> promoted -> resolve -> worker fill -> byte-identical` now runs
+  end to end against a real hub and real R2 (evidence:
+  `~/cozy/samples/ingestv2-accept/`). Everything below was found by that run and
+  by nothing else; each had passing unit tests over it.
+
+  - **The chunked-manifest wire shape** (above). The parser was written from a
+    design document instead of from the hub's serializer, and the unit tests
+    encoded the same assumption — a self-consistent suite proving the client
+    agreed with itself. For a WIRE contract the fixture must come from the
+    producer's serializer or a captured real response. `chunk_urls` is now read
+    index-aligned, a nested `url` still works (the proto's `ChunkRef` carries
+    `sha256`/`url`/`len` together, so one library serves both transports), and a
+    MISALIGNED url list is fatal rather than "fetch fewer chunks" — index
+    position is the only thing binding a URL to its digest.
+
+  - **A typed refusal was retried into a different error.** A v2 completion does
+    not answer with an error envelope; it answers with the th#1301 PROJECTION,
+    whose refusal carries an explicit `status.failure.retryable`.
+    `_send_with_retries` guesses definiteness from body SHAPE, so it read
+    `retryable: false` as a proxy non-answer and retried — and the retry, finding
+    the session terminal, returned 409 `publish_repudiated`. Measured twice: the
+    caller was told a consequence while the cause
+    (`invalid_manifest_for_kind: missing_diffusers_single_file_safetensors`) was
+    discarded. A publish is not idempotent to re-complete, so a blind retry there
+    can only destroy the diagnosis. `_send_with_retries` gains an optional
+    `definite` predicate; `/complete` supplies one and the error now leads with
+    the hub's own code, retryable bit and failing stage.
+
+  - **The publish error envelope is a SECOND hub shape.** tensorhub's
+    `publishError.body()` emits `{"error": "<code>", "message": ...}` — the code
+    as a STRING, not an object — which `response_is_from_hub` did not recognise.
+    So every publish refusal, on **v1 as well as v2**, has been classified
+    proxy-shaped and retried under the silence window. It stayed invisible
+    because a retried v1 refusal usually fails again identically. pgw#743's bias
+    is preserved and re-pinned: an unrecognised body is still proxy-shaped,
+    because mis-terminating an outage throws away paid-for work while
+    mis-retrying a refusal costs a bounded backoff.
+
+- **pgw#781 / th#1303 — `publish_v2` REFUSES a provenance stamp rather than
+  dropping it.** The v2 declare route writes `Provenance: []byte("{}")`
+  unconditionally, while every mirror publish carries
+  `{"upstream_revision": …}`. Flipping the mirror path to v2 would blank,
+  silently, the field naming which upstream commit we copied — the field
+  th#1301's strongest check (our sha256 vs upstream's published sha256, the
+  interop the whole re-key was for) is computed against. Filed as th#1331; the
+  guard is deleted in the same commit the route learns the field.
+
+
+- **th#1330 B2 — a component OVERRIDE no longer also fetches the component it overrides.**
+  pgw#617 is load-then-substitute: the override's tree is materialized separately and handed
+  to `from_pretrained` as a constructed object, so the base composition's copy of that
+  subfolder was downloaded and then never read — ~1.64 GB per SDXL text-encoder override, per
+  pod. `_materialize_local` now derives an exclusion from the binding's own
+  `component_overrides` (only for subfolders the snapshot actually carries) and passes it
+  through `ensure_local` -> `cozy_snapshot.ensure_snapshot`; every byte figure on the path
+  (disk-headroom gate, DOWNLOADING totals, the pgw#789 boot weights span) counts what is
+  actually fetched, and a typed `component_fetch_skipped` activity event names the bytes
+  skipped. The narrowed tree keys as `<digest>__x<fp>` (pgw#505's mechanism, negative side),
+  so it can never occupy the name reserved for a complete snapshot: a later FLAT dispatch of
+  the same base ref still materializes the full tree. Proven RED at HEAD / GREEN with the fix
+  on the real worker+CAS boundary in `tests/test_component_override_fetch_th1330.py` — the
+  evidence is the CAS itself, the base's `vae/` blob is absent from `blobs/`.
+
+- **th#1330 B4 (worker half) — `reclaimable_bytes` stopped over-promising, and disk GC stopped
+  deleting a tree a sibling ref still points at.** The reported figure summed each evictable
+  ref's whole indexed tree, so a blob two evictable refs shared was counted twice AND a blob
+  an evictable ref shares with a RETAINED one was counted as reclaimable even though
+  `sweep_orphan_blobs` only unlinks at `st_nlink == 1` — deleting that tree frees nothing.
+  The hub sizes every capacity decision off this number. Reclaimable is now the deduped set of
+  digests no retained ref holds; a ref with no banked manifest keeps its full indexed size.
+  Separately, `_evict_disk_ref` now refuses to `rmtree` a snapshot directory another
+  still-resident ref is materialized at (two refs at one digest share one directory).
+
+- **th#1330 B5 (worker half) — the banked snapshot map is no longer append-only.**
+  `ModelStore._snapshots` / `_snapshot_generations` / `_verified` kept a manifest forever, so a
+  ref dropped from DesiredResidency could still be materialized from OBSOLETE bytes by a later
+  bare `ensure_local(ref)`, with no hub prompting. `replace_desired_snapshots` now drops
+  manifests for refs that are neither desired, resident, in the preserve set, in use, nor mid
+  materialization; a ref wanted again goes through `_await_hub_snapshot`, which is the correct
+  path (the hub re-mints with LIVE presigned URLs).
 
 - **pgw#791 — the AOT serve path now satisfies the artifact's ALIGNED-input contract at
   ingress, once, instead of letting AOTInductor copy per call.** Inductor compiles its fast
@@ -97,6 +777,15 @@
   hub-visible `aot_input_realigned` event naming the input (coalesced to one per
   (entry, input, reason), with every occurrence counted and surfaced by
   `aot_serve.realigned_inputs(pipeline)`).
+
+  **Measured under control (RTX 4090, one artifact, one process, only the ingress differs):
+  the defect reproduces exactly — `timestep` is unaligned on 126 of 168 denoiser calls and the
+  pre-fix path logs 126 runner-side clone warnings against the fixed path's zero — but the COST
+  is +0.8 ms on a 3,373 ms request (+0.02%), not the ~119 ms the issue inferred from an
+  uncontrolled residual comparison.** So this is a contract fix and an OBSERVABILITY fix, not a
+  latency win: the warnings are written by C++ to fd 2, where even an in-process
+  `redirect_stderr` cannot see them, and the typed event is the only surface that reaches the
+  hub. WARM-INFERENCE-MATRIX §2c's 196-vs-77 ms residual gap needs another explanation.
 
 - **pgw#790 — a LoRA-bucket family now mints BOTH graph classes into one cell, and the serve
   path routes adapter-free traffic to the branchless one.** gw#627's canonical zeroed
@@ -134,6 +823,200 @@
   pgw#723 mint obligation — landed them in `*args` and died on `the lifted LoRA argument
   'lora_a' is missing`. The wrapper now appends the pair to the denoiser's own positional
   parameters via `__signature__` and accepts it either way.
+
+- **pgw#795 (round 3) — three more load-induced failures, found by running the
+  suite against a clean `chaos` tree on a loaded box.** None was caused by any
+  code change; all three asserted the machine. `subprocess_runner.run_entrypoint`
+  turned its `subprocess.run(timeout=25.0)` TOTAL budget into a SILENCE window —
+  the entrypoint emits `worker.startup.phase` lines throughout boot, so a boot
+  that keeps talking now runs as long as it needs and only silence gives up
+  (red-verified: a chatty child survives 3.6 s through a 1.0 s window; a wedged
+  one is caught in 1.3 s and killed, output preserved). `test_mint_liveness_pgw784`
+  asserted a beat-gap margin three times tighter than the hub's own kill line and
+  failed at 0.51 s against 0.50 s while the kill line sat at 1.50 s — it now
+  asserts the property (the hub would never kill this worker) and reports the
+  margin. `test_p2_residency_reconcile` sampled `resident_identity` the instant an
+  event arrived and read `('snap-a', 0)`; it now waits for the store to rebase on
+  progress.
+
+- **pgw#795 (sweep + guard) — the anti-pattern is now detected, not remembered.**
+  `test_magic_timeouts_gw666`'s guard pinned five NAMED constants in five NAMED
+  `src/` files, so it missed this twice over: it never looked at `tests/`, and a
+  freshly-invented wall clock walks past a regression pin even in `src/`. "Tests
+  are exempt" does not survive the evidence — the publish workflow runs
+  `pytest tests/` as the gate on every PyPI upload, so a test that fails on the
+  runner's mood is a release-blocking defect (three publish jobs, each ~4.6 h
+  queued and ~22 min run, three lanes blocked). Three kinds of fixed duration in
+  tests remain legitimate and are NOT flagged: induced durations (the fake
+  handler's sleep IS the stimulus), absence probes (`timeout=2.0` inside
+  `except TimeoutError`, whose expiry makes the test PASS), and hang bounds with
+  an order of magnitude of headroom. The flagged shape is the fourth: a fixed
+  duration whose EXPIRY FAILS the test.
+
+  Guards added: `tests/harness/` may hold no fixed deadline at all (one there is
+  one in ~37 files), and the remaining sites in test modules — 6 deadline waits,
+  5 elapsed-vs-constant assertions — are pinned as burn-down inventories that may
+  shrink but not grow. Fixed in this pass: `disk_usage_report` proves it skipped
+  the stalled statvfs structurally (`refresh_task` still pending) instead of by a
+  0.1s budget; `_close_sequence_group` proves it returned before the 0.5s close
+  finished instead of by a 0.4s budget; pgw#677's tenant-latency budgets anchor to
+  the harness's own `seed_forward_s` / `compile_delay_s` instead of 0.45s / 300ms
+  / 400ms; and the auth-retry and permit-holder waits count progress through
+  `await_count`.
+
+- **pgw#794 — a fail-closed adapter-fidelity gate: an adapter the serving dtype
+  DESTROYS is now refused instead of served silently.** Fusing a shipped adapter
+  into fp8-E4M3 weights does not erase the delta, it SUBSTITUTES for it
+  (measured: surviving-delta cosine 0.074 on qwen Lightning, 15x the true
+  delta's norm, 99.7% orthogonal to it). `_reject_zero_delta` catches an EMPTY
+  adapter, never an INERT one, and te#86's produce-time detector diffs in the
+  SOURCE dtype, so the fp8 cast — the whole hazard — was invisible to it.
+  `models/adapter_fidelity.py` scores the norm-weighted whole-adapter cosine
+  against the grid read off the REAL destination; refusal is the typed,
+  hub-visible `AdapterFidelityRefused` plus a `lora_fidelity` activity event.
+  Refused ONLY on the path that destroys it — the resident branch keeps A and B
+  separate and rides at 0.999999.
+
+## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, the benchmark telemetry is connected, and the suite stops asserting the runner
+
+- **th#1330 (th#1316 worker half) — a `disk_ref` the hub's own resolutions have
+  already replaced is no longer materialized.** The reconcile pass executed
+  `DesiredResidency.disk_refs` verbatim and serially, so a desired set carrying
+  BOTH `<ref>` and `<ref>#fp8` — with this worker's own `resolutions` mapping the
+  first onto the second — pulled the bf16 base ahead of the fp8 variant it was
+  meant to replace. Measured on prod (`tensorhub/sdxl` 0.2.23, L4): 6.94 GB at
+  +178 s ahead of 4.38 GB at +230 s, 144 s of a 270 s cold boot, for weights the
+  pod never loaded (`lane=fp8-w8a16`). The declared spelling is now skipped —
+  exactly when its resolved twin is desired in the SAME generation, so a
+  canonical-spelling lane override (th#913) is never skipped — and it is dropped
+  from `store.keep` so it cannot outrank cold refs in the GC preserve set. Each
+  skip emits a typed `residency_ref_superseded` activity event.
+
+- **pgw#795 — the v0.78.0 publish blockers: two tests that asserted the RUNNER,
+  not the code.** Three consecutive publish jobs died on them, and no code under
+  test had changed.
+
+  `test_residency_republish_pgw628` waited on a fixed 15 s deadline for its third
+  ON_DISK re-report and reported "saw 2 of 3". The clock was the messenger, and it
+  lied about the cause: the real defect is that `harness/residency-tiny` is a ref a
+  toy endpoint DECLARES, so ~2 s after boot the eager first boot promotes it to RAM
+  and every later re-sent plan re-announces the held identity as IN_RAM instead of
+  ON_DISK. The test needed three ON_DISK re-reports inside a ~2 s window and was
+  racing a worker-side timer; a loaded runner loses that race. Measured directly:
+  with the declared ref the re-announce stops at t~=2.03 s regardless of ack
+  spacing; with an UNDECLARED ref it holds at 0.5 s and 5 s spacing alike. A wall
+  clock cannot tell "slow" from "this can never happen now", which is why raising
+  the timeout would have bought a fourth failed release rather than a fix.
+
+  `test_th1130_deferred_tail` asserted `encode_ms >= 10` — a claim about the
+  runner's spare CPU. It had already been lowered from `>= 100` (failed at 83 ms)
+  and from `>= 0.5 * total.tail` (failed at 76 vs 77). Lowering the constant each
+  time is the anti-pattern with a smaller number: the quantity is the machine's
+  speed. It now proves the encode by its PRODUCT — a 1024^2 WEBP frame on the wire
+  plus an attributed `image_encode` stage — and the slot-exclusion inequality takes
+  its slack from the stage map's own unattributed residual instead of a hard-coded
+  15 ms, so the tolerance grows with the noise it exists to absorb.
+
+  New `tests/harness/progress_wait.py` gives the suite the give-up rule
+  `gen_worker.stall` already gives production code: a wait ends when the thing
+  happens, when the peer is provably gone (definitive, no clock), or when the
+  awaited observable has not advanced for a staleness window this run MEASURED
+  (`Cadence`: 10x the slowest advance seen, session-shared, floored). Only the
+  awaited observable counts as progress — peer liveness and unrelated chatter do
+  not reset the window, because a window that resets on them never closes (both
+  hangs measured while authoring this). `hub_double`'s `wait_for` /
+  `wait_for_count` / `wait_connection` drop their 15 s wall clocks onto the same
+  rule for all ~37 files that use them, while an EXPLICIT `timeout=` keeps its old
+  meaning for the callers that probe for absence. Expiry now names what it waited
+  on, what it last saw, and how the window was derived.
+
+- **pgw#781 / th#1303 — the chunked sha256 CAS is WIRED, in both directions.** The
+  primitives landed with nothing calling them: `models/chunk_upload.py` had zero
+  production callers, and `models/cozy_snapshot.py` — the real fill path — never
+  imported `models/chunk_cas.py` at all. So a v2 publish was unconsumable and a v2
+  publish was unproducible, which made "publish v2" untestable as an outcome
+  rather than merely unproven.
+
+  **Download.** `WorkerResolvedRepoFile` carries `digest` / `chunks[]` /
+  `chunk_size_bytes`, and `cas_ref()` is the ONE place the v1/v2 dual-read is
+  expressed for a resolved entry — it RAISES on an entry with no readable digest
+  instead of returning `""`, because every caller of it is an integrity check.
+  Both wire boundaries (gRPC `pb.Snapshot`, HTTP resolve) carry the new fields,
+  and neither requires a whole-file URL any more — a chunked entry legitimately
+  has none. Local CAS becomes `blobs/<algo>/aa/bb/<hex>`, so legacy trees keep
+  their exact paths while sha256 blobs cannot collide with blake3 ones. Chunked
+  files reassemble through `chunk_cas.download_chunked_file` (bounded
+  out-of-order fetch, in-order commit, fused whole-file hash, per-chunk progress
+  floor — pgw#786's lemon-host pathology now solved on the real path, at chunk
+  granularity, because the retry unit is 64 MiB and completed chunks are
+  durable).
+
+  **Upload.** `convert.hub.HubClient.publish_v2()` implements the hub's v2
+  contract: declare -> `{have, need}` -> PUT the granted objects with the hub's
+  headers VERBATIM -> complete. The checksum is inside the presigned signature,
+  so R2 refuses wrong bytes (400, and the object does not exist afterwards) and
+  refuses a substituted claim (403) — a claimed digest stops being assertable,
+  which kills th#1305's inherit/overwrite class structurally. Resume needs no
+  client state: re-plan and the need set comes back smaller. There is NO protocol
+  auto-select and no env knob — the caller names the protocol, so flipping a
+  producer class is a code change plus a deploy, and a hub without the v2 routes
+  FAILS rather than silently downgrading to blake3.
+
+  **Two silent defects fixed on the way, both of the same family as the executor
+  gate.** `_verify_materialized_tree` read `f.blake3` and guarded on it being
+  non-empty, so a reused v2 tree was reported CLEAN having hashed ZERO bytes; and
+  quarantine/`delete_blobs` STRIPPED the algorithm tag, aiming the unlink at
+  `blobs/blake3/<sha256hex>` — at nothing — leaving the corrupt blob to be
+  re-linked by the very next fill. Separately, `NetworkBytesScope`'s sink was read
+  through a contextvar per call, and chunk fetches run on a `ThreadPoolExecutor`
+  that does not propagate contextvars, so every chunked transfer would have
+  reported ZERO network bytes — th#850's "volume-attached boot => ~0 network
+  bytes" assertion reads that counter, so a cold boot would have looked warm.
+
+  23 new tests, all over real localhost HTTP servers with real sockets, threads
+  and files. The download side asserts BYTES HASHED, never merely "ok" — "ok" is
+  exactly what the old code got right while doing nothing. The upload side runs
+  against a stub that ENFORCES LIKE R2, because that enforcement is the design.
+
+- **test hygiene (release-train blocker)** — `test_th1130_deferred_tail` asserted
+  that the deferred encode occupies at least half the request tail. That is a
+  claim about the RUNNER's spare capacity, not about the code: a busy machine
+  inflates the unattributed residual and the ratio moves with nothing under test
+  changing. It failed a release attempt at `76 >= 0.5 * 155`, having already been
+  weakened once from an absolute `>= 100` that failed the same way. Removed; the
+  property it was reaching for (the encode runs slotless, entirely after the
+  permit is released) is asserted directly and remains true at any speed.
+
+- **pgw#788 — a TORCHLESS worker could not boot. torch is a CAPABILITY now, and its
+  absence is a sealed FACT.** `entrypoint.py` calls `env_seal.establish()` on every boot
+  regardless of `accelerator`, and from **0.70.3** onward that chain bare-imported torch at
+  three call sites with no guard — `env_seal.establish_config()` (and `effective_config()`),
+  `host_isa.impose()`, `guard_closure.establish_posture()` — so a torchless image died at
+  `phase=env_seal` before advertising a single function, with no env knob to skip it. The
+  window is 0.70.3 / 0.70.4 / 0.70.5 / 0.75.x / 0.76.x / 0.77.0 / **0.78.0**; the last safe
+  line is 0.70.2. `task e2e`'s marco-polo J2/J3/DelegatedSpend have been unbootable that
+  whole time, and ie#578 has already relocked `dj-utils`, `quality-benchmark` and
+  `dj-pipeline` onto pins inside it — they break on their next BUILD, not on the relock.
+
+  New `torch_capability.torch_or_none()` is the one probe all three use. When torch is
+  absent the seal RECORDS it: `config` carries `torch: "absent"` (plus the torch-free
+  interpreter facts), `inductor` is `"absent"`, `posture` is `{"torch": "absent"}`, and the
+  ISA clamp and guard posture no-op, logged once. That is a *stronger* seal than one that
+  cannot be computed — "this pod had no torch" is a real, keyable environment fact, so the
+  digest stays meaningful for CPU cells. **Adding torch to the CPU images was rejected**: a
+  ~2-3 GB dependency on pods whose entire value is being cheap inverts the point and encodes
+  an SDK defect as a fleet requirement (`accelerator='none'` is a first-class shape, th#721).
+  A DECLARED config knob on a torchless worker still refuses by name — every canonical knob
+  is a torch flag, and honouring one silently would fork cell identity.
+
+  **With torch present the seal is byte-identical**, verified rather than asserted: the same
+  `seal_digest` (`6eda4772...`) before and after on this box. A changed seal shape would have
+  stranded every published cell.
+
+  `tests/test_torchless_boot_pgw788.py` is the guard that did not exist — it import-blocks
+  torch with a `sys.meta_path` finder (no second venv) and asserts the boot chain completes,
+  and `publish.yml` now imports the public entrypoint and runs the seal **in the torch-free
+  wheel-contract venv**, which is a real environment rather than a simulation.
 
 - **th#1299 (worker half of the visibility defect)** — an abandoned self-mint now names
   its own cause. The abort event reported `phase="abandoned"` with the detail
@@ -182,7 +1065,7 @@
   parseable out of the free-text `detail` and JIT duration existed nowhere off
   the pod. Hub half: tensorhub migration 0070 + `GET /v1/admin/compile-duration`.
 
-## 0.78.0 (2026-07-30) — cross-SKU adoption becomes real, and the benchmark telemetry is finally connected
+### 0.78.0 detail — the cross-SKU adoption trio (pgw#765 + pgw#772 + pgw#789)
 
 Everything on chaos since 0.77.0. The headline trio, cut together because none of
 them is worth much alone:
@@ -764,7 +1647,6 @@ yet"), plus the flip-critical AOT serve seams.
   lane; the flip smoke notes the gap until it ships).
 
 
-
 ## Unreleased — C2PA signing moves hub-side (th#1307)
 
 - **The C2PA private key never enters a pod (th#1307).** The hub used to inject
@@ -1200,7 +2082,6 @@ digests in cell metadata, pgw#711 publish digests (`artifact_digest`/`manifest_d
 publish-complete), pgw#712 no-republish fencing + unicity refusal. All behind
 `GEN_WORKER_EQUIVALENCE_ADOPTION`, **default OFF** — the flag flip is gated on th#1229/
 th#1239 hub halves. No behavior change with the flag unset.
-
 
 ## 0.75.0 (2026-07-26) — pgw#660: the hard GPU-architecture floor has a declared carrier again
 
@@ -1644,7 +2525,6 @@ rebuilds into `NVIDIAModelOptConfig`, whose constructor requires a
   an SDK diagnostics endpoint, re-exported exactly as its own docstring
   instructed, vanished from a release silently. Now a WARNING naming the
   class and the fix — subclass it locally, which is what the docstring says.
-
 
 ## 0.70.0 (2026-07-26) — pgw#677: tenant work always wins the GPU — the background mint yields
 
@@ -2691,7 +3571,6 @@ must change:
   already a per-handler opt-in (dual dispatch exists today), and the
   blocking `ctx.save_*` methods will gain `async` twins in a later
   non-breaking pass (pgw#652 Phase 1). No new sync ctx I/O was added.
-
 
 ## 0.58.1 (2026-07-25)
 
@@ -3808,7 +4687,6 @@ must change:
   pipeline (never its scaled-mm denoiser) via the new `components=` scope
   override on `apply_fp8_storage`.
 
-
 ## 0.30.2 (2026-07-16)
 
 - **gw#554: clone disk admission follows the resolved work instead of a
@@ -3822,7 +4700,6 @@ must change:
   still reject provider-fetched base components that were absent from the
   source plan. The `COZY_CONVERT_DISK_HEADROOM` override is removed.
 
-
 ## 0.30.1 (2026-07-16)
 
 - **ie#381 fix 2: the bf16-resident fit check counts fp8 bytes per TENSOR,
@@ -3834,7 +4711,6 @@ must change:
   envelope term, and the upgrade proceeded into the activation budget.
   `snapshot_component_fp8_bytes` sums F8_E4M3 tensor bytes from the
   safetensors headers; `bf16_resident_fits` doubles exactly those.
-
 
 ## 0.30.0 (2026-07-16)
 
@@ -3890,7 +4766,6 @@ must change:
   same inputs (gw#391 parity). Declared-unknown loads (local CLI) keep the
   old margin-only rule.
 
-
 ## 0.28.0 (2026-07-16)
 
 - **gw#470 boot warmup default-on.** GPU inference endpoints now warm before
@@ -3916,7 +4791,6 @@ must change:
     failures (loud, th#581 rails). Cancel/drain-safe on the existing
     `_to_thread_complete` rails.
 
-
 ## 0.27.0 (2026-07-16)
 
 - **th#826 call-out primitive (workflows-as-endpoints).** Functions declared
@@ -3935,14 +4809,12 @@ must change:
     request's payer, inherit its availability tier, and die with the tree on
     parent cancel.
 
-
 ## 0.26.9 (2026-07-15)
 
 - hub_policy: probe `modelopt` in the known optional-libs list (te#79
   regression: `Resources(libraries=("modelopt",))` functions were
   structurally unavailable — the executor's find_spec fallback passed but
   plan_serve re-checked installed_libs, which never probed modelopt).
-
 
 ## 0.26.1 (2026-07-14)
 
@@ -4451,7 +5323,6 @@ healthy hub binding.
   (`CreatePodRequest.MinMemoryGB`/`MinVCPUCount`, th#740
   read-back-and-reject). Host asks never imply `gpu=True`.
 
-
 ## 0.17.2 (2026-07-12)
 
 - **pgw#519: `model.choices[].binding` was missing the `family` stamp.**
@@ -4476,7 +5347,6 @@ healthy hub binding.
   FINALIZE_OVERLAP log line is now corroborating evidence, not the only
   one). Tensorhub counterpart consumes all three (tensorhub PR #299).
 
-
 ## 0.17.0 (2026-07-12)
 
 - **th#714: C2PA Content Credentials on generated media (EU AI Act Art. 50).**
@@ -4495,7 +5365,6 @@ healthy hub binding.
   tensors) pass through untouched via content sniffing. New `signing` extra
   (c2pa-python, the official CAI c2pa-rs binding); sign+verify round-trip
   tests (png/webp/jpeg/mp4) run in CI against an openssl-generated test cert.
-
 
 ## 0.16.0 (2026-07-12)
 
@@ -4560,7 +5429,6 @@ healthy hub binding.
   keeps both sides (keys separate). Verified equal inside the serve image
   on the two real fp8 TE configs.
 
-
 ## 0.14.15 (2026-07-12)
 
 - **gw#479: canonical config digests hoist child-only scalars to the
@@ -4574,7 +5442,6 @@ healthy hub binding.
   Verified equal inside the serve image on the two real fp8 TE configs.
 ## 0.15.0 (2026-07-12)
 
-
 ## 0.14.14 (2026-07-12)
 
 - **gw#407 host-RAM admission sizes multi-slot setups by the LARGEST slot,
@@ -4583,7 +5450,6 @@ healthy hub binding.
   "56.2GiB incoming" on a 61GiB-RAM A100 pod that never stages more than
   one slot at a time (gw#479 J24M run19). Single-slot behavior unchanged;
   the J17 16-variant case (separate records) unchanged.
-
 
 ## 0.14.13 (2026-07-12)
 
@@ -4661,7 +5527,6 @@ healthy hub binding.
   TE; only the vae shared). Sub-config values that DIFFER from the parent
   still separate keys.
 
-
 ## 0.14.8 (2026-07-12)
 
 - **ie#463: `diffusers_step_callback` gains `window=(start, end)`.** Multi-stage
@@ -4706,7 +5571,6 @@ healthy hub binding.
 - Releases the merged-but-unreleased th#757 forensics change:
   `download_failed` ModelEvents carry the sanitized root cause.
 
-
 ## 0.14.4 (2026-07-11)
 
 - **th#757 (worker side): terminal download failures carry the root cause.**
@@ -4716,7 +5580,6 @@ healthy hub binding.
   surface; J24M run11's starved request was undiagnosable without it. The
   exact-match vocab strings the hub switches on (`url_expired`,
   `missing_snapshot`, `insufficient_disk`, `digest_mismatch`) are unchanged.
-
 
 ## 0.14.5 (2026-07-11)
 

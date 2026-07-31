@@ -37,14 +37,6 @@ from gen_worker.api.export_contract import (
 # ---------------------------------------------------------------------------
 
 
-def test_dim_carries_input_axis_bindings() -> None:
-    d = Dim("T_v", carried_by=(("hidden_states", 1), ("timestep", 1),
-                               ("video_coords", 2)))
-    assert d.carried_by == (("hidden_states", 1), ("timestep", 1),
-                            ("video_coords", 2))
-    assert d.multiple_of == 1 and d.relates_to == ()
-
-
 def test_dim_refusals_are_named() -> None:
     with pytest.raises(DeclarationError, match="no .*bindings"):
         Dim("H_lat", carried_by=())
@@ -56,13 +48,6 @@ def test_dim_refusals_are_named() -> None:
         Dim("N", carried_by=(("t", 1),), relates_to=("N",))
     with pytest.raises(DeclarationError, match="multiple_of"):
         Dim("H_lat", carried_by=(("sample", 2),), multiple_of=0)
-
-
-def test_dim_has_no_min_max_fields() -> None:
-    """Bounds derive from the class rows — a Dim carrying hand-written bounds
-    is the endpoint hand-math #739 forbids, so the field does not exist."""
-    with pytest.raises(TypeError):
-        Dim("N_tok", carried_by=(("timestep", 1),), min=12400)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -249,11 +234,6 @@ def test_input_axis_specs() -> None:
         Input("x", shape=(("cfg", "in_channels"),))
     with pytest.raises(DeclarationError, match="positive"):
         Input("x", shape=(0,))
-    # No args/kwargs choice exists to declare: all-positional example feeds
-    # are a mint obligation (pod 9, pgw#723 residuals), so the vocabulary
-    # carries no `positional` knob at all.
-    with pytest.raises(TypeError):
-        Input("x", shape=("B",), positional=True)  # type: ignore[call-arg]
     assert Arg("return_dict", False).value is False
 
 

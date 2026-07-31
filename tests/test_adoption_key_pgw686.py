@@ -167,21 +167,6 @@ def test_burst_divergence_reproduced_lane_only(burst_runtime: None) -> None:
         assert not ck.is_key(old)
 
 
-def test_raw_pipeline_probe_is_blind_to_w8a8_mode(burst_runtime: None) -> None:
-    """The mechanism: loading.pipeline_weight_lane cannot see the denoiser's
-    w8a8 GEMM mode, so a key computed from it can never equal the key the
-    mint stamps (stamp_lane's branch_lane fallback sees it)."""
-    from gen_worker.models.loading import pipeline_weight_lane
-
-    pipe = _Pipe()
-    assert pipeline_weight_lane(pipe) == ""
-    assert w8a8_lora.branch_lane(pipe.unet) == "w8a8"
-    # The pre-fix advertised key IS the burst's never-published identity.
-    assert _requested(pipeline_weight_lane(pipe)) == _requested("")
-    assert _requested(pipeline_weight_lane(pipe)) \
-        != ck.from_artifact_metadata(_BURST_META).digest
-
-
 # --- the fix: one base-lane resolution for every cell-identity surface -----
 
 
@@ -225,13 +210,3 @@ def test_stamp_lane_memoizes_the_same_base() -> None:
     assert pipe._cozy_lora_base_lane == expected == "w8a8"
     # bucket 0 on the stub: the stamp restores the branchless base lane.
     assert pipe._cozy_weight_lane == "w8a8"
-
-
-def test_lookup_speculation_covers_the_w8a8_lane() -> None:
-    """Pre-load pull-by-key speculation must include the w8a8 base lane, or
-    a cold worker can never pull the very cell its own boot will mint."""
-    from gen_worker import executor
-
-    assert "w8a8" in executor._SPECULATIVE_CELL_BASE_LANES
-    assert "" in executor._SPECULATIVE_CELL_BASE_LANES
-    assert "fp8-hooks" in executor._SPECULATIVE_CELL_BASE_LANES

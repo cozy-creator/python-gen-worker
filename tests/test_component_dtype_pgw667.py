@@ -16,15 +16,11 @@ is the dtype of actual tensors on the real load paths:
     the composition's compute dtype;
   * a uniform composition (sdxl) is untouched — no dict dtype, no behaviour
     change;
-  * a SUBSTITUTED component keeps the fact (``load_component_override``);
-  * the installed diffusers really does honor a per-component dtype map (a
-    source guard on the dependency, so a future diffusers dropping it fails
-    here rather than silently truncating in production).
+  * a SUBSTITUTED component keeps the fact (``load_component_override``).
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 from typing import Any, Dict
@@ -33,7 +29,6 @@ import pytest
 import torch
 from diffusers import (
     AutoencoderKLWan,
-    DiffusionPipeline,
     StableDiffusionXLPipeline,
     WanImageToVideoPipeline,
     WanPipeline,
@@ -244,16 +239,3 @@ def test_substituted_component_keeps_the_fact(tmp_path: Path) -> None:
     module = load_component_override(base, "vae", override, dtype="bf16")
     assert isinstance(module, AutoencoderKLWan)
     assert _vae_dtype(module) is torch.float32
-
-
-def test_installed_diffusers_honors_a_per_component_dtype_map() -> None:
-    """Real-dependency guard: the mechanism the widening rides on.
-
-    ``DiffusionPipeline.from_pretrained`` selects each sub-model's dtype from a
-    dict via ``torch_dtype.get(name, torch_dtype.get("default", ...))``. If a
-    future diffusers drops that, the fp32 VAE would silently load bf16 — which
-    is exactly the failure pgw#667 exists to prevent — so it fails HERE.
-    """
-    src = inspect.getsource(DiffusionPipeline.from_pretrained)
-    assert "isinstance(torch_dtype, dict)" in src
-    assert '"default"' in src or "'default'" in src

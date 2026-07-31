@@ -842,11 +842,35 @@ message Snapshot {
   repeated SnapshotFile files = 2;
 }
 
+message ChunkRef {
+  string sha256 = 1;
+  string url    = 2; // presigned GET for this chunk
+  int64  len    = 3;
+}
+
 message SnapshotFile {
   string path       = 1;
   int64  size_bytes = 2;
-  string blake3     = 3; // content hash the worker verifies after download
-  string url        = 4; // presigned GET
+  string blake3     = 3; // LEGACY (th#1303): bare blake3 hex. Deleted at phase 4.
+  string url        = 4; // presigned GET for the whole file
+
+  // th#1303 manifest v2, ADDITIVE. A v2 snapshot carries `digest` (always
+  // algorithm-tagged, e.g. "sha256:<hex>") and, for files larger than
+  // chunk_size_bytes, an ORDERED chunk list. `blake3`+`url` continue to
+  // carry legacy snapshots for the whole dual-read window.
+  //
+  // For a WHOLE file (size <= chunk_size_bytes) `digest` is the CAS key and
+  // the store enforced it at write time. For a CHUNKED file `digest` is the
+  // WHOLE-FILE sha256 — metadata, deliberately not store-enforced — which
+  // the worker verifies for free in the same pass that reassembles the
+  // chunks. The chunk digests are the store-enforced keys.
+  //
+  // A chunked snapshot is only dispatchable to a worker that understands it;
+  // that is gated by the th#1282 supported-version floor, not by a parallel
+  // capability flag.
+  string digest            = 5;
+  int64  chunk_size_bytes  = 6;
+  repeated ChunkRef chunks = 7;
 }
 
 // Worker -> orchestrator: dispatch acknowledged; the worker now owns

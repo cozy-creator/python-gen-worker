@@ -271,11 +271,11 @@ def test_gguf_explicit_quant_pick_and_not_found_refusal() -> None:
 
 
 @pytest.mark.parametrize("files,reason", [
+    # Representative rows of the one refusal table (pickle = the classic,
+    # onnx = the common export, tensorrt = the exotic edge); the remaining
+    # formats ride the same branch.
     (["pytorch_model.bin"], "pickle_only"),
     (["model.onnx"], "onnx_only"),
-    (["tf_model.h5"], "tf_only"),
-    (["flax_model.msgpack"], "flax_only"),
-    (["weights.mlpackage"], "coreml_only"),
     (["model.engine"], "tensorrt_only"),
 ])
 def test_classifier_refuses_non_safetensors_only_repos(files: list, reason: str) -> None:

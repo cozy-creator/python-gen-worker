@@ -296,6 +296,9 @@ class Lifecycle:
         self._reconcile_active: Optional[tuple] = None
         self._residency_restart: Optional[asyncio.Event] = None
         self._model_resolutions: Dict[str, Tuple[Any, ...]] = {}
+        # th#1330: declared -> resolved for every disk_ref already reported as
+        # superseded, so the typed event fires on transitions, not per ack.
+        self._superseded_reported: Dict[str, str] = {}
         self.executor.runtime_config.set_projection_callbacks(
             on_parameter_snapshot=self._config_snapshot_applied,
             on_snapshot_failure=self._config_snapshot_failed,
@@ -565,7 +568,12 @@ class Lifecycle:
             )
         else:
             self._observed_residency_generation = generation
-            self.executor.store.keep = list(dict.fromkeys(ref for ref in desired.disk_refs if ref))
+            # th#1330: a superseded declared spelling must not be GC-protected
+            # either — an unloaded base outranking genuinely cold refs in the
+            # preserve set is the same waste one eviction later.
+            _superseded = self._superseded_disk_refs(desired)
+            self.executor.store.keep = list(dict.fromkeys(
+                ref for ref in desired.disk_refs if ref and ref not in _superseded))
             self.executor.store.replace_desired_snapshots(
                 dict(desired.snapshots),
                 generation=generation,
@@ -642,6 +650,55 @@ class Lifecycle:
         if event is None:
             event = self._residency_restart = asyncio.Event()
         event.set()
+
+    def _superseded_disk_refs(self, desired: "pb.DesiredResidency") -> set:
+        """th#1330/th#1316: declared disk_refs the hub's OWN resolutions have
+        already replaced, and whose replacement is in the same list.
+
+        The hub addresses workers in resolved ref space (th#736), but a moment
+        with no pick — a transient flavor resolve, a refusal, an
+        unminted-cell gate — seeds the BARE spelling into desired.disk_refs,
+        and no hub path removes it once the pick returns (declared and
+        effective collapse to one key in the removal layer). The worker then
+        materializes both: measured on prod, a 6.94 GB bf16 base staged ahead
+        of the 4.38 GB fp8 variant it was meant to replace, ~144 s of a 270 s
+        cold boot, for weights that are never loaded.
+
+        Skipping is safe exactly when the resolved twin is ALSO listed: the
+        hub is already asking for the artifact this ref resolves to, so the
+        declared spelling can only add bytes. When the resolved twin is NOT
+        listed the ref is materialized normally — a lane override that keeps
+        the canonical spelling (th#913) is never skipped."""
+        resolutions = getattr(self, "_model_resolutions", {}) or {}
+        if not resolutions:
+            return set()
+        listed = {ref for ref in desired.disk_refs if ref}
+        superseded = set()
+        for ref in listed:
+            pick = resolutions.get(ref)
+            resolved = (pick[0] if pick else "") or ""
+            if resolved and resolved != ref and resolved in listed:
+                superseded.add(ref)
+        for ref in sorted(superseded):
+            resolved = resolutions[ref][0]
+            if self._superseded_reported.get(ref) == resolved:
+                continue
+            self._superseded_reported[ref] = resolved
+            logger.info(
+                "skipping superseded disk_ref %s (resolved to %s, also desired)",
+                ref, resolved,
+            )
+            activity_mod.emit_event(
+                "residency_ref_superseded",
+                f"declared disk_ref {ref} is superseded by its own resolution "
+                f"{resolved}, which is desired in the same generation — not "
+                f"materializing the declared spelling (th#1330)",
+                phase="skipped",
+            )
+        for ref in list(self._superseded_reported):
+            if ref not in superseded:
+                del self._superseded_reported[ref]
+        return superseded
 
     def _work_context(
         self,
@@ -730,8 +787,11 @@ class Lifecycle:
     ) -> None:
         """One convergence pass over ``desired`` in declared order."""
         snapshots = dict(desired.snapshots)
+        # th#1330: never materialize a declared spelling the hub's own
+        # resolutions have replaced with another ref in this same list.
+        superseded = self._superseded_disk_refs(desired)
         for ref in desired.disk_refs:
-            if not ref:
+            if not ref or ref in superseded:
                 continue
             if restart.is_set():
                 return
@@ -1014,6 +1074,22 @@ class Lifecycle:
                 pb.WorkerMessage(state_delta=delta),
                 hello_ack=hello_ack,
             )
+            # pgw#797: THE boot close, and its only owner. "Servable" means the
+            # hub may dispatch to this worker, and the hub dispatches to
+            # `available_functions` — so the fact is "a StateDelta advertising
+            # at least one function has gone out on a connected stream", which
+            # is observable here and nowhere else.
+            #
+            # pgw#789 marked it from `Lifecycle.startup()` instead, once per
+            # code path. That missed the path EVERY real release takes: a spec
+            # declaring `Compile` (or slots) is routed to `dynamic` and set up
+            # on hub delivery, so `awaiting_hub` was empty, the milestone fired
+            # at the end of `startup()` — which `worker.arun` runs CONCURRENTLY
+            # with the transport — and the boot closed before `hello`. Live on
+            # chaos/0.78.0: ordinal 1 `first_request_servable` 8.9s, ordinal 2
+            # `hello` 13.2s, and every span after it suppressed by `in_boot()`.
+            if delta.available_functions and not self.draining:
+                self._mark_servable()
         await self._send_lifecycle_snapshot(
             hello_ack=hello_ack,
             force=force,
@@ -1200,13 +1276,16 @@ class Lifecycle:
                 awaiting_hub[spec.name] = missing
                 continue
             try:
-                # pgw#789: weights -> VRAM is a boot phase. Without this span
-                # the whole pipeline load landed in `residual_ms` and the
-                # cold-boot ladder could not say whether a slow boot was
-                # network-bound or load-bound.
-                with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
-                                   function=spec.name):
-                    await self.executor.ensure_setup(spec)
+                # pgw#797: the `pipeline_load` span moved INTO
+                # `Executor.ensure_setup`. It was here and at
+                # `_setup_awaiting_functions`, i.e. on the two boot paths a
+                # release declaring `Compile` never takes — those specs are
+                # routed to `dynamic` above and set up from hub delivery
+                # (`_ensure_hot_instance` / RunJob), so the span measured the
+                # paths that cost nothing and missed every real load. Same
+                # doctrine as pgw#789 moving `weights_fetch` into the
+                # materializer: instrument the layer all callers pass through.
+                await self.executor.ensure_setup(spec)
             except Exception as exc:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
         if dynamic:
@@ -1240,31 +1319,25 @@ class Lifecycle:
         # is the same quantity the autoscaler's cold-boot horizon prices
         # against, and everything after it is optimization, not boot.
         #
-        # pgw#789: EXCEPT when functions are still awaiting hub-supplied
-        # snapshots. READY with `awaiting_hub` non-empty advertises NO
-        # function, so the hub cannot dispatch — marking the milestone here
-        # measured "startup() returned", not "servable". Live proof (chaos
-        # stack, gen-worker 0.77.0, six boots): every recorded
-        # first_request_servable was 4.2-12.3s while the real boots were
-        # minutes, because the ~230s of tensorhub-ref weight fetching happens
-        # AFTER this line on exactly that path. `_setup_awaiting_functions`
-        # owns the milestone in that case; if the snapshots never arrive it is
-        # never marked, and a boot with no closing milestone is itself the
-        # finding (the same doctrine as an open mid-boot span).
-        if not awaiting_hub:
-            self._mark_servable()
+        # pgw#797: NOT marked here, on any path. pgw#789 special-cased
+        # `awaiting_hub` and left the `dynamic` (compile-cell / slot) path —
+        # i.e. every real release — closing the boot at the end of `startup()`,
+        # concurrently with and usually BEFORE the transport's own hello. The
+        # milestone now has exactly one owner, `maybe_send_state_delta`, which
+        # marks it on the fact itself: a StateDelta advertising a function went
+        # out. If no function is ever advertised the boot has no closing
+        # milestone, and that is the finding (same doctrine as an open span).
         await self.set_phase(pb.WORKER_PHASE_READY)
 
     def _mark_servable(self) -> None:
-        """Close the boot: mark first-request-servable from process start,
-        carrying the reconciliation (measured/residual/per-class) as detail.
-        `mark_once` makes the call idempotent across the two owners."""
+        """Close the boot: mark first-request-servable from process start.
+
+        `mark_once` keeps it once-per-process — it is called on every StateDelta
+        send. The reconciliation detail is filled by the recorder, which is the
+        only thing that knows the instant the row is actually released."""
         boot_mod.mark_once(
             boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
             since_process_start=True,
-            detail=" ".join(
-                f"{k}={v}" for k, v in sorted(boot_mod.reconciliation().items())
-            ),
         )
 
     async def _heartbeat_loop(self) -> None:
@@ -1295,9 +1368,8 @@ class Lifecycle:
                 if spec is None or fn in self.executor.unavailable:
                     continue
                 try:
-                    with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD,
-                                       function=fn):
-                        await self.executor.ensure_setup(spec)
+                    # pgw#797: span owned by `Executor.ensure_setup`.
+                    await self.executor.ensure_setup(spec)
                     logger.info(
                         "boot setup of %s completed after hub snapshot delivery (gw#591)", fn
                     )
@@ -1306,13 +1378,8 @@ class Lifecycle:
                 await self.maybe_send_state_delta()
             if pending:
                 await asyncio.sleep(_BOOT_SETUP_WATCH_INTERVAL_S)
-        # pgw#789: THIS is where a hub-snapshot-fed worker actually becomes
-        # servable — the functions it advertises are set up and the StateDelta
-        # carrying them has gone out. Deliberately outside the loop and after
-        # it: `pending` is empty here (or the worker is draining, in which case
-        # it never became servable and must not claim a boot number).
-        if not pending and not self.draining:
-            self._mark_servable()
+        # pgw#797: no mark here either. The `maybe_send_state_delta` above is
+        # the one that advertises these functions, and it owns the milestone.
 
     # ---- drain -------------------------------------------------------------------
 

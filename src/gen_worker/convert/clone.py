@@ -1189,7 +1189,24 @@ def run_clone(
                 metadata.setdefault(f"attr_{k}", str(v))
 
             _progress(0.55 + 0.4 * (i / max(1, len(specs))), f"clone.publish.{spec.label}")
-            commit = hubclient.commit(
+            # th#1303 phase 3: the mirror is the FIRST producer class flipped to
+            # the chunked sha256 CAS, chosen for blast radius — a mirror is
+            # re-runnable from upstream, so a bad publish costs a re-clone and
+            # never an unrecoverable artifact. Every file here is a real local
+            # file (`files_from_tree`), which v2 requires: its guarantee is that
+            # a digest is PROVEN from bytes in hand. The BANK path at :556 keeps
+            # `commit()` precisely because its adds are by-reference.
+            #
+            # `message` has no v2 equivalent and is NOT silently dropped — it
+            # was `clone {provider}:{ref}@{revision}`, which is exactly
+            # `upstream_ref` + `upstream_revision` in the provenance stamp the
+            # hub now resolves authoritatively (th#1331). The fact moved to a
+            # structured, queryable home; it did not disappear.
+            #
+            # A `merge` into a prior v1/blake3 manifest is a TYPED refusal
+            # (`mixed_algorithm_manifest`) rather than a silent partial — the
+            # right behaviour until the phase-2 backfill re-keys the repo.
+            commit = hubclient.publish_v2(
                 destination_repo=destination,
                 files=files,
                 tags=tags,
@@ -1203,7 +1220,6 @@ def run_clone(
                 dtype=str(attrs.get("dtype") or spec.dtype),
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
-                message=f"clone {provider}:{source.source_ref}@{source.source_revision}",
                 metadata=metadata,
                 provenance=provenance,
                 repo_spec=source.repo_spec,

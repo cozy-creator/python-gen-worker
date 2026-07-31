@@ -63,22 +63,33 @@ def test_the_permit_is_released_before_the_deferred_encode_runs() -> None:
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     stages = dict(res.metrics.stage_ms)
     encode_ms = stages["image_encode"]
-    # The encode must be big enough that "it ran slotless" means something —
-    # but NOT a wall-clock claim about the runner's CPU. `>= 100` failed on a
-    # GitHub runner at 83ms (pgw debt-sweep lane, PR #397), which said nothing
-    # about the property under test. Measurable, and dominating the tail, is
-    # the honest form of the same requirement.
-    assert encode_ms >= 10, f"the 1024^2 webp encode should be visible: {stages}"
-    assert encode_ms >= 0.5 * stages["total.tail"], (
-        f"the deferred encode should dominate the tail: {stages}")
+    # pgw#795: this used to be a wall-clock claim about the runner's CPU, and
+    # it has now failed a release THREE times under three different constants —
+    # `>= 100` at 83ms (PR #397), `>= 0.5 * total.tail` at 76 vs 77, and
+    # `>= 10` on the v0.78.0 publish rerun. Lowering the number each time is
+    # the anti-pattern with a smaller constant: no value is safe, because the
+    # quantity being asserted is the RUNNER's speed, not the code's behaviour.
+    #
+    # What the assertion was actually for is that the encode really happened,
+    # so "it ran slotless" is not a statement about nothing. Its PRODUCT proves
+    # that at any speed: a 1024^2 webp frame came back on the wire.
+    encoded = _image_bytes(res)
+    frame = Image.open(BytesIO(encoded))
+    assert frame.size == (de.SLOW_PX, de.SLOW_PX), frame.size
+    assert frame.format == "WEBP", frame.format
+    assert "image_encode" in stages, stages  # ...and it is ATTRIBUTED as a stage
 
     # The whole encode fits inside the post-release window: the GPU was free
     # for every millisecond of it.
     assert res.metrics.finalize_wall_ms >= encode_ms, (
         res.metrics.finalize_wall_ms, encode_ms, stages)
-    # ...and the permit was NOT held for it.
-    assert res.metrics.slot_held_ms <= res.metrics.runtime_ms - encode_ms + 15, (
-        res.metrics.slot_held_ms, res.metrics.runtime_ms, encode_ms)
+    # ...and the permit was NOT held for it. The slack is the stage map's OWN
+    # unattributed residual rather than a hard-coded 15ms: the residual is where
+    # runner noise lands, so the tolerance grows with the noise it exists to
+    # absorb instead of being a second constant waiting to be lowered.
+    assert res.metrics.slot_held_ms + encode_ms <= (
+        res.metrics.runtime_ms + stages["resid.unattributed"]), (
+        res.metrics.slot_held_ms, res.metrics.runtime_ms, encode_ms, stages)
 
     # th#1111: the tail work is attributed to the tail, and the map reconciles.
     assert stages["total.tail"] >= encode_ms
@@ -109,12 +120,15 @@ def test_a_second_job_takes_the_gpu_while_the_first_is_still_encoding() -> None:
     assert b_start > a_handler_end, "B must not run inside A's GPU phase"
     # ...and started BEFORE A's tail finished: A's encode+upload and B's
     # compute were in flight at the same time.
-    assert b_start < a_done_at, (
-        f"B started {b_start - a_done_at:.3f}s after A's result — no overlap")
+    # pgw#795: the property is the OVERLAP EXISTING — B holding the GPU while
+    # A is still encoding. How MUCH of A's tail B covers is a race between two
+    # threads on a shared runner, so a `>= 0.5 * encode_ms` share was a claim
+    # about the scheduler's mood; the overlap is reported, not asserted on.
     overlap_ms = int((a_done_at - b_start) * 1000)
     encode_ms = dict(a.metrics.stage_ms)["image_encode"]
-    assert overlap_ms >= encode_ms * 0.5, (
-        f"only {overlap_ms}ms of B ran inside A's {encode_ms}ms tail")
+    assert b_start < a_done_at, (
+        f"B started {b_start - a_done_at:.3f}s after A's result — no overlap "
+        f"(A's encode was {encode_ms}ms, overlap {overlap_ms}ms)")
 
 
 def test_an_n_image_loop_never_releases_the_permit_early() -> None:

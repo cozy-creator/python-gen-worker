@@ -51,10 +51,19 @@ import requests
 
 from . import activity as activity_mod
 from . import aot_serve, cell_key
+from . import boot_phases as boot_mod
 from . import compile_cache as cc
-from .procsplit import broker
 from .config import get_settings
 from .convert.hub import blake3_file
+from .models.chunk_cas import (
+    CAS_CHUNK_SIZE_BYTES,
+    ChunkSpec,
+    DigestMismatch,
+    download_chunked_file,
+    verify_file_digest,
+)
+from .models.hub_client import parse_chunk_list, resolved_entry_digest
+from .procsplit import broker
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +72,12 @@ _DOWNLOAD_TIMEOUT_S = 120
 _LIST_LIMIT = 200
 
 EVENT = "aot_cell_discovery"
+
+# th#1335: statuses that mean "you may not look", as opposed to "there is
+# nothing there". 403 is what the hub now answers a worker credential with no
+# read grant on a platform cell repo; 401 covers a credential the hub could not
+# verify at all.
+_NOT_AUTHORIZED = (401, 403)
 
 
 def prefer_aot() -> bool:
@@ -99,22 +114,25 @@ def _get(
     *,
     params: Optional[Dict[str, str]] = None,
     timeout: float = _HTTP_TIMEOUT_S,
-) -> Any:
-    """Authenticated GET; one ANONYMOUS retry on 401/403 (public family repos
-    resolve anonymously — the #459 read posture).
+) -> broker.HubResponse:
+    """Authenticated GET, parent-mediated under the process split.
 
-    pgw#763 delta 1: the authenticated leg is parent-mediated under the split
-    (the compute child holds no worker JWT). The anonymous retry needs no
-    credential, so it stays a plain request from here either way — routing a
-    call that carries no authority through the authorization surface would only
-    make the allowlist read as if it granted more than it does."""
-    resp = broker.request(
+    pgw#763 delta 1: the authenticated leg is routed through the broker because
+    the compute child holds no worker JWT — the parent attaches the credential.
+    Single-process (the default, flag off) sends the identical GET directly.
+
+    th#1335: the anonymous retry on 401/403 is GONE. It existed because the
+    family cell repos used to be public, but th#1310 made them private and
+    recorded the retry as the hazard that would turn one visibility flip into
+    unauthenticated cross-tenant enumeration. The worker JWT now carries a
+    hub-issued ``read_repo`` grant for exactly the families its release
+    declares, so a refusal is a real authorization answer and must be reported
+    as one — never laundered into an anonymous 404. Dropping the retry also
+    removes delta 1's only credential-less leg, so every hub call from here
+    goes through the broker.
+    """
+    return broker.request(
         "GET", path, base_url=base_url, bearer=bearer, params=params, timeout=timeout)
-    if resp.status_code in (401, 403) and bearer:
-        anon = requests.get(
-            base_url.rstrip("/") + path, params=params, timeout=timeout)
-        return broker.HubResponse(status_code=anon.status_code, text=anon.text)
-    return resp
 
 
 def _lane_of_meta(meta: Dict[str, Any]) -> str:
@@ -196,7 +214,35 @@ def _download_artifact(
     cache_dir: Optional[Path],
 ) -> Optional[Path]:
     """Resolve the checkpoint's manifest and fetch its artifact tarball,
-    blake3-verified against the manifest entry. Cached by cell key."""
+    digest-verified against the manifest entry. Cached by cell key.
+
+    pgw#764: bracketed as the ``cell_fetch`` boot phase. Whether this was a
+    cold pull or a cache hit — and how many bytes it cost — is the difference
+    between a fast boot and a slow one, and nothing measured it before.
+    """
+    with boot_mod.span(
+        boot_mod.PHASE_CELL_FETCH,
+        artifact_kind=aot_serve.ARTIFACT_KIND,
+        artifact_key=key,
+    ) as fetch:
+        dest = _download_artifact_inner(
+            base_url, bearer, family, checkpoint_id, key, cache_dir, fetch)
+        if dest is None:
+            # A miss is a typed decline, not an exception: the pilot lane
+            # self-mints instead. Reason tokens already rode _emit above.
+            fetch.refused("fetch_miss")
+        return dest
+
+
+def _download_artifact_inner(
+    base_url: str,
+    bearer: str,
+    family: str,
+    checkpoint_id: str,
+    key: str,
+    cache_dir: Optional[Path],
+    fetch: "boot_mod.BootSpan",
+) -> Optional[Path]:
     repo = cc.system_repo(family)
     dest_dir = (
         Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
@@ -206,6 +252,11 @@ def _download_artifact(
     resp = _get(
         base_url, f"/api/v1/repos/{repo}/resolve",
         bearer, params={"digest": checkpoint_id})
+    if resp.status_code in _NOT_AUTHORIZED:
+        _emit("not_authorized",
+              f"family={family} key={key}: resolve -> {resp.status_code} "
+              f"(worker credential carries no read grant for {repo})")
+        return None
     if resp.status_code != 200:
         _emit("resolve_failed",
               f"family={family} key={key}: resolve -> {resp.status_code}")
@@ -219,30 +270,76 @@ def _download_artifact(
         _emit("resolve_failed",
               f"family={family} key={key}: manifest has no artifact tarball")
         return None
-    want_b3 = str(entry.get("blake3") or "").strip().lower()
-    if want_b3.startswith("blake3:"):
-        want_b3 = want_b3[7:]
-    if dest.is_file() and want_b3 and blake3_file(dest) == want_b3:
-        return dest
+    # th#1303: read the ALGORITHM-TAGGED digest, and REFUSE when there is
+    # none. The old code read `entry["blake3"]` — absent on every manifest v2
+    # entry — and then guarded both integrity checks on its truthiness, so a
+    # v2 cell was installed and executed with no verification at all while
+    # reporting success. A cell artifact is compiled code: an unreadable
+    # digest must fail closed, never degrade into "no check".
+    try:
+        want_ref = resolved_entry_digest(
+            entry, what=f"family={family} key={key}: manifest entry")
+    except ValueError as exc:
+        _emit("resolve_failed", str(exc))
+        return None
 
+    if dest.is_file():
+        try:
+            verify_file_digest(dest, want_ref)
+        except DigestMismatch:
+            dest.unlink(missing_ok=True)  # stale cache — refetch below
+        except ValueError as exc:
+            _emit("resolve_failed", f"family={family} key={key}: {exc}")
+            return None
+        else:
+            fetch.bytes_moved(dest.stat().st_size, boot_mod.SOURCE_LOCAL)
+            return dest
+
+    try:
+        chunks = parse_chunk_list(
+            f"family={family} key={key}", str(entry.get("path") or ""),
+            entry.get("chunks"), entry.get("chunk_urls"))
+    except Exception as exc:  # noqa: BLE001 — a malformed list is a typed miss
+        _emit("resolve_failed",
+              f"family={family} key={key}: unreadable chunk list: {exc}")
+        return None
     url = str(entry.get("url") or "")
-    if not url:
+    if not chunks and not url:
+        # A chunked entry has no whole-file URL; a whole entry has no chunks.
         _emit("resolve_failed",
               f"family={family} key={key}: manifest entry has no URL")
         return None
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".part")
-    with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
-        dl.raise_for_status()
-        with open(tmp, "wb") as f:
-            for chunk in dl.iter_content(1 << 20):
-                f.write(chunk)
-    if want_b3 and blake3_file(tmp) != want_b3:
+    try:
+        if chunks:
+            # Every chunk's sha256 AND the whole-file digest are verified
+            # inside the commit stream — one pass, no second read.
+            download_chunked_file(
+                [ChunkSpec(sha256=c.sha256, url=c.url, length=c.length)
+                 for c in chunks],
+                tmp,
+                whole_digest=want_ref,
+                total_size=int(entry.get("size_bytes") or 0),
+                chunk_size_bytes=(
+                    int(entry.get("chunk_size_bytes") or 0)
+                    or CAS_CHUNK_SIZE_BYTES),
+            )
+        else:
+            with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
+                dl.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in dl.iter_content(1 << 20):
+                        f.write(chunk)
+            verify_file_digest(tmp, want_ref)
+    except (ValueError, RuntimeError) as exc:
         tmp.unlink(missing_ok=True)
         _emit("digest_mismatch",
-              f"family={family} key={key}: downloaded bytes != manifest blake3")
+              f"family={family} key={key}: downloaded bytes refused "
+              f"against {want_ref[:20]}…: {exc}")
         return None
     tmp.replace(dest)
+    fetch.bytes_moved(dest.stat().st_size, boot_mod.SOURCE_R2)
     return dest
 
 
@@ -258,7 +355,29 @@ def discover(
 
     Never raises: every failure is a MISS with a typed event — a broken
     discovery must cost the pilot lane, never the boot.
+
+    pgw#764: bracketed as the ``cell_discover`` boot phase, so the hub can see
+    what asking the catalog cost even when the answer was "no cell".
     """
+    with boot_mod.span(boot_mod.PHASE_CELL_DISCOVER) as found:
+        cell = _discover_inner(
+            pipe, cfg, base_url=base_url, worker_jwt=worker_jwt,
+            cache_dir=cache_dir)
+        if cell is None:
+            found.refused("no_cell")
+        else:
+            found.note(f"family={cell.family} key={cell.cell_key}")
+        return cell
+
+
+def _discover_inner(
+    pipe: Any,
+    cfg: Any,
+    *,
+    base_url: str,
+    worker_jwt: Callable[[], str],
+    cache_dir: Optional[Path] = None,
+) -> Optional[AdoptedAotCell]:
     family = str(getattr(cfg, "family", "") or "")
     if not family:
         return None
@@ -273,6 +392,16 @@ def discover(
         resp = _get(
             base, f"/api/v1/repos/{repo}/checkpoints",
             bearer, params={"limit": str(_LIST_LIMIT)})
+        if resp.status_code in _NOT_AUTHORIZED:
+            # th#1335/th#1230: an authorization refusal is NOT an empty family.
+            # It is a config defect — this release's worker credential carries
+            # no read grant for its own family's cell repo — and it must be
+            # nameable as one, because the fail-soft path (self-mint) looks
+            # identical from the outside either way.
+            _emit("not_authorized",
+                  f"family={family}: checkpoint listing -> {resp.status_code} "
+                  f"(worker credential carries no read grant for {repo})")
+            return None
         if resp.status_code != 200:
             _emit("list_failed",
                   f"family={family}: checkpoint listing -> {resp.status_code}")

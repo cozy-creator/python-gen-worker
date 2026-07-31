@@ -46,7 +46,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, cast
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ def init_rank(spec: RankSpec, store: Any = None) -> Any:
         [c10d.get_rank()],
         spec.backend,
         store,
-        group_name=spec.group_name or f"gwsp-{uuid.uuid4().hex[:8]}",
+        group_name=cast(Any, spec.group_name or f"gwsp-{uuid.uuid4().hex[:8]}"),
         timeout=timedelta(seconds=spec.collective_timeout_s),
     )
     # get_rank(pg)/get_group_rank need the world-rank -> group-rank mapping;
