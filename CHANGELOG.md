@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **pgw#822 — the AOT mint exports the module it DECLARED: ONE lifted arm, plus a
+  declaration/module check that runs BEFORE a pod is rented.** On a real L4 (0.82.0, sdxl
+  0.2.100, lane `w8a8`/`lora64`) the delegated child loaded the pipeline and reached
+  `trace_graph`, then refused: `declared input(s) ['lora_a', 'lora_b'] are not parameters of
+  'forward' on UNet2DConditionModel`. The declaration was right — pgw#725 option 2 lifts the
+  rank-bucket adapter to graph INPUTS so it can never be baked — and the OBJECT was wrong:
+  `mint_child` armed the DYNAMO lane's preparation (`compile_cache.apply_lora_lane`, branch
+  containers only) and then ran the AOT recipe, so `torch.export` got the bare denoiser. Three
+  copies of "prepare a bucket-bearing pipeline for export" existed and only the SERVING one
+  (`models.provision.arm_aot`) was right; the operator path (`aot_inputs.compose`) had the
+  mirror defect, installing the lifted forward over containers that were never allocated. Now
+  there is one — `models.lora_lifted.arm_lifted_lora_lanes` (containers, then lifted signature,
+  in the serving arm's order; idempotent; a no-op at bucket 0) — and `aot_mint.mint` owns
+  calling it, because that function already owned the other end of pgw#790's fork
+  (`_disarm_branches`). Per-class preparation is preserved and proven: `adapter=true` exports
+  the lifted forward, `adapter=false` the plain module after one disarm. `_export_entry` now
+  refuses an unarmed lifted class by naming the PREPARATION rather than the declaration. New
+  `aot_mint.declaration_module_gaps` compares every declared class's input names against its
+  target module's own `forward` signature on the PARENT, and `fleet_cells.mint_recipe` declines
+  by name (`self_mint_skipped`, `phase=declaration_module_mismatch`) — per class, admitting the
+  lifted pair on a lift-CAPABLE target so it predicts the mint, and abstaining rather than
+  declining when it cannot read the composed pipeline. Serving is never affected: a decline
+  falls back to the dynamo recipe like every other named decline.
+
 - **pgw#783 — the process split generalises to N execution groups: the parent supervises
   one compute child PER GPU (flag `GEN_WORKER_PROCESS_SPLIT` still default-OFF).** pgw#782
   measured that one CPython process cannot multiplex N GPUs (four groups in one interpreter
