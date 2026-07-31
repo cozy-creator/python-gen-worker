@@ -9,8 +9,8 @@ equivalent to arbitrary cell delivery after any index rebuild.
 The hub now signs a ``cell-receipt-v1`` compact JWS at publish-finalize
 binding: cell_key + the hub-ATTESTED axes + owning endpoint + the snapshot
 digest (the derivation binding Nix's fingerprint famously omits) + the
-packed tarball's blake3 AND integral size (Bazel REv2: size is part of the
-digest). This module is the WORKER half: before arming any hub-delivered
+packed tarball's ALGORITHM-TAGGED digest AND integral size (Bazel REv2:
+size is part of the digest). This module is the WORKER half: before arming any hub-delivered
 artifact the worker fetches the receipt, verifies the signature against
 the hub's public artifact-signing JWKS, checks every binding against the
 local bytes, and re-checks the operator revocation list (R2's targeted
@@ -22,6 +22,16 @@ the ordinary miss policy (fleet workers self-mint their own replacement —
 their own bytes need no receipt; the copy they publish gets one from the
 th#910 gate). A receipt failure never kills serving.
 
+th#1303/pgw#807 — algorithm-agnostic: the receipt's canonical binding is
+``artifact.digest``, always tagged (``sha256:<hex>`` / ``blake3:<hex>``), and
+verification DISPATCHES on that tag. An untagged bare-hex digest is REFUSED
+rather than read as some assumed algorithm, and a receipt with no usable
+digest at all is REFUSED rather than compared against nothing — the empty
+compare is this migration's signature defect. Dual-read: a receipt carrying
+only the legacy bare-hex ``artifact.blake3`` (every receipt minted before the
+hub half of pgw#807) still verifies, because the cells deployed workers hold
+today were all published over v1. That arm dies at phase 4.
+
 Configuration happens at the HelloAck site in ``lifecycle`` (the same
 moment ``file_base_url`` arrives). cozy-local and the CLI never configure
 this module, so the gate is a no-op there — user-controlled stores keep
@@ -32,13 +42,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import tarfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 import blake3
 import requests
@@ -51,6 +62,9 @@ from . import activity as activity_mod
 logger = logging.getLogger(__name__)
 
 RECEIPT_VERSION = "cell-receipt-v1"
+# The algorithms this worker can actually recompute from local bytes. A
+# receipt naming anything else is refused, never assumed.
+ARTIFACT_DIGEST_ALGORITHMS = ("sha256", "blake3")
 JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
 RECEIPT_PATH = "/v1/worker/cells/receipt"
 REVOCATIONS_PATH = "/v1/worker/cells/revocations"
@@ -79,7 +93,8 @@ class Receipt:
     publisher: str
     snapshot_digest: str
     artifact_path: str
-    artifact_blake3: str
+    # Canonical, ALGORITHM-TAGGED ("<algo>:<hex>"). Never bare hex.
+    artifact_digest: str
     artifact_size_bytes: int
     manifest_digest: str
     fingerprint_digest: str
@@ -145,6 +160,45 @@ def _rsa_key_from_jwk(jwk: Mapping[str, object]) -> Optional[rsa.RSAPublicKey]:
     return rsa.RSAPublicNumbers(e=e, n=n).public_key()
 
 
+def canonical_artifact_digest(digest: str, legacy_blake3: str = "") -> str:
+    """Resolve the receipt's algorithm-tagged artifact digest.
+
+    Every route to "nothing to compare against" is a typed REFUSAL, because
+    that is the shape this whole migration keeps producing: an absent field
+    makes a guard vacuously true and the integrity check silently disappears.
+    A bare hex string is refused for the same reason a bare CAS ref is —
+    it silently acquires whatever algorithm the reader assumed.
+
+    ``legacy_blake3`` is the pre-pgw#807 bare-hex spelling and is only read
+    when no tagged digest is present (dual-read; removed at phase 4).
+    """
+    d = str(digest or "").strip().lower()
+    if d:
+        algo, sep, hex_part = d.partition(":")
+        if not sep:
+            raise ReceiptError(
+                "receipt_digest_untagged",
+                f"artifact digest {d[:16]}… carries no algorithm tag")
+        if algo not in ARTIFACT_DIGEST_ALGORITHMS:
+            raise ReceiptError("receipt_digest_algorithm_unsupported", f"algo={algo!r}")
+        if not _is_hex64(hex_part):
+            raise ReceiptError(
+                "receipt_digest_malformed",
+                f"{algo} digest must be 64 hex characters")
+        return f"{algo}:{hex_part}"
+    b3 = str(legacy_blake3 or "").strip().lower()
+    if not b3:
+        raise ReceiptError("receipt_no_artifact_digest", "receipt binds no artifact digest")
+    if not _is_hex64(b3):
+        raise ReceiptError(
+            "receipt_digest_malformed", "legacy blake3 must be 64 hex characters")
+    return "blake3:" + b3
+
+
+def _is_hex64(value: str) -> bool:
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
 def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receipt:
     """Verify a compact JWS against ``keys`` (kid -> RSA public key) and
     return the decoded claims. Raises :class:`ReceiptError` with a named
@@ -203,7 +257,8 @@ def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receip
         publisher=str(payload.get("publisher") or ""),
         snapshot_digest=str(payload.get("snapshot_digest") or ""),
         artifact_path=str(artifact.get("path") or ""),
-        artifact_blake3=str(artifact.get("blake3") or "").lower(),
+        artifact_digest=canonical_artifact_digest(
+            str(artifact.get("digest") or ""), str(artifact.get("blake3") or "")),
         artifact_size_bytes=size_bytes,
         manifest_digest=str(payload.get("manifest_digest") or ""),
         fingerprint_digest=str(payload.get("fingerprint_digest") or ""),
@@ -260,17 +315,33 @@ def _kid_of(jws: str) -> str:
     return str(header.get("kid") or "").strip() if isinstance(header, dict) else ""
 
 
-def _fetch_receipt_jws(cfg: _Config, artifact_blake3: str, cell_key: str) -> str:
+def _fetch_receipt_jws(cfg: _Config, digests: Mapping[str, str], cell_key: str) -> str:
+    """Fetch the signed receipt for one artifact.
+
+    The worker cannot know WHICH algorithm the hub signed (a v1 cell was
+    published blake3-keyed, a v2 cell sha256-keyed), so it offers every
+    tagged digest it computed and lets the hub match on the set. This is one
+    request carrying several lookup keys, deliberately NOT a 404-and-retry
+    chain: a silent per-algorithm downgrade would make "which digest armed
+    this cell?" unanswerable, and th#715 says a 404 from a proxy is not a 404
+    from the hub. ``blake3`` is sent alongside for hubs that predate pgw#807.
+    """
+    params: List[Tuple[str, str]] = [("cell_key", cell_key)]
+    for algo, hex_digest in digests.items():
+        params.append(("artifact_digest", f"{algo}:{hex_digest}"))
+    if "blake3" in digests:
+        params.append(("blake3", digests["blake3"]))
     resp = requests.get(
         cfg.base_url + RECEIPT_PATH,
-        params={"blake3": artifact_blake3, "cell_key": cell_key},
+        params=params,
         headers={"Authorization": f"Bearer {cfg.worker_jwt()}"},
         timeout=_HTTP_TIMEOUT_S,
     )
     if resp.status_code == 404:
+        offered = ",".join(f"{a}:{h[:16]}" for a, h in sorted(digests.items()))
         raise ReceiptError(
             "receipt_not_found",
-            f"no hub receipt for blake3={artifact_blake3[:16]} key={cell_key}",
+            f"no hub receipt for {offered} key={cell_key}",
         )
     if resp.status_code != 200:
         raise ReceiptError("receipt_fetch_failed", f"{RECEIPT_PATH} -> {resp.status_code}")
@@ -312,12 +383,27 @@ def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
 # -- local bindings ---------------------------------------------------------
 
 
-def _blake3_file(path: Path) -> str:
-    hasher = blake3.blake3()
+def artifact_digests(path: Path, algorithms: Iterable[str] = ARTIFACT_DIGEST_ALGORITHMS) -> Dict[str, str]:
+    """Every digest this worker can offer for ``path``, in ONE read pass.
+
+    Both algorithms are computed because the receipt names the one that
+    binds and the bytes are read once either way; hashing is not the cost of
+    arming a cell. At phase 4 ``ARTIFACT_DIGEST_ALGORITHMS`` loses blake3 and
+    this becomes a single sha256.
+    """
+    hashers: Dict[str, object] = {}
+    for algo in algorithms:
+        if algo == "sha256":
+            hashers[algo] = hashlib.sha256()
+        elif algo == "blake3":
+            hashers[algo] = blake3.blake3()
+        else:
+            raise ReceiptError("receipt_digest_algorithm_unsupported", f"algo={algo!r}")
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
-            hasher.update(chunk)
-    return str(hasher.hexdigest())
+            for hasher in hashers.values():
+                hasher.update(chunk)  # type: ignore[attr-defined]
+    return {algo: str(h.hexdigest()) for algo, h in hashers.items()}  # type: ignore[attr-defined]
 
 
 def _embedded_meta(artifact: Path) -> Dict[str, object]:
@@ -343,9 +429,10 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     verified receipt on success.
 
     Chain of trust: receipt signature (hub key via JWKS) -> local bytes
-    (blake3 + integral size) -> embedded metadata (inside the digested
-    bytes) -> ``meta.cell_key == receipt.cell_key`` -> the runtime's own
-    computed key (enforced downstream by the th#883 selection brain).
+    (the receipt's OWN algorithm + integral size) -> embedded metadata
+    (inside the digested bytes) -> ``meta.cell_key == receipt.cell_key`` ->
+    the runtime's own computed key (enforced downstream by the th#883
+    selection brain).
     """
     with _LOCK:
         cfg = _CONFIG
@@ -359,16 +446,27 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     if not meta_key:
         raise ReceiptError("artifact_unkeyed", f"{artifact.name} metadata has no cell_key")
 
-    digest = _blake3_file(artifact)
+    digests = artifact_digests(artifact)
     size = artifact.stat().st_size
 
-    jws = _fetch_receipt_jws(cfg, digest, meta_key)
+    jws = _fetch_receipt_jws(cfg, digests, meta_key)
     receipt = verify_receipt_jws(jws, _jwks_for(cfg, _kid_of(jws)))
 
-    if receipt.artifact_blake3 != digest:
+    # Dispatch on the receipt's OWN algorithm tag. Hardcoding one here is how
+    # a sha256-bound cell gets checked with blake3 and every honest artifact
+    # looks corrupt; `canonical_artifact_digest` has already guaranteed the
+    # tag is present and supported, so there is no untagged branch to fall
+    # into and nothing compares against an empty string.
+    algo, _, want = receipt.artifact_digest.partition(":")
+    local = digests.get(algo, "")
+    if not local:
+        raise ReceiptError(
+            "receipt_digest_algorithm_unsupported",
+            f"receipt binds {algo} which this worker did not compute")
+    if local != want:
         raise ReceiptError(
             "receipt_digest_mismatch",
-            f"receipt={receipt.artifact_blake3[:16]} local={digest[:16]}")
+            f"{algo} receipt={want[:16]} local={local[:16]}")
     if receipt.artifact_size_bytes != size:
         raise ReceiptError(
             "receipt_size_mismatch",
@@ -438,8 +536,11 @@ def gate_delivered_artifact(artifact: Path, family: str) -> bool:
 
 
 __all__ = [
+    "ARTIFACT_DIGEST_ALGORITHMS",
     "Receipt",
     "ReceiptError",
+    "artifact_digests",
+    "canonical_artifact_digest",
     "configure",
     "configured",
     "gate_delivered_artifact",

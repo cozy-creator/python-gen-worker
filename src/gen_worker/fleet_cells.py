@@ -309,6 +309,20 @@ class CellPublisher:
         try:
             from .convert.hub import CommitFile, HubClient
 
+            # th#1303/pgw#807 — STAGED FLIP to `publish_v2`, deliberately not
+            # taken yet. The receipt half is done (receipts are algorithm-
+            # agnostic on both sides as of this train), but TWO gates remain
+            # and each failure is silent:
+            #   1. HUB: the v2 publish route carries no cell-publish claim at
+            #      all — no cell_store row, no receipt minted. A v2 self-mint
+            #      today publishes a cell nothing can arm (th#1340).
+            #   2. FLEET: a worker on <= 0.79 reads only `artifact.blake3` and
+            #      fetches by `?blake3=`, so it cannot resolve a sha256-bound
+            #      receipt for a v2 cell. Flipping while any such worker
+            #      serves turns every delivery into a self-mint. The flip
+            #      waits on the fleet floor moving past the release that
+            #      carries this module's reader — the same serving-floor rule
+            #      that gates ctx.save_checkpoint.
             client = HubClient(base_url=self.base_url, token=token, owner="root")
             result = client.commit(
                 destination_repo=repo,

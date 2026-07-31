@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **th#1303/pgw#807 — cell receipts are ALGORITHM-AGNOSTIC, which is what the cell
+  self-mint flip was actually blocked on.** Arming compares `receipt.artifact_blake3`
+  inside a signed JWS that can never be edited, and the receipt is fetched by
+  `?blake3=<hex>`. Publish a cell over v2 and the lookup answers "no receipt", every
+  worker refuses to arm, and the fleet re-mints — silently, looking exactly like a
+  cold cache. The canonical binding is now `artifact.digest`, always algorithm-tagged,
+  and verification DISPATCHES on that tag: an untagged bare-hex digest is refused
+  rather than read as some assumed algorithm, and a receipt binding no digest at all
+  is refused rather than compared against nothing.
+
+  Dual-read, deliberately: `crv` stays `cell-receipt-v1` (the deployed fleet refuses
+  any other version outright, so a bump would make every hub-minted receipt
+  unverifiable on first deploy), and a legacy bare-hex `blake3` claim still verifies —
+  every cell the fleet holds today was published over v1. Both arms die at phase 4.
+  `fleet_cells.py`'s self-mint stays on `commit()` with its two remaining gates named
+  in code: the hub's v2 route mints no cell receipt at all (th#1340), and the serving
+  fleet must be past the release carrying this reader.
+
 ## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
 
 > ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL
@@ -1246,7 +1266,6 @@ yet"), plus the flip-critical AOT serve seams.
   lane; the flip smoke notes the gap until it ships).
 
 
-
 ## Unreleased — C2PA signing moves hub-side (th#1307)
 
 - **The C2PA private key never enters a pod (th#1307).** The hub used to inject
@@ -1682,7 +1701,6 @@ digests in cell metadata, pgw#711 publish digests (`artifact_digest`/`manifest_d
 publish-complete), pgw#712 no-republish fencing + unicity refusal. All behind
 `GEN_WORKER_EQUIVALENCE_ADOPTION`, **default OFF** — the flag flip is gated on th#1229/
 th#1239 hub halves. No behavior change with the flag unset.
-
 
 ## 0.75.0 (2026-07-26) — pgw#660: the hard GPU-architecture floor has a declared carrier again
 
@@ -2126,7 +2144,6 @@ rebuilds into `NVIDIAModelOptConfig`, whose constructor requires a
   an SDK diagnostics endpoint, re-exported exactly as its own docstring
   instructed, vanished from a release silently. Now a WARNING naming the
   class and the fix — subclass it locally, which is what the docstring says.
-
 
 ## 0.70.0 (2026-07-26) — pgw#677: tenant work always wins the GPU — the background mint yields
 
@@ -3173,7 +3190,6 @@ must change:
   already a per-handler opt-in (dual dispatch exists today), and the
   blocking `ctx.save_*` methods will gain `async` twins in a later
   non-breaking pass (pgw#652 Phase 1). No new sync ctx I/O was added.
-
 
 ## 0.58.1 (2026-07-25)
 
@@ -4290,7 +4306,6 @@ must change:
   pipeline (never its scaled-mm denoiser) via the new `components=` scope
   override on `apply_fp8_storage`.
 
-
 ## 0.30.2 (2026-07-16)
 
 - **gw#554: clone disk admission follows the resolved work instead of a
@@ -4304,7 +4319,6 @@ must change:
   still reject provider-fetched base components that were absent from the
   source plan. The `COZY_CONVERT_DISK_HEADROOM` override is removed.
 
-
 ## 0.30.1 (2026-07-16)
 
 - **ie#381 fix 2: the bf16-resident fit check counts fp8 bytes per TENSOR,
@@ -4316,7 +4330,6 @@ must change:
   envelope term, and the upgrade proceeded into the activation budget.
   `snapshot_component_fp8_bytes` sums F8_E4M3 tensor bytes from the
   safetensors headers; `bf16_resident_fits` doubles exactly those.
-
 
 ## 0.30.0 (2026-07-16)
 
@@ -4372,7 +4385,6 @@ must change:
   same inputs (gw#391 parity). Declared-unknown loads (local CLI) keep the
   old margin-only rule.
 
-
 ## 0.28.0 (2026-07-16)
 
 - **gw#470 boot warmup default-on.** GPU inference endpoints now warm before
@@ -4398,7 +4410,6 @@ must change:
     failures (loud, th#581 rails). Cancel/drain-safe on the existing
     `_to_thread_complete` rails.
 
-
 ## 0.27.0 (2026-07-16)
 
 - **th#826 call-out primitive (workflows-as-endpoints).** Functions declared
@@ -4417,14 +4428,12 @@ must change:
     request's payer, inherit its availability tier, and die with the tree on
     parent cancel.
 
-
 ## 0.26.9 (2026-07-15)
 
 - hub_policy: probe `modelopt` in the known optional-libs list (te#79
   regression: `Resources(libraries=("modelopt",))` functions were
   structurally unavailable — the executor's find_spec fallback passed but
   plan_serve re-checked installed_libs, which never probed modelopt).
-
 
 ## 0.26.1 (2026-07-14)
 
@@ -4933,7 +4942,6 @@ healthy hub binding.
   (`CreatePodRequest.MinMemoryGB`/`MinVCPUCount`, th#740
   read-back-and-reject). Host asks never imply `gpu=True`.
 
-
 ## 0.17.2 (2026-07-12)
 
 - **pgw#519: `model.choices[].binding` was missing the `family` stamp.**
@@ -4958,7 +4966,6 @@ healthy hub binding.
   FINALIZE_OVERLAP log line is now corroborating evidence, not the only
   one). Tensorhub counterpart consumes all three (tensorhub PR #299).
 
-
 ## 0.17.0 (2026-07-12)
 
 - **th#714: C2PA Content Credentials on generated media (EU AI Act Art. 50).**
@@ -4977,7 +4984,6 @@ healthy hub binding.
   tensors) pass through untouched via content sniffing. New `signing` extra
   (c2pa-python, the official CAI c2pa-rs binding); sign+verify round-trip
   tests (png/webp/jpeg/mp4) run in CI against an openssl-generated test cert.
-
 
 ## 0.16.0 (2026-07-12)
 
@@ -5042,7 +5048,6 @@ healthy hub binding.
   keeps both sides (keys separate). Verified equal inside the serve image
   on the two real fp8 TE configs.
 
-
 ## 0.14.15 (2026-07-12)
 
 - **gw#479: canonical config digests hoist child-only scalars to the
@@ -5056,7 +5061,6 @@ healthy hub binding.
   Verified equal inside the serve image on the two real fp8 TE configs.
 ## 0.15.0 (2026-07-12)
 
-
 ## 0.14.14 (2026-07-12)
 
 - **gw#407 host-RAM admission sizes multi-slot setups by the LARGEST slot,
@@ -5065,7 +5069,6 @@ healthy hub binding.
   "56.2GiB incoming" on a 61GiB-RAM A100 pod that never stages more than
   one slot at a time (gw#479 J24M run19). Single-slot behavior unchanged;
   the J17 16-variant case (separate records) unchanged.
-
 
 ## 0.14.13 (2026-07-12)
 
@@ -5143,7 +5146,6 @@ healthy hub binding.
   TE; only the vae shared). Sub-config values that DIFFER from the parent
   still separate keys.
 
-
 ## 0.14.8 (2026-07-12)
 
 - **ie#463: `diffusers_step_callback` gains `window=(start, end)`.** Multi-stage
@@ -5188,7 +5190,6 @@ healthy hub binding.
 - Releases the merged-but-unreleased th#757 forensics change:
   `download_failed` ModelEvents carry the sanitized root cause.
 
-
 ## 0.14.4 (2026-07-11)
 
 - **th#757 (worker side): terminal download failures carry the root cause.**
@@ -5198,7 +5199,6 @@ healthy hub binding.
   surface; J24M run11's starved request was undiagnosable without it. The
   exact-match vocab strings the hub switches on (`url_expired`,
   `missing_snapshot`, `insufficient_disk`, `digest_mismatch`) are unchanged.
-
 
 ## 0.14.5 (2026-07-11)
 
