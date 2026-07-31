@@ -96,7 +96,8 @@ def _resolved(
     size_bytes: int = 6_941_377_969,
 ) -> WorkerResolvedRepo:
     files = [WorkerResolvedRepoFile(
-        path="model_index.json", size_bytes=1, blake3="ab", url="http://x/f",
+        path="model_index.json", size_bytes=1, digest="sha256:" + "a" * 64,
+        url="http://x/f",
     )]
     return WorkerResolvedRepo(
         snapshot_digest="d" * 8, files=files, size_bytes=size_bytes,

@@ -14,7 +14,7 @@ import requests
 
 from ..capability import InsufficientDiskError
 from ..stall import ProgressFloor
-from .chunk_cas import DigestMismatch, verify_file_digest
+from .chunk_cas import DigestMismatch, parse_cas_ref, verify_file_digest
 from .errors import UrlExpiredError
 
 _log = logging.getLogger(__name__)
@@ -75,8 +75,17 @@ async def _download_one_file(
     this function any more; an empty or untagged digest raises before a single
     byte is fetched.
     """
+    # Validate the ref ONCE, before the retry loop: an absent or unhashable
+    # digest is a permanent refusal, and retrying it three times only delays
+    # the same answer while looking like a flaky network.
     if not str(expected_digest or "").strip():
         raise ValueError(f"download of {dst.name}: no expected digest — refusing")
+    hash_algo, _ = parse_cas_ref(expected_digest)
+    if hash_algo != "sha256":
+        raise ValueError(
+            f"download of {dst.name}: digest algorithm {hash_algo!r} is no longer "
+            "verifiable (th#1303 S1) — refusing rather than fetching unchecked"
+        )
     loop = asyncio.get_running_loop()
     transient_failures = 0
     verify_failures = 0
@@ -269,11 +278,14 @@ def _download_one_file_sync(
 
     try:
         verify_file_digest(tmp, expected_digest)
-    except DigestMismatch as exc:
-        log.error("download_digest_mismatch path=%s expected=%s (%s)",
-                  dst.name, expected_digest[:24], exc)
+    except DigestMismatch:
+        log.error("download_digest_mismatch path=%s expected=%s",
+                  dst.name, expected_digest[:24])
         tmp.unlink(missing_ok=True)
-        raise ValueError("digest mismatch") from exc
+        # Propagate the TYPE. DigestMismatch is a ValueError, so the caller's
+        # retry loop still gives a flaky transfer its strikes, and the final
+        # failure still tells the caller WHICH kind of failure it was.
+        raise
 
     # Durable atomic finalize (gw#408): rename is only atomic in the
     # NAMESPACE — a pod hard-kill after the rename but before writeback

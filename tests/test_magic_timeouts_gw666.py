@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional
 
 import pytest
 import requests
-from blake3 import blake3
+import hashlib
 
 from gen_worker.stall import ProgressFloor, SilenceWindow
 
@@ -352,7 +352,7 @@ def _fetch(url: str, dst: Path, blob: bytes) -> None:
     from gen_worker.models import cozy_cas
 
     asyncio.run(cozy_cas._download_one_file(
-        url, dst, len(blob), blake3(blob).hexdigest(),
+        url, dst, len(blob), "sha256:" + hashlib.sha256(blob).hexdigest(),
     ))
 
 
