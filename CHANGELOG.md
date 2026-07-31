@@ -52,6 +52,19 @@
 
   Nothing changes with `GEN_WORKER_PROCESS_SPLIT` unset, which is every pod today.
 
+- **pgw#820 — an SP follower now dies with rank 0, ABORT included.** The split's
+  `PR_SET_PDEATHSIG` covers parent -> compute child and does not cascade; a group's D-1
+  follower ranks are `daemon=True` grandchildren whose only exit path was a clean
+  interpreter exit — and the measured rank-0 death is `rc=-6` (NCCL abort), where atexit
+  never runs. The orphans would hold a full weight replica on cards 1..D-1 for their own
+  300 s collective timeout while the parent respawned the group onto those same cards in
+  ~1 s: a crash loop seeded by its own orphans, masked today only because rank 0 IS the
+  worker process and the container restart reaps everything. Every follower now sets
+  `PR_SET_PDEATHSIG(SIGKILL)` in its own bootstrap (`_follower_main`), with the spawn-race
+  re-parent check, so a rank-0 death of ANY kind frees the followers' VRAM immediately —
+  also the correct answer for a SIGKILLed worker, split or no split. Proven by a real
+  spawn-path reap test that goes red when the bootstrap is reverted.
+
 ## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
 
 > ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`

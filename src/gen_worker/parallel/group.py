@@ -40,8 +40,10 @@ which they fail loudly and the group is condemned — never a silent wedge.
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 import queue as queue_mod
+import signal
 import time
 import uuid
 from dataclasses import dataclass
@@ -215,17 +217,48 @@ def init_rank(spec: RankSpec, store: Any = None) -> Any:
     return pg
 
 
+_PR_SET_PDEATHSIG = 1
+
+
+def _die_with_rank0(rank0_pid: int) -> None:
+    """pgw#820: a follower is a GRANDCHILD of the pgw#783 parent — the split's
+    ``PR_SET_PDEATHSIG`` covers parent -> compute child and does not cascade.
+    ``daemon=True`` only reaps through ``multiprocessing``'s atexit hook, and
+    the measured rank-0 death is ``rc=-6`` (NCCL abort) where atexit never
+    runs: the followers would keep a full weight replica on cards 1..D-1 for
+    their own 300 s collective timeout while the parent respawns the group
+    onto those same cards in ~1 s — a crash loop seeded by its own orphans.
+
+    So every follower asks the kernel for the same contract the compute child
+    has: SIGKILL when its parent (rank 0) dies, abort included. Linux-only;
+    elsewhere the pre-split behaviour (container death reaps) remains.
+    """
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except Exception:
+        return
+    # Close the spawn race: if rank 0 died BEFORE the prctl landed, no death
+    # signal is coming — the reparent already happened, so exit now.
+    if rank0_pid and os.getppid() != rank0_pid:
+        os._exit(1)
+
+
 def _follower_main(
     spec: RankSpec,
     entry: Callable[[RankSpec, FollowerChannel], None],
     channel: FollowerChannel,
     error_q: Any,
+    rank0_pid: int = 0,
 ) -> None:  # pragma: no cover - runs in a spawned process
     """A follower's whole life: join, run the narrow loop, report a fatal.
 
     Nothing here talks to the hub, and nothing here decides anything — every
     adaptive choice arrives from rank 0 over the channel (pgw#748 §5.4).
     """
+    _die_with_rank0(rank0_pid)
     try:
         entry(spec, channel)
     except BaseException as exc:  # noqa: BLE001 — the whole point is to report
@@ -322,7 +355,10 @@ class RankGroup:
             channel = FollowerChannel(commands=ctx.Queue(), ready=self._ready_q)
             proc = ctx.Process(
                 target=_follower_main,
-                args=(spec, self._entry, channel, self._error_q),
+                # pgw#820: the follower's death is tied to THIS process (rank
+                # 0) in its own bootstrap — daemon=True cannot survive an
+                # abort, and the pgw#783 parent must not know about ranks.
+                args=(spec, self._entry, channel, self._error_q, os.getpid()),
                 name=f"sp-{group_name}-rank{spec.rank}",
                 daemon=True,
             )
