@@ -273,7 +273,12 @@ def test_an_in_process_only_pod_declines_the_aot_recipe_by_name(
 
     pending = outcome.self_mint
     assert pending is not None and pending.recipe == fleet_cells.RECIPE_DYNAMO
-    assert "aot_requires_delegation" in _phases(_events, "self_mint_skipped")
+    # pgw#813 sharpened the vocabulary: the generic `aot_requires_delegation`
+    # carried a hand-written either/or sentence and could not distinguish an
+    # operator kill switch from a pipeline classification. Each cause now
+    # declines under its own phase; this arm is the forced in-process one.
+    assert "aot_mint_forced_in_process" in _phases(
+        _events, "self_mint_skipped")
 
 
 # ---------------------------------------------------------------------------

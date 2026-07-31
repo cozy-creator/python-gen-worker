@@ -6644,6 +6644,14 @@ class Executor:
             # boot. An exported arm demands the same fail-closed boot proof
             # as a dynamo arm; only the per-object scoring differs.
             proves_exported = bool(aot_proof_before)
+            # pgw#815: every mint obligation this boot opened, snapshotted
+            # BEFORE the proof pass pops entries. The assertion after the
+            # block below reads it — a pending that reaches readiness having
+            # touched none of {sealed, publishing, withheld, aborted,
+            # abandoned} was never resolved by anything, which is exactly the
+            # 24-minute L4 mint that ended `finalize completed` with no cell,
+            # no receipt, no local arm and no error.
+            mint_obligations = list(inj.pending_self_mints.values())
             warmup = getattr(instance, "warmup", None)
 
             async def run_warmup() -> Tuple[int, Dict[int, set[str]], str]:
@@ -7188,6 +7196,22 @@ class Executor:
                         cache_misses=misses,
                         duration_ms=int(compile_seconds * 1000),
                     )))
+            # pgw#815: THE assertion. `finalize completed` must be
+            # unreachable while a mint obligation is unresolved — running it
+            # OUTSIDE the `proves_inductor or proves_exported` block is the
+            # point, because a boot that armed a pending and then answered
+            # "nothing proves by FX or export" skipped the whole publish gate
+            # and resolved nothing, silently. Obligations handed to the
+            # background driver (eager-first / delegated) are ITS to resolve
+            # and are excluded here — the driver's own sweep, in
+            # `_background_mint`'s `finally`, is where they are asserted.
+            driver = rec.background_mint
+            owned_by_driver = (
+                {id(p) for p in driver.pendings.values()}
+                if driver is not None else set())
+            self._assert_mint_termini(
+                spec,
+                [p for p in mint_obligations if id(p) not in owned_by_driver])
             if compile_selection and trt_engine.is_engine_ref(compile_selection.ref):
                 trt_candidates = [
                     candidate for candidate in inj.compile_objects
@@ -8725,10 +8749,25 @@ class Executor:
 
         Eager-first applies ONLY to a boot whose every armed artifact is a
         fresh self-mint on an eager-compatible lane: delivered cells keep
-        their sequential proof window (they pay ~0 compile), mandatory
-        quantized lanes never serve eager (gw#586), custom object warmups
-        have no derived plan for the driver to seed, and regional targets
-        have no separable eager callable to route to."""
+        their sequential proof window (they pay ~0 compile), custom object
+        warmups have no derived plan for the driver to seed, and regional
+        targets have no separable eager callable to route to.
+
+        pgw#813 removes two stacked misclassifications:
+
+        * the ``_mandatory_lane_of_bound`` early-out read a model ref's
+          STORAGE flavor (``#fp8-w8a8``) as "cannot serve eager" — the exact
+          proxy pgw#677's reopen removed from the router brain, still live
+          one layer up, and sdxl's mixed fp8 checkpoint (fp8 storage, w8a16
+          execution) is precisely the ref it misreads. The per-candidate
+          brains below answer the question correctly and completely;
+        * the per-candidate arm demanded a hot-swap ROUTER. A DELEGATED
+          pending never has one, because nothing is armed on its pipe by
+          construction — so EVERY delegated mint failed this test and was
+          discarded, and pgw#784's out-of-process route could not run on any
+          lane. A delegated pending's eager tier is the untouched pipeline
+          itself; the router question belongs only to an in-process capture,
+          whose eager-while-compiling routing is what a router performs."""
         if not _eager_first_boot_enabled():
             return False
         if not inj.pending_self_mints:
@@ -8743,33 +8782,80 @@ class Executor:
         # record — mixing tiers inside one proof window is not worth it.
         if set(inj.active_compile_artifacts) - set(inj.pending_self_mints):
             return False
-        if self._mandatory_lane_of_bound(
-            wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
-        ):
-            return False
         from . import compile_cache, hot_swap
 
-        saw_router = False
+        saw_candidate = False
         for candidate in inj.compile_objects:
-            if id(candidate.pipeline) not in inj.pending_self_mints:
+            pending = inj.pending_self_mints.get(id(candidate.pipeline))
+            if pending is None:
                 continue
-            # pgw#677 reopen: THE live break. The weight-lane stamp names
-            # cell identity (pgw#686), not serveability — sdxl's mixed
-            # ``#fp8-w8a8`` storage stamps ``w8a8-lora64`` while the hub
-            # serves it ``fp8-w8a16+eager``. Classifying that stamp as
-            # mandatory silently sent the whole boot down the FOREGROUND
-            # compile-then-serve mint: the first tenant request sat inside
-            # ensure_setup for the full 18-unit inline-compile plan (the
-            # measured 26-minute starvation on three cold L4 pods, zero
-            # renders, gate machinery never engaged). Serveability follows
-            # the ONE brain: hub execution lane first, stamp as fallback.
+            if getattr(pending, "delegated", False):
+                # Nothing is armed on this pipe; the child owns the compile.
+                # The only real question is whether the live object can still
+                # answer a forward — which every lane the fleet serves can,
+                # quantized ones included (pgw#813).
+                if not compile_cache.eager_tier_available(candidate.pipeline):
+                    return False
+                saw_candidate = True
+                continue
+            # In-process capture: the pipe IS armed cold, so eager serving
+            # happens through the pgw#622 router. pgw#677 reopen: the ONE
+            # serveability brain decides fail-closed here (hub execution lane
+            # first, weight-lane stamp as fallback), never the ref flavor.
             if compile_cache.mandatory_serving(candidate.pipeline):
                 return False
             router = hot_swap.router_of(candidate.pipeline)
             if router is None or router.fail_closed:
                 return False
-            saw_router = True
-        return saw_router
+            saw_candidate = True
+        return saw_candidate
+
+    def _assert_mint_termini(
+        self, spec: EndpointSpec, obligations: List[Any],
+        *, driver_owns_delegated: bool = True,
+    ) -> None:
+        """Every self-mint this boot opened must have ENDED somewhere (pgw#815).
+
+        A mint obligation has exactly five honest ends: sealed-and-publishing,
+        withheld, aborted, abandoned, or handed to a background/delegated
+        driver that still owns it. Anything else is the vanishing publish —
+        a pod pays a full GPU compile, reports `finalize completed`, and the
+        store, the receipts, the local arm and the wire are all empty. That
+        combination is unfalsifiable from outside, so it is asserted here and
+        confessed on the wire rather than left to be re-measured on a rental.
+        """
+        if not obligations:
+            return
+        from . import fleet_cells as fleet_cells_mod
+
+        for pending in obligations:
+            if fleet_cells_mod.terminus_of(pending):
+                continue
+            if driver_owns_delegated and getattr(pending, "delegated", False):
+                # The child owns it; `_delegated_mint_run` resolves it and is
+                # the one that must confess if it does not.
+                continue
+            family = str(getattr(pending, "family", "") or "")
+            key = str(getattr(pending, "cell_key", "") or "")
+            logger.error(
+                "%s: SELF_MINT_UNRESOLVED family=%s key=%s — the boot opened "
+                "a mint capture and reached readiness without packing, "
+                "publishing, withholding or abandoning it (pgw#815)",
+                spec.name, family, key)
+            activity_mod.emit_event(
+                "self_mint_abort",
+                f"family={family} key={key}: this boot opened a mint capture "
+                f"and reached readiness without packing, publishing, "
+                f"withholding or abandoning it — no cell, no receipt, no "
+                f"local arm and no refusal. The capture is discarded so the "
+                f"next pod re-mints instead of inheriting a phantom.",
+                phase="no_terminus",
+            )
+            try:
+                fleet_cells_mod.abandon_self_mint(pending)
+            except Exception:  # noqa: BLE001 — the confession is the point
+                logger.debug("abandoning the unresolved mint failed",
+                             exc_info=True)
 
     def _mint_budget_ok(
         self, spec: EndpointSpec, inj: "_InjectionResult",
@@ -8995,6 +9081,13 @@ class Executor:
         else:
             act.completed()
         finally:
+            # pgw#815: the driver's own terminus sweep. Every branch above
+            # already resolves the common shapes; this makes "resolved" an
+            # asserted property of EVERY exit rather than a property of the
+            # branches somebody remembered to write.
+            self._assert_mint_termini(
+                bg.spec, list(bg.pendings.values()),
+                driver_owns_delegated=False)
             if rec.background_mint is bg:
                 rec.background_mint = None
             # pgw#789: WARM-COMPLETE. The eager-first boot (pgw#671) advertises
@@ -9463,6 +9556,19 @@ class Executor:
                 logger.warning(
                     "delegated mint for %s produced no adoptable cell (%s); "
                     "that object stays eager", spec.name, result.detail)
+                # pgw#815: resolve the obligation instead of dropping it —
+                # a `continue` here left the pending with no terminus and no
+                # wire trace whenever a SIBLING pending succeeded (the
+                # `if not finalized: raise` below never fires then).
+                fleet_cells_mod.abandon_self_mint(pending)
+                activity_mod.emit_event(
+                    "self_mint_abort",
+                    f"family={pending.family} key={pending.cell_key}: the "
+                    f"delegated child produced no adoptable cell "
+                    f"({result.detail or result.status}); this object stays "
+                    f"eager and nothing is published",
+                    phase="delegated_no_cell",
+                )
                 continue
             for pid in pids:
                 finalized[pid] = minted

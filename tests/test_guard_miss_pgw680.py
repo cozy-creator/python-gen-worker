@@ -485,6 +485,11 @@ def _spec(name: str, cls: type) -> EndpointSpec:
 class _Rig:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
+        # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
+        # miss delegates by default. This rig has no child process, and the
+        # doctrine under test (mint window OFF, serve window ON) is the
+        # IN-PROCESS mint's — which is what this switch selects.
+        monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
         self.sim = _Sim()
         self.sent: List[pb.WorkerMessage] = []
         self.pipes: Dict[str, _Pipe] = {}

@@ -2905,6 +2905,46 @@ def operator_eager_pin(pipeline: Any) -> bool:
     return lane.execution == lanespec.EXEC_EAGER
 
 
+def eager_tier_available(pipeline: Any) -> bool:
+    """Can this pipeline answer a forward with NOTHING armed? (pgw#813)
+
+    This is the question a background/out-of-process mint actually asks, and
+    it is NOT :func:`mandatory_serving`. Using the latter as a serveability
+    proxy is a category error, and it is the one that left AOT unmintable on
+    every lane: the plain lane declines by #730's measured hold, and the w8a8
+    lane — the lane the AOT program exists to serve — declined because
+    "executes quantized activations" was read as "cannot serve eager".
+
+    A quantized lane serves eager fine. ``_Fp8ScaledLinear.forward`` and
+    ``_W4A4Linear.forward`` are complete eager forwards (``torch._scaled_mm``
+    inline, scales computed per call), the fleet's own cold-boot ladder
+    measures w8a8 eager serving, and pgw#672/#673 already retired the
+    "mandatory lanes raise instead of degrade" posture inside :func:`_guard`
+    — a mandatory lane whose compiled callable fails now serves
+    ``original(...)`` LOUDLY. What ``mandatory_serving`` still answers, and
+    should keep answering, is whether the COMPILED tier is the intended
+    production tier (router fail-closed: novel shapes stay sequential rather
+    than being routed eager behind the tenant's back).
+
+    False only when an armed non-eager backend has REPLACED the callable —
+    an AOTI export or a TRT engine — because there the eager forward is gone
+    until the artifact is unwrapped.
+    """
+    from . import aot_serve, trt_engine
+
+    try:
+        if aot_serve.is_armed(pipeline):
+            return False
+    except Exception:  # noqa: BLE001 — an unanswerable arm is not a swap
+        pass
+    try:
+        if trt_engine.is_armed(pipeline):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def mandatory_serving(pipeline: Any) -> bool:
     """ONE brain for "may this pipeline serve eager?" (pgw#677 reopen).
 

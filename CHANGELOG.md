@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **pgw#813 — the w8a8 lane can mint AOT again: "executes quantized activations"
+  stops meaning "cannot serve eager".** Measured on a real 0.80.0 L4: the plain lane
+  declined `aot_lane_regressed` (correct, #730's hold) and the w8a8 lane declined
+  `aot_requires_delegation` naming two causes that were both FALSE on that pod — no
+  env was set. The operative refusal was `fleet_cells.delegatable` reading
+  `mandatory_serving(pipe)` as a serveability answer. It is not one:
+  `_Fp8ScaledLinear.forward` / `_W4A4Linear.forward` are complete `torch._scaled_mm`
+  eager forwards, the fleet's cold-boot ladder measures w8a8 eager serving all day,
+  and pgw#672/#673 already retired the "mandatory lanes raise instead of degrade"
+  posture inside `_guard`. With the plain lane held, that left NO lane on which a
+  serving pod could mint an AOT cell — the reason `aot_mint_phases` has zero rows
+  platform-wide. New `compile_cache.eager_tier_available` answers the honest question
+  ("can this object answer a forward with nothing armed?") and is false only when an
+  AOTI export or TRT engine has REPLACED the callable; `mandatory_serving` keeps its
+  real job (router fail-closed: the compiled tier is the intended production tier).
+
+  A second, independent blocker went with it: `_eager_first_eligible` demanded a
+  hot-swap ROUTER on every pending pipe, and a DELEGATED pending never has one
+  because nothing is armed on its pipe by construction — so every delegated mint
+  failed the predicate and was discarded, and pgw#784's out-of-process route could
+  not run on ANY lane. The delegated arm now asks for an eager tier, not a router;
+  the in-process arm is unchanged. The stamp-based `_mandatory_lane_of_bound`
+  early-out (a model ref's `#fp8-w8a8` STORAGE flavor read as serveability — the
+  same proxy pgw#677's reopen removed one layer down) is gone.
+
+  Every delegation refusal is now typed and named on the wire from its true cause:
+  `aot_mint_forced_in_process`, `aot_eager_first_disabled`, `aot_regional_targets`,
+  `aot_no_eager_tier` — instead of one phase carrying a hand-written either/or.
+
+- **pgw#815 — a self-mint can no longer reach `finalize completed` having published
+  nothing.** A real 24m22s L4 mint walked `seal_publish -> finalize completed` and
+  left zero cells, zero receipts, no local arm, no `self_mint_publish`, no abort and
+  no error. Three structural silences made that indistinguishable from success and
+  all three are closed: (1) NO success event existed at any publish terminus, so a
+  completed publish and a publish thread killed mid-upload when the pod retired were
+  the same observation — `self_mint_publish` now fires at `sealed`, `started` and
+  `published`, carrying the cell key and the byte count, and in-flight publishes are
+  an observable fact (`fleet_cells.publishes_in_flight`); (2) `publish_self_mint` and
+  `withhold_self_mint_publish` both returned BARE when nothing was packed — both now
+  emit `self_mint_publish_withheld phase=nothing_to_publish`; (3) the executor's
+  whole publish gate lived inside `if proves_inductor or proves_exported:`, so a boot
+  that answered "nothing proves by FX or export" walked past every terminus in
+  silence — `_assert_mint_termini` now runs OUTSIDE that block and on every
+  background-driver exit, confessing `self_mint_abort phase=no_terminus` and
+  discarding the phantom capture so the next pod re-mints. A delegated child that
+  produces no adoptable cell while a sibling succeeds is resolved too, instead of
+  being dropped by a bare `continue`.
+
 - **pgw#811 — `run_impl` is split across K translation units, the largest measured
   compile-speed win on the board.** Two independent compiler profiles of the real
   banked SDXL w8a8 wrapper agree that parse is 3-5% of the compile and that

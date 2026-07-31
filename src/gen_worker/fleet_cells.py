@@ -58,9 +58,10 @@ import shutil
 import tarfile
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 
@@ -369,31 +370,79 @@ class CellPublisher:
         return checkpoint_id
 
 
-def _publish_async(publisher: CellPublisher, family: str, artifact: Path, meta: dict) -> threading.Thread:
+#: pgw#815: publishes currently in flight, keyed by cell key. A self-mint
+#: publish is a fire-and-forget daemon thread, so an interrupted upload used
+#: to leave NO trace anywhere: no cell row, no receipt, no event, no error —
+#: the pod paid a 24-minute compile and reported success. This registry makes
+#: an in-flight publish an observable fact that :func:`publishes_in_flight`
+#: (drain/shutdown) and the executor's terminus assertion can both see.
+_IN_FLIGHT_LOCK = threading.Lock()
+_IN_FLIGHT: Dict[str, Tuple[str, float]] = {}
+
+
+def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
+    """``{cell_key: (family, started_monotonic)}`` for every publish whose
+    thread has neither succeeded nor failed yet (pgw#815)."""
+    with _IN_FLIGHT_LOCK:
+        return dict(_IN_FLIGHT)
+
+
+def _publish_async(
+    publisher: CellPublisher, family: str, artifact: Path, meta: dict,
+    cell_key_digest: str = "",
+) -> threading.Thread:
     """Ship the cell in the background — readiness never waits on an upload.
-    Every outcome is logged; refusals are the hub's recorded decision. The
-    mint dir is cleaned once the publish attempt finishes (the adoption
-    already staged its own copy under the cache dir)."""
+
+    EVERY outcome is a typed event now (pgw#815), success included: this
+    boundary used to emit only on failure, so "published" and "the thread was
+    killed mid-upload when the pod retired" were the same observation —
+    silence. The mint dir is cleaned once the publish attempt finishes (the
+    adoption already staged its own copy under the cache dir).
+    """
+    key = cell_key_digest or str(meta.get("cell_key") or "")
+    try:
+        size_mb = artifact.stat().st_size / 1e6
+    except OSError:
+        size_mb = 0.0
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT[key] = (family, time.monotonic())
+    activity_mod.emit_event(
+        "self_mint_publish",
+        f"family={family} key={key}: uploading {size_mb:.1f} MB to the fleet "
+        f"store; this pod must survive the upload or the cell is lost",
+        phase="started",
+    )
 
     def run() -> None:
+        t0 = time.monotonic()
         try:
-            publisher.publish(family, artifact, meta)
+            checkpoint_id = publisher.publish(family, artifact, meta)
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
-                f"family={family}: hub refused the publish: {exc}",
+                f"family={family} key={key}: hub refused the publish: {exc}",
                 phase="refused",
             )
         except Exception as exc:  # noqa: BLE001 — reported, never fatal
             logger.warning("fleet-cells: publish failed; the next worker on this key re-mints", exc_info=True)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
-                f"family={family}: publish attempt failed: "
+                f"family={family} key={key}: publish attempt failed: "
                 f"{type(exc).__name__}: {exc}",
                 phase="error",
             )
+        else:
+            activity_mod.emit_event(
+                "self_mint_publish",
+                f"family={family} key={key} checkpoint={checkpoint_id}: "
+                f"{size_mb:.1f} MB published to the fleet store",
+                phase="published",
+                duration_ms=int(round((time.monotonic() - t0) * 1000)),
+            )
         finally:
+            with _IN_FLIGHT_LOCK:
+                _IN_FLIGHT.pop(key, None)
             shutil.rmtree(artifact.parent, ignore_errors=True)
 
     t = threading.Thread(target=run, name="cell-publish", daemon=True)
@@ -401,28 +450,47 @@ def _publish_async(publisher: CellPublisher, family: str, artifact: Path, meta: 
     return t
 
 
-def delegatable(pipe: Any, cfg: Any) -> bool:
-    """pgw#784: may this pipeline's mint be DELEGATED to a child process?
+#: Typed PIPELINE-side refusals of out-of-process minting (pgw#813). The
+#: operator-side half lives in ``mint_delegate.delegation_refusal``.
+REFUSAL_REGIONAL_TARGETS = "regional_targets"
+REFUSAL_NO_EAGER_TIER = "no_eager_tier"
 
-    Only if the pipeline can serve EAGER meanwhile, because that is the entire
-    premise: nothing is armed here, so a pipe that must serve compiled has
-    nothing to serve at all until the child finishes. Two refusals:
 
-    * a mandatory quantized lane (w8a8/w4a4) never serves eager (gw#586), and
-      ``mandatory_serving`` is the ONE serveability brain (hub execution lane
-      first, weight-lane stamp as fallback — pgw#677's live break);
-    * regional targets have no separable eager callable to route to.
+def delegation_refusal(pipe: Any, cfg: Any) -> str:
+    """"" when this PIPELINE's mint may be DELEGATED, else the typed reason.
 
-    Both keep today's in-process capture. They are the same two exclusions
-    ``_eager_first_eligible`` applies, asserted at the arm instead of after it,
-    because by then the choice is already made.
+    The premise of pgw#784 is that the live pipeline keeps serving while a
+    child compiles: nothing is armed here, so a pipe with no eager tier has
+    nothing to serve at all until the child finishes.
+
+    pgw#813 CORRECTION. This used to refuse ``mandatory_serving(pipe)`` — i.e.
+    it read "executes quantized activations" as "cannot serve eager". That is
+    a category error and it was the operative cause of AOT being unmintable on
+    every lane: the plain lane is held on dynamo by #730, and w8a8 — the lane
+    Paul ruled AOT-first — was refused a delegated minter here, so the miss
+    fell back to a dynamo cell that AOT discovery can never adopt. A w8a8
+    pipeline serves eager perfectly well (``_Fp8ScaledLinear.forward`` is a
+    complete ``torch._scaled_mm`` forward; the fleet's own cold-boot ladder
+    measures it; pgw#672/#673 already made mandatory lanes DEGRADE to eager
+    loudly rather than raise). ``compile_cache.eager_tier_available`` is the
+    honest predicate and this is now its only caller-side use.
+
+    Regional targets keep their refusal: the family's mint is per-block and
+    the adopt/serve half is still gated behind pgw#812/#814.
     """
     if bool(getattr(cfg, "regional", False)):
-        return False
+        return REFUSAL_REGIONAL_TARGETS
     try:
-        return not cc.mandatory_serving(pipe)
-    except Exception:  # noqa: BLE001 — an unanswerable lane keeps the old path
-        return False
+        if not cc.eager_tier_available(pipe):
+            return REFUSAL_NO_EAGER_TIER
+    except Exception:  # noqa: BLE001 — an unanswerable arm keeps the old path
+        return REFUSAL_NO_EAGER_TIER
+    return ""
+
+
+def delegatable(pipe: Any, cfg: Any) -> bool:
+    """Bool form of :func:`delegation_refusal` (pgw#784 call sites)."""
+    return not delegation_refusal(pipe, cfg)
 
 
 def enable_compiled(
@@ -457,6 +525,7 @@ def enable_compiled(
     """
     family = str(getattr(cfg, "family", "") or "")
     selection_bug: Optional[cc.CellSelectionBugError] = None
+    delegate_refusal = ""
     if delegate is None:
         # pgw#784: whether a miss mints out of process is a POLICY of the
         # arming brain, not an argument its callers thread through. Keeping it
@@ -465,7 +534,10 @@ def enable_compiled(
         # lives. The parameter stays for tests that need to force either shape.
         from . import mint_delegate
 
-        delegate = mint_delegate.delegated()
+        delegate_refusal = mint_delegate.delegation_refusal()
+        delegate = not delegate_refusal
+    elif not delegate:
+        delegate_refusal = "caller_forced_in_process"
 
     # pgw#722 F1 (flag-gated, default OFF): PREFER a published aot-inductor
     # cell over the delivered dynamo artifact. Discovery is fetch-and-filter
@@ -695,16 +767,19 @@ def enable_compiled(
             loading.pipeline_weight_lane(pipe))
         target = mint_root / f"{label}.tar.gz"
 
-    if delegate and not delegatable(pipe, cfg):
-        logger.info(
-            "fleet-cells: %s cannot serve eager while a child mints "
-            "(mandatory lane or regional targets) — minting in-process "
-            "instead (pgw#784)", family)
-        delegate = False
+    if delegate:
+        pipe_refusal = delegation_refusal(pipe, cfg)
+        if pipe_refusal:
+            logger.info(
+                "fleet-cells: %s cannot mint out of process (%s) — minting "
+                "in-process instead (pgw#784)", family, pipe_refusal)
+            delegate = False
+            delegate_refusal = pipe_refusal
     # pgw#805: WHICH recipe this miss mints, decided once, after `delegate` is
     # final. Called on both branches so an AOT decline is named even when the
     # in-process shape is the one that runs.
-    recipe = mint_recipe(pipe, cfg, delegate=delegate)
+    recipe = mint_recipe(
+        pipe, cfg, delegate=delegate, delegate_refusal=delegate_refusal)
     if delegate:
         # pgw#784: NOTHING is armed on the live pipeline. It keeps serving
         # plain eager — no guarded wrappers, no branch containers, no
@@ -821,6 +896,7 @@ def finalize_self_mint(
             f"key={pending.cell_key}: {type(exc).__name__}: {exc}",
             phase="pack_failed",
         )
+        mark_terminus(pending, TERMINUS_ABORTED)
         state["minted"] = None
         _unregister(pending)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
@@ -840,10 +916,22 @@ def finalize_self_mint(
         # pgw#672: remember the finalized identity so a later same-key arm
         # in this process reuses the folded cell instead of re-minting.
         _FINALIZED[key] = minted
+    packed_mb = pending.target.stat().st_size / 1e6
     logger.info(
         "fleet-cells: self-mint proof passed for %s (key=%s, %.1f MB) — "
         "serving compiled; publish decided after sibling coverage is known",
-        pending.family, key, pending.target.stat().st_size / 1e6)
+        pending.family, key, packed_mb)
+    # pgw#815: the SEAL is a terminus and must be countable. A pack that
+    # "succeeded" against an almost-empty capture and a real one used to be
+    # the same silence; the byte count and the key are the two facts that
+    # tell them apart without pod logs.
+    activity_mod.emit_event(
+        "self_mint_publish",
+        f"family={pending.family} key={key}: packed {packed_mb:.1f} MB from "
+        f"the proven capture; publish decided after sibling coverage",
+        phase="sealed",
+    )
+    mark_terminus(pending, TERMINUS_SEALED)
 
     # Hygiene: fold the proven capture into the live compile-cache root and
     # re-point inductor there (the same end state the delivered-cell adoption
@@ -945,6 +1033,7 @@ def adopt_delegated_mint(
             "stays eager and nothing is published",
             phase="delegated_adopt_failed",
         )
+        mark_terminus(pending, TERMINUS_ABORTED)
         state["minted"] = None
         _unregister(pending)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
@@ -979,14 +1068,33 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
     (gw#587: publish failure never blocks the request that triggered the
     miss); the hub's attested gate decides accept/refuse."""
     state = pending._state
-    if state.get("minted") is None or state.get("publish_resolved"):
+    if state.get("publish_resolved"):
+        return
+    if state.get("minted") is None:
+        # pgw#815: this WAS a bare `return`. A caller that believed it had a
+        # finalized cell (the executor's publish gate runs only for pendings
+        # it packed) and a caller that has nothing produced the identical
+        # observation — nothing. Name it.
+        state["publish_resolved"] = True
+        activity_mod.emit_event(
+            "self_mint_publish_withheld",
+            f"family={pending.family} key={pending.cell_key}: the publish "
+            "gate ran with no finalized cell on this pending — nothing was "
+            "packed, so nothing can ship",
+            phase="nothing_to_publish",
+        )
+        mark_terminus(pending, TERMINUS_WITHHELD)
         return
     state["publish_resolved"] = True
     publisher = pending.publisher
     if publisher is not None and publisher.enabled():
+        mark_terminus(pending, TERMINUS_PUBLISHING)
         _publish_async(
             publisher, pending.family, pending.target,
-            dict(state.get("meta") or {}))
+            dict(state.get("meta") or {}),
+            cell_key_digest=str(
+                getattr(state.get("minted"), "cell_key", "")
+                or pending.cell_key))
     else:
         # Runtime assertion (gw#587): every fleet cell miss must produce a
         # publish attempt. A fleet worker minting with no usable sink is a
@@ -1004,6 +1112,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             "stays local to this pod",
             phase="no_sink",
         )
+        mark_terminus(pending, TERMINUS_WITHHELD)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
@@ -1019,7 +1128,22 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
     advertised self-attested); only the store publish is withheld, so the
     next boot re-mints instead of adopting a poisoned cell."""
     state = pending._state
-    if state.get("minted") is None or state.get("publish_resolved"):
+    if state.get("publish_resolved"):
+        return
+    if state.get("minted") is None:
+        # pgw#815: the twin of `publish_self_mint`'s bare return. A withhold
+        # asked of a pending that packed nothing is not a no-op — it means the
+        # mint produced no cell at all, and that end must be named too.
+        state["publish_resolved"] = True
+        activity_mod.emit_event(
+            "self_mint_publish_withheld",
+            f"family={pending.family} key={pending.cell_key}: {reason} — and "
+            "nothing was packed for this pending, so there was no cell to "
+            "withhold either",
+            phase="nothing_to_publish",
+        )
+        mark_terminus(pending, TERMINUS_ABANDONED)
+        shutil.rmtree(pending.mint_root, ignore_errors=True)
         return
     state["publish_resolved"] = True
     logger.error(
@@ -1034,6 +1158,7 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
         f"family={pending.family} key={pending.cell_key}: {reason}",
         phase="incomplete",
     )
+    mark_terminus(pending, TERMINUS_WITHHELD)
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
@@ -1103,6 +1228,27 @@ def republish_after_shape_warm(
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+#: pgw#815: every way a self-mint obligation can END. A pending that carries
+#: none of these when its boot finishes was neither published, nor withheld,
+#: nor aborted, nor abandoned — it VANISHED, which is exactly what a 24-minute
+#: L4 mint did while its activity reported `finalize completed`.
+TERMINUS_SEALED = "sealed"
+TERMINUS_PUBLISHING = "publishing"
+TERMINUS_WITHHELD = "withheld"
+TERMINUS_ABORTED = "aborted"
+TERMINUS_ABANDONED = "abandoned"
+
+
+def mark_terminus(pending: "PendingSelfMint", name: str) -> None:
+    """Record that this mint obligation reached ``name`` (pgw#815)."""
+    pending._state["terminus"] = name
+
+
+def terminus_of(pending: "PendingSelfMint") -> str:
+    """The terminus this mint obligation reached, "" when it reached none."""
+    return str(pending._state.get("terminus") or "")
+
+
 def abandon_self_mint(pending: "PendingSelfMint") -> None:
     """Discard a self-mint capture the proof did not certify (disproven or
     genuinely unexercised with no proven sibling). Never packed, never
@@ -1111,6 +1257,7 @@ def abandon_self_mint(pending: "PendingSelfMint") -> None:
     its publish must survive)."""
     if pending._state.get("minted") is not None:
         return
+    mark_terminus(pending, TERMINUS_ABANDONED)
     _unregister(pending)
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
@@ -1121,8 +1268,41 @@ def _unregister(pending: "PendingSelfMint") -> None:
             del _PENDING[pending.cell_key]
 
 
+#: pgw#813: the typed `self_mint_skipped` phase each delegation refusal
+#: declines under. The old single `aot_requires_delegation` phase carried a
+#: hand-written either/or sentence ("GEN_WORKER_MINT_IN_PROCESS or eager-first
+#: off") that named two causes which were BOTH false on the measured pod while
+#: the true cause — the pipeline-side mandatory-lane misclassification — was
+#: not named at all. A refusal that cannot name its own cause is the defect.
+_DELEGATION_DECLINE_PHASE = {
+    "mint_in_process_forced": "aot_mint_forced_in_process",
+    "eager_first_disabled": "aot_eager_first_disabled",
+    "regional_targets": "aot_regional_targets",
+    "no_eager_tier": "aot_no_eager_tier",
+    "caller_forced_in_process": "aot_mint_forced_in_process",
+}
+_DELEGATION_DECLINE_DETAIL = {
+    "mint_in_process_forced":
+        "GEN_WORKER_MINT_IN_PROCESS is set, which forces the in-process "
+        "capture; an AOTI export has no eager tier to serve from while it "
+        "compiles, so it cannot ride that shape",
+    "eager_first_disabled":
+        "GEN_WORKER_EAGER_FIRST_BOOT=0 turned eager-first off, and delegation "
+        "IS eager-first — there is no route to serve while a child compiles",
+    "regional_targets":
+        "this endpoint declares regional (per-block) compile targets, whose "
+        "delegated mint+adopt half is still held (pgw#812/#814)",
+    "no_eager_tier":
+        "an armed non-eager backend (AOTI cell or TRT engine) has replaced "
+        "this pipeline's forward, so there is no eager tier to serve from",
+    "caller_forced_in_process":
+        "the caller forced the in-process shape",
+}
+
+
 def mint_recipe(
     pipe: Any, cfg: Any, *, delegate: bool, emit: bool = True,
+    delegate_refusal: str = "",
 ) -> str:
     """WHICH mint a miss on this pipeline should run (pgw#805).
 
@@ -1157,11 +1337,17 @@ def mint_recipe(
         # An AOTI export holds the GPU for the whole compile with no router to
         # yield through; in-process it would violate the eager-first serving
         # contract outright. Delegation is not an optimization here.
+        #
+        # pgw#813: the REASON is threaded in, never re-guessed. Each refusal
+        # declines under its own phase so `self_mint_skipped` is groupable by
+        # actual cause instead of by a sentence listing candidates.
         return _decline(
-            "aot_requires_delegation",
-            "out-of-process minting is disabled (GEN_WORKER_MINT_IN_PROCESS "
-            "or eager-first off) and an AOTI export has no eager tier to "
-            "serve from while it compiles")
+            _DELEGATION_DECLINE_PHASE.get(
+                delegate_refusal, "aot_requires_delegation"),
+            _DELEGATION_DECLINE_DETAIL.get(
+                delegate_refusal,
+                "out-of-process minting is unavailable and an AOTI export "
+                "has no eager tier to serve from while it compiles"))
 
     from .api.export_contract import export_declaration
 
@@ -1278,10 +1464,15 @@ __all__ = [
     "SelfMint",
     "abandon_self_mint",
     "delegatable",
+    "delegation_refusal",
     "enable_compiled",
     "finalize_self_mint",
     "finalized_in_process",
+    "mark_terminus",
+    "mint_recipe",
     "publish_self_mint",
+    "publishes_in_flight",
     "republish_after_shape_warm",
+    "terminus_of",
     "withhold_self_mint_publish",
 ]

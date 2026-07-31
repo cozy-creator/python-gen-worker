@@ -49,8 +49,17 @@ logger = logging.getLogger(__name__)
 ENV_IN_PROCESS = "GEN_WORKER_MINT_IN_PROCESS"
 
 
-def delegated() -> bool:
-    """Whether a compile-cell miss should be minted out of process.
+#: Typed refusals :func:`delegation_refusal` can return. They are the OPERATOR
+#: half of the decision (env kill switches); the PIPELINE half lives in
+#: ``fleet_cells.delegation_refusal``. pgw#813: the two were collapsed into one
+#: either/or sentence on the wire, so a real refusal named two causes that were
+#: both false and never named the one that was true.
+REFUSAL_IN_PROCESS_FORCED = "mint_in_process_forced"
+REFUSAL_EAGER_FIRST_DISABLED = "eager_first_disabled"
+
+
+def delegation_refusal() -> str:
+    """"" when this WORKER may mint out of process, else the typed reason.
 
     Delegation IS eager-first: the live pipeline is never armed, so a boot that
     has eager-first turned off has no route to serve while a child compiles.
@@ -60,8 +69,15 @@ def delegated() -> bool:
     if os.environ.get(ENV_IN_PROCESS, "").strip().lower() in (
         "1", "true", "yes", "on"
     ):
-        return False
-    return os.environ.get("GEN_WORKER_EAGER_FIRST_BOOT", "1").strip() != "0"
+        return REFUSAL_IN_PROCESS_FORCED
+    if os.environ.get("GEN_WORKER_EAGER_FIRST_BOOT", "1").strip() == "0":
+        return REFUSAL_EAGER_FIRST_DISABLED
+    return ""
+
+
+def delegated() -> bool:
+    """Whether a compile-cell miss should be minted out of process."""
+    return not delegation_refusal()
 
 
 @dataclass(frozen=True)
