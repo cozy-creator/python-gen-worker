@@ -39,6 +39,26 @@
   read. This unblocks BOTH mint routes: on 0.81.0 the dynamo/JIT mint is delegated too and
   died in the same child load.
 
+- **pgw#754/pgw#811 follow-on — the host-ISA clamp was THREAD-LOCAL, so every host
+  compile off the boot thread was built `-march=native`.** Found by this release's CI
+  gate and root-caused to torch's own config semantics: `inductor_config.cpp.march = x`
+  writes the `user_override` layer, which torch documents as thread-local (it is a
+  `ContextVar`). `env_seal.establish` imposes on the BOOT thread, so the clamp reached
+  nothing else — and two threads that host-compile are squarely on the production path:
+  `hot_swap`'s process-global background shape-warm/heal worker, and pgw#811's K-way
+  `run_impl` splitter pool (which is exactly what a serving-pod AOT mint drives).
+
+  Before pgw#811 that silently produced unclamped, unportable objects — the pgw#754
+  SIGILL class, on the background-warm path specifically. Since pgw#811's
+  `assert_command_is_clamped` landed in 0.81.0 it is louder and worse: those compiles
+  RAISE `HostIsaError`, so on 0.81.0 every background shape-warm compile fails, and per
+  pgw#680's doctrine two failed heals mark the signature permanently `volatile` (eager
+  forever). `impose()` now writes the process-wide `default` layer as well, and — the
+  part that was actually missing — **verifies the read-back on a FOREIGN thread**, which
+  is the only place the defect was ever visible. A torch internals change that puts the
+  process-wide layer out of reach now refuses loudly at boot instead of silently
+  reverting to per-thread clamping.
+
 - **pgw#816 — a crash the child CLASSIFIED is not retried.** Those two identical 8.5 s
   attempts bought nothing. A `status="failed"` report means the child caught its own
   exception and named it, from the same request file against the same on-disk inputs, so

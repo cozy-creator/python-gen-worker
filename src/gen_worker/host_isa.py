@@ -132,11 +132,64 @@ def mint_simdlen(march: Optional[str]) -> Optional[int]:
     return _SIMDLEN_BELOW_V3
 
 
+def _impose_default(inductor_config: object, key: str, value: object) -> None:
+    """Write the PROCESS-WIDE fallback for an inductor config key.
+
+    ``inductor_config.cpp.march = x`` sets a ``user_override``, and torch
+    documents that layer as thread-local — it is a ``ContextVar``, so only
+    the thread that assigned it ever reads it back. Every OTHER thread falls
+    through the precedence chain to ``default``, which is the layer this
+    writes. Nothing else in the chain is settable at runtime: ``alias`` and
+    the two ``env_value_*`` layers are resolved once at install time.
+    """
+    entry = getattr(inductor_config, "_config", {}).get(key)
+    if entry is None:
+        raise HostIsaError(
+            f"isa clamp cannot reach a process-wide target: torch's inductor "
+            f"config has no {key!r} entry to set a default on. torch's config "
+            f"internals changed; the clamp must be re-seated before any host "
+            f"compile can be trusted to be portable.")
+    entry.default = value
+
+
+def _read_in_fresh_thread(fn: object) -> object:
+    """Run ``fn`` on a brand-new thread and return its value.
+
+    A fresh thread starts with an empty ``ContextVar`` context, so this reads
+    exactly what a background compile thread would read.
+    """
+    import threading
+
+    box: Dict[str, object] = {}
+
+    def _run() -> None:
+        box["v"] = fn()  # type: ignore[operator]
+
+    t = threading.Thread(target=_run, name="host-isa-readback", daemon=True)
+    t.start()
+    t.join()
+    return box.get("v")
+
+
 def impose() -> Dict[str, str]:
     """Clamp torch's inductor codegen target to the portable mint target and
-    verify the read-back. Called from ``env_seal.establish`` at boot, before
-    any compile. No-op (empty dict) on non-x86 machines, and on a torchless
-    worker — there is no inductor codegen to clamp (pgw#788)."""
+    verify the read-back ON A FOREIGN THREAD. Called from
+    ``env_seal.establish`` at boot, before any compile. No-op (empty dict) on
+    non-x86 machines, and on a torchless worker — there is no inductor
+    codegen to clamp (pgw#788).
+
+    The foreign-thread read-back is the whole point, not belt-and-braces.
+    torch's ``user_override`` layer — the one a plain attribute assignment
+    writes — is a ``ContextVar``, i.e. THREAD-LOCAL by torch's own
+    documentation. Boot imposes on the boot thread; every host compile that
+    happens anywhere else does not inherit it. Those are not hypothetical
+    threads: ``hot_swap``'s process-global background shape-warm/heal worker
+    and pgw#811's K-way ``run_impl`` splitter pool both host-compile off the
+    boot thread, so both were emitting ``-march=native`` — unclamped,
+    unportable, the exact pgw#754 SIGILL class — and, once pgw#811's
+    ``assert_command_is_clamped`` landed, failing outright instead. A
+    same-thread read-back could never see any of it.
+    """
     if not torch_capability.present():
         return {}
     march = mint_march()
@@ -145,6 +198,11 @@ def impose() -> Dict[str, str]:
     simdlen = mint_simdlen(march)
     import torch._inductor.config as inductor_config
 
+    # Process-wide first: the fallback every non-imposing thread reads.
+    _impose_default(inductor_config, "cpp.march", march)
+    _impose_default(inductor_config, "cpp.simdlen", simdlen)
+    # Then this thread's own override, so a caller that has one already (a
+    # test's monkeypatch, a torch `config.patch`) still ends up clamped.
     inductor_config.cpp.march = march
     inductor_config.cpp.simdlen = simdlen
     got_march = inductor_config.cpp.march
@@ -154,9 +212,17 @@ def impose() -> Dict[str, str]:
             f"isa clamp did not take effect: imposed march={march!r} "
             f"simdlen={simdlen!r}, effective march={got_march!r} "
             f"simdlen={got_simdlen!r}")
+    foreign = _read_in_fresh_thread(
+        lambda: (inductor_config.cpp.march, inductor_config.cpp.simdlen))
+    if foreign != (march, simdlen):
+        raise HostIsaError(
+            f"isa clamp is thread-local only: this thread reads "
+            f"march={got_march!r} simdlen={got_simdlen!r} but a fresh thread "
+            f"reads {foreign!r}. Any host compile off the boot thread would "
+            f"be built -march=native (pgw#754).")
     logger.info(
-        "host-isa: codegen clamped to march=%s simdlen=%s (host level %s)",
-        march, simdlen, host_level())
+        "host-isa: codegen clamped to march=%s simdlen=%s (host level %s), "
+        "process-wide", march, simdlen, host_level())
     return {"cpp_march": march, "cpp_simdlen": str(simdlen)}
 
 

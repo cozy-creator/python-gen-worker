@@ -29,6 +29,7 @@ import json
 import re
 import shutil
 import subprocess
+import threading
 import zipfile
 from pathlib import Path
 
@@ -245,3 +246,93 @@ def test_satisfiable_stamp_stages(tmp_path: Path) -> None:
 
 def test_cross_machine_artifact_refused() -> None:
     assert "aarch64" in host_isa.unsupported_reason("", "aarch64")
+
+
+# ---------------------------------------------------------------------------
+# The clamp must be PROCESS-wide, not thread-local (0.82.0 release gate)
+# ---------------------------------------------------------------------------
+#
+# torch's config precedence puts ``user_override`` above ``default``, and
+# torch's own docstring says user overrides are THREAD-LOCAL — the layer is a
+# ``ContextVar``. A plain ``inductor_config.cpp.march = x`` therefore clamps
+# only the assigning thread. Boot imposes on the boot thread, so every host
+# compile that runs anywhere else was built ``-march=native``: unclamped,
+# unportable, the pgw#754 SIGILL class. Two such threads exist and both are
+# on the production mint/serve path — ``hot_swap``'s process-global
+# background shape-warm/heal worker, and pgw#811's K-way ``run_impl``
+# splitter pool. Since pgw#811's ``assert_command_is_clamped`` landed
+# (0.81.0) they do not merely emit native code, they FAIL: on 0.81.0 every
+# background warm compile raises HostIsaError, and per pgw#680's doctrine two
+# failed heals mark the signature permanently ``volatile``.
+
+
+def _march_seen_by_a_fresh_thread() -> object:
+    import threading
+
+    import torch._inductor.config as inductor_config
+
+    box = {}
+
+    def _read() -> None:
+        box["march"] = inductor_config.cpp.march
+        box["simdlen"] = inductor_config.cpp.simdlen
+
+    t = threading.Thread(target=_read)
+    t.start()
+    t.join()
+    return box["march"], box["simdlen"]
+
+
+def test_clamp_is_visible_to_a_thread_that_never_imposed() -> None:
+    """RED before the fix: a fresh thread read ``(None, None)`` and torch
+    built ``-march=native`` for it."""
+    march = host_isa.mint_march()
+    assert march is not None
+    host_isa.impose()
+    assert _march_seen_by_a_fresh_thread() == (
+        march, host_isa.mint_simdlen(march))
+
+
+def test_a_background_compile_thread_builds_a_clamped_argv() -> None:
+    """The end the defect was actually felt at: the argv torch would build
+    off the boot thread passes pgw#811's own assertion.
+
+    This drives torch's real ``_get_cpu_arch_cflags``/``get_cpp_torch_options``
+    on a foreign thread rather than re-deriving what it would emit.
+    """
+    from torch._inductor import cpp_builder
+
+    host_isa.impose()
+
+    box: dict = {}
+
+    def _build() -> None:
+        try:
+            compiler = cpp_builder.get_cpp_compiler()
+            box["cflags"] = cpp_builder._get_cpu_arch_cflags(compiler)
+        except Exception as exc:  # pragma: no cover - torch internals moved
+            box["exc"] = exc
+
+    t = threading.Thread(target=_build)
+    t.start()
+    t.join()
+
+    assert "exc" not in box, box.get("exc")
+    flags = box["cflags"]
+    assert "march=native" not in flags, (
+        f"a foreign compile thread still builds -march=native: {flags}")
+    # And the argv assertion pgw#811 added agrees.
+    host_isa.assert_command_is_clamped(
+        ["g++", "x.cpp"] + [f"-{f}" for f in flags])
+
+
+def test_impose_refuses_if_it_cannot_reach_a_process_wide_target() -> None:
+    """A torch internals change must fail LOUDLY at boot, not silently go
+    back to per-thread clamping."""
+
+    class _NoEntries:
+        _config: dict = {}
+
+    with pytest.raises(host_isa.HostIsaError) as exc_info:
+        host_isa._impose_default(_NoEntries(), "cpp.march", "x86-64-v3")
+    assert "process-wide" in str(exc_info.value)
