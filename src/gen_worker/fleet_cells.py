@@ -1418,6 +1418,21 @@ def mint_recipe(
     if refusal:
         return _decline("aot_lifted_torch_gap", refusal)
 
+    # pgw#823: AOTI links a real `.so`, so it needs a C++ compiler — and the
+    # endpoint images do not have one. The parent runs the SAME image as the
+    # child, so this is answerable here, for free, instead of after the child
+    # has loaded the pipeline and exported every graph class: measured, that
+    # cost 336 s of L4 time to arrive at `InvalidCxxCompiler`. Deliberately
+    # NOT `toolchain_present()` — that one passes on the image's C compiler,
+    # and tightening it would refuse the dynamo lane, which needs no C++.
+    if not cc.cxx_toolchain_present():
+        return _decline(
+            "no_cxx_toolchain",
+            "no C++ compiler on this image (torch._inductor would raise "
+            "InvalidCxxCompiler): AOTInductor forces the C++ wrapper and "
+            "links a shared object, unlike the dynamo lane's Triton + Python "
+            "wrapper — install g++/build-essential in the endpoint image")
+
     # pgw#822: the LAST thing checkable without renting anything. Every
     # declared graph class's input names against its target module's own
     # forward signature — per class, because the adapter fork's two halves

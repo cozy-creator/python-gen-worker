@@ -1576,7 +1576,67 @@ def compile_wall_seconds() -> float:
 
 
 def toolchain_present() -> bool:
+    """Any C or C++ compiler — the DYNAMO lane's requirement.
+
+    Deliberately NOT tightened to C++ (pgw#823): on CUDA, dynamo emits Triton
+    kernels behind a PYTHON wrapper and compiles fine with no C++ compiler at
+    all — leg 2's 24-47 minute mints are the proof. Tightening this predicate
+    would refuse the only mint lane the fleet currently has working. The
+    AOT lane's stricter question is :func:`cxx_toolchain_present`.
+    """
     return any(shutil.which(c) for c in ("cc", "gcc", "g++", "clang"))
+
+
+#: What ``torch._inductor`` reaches for when it needs to build C++, in its own
+#: preference order. ``CXX`` wins because inductor honours it too.
+_CXX_CANDIDATES = ("g++", "clang++", "c++")
+
+
+def cxx_compiler() -> str:
+    """The C++ compiler AOTInductor would actually invoke, or ``""``.
+
+    Asks in the same order inductor does — ``config.cpp.cxx`` (which already
+    folds in ``CXX``) when torch is importable, else the plain PATH search —
+    so this predicate cannot drift from the thing it is predicting.
+    """
+    try:
+        from torch._inductor import config as _icfg
+
+        declared = getattr(getattr(_icfg, "cpp", None), "cxx", None)
+        # torch states this as a tuple of candidates, e.g. (None, 'g++').
+        names = [str(c) for c in (declared or ()) if c] \
+            if isinstance(declared, (tuple, list)) else \
+            ([str(declared)] if declared else [])
+        for name in names:
+            found = shutil.which(name)
+            if found:
+                return found
+        if names:
+            # torch named its candidates and NONE resolved — that is exactly
+            # the InvalidCxxCompiler the linker would raise. Do not fall
+            # through to a broader guess and contradict it.
+            return ""
+    except Exception:  # noqa: BLE001 — no torch (discovery/build time) or an
+        pass          # unexpected config shape: fall back to the PATH search
+    for name in (os.environ.get("CXX", ""),) + _CXX_CANDIDATES:
+        if name:
+            found = shutil.which(name)
+            if found:
+                return found
+    return ""
+
+
+def cxx_toolchain_present() -> bool:
+    """Whether AOTInductor can link a kernel on this pod (pgw#823).
+
+    A C compiler is NOT enough: AOTI forces inductor's C++ wrapper and links
+    a real ``.so``. Measured on a real L4 (release `39ac3726`, 0.84.0) — the
+    endpoint image carries a C compiler, so ``toolchain_present()`` passed,
+    and the mint spent **336 s** loading, exporting both graph classes and
+    reaching the linker before torch said
+    ``InvalidCxxCompiler: No working C++ compiler found ... (None, 'g++')``.
+    """
+    return bool(cxx_compiler())
 
 
 # ---------------------------------------------------------------------------
@@ -4228,6 +4288,8 @@ __all__ = [
     "set_guard_failure_callback",
     "sku_slug",
     "system_repo",
+    "cxx_compiler",
+    "cxx_toolchain_present",
     "toolchain_present",
     "unpack",
     "unwrap",
