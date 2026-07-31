@@ -173,7 +173,7 @@ class _StubHub:
         self.fail_all = fail_all
         # (digest, blob, blob_url) -> the manifest file entry to serve. The
         # default is a manifest v1 entry; th#1303 tests hand in v2 shapes.
-        self.entry_for = entry_for or _v1_entry
+        self.entry_for = entry_for or _v2_entry
         self.requests: List[Tuple[str, bool]] = []
         outer = self
 
@@ -243,7 +243,11 @@ def _sha256_bytes(blob: bytes) -> str:
 
 
 def _v1_entry(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
-    """A manifest v1 file entry: the bare-hex ``blake3`` mirror, no ``digest``."""
+    """A manifest v1 file entry: the bare-hex ``blake3`` mirror, no ``digest``.
+
+    th#1303 S1 kept this fixture ONLY to prove such an entry is now REFUSED —
+    nothing here may adopt from it. The default hub entry is ``_v2_entry``.
+    """
     return {"path": f"{digest}.tar.gz", "size_bytes": len(blob),
             "blake3": _blake3_bytes(blob), "url": url}
 
@@ -407,18 +411,24 @@ def _discover_against(
     return adopted, cache / "aot-cells" / f"{key}.tar.gz"
 
 
-def test_discover_digest_mismatch_is_a_miss(
+def test_discover_refuses_a_v1_blake3_only_cell_th1303(
     tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """v1: a manifest whose blake3 does not name the served bytes is refused."""
-    def wrong_v1(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
-        ent = _v1_entry(digest, blob, url)
-        ent["blake3"] = "0" * 64
-        return ent
+    """th#1303 S1 replaces `test_discover_digest_mismatch_is_a_miss`.
 
-    adopted, dest = _discover_against(wrong_v1, tmp_path, key_seed="7")
-    assert adopted is None
+    A manifest v1 entry names its bytes only through the legacy ``blake3``
+    mirror. With `resolved_entry_digest`'s mirror arm gone that entry carries
+    NO digest, so the cell is refused before a byte is executed. Restoring the
+    mirror arm makes this adopt again, which is the revert-turns-red.
+    """
+    seen: List[Tuple[str, str]] = []
+    adopted, dest = _discover_against(
+        _v1_entry, tmp_path, key_seed="7", seen=seen, monkeypatch=monkeypatch)
+    assert adopted is None, "a blake3-only cell must never arm at S1"
     assert not dest.exists() and not dest.with_suffix(".part").exists()
+    assert "resolve_failed" in [p for p, _ in seen], seen
+
 
 
 def test_discover_refuses_a_v2_cell_whose_bytes_do_not_match_th1303(
@@ -467,8 +477,8 @@ def test_discover_refuses_an_entry_with_no_digest_at_all_th1303(
     """No digest is a REFUSAL, never a skip. A cell artifact is compiled code
     the pod will execute; "the manifest didn't say" is not permission."""
     def no_digest(digest: str, blob: bytes, url: str) -> Dict[str, Any]:
-        ent = _v1_entry(digest, blob, url)
-        ent.pop("blake3")
+        ent = _v2_entry(digest, blob, url)
+        ent.pop("digest")
         return ent
 
     seen: List[Tuple[str, str]] = []

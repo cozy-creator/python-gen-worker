@@ -8,7 +8,7 @@ Measured cost on the shape this exists for: ~1.64 GB per SDXL text-encoder
 override, per pod.
 
 Same real boundary as ``test_component_bindings_pgw617``: real worker, real
-executor, real blake3 CAS downloader against an HTTP blob host. The evidence
+executor, real sha256 CAS downloader against an HTTP blob host. The evidence
 is the CAS itself — a blob that was never fetched is not in ``blobs/``.
 """
 
@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import msgspec
-from blake3 import blake3
+import hashlib
 
 from gen_worker.api.binding import wire_ref
 from gen_worker.models.cozy_snapshot import snapshot_dir_key
@@ -118,11 +118,11 @@ def test_override_never_fetches_the_component_it_replaces(tmp_path) -> None:
 
         # THE assertion: the overridden component's bytes were never fetched.
         present = _cas_blob_digests(cache_dir)
-        assert blake3(BASE_TRANSFORMER_BYTES).hexdigest() in present, (
+        assert hashlib.sha256(BASE_TRANSFORMER_BYTES).hexdigest() in present, (
             "the base's own transformer must still be fetched")
-        assert blake3(b"override-vae").hexdigest() in present, (
+        assert hashlib.sha256(b"override-vae").hexdigest() in present, (
             "the override's tree must still be fetched")
-        assert blake3(BASE_VAE_BYTES).hexdigest() not in present, (
+        assert hashlib.sha256(BASE_VAE_BYTES).hexdigest() not in present, (
             "th#1330 B2: the base's vae/ was downloaded and discarded")
 
         # ...and the narrowed tree is keyed as narrowed, never under the bare
