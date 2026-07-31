@@ -35,6 +35,7 @@ correct; a mangled TU is not.
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import logging
 import os
 import re
@@ -42,6 +43,8 @@ import shlex
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
+
+from . import host_isa
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +100,14 @@ class SplitOutcome:
     bytes_in: int = 0
     bytes_out: int = 0
     source: str = ""
+    #: Set by the pgw#811 path, whose shape v1's wording does not describe.
+    summary: str = ""
 
     def detail(self) -> str:
         name = Path(self.source).name if self.source else "<source>"
         if self.applied:
+            if self.summary:
+                return f"{name}: {self.summary}"
             return (
                 f"{name}: {self.statements} constants_info_ statements -> "
                 f"{self.chunks} helper functions "
@@ -290,20 +297,61 @@ def _reinline(source: str) -> str:
 
 #: Env kill-switch. Not a sealed config knob and not an inductor config —
 #: see :func:`install` for why that distinction is what keeps cell identity
-#: untouched.
+#: untouched. Kills v1 and v2 together.
 DISABLE_ENV = "GEN_WORKER_AOT_WRAPPER_SPLIT_OFF"
+
+#: Kill switch for the pgw#811 ``run_impl`` split alone, so the (much older,
+#: much better travelled) v1 ctor split can stay on if v2 ever has to go off.
+DISABLE_V2_ENV = "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"
+
+#: How many of the K+1 part compiles may run at once. pgw#809's pool owns
+#: the pod's CPU budget ACROSS entries; it sets this to its per-entry share
+#: so the two levers compose (split-within-entry x pool-across-entries)
+#: instead of oversubscribing. Unset: derive from the pod's own budget.
+JOBS_ENV = "GEN_WORKER_AOT_HOST_COMPILE_JOBS"
+
+#: Left for serving even when nothing else has claimed the box. Matches
+#: pgw#809's `SERVING_HEADROOM_CPUS`; a mint never starves the tenant.
+SERVING_HEADROOM_CPUS = 2
 
 _installed = False
 
 
-def _emit(outcome: SplitOutcome) -> None:
+def host_compile_jobs(tus: int) -> int:
+    """How many part TUs to compile concurrently, never more than ``tus``.
+
+    The split wins on TOTAL CPU (measured 2.8x on the real TU), so jobs=1 is
+    already a win and this is only ever an accelerator — which is why it
+    fails safe to 1 rather than guessing.
+    """
+    raw = os.environ.get(JOBS_ENV, "").strip()
+    if raw:
+        try:
+            return max(1, min(tus, int(raw)))
+        except ValueError:
+            logger.warning("aot-wrapper-split: ignoring non-numeric %s=%r", JOBS_ENV, raw)
+    try:
+        from .postmortem import effective_cpu_count
+
+        budget = effective_cpu_count() - SERVING_HEADROOM_CPUS
+    except Exception:
+        return 1
+    return max(1, min(tus, budget))
+
+
+def _emit(outcome: SplitOutcome, version: str = "") -> None:
+    """One typed row per wrapper compile. ``version`` distinguishes the
+    pgw#811 ``run_impl`` split (``v2_applied`` / ``v2_declined``) from v1's
+    original ``applied`` / ``declined``, so a fleet can tell which of the two
+    levers fired on any given mint."""
     try:
         from . import activity as activity_mod
 
+        state = "applied" if outcome.applied else "declined"
         activity_mod.emit_event(
             EVENT,
             outcome.detail(),
-            phase="applied" if outcome.applied else "declined",
+            phase=f"{version}_{state}" if version else state,
         )
     except Exception:  # pragma: no cover - telemetry must never break a mint
         logger.debug("aot-wrapper-split: activity emit failed", exc_info=True)
@@ -358,6 +406,106 @@ def transform_command(cmd_line: str) -> Tuple[str, Optional[SplitOutcome]]:
     return shlex.join(argv), outcome
 
 
+# ---------------------------------------------------------------------------
+# v2: the run_impl K-way split, driven over K+1 real compiles
+# ---------------------------------------------------------------------------
+
+def _object_arg(argv: Sequence[str]) -> Optional[int]:
+    """Index of the ``-o`` VALUE in a compile-only command line."""
+    for i, tok in enumerate(argv[:-1]):
+        if tok == "-o":
+            return i + 1
+    return None
+
+
+def _retarget(argv: Sequence[str], src_at: int, obj_at: int,
+              source: Path, obj: Path) -> str:
+    out = list(argv)
+    out[src_at] = str(source)
+    out[obj_at] = str(obj)
+    return shlex.join(out)
+
+
+def _partial_link(argv: Sequence[str], objects: Sequence[Path], target: Path) -> str:
+    """``ld -r`` the part objects into the ONE object torch's link step
+    expects. Driven through the same compiler binary torch chose, so the
+    toolchain stays exactly the one the cell seal names."""
+    return shlex.join([argv[0], "-r", "-nostdlib", "-o", str(target),
+                       *(str(o) for o in objects)])
+
+
+def split_and_compile(cmd_line: str, cwd: str,
+                      run: Callable[[str, str], None]) -> Optional[SplitOutcome]:
+    """Build ``cmd_line``'s source as K+1 chained TUs, partial-linked into
+    the one object torch's link step expects.
+
+    Returns the outcome on success, or None when the caller should fall back
+    to compiling ``cmd_line`` unmodified. Nothing here may leave a
+    half-written object at the target path: the partial link is the last
+    step and runs only once every part has built.
+    """
+    from . import aot_run_impl_split as v2
+
+    argv = shlex.split(cmd_line)
+    src_at, obj_at = _split_source_arg(argv), _object_arg(argv)
+    if src_at is None or obj_at is None:
+        return None
+    source = Path(argv[src_at])
+    try:
+        text = source.read_text()
+    except OSError as exc:
+        _emit(SplitOutcome(False, f"unreadable source: {exc}",
+                           source=str(source)), version="v2")
+        return None
+    split = v2.split_run_impl(text)
+    if not split.applied:
+        _emit(SplitOutcome(False, split.reason, source=str(source)))
+        return None
+
+    stem = source.name[: -len(".cpp")]
+    units: List[Tuple[Path, Path]] = []
+    for name, body in [("main", split.main),
+                       *((f"part{i}", p) for i, p in enumerate(split.parts))]:
+        cpp = source.with_name(f"{stem}.pgw811.{name}.cpp")
+        cpp.write_text(body)
+        units.append((cpp, cpp.with_suffix(".o")))
+
+    jobs = host_compile_jobs(len(units))
+    errors: List[BaseException] = []
+
+    def build(unit: Tuple[Path, Path]) -> None:
+        run(_retarget(argv, src_at, obj_at, unit[0], unit[1]), cwd)
+
+    if jobs == 1:
+        for unit in units:
+            build(unit)
+    else:
+        with cf.ThreadPoolExecutor(max_workers=jobs) as pool:
+            for future in cf.as_completed([pool.submit(build, u) for u in units]):
+                exc = future.exception()
+                if exc is not None:
+                    errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    run(_partial_link(argv, [o for _, o in units], Path(argv[obj_at])), cwd)
+    return SplitOutcome(
+        True,
+        "",
+        statements=split.compute_lines,
+        chunks=len(units),
+        bytes_in=len(text),
+        bytes_out=sum(len(b) for b in (split.main, *split.parts)),
+        source=str(source),
+        summary=(
+            f"run_impl {split.compute_lines} statements / {split.declarations} "
+            f"declarations -> {len(split.parts)} chained TUs "
+            f"(max {split.threaded_max} threaded, {split.rederived_max} "
+            f"re-derived), {jobs} concurrent compiles, partial-linked"
+        ),
+    )
+
+
 def install() -> bool:
     """Install the transform on torch's single host-compile funnel.
 
@@ -389,6 +537,17 @@ def install() -> bool:
     original: Callable[..., None] = cpp_builder.run_compile_cmd
 
     def _patched(cmd_line: str, cwd: str) -> None:
+        # pgw#754's clamp is asserted at the CONFIG level by
+        # host_isa.impose(); this is the argv-level assertion nothing had.
+        # `run_compile_cmd` is torch's single host-compile funnel, so every
+        # object a mint produces passes through here exactly once. It raises
+        # rather than degrading: an unclamped object is not slower, it is
+        # unportable, and pgw#754 is a SIGILL-class defect.
+        try:
+            host_isa.assert_command_is_clamped(shlex.split(cmd_line))
+        except ValueError:
+            pass                      # unparseable argv is not an ISA claim
+
         try:
             new_cmd, outcome = transform_command(cmd_line)
         except Exception:
@@ -398,9 +557,37 @@ def install() -> bool:
             )
             original(cmd_line, cwd)
             return
-        if outcome is None or not outcome.applied:
-            if outcome is not None:
-                _emit(outcome)
+        if outcome is None:
+            original(cmd_line, cwd)          # not a single-source C++ compile
+            return
+        _emit(outcome)
+
+        # v2 (pgw#811) splits run_impl out of whatever source v1 left behind
+        # — inductor's own when v1 declined, v1's regrouped one when it did
+        # not. It subsumes the single compile: when it fires it drives every
+        # compile itself and there is no monolith left to run.
+        if not os.environ.get(DISABLE_V2_ENV, "").strip():
+            try:
+                v2_outcome = split_and_compile(new_cmd, cwd, original)
+            except Exception as exc:
+                _emit(
+                    SplitOutcome(
+                        False,
+                        "split TUs failed to build, retried the whole wrapper: "
+                        f"{type(exc).__name__}: {exc}",
+                        source=outcome.source,
+                    ),
+                    version="v2",
+                )
+                logger.warning(
+                    "aot-wrapper-split: pgw#811 split failed (%s); recompiling "
+                    "the whole wrapper", type(exc).__name__, exc_info=True)
+            else:
+                if v2_outcome is not None:
+                    _emit(v2_outcome, version="v2")
+                    return
+
+        if not outcome.applied:
             original(cmd_line, cwd)
             return
         try:
@@ -441,8 +628,13 @@ __all__ = [
     "EVENT",
     "MIN_STATEMENTS",
     "DISABLE_ENV",
+    "DISABLE_V2_ENV",
+    "JOBS_ENV",
+    "SERVING_HEADROOM_CPUS",
     "SplitOutcome",
+    "host_compile_jobs",
     "install",
+    "split_and_compile",
     "split_constants_constructor",
     "transform_command",
 ]

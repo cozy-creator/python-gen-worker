@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import platform
 from functools import lru_cache
-from typing import Dict, FrozenSet, Mapping, Optional, Tuple, Union
+from typing import Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, Union
 
 from . import torch_capability
 
@@ -158,6 +158,34 @@ def impose() -> Dict[str, str]:
         "host-isa: codegen clamped to march=%s simdlen=%s (host level %s)",
         march, simdlen, host_level())
     return {"cpp_march": march, "cpp_simdlen": str(simdlen)}
+
+
+def assert_command_is_clamped(argv: Sequence[str]) -> None:
+    """Refuse a host compile whose ARGV still carries ``-march=native``.
+
+    :func:`impose` asserts the clamp at the *config* level and nothing has
+    ever asserted it at the argv level — and pgw#793's research harness is a
+    live example of a path that mints unclamped objects, because it never
+    booted through ``env_seal.establish``. torch builds the flag in
+    ``cpp_builder._get_cpu_arch_cflags``, which falls through to
+    ``march=native`` whenever ``config.cpp.march`` is None, so this reads
+    what was actually built rather than what was intended.
+
+    Why it matters beyond ISA portability: gcc records the EXPANDED flag set
+    in ``DW_AT_producer``, so a ``-march=native`` object is byte-different on
+    every host CPU model even when the machine code is identical.
+
+    A no-op on non-x86 (``mint_march()`` is None there, so nothing is
+    claimed and nothing is checked).
+    """
+    if mint_march() is None:
+        return
+    for tok in argv:
+        if tok == "-march=native" or tok == "--param=march=native":
+            raise HostIsaError(
+                "host compile carries -march=native despite the pgw#754 clamp; "
+                "this process did not boot through env_seal.establish. "
+                f"argv: {' '.join(argv[:12])}...")
 
 
 def effective() -> Dict[str, str]:

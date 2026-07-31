@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#811 — `run_impl` is split across K translation units, the largest measured
+  compile-speed win on the board.** Two independent compiler profiles of the real
+  banked SDXL w8a8 wrapper agree that parse is 3-5% of the compile and that
+  `AOTInductorModel::run_impl` ALONE is 68% of it, because the cost is superlinear
+  (measured n^1.57) in ONE function's size: 10,032 declarations and 4,231 dispatch
+  calls in a single body, burning in stack-slot conflict colouring and CFG-wide block
+  placement. No flag fixes that (best -19%, most NEGATIVE) and no bigger machine
+  fixes it (32-core i9: 140 s vs a 4-vCPU pod's 180.6 s — one process, one core,
+  either way). Measured here on the real TU with torch's own flags and the production
+  march clamp: **120.0 s -> 38.7 s of total CPU (3.1x, so it wins even serially) and
+  121.8 s -> 9.7 s wall at K=8 (12.6x)**, with peak RSS 2.02 GB -> 0.63 GB. The
+  4-vCPU pod emulation is 16.1 s.
+
+  It is a continuation CHAIN, not K calls from `run_impl`: each part ends by calling
+  the next with the live set by reference, so **no declaration is rewritten and every
+  statement is byte-identical to what inductor emitted**, and every local's lifetime
+  and destruction order is unchanged. Each part is a member function of a generated
+  `_pgw811_run_ctx` carrying `constants_`/`kernels_`/`device_idx_`/`cubin_dir_` under
+  their original names, which is what buys zero body rewriting. Real liveness, not
+  the research prototype's fresh defaults: on the real TU only 386 of 8,590 compute
+  declarations (4.5%) cross a K=8 boundary; the rest stay part-local, and the ones
+  that are pure re-derivations (`constants_->at(n)` bindings, const `int_array_N`)
+  are copied rather than threaded.
+
+  FAIL-CLOSED, as v1 is, and by the same architecture: a self-contained mechanical
+  inverse reads ONLY the split output and must reproduce the input byte for byte.
+  It consumes no side table, so the transform cannot fool it — RED-verified against
+  seven corruption classes (statement deleted / reordered / inserted / argument
+  changed / disguised as generated / disguised as a re-derivation / re-derived
+  binding altered). The last one found a real hole: re-derivations were being dropped
+  blindly, so a mutated `constants_->at(n)` survived; they now carry their own marker
+  and must be found verbatim in the reconstruction they claim to copy. Equivalence is
+  also proved by EXECUTION — a shape-faithful wrapper is compiled both ways, partial-
+  linked exactly as the mint does it, run, and required to print the same bytes.
+  Anything unrecognised, unbalanced or untypable declines; if a part will not build,
+  the whole wrapper is recompiled unmodified. A slow mint beats a wrong artifact.
+
+  No cell is re-keyed: all three digests (inductor config, env seal, toolchain) are
+  asserted unmoved, and neither module is reachable from the static code closure. The
+  split adds compiler INVOCATIONS, not a compiler or a flag. Kill switches:
+  `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` for v2 alone, `GEN_WORKER_AOT_WRAPPER_SPLIT_OFF`
+  for both. Concurrency comes from `GEN_WORKER_AOT_HOST_COMPILE_JOBS` so pgw#809's
+  pool owns the pod budget across entries while this fans out within one.
+
+- **pgw#754's march clamp is now asserted at the ARGV level, not just the config
+  level.** `host_isa.impose()` verified `config.cpp.march` and nothing ever read the
+  command line torch actually built — and pgw#793's research harness is a live
+  example of a path that mints `-march=native` objects because it never booted
+  through `env_seal.establish`. `host_isa.assert_command_is_clamped` now runs on
+  torch's single host-compile funnel and RAISES: an unclamped object is not slower,
+  it is unportable, and pgw#754 is a SIGILL-class defect. (The harness itself was
+  fixed to boot through `env_seal.establish` and record `mint_march`.)
+
 ## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
 
 > ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL
