@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.84.0 (2026-07-31) — the AOT mint exports the module it DECLARED: one lifted arm for the export, a declaration/module check before a pod is rented, and the process split becomes an N-group AUTHORIZATION boundary (dark)
 
 - **pgw#822 — the AOT mint exports the module it DECLARED: ONE lifted arm, plus a
   declaration/module check that runs BEFORE a pod is rented.** On a real L4 (0.82.0, sdxl
@@ -118,6 +118,15 @@
   eager, mandatory lanes keep their typed refusal) instead of pretending a process-global
   control plane is per-group. G==1 — every pod today — keeps the exact in-process fallback
   path. The mint-once-adopt-N story belongs to the pgw#783 split world.
+
+- **pgw#821 (th#1303 empty-guard class) — component sharing was silently OFF fleet-wide on
+  every manifest-v2 snapshot.** `component_digests` read `f.blake3`, which is EMPTY on every
+  v2 entry, so every file of a v2 snapshot was skipped and gw#479 component sharing never
+  engaged — the fail-CLOSED half of the empty-guard class, invisible because a skipped file
+  looks exactly like a file with nothing to share. Now a dual-read (the tagged `digest`
+  first, then the legacy `blake3` mirror) until th#1303 S1 retires the v1 arm. Extracted
+  from the blake3-removal branch so the live defect does not wait on the v1 write-freeze
+  gate.
 
 ## 0.83.0 (2026-07-31) — REGIONAL CELLS: the minutes-scale mint. A cell's entries become BLOCK CLASSES, and flux2 can mint at all again
 
