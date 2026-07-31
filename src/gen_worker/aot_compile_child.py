@@ -32,6 +32,7 @@ import msgspec
 
 from .aot_compile_pool import (
     COMPILED,
+    arm_parent_death_signal,
     EXIT_BAD_JOB,
     EXIT_COMPILED,
     EXIT_REFUSED,
@@ -62,6 +63,10 @@ def run(job: EntryJob) -> int:
 
     started = time.monotonic()
     report_path = Path(job.report)
+    # Before anything expensive: if the mint child dies, this compile dies
+    # with it. A serving pod must never be left burning CPU on a cell nobody
+    # is waiting for any more.
+    arm_parent_death_signal()
     # The seal is the parent's — re-established, not re-derived, because this
     # process emits the very bytes the seal describes. A child that sealed
     # differently would produce an artifact the parent's verify() rejects on

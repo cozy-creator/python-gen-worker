@@ -21,13 +21,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, List, Tuple
 
 import pytest
 
 from gen_worker import aot_compile_pool as pool
+from harness.progress_wait import Cadence, await_progress
 
 torch = pytest.importorskip("torch")
 
@@ -92,23 +92,26 @@ def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
     Asserts, in one run: every entry comes back; the loose files exist and
     are readable by the PARENT (the shared cache dir is the whole reason
     they are); assembly is ordered by entry NAME and not by completion; the
-    wall clock is genuinely under the serial sum (the pool is not a
-    sequential loop with extra steps); the staged programs are swept; the
+    pool really did run K children at once (structurally, not by clock);
+    the staged programs are swept; the
     per-entry seconds and the child peak RSS are recorded (the memory bound
     is measured, not assumed); and ``package_aoti`` accepts the result.
     """
     from torch._inductor.package import package_aoti
 
     entries = _entries(4)
-    width = pool.entry_workers(len(entries), limit=2)
+    # The width is STATED, not derived: a 4-vCPU CI runner honestly derives
+    # K=1, and this scenario would then pass while exercising no pool at all.
+    width = pool.entry_workers(
+        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
+        free_vram_bytes=0, device_lock=True)
+    assert width.workers == 2
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
         cache_dir=str(tmp_path / "cache"))
 
-    t0 = time.monotonic()
     out = box.compile(entries)
-    wall = time.monotonic() - t0
 
     assert set(out) == {name for name, _ in entries}
     assert list(out) == sorted(out), (
@@ -122,14 +125,14 @@ def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
                 f"shared TORCHINDUCTOR_CACHE_DIR is how loose files travel")
 
     assert set(box.entry_seconds) == set(out)
-    # Concurrency is asserted from OBSERVED overlap, never from wall clock:
-    # this suite runs on a box shared with other agent lanes, where a
-    # `wall < serial_sum` assertion is a coin flip under load. Two children
-    # alive at once is the invariant that actually says "the pool overlapped".
+    # Overlap is asserted STRUCTURALLY — K processes really were alive at
+    # once — never as a wall-clock speedup. A `wall < serial_sum` assertion
+    # measures the runner's spare CPU, not this code: on a 4-vCPU CI box it
+    # read 85.504 < 85.22 and failed a release. The speedup claim belongs in
+    # pgw#809's measured tables, where it is CPU-seconds and byte-identity.
     assert box.peak_concurrency == width.workers, (
         f"pool never reached its own width: saw {box.peak_concurrency} "
         f"concurrent children, K={width.workers}")
-    assert wall > 0
     assert box.peak_rss_bytes > 0, (
         "per-entry peak RSS is what bounds K by memory; an unmeasured peak "
         "makes the width policy a guess")
@@ -158,7 +161,9 @@ def test_one_failing_entry_fails_the_mint_and_takes_its_siblings(
     """
     entries = _entries(4)
     doomed = entries[1][0]
-    width = pool.entry_workers(len(entries), limit=4)
+    width = pool.entry_workers(
+        len(entries), limit=4, vcpus=16, available_bytes=64 * 1024**3,
+        free_vram_bytes=0, device_lock=True)
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
@@ -186,16 +191,18 @@ def test_one_failing_entry_fails_the_mint_and_takes_its_siblings(
     assert "exited" in str(exc)
 
     # No orphans: the pool kills process GROUPS, so every child's own
-    # inductor workers and g++ go with it. Give the SIGKILL path a moment,
-    # then sweep the real process table.
-    deadline = time.monotonic() + 20.0
-    leaked: List[int] = []
-    while time.monotonic() < deadline:
-        leaked = [p for p in _descendants(os.getpid()) if p not in before]
-        if not leaked:
-            break
-        time.sleep(0.25)
-    assert not leaked, f"orphan processes survived the failed mint: {leaked}"
+    # inductor workers and g++ go with it. Waited on PROGRESS — each pid that
+    # disappears is an advance — rather than on a clock, because a clock here
+    # asserts the runner's speed and a wedged teardown must still FAIL rather
+    # than be outrun (pgw#795).
+    await_progress(
+        lambda: tuple(
+            sorted(p for p in _descendants(os.getpid()) if p not in before)),
+        lambda leaked: not leaked,
+        what="the failed mint's sibling children to be reaped",
+        cadence=Cadence(),
+        render=lambda leaked: f"{len(leaked)} orphan(s): {list(leaked)[:8]}",
+    )
 
     staged = list((tmp_path / "pool").rglob("program.pt2"))
     assert not staged, f"staged programs left on disk: {staged}"

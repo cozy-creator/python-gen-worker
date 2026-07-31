@@ -461,44 +461,38 @@ def _terminate_group(proc: subprocess.Popen, *, grace_s: float = _KILL_GRACE_S) 
 _PR_SET_PDEATHSIG = 1
 
 
-def _resolve_prctl() -> Any:
-    """Bind ``libc.prctl`` at IMPORT time, not in the pre-exec hook.
+def arm_parent_death_signal() -> bool:
+    """Ask the kernel to SIGKILL THIS process when its parent dies.
 
-    This matters more than it looks. ``preexec_fn`` runs in the forked child of
-    a process that has threads (inductor's own), where only async-signal-safe
-    work is legal: a ``CDLL`` load there allocates and takes the loader lock,
-    and a lock held by a thread that did not survive the fork deadlocks the
-    child forever. Resolving here leaves the hook with nothing to do but a
-    syscall.
+    Called by the entry child on itself, never by the parent through
+    ``preexec_fn``. Two reasons, and the second is the expensive one:
+
+    * ``preexec_fn`` runs in the forked child of a process that has threads,
+      where only async-signal-safe work is legal — the hazard is real enough
+      that CPython documents it.
+    * Passing ``preexec_fn`` also FORCES ``fork()`` instead of
+      ``posix_spawn()`` for every spawn. The mint child has live gRPC threads,
+      and gRPC installs ``pthread_atfork`` handlers; making the pool the only
+      thing in the worker that forks a threaded process is a large blast
+      radius for a one-line guarantee. Arming from the child costs a
+      microscopic race (the parent dying between ``exec`` and this call) and
+      buys back the ordinary spawn path.
+
+    Why it exists at all: the pool runs INSIDE pgw#784's mint child, and the
+    serving worker reaps that child by process GROUP when a mint is abandoned.
+    Entry children hold their OWN session — so the worker's group kill does
+    not reach them, and without this an abandoned mint would leave K compiles
+    burning a serving pod's CPU with nothing left to notice.
     """
     try:
         import ctypes
 
-        return ctypes.CDLL("libc.so.6", use_errno=True).prctl
-    except Exception:  # noqa: BLE001  (non-Linux, or no libc)
-        return None
-
-
-_PRCTL = _resolve_prctl()
-
-
-def _die_with_parent() -> None:
-    """Ask the kernel to SIGKILL this child if its parent dies. Runs in the
-    forked child, before exec.
-
-    Not belt-and-braces on top of the group kill — it closes a hole the group
-    kill cannot. The pool runs INSIDE pgw#784's mint child, and the serving
-    worker reaps that child by process GROUP when a mint is abandoned or
-    stalls. Entry children get their OWN session (so the pool can reap one
-    entry's ``cc1plus`` subtree without touching its siblings), which means
-    the worker's group kill does not reach them. Without this, a worker that
-    abandoned a mint would leave K compiles running on a serving pod forever,
-    and no code path anywhere would ever notice. ``PR_SET_PDEATHSIG`` also
-    survives the case an orderly teardown cannot cover: the mint child being
-    SIGKILLed, where no handler of ours ever runs.
-    """
-    if _PRCTL is not None:
-        _PRCTL(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+            return False
+    except Exception:  # noqa: BLE001  (non-Linux, or no libc — group kill only)
+        return False
+    return True
 
 
 def _read_report(path: Path) -> Optional[EntryReport]:
@@ -596,7 +590,6 @@ class EntryCompilePool:
                 stderr=handle,
                 env=child_env(self.cache_dir),
                 start_new_session=True,   # own group -> group-wide reaping
-                preexec_fn=_die_with_parent,
             )
         finally:
             handle.close()
@@ -770,6 +763,7 @@ __all__ = [
     "EXIT_REFUSED",
     "EntryCompileFailed",
     "EntryCompilePool",
+    "arm_parent_death_signal",
     "EntryJob",
     "EntryReport",
     "DEFAULT_ENTRY_DEVICE_BYTES",
