@@ -644,3 +644,74 @@ def test_tenant_guard_miss_end_to_end(
                     if m.WhichOneof("msg") == "activity_update"
                     and m.activity_update.kind == activity_mod.KIND_GUARD_MISS]
     assert len(events_after) == 1
+
+
+# ---------------------------------------------------------------------------
+# The heal must compile under the REQUESTING thread's intra-op count
+# ---------------------------------------------------------------------------
+#
+# Dynamo's GLOBAL_STATE guard snapshots torch.get_num_threads() on the thread
+# that COMPILES, and the OpenMP intra-op ICV is per-thread and sticky once
+# initialized. hot_swap runs ONE process-global warm thread, so if it was
+# created before something narrowed the serving thread's count, every entry it
+# compiled carried a guard the serving thread could never satisfy
+# ("GLOBAL_STATE changed: num_threads") — the heal marked the signature warm
+# while its entry was unservable, the next request missed again, and
+# _GUARD_MISS_HEAL_LIMIT made the signature permanently volatile.
+#
+# Latent rather than live on today's production ordering (both
+# cpu_budget.impose_intra_op_threads call sites run at boot, before the warm
+# thread exists) — but the warm job already carries the requesting thread's
+# grad-mode and autocast, and the intra-op count is the same class of state.
+
+
+def test_warm_job_carries_the_requesting_threads_intra_op_count() -> None:
+    """Both job-creating paths record the count of the thread that ASKED."""
+    router = hot_swap.Router()
+    x = torch.ones(4)
+    captured: List[Any] = []
+
+    def fake_submit(job: Any) -> bool:
+        captured.append(job)
+        return True
+
+    real_submit = hot_swap._submit
+    hot_swap._submit = fake_submit  # type: ignore[assignment]
+    try:
+        router.record_guard_miss(
+            ("transformer.forward", hot_swap.signature((x,), {})),
+            "transformer.forward", lambda *a, **k: x, (x,), {})
+    finally:
+        hot_swap._submit = real_submit  # type: ignore[assignment]
+
+    assert captured, "the heal must submit a warm job"
+    assert captured[0].num_threads == torch.get_num_threads()
+
+
+def test_the_warm_compile_imposes_that_count_before_compiling() -> None:
+    """The whole point: the compile runs at the requesting thread's value, so
+    the entry's GLOBAL_STATE guard matches the thread that will serve it."""
+    router = hot_swap.Router()
+    seen: List[int] = []
+
+    def recording_compiled(*_a: Any, **_k: Any) -> Any:
+        seen.append(int(torch.get_num_threads()))
+        return None
+
+    here = int(torch.get_num_threads())
+    diverged = max(1, here - 1)  # what a stale warm thread would be sitting at
+    job = hot_swap._WarmJob(
+        router=router, label="transformer.forward", sig=("s",),
+        compiled=recording_compiled, args=(torch.ones(4),), kwargs={},
+        device=None, grad_mode="grad", autocast_dtype=None,
+        num_threads=diverged, turn=None,
+    )
+    restore = int(torch.get_num_threads())
+    try:
+        hot_swap._run_warm_compile(job)
+    finally:
+        torch.set_num_threads(restore)
+
+    assert seen == [diverged], (
+        "the warm compile must impose the job's intra-op count before "
+        f"compiling; compiled at {seen} instead of [{diverged}]")

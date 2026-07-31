@@ -194,6 +194,28 @@
   published tree was never itself CI-green** — the promotion PR tested master plus
   cherry-picks, a different tree from the chaos commit the tag pointed at.
 
+- **pgw#680 follow-on — a background warm/heal now compiles under the REQUESTING thread's
+  intra-op count, so the entry it produces is servable by the thread that asked for it.**
+  Dynamo's `GLOBAL_STATE` guard snapshots `torch.get_num_threads()` on the thread that
+  COMPILES, and the OpenMP intra-op ICV is per-thread and sticky once initialized.
+  `hot_swap` runs ONE process-global shape-warm thread, so if it is created before anything
+  narrows the serving thread's count, every entry it compiles carries a guard the serving
+  thread can never satisfy — `GLOBAL_STATE changed: num_threads`. The pgw#622 hot-swap path
+  then never swaps, and a pgw#680 guard-miss heal marks the signature warm while its entry is
+  unservable, so the next request misses again and `_GUARD_MISS_HEAL_LIMIT` makes the
+  signature permanently `volatile` — the outcome the doctrine exists to prevent.
+
+  **Latent rather than live on today's ordering, and stated that way deliberately:** both
+  `cpu_budget.impose_intra_op_threads()` call sites run at boot, before any warm job exists
+  (`entrypoint._impose_group_host_policy` and `Executor.__init__`), so the warm thread
+  inherits the imposed value and no shipped pod is known to have hit this. It goes live the
+  moment anything imposes AFTER serving starts — a second `Executor` in one process, a
+  topology re-assert, a harness path. The warm job already carried the requesting thread's
+  grad-mode and autocast state; the intra-op count is the same class of state and was simply
+  missed, so it is now carried and imposed the same way. Found by the release gate rather
+  than by a pod, and red/green-verified through the real `Router` and the real
+  process-global warm thread.
+
 - **pgw#806 / pgw#802 / pgw#738+#764 — suite minimization and test health (no library
   behaviour change).** The publish gate is the suite, so a test that fails on the
   runner's mood is a release-blocking defect. Source-text handcuffs (tests asserting the
