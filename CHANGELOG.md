@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#809 — a cell's entries compile K-wide, out of process.** `aot_mint` exported
+  and compiled a pgw#758 cell's graph classes one at a time; an sdxl cell is 18 entries
+  at ~420 s, so a mint was ~2 h of which almost all was independent, embarrassingly
+  parallel work. Export stays serial (one pipeline, one card, one branch-arm toggle),
+  and the compiles now run in a bounded pool of `gen_worker.aot_compile_child`
+  processes.
+
+  **Processes, because threads are wrong here — measured, not assumed.** Four
+  concurrent `aot_compile` calls in one process returned one usable result and three
+  distinct internal failures (`CURRENT_PATCHER is None`, `KeyError: 'custom'` in
+  `fx.traceback.annotate`, a fake-tensor crash): inductor's compile path keeps
+  process-global mutable state. The exported program travels on disk, and that
+  roundtrip is byte-exact — a compile after `torch.export.save`/`load` produces a
+  `wrapper.cpp` identical to the in-process compile, under the same inductor cache
+  hash.
+
+  **K is derived, never configured**, as the min of three bounds the pod actually
+  has: free VRAM over one entry child's device footprint (`mint_budget.co_residency`,
+  the bound that binds — an AOTI compile benchmarks kernels ON THE CARD),
+  `effective_cpu_count()` minus serving headroom, and available host RAM; ceiling 8.
+  A 4-vCPU pod gets K=1, which is the previous serial path exactly.
+
+  **The safety interlock is the point, not the speed.** Kernel configs are chosen by
+  timing kernels on the device, and the cell key does not move when a config changes —
+  so two entries benchmarking at once could publish a slower cell under a good cell's
+  identity. `aot_device_lock` registers a cross-process `flock` on torch's own
+  `set_gpu_benchmark_lock_context` hook, so no two entries ever time a kernel at the
+  same moment; a torch without that hook forces K=1 rather than benchmarking against
+  itself. Entry children carry `PR_SET_PDEATHSIG` so an abandoned mint cannot orphan
+  a compile onto a serving pod.
+
+  Cell identity is untouched: `env_seal.inductor_config_digest()` is unmoved across K
+  and across the pool's cache dir, and assembly is ordered by entry NAME, never by
+  completion. `mint_phases.pool` records the K a mint ran at and every input that
+  chose it.
+
 ## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
 
 > ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL

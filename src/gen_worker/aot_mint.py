@@ -81,7 +81,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import aot_package, aot_serve, aot_wrapper_split, cell_key
+from . import (
+    aot_compile_pool, aot_package, aot_serve, aot_wrapper_split, cell_key)
 from .compile_cache import (
     _resolve_target,
     lane_bucket,
@@ -860,11 +861,17 @@ def _export_entry(
     decl: Any,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
+    compile_now: bool = True,
 ) -> _MintedEntry:
     """Resolve, feed, (warm,) export, gate, and compile ONE declared graph
     class. Every refusal is prefixed with the entry name — a multi-graph
     mint that cannot say WHICH class failed is the silent-failure path in
-    a new hat (pgw#758)."""
+    a new hat (pgw#758).
+
+    ``compile_now=False`` stops after the export-side gates and returns the
+    entry with no files: pgw#809's pool then compiles every entry K-wide out
+    of process. Export must stay here and stay SERIAL — it runs against the
+    one live pipeline, on the one card, inside the one branch-arm toggle."""
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
     from . import aot_inputs
 
@@ -968,14 +975,16 @@ def _export_entry(
                 f"entry {entry!r}: no-baked-adapter gate (#725 G3): "
                 f"{exc}") from exc
 
-    before = _phase_snapshot()
-    t0 = time.monotonic()
-    files = compile_entry_files(
-        program, entry, inductor_configs=inductor_configs)
-    timings["compile_s"] = round(time.monotonic() - t0, 2)
-    phases = _phase_delta(before, _phase_snapshot())
-    if phases:
-        timings["phases"] = phases
+    files: List[Any] = []
+    if compile_now:
+        before = _phase_snapshot()
+        t0 = time.monotonic()
+        files = compile_entry_files(
+            program, entry, inductor_configs=inductor_configs)
+        timings["compile_s"] = round(time.monotonic() - t0, 2)
+        phases = _phase_delta(before, _phase_snapshot())
+        if phases:
+            timings["phases"] = phases
 
     return _MintedEntry(
         name=entry, spec=espec, module=module, owner=owner, program=program,
@@ -1052,9 +1061,15 @@ def mint(
     *,
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
+    entry_workers: int = 0,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
     multi-graph cell (pgw#758).
+
+    ``entry_workers`` CAPS pgw#809's compile pool; it never widens it. The
+    width is derived from the pod (see :func:`aot_compile_pool.entry_workers`),
+    and this argument exists so an operator or a test can force the serial
+    path (``1``) without pretending a 4-vCPU pod is an H100 host.
 
     Does NOT publish — :func:`publish` is a separate step so a mint can be
     inspected, byte-compared (#699 double-mint), or produced on a box with no
@@ -1090,8 +1105,20 @@ def mint(
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
     rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+    # pgw#809: how wide this pod may compile. Derived from the pod's REAL
+    # budget (cgroup-aware vCPUs minus serving headroom, and available host
+    # RAM over the measured per-entry peak) — never os.cpu_count, never a
+    # constant. K=1 IS the pre-#809 serial in-process path, which is the
+    # honest answer on a narrow pod.
+    width = aot_compile_pool.entry_workers(
+        len(rows), limit=int(entry_workers or 0),
+        device_bytes=_entry_device_bytes(spec))
+    parallel = width.workers > 1
+    logger.info("aot-mint: entry compile width — %s", width.reason)
+
     minted: List[_MintedEntry] = []
     disarmed = False
+    t_export = time.monotonic()
     try:
         for plan, arm in rows:
             if arm is False and not disarmed:
@@ -1102,10 +1129,17 @@ def mint(
                 _disarm_branches(pipeline)
                 disarmed = True
             minted.append(_export_entry(
-                pipeline, spec, plan, decl, inductor_configs=inductor_configs))
+                pipeline, spec, plan, decl, inductor_configs=inductor_configs,
+                compile_now=not parallel))
     finally:
         if disarmed:
             _rearm_branches(pipeline, int(spec.lora_bucket or 0))
+
+    if parallel:
+        timings["export_all_s"] = round(time.monotonic() - t_export, 2)
+        _compile_entries_parallel(
+            minted, work, width, inductor_configs=inductor_configs)
+    timings["entry_workers"] = float(width.workers)
 
     t0 = time.monotonic()
     package = package_cell(
@@ -1141,7 +1175,7 @@ def mint(
 
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
-    phase_table = _mint_phase_table(minted, timings, inductor_configs)
+    phase_table = _mint_phase_table(minted, timings, inductor_configs, width)
     _emit_phase_event(spec, phase_table)
 
     meta["cell_key"] = key = cell_identity(meta, spec).digest
@@ -1164,6 +1198,77 @@ def mint(
         timings,
     )
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
+
+
+def _entry_device_bytes(spec: ExportSpec) -> int:
+    """One entry child's DEVICE ask, from this process rather than a constant.
+
+    An AOTI compile benchmarks kernels on the card, so an entry child holds
+    its own weight copy, one activation set and a CUDA context — which is
+    exactly what ``mint_budget.co_residency`` already computes for the pgw#784
+    mint child, read off the pipeline THIS process has resident. Reused rather
+    than re-derived: the entry child loads the same weights at the same lane
+    and runs the same declared shapes, so the mint child's own footprint is a
+    proxy and not a guess. 0 means "unprobeable", and the width policy treats
+    that as "do not license concurrency on a card you cannot measure".
+    """
+    try:
+        from . import mint_budget
+
+        budget = mint_budget.co_residency(
+            family=str(spec.family or ""),
+            weight_lane=str(spec.lane_label() or ""))
+    except Exception:  # noqa: BLE001
+        return 0
+    return int(budget.need_bytes) if budget.probed else 0
+
+
+def _compile_entries_parallel(
+    minted: List[_MintedEntry],
+    work: Path,
+    width: aot_compile_pool.PoolWidth,
+    *,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """pgw#809: fill every entry's ``files`` K-wide, out of process.
+
+    Mutates ``minted`` in place, and every entry MUST come back with files —
+    a pool that quietly returned fewer entries than it was given would pack a
+    short cell. Assembly is by entry NAME: ``package_cell`` reads
+    ``{row.name: row.files}`` in the order ``minted`` already holds (the
+    declaration's order), so completion order is not observable in the
+    artifact.
+    """
+    # A SIBLING of work/, never inside it. pack() only copies a fixed member
+    # set so debris there would be harmless today, but a pool workdir living
+    # inside the directory that becomes the artifact is one refactor away from
+    # putting job files and stderr tails into a cell.
+    pool = aot_compile_pool.EntryCompilePool(
+        work.parent / "entry-pool", width=width,
+        inductor_configs=inductor_configs)
+    t0 = time.monotonic()
+    try:
+        by_entry = pool.compile([(row.name, row.program) for row in minted])
+    except aot_compile_pool.EntryCompileFailed as exc:
+        # Named, and terminal: the siblings are already torn down group-wide
+        # by the pool. A mint that says only "a compile failed" over 18
+        # entries is the silent-failure path in a new hat (pgw#758).
+        raise MintRefused(str(exc)) from exc
+    wall = time.monotonic() - t0
+    missing = [row.name for row in minted if row.name not in by_entry]
+    if missing:
+        raise MintRefused(
+            f"entry compile pool returned {len(by_entry)} of {len(minted)} "
+            f"entries — missing {missing!r}. Packing the rest would ship a "
+            f"cell whose declared class set is a lie")
+    for row in minted:
+        row.files = list(by_entry[row.name])
+        row.timings["compile_s"] = pool.entry_seconds.get(row.name, 0.0)
+    logger.info(
+        "aot-mint: pgw#809 pool compiled %d entr%s at K=%d in %.0fs "
+        "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",
+        len(minted), "y" if len(minted) == 1 else "ies", width.workers, wall,
+        sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
 
 
 def _gate_and_declare_entry(
@@ -1231,11 +1336,16 @@ def _mint_phase_table(
     minted: Sequence[_MintedEntry],
     timings: Mapping[str, float],
     inductor_configs: Optional[Mapping[str, Any]],
+    width: Optional[aot_compile_pool.PoolWidth] = None,
 ) -> Dict[str, Any]:
     """The per-mint phase table (#757's instrument-first deliverable): one
     readable record of where the mint's seconds went, per entry and in
     total, plus the two facts an AOT-vs-JIT comparison needs to be fair —
-    the graph-class COUNT this mint compiled and the autotune posture."""
+    the graph-class COUNT this mint compiled and the autotune posture.
+
+    pgw#809 adds the ``pool`` block: the K this mint ran at AND the budget
+    that chose it. Without it a mint's wall clock is uninterpretable —
+    two mints of the same cell on two pods legitimately differ by 4x."""
     entries = {
         row.name: dict(row.timings) for row in minted}
     totals: Dict[str, float] = {
@@ -1269,6 +1379,7 @@ def _mint_phase_table(
         "totals": {**totals, **{k: v for k, v in timings.items()}},
         "phases": phase_totals,
         "entries": entries,
+        "pool": width.facts() if width is not None else {"entry_workers": 1},
     }
 
 
