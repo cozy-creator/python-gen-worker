@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from . import activity as activity_mod
 
@@ -310,26 +310,6 @@ def _ratio(num_sq: float, den_sq: float) -> float:
     return math.sqrt(max(num_sq, 0.0) / den_sq)
 
 
-def aggregate(rows: Sequence[RowStat]) -> Tuple[float, float]:
-    """``(cosine, retention)`` recombined from per-row stats, norm-weighted.
-
-    For callers that already hold rows (a resumed comparison, a banked
-    measurement) and must not re-derive the aggregate by averaging.
-    """
-    cross = ref_sq = sub_sq = 0.0
-    for row in rows:
-        # Reconstruct each row's Gram contribution from its own two numbers:
-        # |ref|^2 is unknown in absolute terms, so weight by element count,
-        # which is the honest proxy when only ratios were banked.
-        w = float(max(row.elements, 1))
-        r2 = w
-        s2 = w * row.retention * row.retention
-        cross += row.cosine * math.sqrt(r2) * math.sqrt(s2)
-        ref_sq += r2
-        sub_sq += s2
-    return _cosine(cross, ref_sq, sub_sq), _ratio(sub_sq, ref_sq)
-
-
 # ---------------------------------------------------------------------------
 # The gate shape
 # ---------------------------------------------------------------------------
@@ -379,5 +359,5 @@ __all__ = [
     "PHASE_DEGRADED", "PHASE_REFUSED",
     "VERDICT_DEGRADED", "VERDICT_DESTROYED", "VERDICT_HEALTHY",
     "Comparison", "RowStat", "Thresholds",
-    "aggregate", "compare_outputs", "flatten_outputs", "gate", "worst_of",
+    "compare_outputs", "flatten_outputs", "gate", "worst_of",
 ]
