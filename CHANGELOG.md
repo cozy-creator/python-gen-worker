@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.83.0 (2026-07-31) — REGIONAL CELLS: the minutes-scale mint. A cell's entries become BLOCK CLASSES, and flux2 can mint at all again
+
+> ### ⚠ TWO THINGS TO READ BEFORE UPGRADING
+>
+> **1. The contract-facts bump v2 -> v3 RE-KEYS EVERY PUBLISHED `aot-inductor` CELL.**
+> `shell_digest` is mandatory from this release, and a mandatory fact is part of the
+> key — so every cell published under v2 is unreachable to a 0.83.0 worker and every
+> family re-mints once. This is deliberate and there is no smaller way to do it: a v2
+> key describes the PARTS and does not bind the ASSEMBLY, which is exactly the
+> cache-poisoning class regional would otherwise introduce. **The cost is being paid
+> now on purpose**: the fleet holds ~zero published `aot-inductor` cells today (leg 4
+> has never completed a mint — `aot_mint_phases` has been empty on both stacks since
+> th#1322), so the re-key is free at this instant and would not be at any later one.
+> Recorded here as a decision, not left to be discovered by a re-minting fleet.
+>
+> **2. sdxl's regional opt-in is deliberately NOT in this train, and the ORDER is
+> forced.** `Compile(regional=True)` is honoured by the export lane only from 0.83.0;
+> on any earlier SDK the same declaration reaches `fleet_cells.delegation_refusal`,
+> which declines `aot_regional_targets`, and **sdxl stops AOT-minting altogether**. So
+> the flag and its `gen-worker==0.79.0 -> ==0.83.0` pin bump are ONE commit on
+> inference-endpoints branch `agent/817-sdxl-regional-optin` (`75712ba`), which merges
+> only AFTER this release is on PyPI. The sequence is: publish 0.83.0 -> merge the
+> opt-in with the pin bump -> only then can a pod mint a regional cell. Until the opt-in
+> lands a pod mints whole-graph, correctly.
 
 - **pgw#817 — REGIONAL CELLS: a cell whose entries are BLOCK CLASSES, so the sdxl
   w8a8 mint is 19.4 s of graph compile instead of 274.7 s.** A DiT — and sdxl's
@@ -87,6 +110,16 @@
   one channel the minutes-scale claim is measured on — and a block entry's
   bindability template was the target rather than the block, which refused every
   correct regional mint by name and only a real-path mint could catch.
+
+  A third was caught by the release gate's full suite, which the lane's 351-test
+  regression ring did not cover: `test_regional_dynamic_refusal_pgw746.py` still
+  asserted the DECLARATION-side refusal D4 relocated, so the tree was two tests
+  red. Relocated rather than deleted — the file now pins what pgw#746 was right
+  about (the dynamo branch cannot honour the marks, so it declines BY NAME and
+  the target falls through to the whole-forward branch, which does mark; a
+  decline that read as a skip would be an uncompiled target) and drops the two
+  premises pgw#812 measured away. Red-verified against the v0.82.0 source: 4 of
+  the 8 fail there.
 
 - **pgw#812 D1 + D2 — the two defects that make flux2 unmintable, and neither is
   about regional compilation.** D1: `dynamic_shapes_spec` minted one torch symbol per
