@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
+
+> ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL
+>
+> Every release up to and including 0.79.0 was a pure AOT *consumer*: discovery
+> missed, nothing was minted, and the next pod missed identically — with no
+> refusal on the wire. That wire is connected here. Two consequences for
+> whoever runs the first proof:
+>
+> - **The lane matters.** pgw#730 holds the PLAIN lane on dynamo, so a
+>   plain-lane release (e.g. `d9d9bf2691d0e1f89e23999d`, `sdxl` 0.2.93) now
+>   correctly declines with `self_mint_skipped phase=aot_lane_regressed`
+>   instead of minting. A serving-pod AOT mint proof needs the **w8a8** lane.
+> - **`aot_mint_phases` was empty on both stacks since th#1322 shipped**, because
+>   the child process that fills it holds no orchestrator session. The parent
+>   now re-emits the child's phase table, so that column starts carrying rows
+>   from this version — an empty column on 0.80.0 means no mint ran, which is
+>   information the previous releases could not give.
+
+- **th#1303 phase 3, producer class 2: the CONVERSION producer publishes v2.**
+  `publish_flavors` — the surface every quantize / fuse / cast / distil / produce
+  job in the conversion endpoint calls, and the highest-volume publisher after the
+  mirror — still called `commit()`, so the corpus repoint had a second tap filling
+  the blake3 CAS behind it. It now calls `HubClient.publish_v2`: chunked sha256,
+  each object's digest signed into its presigned PUT so R2 refuses bytes that do
+  not hash to the key. Sixteen of training-endpoints' seventeen publish entry
+  points reach the hub through this one call, so they flip with it.
+
+  Safe because every file is a real local file (`_flavor_files` walks the produced
+  tree) — v2's guarantee is that the digest is PROVEN from bytes in hand, which is
+  exactly why the mirror's by-reference BANK arm (`clone.py:556`) is deliberately
+  NOT flipped and stays on `commit()` until the phase-2 backfill.
+
+  No auto-select and no env knob: the protocol is named at the call site, so
+  "which producers are on v2 today?" is answerable by reading the code.
 
 - **pgw#809 — a cell's entries compile K-wide, out of process.** `aot_mint` exported
   and compiled a pgw#758 cell's graph classes one at a time; an sdxl cell is 18 entries
@@ -38,41 +72,6 @@
   completion. `mint_phases.pool` records the K a mint ran at and every input that
   chose it.
 
-## 0.80.0 (2026-07-30) — a serving pod can finally MINT an AOT cell: a discovery miss starts a real out-of-process mint instead of nothing, every decline names itself, and the boot-span ladder runs on the real path
-
-> ### ⚠ 0.80.0 IS THE FIRST SDK ON WHICH A `prefer_aot` POD CAN PRODUCE A CELL
->
-> Every release up to and including 0.79.0 was a pure AOT *consumer*: discovery
-> missed, nothing was minted, and the next pod missed identically — with no
-> refusal on the wire. That wire is connected here. Two consequences for
-> whoever runs the first proof:
->
-> - **The lane matters.** pgw#730 holds the PLAIN lane on dynamo, so a
->   plain-lane release (e.g. `d9d9bf2691d0e1f89e23999d`, `sdxl` 0.2.93) now
->   correctly declines with `self_mint_skipped phase=aot_lane_regressed`
->   instead of minting. A serving-pod AOT mint proof needs the **w8a8** lane.
-> - **`aot_mint_phases` was empty on both stacks since th#1322 shipped**, because
->   the child process that fills it holds no orchestrator session. The parent
->   now re-emits the child's phase table, so that column starts carrying rows
->   from this version — an empty column on 0.80.0 means no mint ran, which is
->   information the previous releases could not give.
-
-- **th#1303 phase 3, producer class 2: the CONVERSION producer publishes v2.**
-  `publish_flavors` — the surface every quantize / fuse / cast / distil / produce
-  job in the conversion endpoint calls, and the highest-volume publisher after the
-  mirror — still called `commit()`, so the corpus repoint had a second tap filling
-  the blake3 CAS behind it. It now calls `HubClient.publish_v2`: chunked sha256,
-  each object's digest signed into its presigned PUT so R2 refuses bytes that do
-  not hash to the key. Sixteen of training-endpoints' seventeen publish entry
-  points reach the hub through this one call, so they flip with it.
-
-  Safe because every file is a real local file (`_flavor_files` walks the produced
-  tree) — v2's guarantee is that the digest is PROVEN from bytes in hand, which is
-  exactly why the mirror's by-reference BANK arm (`clone.py:556`) is deliberately
-  NOT flipped and stays on `commit()` until the phase-2 backfill.
-
-  No auto-select and no env knob: the protocol is named at the call site, so
-  "which producers are on v2 today?" is answerable by reading the code.
 
 - **pgw#805 — an AOT cell-discovery MISS never started a mint. The AOT lane was a
   pure consumer.** `aot_mint.mint()` was reachable only from
