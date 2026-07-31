@@ -482,9 +482,9 @@ def split_and_compile(cmd_line: str, cwd: str,
     else:
         with cf.ThreadPoolExecutor(max_workers=jobs) as pool:
             for future in cf.as_completed([pool.submit(build, u) for u in units]):
-                exc = future.exception()
-                if exc is not None:
-                    errors.append(exc)
+                err = future.exception()
+                if err is not None:
+                    errors.append(err)
         if errors:
             raise errors[0]
 

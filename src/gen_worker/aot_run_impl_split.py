@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +185,7 @@ class Anchors:
     run_impl: Tuple[int, int]  # signature line .. the `} // ...run_impl` line
 
 
-def _find(lines: Sequence[str], pred, start: int = 0, what: str = "") -> int:
+def _find(lines: Sequence[str], pred: Callable[[str], bool], start: int = 0, what: str = "") -> int:
     for i in range(start, len(lines)):
         if pred(lines[i]):
             return i
