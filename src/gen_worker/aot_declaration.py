@@ -130,7 +130,7 @@ def derived_dynamic(
                 continue
             out.append(DynamicDim(
                 input_name=bound, axis=int(axis), min=lo, max=hi,
-                multiple_of=dim.multiple_of))
+                multiple_of=dim.multiple_of, dim=str(dim.name)))
     return tuple(out)
 
 
@@ -151,7 +151,8 @@ def named_dynamic_rows(decl: Compile, target: str) -> Tuple[DynamicDim, ...]:
                 continue
             out.append(DynamicDim(
                 input_name=bound, axis=int(axis), min=int(dd.min),
-                max=int(dd.max), multiple_of=dim.multiple_of))
+                max=int(dd.max), multiple_of=dim.multiple_of,
+                dim=str(dim.name)))
     return tuple(out)
 
 

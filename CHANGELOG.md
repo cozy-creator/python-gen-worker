@@ -95,6 +95,147 @@
   control plane is per-group. G==1 — every pod today — keeps the exact in-process fallback
   path. The mint-once-adopt-N story belongs to the pgw#783 split world.
 
+## 0.83.0 (2026-07-31) — REGIONAL CELLS: the minutes-scale mint. A cell's entries become BLOCK CLASSES, and flux2 can mint at all again
+
+> ### ⚠ TWO THINGS TO READ BEFORE UPGRADING
+>
+> **1. The contract-facts bump v2 -> v3 RE-KEYS EVERY PUBLISHED `aot-inductor` CELL.**
+> `shell_digest` is mandatory from this release, and a mandatory fact is part of the
+> key — so every cell published under v2 is unreachable to a 0.83.0 worker and every
+> family re-mints once. This is deliberate and there is no smaller way to do it: a v2
+> key describes the PARTS and does not bind the ASSEMBLY, which is exactly the
+> cache-poisoning class regional would otherwise introduce. **The cost is being paid
+> now on purpose**: the fleet holds ~zero published `aot-inductor` cells today (leg 4
+> has never completed a mint — `aot_mint_phases` has been empty on both stacks since
+> th#1322), so the re-key is free at this instant and would not be at any later one.
+> Recorded here as a decision, not left to be discovered by a re-minting fleet.
+>
+> **2. sdxl's regional opt-in is deliberately NOT in this train, and the ORDER is
+> forced.** `Compile(regional=True)` is honoured by the export lane only from 0.83.0;
+> on any earlier SDK the same declaration reaches `fleet_cells.delegation_refusal`,
+> which declines `aot_regional_targets`, and **sdxl stops AOT-minting altogether**. So
+> the flag and its `gen-worker==0.79.0 -> ==0.83.0` pin bump are ONE commit on
+> inference-endpoints branch `agent/817-sdxl-regional-optin` (`75712ba`), which merges
+> only AFTER this release is on PyPI. The sequence is: publish 0.83.0 -> merge the
+> opt-in with the pin bump -> only then can a pod mint a regional cell. Until the opt-in
+> lands a pod mints whole-graph, correctly.
+
+- **pgw#817 — REGIONAL CELLS: a cell whose entries are BLOCK CLASSES, so the sdxl
+  w8a8 mint is 19.4 s of graph compile instead of 274.7 s.** A DiT — and sdxl's
+  UNet — is one block repeated N times, and a whole-graph mint traces, lowers,
+  codegens and g++-compiles all N. pgw#812 measured compiling ONE block per class
+  and reusing it on our own path: **14.2x on the real sdxl w8a8 mint** with serve
+  parity **+0.24%**, artifact 4.7 MB instead of 18.2 MB, and numerics CLEANER than
+  whole-graph on fp8 (cos 0.989-0.993 against the pgw#814 whole-graph degradation).
+  bf16 is 7.7x, and there regional serves 5.7% FASTER than the whole-graph
+  artifact. This is the adoption.
+
+  **It is still ONE `.pt2` and the entry grammar is unchanged** —
+  `unet/block=BasicTransformerBlock#0,cfg=true/B=2`. What inverts is the entry
+  AXIS: entries enumerate block classes of a target instead of shape coordinates
+  of its whole forward. No new artifact class, no hub change, no `cell_store`
+  change. The shell stays EAGER (exporting it with the blocks elided is not
+  expressible in `torch.export` today), so the compiled fraction of the model
+  equals the repeated-block fraction — stated here rather than discovered later.
+
+  **`shell_digest` is now a mandatory contract fact (v2 -> v3), and it is the
+  load-bearing part.** Regionally `combined_graph_hash` describes only the PARTS,
+  so two models with identical blocks and a different shell — a different
+  `num_layers`, a different rope construction, a diffusers minor that rewrites the
+  outer forward — would key identically while serving different math. Without it
+  regional trades compile time for a cache-poisoning class we do not have today.
+  This re-keys every published `aot-inductor` cell; correct and expected, since a
+  v2 key does not bind the assembly and there is no way to add the binding without
+  moving the key. `cell_identity`'s `"mode": ""` hardcode goes with it, along with
+  its comment that "regional is a dynamo partitioning strategy with no export
+  counterpart" — falsified by measurement.
+
+  **Binding is now BY REFERENCE, and it had to be.** `user_managed` appeared
+  nowhere in the SDK: `ArtifactRunner.bind` copied every constant. Whole-graph
+  that is a one-off duplicate; regionally it is N copies of the block weights in
+  VRAM — for flux2, a second whole model. `bind(..., user_managed=True)` binds by
+  reference (the resident pipeline keeps the tensors alive by construction); the
+  whole-graph call shape is byte-identical to what pgw#721/#723 measured on a pod,
+  and a torch whose `load_constants` lacks the parameter is a NAMED refusal rather
+  than a silent copy that would OOM the card N blocks later. Arming is
+  per-INSTANCE and **all-or-nothing per target** — a model with 24 of 25 blocks
+  armed is a silently half-eager model — and the unbound-call gate runs before the
+  FIRST call of EVERY instance, because that segfault surface multiplies by N.
+
+  **A cell that degrades its output now REFUSES to arm, typed.** pgw#800's verdict
+  ladder is lifted into a shared `numerics_ladder` primitive — the rungs, the
+  norm-weighted aggregate rule (never a per-row median: a few destroyed high-norm
+  outputs must not hide behind many intact ones), the evidence formatting and the
+  fail-closed gate shape — with `adapter_fidelity` as one caller. The
+  output-comparison population gets its own O(n) evaluator and its own DERIVED
+  band, because pgw#814 says in as many words that the adapter floors are
+  calibrated for adapter deltas and must not be inherited: floor **0.98** =
+  sqrt(0.9890 x 0.9730), worst accepted being flux2 w8a8 REGIONAL vs eager and
+  best refused being the flux2 w8a8 whole-graph artifact pgw#814 ruled
+  unadoptable; warn **0.999**, since everything anyone has called healthy measures
+  0.9998+. A magnitude bound (**0.95**, symmetric in the log) is new and not
+  decoration — cosine is scale-invariant, so an artifact reproducing eager's
+  direction exactly at 0.9x the magnitude scores a PERFECT cosine while serving a
+  systematically dimmer image. Families declare their own tolerance
+  (`Compile(numerics_floor=, numerics_warn=)`). New `cell_numerics` activity kind,
+  `phase=refused|degraded|armed`.
+
+  **`Compile(regional=True)` + `dynamic=(...)` is admitted**, and the old refusal's
+  content survives where it is still true: the DYNAMO regional branch calls
+  `compile_repeated_blocks(dynamic=None)` and cannot honour the marks, so it
+  declines by name and the target takes the whole-forward branch, which does mark.
+  The export lane implements it directly — measured FREE on a conv-free region
+  (+0.2% bf16 / 0.0% w8a8, against pgw#730's +7.2% for the same axis on sdxl's
+  conv lane).
+
+  **`mint_recipe` gains `aot-regional`**, selected from the family's own export
+  declaration — per-family, never a fleet default, because on a small-table DiT
+  regional is a 2x that costs a serve-path change while pgw#811 buys a comparable
+  win with none. The blanket `regional_targets` delegation refusal is discharged
+  and deleted: regional is the shape that most wants delegating, being the one
+  that finishes in minutes. pgw#809's pool is RE-PRICED rather than assumed —
+  regional moves the entry count UP (one per plan x block class; sdxl's 18 become
+  36) and the per-entry DEVICE ask DOWN by the measured block fraction, and VRAM
+  is the bound that actually binds K, so multiplying the two levers would have
+  sized the pool for a whole-model child regional never runs.
+
+  Two defects found while building, both of which would have been silent: the
+  delegation tail chose its reporting kind with a string-literal `recipe == "aot"`
+  and would have sent every regional mint's phase table down `jit_compile` — the
+  one channel the minutes-scale claim is measured on — and a block entry's
+  bindability template was the target rather than the block, which refused every
+  correct regional mint by name and only a real-path mint could catch.
+
+  A third was caught by the release gate's full suite, which the lane's 351-test
+  regression ring did not cover: `test_regional_dynamic_refusal_pgw746.py` still
+  asserted the DECLARATION-side refusal D4 relocated, so the tree was two tests
+  red. Relocated rather than deleted — the file now pins what pgw#746 was right
+  about (the dynamo branch cannot honour the marks, so it declines BY NAME and
+  the target falls through to the whole-forward branch, which does mark; a
+  decline that read as a skip would be an uncompiled target) and drops the two
+  premises pgw#812 measured away. Red-verified against the v0.82.0 source: 4 of
+  the 8 fail there.
+
+- **pgw#812 D1 + D2 — the two defects that make flux2 unmintable, and neither is
+  about regional compilation.** D1: `dynamic_shapes_spec` minted one torch symbol per
+  (input, axis), so a declared `Dim` with several carriers became several INDEPENDENT
+  symbols and strict export refused the declaration —
+  `Constraints violated (img_ids_1)!`. flux2 binds `T_img` to BOTH `hidden_states[1]`
+  and `img_ids[1]` deliberately, so the edit lane cannot let `img_ids` specialize and
+  silently pin the artifact to generate; the most careful declaration in the fleet was
+  the one that could not mint, and ie#571 recorded it "READY — no open mint blockers".
+  `DynamicDim` now carries the declared dim NAME and every carrier of one dim shares
+  one symbol; rows with no declared name keep a symbol each, which the hand-registered
+  builder path requires (latent H and W are two independent axes of one input).
+
+  D2: the ie#566 G3 range gate then refused the mint on
+  `Eq(Mod(3072*s + 1572864, 48*s + 24576), 0)` — which is `Mod(64*X, X) == 0`,
+  identically true, pinning nothing. The gate matched "an Eq guard mentioning a
+  declared symbol" without asking whether the guard was satisfiable-for-all, so a
+  vacuous divisibility fact read as a specialization. It now admits a guard sympy can
+  PROVE is a tautology and keeps refusing everything else, so it still fails closed on
+  a guard it cannot reduce.
+
 ## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
 
 > ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`

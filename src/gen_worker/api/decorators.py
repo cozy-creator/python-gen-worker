@@ -757,6 +757,16 @@ class Compile(msgspec.Struct, frozen=True):
     warm_changes_key: Optional[bool] = None
     # Declared-eager lanes (LTX §2.3): recorded decision, not an omission.
     eager: tuple[str, ...] = ()
+    # pgw#817 / pgw#812 S6: this family's ADOPTION numerics tolerance. A cell
+    # about to arm is run against the eager forward it replaces and judged on
+    # the shared verdict ladder; below `numerics_floor` it REFUSES to arm.
+    # None = the SDK default (0.98 / 0.999), whose derivation is pgw#814's
+    # measured band — see `aot_regional.NUMERICS_FLOOR`. Declared per family
+    # because bf16 attention reassociation makes exact equality the wrong bar
+    # and the right bar is not the same for a 25-block fp8 DiT and a
+    # conv-bearing UNet.
+    numerics_floor: Optional[float] = None
+    numerics_warn: Optional[float] = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -791,29 +801,28 @@ class Compile(msgspec.Struct, frozen=True):
         if len({d.dim for d in dyn}) != len(dyn):
             raise ValueError("Compile.dynamic repeats a dim")
         force(self, "dynamic", dyn)
-        if dyn and self.regional:
-            # OQ-7 (LTX-AOT-DESIGN.md): `_with_declared_marks` is applied only
-            # on the whole-graph branch. The regional branch calls
-            # compile_repeated_blocks(dynamic=None) and never marks, so this
-            # combination declares dynamism the trace never implements while
-            # the contract digest claims it — a key that asserts a contract the
-            # artifact does not honor, which is the exact failure class pgw#716
-            # exists to prevent.
-            #
-            # Refused by name rather than silently marked: regional is retiring
-            # (LTX §3.2 chose whole-transformer export), so teaching the
-            # regional branch to mark would be building on a lane that is going
-            # away. Refusal is the honest reading until it does.
-            raise ValueError(
-                "Compile(regional=True) cannot carry dynamic=(...): the "
-                "regional branch compiles repeated blocks and never applies "
-                "the declared marks, so the declaration would be silently "
-                "inert while the contract digest claimed the dynamism "
-                f"({', '.join(d.dim for d in dyn)}). Declare dynamic=() to "
-                "keep regional block compilation, or regional=False to get "
-                "the marks. Regional is retiring in favor of whole-graph "
-                "export (LTX-AOT-DESIGN.md §3.2)."
-            )
+        # pgw#817/D4: `regional=True` + `dynamic=(...)` is ADMITTED.
+        #
+        # It used to be refused here, on the reading that "regional is a
+        # dynamo partitioning strategy that never applies the declared marks,
+        # so the declaration would be inert while the contract digest claimed
+        # the dynamism" — and that regional was retiring in favour of
+        # whole-graph export (LTX-AOT-DESIGN §3.2).
+        #
+        # pgw#812 measured both halves of that away. Regional has an EXPORT
+        # counterpart: a block is exported with `dynamic_shapes` exactly like
+        # a whole graph, and the symbolic inner axis was measured FREE on a
+        # conv-free region (+0.2% bf16 / 0.0% w8a8, against pgw#730's +7.2%
+        # for the same axis on sdxl's conv lane). And regional is not
+        # retiring: it is 14.2x the whole-graph mint on the real sdxl w8a8
+        # cell with serve parity at +0.24%.
+        #
+        # The old refusal's CONTENT survives as a lane-side decline: the
+        # DYNAMO regional branch still calls `compile_repeated_blocks(
+        # dynamic=None)` and still cannot honour the marks, so it declines by
+        # name (`compile_cache._regional_dynamic_decline`) instead of arming
+        # a graph that does not implement the contract its key asserts. The
+        # declaration is legal; the lane that cannot serve it says so.
         for name, typ in (("dims", Dim), ("forks", Fork),
                           ("classes", GraphClass), ("inputs", Input),
                           ("args", Arg)):
@@ -826,6 +835,22 @@ class Compile(msgspec.Struct, frozen=True):
         if self.warm_changes_key is not None:
             force(self, "warm_changes_key", bool(self.warm_changes_key))
         force(self, "eager", tuple(str(e).strip() for e in self.eager))
+        for name in ("numerics_floor", "numerics_warn"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            value = float(value)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"Compile.{name} is a COSINE bound and must be in "
+                    f"[0, 1], got {value!r}")
+            force(self, name, value)
+        if (self.numerics_floor is not None and self.numerics_warn is not None
+                and self.numerics_floor > self.numerics_warn):
+            raise ValueError(
+                f"Compile.numerics_floor ({self.numerics_floor}) must not "
+                f"exceed numerics_warn ({self.numerics_warn}): the floor "
+                f"refuses, the warn only confesses")
         validate_contract(self)
 
     @property

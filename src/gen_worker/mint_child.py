@@ -70,6 +70,12 @@ logger = logging.getLogger(__name__)
 #: rather than imported so the child never pulls the whole arming brain in).
 RECIPE_DYNAMO = "dynamo"
 RECIPE_AOT = "aot"
+#: pgw#817: the AOT mint whose entries are BLOCK classes. Same child, same
+#: `_mint_aot` call — the SHAPE is decided by the family's own export
+#: declaration (`Compile(regional=True)`), which the child reads from the
+#: endpoint it loads, so the recipe name is a label the parent and the hub
+#: group by rather than a second code path to keep in step.
+RECIPE_AOT_REGIONAL = "aot-regional"
 
 
 class MintChildRefused(RuntimeError):
@@ -411,7 +417,7 @@ def _mint_aot(
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
         mint_phases=dict(result.metadata.get("mint_phases") or {}),
-        recipe=RECIPE_AOT,
+        recipe=request.recipe or RECIPE_AOT,
     )
 
 
@@ -466,7 +472,7 @@ def mint(request: MintRequest) -> MintReport:
     if cfg.lora_bucket:
         cc.apply_lora_lane(pipe, cfg.lora_bucket)
 
-    if request.recipe == RECIPE_AOT:
+    if request.recipe in (RECIPE_AOT, RECIPE_AOT_REGIONAL):
         # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
         # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
         # model ref for an operator's mint pod): the graphs this cell must

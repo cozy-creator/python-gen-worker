@@ -2365,6 +2365,32 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     return hashlib.sha256(encoded).hexdigest(), weight_contract
 
 
+def _regional_dynamic_decline(cfg: Any, target: str) -> str:
+    """"" when the DYNAMO regional branch may arm ``target``, else the reason.
+
+    pgw#817/D4 moved the `regional + dynamic` refusal out of the declaration
+    (where it forbade a combination the EXPORT lane measured as free) and into
+    the one lane that genuinely cannot honour it. `compile_repeated_blocks(
+    dynamic=None)` never applies the declared marks, so a dynamo regional arm
+    over a declaration carrying `dynamic=(...)` would serve a graph that does
+    not implement the contract its cell key asserts — the exact failure class
+    pgw#716 exists to prevent. Declining here sends the target to the
+    whole-forward branch, which DOES mark, so the declaration is still served;
+    it is only served by the other lane.
+    """
+    dyn = tuple(getattr(cfg, "dynamic", ()) or ())
+    if not dyn:
+        return ""
+    names = ", ".join(str(getattr(d, "dim", "") or "?") for d in dyn)
+    return (
+        f"target {target!r} declares regional=True AND dynamic=({names}) — "
+        f"the dynamo regional branch calls compile_repeated_blocks("
+        f"dynamic=None) and never applies the declared marks, so it declines "
+        f"and this target takes the whole-forward branch (which does). The "
+        f"AOT export lane implements regional+dynamic directly (pgw#812 "
+        f"RESULT 3: free on a conv-free region)")
+
+
 def _apply_declared_shape_config(cfg: Any) -> None:
     """The v2 dynamo posture: nothing becomes dynamic by accident.
 
@@ -3087,14 +3113,23 @@ def apply(
             logger.debug("compile-cache: pipeline has no target %r; skipping", target)
             continue
         owner, attr, fn = resolved
+        # pgw#817/D4: computed BEFORE the branch so a declined regional target
+        # falls through to the whole-forward branch (which does apply the
+        # declared marks) instead of being skipped entirely.
+        regional_decline = _regional_dynamic_decline(cfg, target) \
+            if regional else ""
+        if regional_decline:
+            logger.info("compile-cache: %s", regional_decline)
         if (
             regional
+            and not regional_decline
             and attr == "forward"
             and callable(getattr(owner, "compile_repeated_blocks", None))
         ):
             # Per-block graphs (ie#381): bounded memory under fp8 layerwise
             # casting + much cheaper cold compile. Blocks are compiled in
             # place; the guard wrapper clears them on the first failure.
+            #
             _apply_declared_shape_config(cfg)
             owner.compile_repeated_blocks(dynamic=None)
             # pgw#681: regional entry crosses the same canonical boundary as

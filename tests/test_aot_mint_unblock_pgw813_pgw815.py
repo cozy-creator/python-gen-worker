@@ -278,12 +278,19 @@ def test_delegation_declines_name_their_TRUE_cause(
     _arm()
     assert "aot_eager_first_disabled" in _phases(_events, "self_mint_skipped")
 
+    # pgw#817: `regional=True` NO LONGER declines delegation. The blanket
+    # refusal ("the adopt/serve half is still held, pgw#812/#814") is
+    # discharged — the per-block mint, the bind-by-reference arm and the
+    # assembled-vs-eager gate all exist — and a regional mint is the shape
+    # that most wants delegating, because it is the one that finishes in
+    # single-digit minutes.
     _events.clear()
     monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT")
     fleet_cells._PENDING.clear()
     fleet_cells.enable_compiled(
         _Pipe(), _Cfg(regional=True), publisher=_Publisher())  # type: ignore[arg-type]
-    assert "aot_regional_targets" in _phases(_events, "self_mint_skipped")
+    assert "aot_regional_targets" not in _phases(_events, "self_mint_skipped")
+    assert fleet_cells.delegation_refusal(_Pipe(), _Cfg(regional=True)) == ""
 
 
 def test_mint_delegate_names_its_own_refusals(

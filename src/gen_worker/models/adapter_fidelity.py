@@ -67,6 +67,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 
 from .. import activity as activity_mod
+from .. import numerics_ladder
 from ..activity import KIND_LORA_FIDELITY
 from ..api.errors import AdapterFidelityRefused
 
@@ -121,12 +122,21 @@ FIDELITY_WARN = 0.99
 #: Typed hub-visible event phases for :data:`~gen_worker.activity.KIND_LORA_FIDELITY`
 #: (pgw#760 doctrine: a decision that changes what this worker serves rides an
 #: event, never a log line).
-PHASE_REFUSED = "refused"
-PHASE_DEGRADED = "degraded"
+PHASE_REFUSED = numerics_ladder.PHASE_REFUSED
+PHASE_DEGRADED = numerics_ladder.PHASE_DEGRADED
 
-VERDICT_HEALTHY = "healthy"
-VERDICT_DEGRADED = "degraded"
-VERDICT_DESTROYED = "destroyed"
+VERDICT_HEALTHY = numerics_ladder.VERDICT_HEALTHY
+VERDICT_DEGRADED = numerics_ladder.VERDICT_DEGRADED
+VERDICT_DESTROYED = numerics_ladder.VERDICT_DESTROYED
+
+#: pgw#817: this population's calibration of the SHARED ladder
+#: (:mod:`gen_worker.numerics_ladder`). ``retention_floor=0`` deliberately —
+#: a destroyed adapter's retention is 15.3, so here the norm ratio is evidence
+#: and never a bound. The output-comparison population gates it; this one
+#: cannot.
+ADAPTER_THRESHOLDS = numerics_ladder.Thresholds(
+    floor=FIDELITY_FLOOR, warn=FIDELITY_WARN, retention_floor=0.0,
+    label="adapter-delta (pgw#794 §3)")
 
 #: torch float8_e4m3fn's finite max. The cast does NOT saturate, so the
 #: producer clamps first (``convert/writer.py``); the grid here mirrors it.
@@ -314,11 +324,9 @@ class AdapterSurvival:
 
     @property
     def verdict(self) -> str:
-        if self.cosine < FIDELITY_FLOOR:
-            return VERDICT_DESTROYED
-        if self.cosine < FIDELITY_WARN:
-            return VERDICT_DEGRADED
-        return VERDICT_HEALTHY
+        # pgw#817: ONE ladder, calibrated per population. The rungs and the
+        # ordering live in `numerics_ladder`; only the numbers are ours.
+        return ADAPTER_THRESHOLDS.verdict(self.cosine, self.retention)
 
     def worst(self, limit: int = 5) -> Tuple[ModuleSurvival, ...]:
         return tuple(sorted(self.modules, key=lambda m: m.cosine)[:limit])
