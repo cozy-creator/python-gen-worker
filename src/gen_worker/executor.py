@@ -71,6 +71,7 @@ from .models import disk_gc
 from .models import disk_telemetry
 from .models import provision
 from .models import residency as residency_mod
+from .models import staging as staging_mod
 from .models.memory import (
     aflush_memory,
     deeper_offload_mode,
@@ -1219,6 +1220,18 @@ class ModelStore:
                 # Retarget it rather than replace it: its entries and leases
                 # are already the live bookkeeping.
                 zero.device_group = self._residency_groups[0]
+        # pgw#780 item 1: the pinned-host fair share was DEAD code — the pool's
+        # per-group cap only engages once it knows G, and nothing in src/ ever
+        # told it. Without this a G=4 degraded pod lets group 0 claim the whole
+        # pinned budget (§4.3 caveat 2).
+        staging_mod.pinned_pool().set_group_count(int(topology.groups))
+        # pgw#780 item 2: registries were created lazily on first dispatch, so
+        # the boot disk re-track (which unions over all_residencies()) was a
+        # no-op for groups 1..G-1 — their LRU/preserve/eviction views started
+        # blind to the disk tier that was already there. Create every group's
+        # registry NOW, before any boot walk unions over them.
+        for ordinal in range(int(topology.groups)):
+            self.residency_for(ordinal)
 
     def disk_ref_in_use(self, ref: str) -> bool:
         """In-use across ALL groups (§4.3 caveat 3): one group's GC must never
@@ -1244,13 +1257,34 @@ class ModelStore:
 
     def residency_snapshot(self) -> List[pb.ModelResidency]:
         out: List[pb.ModelResidency] = []
-        # Hold identity stable while Residency captures its tiers. Residency
-        # callbacks run only after releasing their own lock, so this cannot
-        # invert lock order: a transition either happens entirely before this
-        # snapshot, or its identity update waits until the captured view is
-        # complete.
+        # pgw#776 / DPA-6: union across EVERY group's registry. This runs on
+        # the event-loop thread (where _state_delta lives), whose contextvar
+        # is always the default group — reading `self.residency` here meant a
+        # G=4 pod reported 1/G of its resident set, and the hub's cache-aware
+        # victims, keep-warm objectives and warm-preference routing all
+        # decided on a quarter of the truth. Same union rule as disk_refs():
+        # one row per ref at its BEST tier, vram summed across groups (the
+        # pod's total VRAM commitment for that ref).
+        merged: Dict[str, Tuple[residency_mod.Tier, int]] = {}
+        rank = {
+            residency_mod.Tier.VRAM: 2,
+            residency_mod.Tier.RAM: 1,
+            residency_mod.Tier.DISK: 0,
+        }
+        for reg in self.all_residencies():
+            for ref, tier, vram in reg.snapshot():
+                prev = merged.get(ref)
+                if prev is None:
+                    merged[ref] = (tier, int(vram))
+                else:
+                    best = tier if rank[tier] > rank[prev[0]] else prev[0]
+                    merged[ref] = (best, prev[1] + int(vram))
+        # Hold identity stable while emitting. Residency callbacks run only
+        # after releasing their own lock, so this cannot invert lock order: a
+        # transition either happens entirely before this snapshot, or its
+        # identity update waits until the captured view is complete.
         with self._identity_lock:
-            for ref, tier, vram in self.residency.snapshot():
+            for ref, (tier, vram) in merged.items():
                 # DISK is backed by the verified disk snapshot; RAM/VRAM is
                 # backed by the loaded resident object. During stale A -> B
                 # teardown those identities intentionally differ.

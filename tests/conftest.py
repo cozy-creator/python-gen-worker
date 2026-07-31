@@ -154,6 +154,18 @@ def _boot_isa_clamp():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_pinned_pool_groups():
+    """pgw#780 item 1 made `bind_topology` wire the PROCESS-GLOBAL pinned pool
+    with the delivered group count. Correct in production (one process, one
+    bind); poison in a suite: a G=4 executor in one test leaves every later
+    test's pinned budget quartered. Reset to the solo share after each test."""
+    yield
+    from gen_worker.models import staging as _staging
+
+    _staging.pinned_pool().set_group_count(1)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_receipt_gate():
     """pgw#709's receipt gate is armed once at HelloAck and stays configured
     for the process — correct in production, poison in a suite: any test that

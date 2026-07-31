@@ -65,6 +65,24 @@
   also the correct answer for a SIGKILLed worker, split or no split. Proven by a real
   spawn-path reap test that goes red when the bootstrap is reverted.
 
+- **pgw#780 items 1/2/4 + pgw#776/DPA-6 — the per-group bookkeeping pgw#748 CLAIMED is now
+  wired.** Four "wire it or delete the claim" gaps between the DP commits' claims and what
+  ran: (1) `PinnedPool.set_group_count` was called nowhere in src/ — the cap/G pinned-host
+  fair share was dead code and group 0 could claim the whole 50% of host RAM on a G=4
+  degraded pod; `bind_topology` wires it now. (2) Registries were created lazily on first
+  dispatch, so the boot disk re-track (a union over `all_residencies()`) was a no-op for
+  groups 1..G-1; `bind_topology` creates every group's registry eagerly. (3=item 4) The
+  "dedicated H2D copy stream" was a device-0 singleton — a promote onto cuda:3 queued its
+  copies under card 0's stream context and synchronized card 0, silently losing the
+  overlap-with-compute property for every group but 0; one stream per device now, keyed by
+  the promote's target. (4=DPA-6) `residency_snapshot()` read the CURRENT group's registry,
+  which on the event-loop thread is always group 0 — at G=4 the hub saw 1/4 of the resident
+  set and every cache-aware decision (victims, keep-warm, warm routing) ran against a
+  quarter of the truth; it unions across groups now, one row per ref at its best tier,
+  vram summed. Items 3 (per-group preloader/boot warm) and 5 (per-(function,group)
+  disables) are recorded as dissolved by the pgw#783 split — each child IS one group — and
+  stay open only for the in-process multi-group interim (see the tracker).
+
 ## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
 
 > ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`
