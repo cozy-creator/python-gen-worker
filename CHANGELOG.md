@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#783 — the process split generalises to N execution groups: the parent supervises
+  one compute child PER GPU (flag `GEN_WORKER_PROCESS_SPLIT` still default-OFF).** pgw#782
+  measured that one CPython process cannot multiplex N GPUs (four groups in one interpreter
+  served 0.94x of serial at 21% per card; four PROCESSES one group each served **4.00x** at
+  91-93%), so the child of pgw#763's split is the EXECUTION GROUP. `ParentControl` now holds
+  one `_ChildSlot` per group; each child is a single-group worker scoped to its own cards
+  (`CUDA_VISIBLE_DEVICES`), with its own CUDA context, inductor cache and mint. The parent
+  routes each dispatch to the group owning the hub-picked rank-0 device (rewriting `gpu_index`
+  to the child-local 0; a mis-dispatch is refused, never floored), and aggregates N children
+  into ONE worker the hub sees: `available_functions`/residency UNION, `state_delta` merged,
+  `activity_update`/`fn_unavailable`/`fn_degraded` reconciled to a single worker-level truth,
+  one parent-originated beat, per-group liveness/watchdog so a single child's death is
+  attributed to ITS request and respawns ITS group while siblings serve. Per-group resource
+  correctness: the CPU intra-op divisor is `groups x host_siblings()`, the host-RAM guard/floor
+  divide the cgroup by the sibling count, each child gets its own inductor/triton dir, a
+  cross-process `flock` dedups a CAS fetch across children, and `PR_SET_PDEATHSIG` makes every
+  child die with the parent so a crashed group cannot strand VRAM. `worker_session_id` is now
+  parent-minted (survives child respawns; a latent defect even at G=1). **At G=1 the whole thing
+  is byte-identical to the pgw#763 single-child parent** — every worker-level aggregation point
+  takes an explicit `groups==1` fast path, and the pgw#763 procsplit integration suite passes
+  unchanged. The 4x is proven in the two/four-process arms of pgw#782; a live 4xGPU
+  demonstration of the split driving them is the remaining acceptance. Merges dark; the
+  default-on decision is deferred.
+
+- **pgw#763 driver 3 — the process split becomes an AUTHORIZATION boundary, not just a
+  fault boundary (flag still default-OFF).** Stages 1-4 built the parent/child seam for
+  resilience; the premise of the whole design is that tenant endpoint code is imported into
+  the worker process, so the JWT, capability tokens, hardware/canary measurement and billing
+  were all forgeable by that code. Six deltas move each of them to the parent side:
+
+  - the split switch itself is platform-reserved and pod-launch-injected (hub half:
+    tensorhub `e4016fe9`) — a boundary the contained code can decline is not a boundary;
+  - the compute child holds **no worker JWT**: `T_TOKEN` is deleted AND `WORKER_JWT` is
+    stripped from the child's environment, so identity-bearing hub calls become narrow,
+    allowlisted, audited **parent actions** (`procsplit/actions.py`) with the base URL chosen
+    by the parent. Identity travels as a claim (`WORKER_ID`, new `WORKER_RELEASE_ID`), never
+    as a credential;
+  - `Hello.resources` — the hardware and the boot canary, i.e. the fleet-wide verdict keys —
+    are measured by the PARENT in a subprocess that imports no endpoint module, and stamped
+    onto every relayed Hello;
+  - billable quantities the parent can observe (wall clock, dispatch concurrency, child RSS)
+    are attested by the parent; the ones it cannot see without pulling the data plane through
+    its interpreter stay child-reported and are NAMED in a durable record;
+  - the parent DECIDES on each per-job capability token — forward, or withhold and refuse the
+    job — instead of relaying whatever arrives;
+  - C2PA signing is a `sign(hash)` ask over the seam; neither the key nor the credential that
+    reaches the oracle exists in the child.
+
+  Nothing changes with `GEN_WORKER_PROCESS_SPLIT` unset, which is every pod today.
+
 ## 0.82.0 (2026-07-31) — the delegated mint child loads the composition the parent SERVES: the `phase=load` crash that closed BOTH mint routes on 0.81.0 is gone, and a crash the child classified is no longer retried
 
 > ### ⚠ 0.82.0 IS THE FIRST SDK ON WHICH A DELEGATED MINT CAN GET PAST `child:load`

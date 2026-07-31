@@ -139,13 +139,23 @@ class Worker:
             )
         self.lifecycle = Lifecycle(settings, self.executor)
         self.executor._on_state_change = self.lifecycle.state_changed
-        self.transport = Transport(
-            settings,
-            self.lifecycle,
-            queue_maxsize=queue_maxsize,
-            backoff_base_s=backoff_base_s,
-            backoff_cap_s=backoff_cap_s,
-        )
+        # pgw#763: in the split's COMPUTE CHILD, the "transport" speaks frames
+        # to the control parent (which owns the real gRPC stream + SendQueue).
+        # Lifecycle/Executor wiring is identical either way.
+        from .procsplit import is_compute_child
+
+        if is_compute_child():
+            from .procsplit.child import ChildTransport
+
+            self.transport: Any = ChildTransport(settings, self.lifecycle)
+        else:
+            self.transport = Transport(
+                settings,
+                self.lifecycle,
+                queue_maxsize=queue_maxsize,
+                backoff_base_s=backoff_base_s,
+                backoff_cap_s=backoff_cap_s,
+            )
         self.lifecycle.transport = self.transport
         # Capability renewal presents the freshest worker JWT (contract §1
         # rotation), not the boot-time settings token.

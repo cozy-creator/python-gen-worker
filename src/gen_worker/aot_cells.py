@@ -53,6 +53,7 @@ from . import activity as activity_mod
 from . import aot_serve, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
+from .procsplit import broker
 from .config import get_settings
 from .convert.hub import blake3_file
 from .models.chunk_cas import (
@@ -107,13 +108,13 @@ def _emit(phase: str, detail: str) -> None:
 
 
 def _get(
-    url: str,
+    base_url: str,
+    path: str,
     bearer: str,
     *,
     params: Optional[Dict[str, str]] = None,
     timeout: float = _HTTP_TIMEOUT_S,
-    stream: bool = False,
-) -> requests.Response:
+) -> "broker.HubResponse":
     """GET with the worker bearer.
 
     th#1335: the anonymous retry on 401/403 is GONE. It existed because the
@@ -123,10 +124,14 @@ def _get(
     hub-issued ``read_repo`` grant for exactly the families its release
     declares, so a refusal is a real authorization answer and must be reported
     as one — never laundered into an anonymous 404.
+
+    pgw#763 delta 1: parent-mediated under the split (the compute child holds
+    no worker JWT); the identical GET otherwise. th#1335 deleted the only
+    unauthenticated leg, so EVERY call from here carries worker identity and
+    rides the authorization surface — the two changes compose.
     """
-    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
-    return requests.get(
-        url, params=params, headers=headers, timeout=timeout, stream=stream)
+    return broker.request(
+        "GET", path, base_url=base_url, bearer=bearer, params=params, timeout=timeout)
 
 
 def _lane_of_meta(meta: Dict[str, Any]) -> str:
@@ -244,7 +249,7 @@ def _download_artifact_inner(
     dest = dest_dir / f"{key}.tar.gz"
 
     resp = _get(
-        f"{base_url}/api/v1/repos/{repo}/resolve",
+        base_url, f"/api/v1/repos/{repo}/resolve",
         bearer, params={"digest": checkpoint_id})
     if resp.status_code in _NOT_AUTHORIZED:
         _emit("not_authorized",
@@ -384,7 +389,7 @@ def _discover_inner(
         repo = cc.system_repo(family)
         bearer = str(worker_jwt() or "").strip()
         resp = _get(
-            f"{base}/api/v1/repos/{repo}/checkpoints",
+            base, f"/api/v1/repos/{repo}/checkpoints",
             bearer, params={"limit": str(_LIST_LIMIT)})
         if resp.status_code in _NOT_AUTHORIZED:
             # th#1335/th#1230: an authorization refusal is NOT an empty family.

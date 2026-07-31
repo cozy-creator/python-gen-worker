@@ -34,6 +34,7 @@ host's total RAM (a pod's memory.max is what kills it).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -42,7 +43,7 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, Iterator, Optional, Sequence
 
 import requests
 
@@ -257,6 +258,48 @@ def _fetch_chunk_bytes(
     raise last_exc
 
 
+@contextlib.contextmanager
+def _cas_fetch_lock(dst: Path) -> Iterator[None]:
+    """pgw#783: an OS ``flock`` on a per-digest lock file so G compute children
+    sharing ONE container filesystem dedup a fetch of the same CAS entry to ONE
+    download instead of G. The in-process ``threading.Lock`` cannot: the groups
+    are separate PROCESSES. The first child to arrive holds the lock and
+    fetches; the rest block on ``flock`` and, when it releases, find ``dst``
+    already present and skip the download (the caller's existence check).
+
+    Best-effort: a platform without ``fcntl`` yields without a lock (the
+    pre-pgw#783 behaviour — correctness held, only egress was duplicated), and
+    the writer-unique ``tmp`` path already made concurrent writers
+    non-corrupting, so the lock is a COST optimisation, never a safety gate."""
+    try:
+        import fcntl
+    except Exception:
+        yield
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = dst.parent / f".{dst.name}.casfetch.lock"
+    # ACQUIRE — its failures must not be confused with the body's, so they are
+    # handled entirely before the yield.
+    fd = None
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        # Odd FS / NFS without lockd: proceed unserialised rather than fail.
+        if fd is not None:
+            os.close(fd)
+            fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            os.close(fd)
+
+
 def download_chunked_file(
     chunks: Sequence[ChunkSpec],
     dst: Path,
@@ -302,6 +345,37 @@ def download_chunked_file(
         if not (c.url or "").strip():
             raise ValueError(f"chunk {i} has no URL")
 
+    # pgw#783: G compute children share ONE container filesystem, so serialise
+    # the fetch of this exact CAS entry across processes — the in-process dedup
+    # cannot, the groups are separate processes. The first child fetches under
+    # the flock; the rest block, then find dst already present and skip (G x
+    # egress -> 1x). The lock is a COST optimisation: the writer-unique tmp path
+    # already makes concurrent writers non-corrupting, so a lock we cannot take
+    # only costs a duplicate download, never correctness.
+    with _cas_fetch_lock(dst):
+        if dst.exists() and dst.stat().st_size == total_size:
+            # A sibling in this pod already materialised it while we waited.
+            _log.info("chunk_cas dedup: %s already present (%d bytes); skipping "
+                      "the fetch", dst.name, total_size)
+            return
+        _download_chunked_locked(
+            chunks, dst, want_whole=want_whole, total_size=total_size,
+            window=window, on_bytes=on_bytes, session_factory=session_factory,
+        )
+
+
+def _download_chunked_locked(
+    chunks: Sequence[ChunkSpec],
+    dst: Path,
+    *,
+    want_whole: str,
+    total_size: int,
+    window: int,
+    on_bytes: Optional[Callable[[int], None]],
+    session_factory: Callable[[], requests.Session],
+) -> None:
+    """The reassembly itself, run while holding the cross-process CAS fetch lock
+    (``download_chunked_file`` does the shape checks and the dedup)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     # Writer-unique, stable for this call so its own resume works, but distinct
     # from every other writer of the same digest — including another PROCESS

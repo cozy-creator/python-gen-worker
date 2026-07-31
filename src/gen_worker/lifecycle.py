@@ -251,7 +251,13 @@ class Lifecycle:
         self.worker_id = (
             settings.worker_id or str(claims.get("sub") or "").strip() or f"py-worker-{os.getpid()}"
         )
-        self.release_id = str(claims.get("release_id") or "").strip()
+        # pgw#763 delta 1: in the split's compute child there is no JWT to read
+        # claims from — the parent decodes its own and hands the release id
+        # down as a plain value. A claim is not a credential.
+        self.release_id = (
+            str(claims.get("release_id") or "").strip()
+            or str(getattr(settings, "worker_release_id", "") or "").strip()
+        )
         self.intent_registry = IntentRegistry(
             self.release_id,
             executor.specs.keys(),

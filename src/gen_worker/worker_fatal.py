@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 
 REASON_CLASS = "worker_fatal"
 
+
+def _broker_active() -> bool:
+    """True in a pgw#763 compute child with a live control seam."""
+    try:
+        from .procsplit import broker
+
+        return broker.active()
+    except Exception:
+        return False
+
 # The hub stores `detail` in a jsonb payload; a full traceback of a deep
 # framework stack can be very long. Keep the head (the raise site chain) and
 # the tail (the actual exception) — the middle is the least diagnostic part.
@@ -102,6 +112,14 @@ def report_worker_fatal(
     if settings is None or not (settings.orchestrator_public_addr or "").strip():
         return False
     detail = build_fatal_detail(phase, exc, exit_code=exit_code)
+    # pgw#763 delta 1: in the compute child there is no worker JWT to open a
+    # Connect with, and there should not be — a HardwareUnsuitable-carrier
+    # report is a fleet-wide verdict key (th#1310), so it is worth more dialed
+    # by the process that runs no tenant code. The parent dials it.
+    if _broker_active():
+        from .procsplit import broker
+
+        return broker.report_detail(detail)
     try:
         report = _build_report(settings, detail)
         return asyncio.run(_report_async(settings, report))
@@ -120,6 +138,10 @@ async def report_worker_error_async(settings: Optional[Settings], detail: str) -
     caller's running loop; opens its own short Connect like every report."""
     if settings is None or not (settings.orchestrator_public_addr or "").strip():
         return False
+    if _broker_active():
+        from .procsplit import broker
+
+        return await asyncio.to_thread(broker.report_detail, _clip(detail))
     try:
         return await _report_async(settings, _build_report(settings, _clip(detail)))
     except Exception:
@@ -136,6 +158,10 @@ def report_worker_detail(settings: Optional[Settings], detail: str) -> bool:
     """
     if settings is None or not (settings.orchestrator_public_addr or "").strip():
         return False
+    if _broker_active():
+        from .procsplit import broker
+
+        return broker.report_detail(_clip(detail))
     try:
         return asyncio.run(_report_async(settings, _build_report(settings, _clip(detail))))
     except Exception:

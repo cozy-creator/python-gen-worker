@@ -70,6 +70,7 @@ from . import aot_cells, cell_key
 from . import compile_cache as cc
 from . import guard_closure
 from .convert.hub import blake3_file
+from .procsplit import broker
 # module import (not `from .loading import pipeline_weight_lane`): tests
 # monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
 from .models import loading, provision
@@ -235,7 +236,14 @@ class CellPublisher:
         self.image_digest = str(image_digest or "").strip()
 
     def enabled(self) -> bool:
-        return bool(self.base_url and (self._worker_jwt() or "").strip())
+        # pgw#763 delta 1: "we hold a worker JWT" stopped being the test for
+        # "we can make a worker-authenticated call". In the compute child the
+        # credential is the PARENT's and the call is mediated, so the honest
+        # question is whether either route exists.
+        return bool(
+            self.base_url
+            and ((self._worker_jwt() or "").strip() or broker.active())
+        )
 
     def worker_jwt(self) -> str:
         """Current worker JWT (rotation-aware, #561)."""
@@ -245,9 +253,17 @@ class CellPublisher:
 
     def _post(self, path: str, payload: dict, *, timeout: float) -> dict:
 
-        resp = requests.post(
-            f"{self.base_url}{path}",
-            headers={"Authorization": f"Bearer {self._worker_jwt()}"},
+        # pgw#763 delta 1: parent-mediated under the split — the compute child
+        # holds no worker JWT, so the parent makes the attested-intent call and
+        # returns the KEY-PINNED capability token, which is a short-TTL,
+        # least-authority grant the child is explicitly allowed to hold. The
+        # cell bytes still go child -> CAS directly under that token: the seam
+        # carries control, not data.
+        resp = broker.request(
+            "POST",
+            path,
+            base_url=self.base_url,
+            bearer=self._worker_jwt(),
             json=payload,
             timeout=timeout,
         )
