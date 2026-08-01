@@ -12,7 +12,7 @@ import os
 import faulthandler
 import signal
 
-# Reduce CUDA allocator fragmentation for tight-VRAM worker processes.
+# Reduce CUDA allocator fragmentation for tight-VRAM single-process workers.
 # Set BEFORE any module imports torch (PyTorch reads this env var only at
 # first cudaMalloc; setting it later is a no-op). gen-worker entrypoint is
 # the first module loaded in every worker process, so putting it here gives
@@ -34,15 +34,15 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # compile-worker subprocess. See compile_cache._disable_aot_autograd_cache.
 os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
 
-# pgw#763: this process becomes the CONTROL PARENT — gRPC stream, identity,
-# JWT, child supervision — and must run BEFORE the heavy imports below so it
-# never loads torch. It spawns/respawns compute children (this same entrypoint
-# with GEN_WORKER_COMPUTE_CHILD=1) and only ever exits deliberately. The split
-# is unconditional; only a compute child falls through to the imports below.
+# pgw#763: with GEN_WORKER_PROCESS_SPLIT=1 this process becomes the CONTROL
+# PARENT — gRPC stream, identity, JWT, child supervision — and must run BEFORE
+# the heavy imports below so it never loads torch. It spawns/respawns compute
+# children (this same entrypoint with GEN_WORKER_COMPUTE_CHILD=1) and only
+# ever exits deliberately.
 if __name__ == "__main__":
-    from .procsplit import is_compute_child  # noqa: E402
+    from .procsplit import is_compute_child, split_enabled  # noqa: E402
 
-    if not is_compute_child():
+    if split_enabled() and not is_compute_child():
         from .procsplit.parent import run_parent  # noqa: E402
 
         os._exit(run_parent())
