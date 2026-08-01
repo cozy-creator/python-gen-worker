@@ -34,6 +34,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from .writer import NEVER_SHARD_MAX_SIZE
+from .writer import assert_one_file_per_component
 from .writer import streaming_dtype_cast
 from .writer import streaming_fp8_storage_cast
 import json as _json
@@ -457,13 +459,14 @@ def _run_bnb_inline(
         ) from exc
 
     try:
-        model.save_pretrained(str(out_dir))
+        model.save_pretrained(str(out_dir), max_shard_size=NEVER_SHARD_MAX_SIZE)
     except Exception as exc:
         raise InlineConversionNotPossible(
             reason=f"bitsandbytes save_pretrained failed for {dtype}: {exc}",
             target_dtype=dtype,
         ) from exc
 
+    assert_one_file_per_component(out_dir, producer="bitsandbytes quantize")
     saved_files: list[Path] = sorted(
         f for f in out_dir.rglob("*") if f.is_file()
     )
@@ -572,7 +575,8 @@ def _run_bnb_diffusers_inline(
 
             comp_out.mkdir(parents=True, exist_ok=True)
             try:
-                module.save_pretrained(str(comp_out))
+                module.save_pretrained(
+                    str(comp_out), max_shard_size=NEVER_SHARD_MAX_SIZE)
             except Exception as exc:
                 raise InlineConversionNotPossible(
                     reason=(
@@ -581,6 +585,8 @@ def _run_bnb_diffusers_inline(
                     ),
                     target_dtype=dtype,
                 ) from exc
+            assert_one_file_per_component(
+                comp_out, producer=f"bitsandbytes quantize [{comp_name}]")
             quantized_components.append(comp_name)
             del module
         else:

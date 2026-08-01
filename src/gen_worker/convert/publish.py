@@ -23,6 +23,7 @@ from ..models.ladder import (
 )
 from .hub import CommitFile, CommitResult, HubClient, files_from_tree
 from .produced import ProducedFlavor
+from .writer import assert_one_file_per_component
 
 _PLACEMENT_ATTR_KEYS = ("placement_sm_allowed", "placement_sm_min", "placement_engines")
 
@@ -99,6 +100,15 @@ def publish_flavors(
     client = HubClient.from_ctx(ctx)
     results: list[CommitResult] = []
     for flavor in flavors:
+        # th#1362 item 4: OUR producers never emit shards, and this is the
+        # last place a conversion / training-promote / cell-publish output can
+        # be checked before it becomes somebody's checkpoint. It is NOT a
+        # universal publish gate — a user's own sharded upload never reaches
+        # this function; it goes to the hub's upload API and is accepted as
+        # given. Checked rather than assumed because save_pretrained shards on
+        # its own.
+        assert_one_file_per_component(
+            Path(flavor.path), producer=f"publish_flavors[{dest}]")
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
         label = str(flavor.flavor or attrs.get("flavor") or attrs.get("dtype") or "").strip()
         # th#606: worker-addable provenance stamp fields. Producers declare

@@ -28,7 +28,11 @@ from .registry import (
     require_repackage_family,
 )
 from .repack_spec import ComponentRepack, DtypePolicy, RepackageFamily
-from .writer import ConversionImplementationError
+from .writer import (
+    NEVER_SHARD_MAX_SIZE,
+    ConversionImplementationError,
+    assert_one_file_per_component,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -372,7 +376,9 @@ def singlefile_to_diffusers(
                 config=config,
                 torch_dtype=_repackage_torch_dtype(output_dtype, spec.dtypes),
             )
-            pipe.save_pretrained(str(output_dir), safe_serialization=True)
+            pipe.save_pretrained(str(output_dir), safe_serialization=True,
+                                 max_shard_size=NEVER_SHARD_MAX_SIZE)
+            assert_one_file_per_component(output_dir, producer="layout repackage")
             return {
                 "pipeline_class": pipeline_class,
                 "pipeline_config": str(config or ""),

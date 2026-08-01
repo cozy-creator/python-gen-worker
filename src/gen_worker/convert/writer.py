@@ -375,6 +375,7 @@ def _stream_reencode(
             except Exception:  # noqa: BLE001
                 pass
 
+    assert_one_file_per_component(out_dir, producer="streaming re-encode")
     return {
         "tensor_count": tensor_count,
         "converted_count": converted,
@@ -660,6 +661,7 @@ def streaming_w8a8_cast(
             f"w8a8 cast left {len(pending_scales)} orphan scale tensor(s) "
             f"(e.g. {sorted(pending_scales)[:3]})")
 
+    assert_one_file_per_component(out_dir, producer="w8a8 cast")
     return {
         "tensor_count": tensor_count,
         "converted_count": len(quantized_names),
@@ -1392,6 +1394,60 @@ def _read_safetensors_header(fd: int) -> tuple[dict, int]:
     return header, _HEADER_LEN_PREFIX + header_len
 
 
+# ---------------------------------------------------------------------------
+# Producer invariant (th#1362 item 4)
+# ---------------------------------------------------------------------------
+
+# HF's save_pretrained shards at its own default (5-10 GB) and takes no "never"
+# sentinel, so producers that go through it pass this instead. Our producers do
+# not emit shards; the assertion below is what makes that true rather than
+# hoped-for.
+NEVER_SHARD_MAX_SIZE = "1024GB"
+
+_SHARD_MEMBER_NAME_RE = re.compile(r"^.+-\d{5}-of-\d{5}\.(safetensors|bin|pt|ckpt)$")
+
+
+def find_producer_shards(tree: Path) -> list[str]:
+    """Tree-relative paths that make this output a SHARD SET.
+
+    Deliberately narrow: an HF shard index, or a member named by the
+    ``-NNNNN-of-MMMMM`` convention. Two unrelated weight files in one component
+    (dtype variants, say) are not sharding and are none of this check's
+    business.
+    """
+    root = Path(tree)
+    if root.is_file():
+        return ([root.name] if _SHARD_MEMBER_NAME_RE.match(root.name)
+                or root.name.endswith(".safetensors.index.json") else [])
+    found: list[str] = []
+    for f in sorted(root.rglob("*")):
+        if not f.is_file():
+            continue
+        if f.name.endswith(".safetensors.index.json") \
+                or _SHARD_MEMBER_NAME_RE.match(f.name):
+            found.append(str(f.relative_to(root)))
+    return found
+
+
+def assert_one_file_per_component(tree: Path, *, producer: str) -> None:
+    """th#1362: OUR producers never emit shards — assert it on our own output.
+
+    This is not a publish gate and never applies to somebody else's artifact: a
+    user uploading a sharded checkpoint is accepted as given, because
+    de-sharding would change its checkpoint id. It applies where WE own the
+    bytes, and it fails CLOSED — save_pretrained will happily shard on its own,
+    so this must be checked rather than assumed. A format that genuinely cannot
+    be written as one file per component is a named, justified exception, never
+    a silent fallback.
+    """
+    shards = find_producer_shards(Path(tree))
+    if shards:
+        raise ConversionImplementationError(
+            f"sharded_producer_output: {producer} emitted a shard set "
+            f"({len(shards)} file(s), e.g. {shards[:3]}) under {tree}; "
+            f"our producers write one file per component (th#1362)")
+
+
 def merge_safetensors_by_offset(
     shard_paths: Sequence[Path],
     out_path: Path,
@@ -1561,6 +1617,10 @@ __all__ = [
     "VARIANT_WEIGHT_NAME_RE",
     "normalize_variant_filenames",
     "list_shard_files_from_index",
+    "merge_safetensors_by_offset",
+    "NEVER_SHARD_MAX_SIZE",
+    "find_producer_shards",
+    "assert_one_file_per_component",
     "IncrementalSafetensorsWriter",
     "torch_dtype_to_st",
     "materialize_pickle_to_safetensors",
