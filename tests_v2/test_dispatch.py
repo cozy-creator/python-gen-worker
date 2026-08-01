@@ -359,13 +359,10 @@ def test_send_queue_sheds_progress_never_results() -> None:
 def test_dispatch_refusal_matrix_is_typed_and_named(hub, blob_host) -> None:
     rows = [
         # (request_id, RunJob kwargs, expected status, must-name fragments)
-        # NOTE: r-unknown's safe_message is asserted separately below — it is
-        # currently EMPTY on the wire (pgw#810), so it cannot ride the
-        # names-its-cause loop until that is fixed.
         ("r-unknown",
          dict(function_name="nope",
               input_payload=catalog.row("echo").input_bytes(text="marco")),
-         pb.JOB_STATUS_INVALID, None),
+         pb.JOB_STATUS_INVALID, ["nope"]),
         ("r-bad-manifest",
          dict(function_name="echo", input_payload=b"\xc1not-msgpack"),
          pb.JOB_STATUS_INVALID, []),
@@ -392,8 +389,6 @@ def test_dispatch_refusal_matrix_is_typed_and_named(hub, blob_host) -> None:
             assert res.status == want_status, (
                 f"{rid}: status {res.status} != {want_status} "
                 f"({res.safe_message!r})")
-            if fragments is None:
-                continue  # pgw#810, asserted by its own xfail below
             assert res.safe_message, f"{rid}: refusal with NO named cause"
             for fragment in fragments:
                 assert fragment in res.safe_message, (
@@ -478,17 +473,6 @@ def test_result_upload_refusal_is_typed_not_silent(hub) -> None:
         sink.shutdown()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="pgw#810: the unknown-function refusal sends safe_message='' — the "
-           "caller is told INVALID and never told why. Every sibling refusal "
-           "on that path (worker draining, function unavailable) names its "
-           "cause, and the typed intent transition already carries "
-           "`unknown function <name>`; only the wire result drops it. "
-           "One-line fix in executor.py, held back here because that file "
-           "carries another lane's uncommitted work. Delete this xfail with "
-           "the fix — strict=True makes it fail loudly once it starts passing.",
-)
 def test_unknown_function_refusal_names_the_function(hub) -> None:
     """A refusal that does not name its cause is a log-only swallow on the
     wire: the hub records INVALID and no operator can tell which function was
