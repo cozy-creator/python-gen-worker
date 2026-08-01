@@ -505,6 +505,7 @@ class BlockShim:
             "target": target or family,
             "family": family,
             "failure_callback": None,
+            "refusal_callback": None,
             "revocation_error": "",
             "runner": runner,
         }
@@ -535,6 +536,7 @@ class BlockShim:
                 f"mode={MODE_REGIONAL}: {exc}",
                 phase=exc.reason,
             )
+            aot_serve.report_ingress_refusal(state, exc.reason, str(exc))
             return eager(*args, **kwargs)
         except aot_serve.ConstantsUnboundError as exc:
             state["failed"] = True

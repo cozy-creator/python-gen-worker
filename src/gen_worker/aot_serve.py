@@ -1807,6 +1807,7 @@ def wrap_module(
         "attr": attr,
         "target": label,
         "failure_callback": None,
+        "refusal_callback": None,
         "revocation_error": "",
         "runner": runner,
     }
@@ -1853,6 +1854,7 @@ def wrap_module(
                 f"family={meta.get('family')} target={label}: {exc}",
                 phase=exc.reason,
             )
+            report_ingress_refusal(state, exc.reason, str(exc))
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
             # Reaching here means the arm order was violated. The gate did
@@ -1904,6 +1906,39 @@ def _revoke(state: Dict[str, Any], detail: str) -> None:
             f"{type(callback_exc).__name__}: {callback_exc}")
         logger.exception("aot-serve: %s", state["revocation_error"])
         raise CompiledLaneUnavailableError(state["revocation_error"]) from callback_exc
+
+
+def report_ingress_refusal(state: Dict[str, Any], reason: str, detail: str) -> None:
+    """Hand ONE per-request ingress refusal to the arming brain (pgw#844).
+
+    The refusal already rides ``aot_ingress_refused`` as a countable typed
+    event, but that event names no REQUEST — so the request row that was
+    served eager by an armed compiled lane still reported
+    ``serving_mode=aot_cell, fallback_reason=""``, i.e. an eager latency
+    sample counted as compiled. That is the exact contamination
+    :mod:`serving_mode` exists to prevent, and arming a partially
+    dispatchable cell (which pgw#844 now does) is what makes it common.
+
+    Never raises: telemetry must not be able to un-serve a request that the
+    eager fallback is about to answer correctly.
+    """
+    callback = state.get("refusal_callback")
+    if not callable(callback):
+        return
+    try:
+        callback(str(reason or ""), str(detail or ""))
+    except Exception:  # noqa: BLE001 — a reporting failure is not a serve failure
+        logger.debug("aot-serve: ingress-refusal report failed", exc_info=True)
+
+
+def set_ingress_refusal_callback(pipeline: Any, callback: Any) -> bool:
+    """Bind per-request eager-fallback accounting to every wrapped target."""
+    states = _marker_states(pipeline)
+    if not states:
+        return False
+    for state in states:
+        state["refusal_callback"] = callback
+    return True
 
 
 def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
@@ -2285,6 +2320,8 @@ __all__ = [
     "resolve_constants",
     "runtime_key",
     "set_guard_failure_callback",
+    "set_ingress_refusal_callback",
+    "report_ingress_refusal",
     "split_literals",
     "torch_maj_min",
     "torch_version",

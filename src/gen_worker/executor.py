@@ -2593,6 +2593,12 @@ class _WarmupEvidence:
 
     count: int = 0
     functions_by_object: Dict[int, set[str]] = dc_field(default_factory=dict)
+    #: pgw#844: per object, the aliases that proved SOME but not all of their
+    #: declared graph classes on the EXPORTED lane -> the classes that stayed
+    #: eager. Non-empty means "compiled for these shapes, eager for those",
+    #: which is a serving posture, not a boot failure.
+    partial_by_object: Dict[int, Dict[str, Tuple[str, ...]]] = dc_field(
+        default_factory=dict)
     #: pgw#677 reopen: non-empty when the warm plan was CUT SHORT (OOM
     #: backoff) — names the truncation. A truncated plan must never publish
     #: its partial capture as the family cell.
@@ -4058,7 +4064,7 @@ class Executor:
         self, rec: _ClassRecord, target: _CompileTargetRecord,
     ) -> bool:
         """Bind one live wrapper's first failure to exact target revocation."""
-        from . import compile_cache, trt_engine
+        from . import aot_serve, compile_cache, trt_engine
 
         # pgw#677: every shape-warm/heal compile for this pipeline must run
         # inside a background GPU turn (yield to tenant demand; mutual
@@ -4069,6 +4075,22 @@ class Executor:
             self._compile_guard_failed(rec, target, detail)
 
         if trt_engine.set_guard_failure_callback(target.pipeline, callback):
+            return True
+        # pgw#844: the EXPORTED lane owns its own revocation signal and this
+        # was never asked for it — `enable_compiled` returns as soon as
+        # `arm_aot` succeeds, so an AOT-armed pipeline never gets the dynamo
+        # `failure_signal` marker `compile_cache.set_guard_failure_callback`
+        # reads. Every aot arm therefore answered "no runtime guard
+        # revocation signal", had its `active_compile_ref` cleared, and
+        # advertised eager — a compiled AOT serve was structurally
+        # unreachable on the boot path regardless of dispatch. Ask the lane
+        # that is actually armed.
+        if aot_serve.set_guard_failure_callback(target.pipeline, callback):
+            def refusal_callback(reason: str, detail: str) -> None:
+                self._compile_ingress_refused(target, reason, detail)
+
+            aot_serve.set_ingress_refusal_callback(
+                target.pipeline, refusal_callback)
             return True
         if not compile_cache.set_guard_failure_callback(
             target.pipeline, callback,
@@ -4133,6 +4155,35 @@ class Executor:
                 serving_mode_mod.FALLBACK_VOLATILE) else
              serving_mode_mod.FALLBACK_GUARD_MISS),
         )
+
+    def _compile_ingress_refused(
+        self, target: _CompileTargetRecord, reason: str, detail: str,
+    ) -> None:
+        """pgw#844: one tenant request was refused at the artifact's ingress
+        and served eager by an ARMED compiled lane.
+
+        The typed `aot_ingress_refused` event already counts the refusal per
+        (release, SKU, reason). This charges the same fact to THIS request's
+        JobMetrics, which is the different question: an eager latency sample
+        tagged `serving_mode=aot_cell` argues against the optimization that is
+        working for every other shape. It matters now precisely because a
+        partially dispatchable cell stays armed instead of costing the pod its
+        whole compiled lane — the eager shapes must be subtractable from the
+        compiled measurement, by name.
+
+        Observability only: the artifact stays armed and the target keeps its
+        active identity, exactly as the per-call refusal contract says.
+        """
+        from . import postmortem
+
+        request_id = postmortem.current_inflight_request()
+        if not request_id:
+            return
+        logger.debug(
+            "aot ingress refusal charged to request %s (%s): %s",
+            request_id, reason, detail[:200])
+        self._mark_request_eager_fallback(
+            request_id, serving_mode_mod.FALLBACK_INGRESS_REFUSED)
 
     def _mark_request_eager_fallback(self, request_id: str, reason: str) -> None:
         """Record that ``request_id`` was served eager by a compiled lane.
@@ -6006,6 +6057,13 @@ class Executor:
         # pgw#654 coverage attribution: runs prove GRAPH CLASSES; an alias
         # is proven on an object once ALL of its graph classes proved there.
         proven_keys: Dict[int, set] = {}
+        # pgw#844: which objects proved through the EXPORTED lane. An exported
+        # artifact refuses an out-of-contract shape BY NAME and serves that one
+        # call eager while staying armed, so a graph class it did not serve is
+        # a per-shape posture, not a silent recompile — which is what lets the
+        # attribution below be per-class for this lane and stay all-or-nothing
+        # for dynamo, where an unproven class means an unannounced recompile.
+        exported_proof_ids: set = set()
 
         async def _one(wj: Any, build: Any, mode: str, *, variant: bool) -> bool:
             """One warmup forward; False = OOM, stop warming."""
@@ -6116,6 +6174,8 @@ class Executor:
                 # and by still being armed, so a call that ended in a revoked
                 # (failed) artifact cannot count as proof.
                 aot_proven = aot_serve.proven_since(obj, aot_before)
+                if aot_proven:
+                    exported_proof_ids.add(id(obj))
                 if inductor_proven or trt_proven or aot_proven:
                     proven_keys.setdefault(id(obj), set()).add(wj.graph_key)
             logger.info(
@@ -6198,8 +6258,54 @@ class Executor:
                 name for name, keys in keys_by_name.items()
                 if keys and keys <= proven
             }
+            # pgw#844: …and on the EXPORTED lane an alias that proved SOME of
+            # its graph classes is attributed too, with the rest named.
+            #
+            # The measured shape (attempt twelve, pod o0legpgj5olhic): a
+            # regional sdxl cell armed all 72 entries, dispatched 1024x1024
+            # correctly, and refused the other eight aspect buckets
+            # `entry_ambiguous` because a transformer block sees H_lat*W_lat
+            # and the entries are keyed on H and W separately. Those eight
+            # classes went unproven, the all-or-nothing rule above attributed
+            # NO alias, the target was omitted as `target_applicability_
+            # incomplete`, and the boot ended `boot_ended_uncompiled` — so the
+            # ONE bucket that was armed, correct and unambiguous served eager
+            # too. One undispatchable shape cost the pod every shape.
+            #
+            # `boot_ended_uncompiled` must mean "nothing is dispatchable", not
+            # "something wasn't". An exported artifact refuses a shape it
+            # cannot serve BY NAME, counts it, emits `aot_ingress_refused`,
+            # charges the request `fallback_reason=ingress_refused`, and stays
+            # armed — so the degradation is per shape and fully visible, which
+            # is exactly the fail-soft posture the compiled lane is built on.
+            # Dynamo keeps the strict rule: there an unproven class means an
+            # unannounced recompile at serve time, which is silent.
+            partial: Dict[str, Tuple[str, ...]] = {}
+            if obj_id in exported_proof_ids:
+                for name, keys in keys_by_name.items():
+                    if not keys or name in names or not (keys & proven):
+                        continue
+                    names.add(name)
+                    partial[name] = tuple(sorted(
+                        str(key) for key in (keys - proven)))
             if names:
                 evidence.functions_by_object[obj_id] = names
+            if partial:
+                evidence.partial_by_object[obj_id] = partial
+                for name, missing in sorted(partial.items()):
+                    total = len(keys_by_name[name])
+                    activity_mod.emit_event(
+                        "compiled_shape_coverage",
+                        f"fn={name}: {total - len(missing)}/{total} declared "
+                        f"graph classes served COMPILED at boot; the compiled "
+                        f"lane stays armed and these {len(missing)} class(es) "
+                        f"serve EAGER per request (each one named at ingress, "
+                        f"and every such request reports "
+                        f"fallback_reason="
+                        f"{serving_mode_mod.FALLBACK_INGRESS_REFUSED}): "
+                        f"{list(missing[:8])!r}",
+                        phase="partial_shape_coverage",
+                    )
         return evidence
 
     async def _invoke_warmup(

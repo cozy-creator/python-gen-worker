@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#844 (P0) — an AOT cell could never advertise compiled, and one
+  undispatchable aspect bucket cost the pod every other shape.** Attempt
+  twelve (L4 `o0legpgj5olhic`) adopted the first cross-pod cell in platform
+  history — 72 entries armed, 58 s — and then served 100 % eager, including
+  1024x1024, whose entry was armed, correct and unambiguous. Two independent
+  defects, both fixed, both red-first on the real boot path:
+  - **the exported lane was never asked for its revocation signal.**
+    `_bind_compile_guard` probed TRT and dynamo only, and
+    `provision.enable_compiled` returns as soon as `arm_aot` succeeds — so an
+    AOT-armed pipeline carries no `compile_cache` `failure_signal` marker at
+    all, answered *"no runtime guard revocation signal"*, and had its
+    `active_compile_ref` cleared on every boot. `aot_serve` has owned
+    `set_guard_failure_callback` since pgw#721 and nothing called it. This is
+    why no `serving_mode=compiled` row exists anywhere on the release: a
+    compiled AOT serve was structurally unreachable regardless of dispatch.
+  - **the boot's coverage claim was all-or-nothing.** A transformer block sees
+    `(B, H_lat*W_lat, C)` — the token PRODUCT — while entries are keyed on the
+    latent H and W separately, so sdxl's 9 aspect buckets collapse to 4 token
+    counts and 8 of 9 are `entry_ambiguous`. An alias attributed to an object
+    only when EVERY declared graph class proved there, so a partially
+    dispatchable cell claimed nothing (hot adopt: `function_alias_unproven` ->
+    rollback). On the EXPORTED lane an alias that proves SOME of its classes
+    is now attributed, and the classes that stayed eager are NAMED on one
+    `compiled_shape_coverage / partial_shape_coverage` event. Dynamo keeps the
+    strict rule — there an unproven class is an unannounced recompile, which
+    is silent, while an exported refusal is typed, counted and armed-through.
+  `boot_ended_uncompiled` now means *nothing is dispatchable*, never
+  *something wasn't*.
+- **pgw#844 — a refused shape no longer contaminates the compiled
+  measurement.** An `aot_serve` / regional-block ingress refusal reports
+  through a new `set_ingress_refusal_callback` seam and charges THIS request
+  `fallback_reason=ingress_refused` on its own `JobMetrics`, so an eager
+  sample from an armed lane stops being counted as `serving_mode=aot_cell`
+  with no reason. Only reachable now that a partially dispatchable cell stays
+  armed, which is why it lands with the fix rather than before it.
 ## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), two more runner-flake classes die (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
 
 - **pgw#833 follow-on — forwarding a signal is not draining a pod.** The
