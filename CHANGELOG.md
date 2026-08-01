@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), two more runner-flake classes die (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
 
 - **pgw#833 follow-on — forwarding a signal is not draining a pod.** The
   gw#640 SIGTERM test hung CI three runs running. It was not the stderr tee
@@ -184,7 +184,6 @@
   violations, dark residual 4.9-8.1 %, `child_other_s` <= 0.002 s**, and
   pgw#832's `seal_libhash_s` still 0.06-0.17 s.
 
-## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829)
 
 - **pgw#833 follow-on — the child-stderr tee writes OFF the event loop.** The
   pump teed each chunk to the parent's stderr with a blocking `flush()` on the
