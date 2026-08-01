@@ -1,5 +1,338 @@
 # Changelog
 
+## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
+
+- **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
+  0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
+  toolchain `.so` the image ships (36 files, 3.96 GB); its memo was per
+  PROCESS, and the pgw#809 pool's worker is a process that compiles one entry
+  and exits — so a 72-entry mint re-paid the pass 72 times, K-wide (~28 % of
+  per-entry `compile_s`, pgw#830's measurement). The pool parent now seeds an
+  on-disk digest memo (`write_library_memo`, keyed by `(path, mtime_ns,
+  size)`) once per pool — near-free when the parent already sealed — and each
+  child, pointed at it via `GEN_WORKER_SEAL_LIB_MEMO`, still enumerates and
+  stats every file ITSELF, using a memo digest only on an exact triple match
+  and falling back to the full rehash on any mismatch. The seal value is
+  byte-identical to a full rehash in every detectable case (proven by test);
+  the one undetectable case — same-size content rewritten with `mtime_ns`
+  restored — is exactly the trust boundary the in-process `lru_cache` (same
+  key) always had, asserted as such rather than papered over. Seeding cost is
+  named (`seal_seed_s` on the pool ledger, outside the capacity identity);
+  seeding failure emits a typed `aot_mint_phases phase=pool` event and children
+  rehash in full (the safe path). `seal_libhash_s` is now timed where the pass
+  runs instead of inferred from `seal_effective_s`, so the span stays honest
+  under a memo.
+- **pgw#830 — the dark 44 % of AOT compile time is named, and the attribution
+  can no longer rot in silence.** Attempt nine recorded `compile_s=1331.72` with
+  five phases summing to 742.6 s (56 %); the other 589 s had no name. The cause
+  was structural, not a missing metric key: in the pgw#809 pooled path
+  `compile_s` is the parent's Popen-to-reap wall of an entry CHILD PROCESS,
+  while `phases` only ever measured the inside of `aot_compile`. New
+  `aot_compile_spans` defines three nested partitions, each with an explicit
+  residual — `compile_s = child_boot_s + child_wall_s + reap_lag_s`,
+  `child_wall_s = child_seal_s + child_torch_import_s + child_devlock_s +
+  child_program_load_s + compile_wall_s + child_other_s`, and
+  `compile_wall_s = lowering_s + codegen_s + graph_passes_s + host_compile_s +
+  compile_other_s` — so a phase that stops being measured shows up as a growing
+  residual instead of as time silently vanishing. `triton_s`,
+  `device_lock_wait_s` (counted by pgw#809's lock since it existed, never read
+  until now) and `inductor_total_s` are reported as OVERLAYS, never summed into
+  the partition: they nest inside members above them, and adding them in was
+  the second attribution bug.
+- **pgw#830 — what the dark time actually was: `env_seal.establish()`, once per
+  ENTRY.** MEASURED off-pod on a real 8-entry pooled compile through real
+  children: `child_seal_s` is **37 % of one entry's `compile_s`** (18.36 s of
+  49.49 s), of which `seal_libhash_s` is 10.47 s — the identity manifest
+  SHA-256s **36 toolchain `.so` files, 3.96 GB**, and its memo is an
+  `lru_cache`, i.e. per PROCESS. A pool whose worker is a process that exits
+  therefore re-pays a multi-GB hashing pass for every entry. `env_seal` now
+  publishes `LAST_ESTABLISH_SPANS` (scrub / config / isa / posture / effective /
+  libhash) so the cost is a line item rather than an anonymous setup charge.
+  Telemetry only — no digest, no decision and no identity depends on it.
+- **pgw#830 — POOL IDLE is a separate line item from serial dark time, because
+  the two have opposite fixes.** New `PoolLedger` closes
+  `capacity = busy + idle` exactly and splits idle by CAUSE
+  (`idle_staging_s` — a freed slot waiting on the parent's serial
+  `torch.export.save`; `idle_drain_s` — the straggler tail; `idle_spawn_s`;
+  `idle_other_s`), charged as free-slot-seconds at the moment they occur rather
+  than divided out afterwards. The pool emits its own typed
+  `aot_mint_phases phase=pool` event, and per-entry `parent_stage_s` /
+  `parent_spawn_s` ride the existing phase channel under a distinct prefix so
+  nobody sums parent work into a compile total.
+- **pgw#830 — the invariant is a TEST.** `test_compile_attribution_pgw830.py`
+  drives the real `EntryCompilePool` through real `aot_compile` children and
+  asserts each partition equals the sum of its members, that the residual stays
+  under 15 % of `compile_s`, and that the seal split still covers
+  `child_seal_s`. On the recorded run the unnamed residual is **4.8 %**, against
+  44 % before.
+
+- **pgw#783 — the parent/child process split is now the ONLY worker execution
+  model; the `GEN_WORKER_PROCESS_SPLIT` flag is gone.** `entrypoint`
+  unconditionally becomes the control parent and execs one compute child per
+  execution group — there is no single-process mode to fall back to.
+  `split_enabled()`/`ENV_SPLIT` are removed from `procsplit`. G=1 behaviour is
+  byte-identical to the previous flag-on path. Re-landed on top of pgw#826
+  (the first landing, 79894b4, crash-looped a hardware-unsuitable pod forever
+  and was reverted out of the 0.85.0 cut): a compute child's terminal boot
+  verdict now ends the pod — T_BOOT_FATAL relays the typed HardwareUnsuitable
+  report through the parent's credential and the parent exits 1, no respawn —
+  and that machinery is exercised with the split always on. The boot-smoke
+  hardware-report suite asserts the split-world contract (child hands the
+  verdict to the parent; the parent's relay is what the report budget bounds).
+- **pgw#783 follow-on — the control parent honors the pgw#639 SIGUSR2
+  contract: dump and forward, never die.** tests_v2's zero-based boot gate
+  caught it under the unconditional split: SIGUSR2 to the pod pid (now always
+  the control parent) took default action and killed the worker. The parent
+  installs the forward-to-children handler first, then faulthandler with
+  `chain=True`, so one signal prints parent + children thread stacks to the
+  pod log and kills nothing.
+
+## 0.86.0 (2026-08-01) — no mint route could publish a cell: the regional arm gets its caller, the delegated mint child gets its slots, eager serving names its reason, and the zero-based suite becomes a CI gate
+
+- **pgw#827 — a REGIONAL cell is adopted through the REGIONAL arm, so it can be
+  PUBLISHED at all.** On a real L4 (0.85.0, sdxl 0.2.105, lane `w8a8-lora64`,
+  recipe `aot-regional`, pod `o7y87kfunc3rmm`) the platform's first successful
+  AOT mint — `aot_mint_phases phase=minted n_entries=72 total_s=354.45` — was
+  then discarded at the mint's own self-adopt verification with `aot_adopt
+  constants_constant_unresolved`: all 30 declared constants of every entry
+  unresolvable. `models.provision.arm_aot` DETECTED the regional cell (pgw#825
+  added that, to skip the lifted install) and handed it to `aot_serve.enable`
+  anyway — the whole-graph arm, which builds ONE bind table per TARGET from
+  `resident_constants(unet)`. A regional entry's FQNs are block-relative
+  (`attn1.to_k.weight`); the denoiser carries them under their full path; and
+  `resolve_constants` is a direct FQN lookup by design. Because
+  `fleet_cells.adopt_delegated_mint` runs that same `arm_aot`, an unwired
+  regional arm did not merely mean regional cells could not serve — it meant
+  they could not be published. New `aot_regional.load_and_arm`/`enable` is the
+  regional twin of `aot_serve.load_and_wrap`/`enable`: the same gates in the
+  same order, differing only in that the bind table is built per block
+  INSTANCE. It publishes the SAME format-2 pipeline marker, so `is_armed`,
+  `execution_count`, `proven_since`, `set_guard_failure_callback` and `unwrap`
+  need no regional variant — without which the executor's adoption proof
+  (pgw#735) could never pass for a regional cell and the mint would publish and
+  then be rolled back as unproven.
+- **pgw#827 — the arm is asked BEFORE the mint spends.** New
+  `models.provision.arm_route(mode)` is one registry, consulted by the arm when
+  it arms and by `fleet_cells.mint_recipe` before the child is spawned. A cell
+  whose mode this runtime has no arm for is refused by name rather than routed
+  to whichever arm is the default, and a regional recipe with no wired arm
+  declines `regional_arm_unwired` at `self_mint_started` instead of after
+  354 s of L4.
+- **pgw#827 — the regional lane gets the whole-graph lane's fail-soft
+  contract.** `aot_regional.BlockShim` had no guard: an artifact fault was a
+  failed REQUEST. It now serves eager on an ingress refusal (named, counted,
+  still armed) and on any other artifact fault marks the instance failed,
+  revokes scheduler-visible compiled proof, and serves eager for the rest of
+  the process.
+- **pgw#827 — the adapter fork routes by module STATE for a regional cell.**
+  pgw#790 discriminates the two arms by ingress, which works because the lift
+  wraps the DENOISER. A regional entry is exported one block deep from the
+  block's own signature, which never carries the lifted pair, so both arms
+  declare the same contract, both admit every call, and `EntryDispatch`
+  correctly refuses `entry_ambiguous` on every forward — the cell arms, reports
+  armed, and serves 100% eager. New `aot_regional.BlockDispatch` picks the arm
+  from the denoiser's live adapter state (`lora_lifted.adapter_active`, the
+  same fact `aot_serve.adapter_call_kwargs` already reads), and ingress then
+  discriminates cfg/shape within the arm.
+- **pgw#831 (gated here, fixed on its own train) — a folded constant bakes the
+  PROTOTYPE block's weights into every other instance.**
+  `eliminated_constants`' "routine compiler fusion, recorded, never fatal" is
+  right for a whole-graph cell and FATAL for a regional one, which reuses one
+  artifact across instances that do not share weights. Measured off-pod with
+  `ff.bias` folded: instance 0 reproduces eager at 0.0, instance 1 is wrong by
+  0.53, with nothing unbound and nothing refused. A regional entry that folded
+  any `state_dict` constant is now REFUSED before packing. The remedy —
+  `aot_inductor.use_runtime_constant_folding=True`, verified to keep them
+  bindable — re-keys every cell and needs `_FOLDED_CONST_*` handling, so it
+  rides pgw#831.
+- **pgw#828 — the delegated mint child runs the endpoint's warm job with the
+  SAME context the serving path builds.** On a real L4 the child loaded the
+  pipeline in 16.45 s (pgw#816 holding) and then died at
+  `ctx.slots["pipeline"]` with `KeyError: 'pipeline'`: it hand-rolled a
+  `RequestContext` with no slots, no models and no root slot. Nothing was
+  missing from the wire — warm-shape slot resolution needs only the spec, which
+  the child builds itself; it simply never asked. New `warmup.warm_context`
+  (plus `warmup.resolved_slots_kwargs` / `warmup.spec_root_slot`, moved out of
+  `executor`) is now the ONE construction, called by the boot warm path, the
+  in-process mint seed and the child; `executor._resolve_slots_kwargs` and
+  `executor._spec_root_slot` are aliases of it. It lives in `warmup` so the
+  child never imports the executor. The regression asserts the two contexts are
+  the SAME construction, slot by slot — a child that resolved different slot
+  defaults would trace different shapes and the parent's proof would miss.
+- **pgw#824 — the fleet-wide silent-failure audit (SDK half): eager serving names its reason,
+  a silent mint phase ticks, and two swallowed failures that were corrupting DECISIONS.**
+  Ordered by Paul after the five-silent-blockers retrospective: five defects hid for weeks
+  because failures were log-only, success events did not exist, refusals carried empty reasons,
+  and eager-first masked every symptom. pgw#760 swept `except` handlers; this closes the three
+  pattern classes that sweep structurally missed, plus the files it deferred and everything
+  written since.
+
+  **Eager serving is an EVENT, not a default.** `serving_mode`'s four fallback classes
+  (`guard_miss`/`ingress_refused`/`healing`/`volatile`) all presuppose an ARMED cell, so the
+  commonest eager case by far — nothing armed at all — reported `serving_mode=eager,
+  fallback_reason=""`. That empty string could not distinguish a release that declares no
+  compile target from a pod still minting from a pod that declined for cause, so "why is this
+  fleet eager right now" had no query. One level down, the declines that DID emit shared one
+  constant phase: `_fail_closed`'s nine distinct exits all sent
+  `self_mint_skipped phase=mint_unavailable` with the cause in free text only — the th#1250
+  lesson (kind-only coalescing erases the reason) repeating. Now: `ArmOutcome.eager_reason`
+  carries the arming brain's token out of its own decision; the nine exits carry nine tokens
+  (`no_family`, `no_cuda`, `no_toolchain`, `no_compile_target`, `delivered_cell_seeded`,
+  `key_computation_failed`, `capture_conflict`, `multi_group_in_process`,
+  `capture_arm_failed`); the in-process cell-QUARANTINE exit — the one eager exit that returned
+  before `_fail_closed` and only `logger.error`'d, on a pod that then serves eager for the rest
+  of its life — is typed (`cell_quarantined`); the delegated arm reports `mint_in_progress`,
+  because eager with an END must never read the same as eager forever; `serving_mode.POSTURE_*`
+  + `resolve(eager_posture=)` reports it per request, applying ONLY when the mode is already
+  eager and never setting `served_eager_fallback` (nothing fell back — there was nothing to
+  fall back FROM), so every existing compiled-vs-eager comparison keeps its meaning; and five
+  `_install_compile_targets` omission branches that were `logger.warning`+`continue` type
+  themselves. `fallback_reason` on the request row is now the SAME string as `phase` on the
+  worker's activity event, so the question is one `GROUP BY` joining the two on a token.
+
+  **A multi-entry AOT mint reports every entry.** `aot_mint.mint` was ONE opaque call spanning
+  the family's whole declared graph-class set (sdxl declares 18), so `mint_child` framed
+  `trace_graph` once and said nothing until `seal_publish` — a real export measured ~5 minutes
+  of complete wire silence, with the pod's only liveness evidence being that its CPU was warm.
+  That proves ALIVE, not PROGRESSING, and the distinction is the content of the
+  no-magic-timeouts doctrine. `mint(on_progress=)` reports per class row BEFORE the row runs (a
+  row that never returns is the one a reader most needs named);
+  `EntryCompilePool.compile(on_entry=)` fires as each entry lands, covering the longest
+  wire-silent stretch of a mint; `mint_child` frames both through the protocol that already
+  exists, so the parent's `_on_frame` lands them on the same `self_mint_compile` activity with
+  step/total. `mint_delegate` also finally passes `on_evidence` — `run_mint` has accepted it
+  since pgw#784 and nobody ever did, so the child's measured progress (tree CPU + capture-dir
+  growth) existed only to decide whether to KILL it, never to prove it was working.
+
+  **A cell-discovery MISS says why every candidate lost, as counts.** `_candidates` dropped
+  rows on `logger.debug`/bare `continue` and the `miss` event reported only "no matching cell
+  among N checkpoint(s)" — so a family with 12 published cells that rejects all 12 read
+  identically to a family with none, and those are different bugs with different owners. The
+  rejections are counted by class and ride the miss detail.
+
+  **Two swallowed failures that corrupt decisions, fixed at the decision.** (1) An emergency
+  nf4 quant landing on ZERO modules was SELF-SUPPRESSING: the failure did `adaptive_rung = ""`,
+  and the `if adaptive_rung:` stamp below it is the very mechanism that reports rung outcomes to
+  placement — so the worst outcome the fit ladder can produce (serving full precision over the
+  budgeted VRAM, on a host already too tight for stored precision) was the only one that
+  reported nothing, while every sibling rung reported itself. Now `RUNG_NF4_UNLANDED`, routed
+  through `SlotLoad.rung` -> `_record_adaptive_rung` -> ServePlan/FnDegraded like every other
+  rung. (2) A failed residency eviction booked `tier=RAM, vram_bytes=0` while
+  `_move_verified`'s own rollback had just put the object back on CUDA: the registry believed
+  the entry held ZERO VRAM, `make_room` handed out headroom that does not exist, and the OOM
+  landed on an unrelated `promote()` later with nothing tying it back. "Book the truth" now
+  means the truth in both branches.
+
+  Also: the block-window offload engagement (every forward now streams weights over PCIe from
+  host RAM — the biggest per-request latency change the loader can make) is typed, the sibling
+  the pgw#760 `apply_fp8_storage` fix missed; and an unparseable `destination_repo` confesses
+  once per context instead of silently redirecting a job's outputs off the repo-CAS path.
+
+  The endpoint half is **ie#589** — the sweep's root finding was that `activity.emit_event` has
+  ZERO adopters across all 27 endpoint families.
+
+  **Reconciled with pgw#825, into ONE mechanism.** 0.85.0's cut merged this branch textually
+  clean and got 16 failed / 6 errored: pgw#825 had split `mint()` into
+  `mint` / `_attach_partial_phases` / `_mint_cell`, so this branch's `on_progress` parameter
+  landed on one function and its `_beat` helper inside another —
+  `NameError: name 'on_progress' is not defined`. Both issues had arrived at the same question
+  ("where is this mint?") from opposite ends: pgw#825 accumulates the partial state so an
+  ABORTED mint reports the seconds it spent, pgw#824 pushes those positions out LIVE. Rather
+  than thread a second parameter past the first mechanism, both now ride one
+  `aot_mint.MintProgress` — it owns `timings`/`minted`/`width`/`t_mint` (pgw#825) and
+  `beat()` (pgw#824), and `beat` RECORDS the position before reporting it, so the two halves
+  cannot disagree. The dividend is pgw#825's one remaining blind spot closed: its per-entry
+  rows name the entries that FINISHED, and an aborted table now also carries `at` — the entry
+  the mint died ON, which is the row a reader is actually asking about.
+- **pgw#808 — the zero-based suite is a CI gate.** `tests_v2/` shipped in 0.85.0 and `ci.yml`
+  ran `tests/` only, so its coverage was imaginary: nothing would have reddened if a v2
+  scenario broke. CI (and `task test`) now run both directories as two independent steps.
+  Both, not the flip: `tests_v2/` has 2 of its 14 planned suites, and nine behavior domains
+  have zero v2 coverage today, so `tests/` is still the net. The flip deletes the v1 step.
+
+  Wiring it found the drift on the first run, which is the argument in one line: pgw#810 (the
+  unknown-function refusal that sent an empty `safe_message`) was FIXED on chaos, and its
+  `xfail(strict=True)` — written to "fail loudly the moment it starts passing" — was never
+  deleted, because nothing ran the file it lived in. A strict xfail that XPASSes is a FAILURE,
+  so `tests_v2/` was already red and nobody could tell. Marker deleted; the refusal now rides
+  the names-its-cause loop with the rest of the matrix, and pgw#810 is closed.
+## 0.85.0 (2026-07-31) — a regional cell's LoRA branch pair is BINDABLE: the ONE bind template, the mismatch refused before the compile is paid for, an aborted mint that reports where it spent, and the process split as the only execution model
+
+- **pgw#825 — a regional cell's LoRA branch pair is BINDABLE, the mismatch is
+  refused BEFORE the compile is paid for, and an aborted mint still reports
+  where it spent.** On a real L4 (0.84.0, sdxl 0.2.104, lane `w8a8-lora64`,
+  recipe `aot-regional`) the mint compiled and was refused at 351.73 s, per
+  entry and AFTER that entry's compile: `20 declared state_dict constant(s)
+  are absent from the resident module's state_dict, e.g.
+  ['attn1.to_q.lora_a', ...]`. Mechanism, reproduced off-pod with a real
+  `torch.export` + AOTI pack: `w8a8_lora.alloc_branch_buffers` registers
+  `lora_a`/`lora_b` **non-persistent** (a checkpoint must not carry a zeroed
+  adapter), `module.state_dict()` omits non-persistent buffers, and
+  `torch.export` still lifts them as BUFFER inputs that AOTInductor declares
+  `ConstantType::Buffer` under their real FQN — i.e. `source=state_dict`. The
+  gate was right and the bind TEMPLATE was wrong, on the mint side and at both
+  arm sites. New `aot_serve.resident_constants` is the ONE definition of what a
+  `state_dict`-sourced constant may bind to (parameters + ALL buffers), used by
+  the mint's bindability gate, `aot_serve`'s whole-graph arm and
+  `aot_regional.arm_blocks`. Input lifting is NOT the fix and was never the
+  defect: it wraps the DENOISER's forward, and a regional entry is exported one
+  block deep — a block's branch pair stays module-resident and binds per
+  instance by reference (`user_managed=True`), which gives regional the same
+  property lifting gives the family graph (an adapter swap is an in-place
+  buffer write, never a rebind and never a recompile). Regional block entries
+  therefore no longer inherit the family's `lifted_inputs`, and
+  `models.provision.arm_aot` refuses to install the lifted forward under a
+  regional cell, whose leaves it would reassign out from under the arm.
+- **pgw#825 — the same question, asked before the compile.** New
+  `aot_package.unbindable_program_constants` runs the bindability check on the
+  ExportedProgram, in both the whole-graph and regional export paths, so a
+  declaration/module mismatch costs milliseconds and a typed refusal instead of
+  4-6 minutes of GPU per entry. The packed gate stays: it reads the artifact's
+  own generated wrapper, which is the only proof of what shipped.
+- **pgw#825 — `aot_mint_phases` reports on EVERY terminus.** An aborted mint
+  emitted only `total_s`, so `compile_s`/`export_s`/`n_entries` parsed to `-`
+  and a run that paid for real compiles produced no measurement. `aot_mint.mint`
+  now attaches the partial phase table to whatever it fails with, the child
+  carries it into a `refused`/`failed` report, and the parent emits the table's
+  roll-up under `phase=aborted` (never `minted`) plus the per-entry
+  `entry:<name>` rows.
+
+- **th#1355 (worker half) — a published cell states its own identity and
+  cost.** The publish payload now carries `identity_axes` (the axes the cell
+  was keyed on) and `mint_duration_ms` (what the mint actually cost), so the
+  hub's cell inventory records what a cell IS and what it took to make
+  instead of inferring both. `CellPublisher.publish` grows a
+  `mint_duration_ms` parameter and `fleet_cells.publish_self_mint` threads
+  the mint's measured duration through to it.
+
+- **pgw#823 (SDK half) — ask for a C++ compiler before spending 336s
+  discovering there isn't one.** An AOT mint on an image with no `g++` (or no
+  CUDA crt/nv headers) ran the full load-and-trace and only failed once
+  inductor tried to build a kernel — 336 s of rented GPU for a question
+  answerable at boot. `compile_cache` now probes the C++/CUDA toolchain and
+  `fleet_cells.mint_recipe` declines by name before the pod is spent;
+  `mint_child` refuses typed on the same predicate.
+
+- **pgw#818 — the worker's fabric gate adopts the hub's full predicate.** The
+  Hello-time demote read `interconnect` alone while the hub's grew a measured
+  bandwidth floor, so in the band `nvlink AND peer_gbps < 200` a 2x2 pod refused
+  half of every dispatch RETRYABLE forever and a 1x4 pod overstated capacity 4x.
+  `delivered_topology` now demotes unless `sp_admits(interconnect, peer_gbps)` —
+  `nvlink AND >= SP_MIN_PEER_GBPS (200.0)`, the hub's `topology.SPAdmits`
+  verbatim — and a WEDGED fabric (`peer_access AND peer_gbps == 0.0`, the
+  collective that hangs with no error) raises
+  `topology_fabric_wedged_peer_access_zero_bandwidth` typed at boot for any
+  multi-GPU topology, closing the race against the hub's quarantine drain.
+  Deliberately still no HelloAck demote field: two independent gates over one
+  measurement is the design; th#1285 interpretation 4's "agree by construction"
+  holds only while the predicates match, which they now again do.
+
+- **pgw#808 — `tests_v2` scaffold: the declarative endpoint catalog and the
+  first two scenario suites.** A new `tests_v2/` tree describes endpoints as
+  DATA (`catalog.py`) and drives boot and dispatch scenarios from that
+  description rather than from hand-built fixtures per test. Additive only —
+  no existing suite or shipped module changes.
+
 ## 0.84.0 (2026-07-31) — the AOT mint exports the module it DECLARED: one lifted arm for the export, a declaration/module check before a pod is rented, and the process split becomes an N-group AUTHORIZATION boundary (dark)
 
 - **pgw#822 — the AOT mint exports the module it DECLARED: ONE lifted arm, plus a

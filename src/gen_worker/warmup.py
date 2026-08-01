@@ -83,6 +83,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -749,3 +750,128 @@ def validate_class_warmup(cls: type, decl: EndpointDecl, specs: List["EndpointSp
     if jobs:
         return
     _raise_unwarmable(cls.__name__, [(s.spec.attr_name, s.reason) for s in skips])
+
+
+# ---------------------------------------------------------------------------
+# The warm-job RequestContext — ONE construction (pgw#828)
+# ---------------------------------------------------------------------------
+
+
+def spec_root_slot(spec: "EndpointSpec") -> str:
+    """The declared root slot name (pgw#654 gap #7): ``Slot(root=True)``,
+    else ``"pipeline"``, else the single slot; ``""`` when nothing resolves
+    a root."""
+    for name, slot in spec.slots.items():
+        if getattr(slot, "root", False):
+            return name
+    if "pipeline" in spec.slots:
+        return "pipeline"
+    if len(spec.slots) == 1:
+        return next(iter(spec.slots))
+    return ""
+
+
+def resolved_slots_kwargs(
+    spec: "EndpointSpec", run: Any = None,
+) -> Dict[str, Any]:
+    """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
+    ``Slot``-declared slot's repo-metadata ``ModelBinding.inference_defaults``
+    over its code fallback preset, then apply each riding lora's
+    ``LoraOverlay.inference_defaults`` as a FIELD-LEVEL override, in lora
+    order (pgw#516 composition rule — see ``api.slot._apply_lora_overrides``).
+
+    Returns the ``resolved_slots=`` / ``slot_errors=`` / ``root_slot=`` kwargs
+    for ``RequestContext.__init__``. A slot that fails to resolve (no metadata
+    + no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access
+    error instead of failing the whole dispatch.
+
+    ``run=None`` is the WARM shape: no per-dispatch binding metadata, so every
+    slot resolves from the spec's own declaration. That is what makes this
+    reachable from the delegated mint child, which has the spec and no job.
+    """
+    if not spec.slots:
+        return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
+    from .api.slot import resolve_slot
+
+    run_models = list(run.models) if run is not None else []
+    raw_defaults = {
+        b.slot: b.inference_defaults for b in run_models if b.inference_defaults}
+    lora_defaults = {
+        b.slot: tuple(
+            lo.inference_defaults for lo in b.loras if lo.inference_defaults)
+        for b in run_models if b.loras
+    }
+    # pgw#654: the resolved checkpoint's stamped objective/distilled facts
+    # ride the binding; the per-function declaration is the backstop (the
+    # hub gates checkpoint<->function compatibility at deploy/dispatch).
+    objectives = {
+        b.slot: str(getattr(b, "objective", "") or "") for b in run_models}
+    distilled_facts = {
+        b.slot: bool(getattr(b, "distilled", False)) for b in run_models}
+    resolved: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+    for name, slot in spec.slots.items():
+        try:
+            resolved[name] = resolve_slot(
+                name, slot,
+                ref=spec.models.get(name),
+                defaults_cls=spec.defaults_type,
+                family=spec.slot_family.get(name, ""),
+                raw_metadata_json=raw_defaults.get(name, ""),
+                lora_metadata_json=lora_defaults.get(name, ()),
+                objective=objectives.get(name, ""),
+                distilled=distilled_facts.get(name, False),
+                allowed_objectives=spec.objectives,
+                allowed_distilled=spec.distilled,
+            )
+        except ValueError as exc:
+            errors[name] = str(exc)
+    return {
+        "resolved_slots": resolved,
+        "slot_errors": errors,
+        "root_slot": spec_root_slot(spec),
+    }
+
+
+def warm_context(
+    spec: "EndpointSpec", *,
+    request_id: str,
+    local_output_dir: str,
+    lane: str = "",
+    config: Optional[Mapping[str, Any]] = None,
+) -> Any:
+    """The ``RequestContext`` a WARM forward runs under — one construction.
+
+    pgw#828: the delegated mint child hand-rolled its own, and the one it
+    rolled had no slots at all. On a real L4 the child LOADED the pipeline in
+    16.45 s (pgw#816's fix holding) and then died in the endpoint's own warm
+    job at ``ctx.slots["pipeline"]`` with ``KeyError: 'pipeline'`` — so the
+    dynamo route published nothing, exactly as the AOT route published
+    nothing, and no mint route on the platform could produce a cell.
+
+    That is the same shape as pgw#816 one stage later, and the same shape as
+    pgw#816/#822/#825/#827: two constructions of one thing, free to drift.
+    The graphs the child traces are the graphs the parent must later hit, so
+    a child whose ctx resolves DIFFERENT slot defaults traces different
+    shapes and the parent's proof misses — the "mint succeeded, no artifact"
+    class. There is one factory now, and both sides call it.
+
+    It lives in ``warmup`` rather than in ``executor`` on purpose: the child
+    already derives its warm plan from here, and it must never import the
+    executor's whole arming brain to build a context.
+    """
+    from .api.binding import wire_ref
+    from .request_context import RequestContext
+
+    ctx: Any = RequestContext(
+        request_id=str(request_id),
+        local_output_dir=local_output_dir,
+        models={slot: wire_ref(b) for slot, b in spec.models.items()},
+        **resolved_slots_kwargs(spec, None),
+        boot_warmup=True,
+    )
+    if lane:
+        ctx._set_lane(str(lane))
+    if config:
+        ctx._set_config(dict(config))
+    return ctx

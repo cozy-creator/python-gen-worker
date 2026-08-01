@@ -205,16 +205,22 @@ async def _report_async(settings: Settings, report: HardwareReport) -> bool:
     return False
 
 
-def report_hardware_unsuitable(settings: Settings, probe: CudaProbeResult) -> bool:
-    """Bounded best-effort: build the typed report and dial the hub with it
-    in place of Hello. Never raises. Returns whether the hub is believed to
-    have received it — the entrypoint logs+exits either way; this is purely
-    the diagnostic channel, not a gate on shutting down."""
+def deliver_hardware_report(settings: Settings, report: HardwareReport) -> bool:
+    """Dial the hub with an already-built report. Never raises. pgw#826: also
+    the path a control parent uses to relay a compute child's terminal boot
+    verdict on its own credential."""
     if not (settings.orchestrator_public_addr or "").strip():
         return False
-    report = build_hardware_report(probe, settings)
     try:
         return asyncio.run(_report_async(settings, report))
     except Exception:
         logger.warning("hardware-unsuitable report failed entirely", exc_info=True)
         return False
+
+
+def report_hardware_unsuitable(settings: Settings, probe: CudaProbeResult) -> bool:
+    """Bounded best-effort: build the typed report and dial the hub with it
+    in place of Hello. Never raises. Returns whether the hub is believed to
+    have received it — the entrypoint logs+exits either way; this is purely
+    the diagnostic channel, not a gate on shutting down."""
+    return deliver_hardware_report(settings, build_hardware_report(probe, settings))

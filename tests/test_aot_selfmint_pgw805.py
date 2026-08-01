@@ -291,7 +291,15 @@ def test_degrading_to_eager_is_never_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RED at HEAD: `_fail_closed`'s plain-lane arm was a bare `logger.info`,
-    and a serve pod exposes no logs (pgw#760)."""
+    and a serve pod exposes no logs (pgw#760).
+
+    pgw#824 tightened the assertion: the phase is the CLASSIFIED cause, not the
+    constant `mint_unavailable` that all nine `_fail_closed` exits used to
+    share. The cause lived only in the free-text detail, so counting "how much
+    of this fleet is eager for want of a C++ compiler" meant substring-matching
+    a sentence. The token is also what the request row's `fallback_reason`
+    carries, so the event stream and the request table join on one string.
+    """
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: False)
 
     outcome = _arm(delegate=True)
@@ -299,9 +307,11 @@ def test_degrading_to_eager_is_never_silent(
     assert not outcome.armed and outcome.self_mint is None
     skipped = [
         detail for kind, phase, detail in _events
-        if kind == "self_mint_skipped" and phase == "mint_unavailable"]
+        if kind == "self_mint_skipped" and phase == "no_toolchain"]
     assert skipped, "a pod that mints nothing and refuses nothing is unreadable"
     assert "no C compiler" in skipped[0]
+    # and the arm carries the same token out, for the request path to report
+    assert outcome.eager_reason == "no_toolchain"
 
 
 # ---------------------------------------------------------------------------

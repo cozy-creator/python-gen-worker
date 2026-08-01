@@ -12,7 +12,7 @@ import os
 import faulthandler
 import signal
 
-# Reduce CUDA allocator fragmentation for tight-VRAM single-process workers.
+# Reduce CUDA allocator fragmentation for tight-VRAM worker processes.
 # Set BEFORE any module imports torch (PyTorch reads this env var only at
 # first cudaMalloc; setting it later is a no-op). gen-worker entrypoint is
 # the first module loaded in every worker process, so putting it here gives
@@ -34,15 +34,15 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # compile-worker subprocess. See compile_cache._disable_aot_autograd_cache.
 os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
 
-# pgw#763: with GEN_WORKER_PROCESS_SPLIT=1 this process becomes the CONTROL
-# PARENT — gRPC stream, identity, JWT, child supervision — and must run BEFORE
-# the heavy imports below so it never loads torch. It spawns/respawns compute
-# children (this same entrypoint with GEN_WORKER_COMPUTE_CHILD=1) and only
-# ever exits deliberately.
+# pgw#763: this process becomes the CONTROL PARENT — gRPC stream, identity,
+# JWT, child supervision — and must run BEFORE the heavy imports below so it
+# never loads torch. It spawns/respawns compute children (this same entrypoint
+# with GEN_WORKER_COMPUTE_CHILD=1) and only ever exits deliberately. The split
+# is unconditional; only a compute child falls through to the imports below.
 if __name__ == "__main__":
-    from .procsplit import is_compute_child, split_enabled  # noqa: E402
+    from .procsplit import is_compute_child  # noqa: E402
 
-    if split_enabled() and not is_compute_child():
+    if not is_compute_child():
         from .procsplit.parent import run_parent  # noqa: E402
 
         os._exit(run_parent())
@@ -411,6 +411,26 @@ def _run_main() -> int:
         probe = probe_cuda()
         if not probe.ok:
             logger.error("%s: %s", CUDA_PROBE_FAILED_MARKER, probe.reason)
+            from .procsplit import is_compute_child
+
+            if is_compute_child():
+                # pgw#826: a hardware verdict is terminal for every child this
+                # pod could spawn. This process holds no credential — hand the
+                # typed report to the parent, which relays it and exits 1.
+                from .hardware_report import build_hardware_report
+                from .procsplit.child import send_boot_fatal
+
+                report = build_hardware_report(probe, settings)
+                relayed = send_boot_fatal(msgspec.to_builtins(report))
+                _log_startup_phase(
+                    "cuda_probe_boot_fatal",
+                    status="ok" if relayed else "error",
+                    level=logging.INFO if relayed else logging.WARNING,
+                    relayed=relayed,
+                    reason_class=report.reason_class,
+                )
+                _log_worker_fatal("cuda_probe", RuntimeError(probe.reason), exit_code=1)
+                return 1
             # gw#619/th#988: dial the hub with a typed hardware-unsuitable
             # report BEFORE exiting — closes the th#986 blindness where this
             # exit was previously silent pre-hello. Best-effort/bounded: the

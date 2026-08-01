@@ -31,7 +31,7 @@ def test_multi_group_degree_is_served() -> None:
     # a SERVED one — per-group process groups (pgw#773/#774) plus
     # topology-derived placement (the residual, see
     # test_group_device_map_pgw773.py) leave nothing to refuse.
-    topo = delivered_topology(_env(4, 2), interconnect="nvlink")
+    topo = delivered_topology(_env(4, 2), interconnect="nvlink", peer_gbps=272.6)
     assert (topo.groups, topo.degree) == (2, 2)
     assert [topo.group(g).devices for g in range(2)] == [(0, 1), (2, 3)]
 
@@ -42,7 +42,7 @@ def test_single_group_and_pure_dp_shapes_are_untouched() -> None:
     assert delivered_topology({}, interconnect="").groups == 1
     dp = delivered_topology(_env(4, 1, parallel=""), interconnect="pcie")
     assert (dp.groups, dp.degree) == (4, 1)
-    sp = delivered_topology(_env(2, 2), interconnect="nvlink")
+    sp = delivered_topology(_env(2, 2), interconnect="nvlink", peer_gbps=272.6)
     assert (sp.groups, sp.degree) == (1, 2)
 
 

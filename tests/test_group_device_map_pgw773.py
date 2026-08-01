@@ -44,7 +44,7 @@ def _no_installed_topology():
 
 
 def test_two_pairs_map_every_rank_to_a_card_it_owns() -> None:
-    topo = delivered_topology(_env(4, 2), interconnect="nvlink")
+    topo = delivered_topology(_env(4, 2), interconnect="nvlink", peer_gbps=272.6)
     assert (topo.groups, topo.degree) == (2, 2)
     install_topology(topo)
 
@@ -66,7 +66,7 @@ def test_two_pairs_map_every_rank_to_a_card_it_owns() -> None:
 def test_the_ranks_a_sequence_runtime_forms_are_the_groups_own_cards() -> None:
     from gen_worker.parallel.runtime import SequenceRuntime
 
-    topo = delivered_topology(_env(4, 2), interconnect="nvlink")
+    topo = delivered_topology(_env(4, 2), interconnect="nvlink", peer_gbps=272.6)
     runtimes = [SequenceRuntime(topo.group(g).devices) for g in range(2)]
     assert [rt.devices for rt in runtimes] == [(0, 1), (2, 3)]
     # rank r of group g executes on devices[r] — group 1 rank 1 is card 3.
@@ -87,7 +87,7 @@ def test_degree_one_and_no_topology_are_the_identity_mapping() -> None:
 def test_the_thread_is_pinned_to_the_groups_card_not_its_ordinal(monkeypatch) -> None:
     import torch
 
-    install_topology(delivered_topology(_env(4, 2), interconnect="nvlink"))
+    install_topology(delivered_topology(_env(4, 2), interconnect="nvlink", peer_gbps=272.6))
     pinned: list = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
@@ -106,7 +106,7 @@ def test_the_thread_is_pinned_to_the_groups_card_not_its_ordinal(monkeypatch) ->
 def test_multi_group_sequence_is_no_longer_refused() -> None:
     # The pgw#773 boot refusal is LIFTED for `sequence` at any shape.
     for gpus, degree in ((4, 2), (8, 2), (8, 4)):
-        topo = delivered_topology(_env(gpus, degree), interconnect="nvlink")
+        topo = delivered_topology(_env(gpus, degree), interconnect="nvlink", peer_gbps=272.6)
         assert (topo.groups, topo.degree) == (gpus // degree, degree)
     refuse_unless_groups_can_coexist(ExecutionTopology(4, 2, parallel="sequence"))
 
@@ -116,7 +116,7 @@ def test_a_degree_without_a_runtime_is_still_refused_by_name() -> None:
     # batch: holding 2 cards per slot and serving 1 card's worth is exactly
     # what a boot refusal exists to prevent.
     with pytest.raises(TopologyError) as exc:
-        delivered_topology(_env(4, 2, parallel="cfg"), interconnect="nvlink")
+        delivered_topology(_env(4, 2, parallel="cfg"), interconnect="nvlink", peer_gbps=272.6)
     assert exc.value.code == "topology_group_parallel_unsupported"
     with pytest.raises(TopologyError):
         refuse_unless_groups_can_coexist(ExecutionTopology(2, 2, parallel="cfg"))
@@ -133,11 +133,11 @@ def test_reading_the_real_environment_publishes_the_packing(monkeypatch) -> None
     # through it — and a question asked about some OTHER pod (explicit env)
     # must publish nothing.
     assert group_rank0_device(1) == 1, "un-installed: the identity mapping"
-    delivered_topology(_env(4, 2), interconnect="nvlink")
+    delivered_topology(_env(4, 2), interconnect="nvlink", peer_gbps=272.6)
     assert group_rank0_device(1) == 1, "an explicit env must not publish"
 
     monkeypatch.setenv("WORKER_EXECUTION_TOPOLOGY", _env(4, 2)["WORKER_EXECUTION_TOPOLOGY"])
-    delivered_topology(interconnect="nvlink")
+    delivered_topology(interconnect="nvlink", peer_gbps=272.6)
     assert group_devices(1) == (2, 3)
 
     # A fabric miss demotes to 4x1 — and it is the DEMOTED packing that gets

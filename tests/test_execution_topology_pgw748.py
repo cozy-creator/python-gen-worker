@@ -270,15 +270,19 @@ def test_disk_facts_union_across_groups(tmp_path) -> None:
 
 def test_a_sharded_pod_without_nvlink_demotes_instead_of_serving_the_promise() -> None:
     raw = '{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"sequence"}'
-    # The pod the hub bought in good faith.
-    nvlink = delivered_topology(_env(raw), interconnect="nvlink")
+    # The pod the hub bought in good faith. pgw#818: class alone no longer
+    # keeps the group — the measured bandwidth must clear the floor too.
+    nvlink = delivered_topology(_env(raw), interconnect="nvlink", peer_gbps=272.6)
     assert (nvlink.groups, nvlink.degree, nvlink.parallel) == (1, 2, "sequence")
 
     # H100-PCIe measured `SYS` at 14.5 GB/s -> 1.40x, sold as 1.89x.
     # 2xRTX-4090 measured 1.96 GB/s -> 0.51x, SLOWER than one GPU.
     for miss in ("host-staged", "pcie-p2p", ""):
-        demoted = delivered_topology(_env(raw), interconnect=miss)
+        demoted = delivered_topology(_env(raw), interconnect=miss, peer_gbps=14.5)
         assert (demoted.groups, demoted.degree, demoted.parallel) == (2, 1, "")
+    # And the class-passes-floor-fails band (pgw#818's disagreement band).
+    demoted = delivered_topology(_env(raw), interconnect="nvlink", peer_gbps=30.2)
+    assert (demoted.groups, demoted.degree, demoted.parallel) == (2, 1, "")
 
 
 def test_an_internal_group_is_never_demoted() -> None:
@@ -286,7 +290,7 @@ def test_an_internal_group_is_never_demoted() -> None:
     # break a release that has always worked.
     raw = '{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"internal"}'
     for link in ("nvlink", "host-staged", ""):
-        topo = delivered_topology(_env(raw), interconnect=link)
+        topo = delivered_topology(_env(raw), interconnect=link, peer_gbps=14.5)
         assert (topo.groups, topo.degree, topo.parallel) == (1, 2, "internal")
 
 

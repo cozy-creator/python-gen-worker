@@ -86,7 +86,8 @@ class _Publisher:
     def worker_jwt(self) -> str:
         return "jwt"
 
-    def publish(self, family: str, artifact: Path, meta: dict) -> str:
+    def publish(self, family: str, artifact: Path, meta: dict,
+                mint_duration_ms: int = 0) -> str:
         self.started.set()
         self.release.wait(timeout=30)
         if self.fail is not None:
@@ -96,6 +97,7 @@ class _Publisher:
             "family": family,
             "bytes": Path(artifact).stat().st_size,
             "meta": dict(meta),
+            "mint_duration_ms": mint_duration_ms,
         }
         return f"chk-{key[:8]}"
 

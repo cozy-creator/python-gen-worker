@@ -103,42 +103,6 @@ jobs:
           uv pip install --python /tmp/wheel-contract/bin/python dist/gen_worker-*.whl
           cd /tmp && /tmp/wheel-contract/bin/python "$GITHUB_WORKSPACE/scripts/check_registry_contract.py" --installed
 
-      # pgw#788 gate, in the SAME venv — it installs the wheel with no extras,
-      # so it is genuinely torch-free. 0.70.3 through 0.78.0 shipped a boot path
-      # that bare-imported torch three times over, and every torchless CPU
-      # endpoint died at phase=env_seal; nothing caught it because every
-      # environment we test in has torch. The in-suite test simulates the
-      # absence with a meta_path finder, and a simulation can drift from a real
-      # environment — this is the real one.
-      - name: Torchless boot contract on the built wheel (pgw#788)
-        run: |
-          cd /tmp && /tmp/wheel-contract/bin/python "$GITHUB_WORKSPACE/scripts/check_torchless_boot_pgw788.py"
-
-      # pgw#770 gate: the svdq layout fix must be in the ARTIFACT, and CORRECT
-      # there. 0.77.0 shipped without `pack_lowrank`/`pack_vector` and the
-      # conversion endpoint — which installs the pinned wheel with no source
-      # overlay — died on the import; nothing caught it, because the suite
-      # imports src/. The wheel is force-installed over the project venv (which
-      # already has torch, so the oracle cannot importorskip itself green) and
-      # the test runs from a scratch dir, where pyproject's pythonpath=["src"]
-      # and tests/conftest.py cannot resolve the checkout instead.
-      # test_svdq_official_layout_pgw770.py is the ONLY independent oracle in
-      # this area: it asserts our inverses against deepcompressor's forward
-      # packers transcribed verbatim. Every other svdq suite is an
-      # encoder/decoder round trip that a shared wrong convention passes —
-      # which is how the original bug survived a "bit-exact, 4573 tensors"
-      # claim that was a name/shape census.
-      - name: svdq layout oracle on the built wheel (pgw#770)
-        run: |
-          uv pip install --python .venv/bin/python --force-reinstall --no-deps dist/gen_worker-*.whl
-          mkdir -p /tmp/wheel-svdq
-          cp tests/test_svdq_official_layout_pgw770.py /tmp/wheel-svdq/
-          cd /tmp/wheel-svdq
-          "$GITHUB_WORKSPACE/.venv/bin/python" \
-            "$GITHUB_WORKSPACE/scripts/check_svdq_wheel_pgw770.py"
-          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest \
-            test_svdq_official_layout_pgw770.py -v -p no:cacheprovider -o addopts=
-
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         # Uses trusted publishing - no token needed

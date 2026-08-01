@@ -64,6 +64,43 @@ INTERCONNECT_HOST_STAGED = "host-staged"
 INTERCONNECT_PCIE_P2P = "pcie-p2p"
 INTERCONNECT_NVLINK = "nvlink"
 
+# SP_MIN_PEER_GBPS (pgw#818) is the measured-bandwidth floor a pod must clear
+# to carry a platform-sharded group, IN ADDITION to classifying ``nvlink`` —
+# the hub's ``topology.SPMinPeerGbps`` (tensorhub topology/interconnect.go),
+# verbatim. Class alone is a string a degraded NV4 host also prints. The
+# 2026-07-29 fleet survey found the populations separated by an empty band
+# under EITHER leg a canary might report into ``peer_gbps``:
+#
+#   achieved all-to-all    NVLink 241.9 - 273.9  |  everything else <= 30.2
+#   device-to-device copy  NVLink 388.2 - 389.8  |  everything else <= 52.9
+#
+# 200 GB/s sits inside both gaps. Hub and worker gate INDEPENDENTLY on the
+# same measurement with the same two-term predicate (th#1285 interpretation 4
+# holds only while the predicates match — pgw#818 is what happened when one
+# side grew a floor alone); there is deliberately no HelloAck demote field.
+SP_MIN_PEER_GBPS = 200.0
+
+
+def sp_admits(interconnect: str, peer_gbps: float) -> bool:
+    """Whether this pod's MEASURED fabric may carry a platform-sharded group.
+
+    Both terms required: the class must be ``nvlink`` AND the bandwidth must
+    clear ``SP_MIN_PEER_GBPS``. Unknown/unmeasured admits nothing — the fast
+    tier's promise is only kept when the pod proved it.
+    """
+    return interconnect == INTERCONNECT_NVLINK and peer_gbps >= SP_MIN_PEER_GBPS
+
+
+def is_fabric_wedge(peer_access: bool, peer_gbps: float) -> bool:
+    """An NCCL WEDGE, not a slow host: peer access reported, bandwidth
+    measured exactly zero. Reproduced twice on machine 8n9k05n0sz03 (H100
+    NVL, SECURE): the collective HUNG — no exception, no timeout, no log. A
+    pod serving in that state strands every request routed to it. Zero
+    WITHOUT peer access is just "not measured" (a 1-GPU pod), no verdict.
+    Mirrors the hub's ``topology.IsFabricWedge``.
+    """
+    return peer_access and peer_gbps == 0.0
+
 # The wan-2.2 A14B production activation shape one Ulysses all-to-all moves
 # (SEQPAR-DESIGN §3): [batch, heads, tokens, head_dim] bf16 = 387 MB.
 PRODUCTION_ACTIVATION_SHAPE: Tuple[int, ...] = (1, 40, 37800, 128)
@@ -552,6 +589,9 @@ __all__ = [
     "classify_interconnect",
     "parse_nvidia_smi_topo",
     "PRODUCTION_ACTIVATION_SHAPE",
+    "SP_MIN_PEER_GBPS",
+    "sp_admits",
+    "is_fabric_wedge",
 ]
 
 

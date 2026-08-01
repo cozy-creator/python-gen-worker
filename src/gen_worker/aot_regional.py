@@ -38,10 +38,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
+from . import aot_serve
 from . import numerics_ladder
 from .activity import KIND_CELL_NUMERICS
 
@@ -400,16 +403,85 @@ class BlockShim:
     fails only at first serve.
     """
 
-    def __init__(self, runner: Any, block: Any, outputs: int = 1) -> None:
+    def __init__(
+        self, runner: Any, block: Any, outputs: int = 1,
+        *, family: str = "", target: str = "",
+    ) -> None:
         self.runner = runner
         self._block = block
         self.outputs = int(outputs)
         self.calls = 0
+        #: The same state dict ``aot_serve.wrap_module`` writes, so the
+        #: pipeline marker a regional arm publishes is read by the SAME
+        #: ``is_armed``/``execution_count``/``proven_since``/``unwrap``
+        #: helpers the whole-graph arm's marker is. A second reporting shape
+        #: would mean the scheduler learns about one lane and not the other.
+        self.state: Dict[str, Any] = {
+            "failed": False,
+            "successful_calls": 0,
+            "ingress_refusals": 0,
+            "last_refusal": "",
+            "original": type(block).forward.__get__(block),
+            "attr": "forward",
+            "target": target or family,
+            "family": family,
+            "failure_callback": None,
+            "revocation_error": "",
+            "runner": runner,
+        }
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        state = self.state
+        eager = state["original"]
+        if state["revocation_error"]:
+            raise aot_serve.CompiledLaneUnavailableError(
+                state["revocation_error"])
+        if state["failed"]:
+            return eager(*args, **kwargs)
+        try:
+            values, _names = positional_feed(self._block, args, kwargs)
+            out = self.runner(*values)
+        except aot_serve.IngressContractError as exc:
+            # A per-request contract refusal, exactly as on the whole-graph
+            # lane: named, counted, served eager, artifact stays armed.
+            state["ingress_refusals"] = int(state["ingress_refusals"]) + 1
+            state["last_refusal"] = f"{exc.reason}: {exc}"
+            logger.warning(
+                "aot-regional: %s REFUSED out-of-contract block input "
+                "(%s: %s); serving this call eager, artifact stays armed",
+                state["target"], exc.reason, exc)
+            activity_mod.emit_event(
+                "aot_ingress_refused",
+                f"family={state['family']} target={state['target']} "
+                f"mode={MODE_REGIONAL}: {exc}",
+                phase=exc.reason,
+            )
+            return eager(*args, **kwargs)
+        except aot_serve.ConstantsUnboundError as exc:
+            state["failed"] = True
+            logger.error(
+                "aot-regional: %s invoked with unbound constants (%s); eager "
+                "for the rest of this process", state["target"], exc)
+            activity_mod.emit_event(
+                "aot_constants_unbound",
+                f"family={state['family']} target={state['target']} "
+                f"mode={MODE_REGIONAL}: {exc}",
+                phase=exc.reason,
+            )
+            aot_serve._revoke(state, f"constants unbound: {exc}")
+            return eager(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — ANY artifact problem => eager
+            state["failed"] = True
+            aot_serve._revoke(
+                state,
+                f"AOTI regional block {state['target']} failed: "
+                f"{type(exc).__name__}: {exc}")
+            logger.warning(
+                "aot-regional: %s failed (%s: %s); eager for the rest of this "
+                "process", state["target"], type(exc).__name__, exc)
+            return eager(*args, **kwargs)
         self.calls += 1
-        values, _names = positional_feed(self._block, args, kwargs)
-        out = self.runner(*values)
+        state["successful_calls"] = int(getattr(self.runner, "calls", 0))
         if self.outputs == 1 and isinstance(out, (list, tuple)) and len(out) == 1:
             return out[0]
         return tuple(out) if isinstance(out, list) else out
@@ -457,6 +529,7 @@ def arm_blocks(
     family: str = "",
     cell_key: str = "",
     outputs_for: Optional[Any] = None,
+    literals: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> RegionalArm:
     """Bind and install ONE runner per block INSTANCE, by reference.
 
@@ -480,8 +553,14 @@ def arm_blocks(
         for group in groups:
             for module in group.instances:
                 runner = runner_for(group.key)
-                state = dict(module.state_dict())
-                runner.bind(state, {}, user_managed=True)
+                # pgw#825: NOT `state_dict()` — it omits the non-persistent
+                # branch buffers the block's own constant table declares.
+                # pgw#827: and the module is the BLOCK INSTANCE, never the
+                # target. A regional entry's declared FQNs are block-relative
+                # (`attn1.to_k.weight`), so a table built at denoiser scope
+                # resolves NONE of them — which is the whole defect.
+                state = aot_serve.resident_constants(module)
+                runner.bind(state, literals or {}, user_managed=True)
                 # S4: per INSTANCE, before its first call.
                 runner.assert_ready()
                 if not getattr(runner, "user_managed", False):
@@ -494,7 +573,8 @@ def arm_blocks(
                 shim = BlockShim(
                     runner, module,
                     outputs=1 if outputs_for is None else int(
-                        outputs_for(group.key)))
+                        outputs_for(group.key)),
+                    family=family, target=f"{target}[{group.key}]")
                 module.forward = shim
                 arm.shims.append((module, shim))
                 arm.bound_instances += 1
@@ -619,6 +699,371 @@ def arm_and_verify(
     return arm
 
 
+# ---------------------------------------------------------------------------
+# S4, wired — the regional ADOPT path (pgw#827)
+# ---------------------------------------------------------------------------
+
+
+def entry_block_key(name: str, block: Mapping[str, Any]) -> str:
+    """The block class one packaged entry belongs to, from its own fork.
+
+    Read off the recorded coordinate rather than parsed out of the entry
+    NAME: the name is a rendering of the fork, and re-deriving a fact from
+    its rendering is how the two drift.
+    """
+    fork = {str(n): v for n, v in (
+        tuple(row) for row in (block.get("fork") or ()))}
+    return str(fork.get(BLOCK_FORK) or "")
+
+
+def entry_output_count(block: Mapping[str, Any]) -> int:
+    """How many tensors this block entry's traced forward returned.
+
+    ``1`` means a BARE tensor, which the shim unwraps out of AOTI's output
+    list. Taken from the program's own recorded ``out_spec`` — a guessed
+    envelope is the pgw#758 "``return_dict=False`` means a 1-tuple" bug one
+    level down, and it surfaces only at first serve.
+    """
+    spec_text = str(((block.get("graph") or {}).get("pytree") or {}).get(
+        "out_spec") or "")
+    if not spec_text:
+        return 1
+    try:
+        import torch.utils._pytree as pytree
+
+        spec = pytree.treespec_loads(spec_text)
+    except Exception:  # noqa: BLE001 — an unparseable spec keeps the default
+        return 1
+    return 1 if spec.is_leaf() else max(1, int(spec.num_leaves))
+
+
+def entry_adapter_arm(block: Mapping[str, Any]) -> Optional[bool]:
+    """The adapter arm one entry's fork states, or ``None`` (pgw#790)."""
+    fork = {str(n): v for n, v in (
+        tuple(row) for row in (block.get("fork") or ()))}
+    value = fork.get("adapter", None)
+    return None if value is None else bool(value)
+
+
+@dataclass
+class BlockDispatch:
+    """One block instance's entries, routed by the ADAPTER ARM first.
+
+    pgw#790 discriminates the adapter fork by INGRESS: the branch-bearing
+    class declares ``lora_a``/``lora_b`` and the branchless one refuses them,
+    so a call either carries the pair or it does not, and exactly one class
+    admits it. That works because the lift wraps the DENOISER, and the pair
+    arrives in the denoiser's call.
+
+    A regional entry is exported one block deep from the block's OWN
+    signature, which never carries the pair (pgw#825) — the branch is
+    module-resident. So both arms of a regional block declare the SAME
+    ingress contract, both admit every call, and :class:`EntryDispatch`
+    correctly refuses ``entry_ambiguous`` on every forward. The cell arms,
+    reports armed, and serves 100 % eager.
+
+    The discriminator regional actually has is the one the whole-graph lane
+    reads for the same decision (:func:`aot_serve.adapter_call_kwargs` ->
+    ``lora_lifted.adapter_active``): whether an adapter is CURRENTLY placed
+    on the denoiser this block belongs to. It is asked of the target module,
+    not the block, because that is the scope an attach has.
+    """
+
+    by_arm: Mapping[Optional[bool], aot_serve.EntryDispatch]
+    adapter_owner: Any = None
+
+    def _arms(self) -> Tuple[aot_serve.EntryDispatch, ...]:
+        return tuple(self.by_arm.values())
+
+    def bind(
+        self, state_dict: Mapping[str, Any],
+        literals: Mapping[str, Mapping[str, Any]],
+        *, user_managed: bool = False,
+    ) -> None:
+        for dispatch in self._arms():
+            dispatch.bind(state_dict, literals, user_managed=user_managed)
+
+    def assert_ready(self) -> None:
+        for dispatch in self._arms():
+            dispatch.assert_ready()
+
+    @property
+    def user_managed(self) -> bool:
+        arms = self._arms()
+        return bool(arms) and all(d.user_managed for d in arms)
+
+    def select_arm(self) -> aot_serve.EntryDispatch:
+        if len(self.by_arm) == 1:
+            return next(iter(self.by_arm.values()))
+        from .models import lora_lifted
+
+        active = bool(
+            self.adapter_owner is not None
+            and lora_lifted.adapter_active(self.adapter_owner))
+        chosen = self.by_arm.get(active)
+        if chosen is None:
+            chosen = self.by_arm.get(None) or next(iter(self.by_arm.values()))
+        return chosen
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self.select_arm()(*args, **kwargs)
+
+    @property
+    def calls(self) -> int:
+        return sum(d.calls for d in self._arms())
+
+    def entry_calls(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for dispatch in self._arms():
+            out.update(dispatch.entry_calls())
+        return out
+
+    def refusal_counts(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for dispatch in self._arms():
+            for reason, count in dispatch.refusal_counts().items():
+                out[reason] = out.get(reason, 0) + count
+        return out
+
+    def realignment_counts(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for dispatch in self._arms():
+            for key, count in dispatch.realignment_counts().items():
+                out[key] = out.get(key, 0) + count
+        return out
+
+    def excludes(self, names: Sequence[str]) -> bool:
+        return any(d.excludes(names) for d in self._arms())
+
+
+def _grouped_entries(
+    entries: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Dict[str, List[Tuple[str, Mapping[str, Any]]]]]:
+    """``{target: {block key: [(entry name, entry block), ...]}}``."""
+    out: Dict[str, Dict[str, List[Tuple[str, Mapping[str, Any]]]]] = {}
+    for name in sorted(entries):
+        block = entries[name]
+        key = entry_block_key(name, block)
+        if not key:
+            raise aot_serve.AdoptError(
+                "regional_entry_unkeyed",
+                f"entry {name!r} carries no {BLOCK_FORK!r} fork coordinate, "
+                f"so this runtime cannot tell which block class it serves — "
+                f"a regional cell whose entries are unattributable can only "
+                f"be armed by guessing")
+        out.setdefault(str(block.get("target") or ""), {}).setdefault(
+            key, []).append((name, block))
+    return out
+
+
+def load_and_arm(
+    pipeline: Any, cfg: Any, artifact: Path,
+    cache_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Stage + verify + load + bind + install a REGIONAL cell (pgw#827).
+
+    The regional twin of :func:`aot_serve.load_and_wrap`, and deliberately
+    the same sequence through the same gates — stage, runtime-key verify,
+    ISA, sm, per-entry contract, B1 bind gate, all-or-nothing before the
+    first live mutation. It differs in exactly one thing, which is the
+    entire point: the bind table is built **per block INSTANCE**
+    (``resident_constants(block)``), not once per target
+    (``resident_constants(denoiser)``).
+
+    That one difference is what pgw#827 measured: a regional entry's
+    declared FQNs are block-relative (``attn1.to_k.weight``), the denoiser
+    carries them under their full path
+    (``down_blocks.…transformer_blocks.0.attn1.to_k.weight``), and
+    :func:`aot_serve.resolve_constants` is a direct FQN lookup by design —
+    so a denoiser-scope table resolves NONE of a regional cell's constants.
+    On a real L4 that discarded a complete 72-entry, 354 s artifact at
+    ``constants_constant_unresolved``, and because the MINT's own self-adopt
+    verification runs this same path, it meant a regional cell could not be
+    PUBLISHED at all, not merely that it could not serve.
+
+    Raises :class:`compile_cache.AdoptError` with a classified reason on any
+    failure. The pipeline is untouched on every rejection.
+    """
+    family = str(getattr(cfg, "family", "") or "")
+    staged = aot_serve.stage_artifact(
+        Path(artifact), family, cache_dir=cache_dir)
+    arms: List[RegionalArm] = []
+    try:
+        meta = staged.metadata
+        try:
+            entries = aot_serve.entries_from_meta(meta)
+        except ValueError as exc:
+            raise aot_serve.AdoptError("contract_invalid", str(exc)) from exc
+        grouped = _grouped_entries(entries)
+
+        # Resolve every target and prove the DECLARED block classes are the
+        # LIVE ones before a single package is dlopen'd.
+        owners: Dict[str, Any] = {}
+        live: Dict[str, Dict[str, BlockGroup]] = {}
+        for target, by_block in grouped.items():
+            module, attr = aot_serve._target_owner(pipeline, target)
+            if attr != "forward":
+                raise aot_serve.AdoptError(
+                    "regional_target_not_a_module",
+                    f"target {target!r} resolves to a callable attribute "
+                    f"({attr!r}), which has no block structure to arm")
+            groups = {g.key: g for g in repeated_block_groups(module)}
+            missing = sorted(set(by_block) - set(groups))
+            if missing:
+                raise aot_serve.AdoptError(
+                    "regional_block_absent",
+                    f"target {target!r}: the cell declares block class(es) "
+                    f"{missing!r} that this resident "
+                    f"{type(module).__name__} does not have")
+            undeclared = sorted(set(groups) - set(by_block))
+            if undeclared:
+                # All-or-nothing (S4): a target whose blocks are only partly
+                # covered would arm into a silently half-eager model.
+                raise aot_serve.AdoptError(
+                    "regional_block_undeclared",
+                    f"target {target!r}: resident block class(es) "
+                    f"{undeclared!r} have no entry in this cell — arming it "
+                    f"would leave a silently half-eager model")
+            owners[target] = module
+            live[target] = groups
+
+        literals_by_entry: Dict[str, Dict[str, Any]] = {}
+        literals_path = staged.root / aot_serve.LITERALS_NAME
+        if literals_path.exists():
+            first = next(iter(owners.values()))
+            device = str(getattr(first, "device", "cuda"))
+            try:
+                literals_by_entry = aot_serve.split_literals(
+                    aot_serve._load_literals(literals_path, device))
+            except ValueError as exc:
+                raise aot_serve.AdoptError(
+                    "contract_invalid", str(exc)) from exc
+
+        package_path = staged.root / aot_serve.PACKAGE_NAME
+        cell_key = str(meta.get("cell_key") or "")
+        t0 = time.monotonic()
+        loads = 0
+        rows: Dict[str, Dict[str, Any]] = {}
+        for target, by_block in grouped.items():
+            module = owners[target]
+
+            def runner_for(key: str, _t: str = target) -> BlockDispatch:
+                nonlocal loads
+                built: Dict[
+                    Optional[bool],
+                    List[Tuple[str, aot_serve.ArtifactRunner]]] = {}
+                for name, block in grouped[_t][key]:
+                    try:
+                        contract = aot_serve.contract_from_meta(block)
+                        constants = aot_serve.constants_from_meta(block)
+                    except ValueError as exc:
+                        raise aot_serve.AdoptError(
+                            "contract_invalid",
+                            f"entry {name!r}: {exc}") from exc
+                    package = aot_serve._load_package(package_path, name)
+                    loads += 1
+                    built.setdefault(entry_adapter_arm(block), []).append(
+                        (name, aot_serve.ArtifactRunner(
+                            package=package, contract=contract,
+                            constants=constants, module_name=_t, entry=name,
+                            family=family)))
+                return BlockDispatch(
+                    by_arm={arm: aot_serve.EntryDispatch(tuple(rows))
+                            for arm, rows in built.items()},
+                    adapter_owner=owners[_t])
+
+            def outputs_for(key: str, _t: str = target) -> int:
+                return max(entry_output_count(block)
+                           for _n, block in grouped[_t][key])
+
+            try:
+                arm = arm_blocks(
+                    [live[target][key] for key in sorted(by_block)],
+                    runner_for, target=target, family=family,
+                    cell_key=cell_key, outputs_for=outputs_for,
+                    literals=literals_by_entry)
+            except aot_serve.ConstantsUnboundError as exc:
+                raise aot_serve.AdoptError(
+                    f"constants_{exc.reason}",
+                    f"target {target!r}: {exc}") from exc
+            except RegionalArmRefused as exc:
+                raise aot_serve.AdoptError(
+                    f"regional_{exc.reason}", str(exc)) from exc
+            arms.append(arm)
+            for index, (instance, shim) in enumerate(arm.shims):
+                rows[f"{target}#{index}"] = {
+                    "module": instance, "attr": "forward",
+                    "state": shim.state}
+
+        # The pipeline marker is the SAME format-2 shape the whole-graph arm
+        # publishes, so `is_armed`, `execution_count`, `proven_since`,
+        # `set_guard_failure_callback` and `unwrap` need no regional variant.
+        # A second reporting shape would mean the executor's adoption PROOF
+        # (pgw#735: it executed, and it is still armed) could never pass for
+        # a regional cell — the mint would publish and then be rolled back as
+        # unproven.
+        setattr(pipeline, aot_serve._MARKER_ATTR,
+                {"meta": meta, "targets": rows})
+        instances = sum(arm.bound_instances for arm in arms)
+        logger.info(
+            "aot-regional: armed %s key=%s — %d entr%s across %d block "
+            "class(es) bound BY REFERENCE onto %d instance(s) in %.1fs "
+            "(%d package loads, 0 weight copies)",
+            family, cell_key, len(entries),
+            "y" if len(entries) == 1 else "ies",
+            sum(len(v) for v in grouped.values()), instances,
+            time.monotonic() - t0, loads)
+        return meta
+    except Exception:
+        for arm in arms:
+            arm.revert()
+        try:
+            delattr(pipeline, aot_serve._MARKER_ATTR)
+        except AttributeError:
+            pass
+        raise
+    finally:
+        staged.close()
+
+
+def enable(
+    pipeline: Any, cfg: Any, cache_dir: Optional[Path] = None,
+    artifact: Optional[Path] = None,
+) -> bool:
+    """Consumer entry point for a REGIONAL cell — the twin of
+    :func:`aot_serve.enable`, with the identical fail-soft contract: any miss
+    returns False and the caller's ordinary miss policy takes over.
+
+    Emits the same ``aot_adopt`` event kind and phases, so a regional
+    refusal is legible to the hub through the records that already exist.
+    """
+    if artifact is None:
+        return False
+    try:
+        meta = load_and_arm(pipeline, cfg, Path(artifact), cache_dir=cache_dir)
+    except Exception as exc:  # noqa: BLE001 — any miss => eager
+        reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
+        logger.warning(
+            "aot-regional: artifact unusable (%s: %s); staying eager",
+            reason, exc)
+        activity_mod.emit_event(
+            aot_serve.ADOPT_EVENT,
+            f"{aot_serve._adopt_identity(Path(artifact))} "
+            f"mode={MODE_REGIONAL}: {type(exc).__name__}: {exc}",
+            phase=reason,
+        )
+        return False
+    activity_mod.emit_event(
+        aot_serve.ADOPT_EVENT,
+        f"family={meta.get('family')} key={meta.get('cell_key')} "
+        f"mode={MODE_REGIONAL} entries={len(meta.get('entries') or {})} "
+        f"sku={meta.get('sku')} torch={meta.get('torch')} "
+        f"precision={meta.get('precision')}",
+        phase="armed",
+    )
+    return True
+
+
 def _detach(value: Any) -> Any:
     """Clone every tensor out of a forward's return.
 
@@ -648,6 +1093,9 @@ __all__ = [
     "BlockGroup", "BlockShim", "RegionalArm", "RegionalArmRefused",
     "arm_and_verify", "arm_blocks", "block_entry_fork", "capture_block_feeds",
     "positional_feed",
-    "declared_repeated_classes", "declared_thresholds", "gate_assembled",
+    "BlockDispatch",
+    "declared_repeated_classes", "declared_thresholds", "enable",
+    "entry_adapter_arm", "entry_block_key", "entry_output_count",
+    "gate_assembled", "load_and_arm",
     "repeated_block_groups", "shell_digest", "shell_facts",
 ]

@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import threading
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import Settings
 from ..pb import worker_scheduler_pb2 as pb
@@ -25,6 +26,31 @@ from . import ENV_LIVENESS_FD, ENV_SOCKET, ENV_WATCHDOG_PING_S, frames
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WATCHDOG_PING_S = 5.0
+_BOOT_FATAL_SEND_TIMEOUT_S = 5.0
+
+
+def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable") -> bool:
+    """pgw#826: hand the parent a TERMINAL typed boot verdict before exiting.
+
+    Runs pre-transport (the CUDA probe fails before ChildTransport exists), so
+    it opens its own short-lived socket. The parent propagates the report on
+    its credential and exits 1 instead of respawning — a hardware verdict is
+    not a transient fault.
+    """
+    path = os.environ.get(ENV_SOCKET, "").strip()
+    if not path:
+        return False
+    payload = frames.pack_meta({"kind": kind, "terminal": True, "report": report})
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(_BOOT_FATAL_SEND_TIMEOUT_S)
+            sock.connect(path)
+            sock.sendall(frames.frame_bytes(frames.T_BOOT_FATAL, payload))
+    except OSError:
+        logger.warning("could not hand the boot fatal to the control parent",
+                       exc_info=True)
+        return False
+    return True
 
 
 def _ping_interval() -> float:

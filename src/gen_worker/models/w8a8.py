@@ -37,8 +37,9 @@ import logging
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import shutil
 
 logger = logging.getLogger(__name__)
@@ -304,6 +305,22 @@ def _choose_gemm_mode(sm: int) -> str:
     logger.warning(
         "w8a8: no fp8 GEMM branch engages a real win on this device (sm_%d); "
         "dequant lane", sm)
+    # pgw#824: this is a LANE decision, taken once per process and silent. The
+    # whole point of the w8a8 artifact is the fused fp8 GEMM; falling to the
+    # dequant lane keeps the memory saving but gives up the speed, so every
+    # request this pod serves is slower than the lane it advertises — and a
+    # fleet-wide qualification regression (a driver/torch bump that stops the
+    # kernel qualifying) would show up as "everything got slower" with no
+    # cause anywhere. Once per process by construction: `_choose_gemm_mode` is
+    # reached through an lru_cache(1).
+    activity_mod.emit_event(
+        activity_mod.KIND_SERVE_DEGRADE,
+        f"sm_{sm}: no fp8 GEMM branch qualified (probe or micro-benchmark "
+        f"declined every candidate), so this pod serves the w8a8 artifact on "
+        f"the DEQUANT lane — the memory saving is kept, the fused-GEMM speed "
+        f"is not",
+        phase="w8a8_gemm_unqualified",
+    )
     return ""
 
 
@@ -712,6 +729,20 @@ def swap_w8a8_linears(
         return fh.get_tensor(name)
 
     swapped = 0
+    # pgw#824: every layer this loop SKIPS stays dequantized — full precision,
+    # in a pipeline that reports the w8a8 lane to placement, billing and every
+    # AOT-vs-eager comparison. One skip was a `logger.warning`; the alignment
+    # skip below had no report of ANY kind. Counted by class and confessed once
+    # after the loop: per-layer events would flood a 300-Linear denoiser, and
+    # coalescing with counts is the pattern (dropping is not).
+    skipped: Dict[str, int] = {}
+    samples: List[str] = []
+
+    def _skip(cls: str, target: str) -> None:
+        skipped[cls] = skipped.get(cls, 0) + 1
+        if len(samples) < 3:
+            samples.append(f"{target}({cls})")
+
     try:
         for layer in art.quantized:
             target = str(key_map(layer)) if key_map is not None else layer
@@ -728,6 +759,7 @@ def swap_w8a8_linears(
                 logger.warning(
                     "w8a8 swap: %s is %s, not a plain Linear; layer stays "
                     "dequantized", target, type(old).__name__)
+                _skip("not_plain_linear", target)
                 continue
             w = _tensor(f"{layer}.weight")
             out_f, in_f = int(w.shape[0]), int(w.shape[1])
@@ -736,7 +768,9 @@ def swap_w8a8_linears(
                     f"quantized layer {layer!r} shape [{out_f}, {in_f}] != "
                     f"module {target!r} [{old.out_features}, {old.in_features}]")
             if in_f % _DIM_ALIGN or out_f % _DIM_ALIGN:
-                continue  # scaled_mm alignment; dequant weights stay
+                # scaled_mm alignment; dequant weights stay
+                _skip("dim_unaligned", target)
+                continue
             has_static = f"{layer}.input_scale" in where
             dev = old.weight.device
             new = lin_cls(in_f, out_f, bias=old.bias is not None,
@@ -761,6 +795,18 @@ def swap_w8a8_linears(
                 pass
     logger.info("w8a8 swap: %d/%d quantized Linears on scaled_mm",
                 swapped, len(art.quantized))
+    if skipped:
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            f"model={type(model).__name__}: {swapped}/{len(art.quantized)} "
+            f"quantized Linears landed on scaled_mm; "
+            f"{sum(skipped.values())} stayed DEQUANTIZED at full precision "
+            f"({', '.join(f'{k}={v}' for k, v in sorted(skipped.items()))}; "
+            f"e.g. {', '.join(samples)}). This pipeline reports the w8a8 lane "
+            f"while part of it serves bf16 — over its budgeted VRAM, and "
+            f"slower than the lane promises",
+            phase="w8a8_partial_swap",
+        )
     return swapped
 
 

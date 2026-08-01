@@ -133,7 +133,17 @@ class MintRefused(RuntimeError):
     Every mint failure is one of these with a reason that names the offending
     thing — a lane, a tensor, a missing declaration field. A mint that cannot
     say what went wrong is the silent-failure path the doctrine forbids.
+
+    ``mint_phases`` carries the PARTIAL phase table of the mint that refused
+    (pgw#825): the entries that did export and compile before the refusal
+    spent real minutes on a real pod, and a terminus that reports only a
+    wall-clock total is a measurement lost to a pod that no longer exists.
+    Populated by :func:`mint`; empty for a refusal raised before any entry.
     """
+
+    def __init__(self, *args: Any, mint_phases: Optional[Mapping[str, Any]] = None) -> None:
+        super().__init__(*args)
+        self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1098,17 @@ def _export_entry(
                 f"entry {entry!r}: no-baked-adapter gate (#725 G3): "
                 f"{exc}") from exc
 
+    # pgw#825: BEFORE the compile, not after it. The packed bindability gate
+    # runs on the artifact and is the proof of what shipped; this one asks the
+    # same question of the exported program, where it costs milliseconds
+    # instead of an entry's whole compile.
+    unbindable = aot_package.unbindable_program_constants(
+        program, _state_dict_keys(owner))
+    if unbindable:
+        raise MintRefused(
+            f"entry {entry!r}: pre-compile bindability gate: "
+            + "; ".join(unbindable))
+
     files: List[Any] = []
     if compile_now:
         before = _phase_snapshot()
@@ -1190,6 +1211,18 @@ def _export_regional_entries(
                 key=lambda kv: str(kv[0]))),
             dynamic=_regional_dynamic(espec.dynamic, names),
             regional=True,
+            # pgw#825: a BLOCK never carries the lifted signature. Input
+            # lifting (pgw#725) is a whole-graph-cell mechanism — it wraps the
+            # DENOISER's forward so the flat pair arrives in the call — and the
+            # regional entry is exported one block deep, from the block's own
+            # signature. The block's branch pair stays module-resident and is
+            # bound per instance BY REFERENCE (`user_managed=True`), which
+            # gives regional the same property lifting gives the family graph:
+            # an adapter swap is an in-place buffer write, never a recompile
+            # and never a rebind. Inheriting the family's `lifted_inputs` here
+            # would record a contract this entry's program does not have.
+            lifted_inputs=(),
+            lora_fqns=(),
         )
         entry = _decl.entry_name(espec.target, bspec.fork, bspec.class_dims)
         timings: Dict[str, Any] = {
@@ -1209,6 +1242,21 @@ def _export_regional_entries(
         if gaps:
             raise MintRefused(
                 f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
+
+        # pgw#825: the block's own bind table, asked BEFORE its compile. A
+        # regional mint pays 4-6 minutes per entry, and this mismatch is a
+        # property of the exported program — the refusal must cost seconds.
+        unbindable = aot_package.unbindable_program_constants(
+            program, _state_dict_keys(block))
+        if unbindable:
+            raise MintRefused(
+                f"entry {entry!r}: pre-compile bindability gate: "
+                + "; ".join(unbindable))
+        baked = _regional_branch_gaps(block, program, int(bspec.lora_bucket or 0))
+        if baked:
+            raise MintRefused(
+                f"entry {entry!r}: regional no-baked-adapter gate (#725 G3): "
+                + "; ".join(baked))
 
         files: List[Any] = []
         if compile_now:
@@ -1234,6 +1282,52 @@ def _export_regional_entries(
             program=program, input_names=tuple(names), flat_names=tuple(names),
             files=files, timings=timings))
     return out
+
+
+def _regional_branch_gaps(
+    block: Any, program: Any, bucket: int,
+) -> List[str]:
+    """pgw#725 G3, in the shape a REGIONAL entry can be asked it.
+
+    The family gate asserts the adapter is a graph INPUT. A block cannot take
+    that form — the lift wraps the denoiser, and a block entry is exported
+    from the block's own signature — so regional's equivalent invariant is
+    that every branch pair is a NAMED, bindable buffer of the block. Two lanes
+    make that a real question rather than a formality:
+
+    * the w8a8 lane registers the pair as non-persistent buffers, which export
+      lifts under their true FQN — bindable, and the whole point of pgw#825;
+    * the cast-hook/plain-Linear lanes keep it in the module ``__dict__``,
+      where export can lift it as an ANONYMOUS tensor constant whose bytes
+      then SHIP in the literal payload. That is a baked, permanently zeroed
+      adapter: the cell arms, serves, and silently returns the base model for
+      every attach — pgw#704 S9 with no error anywhere.
+
+    Only the adapter-bearing fork class is asked (``bucket`` is zero on the
+    branchless one, whose pair is deliberately absent).
+    """
+    if not bucket:
+        return []
+    from .models import w8a8_lora
+
+    lifted = set(aot_package.program_state_dict_fqns(program))
+    missing: List[str] = []
+    for path, mod in w8a8_lora.branch_modules(block).items():
+        for slot in ("lora_a", "lora_b"):
+            if getattr(mod, slot, None) is None:
+                continue
+            fqn = f"{path}.{slot}" if path else slot
+            if fqn not in lifted:
+                missing.append(fqn)
+    if not missing:
+        return []
+    return [
+        f"{len(missing)} branch tensor(s) of this bucket-{bucket} block did "
+        f"not survive export as bindable buffers, e.g. {sorted(missing)[:6]!r}"
+        f" — a branch that is not a lifted buffer was either baked as a "
+        f"literal (a permanently ZEROED adapter that serves the base model "
+        f"silently) or traced away entirely"
+    ]
 
 
 def replace_spec(spec: ExportSpec, **changes: Any) -> ExportSpec:
@@ -1431,6 +1525,65 @@ def _arm_branches(pipeline: Any, bucket: int) -> None:
     lora_lifted.arm_lifted_lora_lanes(pipeline, int(bucket or 0))
 
 
+# pgw#824: the phase tokens the in-mint progress callback reports under.
+# Wire-shared with ``activity.PHASE_*`` and framed verbatim by ``mint_child``,
+# so a reader groups a delegated mint's progress on the SAME strings whether it
+# came from the child's frames or from the parent's own activity.
+PHASE_TRACE_GRAPH = "trace_graph"
+PHASE_INDUCTOR_COMPILE = "inductor_compile"
+PHASE_SEAL_PUBLISH = "seal_publish"
+
+
+@dataclass
+class MintProgress:
+    """The ONE record of where a mint IS — live and post-mortem.
+
+    pgw#824 and pgw#825 arrived at the same question from opposite ends and
+    must not answer it twice. pgw#825 needs the partial state (`minted`,
+    `timings`, `width`, the mint's own clock) so a mint that ABORTS still
+    reports the seconds it spent instead of a bare wall clock. pgw#824 needs
+    those same positions pushed out LIVE, because a 20-minute export that
+    reports nothing is indistinguishable from a hung one.
+
+    One object carries both, so a live beat and an abort table can never
+    disagree about which entry the mint was on: :meth:`beat` records the
+    position it reports, and :func:`_attach_partial_phases` stamps that same
+    position onto the aborted table as ``at``. That closes pgw#825's one
+    remaining blind spot — its per-entry rows name the entries that FINISHED,
+    and the entry a mint dies ON is the one a reader most needs named.
+
+    Handed down and mutated in place; ``on_progress`` is optional and
+    best-effort by construction — a raising callback never costs a mint.
+    """
+
+    inductor_configs: Optional[Mapping[str, Any]] = None
+    on_progress: Optional[Callable[[str, int, int, str], None]] = None
+    t_mint: Optional[float] = None
+    timings: Dict[str, float] = field(default_factory=dict)
+    minted: List[_MintedEntry] = field(default_factory=list)
+    width: Optional[aot_compile_pool.PoolWidth] = None
+    #: The last position :meth:`beat` reported, verbatim.
+    at: Dict[str, Any] = field(default_factory=dict)
+
+    def beat(self, phase: str, step: int, total: int, note: str = "") -> None:
+        """Report a position, and REMEMBER it.
+
+        Recording precedes reporting: the position must survive into the abort
+        table even when there is no ``on_progress`` sink and even when the sink
+        raises, or the two halves of this object would tell different stories.
+        """
+        phase, step, total = str(phase), int(step), int(total)
+        note = str(note)[:180]
+        self.at = {
+            "phase": phase, "step": step, "total": total, "note": note}
+        if self.on_progress is None:
+            return
+        try:
+            self.on_progress(phase, step, total, note)
+        except Exception:  # noqa: BLE001 — telemetry never fails a mint
+            logger.debug("aot-mint progress callback failed", exc_info=True)
+
+
 def mint(
     pipeline: Any,
     spec: ExportSpec,
@@ -1439,6 +1592,76 @@ def mint(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
+    on_progress: Optional[Callable[[str, int, int, str], None]] = None,
+) -> MintResult:
+    """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
+
+    pgw#825: an aborted mint used to report a wall-clock total and nothing
+    else — `compile_s`, `export_s` and `n_entries` all parsed to `-` — so a
+    run that paid for real compiles and then refused produced no measurement
+    at all, and the pod it happened on is gone by the time anyone reads the
+    table. The live entry list and timings dict are handed down and mutated
+    in place, so whatever completed before the terminus is reportable from
+    here whether the mint returned, refused, or died.
+
+    pgw#824 rides the SAME record (:class:`MintProgress`) rather than a second
+    one: ``on_progress(phase, step, total, note)`` is where those in-flight
+    positions are pushed out live, and the last one pushed is what an aborted
+    table reports as ``at``.
+    """
+    progress = MintProgress(
+        inductor_configs=inductor_configs, on_progress=on_progress)
+    try:
+        return _mint_cell(
+            pipeline, spec, out_dir,
+            allow_regressed_lanes=allow_regressed_lanes,
+            inductor_configs=inductor_configs,
+            entry_workers=entry_workers, progress=progress)
+    except BaseException as exc:
+        _attach_partial_phases(exc, progress)
+        raise
+
+
+def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
+    """Hang the partial phase table off a failed mint's exception.
+
+    Telemetry never changes an outcome, so every step is guarded: a mint that
+    refuses must refuse with ITS sentence, not with a reporting error.
+    """
+    try:
+        minted = list(progress.minted)
+        timings = dict(progress.timings)
+        started = progress.t_mint
+        where = dict(progress.at)
+        if not minted and not timings and not where:
+            return
+        if started is not None:
+            # The mint's OWN wall clock, so an aborted total is comparable
+            # with a completed one rather than being a sum of entry seconds.
+            timings["total_s"] = round(time.monotonic() - float(started), 2)
+        table = _mint_phase_table(
+            minted, timings, progress.inductor_configs, progress.width)
+        table["terminus"] = "aborted"
+        if where:
+            # pgw#824 x pgw#825: the entries block names what FINISHED; this
+            # names what the mint was ON. Without it an 18-entry mint that
+            # dies in entry 12's export reports 11 rows and no twelfth, and
+            # the row that matters is the missing one.
+            table["at"] = where
+        setattr(exc, "mint_phases", table)
+    except Exception:  # pragma: no cover — telemetry never fails a mint
+        logger.debug("aot-mint: partial phase table unavailable", exc_info=True)
+
+
+def _mint_cell(
+    pipeline: Any,
+    spec: ExportSpec,
+    out_dir: Path,
+    *,
+    allow_regressed_lanes: bool = False,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+    entry_workers: int = 0,
+    progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
     multi-graph cell (pgw#758).
@@ -1447,6 +1670,18 @@ def mint(
     width is derived from the pod (see :func:`aot_compile_pool.entry_workers`),
     and this argument exists so an operator or a test can force the serial
     path (``1``) without pretending a 4-vCPU pod is an H100 host.
+
+    ``progress`` (:class:`MintProgress`) is the mint's own position record —
+    handed down by :func:`mint`, mutated in place, and read back by
+    :func:`_attach_partial_phases` on any terminus. ``progress.beat()``
+    reports progress WITHIN the mint (pgw#824). This function used to be one
+    opaque call spanning the family's whole declared class set — sdxl declares
+    18 — so the mint child framed ``trace_graph`` once and said nothing again
+    until ``seal_publish``. A real export measured ~5 minutes of complete wire
+    silence, and the pod's only liveness evidence was that its CPU was warm.
+    "Entry 12 of 18" is the difference between a pod that is alive and a pod
+    that is working, which is exactly the distinction the no-magic-timeouts
+    doctrine runs on.
 
     Does NOT publish — :func:`publish` is a separate step so a mint can be
     inspected, byte-compared (#699 double-mint), or produced on a box with no
@@ -1476,8 +1711,13 @@ def mint(
     out_dir = Path(out_dir)
     work = out_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
-    timings: Dict[str, float] = {}
+    # Handed to the caller BY REFERENCE and mutated in place: an aborted mint
+    # reports the seconds it did spend (pgw#825) and the position it was on
+    # (pgw#824), out of ONE record.
+    progress = MintProgress() if progress is None else progress
+    timings = progress.timings
     t_mint = time.monotonic()
+    progress.t_mint = t_mint
 
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
@@ -1517,16 +1757,20 @@ def mint(
             if regional else 1.0))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
+    progress.width = width
 
-    minted: List[_MintedEntry] = []
+    minted = progress.minted
     disarmed = False
     # pgw#822: the adapter-BEARING classes are exported from the lifted
     # forward. Arming it is this function's job, not the caller's — see
     # `_arm_branches`.
     _arm_branches(pipeline, int(spec.lora_bucket or 0))
     t_export = time.monotonic()
+    progress.beat(
+        PHASE_TRACE_GRAPH, 0, len(rows),
+        f"{len(rows)} declared class row(s)")
     try:
-        for plan, arm in rows:
+        for index, (plan, arm) in enumerate(rows, start=1):
             if arm is False and not disarmed:
                 # ONE toggle for the whole branchless group (the rows are
                 # ordered adapter-bearing first): disable/enable reallocates
@@ -1534,6 +1778,12 @@ def mint(
                 # be N times the VRAM churn for the same graphs.
                 _disarm_branches(pipeline)
                 disarmed = True
+            # Reported BEFORE the work, not after: a row that never returns
+            # is the one a reader most needs named, and an after-the-fact tick
+            # names only the rows that finished.
+            progress.beat(
+                PHASE_TRACE_GRAPH, index, len(rows),
+                _decl.plan_entry_name(plan))
             if regional:
                 minted.extend(_export_regional_entries(
                     pipeline, spec, plan, decl,
@@ -1550,11 +1800,19 @@ def mint(
 
     if parallel:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
+        progress.beat(
+            PHASE_INDUCTOR_COMPILE, 0, len(minted),
+            f"{len(minted)} entries, {width.workers} wide")
         _compile_entries_parallel(
-            minted, work, width, inductor_configs=inductor_configs)
+            minted, work, width, inductor_configs=inductor_configs,
+            on_entry=lambda name, done, total: progress.beat(
+                PHASE_INDUCTOR_COMPILE, done, total, name))
     timings["entry_workers"] = float(width.workers)
 
     t0 = time.monotonic()
+    progress.beat(
+        PHASE_SEAL_PUBLISH, len(minted), len(minted),
+        f"packaging {len(minted)} entries")
     package = package_cell(
         {row.name: row.files for row in minted}, work / aot_serve.PACKAGE_NAME)
     timings["package_s"] = round(time.monotonic() - t0, 2)
@@ -1730,6 +1988,7 @@ def _compile_entries_parallel(
     width: aot_compile_pool.PoolWidth,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
+    on_entry: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     """pgw#809: fill every entry's ``files`` K-wide, out of process.
 
@@ -1749,7 +2008,8 @@ def _compile_entries_parallel(
         inductor_configs=inductor_configs)
     t0 = time.monotonic()
     try:
-        by_entry = pool.compile([(row.name, row.program) for row in minted])
+        by_entry = pool.compile(
+            [(row.name, row.program) for row in minted], on_entry=on_entry)
     except aot_compile_pool.EntryCompileFailed as exc:
         # Named, and terminal: the siblings are already torn down group-wide
         # by the pool. A mint that says only "a compile failed" over 18
@@ -1809,6 +2069,42 @@ def _gate_and_declare_entry(
         logger.info(
             "aot-mint: %s: %d lifted constant(s) fused away by the compiler "
             "(e.g. %s)", entry, len(fused), fused[:3])
+    if row.spec.regional and fused:
+        # pgw#827 (found by wiring the regional arm): "recorded, never fatal"
+        # is right for a WHOLE-GRAPH cell — it is minted from the very weights
+        # it serves, so a folded constant is that module's own value. It is
+        # FATAL for a regional cell. One artifact serves N INSTANCES with
+        # DIFFERENT weights, so a constant the compiler folded away carries
+        # the PROTOTYPE instance's bytes into every other instance, silently,
+        # with no unbound constant and no refusal anywhere.
+        #
+        # MEASURED off-pod (torch 2.13.0+cu130, CPU, a 3-block toy): with
+        # `ff.bias` folded, instance 0 reproduces eager exactly (0.0) and
+        # instance 1 is wrong by 0.53. Nothing in the artifact, the manifest
+        # or the bind gate can see it — which is why it is refused HERE.
+        #
+        # The remedy is proven and is NOT this refusal: compiling regional
+        # entries under `aot_inductor.use_runtime_constant_folding=True` keeps
+        # every folded constant a real bindable input (verified: `fused` goes
+        # to [] and `ff.bias` reappears in the artifact's own table). It also
+        # adds `_FOLDED_CONST_*` rows the manifest and the bind path must
+        # learn, and it re-keys every cell — so it is a change with a train,
+        # not a hotfix. Until then a cell that would serve wrong numbers must
+        # not be published.
+        state_dict_fused = [
+            name for name in fused
+            if name in set(aot_package.program_state_dict_fqns(row.program))]
+        if state_dict_fused:
+            raise MintRefused(
+                f"entry {entry!r}: the compiler folded {len(state_dict_fused)} "
+                f"state_dict constant(s) away "
+                f"({sorted(state_dict_fused)[:6]!r}). A REGIONAL entry is "
+                f"reused across every instance of its block class, so a "
+                f"folded constant bakes the PROTOTYPE instance's weights into "
+                f"all of them — the artifact is correct for instance 0 and "
+                f"silently wrong for the rest. Recompile with "
+                f"`aot_inductor.use_runtime_constant_folding=True`, which "
+                f"keeps them bindable")
     try:
         inputs, symbols = aot_package.input_contract(
             row.program, row.flat_names)
@@ -1922,6 +2218,7 @@ def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
 
 def emit_phase_events(
     *, family: str, lane: str, table: Mapping[str, Any],
+    terminus: str = "",
 ) -> None:
     """Typed telemetry event — the phase table must reach observability,
     never only a pod log.
@@ -1943,13 +2240,19 @@ def emit_phase_events(
         totals = dict(table.get("totals") or {})
         lane = lane or "plain"
         total_s = float(totals.get("total_s") or 0.0)
+        # pgw#825: the roll-up's PHASE is the mint's terminus. An aborted mint
+        # measured real entries and must report them — under `aborted`, never
+        # under `minted`, or a partial table would enter an AOT-vs-JIT
+        # comparison as if a cell came out.
+        roll_up = terminus or str(table.get("terminus") or "") \
+            or activity_mod.PHASE_MINTED
         activity_mod.emit_event(
             MINT_PHASES_KIND,
-            f"family={family} lane={lane} "
+            f"family={family} lane={lane} status={roll_up} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
-            phase=activity_mod.PHASE_MINTED,
+            phase=roll_up,
             duration_ms=int(round(total_s * 1000)),
         )
         for name, timings in sorted((table.get("entries") or {}).items()):
@@ -2157,8 +2460,14 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
 
 
 def _state_dict_keys(module: Any) -> Tuple[str, ...]:
+    """The names the SERVE arm will have to bind from — pgw#825.
+
+    ``aot_serve.resident_constants``, never ``state_dict()``: the gate's whole
+    value is that it predicts the arm, and the arm binds non-persistent
+    buffers (the LoRA branch pair) that ``state_dict()`` does not report.
+    """
     try:
-        return tuple(str(k) for k in module.state_dict().keys())
+        return tuple(str(k) for k in aot_serve.resident_constants(module))
     except Exception:
         return ()
 
@@ -2401,7 +2710,12 @@ def publish(result: MintResult, publisher: Any) -> str:
     family = str(result.metadata.get("family") or "")
     if not family:
         raise MintRefused("cannot publish an artifact with no family")
-    return str(publisher.publish(family, result.artifact, dict(result.metadata)))
+    # th#1355: the mint pod already measured this (timings["total_s"]), so the
+    # cell's own cell_store row records what it cost to build instead of the
+    # cost living only in an activity event that carries no cell key.
+    mint_duration_ms = max(0, int(round(float(result.timings.get("total_s") or 0.0) * 1000)))
+    return str(publisher.publish(
+        family, result.artifact, dict(result.metadata), mint_duration_ms))
 
 
 # ---------------------------------------------------------------------------

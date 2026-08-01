@@ -36,21 +36,29 @@ def test_probe_failure_boot_dials_hub_sends_report_and_exits_cleanly(tmp_path: P
         assert_no_unhandled_crash(result, phases)
         assert result.returncode == 1
 
-        phase_names = [p.get("phase") for p in phases]
-        assert "cuda_probe_hardware_report" in phase_names, phase_names
-        report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_hardware_report")
-        assert report_phase.get("delivered") is True, report_phase
+        # pgw#783/pgw#826: the probe fails in the compute child, which holds no
+        # credential — it hands the typed report to the control parent, which
+        # relays it to the hub and exits 1.
+        report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_boot_fatal")
+        assert report_phase.get("relayed") is True, report_phase
 
         # pgw#795: no explicit bound — this message MUST arrive, and the boot
         # that produces it was measured taking 25.11s on a loaded runner while
         # 5.0 was the number here.
-        msg = servicer.wait_for_message()
-        assert msg.WhichOneof("msg") == "hardware_unsuitable"
-        hw = msg.hardware_unsuitable
-        assert hw.worker_id == "gw619-smoke-worker"
+        servicer.wait_for_message()
+        reports = [
+            m.hardware_unsuitable for m in servicer.received
+            if m.WhichOneof("msg") == "hardware_unsuitable"
+        ]
         # This box's own torch/driver mismatch reproduces the real th#591/
         # th#979 signature end to end — no mocking needed.
-        assert hw.reason_class in ("cuda_unavailable", "driver_too_old")
+        hw = next(
+            (r for r in reports
+             if r.reason_class in ("cuda_unavailable", "driver_too_old")),
+            None,
+        )
+        assert hw is not None, [r.reason_class for r in reports]
+        assert hw.worker_id == "gw619-smoke-worker"
         assert hw.detail
         assert hw.torch_version
 
@@ -69,8 +77,11 @@ def test_probe_failure_hub_unreachable_still_exits_without_hanging(tmp_path: Pat
     assert_no_unhandled_crash(result, phases)
     assert result.returncode == 1
 
-    report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_hardware_report")
-    assert report_phase.get("delivered") is False, report_phase
+    # pgw#783/pgw#826: the child's verdict reaches the parent, whose relay to
+    # the unreachable hub fails — and the parent still exits 1, no respawn.
+    report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_boot_fatal")
+    assert report_phase.get("relayed") is True, report_phase
+    assert "report_delivered=False" in combined
     # The silent-exit fallback must still fire — a refused connection must not
     # turn into a multi-minute pod-billing hang.
     #
@@ -111,7 +122,62 @@ def test_probe_failure_silent_hub_exits_on_the_report_budget_not_a_hang(
     assert_no_unhandled_crash(result, phases)
     assert result.returncode == 1
 
-    report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_hardware_report")
-    assert report_phase.get("delivered") is False, report_phase
+    # pgw#783/pgw#826: the parent's relay to the blackholed hub is what the
+    # report budget must bound; it fails undelivered and the pod still ends.
+    report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_boot_fatal")
+    assert report_phase.get("relayed") is True, report_phase
+    assert "report_delivered=False" in combined
     fatal = next((p for p in phases if p.get("phase") == "worker_fatal"), None)
     assert fatal is not None and fatal.get("phase_context") == "cuda_probe", phases
+
+
+def test_probe_failure_is_terminal_no_respawn_exits_1(tmp_path: Path) -> None:
+    """pgw#826 regression, the exact shape that wedged the 0.85.0 cut: the
+    compute child's CUDA probe failure must be TERMINAL — the parent exits 1
+    instead of respawning a fresh child every ~55s forever. The harness's
+    total-runtime cap makes a regressed crash loop fail fast rather than burn
+    the CI job (no silence window can end it: every respawn prints)."""
+    result = run_entrypoint(
+        tmp_path,
+        functions=[gpu_manifest_entry()],
+        env_overrides={
+            "ORCHESTRATOR_PUBLIC_ADDR": closed_port_addr(),
+        },
+        timeout=90.0,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1
+    # Exactly one spawn: a hardware verdict is never crash-to-retry.
+    assert combined.count("spawning compute child") == 1, combined
+    assert "cuda_probe_boot_fatal" in combined
+    assert "compute_boot_fatal" in combined
+
+
+def test_probe_failure_parent_relays_the_typed_report(tmp_path: Path) -> None:
+    """pgw#826: the child holds no credential, so the PARENT must deliver the
+    typed HardwareUnsuitable report to the hub before exiting 1."""
+    with recording_hub() as (servicer, addr):
+        result = run_entrypoint(
+            tmp_path,
+            functions=[gpu_manifest_entry()],
+            env_overrides={
+                "ORCHESTRATOR_PUBLIC_ADDR": addr,
+                "WORKER_ID": "pgw826-split-worker",
+            },
+        )
+        assert result.returncode == 1
+        servicer.wait_for_message()
+        # The parent also dials worker_fatal-carrier postmortems on the same
+        # stream shape; the typed hardware verdict must be among them.
+        reports = [
+            m.hardware_unsuitable for m in servicer.received
+            if m.WhichOneof("msg") == "hardware_unsuitable"
+        ]
+        hw = next(
+            (r for r in reports
+             if r.reason_class in ("cuda_unavailable", "driver_too_old")),
+            None,
+        )
+        assert hw is not None, [r.reason_class for r in reports]
+        assert hw.worker_id == "pgw826-split-worker"
+        assert hw.detail

@@ -57,8 +57,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # parent strips it), so it cannot read `release_id` out of the claims — but
     # the intent registry and every lifecycle snapshot are keyed on it. A claim
     # is not a credential: the control parent decodes its own token and hands
-    # this one value down. Empty (and unused) in single-process mode, where the
-    # claims are still authoritative.
+    # this one value down to the compute child.
     worker_release_id: str = ""
 
     # Runtime introspection (set by the RunPod runtime; not configuration).

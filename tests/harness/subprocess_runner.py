@@ -52,6 +52,7 @@ def run_entrypoint(
     functions: List[Dict[str, Any]],
     env_overrides: Optional[Dict[str, str]] = None,
     timeout: float = 25.0,
+    total_budget_s: float = 300.0,
 ) -> subprocess.CompletedProcess[str]:
     """Boot a real entrypoint subprocess and collect its output.
 
@@ -63,6 +64,12 @@ def run_entrypoint(
     and only silence gives up. Same rule ``gen_worker.stall`` gives production
     code, and the same reason: on a shared runner a fixed budget decides the
     machine's speed, not the code's behaviour.
+
+    pgw#826: ``total_budget_s`` is the COEXISTING backstop the silence window
+    cannot be — a crash LOOP is never silent (every respawn prints), so
+    without a total-runtime cap a looping boot presents as liveness and burns
+    the whole CI job. Generous (order-of-magnitude over a slow boot), never a
+    speed judgment.
     """
     manifest_path = tmp_path / "endpoint.lock"
     write_manifest(manifest_path, functions)
@@ -95,7 +102,8 @@ def run_entrypoint(
     from .progress_wait import Cadence
 
     return _collect_until_silent(
-        proc, silence_window_s=max(timeout, Cadence().floor_s)
+        proc, silence_window_s=max(timeout, Cadence().floor_s),
+        total_budget_s=total_budget_s,
     )
 
 
@@ -117,10 +125,27 @@ class _WentSilent(subprocess.TimeoutExpired):
         )
 
 
+class _RanTooLong(subprocess.TimeoutExpired):
+    """pgw#826: the child kept TALKING past the total-runtime cap — the shape
+    of a crash loop, which no silence window can end (every respawn prints)."""
+
+    def __str__(self) -> str:
+        tail = "".join((self.output or "").splitlines(keepends=True)[-3:]).strip()
+        return (
+            f"the boot subprocess was still running (and talking) after "
+            f"{self.timeout}s total — a crash loop presents as liveness, so the "
+            f"total-runtime cap killed it. Last output: {tail!r}"
+        )
+
+
 def _collect_until_silent(
     proc: "subprocess.Popen[str]", *, silence_window_s: float,
+    total_budget_s: float = 300.0,
 ) -> "subprocess.CompletedProcess[str]":
+    import time as _time
+
     window = SilenceWindow(silence_window_s)
+    started = _time.monotonic()
     chunks: Dict[str, List[str]] = {"out": [], "err": []}
 
     def _drain(stream: Any, key: str) -> None:
@@ -140,15 +165,19 @@ def _collect_until_silent(
             proc.wait(timeout=0.25)
             break
         except subprocess.TimeoutExpired:
-            if window.stalled():
-                proc.kill()
-                proc.wait()
-                for reader in readers:
-                    reader.join(timeout=5.0)
-                raise _WentSilent(
-                    proc.args, silence_window_s,
-                    output="".join(chunks["out"]), stderr="".join(chunks["err"]),
-                ) from None
+            stalled = window.stalled()
+            ran_too_long = _time.monotonic() - started > total_budget_s
+            if not stalled and not ran_too_long:
+                continue
+            proc.kill()
+            proc.wait()
+            for reader in readers:
+                reader.join(timeout=5.0)
+            exc = _WentSilent if stalled else _RanTooLong
+            raise exc(
+                proc.args, silence_window_s if stalled else total_budget_s,
+                output="".join(chunks["out"]), stderr="".join(chunks["err"]),
+            ) from None
     for reader in readers:
         reader.join(timeout=5.0)
     return subprocess.CompletedProcess(

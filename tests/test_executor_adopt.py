@@ -1483,7 +1483,7 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
     published: dict = {}
 
     class _Pub(fleet_cells.CellPublisher):
-        def publish(self, family, artifact, meta):
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
             # Fill `published` BEFORE the event: the main thread's wait loop
             # keys on the event and immediately reads `published` (a publish
             # event must mean the publish is observable, not merely started).
@@ -1612,7 +1612,7 @@ def test_pending_self_mint_unproven_fails_closed_and_never_publishes(
     model_dir.mkdir()
 
     class _Pub(fleet_cells.CellPublisher):
-        def publish(self, family, artifact, meta):
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
             pytest.fail("an unproven self-mint must NEVER publish")
 
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
@@ -3936,7 +3936,7 @@ def test_two_lane_mint_with_unexercised_sibling_completes_and_withholds_publish(
     from gen_worker import fleet_cells
 
     class _Pub(fleet_cells.CellPublisher):
-        def publish(self, family, artifact, meta):
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
             pytest.fail(
                 "an incomplete family cell (unexercised mandatory sibling) "
                 "must never be published")
@@ -3993,7 +3993,7 @@ def test_two_lane_mint_fully_exercised_publishes_the_union_cell(
     calls: list = []
 
     class _Pub(fleet_cells.CellPublisher):
-        def publish(self, family, artifact, meta):
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
             calls.append((family, Path(artifact).read_bytes()))
             published.set()
             return "cp-1"
@@ -4145,7 +4145,7 @@ def test_routed_two_lane_mint_synthesized_media_coverage_publishes_union(
     calls: list = []
 
     class _Pub(fleet_cells.CellPublisher):
-        def publish(self, family, artifact, meta):
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
             calls.append((family, Path(artifact).read_bytes()))
             published.set()
             return "cp-1"

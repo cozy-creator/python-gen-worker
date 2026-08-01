@@ -54,6 +54,11 @@ T_LIVENESS = 25      # msgpack {"act": bool, "kind": str}
 # result. msgpack {"id": int, "method": str, "path": str, "query": {..},
 #                  "json": {..}, "timeout": float}
 T_ACTION_REQ = 26
+# pgw#826: a TERMINAL typed boot verdict, sent pre-transport by a child that is
+# about to exit (e.g. the CUDA probe failed). The parent propagates the report
+# on its credential and exits 1 instead of respawning.
+# msgpack {"kind": str, "terminal": bool, "report": {..HardwareReport fields..}}
+T_BOOT_FATAL = 27
 
 
 def pack_meta(obj: Any) -> bytes:

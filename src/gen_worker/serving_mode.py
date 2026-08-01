@@ -40,10 +40,37 @@ MODE_JIT_CELL = "jit_cell"
 MODE_AOT_CELL = "aot_cell"
 
 # --- eager-fallback reason classes (wire-shared) -----------------------------
+# A COMPILED lane that fell back to eager for THIS request.
 FALLBACK_GUARD_MISS = "guard_miss"
 FALLBACK_INGRESS_REFUSED = "ingress_refused"
 FALLBACK_HEALING = "healing"
 FALLBACK_VOLATILE = "volatile"
+_PER_REQUEST_FALLBACKS = frozenset({
+    FALLBACK_GUARD_MISS, FALLBACK_INGRESS_REFUSED,
+    FALLBACK_HEALING, FALLBACK_VOLATILE,
+})
+
+# --- eager POSTURE reason classes (pgw#824, wire-shared) ---------------------
+# The four classes above answer "a cell was armed and this request did not use
+# it". They cannot answer the much commoner case: NOTHING is armed at all. That
+# request reported `serving_mode=eager, fallback_reason=""` — indistinguishable
+# from a release that never declared a compile target, from a pod whose mint is
+# still running, and from a pod that declined the mint for cause. So "why is
+# this fleet eager right now" had no query.
+#
+# The posture token is the SAME token the decline's `self_mint_skipped` /
+# `self_mint_started` activity event carries in `phase`, so a request row and
+# the worker's own event stream join on one string instead of on a sentence.
+#: The arming brain has not answered yet (boot in flight, setup not finished).
+POSTURE_ARM_PENDING = "arm_pending"
+#: A mint is being built right now (delegated child, background driver); this
+#: worker serves eager until it adopts. Transient BY CONSTRUCTION.
+POSTURE_MINT_IN_PROGRESS = "mint_in_progress"
+#: The release declared no compile target at all — eager is the contract, not
+#: a degradation. Kept distinct so it never pollutes the defect classes.
+POSTURE_NO_COMPILE_DECLARED = "no_compile_declared"
+#: Terminal fallback when a decline reached the request path unclassified.
+POSTURE_UNCOMPILED = "uncompiled"
 
 #: Step-count field names, in precedence order. Matches warmup._STEP_FIELDS so
 #: the boot warmup and the served request agree on what "steps" means.
@@ -154,6 +181,7 @@ def resolve(
     ingress_refused: bool = False,
     verdict: str = "",
     sm: Optional[str] = None,
+    eager_posture: str = "",
 ) -> ServedIdentity:
     """The full dimension set for one request.
 
@@ -166,11 +194,17 @@ def resolve(
     callers that know the signature. Any of them means this request was served
     eager by a compiled lane, which is exactly the sample that must not be
     counted as compiled.
+
+    ``eager_posture`` (pgw#824) answers the OTHER eager case — no cell armed at
+    all — with the arming brain's own classified token. It applies only when
+    the mode is already ``eager``: a per-request fallback on a compiled lane
+    always outranks it, and it never sets ``served_eager_fallback`` (nothing
+    fell back; there was nothing to fall back FROM), so every existing
+    compiled-vs-eager comparison keeps exactly its old meaning.
     """
     mode = classify_mode(active_compile_ref, pipeline)
     named = str(verdict or "").strip()
-    if named in (FALLBACK_HEALING, FALLBACK_VOLATILE, FALLBACK_GUARD_MISS,
-                 FALLBACK_INGRESS_REFUSED):
+    if named in _PER_REQUEST_FALLBACKS:
         reason = named
     elif guard_missed:
         reason = FALLBACK_GUARD_MISS
@@ -178,10 +212,13 @@ def resolve(
         reason = FALLBACK_INGRESS_REFUSED
     else:
         reason = fallback_of(router, sig)
+    fell_back = bool(reason)
+    if not reason and mode == MODE_EAGER:
+        reason = str(eager_posture or "").strip()
     return ServedIdentity(
         serving_mode=mode,
         served_cell_ref=str(active_compile_ref or "").strip(),
-        served_eager_fallback=bool(reason),
+        served_eager_fallback=fell_back,
         fallback_reason=reason,
         sm=normalize_sm(sm) if sm is not None else detect_sm(),
     )
@@ -236,6 +273,10 @@ __all__ = [
     "FALLBACK_INGRESS_REFUSED",
     "FALLBACK_HEALING",
     "FALLBACK_VOLATILE",
+    "POSTURE_ARM_PENDING",
+    "POSTURE_MINT_IN_PROGRESS",
+    "POSTURE_NO_COMPILE_DECLARED",
+    "POSTURE_UNCOMPILED",
     "ServedIdentity",
     "classify_mode",
     "detect_sm",

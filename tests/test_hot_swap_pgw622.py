@@ -306,7 +306,7 @@ class _Publisher:
     def enabled(self):
         return self._enabled
 
-    def publish(self, family, artifact, meta):
+    def publish(self, family, artifact, meta, mint_duration_ms=0):
         with tarfile.open(artifact) as tar:
             names = sorted(tar.getnames())
         self.published.append((family, names, dict(meta)))
@@ -382,7 +382,7 @@ def test_republish_failure_never_raises(monkeypatch, tmp_path):
     (live_root / "inductor").mkdir(parents=True)
 
     class Boom(_Publisher):
-        def publish(self, family, artifact, meta):
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
             raise RuntimeError("wire down")
 
     class Pipe:

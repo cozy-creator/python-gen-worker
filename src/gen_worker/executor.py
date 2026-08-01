@@ -37,6 +37,7 @@ from . import cpu_budget
 from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
+from . import warmup
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -321,71 +322,12 @@ class _AllComponents(frozenset):
 _ALL_COMPONENTS = _AllComponents()
 
 
-def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dict[str, Any]:
-    """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
-    Slot-declared slot's repo-metadata ``ModelBinding.inference_defaults``
-    over its code fallback preset, then apply each riding lora's
-    ``LoraOverlay.inference_defaults`` as a FIELD-LEVEL override, in lora
-    order (pgw#516 composition rule — see ``api.slot._apply_lora_overrides``).
-    Returns the ``resolved_slots=``/``slot_errors=`` kwargs for
-    ``RequestContext.__init__`` — a slot that fails to resolve (no metadata +
-    no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access error
-    instead of failing the whole dispatch."""
-    if not spec.slots:
-        return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
-    from .api.slot import resolve_slot
-
-    run_models = list(run.models) if run is not None else []
-    raw_defaults = {b.slot: b.inference_defaults for b in run_models if b.inference_defaults}
-    lora_defaults = {
-        b.slot: tuple(lo.inference_defaults for lo in b.loras if lo.inference_defaults)
-        for b in run_models if b.loras
-    }
-    # pgw#654: the resolved checkpoint's stamped objective/distilled facts
-    # ride the binding; the per-function declaration is the backstop (the
-    # hub gates checkpoint<->function compatibility at deploy/dispatch).
-    objectives = {
-        b.slot: str(getattr(b, "objective", "") or "") for b in run_models
-    }
-    distilled_facts = {
-        b.slot: bool(getattr(b, "distilled", False)) for b in run_models
-    }
-    resolved: Dict[str, Any] = {}
-    errors: Dict[str, str] = {}
-    for name, slot in spec.slots.items():
-        try:
-            resolved[name] = resolve_slot(
-                name, slot,
-                ref=spec.models.get(name),
-                defaults_cls=spec.defaults_type,
-                family=spec.slot_family.get(name, ""),
-                raw_metadata_json=raw_defaults.get(name, ""),
-                lora_metadata_json=lora_defaults.get(name, ()),
-                objective=objectives.get(name, ""),
-                distilled=distilled_facts.get(name, False),
-                allowed_objectives=spec.objectives,
-                allowed_distilled=spec.distilled,
-            )
-        except ValueError as exc:
-            errors[name] = str(exc)
-    return {
-        "resolved_slots": resolved,
-        "slot_errors": errors,
-        "root_slot": _spec_root_slot(spec),
-    }
-
-
-def _spec_root_slot(spec: EndpointSpec) -> str:
-    """The declared root slot name (pgw#654 gap #7): Slot(root=True), else
-    "pipeline", else the single slot; "" when nothing resolves a root."""
-    for name, slot in spec.slots.items():
-        if getattr(slot, "root", False):
-            return name
-    if "pipeline" in spec.slots:
-        return "pipeline"
-    if len(spec.slots) == 1:
-        return next(iter(spec.slots))
-    return ""
+#: pgw#828: the slot-resolution chain and the root-slot rule moved to
+#: ``warmup`` so the delegated mint child can reach them WITHOUT importing
+#: the executor. These names stay as aliases because the dispatch path and
+#: several tests call them here; there is one implementation.
+_resolve_slots_kwargs = warmup.resolved_slots_kwargs
+_spec_root_slot = warmup.spec_root_slot
 
 
 def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
@@ -2775,6 +2717,13 @@ class _ClassRecord:
     # deferred. Cleared when the mint completes, is disproven, or is
     # abandoned (peer-cell adoption, vacate, shutdown).
     background_mint: Optional["_BackgroundMint"] = None
+    # pgw#824: WHY this record is not serving from a cell, as the arming
+    # brain's own classified token (fleet_cells.ArmOutcome.eager_reason /
+    # serving_mode.POSTURE_*). Every request served eager reports it as
+    # `fallback_reason`, so "why is this fleet eager right now" is one GROUP BY
+    # over request rows that joins the worker's own `self_mint_skipped` events
+    # on the same string. "" once a cell is armed.
+    eager_posture: str = ""
 
 
 class _MintAbandoned(Exception):
@@ -2937,6 +2886,10 @@ class _InjectionResult:
     # packed. The warmup-proof loop finalizes (packs + publishes) exactly
     # the proven entries and abandons the rest — never before the proof.
     pending_self_mints: Dict[int, Any] = dc_field(default_factory=dict)
+    # pgw#824: the arming brain's classified reason for every compile object
+    # that ended this setup WITHOUT an armed cell. Carried into the record, so
+    # the reason outlives the function that computed it.
+    eager_postures: List[str] = dc_field(default_factory=list)
 
     def add_compile_object(
         self, pipeline: Any, slots: typing.Iterable[str],
@@ -4200,6 +4153,28 @@ class Executor:
             if not job.fallback_reason:
                 job.fallback_reason = reason
 
+    def _note_eager_posture(
+        self, rec: _ClassRecord, token: str, detail: str = "",
+    ) -> None:
+        """pgw#824: record (and, once, confess) WHY this record has no cell.
+
+        First token wins: the earliest honest cause outranks a later generic
+        one. The typed event fires only on the transition, so a decline that
+        happens per-object on a many-slot record coalesces to ONE row instead
+        of N identical ones — counts, not silence, and not a flood.
+        """
+        token = str(token or "").strip()
+        if not token or rec.eager_posture:
+            return
+        rec.eager_posture = token
+        activity_mod.emit_event(
+            "serve_eager_posture",
+            f"fn={','.join(s.name for s in rec.specs) or '?'}: this instance "
+            f"serves EAGER — {detail or token}. Every request it serves "
+            f"reports fallback_reason={token}.",
+            phase=token,
+        )
+
     def _install_compile_targets(
         self,
         rec: _ClassRecord,
@@ -4224,6 +4199,8 @@ class Executor:
         if eager_only:
             logger.info(
                 "%s: no compile targets installed — %s", spec.name, eager_only)
+            self._note_eager_posture(
+                rec, "no_compile_targets_installed", eager_only)
             return
         # Production injection supplies object-scoped slot ownership. Keep
         # bare objects accepted for focused unit construction only, deriving
@@ -4367,12 +4344,18 @@ class Executor:
                 )
                 # pgw#672: mandatory lanes no longer raise here — the
                 # functions serve explicit eager instead of dying.
+                # pgw#824: and a log line is not "instead of dying" on a pod
+                # with no stdout — it is dying quietly.
+                self._note_eager_posture(
+                    rec, "target_applicability_incomplete", detail)
                 continue
             lane_error = compile_cache.compile_target_lane_error(
                 target.pipeline_weight_lane, target.lora_bucket)
             if lane_error:
                 logger.warning(
                     "compile target omitted for %s: %s", spec.name, lane_error)
+                self._note_eager_posture(
+                    rec, "target_lane_unsupported", lane_error)
                 continue
             if (candidate_requested_lane
                     and target_quant_lane != candidate_requested_lane):
@@ -4390,6 +4373,9 @@ class Executor:
                     "is incomplete (ref=%r digest=%r)",
                     spec.name, active_ref, active_digest,
                 )
+                self._note_eager_posture(
+                    rec, "artifact_identity_incomplete",
+                    f"ref={active_ref!r} digest={active_digest!r}")
                 continue
             if mandatory_quant and not active_ref:
                 # pgw#672: a quantized-lane object without a proven exact
@@ -4404,6 +4390,10 @@ class Executor:
                     "explicit eager (pgw#672)",
                     target_quant_lane.upper(), spec.name,
                 )
+                self._note_eager_posture(
+                    rec, "mandatory_lane_active_less",
+                    f"{target_quant_lane.upper()} target registered with no "
+                    f"proven active artifact")
             with target.state_lock:
                 target.active_compile_ref = active_ref
                 target.active_compile_snapshot_digest = active_digest
@@ -5153,6 +5143,7 @@ class Executor:
         two can never disagree about whether this request ran compiled.
         """
         ref, pipeline = "", None
+        posture = ""
         if spec is not None and spec.cls is not None:
             rec = self._classes.get(spec.instance_key)
             if rec is not None:
@@ -5162,12 +5153,43 @@ class Executor:
                     if active:
                         ref, pipeline = active, target.pipeline
                         break
+                if not ref:
+                    posture = self._eager_posture(spec, rec)
         return serving_mode_mod.resolve(
             active_compile_ref=ref,
             pipeline=pipeline,
             guard_missed=bool(job is not None and job.served_eager_fallback),
             verdict=(job.fallback_reason if job is not None else ""),
+            eager_posture=posture,
         )
+
+    def _eager_posture(self, spec: EndpointSpec, rec: "_ClassRecord") -> str:
+        """pgw#824: the classified reason this record has no armed cell.
+
+        Read LIVE rather than only from the stored token, because the two
+        transient postures are properties of right now, not of the arming
+        decision: a mint in flight means this eager request is a warming pod
+        (its `fallback_reason` stops appearing on its own), while a stored
+        decline means it never will.
+
+        Order matters. An in-flight mint outranks whatever the arming brain
+        said when it opened, because the background driver can start after a
+        DIFFERENT decline was already recorded.
+        """
+        if rec.background_mint is not None:
+            return serving_mode_mod.POSTURE_MINT_IN_PROGRESS
+        stored = str(rec.eager_posture or "")
+        if stored:
+            return stored
+        if not any(
+            s.compile is not None and s.compile.family for s in rec.specs
+        ):
+            # Eager is this release's CONTRACT, not a degradation. Naming it
+            # keeps the honest zero out of every defect-class count.
+            return serving_mode_mod.POSTURE_NO_COMPILE_DECLARED
+        if not rec.ready:
+            return serving_mode_mod.POSTURE_ARM_PENDING
+        return serving_mode_mod.POSTURE_UNCOMPILED
 
     def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
         """th#1050: the instructed lane's body when the endpoint DECLARES it
@@ -6022,15 +6044,11 @@ class Executor:
                     return True
                 if payload is None:
                     return True  # variant base already carries media
-                ctx: RequestContext[Any] = RequestContext(
-                    request_id=f"boot-warmup-{wj.spec.name}",
+                ctx: RequestContext[Any] = warmup.warm_context(
+                    wj.spec, request_id=f"boot-warmup-{wj.spec.name}",
                     local_output_dir=tmp,
-                    models={slot: wire_ref(b) for slot, b in wj.spec.models.items()},
-                    **_resolve_slots_kwargs(wj.spec, None),
-                    boot_warmup=True,
-                )
-                ctx._set_lane(self._served_lane(wj.spec))
-                ctx._set_config(self._effective_config(wj.spec))
+                    lane=self._served_lane(wj.spec),
+                    config=self._effective_config(wj.spec))
                 try:
                     await self._invoke_warmup(wj.spec, instance, ctx, payload, handler_kwargs)
                 except Exception as exc:
@@ -7321,6 +7339,12 @@ class Executor:
             # pipeline exists and its attention backend is set, before
             # compile. Degree 1 (every pod today) is a no-op.
             await self._arm_sequence_group(rec, spec, slot_refs)
+            # pgw#824: the arming brain's own classified declines, carried
+            # from the injection into the record BEFORE target installation so
+            # its own (coarser) omission tokens never outrank them.
+            for token in inj.eager_postures:
+                self._note_eager_posture(
+                    rec, token, f"the arming policy declined: {token}")
             self._install_compile_targets(
                 rec,
                 spec,
@@ -8586,6 +8610,12 @@ class Executor:
                             raise
                         armed = outcome.armed
                         pipe_mint = outcome.self_mint
+                        # pgw#824: the arming brain already classified WHY it
+                        # is not arming; without carrying it here the reason
+                        # died at the end of this function and every eager
+                        # request the pod then served reported "".
+                        if not armed and outcome.eager_reason:
+                            result.eager_postures.append(outcome.eager_reason)
                         if outcome.selection_bug is not None:
                             # th#1031: no longer fatal — this SAME call
                             # already fell through to self-mint (or, for a
@@ -9234,18 +9264,11 @@ class Executor:
                 payload = wj.build(tmp)
                 if payload is None:
                     return
-                ctx: RequestContext[Any] = RequestContext(
-                    request_id=f"bg-mint-{wj.spec.name}",
+                ctx: RequestContext[Any] = warmup.warm_context(
+                    wj.spec, request_id=f"bg-mint-{wj.spec.name}",
                     local_output_dir=tmp,
-                    models={
-                        slot: wire_ref(b)
-                        for slot, b in wj.spec.models.items()
-                    },
-                    **_resolve_slots_kwargs(wj.spec, None),
-                    boot_warmup=True,
-                )
-                ctx._set_lane(self._served_lane(wj.spec))
-                ctx._set_config(self._effective_config(wj.spec))
+                    lane=self._served_lane(wj.spec),
+                    config=self._effective_config(wj.spec))
                 if preemptible:
                     bg.seed_ctx = ctx
                     # Registration race: demand that arrived after the turn
@@ -9514,6 +9537,10 @@ class Executor:
 
         spec = bg.spec
         act.phase(activity_mod.PHASE_FINALIZE)
+        # pgw#824: the eager posture is DISCHARGED — this record now serves
+        # from a cell. Left behind, a stale token would misattribute a later,
+        # unrelated un-arm (guard revocation) to whatever declined at boot.
+        rec.eager_posture = ""
         for pid, outcome in finalized.items():
             pipe = bg.pipes[pid]
             for target in rec.compile_targets.values():

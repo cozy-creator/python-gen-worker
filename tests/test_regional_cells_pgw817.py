@@ -766,7 +766,15 @@ class _TinyBlock(nn.Module):
 
     def __init__(self, width: int) -> None:
         super().__init__()
-        self.lin = nn.Linear(width, width)
+        # pgw#831/pgw#827: bias-FREE deliberately. The compiler folds a
+        # `Linear` bias into the epilogue, and a folded constant bakes the
+        # PROTOTYPE instance's bytes into every other instance of a regional
+        # cell — measured: instance 0 exact, instance 1 wrong by 0.53. The
+        # mint refuses that by name now, so this toy would refuse. What these
+        # tests are about (block discovery, packaging, the pool) is unchanged;
+        # `test_a_folded_state_dict_constant_REFUSES_a_regional_mint` in
+        # `test_regional_arm_wiring_pgw827.py` owns the bias case.
+        self.lin = nn.Linear(width, width, bias=False)
 
     def forward(self, hidden_states: Any, temb: Any = None) -> Any:
         out = torch.tanh(self.lin(hidden_states))

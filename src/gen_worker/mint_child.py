@@ -50,7 +50,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
@@ -77,13 +77,28 @@ RECIPE_AOT = "aot"
 #: group by rather than a second code path to keep in step.
 RECIPE_AOT_REGIONAL = "aot-regional"
 
+#: The recipes that export through AOTInductor. Named so a pre-flight guard can
+#: test membership without reading as the recipe DISPATCH below (pgw#817 pins
+#: that the dispatch follows the parent's composition; a refusal precedes it).
+_AOT_RECIPES = (RECIPE_AOT, RECIPE_AOT_REGIONAL)
+
 
 class MintChildRefused(RuntimeError):
     """A named, deterministic reason this mint cannot happen here.
 
     Never retried by the parent: re-running a named refusal buys a second
     billed compile for the same sentence.
+
+    ``mint_phases`` carries the refusing mint's PARTIAL phase table when it
+    got far enough to have one (pgw#825) — the entries it exported and
+    compiled before refusing are real minutes and must reach the hub.
     """
+
+    def __init__(
+        self, *args: Any, mint_phases: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        super().__init__(*args)
+        self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
 
 
 # th#1322: per-phase spans, measured HERE because this process owns the clock
@@ -294,22 +309,21 @@ def _run_warm_job(instance: Any, job: Any, config: Dict[str, Any], lane: str) ->
     """
     import asyncio
 
-    from .request_context import RequestContext
+    from . import warmup
 
     spec = job.spec
     with tempfile.TemporaryDirectory(prefix="gw-mintchild-") as tmp:
         payload = job.build(tmp)
         if payload is None:
             return
-        ctx: RequestContext[Any] = RequestContext(
-            request_id=f"mint-child-{spec.name}",
-            local_output_dir=tmp,
-            boot_warmup=True,
-        )
-        if lane:
-            ctx._set_lane(lane)
-        if config:
-            ctx._set_config(dict(config))
+        # pgw#828: the SAME construction the executor's warm path uses. This
+        # was three hand-rolled contexts, and the child's had no slots at
+        # all — `ctx.slots["pipeline"]` raised `KeyError: 'pipeline'` on a
+        # real L4 after a 16.45 s load, so the dynamo mint route published
+        # nothing.
+        ctx = warmup.warm_context(
+            spec, request_id=f"mint-child-{spec.name}",
+            local_output_dir=tmp, lane=lane, config=config)
         bound = getattr(instance, spec.attr_name)
         kwargs = {spec.ctx_param: ctx, spec.payload_param: payload}
         if spec.is_async_gen:
@@ -374,13 +388,29 @@ def _mint_aot(
     spec = fleet_cells.aot_export_spec(pipe, cfg)
     out_dir = target.parent / "aot"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # pgw#824: `aot_mint.mint` used to be ONE opaque call spanning the family's
+    # whole declared class set (sdxl: 18), so this function framed `trace_graph`
+    # once and then said nothing at all until `seal_publish` below. A real
+    # export measured ~5 minutes of complete wire silence; the parent's only
+    # evidence that the child was working was that its CPU was warm, which
+    # proves alive, not progressing. Every entry now rides the frame protocol
+    # that already exists -- no new wire, and the parent's `_on_frame` lands it
+    # on the same self_mint_compile activity the hub already reads.
+    def _progress(phase: str, step: int, total: int, note: str) -> None:
+        frame(phase=phase, step=step, total=total, note=note)
+
     try:
-        result = aot_mint.mint(pipe, spec, out_dir)
+        result = aot_mint.mint(pipe, spec, out_dir, on_progress=_progress)
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod
-        # that exposes no logs (pgw#760).
-        raise MintChildRefused(f"aot mint refused: {exc}") from exc
+        # that exposes no logs (pgw#760). pgw#825: the seconds it spent before
+        # refusing ride WITH the sentence — a refusal after four paid compiles
+        # and a refusal in the first second are not the same event.
+        raise MintChildRefused(
+            f"aot mint refused: {exc}",
+            mint_phases=getattr(exc, "mint_phases", None)) from exc
 
     frame(phase="seal_publish", note=f"packed {result.artifact.name}")
     artifact = Path(result.artifact)
@@ -452,6 +482,15 @@ def mint(request: MintRequest) -> MintReport:
     if not cc.toolchain_present():
         raise MintChildRefused(
             "no C toolchain (cc/gcc/clang) — inductor cannot link a kernel")
+    if request.recipe in _AOT_RECIPES and not cc.cxx_toolchain_present():
+        # pgw#823: the AOT recipe's stricter requirement, asserted BEFORE the
+        # weights are read. The guard above passes on a C compiler; AOTI needs
+        # a C++ one, and without this the miss surfaces 336 s later as an
+        # InductorError from inside the linker.
+        raise MintChildRefused(
+            "no C++ compiler (g++/clang++) — AOTInductor links a shared "
+            "object and cannot build one; the dynamo recipe does not need "
+            "this, the AOT recipe does")
 
     frame(phase="load", note=f"discover {list(request.modules)}")
     specs = collect_endpoints(list(request.modules))
@@ -581,7 +620,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write_report(report_path, MintReport(
             status="refused", detail=str(exc)[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0]))
+            phase=_PHASE_OPEN[0],
+            mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     except BaseException as exc:  # noqa: BLE001 — every death is classified
@@ -590,7 +630,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             status="resource" if resource_shortfall else "failed",
             detail=f"{type(exc).__name__}: {exc}"[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0]))
+            phase=_PHASE_OPEN[0],
+            # pgw#825: a CRASH's paid compiles are measurable too — the mint
+            # attaches its partial table to whatever it died with.
+            mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
         logger.exception("mint-child: mint failed")
         if resource_shortfall:
             return EXIT_RESOURCE

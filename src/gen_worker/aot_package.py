@@ -383,6 +383,53 @@ def program_constant_fqns(program: Any) -> Tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def program_state_dict_fqns(program: Any) -> Tuple[str, ...]:
+    """The FQNs an ``ExportedProgram`` will declare ``source=state_dict``.
+
+    Parameters and buffers only: a lifted tensor constant has no resident
+    counterpart and ships its bytes as a LITERAL instead. This is the
+    program-side mirror of ``DeclaredConstant.source`` — AOTInductor records
+    exactly these two input kinds as ``ConstantType::Parameter``/``Buffer``,
+    which is what makes the check below predictive of the packed manifest.
+    """
+    signature = getattr(program, "graph_signature", None)
+    names: set[str] = set()
+    for attr in ("parameters", "buffers"):
+        names.update(str(n) for n in getattr(signature, attr, ()) or ())
+    return tuple(sorted(names))
+
+
+def unbindable_program_constants(
+    program: Any, state_dict_keys: Iterable[str],
+) -> List[str]:
+    """:func:`unbindable_constants`, asked BEFORE the compile is paid for.
+
+    pgw#825: the packed gate fires per entry AFTER that entry's 4-6 minute
+    AOTI compile, so a declaration/module mismatch cost a whole L4 rental to
+    learn. The exported program already names every parameter and buffer it
+    lifted, and AOTInductor's constant table is a function of exactly that —
+    so the same refusal is knowable in milliseconds, off the program, before
+    a kernel is built.
+
+    The packed gate is NOT replaced by this one: it reads the artifact's own
+    generated wrapper, which is the only proof of what actually shipped.
+    """
+    available = set(state_dict_keys)
+    if not available:
+        return []
+    missing = [
+        fqn for fqn in program_state_dict_fqns(program) if fqn not in available
+    ]
+    if not missing:
+        return []
+    return [
+        f"{len(missing)} constant(s) the exported program lifts from the "
+        f"module's state_dict are absent from the resident module's bind "
+        f"table, e.g. {missing[:6]!r} — the compiled cell could never bind "
+        f"them, so the compile would be paid for an unpublishable entry"
+    ]
+
+
 def program_package_drift(
     program: Any, package: Path, entry: str = "",
 ) -> List[str]:

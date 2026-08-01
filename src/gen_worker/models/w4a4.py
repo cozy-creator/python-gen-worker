@@ -45,8 +45,9 @@ import logging
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import shutil
 
 from .nvfp4_quant import (
@@ -671,6 +672,17 @@ def swap_w4a4_linears(
         return fh.get_tensor(name)
 
     swapped = 0
+    # pgw#824: the w8a8 twin. A skipped layer stays dequantized at full
+    # precision inside a pipeline that reports the w4a4 lane; the alignment
+    # skip below had no report of any kind. Counted by class, confessed once.
+    skipped: Dict[str, int] = {}
+    samples: List[str] = []
+
+    def _skip(cls: str, target: str) -> None:
+        skipped[cls] = skipped.get(cls, 0) + 1
+        if len(samples) < 3:
+            samples.append(f"{target}({cls})")
+
     try:
         for layer in art.quantized:
             target = str(key_map(layer)) if key_map is not None else layer
@@ -687,6 +699,7 @@ def swap_w4a4_linears(
                 logger.warning(
                     "w4a4 swap: %s is %s, not a plain Linear; layer stays "
                     "dequantized", target, type(old).__name__)
+                _skip("not_plain_linear", target)
                 continue
             w = _tensor(f"{layer}.weight")
             out_f, in_f = int(w.shape[0]), int(w.shape[1]) * 2
@@ -695,6 +708,7 @@ def swap_w4a4_linears(
                     f"quantized layer {layer!r} shape [{out_f}, {in_f}] != "
                     f"module {target!r} [{old.out_features}, {old.in_features}]")
             if in_f % _K_ALIGN or out_f % _N_ALIGN:
+                _skip("dim_unaligned", target)
                 continue
             has_static = f"{layer}.input_scale" in where
             has_pqs = f"{layer}.pre_quant_scale" in where
@@ -726,6 +740,17 @@ def swap_w4a4_linears(
                 pass
     logger.info("w4a4 swap: %d/%d quantized Linears on fp4 scaled_mm",
                 swapped, len(art.quantized))
+    if skipped:
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            f"model={type(model).__name__}: {swapped}/{len(art.quantized)} "
+            f"quantized Linears landed on fp4 scaled_mm; "
+            f"{sum(skipped.values())} stayed DEQUANTIZED at full precision "
+            f"({', '.join(f'{k}={v}' for k, v in sorted(skipped.items()))}; "
+            f"e.g. {', '.join(samples)}). This pipeline reports the w4a4 lane "
+            f"while part of it serves bf16",
+            phase="w4a4_partial_swap",
+        )
     return swapped
 
 
