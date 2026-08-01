@@ -44,6 +44,22 @@ _FORWARDED = (
     signal.SIGUSR1,
     signal.SIGUSR2,
 )
+# The subset that means "die". These arm the shutdown deadline; SIGUSR1/USR2
+# are the pgw#639 forensic pokes and must never start a countdown.
+_TERMINATING = (
+    signal.SIGTERM,
+    signal.SIGINT,
+    signal.SIGHUP,
+    signal.SIGQUIT,
+)
+# Whatever the mask, these must be deliverable: the drain contract, and the
+# child reaping asyncio needs.
+_CONTRACT_SIGNALS = frozenset(_FORWARDED) | {signal.SIGCHLD}
+
+# TimeoutStopSec, outer layer. The procsplit parent already SIGKILLs its own
+# compute children after `_DEFAULT_STOP_TIMEOUT_S` (120s); this backstop must
+# outlive that so the inner escalation and its death dial run first.
+_STOP_TIMEOUT_S = 180.0
 
 
 def supervision_enabled() -> bool:
@@ -54,13 +70,56 @@ def supervision_enabled() -> bool:
     return hasattr(os, "fork")
 
 
-def _forward(child_pid: int) -> None:
+def _mask(how: int, signals: frozenset) -> None:
+    """Best-effort sigmask edit. A platform without it simply keeps today's."""
+    try:
+        signal.pthread_sigmask(how, set(signals))
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _forward(child_pid: int, stop_timeout_s: float = _STOP_TIMEOUT_S) -> None:
+    """Relay the contract signals to the worker, and bound the shutdown.
+
+    pgw#639/#640 require the relay. But a relay alone is not a drain: a child
+    that cannot answer — deaf, wedged below Python in a CUDA call, or blocked
+    writing into a stderr pipe nobody is draining — leaves the parent in
+    ``waitpid`` forever, which on a pod means PID 1 never exits and a rented
+    GPU keeps billing. So the first terminating signal also starts a clock,
+    and when it runs out the child is SIGKILLed. Shutdown always completes;
+    the post-mortem then names the SIGKILL, so the reason is never silent.
+    """
+    armed = False
+
+    def escalate(_signum: int, _frame: object) -> None:
+        logger.error(
+            "worker %d did not exit within %.0fs of the shutdown signal — "
+            "SIGKILL (the pod must not outlive its drain)",
+            child_pid, stop_timeout_s,
+        )
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
     def handler(signum: int, _frame: object) -> None:
+        nonlocal armed
         try:
             os.kill(child_pid, signum)
         except ProcessLookupError:
             pass
+        if signum in _TERMINATING and stop_timeout_s > 0 and not armed:
+            # First one wins: a repeated SIGTERM must not push the deadline out.
+            armed = True
+            try:
+                signal.setitimer(signal.ITIMER_REAL, stop_timeout_s)
+            except (OSError, ValueError):
+                pass
 
+    try:
+        signal.signal(signal.SIGALRM, escalate)
+    except (OSError, ValueError):
+        pass
     for sig in _FORWARDED:
         try:
             signal.signal(sig, handler)
@@ -118,12 +177,20 @@ def report_previous_container_death(
     return detail
 
 
-def supervise(record_path: Path = postmortem.BOOT_RECORD_PATH) -> None:
+def supervise(
+    record_path: Path = postmortem.BOOT_RECORD_PATH,
+    *,
+    stop_timeout_s: float = _STOP_TIMEOUT_S,
+) -> None:
     """Parent: fork, wait, report, exit. Child: return and be the worker.
 
     Called before the worker's heavy imports so the parent stays tiny — the
     kernel's OOM killer picks the fat child, leaving the reporter alive.
     """
+    # The signal mask survives fork AND exec, so whoever launched this process
+    # decides whether the drain contract is deliverable at all. Take it back —
+    # on every path, including the un-supervised one.
+    _mask(signal.SIG_UNBLOCK, _CONTRACT_SIGNALS)
     if not supervision_enabled():
         return
 
@@ -135,21 +202,33 @@ def supervise(record_path: Path = postmortem.BOOT_RECORD_PATH) -> None:
 
     started = time.time()
     oom_before = postmortem.oom_kill_count()
+    # Hold the contract signals across the fork. Between `fork()` and the
+    # parent installing its handlers they are still at SIG_DFL, and a SIGTERM
+    # landing in that window kills the reporter outright and strands the
+    # worker as an orphan — a pod that ignores its own drain. Blocking makes
+    # the window unreachable: anything sent there is merely pending, and is
+    # delivered into the handler the moment we unblock.
+    _mask(signal.SIG_BLOCK, frozenset(_FORWARDED))
     try:
         child_pid = os.fork()
     except OSError:
         logger.warning("fork failed; running the worker in-process", exc_info=True)
+        _mask(signal.SIG_UNBLOCK, _CONTRACT_SIGNALS)
         return
     if child_pid == 0:
         os.environ[_CHILD_ENV] = "1"
+        _mask(signal.SIG_UNBLOCK, _CONTRACT_SIGNALS)
         return  # the child continues into the worker
 
+    # Handlers FIRST, then unblock — the reverse order delivers any signal
+    # that arrived while blocked straight into SIG_DFL and kills the parent.
+    _forward(child_pid, stop_timeout_s)
+    _mask(signal.SIG_UNBLOCK, _CONTRACT_SIGNALS)
     # The parent forked before the worker configured logging.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    _forward(child_pid)
     status = _wait_for(child_pid)
     verdict = postmortem.describe_exit(status)
     clean = not verdict.get("signaled") and verdict.get("exit_code") == 0

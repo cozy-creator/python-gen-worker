@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+- **pgw#833 follow-on — forwarding a signal is not draining a pod.** The
+  gw#640 SIGTERM test hung CI three runs running. It was not the stderr tee
+  (`844f9f6` was CI-3's parent and the hang survived it) and not a blocked
+  signal mask: all three live specimens off the failing runs had `SigBlk` and
+  `ShdPnd` **zero**, and an instrumented repro caught the child's SIGTERM
+  handler firing 1 ms after the parent forwarded it. The deadlock is a lost
+  wakeup: the child installed a handler, announced `READY`, then entered
+  `signal.pause()` — and on a contended box the forwarded SIGTERM lands in the
+  gap, is consumed by the handler, and `pause()` then waits forever for a
+  signal that already came, while the parent waits forever in `waitpid`. The
+  stand-in now blocks SIGTERM and `sigwait`s it, which has no gap.
+  Underneath the flake sat the real P0: `supervise()` forwarded a terminating
+  signal and then waited **unboundedly**. Any child that cannot answer — deaf,
+  wedged below Python in a CUDA call, or blocked writing into a stderr pipe
+  nobody drains — pins PID 1 alive, and a rented GPU keeps billing. Three
+  fixes in `supervisor.py`:
+  - **TimeoutStopSec for the outer layer.** The first terminating signal arms
+    `setitimer(ITIMER_REAL, 180s)`; when it expires the worker is SIGKILLed and
+    the post-mortem names the SIGKILL, so shutdown always completes and never
+    silently. 180s deliberately outlives the procsplit parent's own 120s
+    `_DEFAULT_STOP_TIMEOUT_S` so the inner escalation and its death dial run
+    first. Repeated SIGTERMs cannot push the deadline out.
+  - **The fork window is closed.** Between `fork()` and the parent installing
+    handlers, SIGTERM was still `SIG_DFL` — landing there killed the reporter
+    and stranded the worker as an orphan (a shape observed live on the box).
+    The contract signals are now blocked across the fork and unblocked only
+    *after* the handlers exist; the reverse order delivers a pending signal
+    straight into `SIG_DFL`.
+  - **The mask is taken back on every path**, including the un-supervised one:
+    it survives fork AND exec, so a launcher that blocks SIGTERM otherwise
+    decides that the drain is undeliverable. (Mechanism found by the 0.90.0
+    cut lane.)
+  Guards executed red first: a wedged child (`deaf`, and the exact
+  stalled-stderr-consumer hazard) hangs to the timeout without the escalation,
+  and the blocked-mask launcher hangs without the unblock — 3 red / 3 green,
+  11 passed in 14.6 s where the pre-fix tree burned 211 s in hangs, 6/6 under
+  2-core pinning. The shutdown tests also reap their own pair now, so a red run
+  stops stranding supervisor orphans on the host.
+  Separately, CI's `RuntimeError: Event loop is closed` pair is **not** this
+  hang: they are `PytestUnraisableExceptionWarning`s in the warnings summary,
+  attributed to two *passing* tests, from `BaseSubprocessTransport.__del__`
+  running after its loop closed — newly reachable because pgw#833 gave the
+  child a stderr PIPE for `__del__` to tear down. The parent now closes a
+  reaped child's transport deterministically, after `_settle_link` has drained
+  stderr to EOF.
+
 - **th#1362 — retire safetensors sharding: read-tolerant, write-invariant.**
   Sharding exists upstream to solve resumable transfer, parallel download,
   object-size caps and partial-failure re-upload. Chunked CAS solves all four

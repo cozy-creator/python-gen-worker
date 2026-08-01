@@ -169,6 +169,25 @@ def _tee_stderr_chunk(chunk: bytes) -> None:
         pass  # the ring still keeps the bytes for the dial
 
 
+def _close_transport(proc: asyncio.subprocess.Process) -> None:
+    """Tear a reaped child's transport down while its loop is still alive.
+
+    pgw#833 gave the child a stderr PIPE, which gave BaseSubprocessTransport a
+    pipe protocol to close in ``__del__``. If GC reaches it after the loop has
+    closed, ``__del__`` calls ``call_soon`` on a dead loop and raises
+    "RuntimeError: Event loop is closed" as an unraisable — cosmetic, but it
+    surfaced in CI's warnings summary against unrelated passing tests. Closing
+    it here, with the child already reaped, removes the GC race entirely.
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is None:
+        return
+    try:
+        transport.close()
+    except Exception:
+        pass
+
+
 def _http_call(
     method: str,
     url: str,
@@ -644,6 +663,10 @@ class _ChildSlot:
             self.death_report_done.clear()
             saw_hello = self.child_saw_hello
             await self._settle_link()
+            # AFTER the settle: _settle_link drains the stderr pipe to EOF so
+            # the death dial carries the child's actual last words. Closing the
+            # transport first would cut that drain short.
+            _close_transport(proc)
             if p._stopping.is_set():
                 self.death_report_done.set()
                 return
