@@ -24,7 +24,7 @@ import shutil
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional, Sequence
 import os
 from gen_worker.models.loading import (_fp8_block_windows, _fp8_block_windows_whole)
 from fnmatch import fnmatch
@@ -1504,6 +1504,99 @@ def _read_safetensors_header(fd: int) -> tuple[dict, int]:
     if not isinstance(header, dict):
         raise ValueError("safetensors: header root must be an object")
     return header, _HEADER_LEN_PREFIX + header_len
+
+
+def merge_safetensors_by_offset(
+    shard_paths: Sequence[Path],
+    out_path: Path,
+) -> Path:
+    """Concatenate an HF shard set into ONE safetensors file by raw byte-range
+    copy — the input never enters Python as a tensor.
+
+    The inverse of the shard planner, and the only direction th#1362 keeps:
+    chunked CAS already solves resumable/parallel transfer BELOW the file, so a
+    shard set buys nothing and costs an index that can disagree with the bytes
+    it describes (the klein-4b unloadable publish).
+
+    Tensor order is preserved — shard order, then data order within a shard —
+    so the merged file is the natural concatenation of what upstream shipped.
+    """
+    if not shard_paths:
+        raise ValueError("merge_safetensors_by_offset: no shards")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fds: list[int] = []
+    try:
+        entries: list[tuple[str, dict, int, int, int, int]] = []
+        merged_md: dict[str, str] = {}
+        seen: dict[str, Path] = {}
+        for shard in shard_paths:
+            fd = os.open(str(shard), os.O_RDONLY)
+            fds.append(fd)
+            header, data_base = _read_safetensors_header(fd)
+            md = header.get("__metadata__")
+            if isinstance(md, dict):
+                for k, v in md.items():
+                    if k in merged_md and merged_md[k] != v:
+                        raise ValueError(
+                            f"safetensors shards disagree on __metadata__[{k!r}]: "
+                            f"{merged_md[k]!r} vs {v!r}")
+                    merged_md[str(k)] = v
+            rows = []
+            for name, meta in header.items():
+                if name == "__metadata__" or not isinstance(meta, dict):
+                    continue
+                offs = meta.get("data_offsets")
+                if (not isinstance(offs, list) or len(offs) != 2
+                        or int(offs[1]) < int(offs[0])):
+                    raise ValueError(
+                        f"safetensors: tensor {name!r} has invalid data_offsets")
+                if name in seen:
+                    raise ValueError(
+                        f"safetensors shards both define {name!r} "
+                        f"({seen[name].name} and {shard.name})")
+                seen[name] = shard
+                rows.append((name, meta, fd, data_base, int(offs[0]), int(offs[1])))
+            rows.sort(key=lambda r: r[4])  # sequential source reads
+            entries.extend(rows)
+
+        new_header: dict[str, Any] = {}
+        if merged_md:
+            new_header["__metadata__"] = merged_md
+        cursor = 0
+        for name, meta, _fd, _base, s, e in entries:
+            new_header[name] = {
+                "dtype": meta["dtype"],
+                "shape": list(meta["shape"]),
+                "data_offsets": [cursor, cursor + (e - s)],
+            }
+            cursor += e - s
+        blob = json.dumps(new_header, separators=(",", ":")).encode("utf-8")
+
+        tmp = out_path.parent / f".{out_path.name}.merging"
+        dst = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(dst, len(blob).to_bytes(_HEADER_LEN_PREFIX, "little"))
+            os.write(dst, blob)
+            for name, _meta, fd, base, s, e in entries:
+                remaining = e - s
+                src_abs = base + s
+                while remaining > 0:
+                    buf = os.pread(fd, min(remaining, _RAW_COPY_CHUNK), src_abs)
+                    if not buf:
+                        raise IOError(
+                            f"safetensors: short read on {name!r} at {src_abs}")
+                    os.write(dst, buf)
+                    remaining -= len(buf)
+                    src_abs += len(buf)
+        finally:
+            os.close(dst)
+        tmp.replace(out_path)
+        return out_path
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 def shard_safetensors_by_offset(
