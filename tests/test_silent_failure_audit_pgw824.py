@@ -378,3 +378,87 @@ def test_an_unparseable_destination_repo_confesses_once() -> None:
     # coalesced: the getter runs once per uploaded file, so one config defect
     # must not become a per-file flood
     assert "_repo_scope_parse_reported" in src
+
+
+# ---------------------------------------------------------------------------
+# Invariant 2, END TO END — the posture reaches the HUB on the real wire.
+#
+# Everything above proves the pieces. This proves the CHAIN: a real worker, a
+# real gRPC stream, a real compile-declaring endpoint that cannot arm on this
+# host, a real dispatch — and the terminal JobResult the hub-double receives
+# carrying a classified reason instead of "".
+# ---------------------------------------------------------------------------
+
+
+def test_an_eager_request_on_a_compile_declaring_release_names_its_reason() -> None:
+    """RED before pgw#824: `fallback_reason=""` on every one of these rows.
+
+    This endpoint DECLARES a compile cell, so `no_compile_declared` cannot be
+    the answer — the worker genuinely wanted a cell and did not get one. The
+    arming brain classified why (there is no CUDA device on a CI host, so
+    `_fail_closed(phase="no_cuda")`), and the whole point of the issue is that
+    the classification survives all the way to the request row instead of dying
+    in the function that computed it.
+    """
+    import pathlib
+    import tempfile
+
+    import msgspec
+
+    from gen_worker import boot_phases
+    from gen_worker.api.binding import wire_ref
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    from harness.blob_host import BlobHost
+    from harness.boot_ladder_endpoints_pgw797 import COMPILE_MODEL, EchoIn
+    from harness.hub_double import hub_double, is_ready, is_result_for
+
+    boot_phases.reset_for_tests()
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="pgw824-"))
+    blobs = BlobHost(tmp)
+    model_ref = wire_ref(COMPILE_MODEL)
+    model_snap = blobs.one_file_snapshot(
+        "snap-model", "model", b"pgw824-compile-model-bytes" * 512)
+    try:
+        with hub_double(
+            modules=("harness.boot_ladder_endpoints_pgw797",),
+        ) as (scheduler, _h):
+            conn = scheduler.wait_connection(0)
+            conn.wait_for(is_ready)
+            conn.send(hello_ack=pb.HelloAck(
+                protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+                desired_residency=pb.DesiredResidency(
+                    generation=1,
+                    disk_refs=[model_ref],
+                    snapshots={model_ref: model_snap},
+                    hot=[pb.DesiredInstance(
+                        function_name="compile-echo",
+                        models=[pb.ModelBinding(slot="model", ref=model_ref)],
+                    )],
+                ),
+            ))
+            conn.wait_for(
+                lambda m: m.WhichOneof("msg") == "state_delta"
+                and "compile-echo" in m.state_delta.available_functions
+            )
+            conn.send(run_job=pb.RunJob(
+                request_id="r-posture", attempt=1,
+                function_name="compile-echo",
+                input_payload=msgspec.msgpack.encode(EchoIn(text="x")),
+            ))
+            res = conn.wait_for(is_result_for("r-posture")).job_result
+    finally:
+        blobs.shutdown()
+
+    assert res.status == pb.JOB_STATUS_OK
+    m = res.metrics
+    assert m.serving_mode == serving_mode.MODE_EAGER
+    # THE ASSERTION. Not "" -- a classified, countable token.
+    assert m.fallback_reason != "", (
+        "an eager request on a release that DECLARED a compile target must "
+        "say why it is eager; \"\" is the defect this issue exists to close")
+    # and it must not be the honest-zero class: this release DOES declare one
+    assert m.fallback_reason != serving_mode.POSTURE_NO_COMPILE_DECLARED
+    # nothing fell back -- there was nothing to fall back FROM
+    assert m.served_eager_fallback is False
+    assert m.served_cell_ref == ""
