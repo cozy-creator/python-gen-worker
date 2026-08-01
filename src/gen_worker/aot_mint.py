@@ -1525,6 +1525,15 @@ def _arm_branches(pipeline: Any, bucket: int) -> None:
     lora_lifted.arm_lifted_lora_lanes(pipeline, int(bucket or 0))
 
 
+# pgw#824: the phase tokens the in-mint progress callback reports under.
+# Wire-shared with ``activity.PHASE_*`` and framed verbatim by ``mint_child``,
+# so a reader groups a delegated mint's progress on the SAME strings whether it
+# came from the child's frames or from the parent's own activity.
+PHASE_TRACE_GRAPH = "trace_graph"
+PHASE_INDUCTOR_COMPILE = "inductor_compile"
+PHASE_SEAL_PUBLISH = "seal_publish"
+
+
 def mint(
     pipeline: Any,
     spec: ExportSpec,
@@ -1533,6 +1542,7 @@ def mint(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
+    on_progress: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
 
@@ -1599,10 +1609,27 @@ def _mint_cell(
     and this argument exists so an operator or a test can force the serial
     path (``1``) without pretending a 4-vCPU pod is an H100 host.
 
+    ``on_progress(phase, step, total, note)`` (pgw#824) reports progress
+    WITHIN the mint. This function used to be one opaque call spanning the
+    family's whole declared class set — sdxl declares 18 — so the mint child
+    framed ``trace_graph`` once and said nothing again until ``seal_publish``.
+    A real export measured ~5 minutes of complete wire silence, and the pod's
+    only liveness evidence was that its CPU was warm. "Entry 12 of 18" is the
+    difference between a pod that is alive and a pod that is working, which is
+    exactly the distinction the no-magic-timeouts doctrine runs on. Optional
+    and best-effort: a raising callback never costs a mint.
+
     Does NOT publish — :func:`publish` is a separate step so a mint can be
     inspected, byte-compared (#699 double-mint), or produced on a box with no
     hub credentials.
     """
+    def _beat(phase: str, step: int, total: int, note: str = "") -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(phase, int(step), int(total), str(note)[:180])
+        except Exception:  # noqa: BLE001 — telemetry never fails a mint
+            logger.debug("aot-mint progress callback failed", exc_info=True)
     from .api.export_contract import export_declaration
 
     refusal = lane_admitted(spec, allow_regressed_lanes=allow_regressed_lanes)
@@ -1683,8 +1710,9 @@ def _mint_cell(
     # `_arm_branches`.
     _arm_branches(pipeline, int(spec.lora_bucket or 0))
     t_export = time.monotonic()
+    _beat(PHASE_TRACE_GRAPH, 0, len(rows), f"{len(rows)} declared class row(s)")
     try:
-        for plan, arm in rows:
+        for index, (plan, arm) in enumerate(rows, start=1):
             if arm is False and not disarmed:
                 # ONE toggle for the whole branchless group (the rows are
                 # ordered adapter-bearing first): disable/enable reallocates
@@ -1692,6 +1720,12 @@ def _mint_cell(
                 # be N times the VRAM churn for the same graphs.
                 _disarm_branches(pipeline)
                 disarmed = True
+            # Reported BEFORE the work, not after: a row that never returns
+            # is the one a reader most needs named, and an after-the-fact tick
+            # names only the rows that finished.
+            _beat(
+                PHASE_TRACE_GRAPH, index, len(rows),
+                _decl.plan_entry_name(plan))
             if regional:
                 minted.extend(_export_regional_entries(
                     pipeline, spec, plan, decl,
@@ -1708,11 +1742,18 @@ def _mint_cell(
 
     if parallel:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
+        _beat(
+            PHASE_INDUCTOR_COMPILE, 0, len(minted),
+            f"{len(minted)} entries, {width.workers} wide")
         _compile_entries_parallel(
-            minted, work, width, inductor_configs=inductor_configs)
+            minted, work, width, inductor_configs=inductor_configs,
+            on_entry=lambda name, done, total: _beat(
+                PHASE_INDUCTOR_COMPILE, done, total, name))
     timings["entry_workers"] = float(width.workers)
 
     t0 = time.monotonic()
+    _beat(PHASE_SEAL_PUBLISH, len(minted), len(minted),
+          f"packaging {len(minted)} entries")
     package = package_cell(
         {row.name: row.files for row in minted}, work / aot_serve.PACKAGE_NAME)
     timings["package_s"] = round(time.monotonic() - t0, 2)
@@ -1888,6 +1929,7 @@ def _compile_entries_parallel(
     width: aot_compile_pool.PoolWidth,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
+    on_entry: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     """pgw#809: fill every entry's ``files`` K-wide, out of process.
 
@@ -1907,7 +1949,8 @@ def _compile_entries_parallel(
         inductor_configs=inductor_configs)
     t0 = time.monotonic()
     try:
-        by_entry = pool.compile([(row.name, row.program) for row in minted])
+        by_entry = pool.compile(
+            [(row.name, row.program) for row in minted], on_entry=on_entry)
     except aot_compile_pool.EntryCompileFailed as exc:
         # Named, and terminal: the siblings are already torn down group-wide
         # by the pool. A mint that says only "a compile failed" over 18

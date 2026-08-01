@@ -389,8 +389,20 @@ def _mint_aot(
     spec = fleet_cells.aot_export_spec(pipe, cfg)
     out_dir = target.parent / "aot"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # pgw#824: `aot_mint.mint` used to be ONE opaque call spanning the family's
+    # whole declared class set (sdxl: 18), so this function framed `trace_graph`
+    # once and then said nothing at all until `seal_publish` below. A real
+    # export measured ~5 minutes of complete wire silence; the parent's only
+    # evidence that the child was working was that its CPU was warm, which
+    # proves alive, not progressing. Every entry now rides the frame protocol
+    # that already exists -- no new wire, and the parent's `_on_frame` lands it
+    # on the same self_mint_compile activity the hub already reads.
+    def _progress(phase: str, step: int, total: int, note: str) -> None:
+        frame(phase=phase, step=step, total=total, note=note)
+
     try:
-        result = aot_mint.mint(pipe, spec, out_dir)
+        result = aot_mint.mint(pipe, spec, out_dir, on_progress=_progress)
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod
