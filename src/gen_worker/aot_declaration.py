@@ -25,6 +25,11 @@ Shape strategy (#730 ratified, per-family declared):
   latent H/W costs conv families the channels-last layout opt, +7.2%);
 - ``dynamic-collapse`` — one mint plan per FORK coordinate; dims that vary
   across the coordinate's rows become declared-dynamic over their hull.
+
+pgw#829 splits that choice per POPULATION: ``regional_shape_strategy``
+governs a regional cell's BLOCK entries, because #730's static-rows verdict
+is a statement about convs and a conv-free attention block has no layout opt
+to lose. See :func:`effective_shape_strategy`.
 """
 
 from __future__ import annotations
@@ -155,13 +160,32 @@ def named_dynamic_rows(decl: Compile, target: str) -> Tuple[DynamicDim, ...]:
     return tuple(out)
 
 
-def mint_plans(decl: Compile, target: str) -> Tuple[MintPlan, ...]:
+def effective_shape_strategy(decl: Compile, *, regional: bool = False) -> str:
+    """The strategy that governs the population being minted (pgw#829).
+
+    A regional cell's entries are BLOCKS, and #730's ``static-rows`` verdict
+    is a statement about convs — so a family whose conv-bearing shell wants
+    static rows and whose conv-free blocks want the collapse says both, and
+    this is the one place the two are told apart. ``regional_shape_strategy``
+    unset inherits ``shape_strategy``, which is exactly the pre-pgw#829
+    behaviour.
+    """
+    if regional:
+        override = str(getattr(decl, "regional_shape_strategy", "") or "")
+        if override:
+            return override
+    return str(decl.shape_strategy or "")
+
+
+def mint_plans(
+    decl: Compile, target: str, *, regional: bool = False,
+) -> Tuple[MintPlan, ...]:
     """Every artifact the declaration says to mint for one target."""
     if not decl.classes:
         raise MintRefused(
             f"family {decl.family!r} declares no graph classes — there is "
             f"no coordinate to mint")
-    strategy = str(decl.shape_strategy or "")
+    strategy = effective_shape_strategy(decl, regional=regional)
     if not strategy:
         raise MintRefused(
             f"family {decl.family!r} declares classes but no shape_strategy "
@@ -247,7 +271,7 @@ def plan_entry_name(plan: MintPlan) -> str:
     return entry_name(plan.target, fork, dims)
 
 
-def cell_plans(decl: Compile) -> Tuple[MintPlan, ...]:
+def cell_plans(decl: Compile, *, regional: bool = False) -> Tuple[MintPlan, ...]:
     """EVERY mint plan of one family's declaration, across ALL declared
     targets — the whole class set one cell packages (pgw#758). Refuses a
     declaration whose plans would collide on an entry name (two classes one
@@ -258,7 +282,7 @@ def cell_plans(decl: Compile) -> Tuple[MintPlan, ...]:
             f"functions has nothing to package")
     plans: List[MintPlan] = []
     for target in decl.targets:
-        plans.extend(mint_plans(decl, target))
+        plans.extend(mint_plans(decl, target, regional=regional))
     seen: Dict[str, MintPlan] = {}
     for plan in plans:
         name = plan_entry_name(plan)
@@ -276,6 +300,7 @@ def select_plan(
     *,
     fork: Mapping[str, Any],
     class_dims: Optional[Mapping[str, int]] = None,
+    regional: bool = False,
 ) -> MintPlan:
     """The mint plan for one requested coordinate, refused by name when the
     coordinate is not declared — reading only declared facts, never family
@@ -287,9 +312,11 @@ def select_plan(
     want_fork = tuple(sorted(
         (str(k), v) for k, v in dict(fork).items()
         if str(k) != aot_mint.ADAPTER_FORK))
-    plans = [p for p in mint_plans(decl, target) if p.fork == want_fork]
+    plans = [p for p in mint_plans(decl, target, regional=regional)
+             if p.fork == want_fork]
     if not plans:
-        have = sorted({str(dict(p.fork)) for p in mint_plans(decl, target)})
+        have = sorted({str(dict(p.fork))
+                       for p in mint_plans(decl, target, regional=regional)})
         raise MintRefused(
             f"family {decl.family!r} declares no graph class at fork "
             f"coordinate {dict(fork)!r} (declared coordinates: {have!r})")
@@ -463,7 +490,8 @@ def declared_inputs(
     plan = select_plan(
         decl, spec.target,
         fork=dict(spec.fork),
-        class_dims=dict(spec.class_dims) if spec.class_dims else None)
+        class_dims=dict(spec.class_dims) if spec.class_dims else None,
+        regional=bool(getattr(spec, "regional", False)))
     seed = plan.seed
     config = getattr(module, "config", None)
     mod_dtype, device = module_dtype_device(module)
@@ -643,6 +671,7 @@ __all__ = [
     "declared_inputs",
     "derived_dynamic",
     "dim_hull",
+    "effective_shape_strategy",
     "entry_coordinates",
     "entry_name",
     "fork_gaps",

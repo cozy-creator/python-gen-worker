@@ -1,5 +1,95 @@
 # Changelog
 
+## Unreleased
+- **pgw#829 — a conv-free block class collapses its whole SHAPE axis onto ONE
+  entry: sdxl's regional mint goes 72 entries -> 8.** pgw#830 measured that
+  attempt nine's 72 entries were not a scheduling problem (the pool was already
+  >= 95.5 % efficient) but a per-ENTRY fixed cost — interpreter boot, the env
+  seal, the torch import, the staged-program load, the reap lag — multiplied 72
+  times. pgw#812 measured the lever: dynamic inner dims are **0.0 %** at serve
+  on a conv-FREE region, because `decide_layout_opt` bails only on conv + free
+  symbol, and #730's static-rows verdict (+7.2 %) was always a statement about
+  CONVS — which regional leaves in the eager shell.
+  `Compile.regional_shape_strategy` declares the BLOCK population's strategy
+  separately from `shape_strategy` (which keeps governing the conv-bearing
+  whole-graph route), and under `dynamic-collapse` a plan's whole class-row set
+  becomes one entry whose block dims are DERIVED: the shell is run eagerly once
+  per declared row, the block's own input shapes are recorded, and axes that
+  move become `torch.export` dims over their observed hull. That derivation is
+  the point — the declaration binds `H_lat`/`W_lat` to `sample`, and the block
+  is handed a flat `(B, H*W/f**2, C)` hidden state carrying neither name, so
+  the varying axis is only observable. Sweeping the rows costs no extra eager
+  forwards (one per plan-row either way) and retains no activations: only the
+  seed row's tensors survive the probe.
+  Guarded, not assumed: the collapse is decided PER BLOCK CLASS off the live
+  module (`aot_regional.block_has_conv`) — a conv-bearing block class keeps one
+  static entry per class row; an axis whose hull reaches 1 is REFUSED (torch's
+  0/1 specialization is not overridable, ie#543) rather than silently
+  specialized; slots that move in lockstep across the rows share one symbol
+  (pgw#812 D1, one level down); a rank change across rows is a fork, refused by
+  name. `_regional_entry_count` derives the pool's width the same way, so
+  pgw#812 S7's re-price does not go stale. Dispatch needed no change: a
+  collapsed entry is discriminated by its recorded range, and the structural
+  adapter/CFG forks stay separate entries. `regional_shape_strategy` without
+  `regional=True` is a declaration nothing reads, and is refused.
+  Proven off-pod on real `torch.export` + real AOTInductor: 8 per-shape entries
+  become 2, every declared coordinate dispatches onto a collapsed entry, and
+  every block INSTANCE at every SHAPE agrees with the per-shape cell and with
+  eager to 1e-6 while being no FURTHER from eager than the 8-entry cell it
+  replaces — stated as no-degradation rather than as bit-equality on purpose,
+  since a dynamic kernel is different compiled code from a static one and
+  demanding identical bytes would over-specify. Priced on a real pool ledger
+  at the A/B's own entry counts: the 6 entries that stopped existing took 6
+  whole copies of pgw#830's per-entry constant with them. pgw#831's
+  folded-constant refusal still fires under a dynamic dim — asserted, so it
+  cannot silently become unreachable for collapsed entries.
+
+- **pgw#829 (found by its own A/B) — a REGIONAL entry traced from a
+  NON-CONTIGUOUS captured block feed computes a 16 % WRONG answer, silently.**
+  A block's example inputs are CAPTURED from a live forward (pgw#812 S5), never
+  constructed, so whatever memory layout the shell happens to hand the block is
+  what gets traced — and AOTInductor generates against that layout. Measured
+  off-pod, $0, CPU, on a 3-block toy whose shell does diffusers' own
+  `permute(0, 2, 3, 1).reshape(b, h*w, c)` (a non-contiguous view):
+
+  | arm | max abs delta vs eager |
+  |---|---|
+  | traced non-contiguous, served with the pgw#791 realign | 0.1645 |
+  | traced non-contiguous, realign DISABLED | 0.1690 |
+  | traced CONTIGUOUS, served with the realign | 1.5e-08 |
+
+  So it is not the realign — it is the artifact, and no serve-side layout can
+  satisfy it. Nothing refused it either: the ingress contract records shapes and
+  dtypes, never strides, so the call is admitted and the answer is quietly off.
+  The mint now traces every regional entry from a contiguous feed, which makes
+  it agree with `aligned_feeds` (already staging out-of-contract inputs into an
+  owned contiguous buffer) by construction. A no-op for a feed that already
+  arrives contiguous — diffusers passes sdxl's blocks through `proj_in`, a
+  Linear, so the real family is in that case — and eager is untouched.
+
+- **pgw#829 (found by its own A/B) — a cell whose entries cannot be told apart
+  at dispatch is REFUSED at mint instead of serving eager forever.**
+  `EntryDispatch.select` calls two entries admitting one call
+  `entry_ambiguous`, which is a per-REQUEST refusal: the cell arms, reports
+  armed, and serves those coordinates 100 % eager while looking healthy. A
+  regional entry is exported one block deep — the shell has already flattened
+  the latent extents into a token count — so two class rows that are different
+  coordinates upstream can hand the block the IDENTICAL shape. What collides
+  is the token PRODUCT, of which a transposed aspect pair is only the obvious
+  case: sdxl's NINE aspect rows carry just FOUR distinct token counts (15360 =
+  1536x640 / 640x1536; 15808 = 1216x832 / 832x1216; 16128 = 1344x768 /
+  1152x896 / 896x1152 / 768x1344, a quadruple whose members are not each
+  other's transpose since 96*168 == 112*144; and 16384 = 1024x1024, the only
+  unique row). So attempt nine's 72-entry cell could have served exactly ONE
+  of its nine aspect ratios compiled — the other eight were `entry_ambiguous`
+  -> eager, per (CFG arm x adapter arm x block class). The new gate groups
+  entries exactly as the serve path does (target x block class x adapter arm)
+  and compares the EXPORTED placeholder signature — the thing the packed
+  contract is derived from, so it is an exact discriminator that is already
+  available before a single kernel is built. It refuses by name and names the
+  remedy: the collapse, under which one entry over the hull is unique by
+  construction.
+
 ## 0.89.0 (2026-08-01) — the cell self-mint publisher speaks chunked sha256: the v1 (blake3) client is deleted, and the procsplit allowlist stops refusing the publisher's own payload
 - **pgw#807 item 3 — the cell self-mint publisher ships over CHUNKED SHA-256,
   and the seam it rides stops refusing its own payloads.** The first AOT mint

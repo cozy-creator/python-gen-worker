@@ -801,6 +801,18 @@ class Compile(msgspec.Struct, frozen=True):
     # "dynamic-collapse". "" = undeclared; refused at mint-plan time, not
     # defaulted.
     shape_strategy: str = ""
+    # pgw#829: the shape strategy of a REGIONAL cell's entries, which are
+    # BLOCKS and not the family's whole forward. `shape_strategy` was
+    # measured on the whole graph; #730's static-rows verdict is a statement
+    # about CONVS (`decide_layout_opt` bails on conv + free symbol, +7.2% on
+    # sdxl), and a conv-free attention block has no layout opt to lose —
+    # pgw#812 measured dynamic inner dims at 0.0% on exactly that region.
+    # Declaring it separately is the point: a family whose SHELL keeps its
+    # convs and whose BLOCKS are conv-free needs to say both, and flipping
+    # `shape_strategy` to serve the block population would silently re-price
+    # the whole-graph route it also owns. "" = inherit `shape_strategy`.
+    # Only meaningful with `regional=True`; refused otherwise.
+    regional_shape_strategy: str = ""
     # Mint-warm canon (#723/#728): whether pre-warming the module changes
     # the exported graph. A declared per-family FACT, not a ritual — sdxl
     # measured False, z-image measured True (rope tables: 4327 cold vs

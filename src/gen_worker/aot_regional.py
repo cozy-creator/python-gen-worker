@@ -280,6 +280,85 @@ def capture_block_feeds(
     return seen
 
 
+#: One captured feed reduced to shapes: the block's own positional parameter
+#: names, and per slot either the tensor's shape or ``None`` for a slot that
+#: carries no shape (a scalar, a flag, a default).
+BlockFeedShape = Tuple[Tuple[str, ...], Tuple[Optional[Tuple[int, ...]], ...]]
+
+
+def capture_block_feed_shapes(
+    groups: Sequence[BlockGroup], run: Any,
+) -> Dict[str, BlockFeedShape]:
+    """The SHAPES each block class is called with, retaining no tensors.
+
+    pgw#829's derivation input. A block's inputs are internal (S5), so the
+    only honest way to learn which of its axes VARY across a plan's class
+    rows is to run the shell on each row and look. This is the cheap half of
+    :func:`capture_block_feeds`: it reduces each captured argument to its
+    shape inside the hook and lets the activations die with the forward, so
+    observing nine aspect rows costs nine eager forwards and nine small
+    tuples rather than nine retained activation sets.
+
+    Slots are in the block's OWN signature order (:func:`positional_feed`),
+    which is the order the export feed and the serve marshal both use — a
+    shape vector indexed any other way could not be compared against them.
+    """
+    seen: Dict[str, BlockFeedShape] = {}
+    handles = []
+
+    def hook_for(key: str) -> Any:
+        def hook(mod: Any, args: Any, kwargs: Any) -> None:
+            if key in seen:
+                return
+            values, names = positional_feed(mod, tuple(args), dict(kwargs))
+            shapes: List[Optional[Tuple[int, ...]]] = []
+            for value in values:
+                shape = getattr(value, "shape", None)
+                shapes.append(
+                    None if shape is None else tuple(int(d) for d in shape))
+            seen[key] = (tuple(names), tuple(shapes))
+        return hook
+
+    try:
+        for group in groups:
+            handles.append(group.prototype.register_forward_pre_hook(
+                hook_for(group.key), with_kwargs=True))
+        run()
+    finally:
+        for handle in handles:
+            handle.remove()
+    missing = [g.key for g in groups if g.key not in seen]
+    if missing:
+        raise RegionalArmRefused(
+            f"block class(es) {missing!r} were never called during the shape "
+            f"probe — a class the shell does not reach on every declared "
+            f"class row cannot have its varying axes derived",
+            reason="block_never_called")
+    return seen
+
+
+def block_has_conv(block: Any) -> bool:
+    """True when this block class carries a convolution (pgw#829's premise
+    guard).
+
+    #730's ``static-rows`` verdict is a statement about CONVS:
+    ``decide_layout_opt`` bails out on a graph that has a conv AND a free
+    symbol, so a dynamic dim costs a conv-bearing graph the channels-last
+    layout optimization (+7.8% measured whole-graph). A conv-free region has
+    no layout opt to lose, which is why pgw#812 measured dynamic inner dims
+    at **0.0%** on exactly the region sdxl regionalizes.
+
+    So the collapse is decided PER BLOCK CLASS off the live module, never
+    fleet-wide and never from the family name: a conv-bearing block class
+    keeps one static entry per class row, and only the conv-free ones
+    collapse. sdxl's ``BasicTransformerBlock`` is conv-free; the convs live
+    in the shell, which stays eager.
+    """
+    from torch.nn.modules.conv import _ConvNd
+
+    return any(isinstance(mod, _ConvNd) for mod in block.modules())
+
+
 # ---------------------------------------------------------------------------
 # S3.3 — the shell digest
 # ---------------------------------------------------------------------------
@@ -1091,7 +1170,8 @@ __all__ = [
     "BLOCK_FORK", "DEFAULT_THRESHOLDS", "MODE_REGIONAL",
     "NUMERICS_FLOOR", "NUMERICS_RETENTION_FLOOR", "NUMERICS_WARN",
     "BlockGroup", "BlockShim", "RegionalArm", "RegionalArmRefused",
-    "arm_and_verify", "arm_blocks", "block_entry_fork", "capture_block_feeds",
+    "arm_and_verify", "arm_blocks", "block_entry_fork", "block_has_conv",
+    "capture_block_feeds", "capture_block_feed_shapes",
     "positional_feed",
     "BlockDispatch",
     "declared_repeated_classes", "declared_thresholds", "enable",
