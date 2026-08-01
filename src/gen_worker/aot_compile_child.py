@@ -40,7 +40,9 @@ import msgspec
 
 from . import aot_compile_spans
 from .aot_compile_pool import (
+    CODE_DIGEST,
     COMPILED,
+    PACKAGE_ROOT,
     arm_parent_death_signal,
     EXIT_BAD_JOB,
     EXIT_COMPILED,
@@ -209,6 +211,11 @@ def _span_fields(
         "module_import_epoch": MODULE_IMPORT_EPOCH,
         "run_start_epoch": ledger.start_epoch,
         "report_epoch": time.time(),
+        # pgw#840: WHICH gen_worker this was. Carried on every report shape
+        # (compiled and both refusals) because a skewed child's refusal is as
+        # misleading as its success — it is a verdict from other code.
+        "code_digest": CODE_DIGEST,
+        "code_dir": PACKAGE_ROOT,
     }
 
 

@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#840 — the entry-compile child must BE the parent's own gen_worker.**
+  pgw#830's attribution invariant went red on a tree nobody had changed: one
+  entry's table had no child spans at all, so its entire 19.5 s compile fell
+  into `reap_lag_s` and the partition stopped closing. The compile had
+  SUCCEEDED and returned files that exist — only the report was from other
+  code. Root cause: the pool spawned `sys.executable -m
+  gen_worker.aot_compile_child` with the parent's env verbatim and let the
+  CHILD's import system pick a `gen_worker` — the cwd first, then any inherited
+  `PYTHONPATH`, then site-packages. On a box with more than one checkout that
+  is a coin flip, and the child that wins compiles the loose files the cell
+  publishes while every gate runs in the parent against the parent's program.
+  MEASURED on the box that filed it: of 236 preserved entry reports, **150 were
+  written by a child predating pgw#830's span table**, several under a parent
+  that had pgw#832 (their pool workdirs hold the `seal-lib-memo.json` only such
+  a parent writes) — same venv, same interpreter. Attribution was the symptom;
+  the defect was an unpinned compiler.
+  `child_env` now prepends the parent's own package root to `PYTHONPATH` and
+  sets `PYTHONSAFEPATH=1` (the cwd would otherwise still outrank it), and the
+  child stamps every report — success and both refusals — with the digest of
+  the parent/child contract source it computed at ITS import, plus where it
+  imported from. `_collect` REFUSES the entry by name on any mismatch,
+  including the empty digest an old child leaves: an artifact compiled by code
+  the parent never ran must not be packed into a cell whose identity claims the
+  parent's. Identity-inert: `PYTHONPATH`/`PYTHONSAFEPATH` are in no scrub
+  namespace and in nothing `env_seal` reads back, and the pool's own
+  cell-identity tests are unchanged and green.
+  Deliberately NOT extended to pgw#784's mint child: that child DOES load the
+  endpoint, and `PYTHONSAFEPATH` would remove the cwd its module may resolve
+  through — the same hole, needing its own evidence, filed rather than guessed.
+  Red/green on the real path: on the unfixed tip a child that is not this
+  gen_worker is ACCEPTED and reproduces the filed table verbatim
+  (`compile_s == reap_lag_s`, no `child_wall_s`, the same violation string);
+  with the fix it is refused by name. Post-fix ledger, 4 real entries: **zero
+  violations, dark residual 4.9-8.1 %, `child_other_s` <= 0.002 s**, and
+  pgw#832's `seal_libhash_s` still 0.06-0.17 s.
+
 ## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829)
 
 - **pgw#833 follow-on — the child-stderr tee writes OFF the event loop.** The

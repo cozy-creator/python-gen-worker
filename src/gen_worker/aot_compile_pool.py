@@ -74,6 +74,46 @@ ENTRY_CHILD_MODULE = "gen_worker.aot_compile_child"
 #: Report file each entry child writes before exiting.
 ENTRY_REPORT_NAME = "report.json"
 
+#: pgw#840: the directory that must be on the child's path for
+#: ``-m gen_worker.aot_compile_child`` to mean THIS gen_worker.
+PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
+
+#: The three modules that define the parent/child contract: the child's own
+#: entrypoint, this module (the job/report structs) and the span partition.
+_CONTRACT_MODULES = (
+    "aot_compile_child.py", "aot_compile_pool.py", "aot_compile_spans.py")
+
+
+def _code_digest() -> str:
+    """A digest of the parent/child contract source, taken AT IMPORT.
+
+    pgw#840: the pool spawns ``sys.executable -m gen_worker.aot_compile_child``
+    and lets the child's import system decide which ``gen_worker`` that is. It
+    can legitimately be a different one — a ``PYTHONPATH`` entry, a ``gen_worker``
+    in the cwd, a second checkout, a stale wheel in the interpreter's
+    site-packages, or the same tree edited between the parent's import and the
+    child's spawn. The child then compiles the very files the cell publishes
+    with code the parent never ran, and the parent believes the report.
+
+    Taken at import (not at read time) on purpose: a tree edited mid-run must
+    compare the code each process is actually EXECUTING, not what its files say
+    afterwards.
+    """
+    import hashlib
+
+    here = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in _CONTRACT_MODULES:
+        try:
+            digest.update(hashlib.sha256((here / name).read_bytes()).digest())
+        except OSError:  # zipimport / frozen: no source to compare
+            return ""
+    return digest.hexdigest()[:16]
+
+
+#: Computed once per process, so parent and child each carry their OWN.
+CODE_DIGEST = _code_digest()
+
 # ---------------------------------------------------------------------------
 # Width policy (pgw#809 constraint 1: NEVER os.cpu_count, NEVER a hardcoded K)
 # ---------------------------------------------------------------------------
@@ -411,6 +451,15 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     #: naming whatever `compile_other_s` turns out to contain — a residual
     #: nobody can look inside is only half an attribution.
     metrics_raw: Dict[str, float] = {}
+    #: pgw#840: WHICH gen_worker compiled this entry. ``code_digest`` is the
+    #: contract-source digest the child computed at ITS import; ``code_dir`` is
+    #: where it imported from, which is the actionable half of the message. An
+    #: empty digest means a child too old to answer — which is the case that
+    #: went dark: it also predates the span table, so the parent absorbed its
+    #: whole compile into ``reap_lag_s`` and reported a partition that did not
+    #: close (the pgw#830 invariant, red on a tree nobody had changed).
+    code_digest: str = ""
+    code_dir: str = ""
 
 
 COMPILED = "compiled"
@@ -545,6 +594,15 @@ def child_env(
       stats instead of re-hashing 4 GB. A LOCATION of digests, never a
       recipe: the child verifies every file's (path, mtime_ns, size) itself
       and rehashes on any mismatch, so the seal value cannot move.
+    * ``PYTHONPATH`` with the PARENT's own package root in front, and
+      ``PYTHONSAFEPATH`` (pgw#840). ``-m gen_worker.aot_compile_child`` used to
+      mean "whatever gen_worker this interpreter resolves": the cwd first, then
+      any inherited ``PYTHONPATH``, then site-packages. On a box with more than
+      one checkout that is a coin flip, and the child that wins compiles the
+      files the cell publishes. Pinning the root makes the child the parent's
+      OWN code by construction; ``PYTHONSAFEPATH`` removes the cwd, which would
+      otherwise still outrank it. The digest check in ``_collect`` is the
+      backstop that proves it rather than assuming it.
     """
     env = dict(os.environ if base is None else base)
     env["GEN_WORKER_AOT_ENTRY_CHILD"] = "1"
@@ -552,6 +610,10 @@ def child_env(
         env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_dir)
     if seal_memo:
         env[env_seal.SEAL_LIB_MEMO_ENV] = str(seal_memo)
+    env["PYTHONSAFEPATH"] = "1"
+    existing = [p for p in env.get("PYTHONPATH", "").split(os.pathsep)
+                if p and p != PACKAGE_ROOT]
+    env["PYTHONPATH"] = os.pathsep.join([PACKAGE_ROOT] + existing)
     return env
 
 
@@ -938,6 +1000,8 @@ class EntryCompilePool:
         # The program is the biggest thing on disk and is dead the moment the
         # child exits; drop it before the next stage runs.
         with_suppress_unlink(row.program_path)
+        if report is not None:
+            self._verify_child_code(row, report)
         if code == EXIT_COMPILED and report is not None and report.files:
             if report.peak_rss_bytes:
                 self.peak_rss_bytes = max(
@@ -966,6 +1030,41 @@ class EntryCompilePool:
             row.entry,
             f"entry {row.entry!r}: compile child exited {code} after "
             f"{elapsed:.0f}s ({_exit_note(code)}): {detail or 'no detail'}")
+
+    def _verify_child_code(self, row: _Running, report: EntryReport) -> None:
+        """pgw#840: the child that compiled this entry must BE the parent.
+
+        Not a telemetry check. The child produces the loose files
+        ``package_aoti`` packs and the cell publishes, while every gate runs in
+        the parent against the parent's program — an assignment that is only
+        sound while both are the same code. A skewed child was invisible: it
+        compiled successfully, returned files that exist, and differed only in
+        what it reported. MEASURED on this box: of 236 preserved entry reports,
+        150 were written by a child that predates pgw#830's span table, several
+        of them under a parent that had it (the pool workdir holds the pgw#832
+        seal memo only a post-pgw#832 parent writes). That is the whole of
+        pgw#840: the invariant went red on a tree nobody had changed, because
+        the child was not from that tree.
+
+        Refused, not warned: an artifact compiled by unknown code must not be
+        packed into a cell whose identity claims the parent's.
+        """
+        if not CODE_DIGEST:
+            return  # no source to compare (zipimport) — cannot prove either way
+        if report.code_digest == CODE_DIGEST:
+            return
+        raise EntryCompileFailed(
+            row.entry,
+            f"entry {row.entry!r}: the compile child ran a DIFFERENT "
+            f"gen_worker than this parent — child code "
+            f"{report.code_digest or '<too old to report one>'} from "
+            f"{report.code_dir or '<unknown>'}, parent code {CODE_DIGEST} from "
+            f"{PACKAGE_ROOT}. `python -m {ENTRY_CHILD_MODULE}` resolves "
+            f"whatever the interpreter's path yields (a second checkout, an "
+            f"inherited PYTHONPATH, a stale wheel, or this tree edited between "
+            f"the parent's import and this spawn), and that child compiled the "
+            f"files this cell would publish while every gate ran against the "
+            f"parent's program")
 
     def _close_entry_partition(
         self, row: _Running, report: EntryReport, *,
@@ -1072,6 +1171,7 @@ def free_disk_bytes(path: Path) -> int:
 
 
 __all__ = [
+    "CODE_DIGEST",
     "COMPILED",
     "CPUS_PER_ENTRY_WORKER",
     "CRASHED",
@@ -1090,6 +1190,7 @@ __all__ = [
     "DEFAULT_ENTRY_DEVICE_BYTES",
     "DEVICE_RESERVE_BYTES",
     "MAX_ENTRY_WORKERS",
+    "PACKAGE_ROOT",
     "REFUSED",
     "SERVING_HEADROOM_CPUS",
     "PoolWidth",
