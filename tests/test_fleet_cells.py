@@ -98,8 +98,8 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
 
 def _publisher(calls):
     class _Pub(fc.CellPublisher):
-        def publish(self, family, artifact, meta):
-            calls.append((family, Path(artifact), dict(meta)))
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
+            calls.append((family, Path(artifact), dict(meta), int(mint_duration_ms)))
             return "cp-1"
 
     return _Pub(base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="sha256:img")
@@ -221,8 +221,9 @@ def test_finalize_packs_the_proven_capture_and_publishes_it(
     published = threading.Event()
 
     class _Pub(fc.CellPublisher):
-        def publish(self, family, artifact, meta):
-            calls.append((family, artifact.read_bytes(), dict(meta)))
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
+            calls.append((family, artifact.read_bytes(), dict(meta),
+                          int(mint_duration_ms)))
             published.set()
             return "cp-1"
 
@@ -247,8 +248,22 @@ def test_finalize_packs_the_proven_capture_and_publishes_it(
     assert minted.snapshot_digest.startswith("blake3:")
     assert len(minted.snapshot_digest) == len("blake3:") + 64
     assert published.wait(5), "a finalized mint must attempt publish"
-    (family, tar_bytes, meta) = calls[0]
+    (family, tar_bytes, meta, mint_duration_ms) = calls[0]
     assert family == "fam"
+    # th#1355: the mint cost travels with the publish. Before this, "what did
+    # this cell cost to build" lived only in an activity event that carried no
+    # cell key, so it could never be joined back to the cell it described.
+    assert mint_duration_ms >= 0
+    # And the ck axes the key is a digest OF ride the intent, so the hub's
+    # cell_store row can say which lane and which card this cell is for
+    # instead of holding an opaque hash.
+    axes = fc._identity_axes(family, meta)
+    assert axes.get("family") == "fam", axes
+    assert axes.get("kind") == "torch-inductor-cache", axes
+    # sm/lane are present in production and empty on a torch-less test box —
+    # the pin is that the helper always produces the axes the metadata CAN
+    # state and never raises, because an inventory detail must not fail a
+    # publish.
     # The published bytes ARE the packed proven capture, and the advertised
     # digest is the digest of exactly those bytes.
     from gen_worker.convert.hub import blake3_file
@@ -303,7 +318,7 @@ def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
     refused = threading.Event()
 
     class _Pub(fc.CellPublisher):
-        def publish(self, family, artifact, meta):
+        def publish(self, family, artifact, meta, mint_duration_ms=0):
             refused.set()
             raise fc.CellPublishRefused("cell_publish_untrusted_tier: community_tier")
 

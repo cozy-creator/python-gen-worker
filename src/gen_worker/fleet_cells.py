@@ -158,6 +158,13 @@ class PendingSelfMint:
     #: CAPTURE HANDLE only — a real AOT key folds the combined graph hash and
     #: is unknowable until the export finishes, so it is never advertised.
     recipe: str = RECIPE_DYNAMO
+    #: th#1355: when this mint was ARMED. arm -> finalize is the window the
+    #: compile happens in, so the elapsed time is this cell's mint cost. It is
+    #: reported to the hub at publish-intent and lands on the cell's own
+    #: `cell_store` row, because "what did this cell cost to build" was
+    #: previously answerable only from an activity event that carried no cell
+    #: key. Monotonic: a wall-clock step must not turn a mint negative.
+    armed_at: float = dataclasses.field(default_factory=time.monotonic)
     _state: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -289,7 +296,8 @@ class CellPublisher:
 
     # -- publish ------------------------------------------------------------
 
-    def publish(self, family: str, artifact: Path, meta: dict) -> str:
+    def publish(self, family: str, artifact: Path, meta: dict,
+                mint_duration_ms: int = 0) -> str:
         """Publish one self-minted cell. Returns the checkpoint id.
 
         Steps: attested intent (worker JWT; hub corroborates the axes and
@@ -321,7 +329,23 @@ class CellPublisher:
         }
         intent = self._post(
             "/v1/worker/cells/publish-intent",
-            {"family": family, "cell_key": key, "axes": axes},
+            {
+                "family": family, "cell_key": key, "axes": axes,
+                # th#1355: the identity the hub could not otherwise learn.
+                # `axes` above are the three the hub ATTESTS against its own
+                # records; `identity_axes` are the ck axes that HASH INTO
+                # `cell_key`. Before this, they reached the hub only on the
+                # DEMAND side and were deleted the moment the demand was
+                # satisfied — so a minted cell's row could not say which lane
+                # or which card it was for. Diagnostic by contract: the hub
+                # cannot recompute the digest and must never select on them.
+                "identity_axes": _identity_axes(family, meta),
+                # The compile wall for THIS cell. Sent at INTENT, not
+                # complete, because the mint is already finished by the time
+                # we ask to publish — so the cost commits in the same INSERT
+                # as the row it describes.
+                "mint_duration_ms": max(0, int(mint_duration_ms or 0)),
+            },
             timeout=_INTENT_TIMEOUT_S,
         )
         token = str(intent.get("capability_token") or "").strip()
@@ -392,6 +416,49 @@ class CellPublisher:
         return checkpoint_id
 
 
+def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
+    """The ck axes that hash into this cell's key, for the hub's inventory.
+
+    Recomputed from the artifact's OWN recorded axes so a stamp can never
+    disagree with what it summarizes — the same rule
+    :func:`cell_key.from_artifact_metadata` enforces for the key itself.
+
+    Two artifacts legitimately cannot state them: EXPORTED (``aot-inductor``)
+    cells carry a STAMPED key whose axes are not an inductor cache's
+    (pgw#735), and pre-key artifacts record no contract block at all. Both
+    fall back to the axes the metadata does hold, so the hub still learns the
+    family, the lane and the card rather than nothing. Never raises — an
+    inventory detail must not fail a publish.
+    """
+    try:
+        return {k: str(v) for k, v in
+                cell_key.from_artifact_metadata(meta).axes_dict().items()}
+    except Exception:  # noqa: BLE001 — diagnostic only, never fatal
+        pass
+    fallback: Dict[str, str] = {}
+    for name, value in (
+        ("family", family or meta.get("family")),
+        ("kind", meta.get("kind")),
+        ("format", meta.get("format")),
+        ("sm", meta.get("sm")),
+        ("mode", meta.get("compile_mode")),
+    ):
+        text = str(value or "").strip()
+        if text:
+            fallback[name] = text
+    try:
+        base, observed = cc.lane_bucket(str(meta.get("weight_lane") or ""))
+        bucket = observed or int(meta.get("lora_bucket") or 0)
+        token = cc.lane_token(base)
+        lane = f"{token}-lora{bucket}" if bucket and token else (
+            f"lora{bucket}" if bucket else token)
+        if lane:
+            fallback["lane"] = lane
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
 #: pgw#815: publishes currently in flight, keyed by cell key. A self-mint
 #: publish is a fire-and-forget daemon thread, so an interrupted upload used
 #: to leave NO trace anywhere: no cell row, no receipt, no event, no error —
@@ -411,7 +478,7 @@ def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
 
 def _publish_async(
     publisher: CellPublisher, family: str, artifact: Path, meta: dict,
-    cell_key_digest: str = "",
+    cell_key_digest: str = "", mint_duration_ms: int = 0,
 ) -> threading.Thread:
     """Ship the cell in the background — readiness never waits on an upload.
 
@@ -438,7 +505,8 @@ def _publish_async(
     def run() -> None:
         t0 = time.monotonic()
         try:
-            checkpoint_id = publisher.publish(family, artifact, meta)
+            checkpoint_id = publisher.publish(
+                family, artifact, meta, mint_duration_ms)
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
             activity_mod.emit_event(
@@ -961,6 +1029,9 @@ def finalize_self_mint(
     )
     state["minted"] = minted
     state["meta"] = dict(meta)
+    # th#1355: the mint cost, banked at the moment the cell becomes real.
+    state["mint_duration_ms"] = max(
+        0, int((time.monotonic() - pending.armed_at) * 1000))
     _unregister(pending)
     with _PENDING_LOCK:
         # pgw#672: remember the finalized identity so a later same-key arm
@@ -1099,6 +1170,9 @@ def adopt_delegated_mint(
     )
     state["minted"] = minted
     state["meta"] = dict(meta)
+    # th#1355: the mint cost, banked at the moment the cell becomes real.
+    state["mint_duration_ms"] = max(
+        0, int((time.monotonic() - pending.armed_at) * 1000))
     _unregister(pending)
     with _PENDING_LOCK:
         _FINALIZED[key] = minted
@@ -1144,7 +1218,8 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             dict(state.get("meta") or {}),
             cell_key_digest=str(
                 getattr(state.get("minted"), "cell_key", "")
-                or pending.cell_key))
+                or pending.cell_key),
+            mint_duration_ms=int(state.get("mint_duration_ms") or 0))
     else:
         # Runtime assertion (gw#587): every fleet cell miss must produce a
         # publish attempt. A fleet worker minting with no usable sink is a
@@ -1264,7 +1339,11 @@ def republish_after_shape_warm(
         label = cc.flavor_label(
             meta["sku"], meta["torch"], meta.get("weight_lane", ""))
         artifact = cc.pack(Path(live_root), tmp_root / f"{label}.tar.gz", meta)
-        publisher.publish(family, artifact, meta)
+        # th#1355: no mint duration — this is a REPACK of an already-captured
+        # cell after a shape warm, not a compile. 0 reads as "unreported",
+        # which is the truth; inventing a number here would poison the cost
+        # aggregate with a tar time.
+        publisher.publish(family, artifact, meta, 0)
         return True
     except CellPublishRefused as exc:
         logger.warning("hot-swap: cell republish refused (hub decision): %s", exc)

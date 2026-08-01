@@ -2401,7 +2401,12 @@ def publish(result: MintResult, publisher: Any) -> str:
     family = str(result.metadata.get("family") or "")
     if not family:
         raise MintRefused("cannot publish an artifact with no family")
-    return str(publisher.publish(family, result.artifact, dict(result.metadata)))
+    # th#1355: the mint pod already measured this (timings["total_s"]), so the
+    # cell's own cell_store row records what it cost to build instead of the
+    # cost living only in an activity event that carries no cell key.
+    mint_duration_ms = max(0, int(round(float(result.timings.get("total_s") or 0.0) * 1000)))
+    return str(publisher.publish(
+        family, result.artifact, dict(result.metadata), mint_duration_ms))
 
 
 # ---------------------------------------------------------------------------

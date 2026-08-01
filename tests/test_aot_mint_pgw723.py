@@ -1015,7 +1015,8 @@ class _RecordingPublisher:
     def __init__(self) -> None:
         self.calls: list = []
 
-    def publish(self, family: str, artifact: Path, meta: dict) -> str:
+    def publish(self, family: str, artifact: Path, meta: dict,
+                mint_duration_ms: int = 0) -> str:
         self.calls.append((family, artifact, meta))
         return "checkpoint-1"
 
