@@ -150,13 +150,78 @@ def test_a_quarantined_cell_is_a_typed_event_not_a_log_line(
 
 # ---------------------------------------------------------------------------
 # Invariant 3 — progress INSIDE a long phase
+#
+# Driven through a REAL mint (torch.export + AOTI pack, CPU, no GPU and no
+# stand-in), because what broke on this branch was the wiring between `mint`
+# and `_mint_cell`, not the callback's shape.
 # ---------------------------------------------------------------------------
 
+_FAMILY = "tiny824"
+_WIDTH = 8
 
-def test_a_multi_entry_mint_reports_every_entry_before_it_runs() -> None:
+
+def _mint(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
+    """One real two-class mint of a tiny CPU module."""
+    torch = pytest.importorskip("torch")
+    import types
+
+    from gen_worker import aot_mint, aot_serve, compile_cache
+    from gen_worker.api.decorators import Compile
+    from gen_worker.api.export_contract import (
+        Dim, GraphClass, Input, register_export_declaration,
+        reset_export_declarations,
+    )
+
+    class _Tiny(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = torch.nn.Linear(_WIDTH, _WIDTH, bias=False)
+
+        def forward(self, sample: Any) -> Any:
+            return torch.tanh(self.lin(sample))
+
+    full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
+    monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
+    monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(full))
+
+    reset_export_declarations()
+    monkeypatch.setattr(
+        aot_mint, "reset_export_declarations", reset_export_declarations,
+        raising=False)
+    register_export_declaration(Compile(
+        family=_FAMILY,
+        targets=("unet",),
+        dims=(Dim("B", carried_by=(("sample", 0),)),),
+        # TWO classes, so "entry i of N" has something to count.
+        classes=(GraphClass(dims={"B": 1}), GraphClass(dims={"B": 2})),
+        inputs=(Input("sample", shape=("B", _WIDTH)),),
+        shape_strategy="static-rows",
+        warm_changes_key=False,
+    ))
+    try:
+        return aot_mint.mint(
+            types.SimpleNamespace(unet=_Tiny().eval()),
+            aot_mint.ExportSpec(family=_FAMILY, target=""),
+            tmp_path / "out", allow_regressed_lanes=True, **kwargs)
+    finally:
+        reset_export_declarations()
+
+
+def test_a_multi_entry_mint_reports_every_entry_before_it_runs(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """RED before pgw#824: `aot_mint.mint` was one opaque call over the
     family's whole declared class set, so a real ~5-minute export emitted
     NOTHING between `trace_graph` and `seal_publish`.
+
+    A REAL mint — real `torch.export`, real AOTI pack, CPU, no stand-in — over
+    a two-class declaration, because the callback contract on its own is not
+    the thing that broke. pgw#825 split the monolithic `mint()` into
+    `mint` / `_attach_partial_phases` / `_mint_cell` while this parameter was
+    on a branch; the two merged textually clean and the beat was left calling
+    a name its function no longer had (`NameError: on_progress`, 16 failed / 6
+    errored). Only a test that drives the real `mint()` end to end can catch
+    that class, so this one does.
 
     Reported BEFORE the work, deliberately: a row that never returns is the one
     a reader most needs named, and an after-the-fact tick names only the rows
@@ -165,20 +230,70 @@ def test_a_multi_entry_mint_reports_every_entry_before_it_runs() -> None:
     from gen_worker import aot_mint
 
     beats: List[Tuple[str, int, int, str]] = []
+    _mint(
+        tmp_path, monkeypatch,
+        on_progress=lambda *row: beats.append(row))  # type: ignore[arg-type]
 
-    # Drive the callback contract directly — the export itself needs a real
-    # pipeline and a GPU, which is exactly the machinery this assertion must
-    # not depend on. What is under test is that the phase tokens the child
-    # frames are the ones the hub already groups on.
-    def on_progress(phase: str, step: int, total: int, note: str) -> None:
-        beats.append((phase, step, total, note))
+    trace = [b for b in beats if b[0] == aot_mint.PHASE_TRACE_GRAPH]
+    # The opener names the size of the job, then one row per declared class.
+    assert [b[1] for b in trace] == [0, 1, 2], beats
+    assert all(b[2] == 2 for b in trace), "a step with no total is not progress"
+    assert trace[0][0] == activity.PHASE_TRACE_GRAPH
+    # Each row NAMES its entry, or "12 of 18" says nothing about which 12.
+    assert all(b[3] for b in trace[1:]), trace
+    # And the mint's tail phase reports too, so a reader can tell "still
+    # exporting" from "packing".
+    assert [b[0] for b in beats][-1] == aot_mint.PHASE_SEAL_PUBLISH, beats
 
-    for i, name in enumerate(["a", "b", "c"], start=1):
-        on_progress(aot_mint.PHASE_TRACE_GRAPH, i, 3, name)
 
-    assert [b[1] for b in beats] == [1, 2, 3]
-    assert all(b[2] == 3 for b in beats), "a step with no total is not progress"
-    assert beats[0][0] == activity.PHASE_TRACE_GRAPH
+def test_an_aborted_mint_reports_the_entry_it_died_ON(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reconciliation of pgw#824's live beat with pgw#825's abort table.
+
+    pgw#825 made an aborted mint report where it SPENT — per-entry rows for the
+    entries that finished. That is the wrong half of the question when a mint
+    dies mid-entry: 11 rows and no twelfth, and the twelfth is the one being
+    asked about. Because both halves now read one `MintProgress`, the abort
+    table carries the last position the live beat reported, as `at`.
+    """
+    from gen_worker import aot_mint
+
+    def _refuse(row: Any, package: Any) -> Any:
+        raise aot_mint.MintRefused(f"entry {row.name!r}: bindability gate: nope")
+
+    monkeypatch.setattr(aot_mint, "_gate_and_declare_entry", _refuse)
+    with pytest.raises(aot_mint.MintRefused) as excinfo:
+        _mint(tmp_path, monkeypatch)
+
+    table = getattr(excinfo.value, "mint_phases", {})
+    assert table.get("terminus") == "aborted"
+    # pgw#825's half, unchanged.
+    assert table["n_entries"] == 2 and table["totals"]["export_s"] > 0
+    # pgw#824's half, on the SAME record.
+    assert table["at"]["phase"] == aot_mint.PHASE_SEAL_PUBLISH
+    assert table["at"]["total"] == 2
+
+
+def test_the_position_is_recorded_even_with_no_sink_and_a_raising_one() -> None:
+    """One mechanism means the live beat and the abort table can never
+    disagree: the position is RECORDED before it is reported, so a mint with no
+    `on_progress` (every non-delegated caller) and a mint whose sink raises
+    both still name where they were. Telemetry never costs a mint its work.
+    """
+    from gen_worker import aot_mint
+
+    quiet = aot_mint.MintProgress()
+    quiet.beat(aot_mint.PHASE_TRACE_GRAPH, 3, 18, "entry-c")
+    assert quiet.at == {
+        "phase": "trace_graph", "step": 3, "total": 18, "note": "entry-c"}
+
+    def _explode(*_: Any) -> None:
+        raise RuntimeError("the sink is not the mint")
+
+    loud = aot_mint.MintProgress(on_progress=_explode)
+    loud.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 12, 18, "entry-l")
+    assert loud.at["step"] == 12
 
 
 def test_the_mint_progress_tokens_are_the_hubs_own_phase_vocabulary() -> None:
