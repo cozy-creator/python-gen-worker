@@ -723,12 +723,28 @@ EXIT_BAD_JOB = 4
 
 class EntryCompileFailed(RuntimeError):
     """One entry's compile failed. Carries the entry name — a pool of 18 that
-    fails anonymously is undebuggable."""
+    fails anonymously is undebuggable — and its CLASSIFICATION.
 
-    def __init__(self, entry: str, detail: str) -> None:
+    pgw#848: ``resource`` is the difference between a mint that is retried at
+    a narrower K and one that is never retried at all. Everything this class
+    carried used to converge on ``MintRefused`` -> ``EXIT_REFUSED``, which
+    ``mint_process`` documents as "typed, deterministic — terminal", so the
+    ONE failure class a narrower pool would have fixed was the one class
+    routed down the never-retry path. ``basis`` names how the verdict was
+    reached, because a verdict from the kernel's own OOM counter and a
+    verdict inferred from a signal are not the same evidence.
+    """
+
+    def __init__(
+        self, entry: str, detail: str, *,
+        resource: bool = False, basis: str = "", peak_rss_bytes: int = 0,
+    ) -> None:
         super().__init__(detail)
         self.entry = entry
         self.detail = detail
+        self.resource = bool(resource)
+        self.basis = str(basis)
+        self.peak_rss_bytes = int(peak_rss_bytes)
 
 
 @dataclass
@@ -739,6 +755,12 @@ class _Running:
     program_path: Path
     started: float
     stderr_path: Path
+    #: pgw#848: THIS entry's own high-water, sampled while it lives. The
+    #: pool-wide max cannot answer "how big was the one that died", and a
+    #: child killed by the OOM killer writes no report — so the parent's
+    #: live sample is the only measurement that survives it, and it is
+    #: exactly the number the next attempt must size K against.
+    peak_rss_bytes: int = 0
     #: Wall clock at the moment ``Popen`` returned — the other end of the
     #: child's boot span, which no monotonic clock can close across processes.
     spawn_epoch: float = 0.0
@@ -975,6 +997,33 @@ def _descendants(root: int) -> List[int]:
     return out
 
 
+def cgroup_oom_kills(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
+    """How many processes this cgroup's memory limit has killed, ever.
+
+    pgw#848: the kernel's own counter, and the only NON-inferential evidence
+    that a dead entry child died of memory. A SIGKILL with no report is the
+    OOM killer far more often than anything else — the pool has said so in
+    ``_exit_note`` since pgw#809 — but "far more often" is not a
+    classification, and the retry policy branches on it. ``-1`` = unreadable,
+    which is honest and is reported as such rather than folded into 0.
+    """
+    for name in ("memory.events", "memory/memory.oom_control"):
+        path = cgroup_root / name
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in ("oom_kill", "oom_kill_disable"):
+                if parts[0] == "oom_kill":
+                    try:
+                        return int(parts[1])
+                    except ValueError:
+                        return -1
+    return -1
+
+
 def _peak_rss_bytes(proc: subprocess.Popen) -> int:
     """The child tree's high-water RSS, read from the kernel while it lives.
 
@@ -1019,6 +1068,14 @@ class EntryCompilePool:
         self.python = python
         self.peak_rss_bytes = 0
         self.peak_concurrency = 0
+        # pgw#848: the kernel's OOM-kill counter as it stood before this pool
+        # ran. A DELTA over the pool's own wall is evidence; the absolute
+        # number is a pod's whole history and means nothing here.
+        self.oom_kills_at_start = cgroup_oom_kills()
+        #: Set when an entry died of memory, so the mint's aborted phase
+        #: table carries the actionable half rather than a bare "refused".
+        self.oom_entry = ""
+        self.oom_basis = ""
         self.entry_seconds: Dict[str, float] = {}
         self.entry_phases: Dict[str, Dict[str, float]] = {}
         # pgw#830: parent-side per-entry spans (staging + spawn) and the
@@ -1259,9 +1316,13 @@ class EntryCompilePool:
         self.peak_concurrency = max(self.peak_concurrency, len(running))
         for row in running:
             # Sample while it is alive: /proc vanishes at exit, and VmHWM is
-            # the only free high-water mark the kernel keeps.
-            self.peak_rss_bytes = max(
-                self.peak_rss_bytes, _peak_rss_bytes(row.proc))
+            # the only free high-water mark the kernel keeps. Per ROW as well
+            # as pool-wide (pgw#848) — a child the OOM killer takes writes no
+            # report, so this sample is the only measurement of it that ever
+            # exists, and it is what sizes the next attempt's K.
+            row.peak_rss_bytes = max(
+                row.peak_rss_bytes, _peak_rss_bytes(row.proc))
+            self.peak_rss_bytes = max(self.peak_rss_bytes, row.peak_rss_bytes)
             if row.proc.poll() is not None:
                 return row
         return None
@@ -1301,10 +1362,53 @@ class EntryCompilePool:
         detail = report.detail if report is not None else ""
         if not detail:
             detail = _stderr_tail(row.stderr_path)
+        resource, basis = self._memory_verdict(code, report)
+        if resource:
+            self.oom_entry, self.oom_basis = row.entry, basis
         raise EntryCompileFailed(
             row.entry,
             f"entry {row.entry!r}: compile child exited {code} after "
-            f"{elapsed:.0f}s ({_exit_note(code)}): {detail or 'no detail'}")
+            f"{elapsed:.0f}s ({_exit_note(code)}): {detail or 'no detail'}"
+            + (
+                f" [pgw#848 classification: MEMORY SHORTFALL, basis={basis}; "
+                f"this entry's measured high-water was "
+                f"{row.peak_rss_bytes / 1024**3:.2f} GiB and the pool ran "
+                f"K={self.width.workers} against a "
+                f"{self.width.per_entry_rss_bytes / 1024**3:.2f} GiB/entry "
+                f"({self.width.per_entry_rss_basis}) ask — this is retryable "
+                f"at a narrower K, NOT a deterministic refusal]"
+                if resource else ""),
+            resource=resource, basis=basis,
+            peak_rss_bytes=row.peak_rss_bytes)
+
+    def _memory_verdict(
+        self, code: Optional[int], report: Optional[EntryReport],
+    ) -> Tuple[bool, str]:
+        """Did this entry die of MEMORY, and on what evidence?
+
+        pgw#848. Two bases, and they are not equivalent:
+
+        * ``cgroup`` — the kernel's own ``memory.events`` ``oom_kill`` counter
+          moved while this pool ran. That is a fact, not an inference.
+        * ``sigkill`` — the child was SIGKILLed and wrote no report, with no
+          usable counter to corroborate it. The pool has documented this
+          shape as "the OOM killer far more often than a compiler bug" since
+          pgw#809; one retry at a narrower K is the right response to a
+          "far more often", and a wrong guess costs one retry rather than a
+          permanently unmintable cell.
+
+        A child that wrote a report classified ITSELF and is believed: a
+        named refusal is deterministic no matter how it exited.
+        """
+        if report is not None:
+            return False, ""
+        if code is None or code >= 0 or -int(code) != int(signal.SIGKILL):
+            return False, ""
+        now = cgroup_oom_kills()
+        if now >= 0 and self.oom_kills_at_start >= 0 \
+                and now > self.oom_kills_at_start:
+            return True, "cgroup"
+        return True, "sigkill"
 
     def _verify_child_code(self, row: _Running, report: EntryReport) -> None:
         """pgw#840: the child that compiled this entry must BE the parent.

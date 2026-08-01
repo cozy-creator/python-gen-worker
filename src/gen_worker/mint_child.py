@@ -598,6 +598,15 @@ def _is_resource_error(exc: BaseException) -> bool:
 
     if is_cuda_oom(exc):
         return True
+    # pgw#848: a HOST memory shortfall, classified by whoever measured it.
+    # Duck-typed rather than imported: `aot_mint.MintResourceExhausted` sets
+    # `mint_resource_shortfall = True`, and this module deliberately pulls in
+    # as little of the arming brain as it can. Until this existed the AOT
+    # pool's only exit was `MintRefused` -> EXIT_REFUSED -> never retried, so
+    # an OOM-killed entry child was reported to the hub as a deterministic
+    # refusal and the mint never tried the narrower K that would fix it.
+    if getattr(exc, "mint_resource_shortfall", False) is True:
+        return True
     return isinstance(exc, MemoryError)
 
 

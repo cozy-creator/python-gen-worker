@@ -146,6 +146,39 @@ class MintRefused(RuntimeError):
         self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
 
 
+class MintResourceExhausted(RuntimeError):
+    """This mint ran out of MEMORY. It is not a refusal, and the difference
+    is the whole point (pgw#848).
+
+    Deliberately NOT a subclass of :class:`MintRefused`. ``mint_child`` maps
+    every ``MintRefused`` to ``EXIT_REFUSED``, which ``mint_process``
+    documents as "typed, deterministic — terminal", so an OOM-killed entry
+    child inherited a never-retry verdict: the one failure class a narrower
+    pool would have fixed was the one class that could never try a narrower
+    pool. Raising a sibling type instead lets the child's own
+    ``_is_resource_error`` see it (via ``mint_resource_shortfall``) and exit
+    ``EXIT_RESOURCE``, which the parent re-budgets and retries.
+
+    ``peak_rss_bytes`` is the dead entry's MEASURED high-water, sampled by
+    the parent while it lived — a child the OOM killer takes writes no
+    report, so this is the only measurement of it that will ever exist.
+    """
+
+    #: Duck type read by ``mint_child._is_resource_error`` so that module
+    #: does not have to import this one (it deliberately imports as little
+    #: of the arming brain as it can).
+    mint_resource_shortfall = True
+
+    def __init__(
+        self, detail: str, *, entry: str = "", basis: str = "",
+        peak_rss_bytes: int = 0,
+    ) -> None:
+        super().__init__(detail)
+        self.entry = entry
+        self.basis = basis
+        self.peak_rss_bytes = int(peak_rss_bytes)
+
+
 # ---------------------------------------------------------------------------
 # The declared export contract
 # ---------------------------------------------------------------------------
@@ -1577,6 +1610,7 @@ def _mint_cell(
             f"{len(minted)} entries, {width.workers} wide")
         progress.pool_ledger = _compile_entries_parallel(
             minted, work, width, inductor_configs=inductor_configs,
+            progress=progress,
             on_entry=lambda name, done, total: progress.beat(
                 PHASE_INDUCTOR_COMPILE, done, total, name))
     timings["entry_workers"] = float(width.workers)
@@ -1676,6 +1710,7 @@ def _compile_entries_parallel(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     on_entry: Optional[Callable[[str, int, int], None]] = None,
+    progress: Optional["MintProgress"] = None,
 ) -> Dict[str, Any]:
     """pgw#809: fill every entry's ``files`` K-wide, out of process.
 
@@ -1702,9 +1737,19 @@ def _compile_entries_parallel(
         by_entry = pool.compile(
             [(row.name, row.program) for row in minted], on_entry=on_entry)
     except aot_compile_pool.EntryCompileFailed as exc:
-        # Named, and terminal: the siblings are already torn down group-wide
-        # by the pool. A mint that says only "a compile failed" over 18
-        # entries is the silent-failure path in a new hat (pgw#758).
+        # pgw#848: the pool's ledger and its MEASURED peak have to survive the
+        # failure, because the aborted phase table is what the parent banks
+        # and re-sizes K from. Without this the OOM'd attempt teaches the
+        # retry nothing and attempt 2 runs the identical width.
+        if progress is not None:
+            progress.pool_ledger = _pool_facts(pool)
+        # Named, and the siblings are already torn down group-wide by the
+        # pool. A mint that says only "a compile failed" over 18 entries is
+        # the silent-failure path in a new hat (pgw#758).
+        if exc.resource:
+            raise MintResourceExhausted(
+                str(exc), entry=exc.entry, basis=exc.basis,
+                peak_rss_bytes=exc.peak_rss_bytes) from exc
         raise MintRefused(str(exc)) from exc
     wall = time.monotonic() - t0
     missing = [row.name for row in minted if row.name not in by_entry]
@@ -1735,13 +1780,26 @@ def _compile_entries_parallel(
         "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",
         len(minted), "y" if len(minted) == 1 else "ies", width.workers, wall,
         sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
-    return {
+    return _pool_facts(pool)
+
+
+def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
+    """The pool block of the phase table, on BOTH termini (pgw#848).
+
+    An aborted mint's pool facts are the ones a reader most needs — they are
+    the inputs to the decision that has to change on the retry.
+    """
+    facts: Dict[str, Any] = {
         **pool.ledger.facts(),
         # Observed, not intended: the only load-independent evidence that the
         # pool actually overlapped rather than looping K-wide on paper.
         "peak_concurrency": int(pool.peak_concurrency),
         "peak_child_rss_bytes": int(pool.peak_rss_bytes),
     }
+    if pool.oom_entry:
+        facts["oom_entry"] = pool.oom_entry
+        facts["oom_basis"] = pool.oom_basis
+    return facts
 
 
 @dataclass(frozen=True)
@@ -2774,6 +2832,7 @@ __all__ = [
     "DynamicDim",
     "ExportSpec",
     "MintRefused",
+    "MintResourceExhausted",
     "MINT_COMPILE_THREADS",
     "MintResult",
     "PARITY_LANES",
