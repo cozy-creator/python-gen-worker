@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
 
 - **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
   0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
@@ -79,6 +79,13 @@
   and that machinery is exercised with the split always on. The boot-smoke
   hardware-report suite asserts the split-world contract (child hands the
   verdict to the parent; the parent's relay is what the report budget bounds).
+- **pgw#783 follow-on — the control parent honors the pgw#639 SIGUSR2
+  contract: dump and forward, never die.** tests_v2's zero-based boot gate
+  caught it under the unconditional split: SIGUSR2 to the pod pid (now always
+  the control parent) took default action and killed the worker. The parent
+  installs the forward-to-children handler first, then faulthandler with
+  `chain=True`, so one signal prints parent + children thread stacks to the
+  pod log and kills nothing.
 
 ## 0.86.0 (2026-08-01) — no mint route could publish a cell: the regional arm gets its caller, the delegated mint child gets its slots, eager serving names its reason, and the zero-based suite becomes a CI gate
 
