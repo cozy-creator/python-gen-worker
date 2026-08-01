@@ -76,6 +76,8 @@ def test_the_report_follows_the_DELIVERED_topology_not_the_env(
 
     class _Canary:
         interconnect = "pcie"
+        peer_gbps = 14.5
+        peer_access = True
 
     monkeypatch.setattr(host_canary, "get_host_canary", lambda: _Canary())
     # Undemoted (from_env) groups are [0,1] and [2,3] -> MINs 8 and 40.

@@ -271,6 +271,19 @@
   decline that read as a skip would be an uncompiled target) and drops the two
   premises pgw#812 measured away. Red-verified against the v0.82.0 source: 4 of
   the 8 fail there.
+- **pgw#818 — the worker's fabric gate adopts the hub's full predicate.** The
+  Hello-time demote read `interconnect` alone while the hub's grew a measured
+  bandwidth floor, so in the band `nvlink AND peer_gbps < 200` a 2x2 pod refused
+  half of every dispatch RETRYABLE forever and a 1x4 pod overstated capacity 4x.
+  `delivered_topology` now demotes unless `sp_admits(interconnect, peer_gbps)` —
+  `nvlink AND >= SP_MIN_PEER_GBPS (200.0)`, the hub's `topology.SPAdmits`
+  verbatim — and a WEDGED fabric (`peer_access AND peer_gbps == 0.0`, the
+  collective that hangs with no error) raises
+  `topology_fabric_wedged_peer_access_zero_bandwidth` typed at boot for any
+  multi-GPU topology, closing the race against the hub's quarantine drain.
+  Deliberately still no HelloAck demote field: two independent gates over one
+  measurement is the design; th#1285 interpretation 4's "agree by construction"
+  holds only while the predicates match, which they now again do.
 
 - **pgw#812 D1 + D2 — the two defects that make flux2 unmintable, and neither is
   about regional compilation.** D1: `dynamic_shapes_spec` minted one torch symbol per

@@ -292,9 +292,15 @@ class ExecutionTopology:
 
     def demoted(self) -> "ExecutionTopology":
         """The hub's ``topology_demoted_fabric_not_nvlink`` re-pack, computed
-        locally: G = gpu_count, D = 1. Both sides read the same measured
-        interconnect, so they agree by construction (§2a's Phase-3 seam does
-        not need a HelloAck field for a mechanism the worker also measures)."""
+        locally: G = gpu_count, D = 1. Both sides read the same measurement —
+        but "agree by construction" holds only while both apply the same
+        PREDICATE over it. pgw#818 is what happened when the hub grew a
+        bandwidth floor and this side kept class-only: in the disagreement
+        band a 2x2 pod refused half of every dispatch forever. The predicate
+        is now shared (``host_canary.sp_admits`` == hub ``topology.SPAdmits``,
+        one constant each side, same number); there is deliberately still no
+        HelloAck demote field — two independent gates over one measurement is
+        the design, and the constants must move together."""
         return ExecutionTopology(gpu_count=self.gpu_count, group_degree=1)
 
     def as_dict(self) -> dict:
@@ -391,16 +397,28 @@ def delivered_topology(
     env: Optional[Mapping[str, str]] = None,
     *,
     interconnect: Optional[str] = None,
+    peer_gbps: Optional[float] = None,
+    peer_access: Optional[bool] = None,
 ) -> ExecutionTopology:
     """The topology this worker will actually execute.
 
-    Applies the same fabric gate the hub applies at Hello: a group the
-    *platform* shards is sold on a proven interconnect, so if this pod's own
-    boot canary does not report ``nvlink`` the group is demoted to ``G×1``
-    rather than served at a promise the hardware cannot keep. ``internal``
-    groups are never demoted — the devices are the model's, not the platform's.
+    Applies the same fabric gate the hub applies at Hello — the SAME two-term
+    predicate (pgw#818): a group the *platform* shards is sold on a proven
+    interconnect, so unless this pod's own boot canary measures ``nvlink``
+    AND ``peer_gbps >= SP_MIN_PEER_GBPS`` the group is demoted to ``G×1``
+    rather than served at a promise the hardware cannot keep. Class alone is
+    not enough — a degraded host prints ``nvlink`` at 30 GB/s, and in that
+    band a hub that demoted while the worker did not left half of every 2x2
+    pod's dispatches in a permanent retry loop. ``internal`` groups are never
+    bandwidth-demoted — the devices are the model's, not the platform's.
 
-    ``interconnect`` defaults to the shipped boot canary's measurement.
+    One refusal outranks everything on ANY multi-GPU topology: a WEDGED
+    fabric (peer access reported, bandwidth exactly zero — the collective
+    hangs with no error) raises typed at boot, so the hub re-packs instead of
+    racing its own quarantine drain against this worker reaching serving.
+
+    ``interconnect``/``peer_gbps``/``peer_access`` default to the shipped
+    boot canary's measurement.
 
     Reading the REAL environment (``env is None``, i.e. every production and
     boot call) also PUBLISHES the result: the placement helpers translate a
@@ -408,23 +426,41 @@ def delivered_topology(
     possibly fabric-demoted — packing can do that. An explicit ``env`` is a
     caller asking a question about some other pod, so it publishes nothing.
     """
+    from .host_canary import is_fabric_wedge, sp_admits
+
     topo = ExecutionTopology.from_env(env)
+    # An explicit ``interconnect`` is a caller asking about SOME pod — the
+    # unsupplied axes default fail-closed (0.0 / False) rather than reading
+    # this process's canary into another pod's question. Production calls
+    # pass nothing and read the pod's own measurement.
+    if interconnect is None and topo.gpu_count > 1:
+        from .host_canary import get_host_canary
+
+        canary = get_host_canary()
+        interconnect = canary.interconnect
+        if peer_gbps is None:
+            peer_gbps = canary.peer_gbps
+        if peer_access is None:
+            peer_access = canary.peer_access
+    if topo.gpu_count > 1 and is_fabric_wedge(bool(peer_access), float(peer_gbps or 0.0)):
+        raise TopologyError(
+            "topology_fabric_wedged_peer_access_zero_bandwidth",
+            f"{topo}: peer access reported with 0.0 GB/s measured — every "
+            "collective on this host blocks forever (fleet survey, machine "
+            "class reproduced twice). Refusing at boot so the hub re-packs "
+            "rather than stranding requests",
+        )
     if not topo.platform_parallel:
         if env is None:
             install_topology(topo)
         return topo
-    if interconnect is None:
-        from .host_canary import get_host_canary
-
-        interconnect = get_host_canary().interconnect
-    from .host_canary import INTERCONNECT_NVLINK
-
-    if interconnect != INTERCONNECT_NVLINK:
+    if not sp_admits(interconnect or "", float(peer_gbps or 0.0)):
         demoted = topo.demoted()
         logger.warning(
-            "topology_demoted_fabric_not_nvlink: measured interconnect=%r, "
-            "%s -> %s (the sharded tier is sold on a fabric this pod does "
-            "not have)", interconnect or "", topo, demoted,
+            "topology_demoted_fabric_not_nvlink: measured interconnect=%r "
+            "peer_gbps=%.2f, %s -> %s (the sharded tier is sold on a fabric "
+            "this pod did not prove)",
+            interconnect or "", float(peer_gbps or 0.0), topo, demoted,
         )
         if env is None:
             install_topology(demoted)
