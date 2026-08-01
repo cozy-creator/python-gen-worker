@@ -519,3 +519,36 @@ def test_an_unqualified_fp8_gemm_is_a_lane_decision_that_reports_itself() -> Non
 
     src = inspect.getsource(w8a8._choose_gemm_mode)
     assert 'phase="w8a8_gemm_unqualified"' in src
+
+
+def test_an_adapter_that_maps_nothing_is_reported_not_waved_through(
+    events: List[Any],
+) -> None:
+    """RED before pgw#824 — a VACUOUS GUARD, the pgw#812-D2 defect class again.
+
+    `adapter_fidelity.evaluate_branch` returns None for an empty mapping and
+    `gate(None)` is a no-op, so an adapter that maps to ZERO modules sails
+    straight through the gate that exists to catch exactly this. The request
+    then renders with NO adapter applied while reporting success: the user
+    asked for a LoRA and got an image without one, and nothing anywhere said
+    so.
+
+    Reachable in production: `_normalize_lora_keys` falls back to RAW keys when
+    `lora_state_dict` normalization raises, and raw kohya keys match no module
+    path on the model.
+    """
+    from gen_worker.models import adapter_fidelity
+
+    # the vacuous half, asserted directly: this is what made it invisible
+    assert adapter_fidelity.evaluate_branch({}, {}, ref="r") is None
+    assert adapter_fidelity.gate(None) is None
+    assert not events, "the gate genuinely reports nothing for an empty map"
+
+    # ... so the zero-mapping fact is reported at the staging site instead
+    import inspect
+
+    from gen_worker.models import w8a8_lora
+
+    src = inspect.getsource(w8a8_lora)
+    assert 'phase="not_applied"' in src
+    assert "if not mapped:" in src
