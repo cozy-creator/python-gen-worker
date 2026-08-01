@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.90.1 (2026-08-01) — the release that actually CONTAINS the drain fix: a drain no longer drops a COMPLETED job's result (pgw#845 P1), superseding a 0.90.0 published from a pre-fix head
+
+- **Supersedes 0.90.0 — never pin 0.90.0.** The v0.90.0 tag was cut at `9332c0e`,
+  BEFORE the pgw#845 P1 drain fix (`09133ca`) landed, so the published 0.90.0
+  wheel still drops the result of a job that already completed when the pod
+  drains (scale-down window). 0.90.0's section below describes the intended
+  release; the drain bullet in it is only TRUE of 0.90.1. Lesson, recorded in
+  the tracker: a green CI run proves the tree it ran on, not that the tag
+  points at the tree you meant to ship — verify tag contents BY CONTENT.
+- **pgw#845 (P1) — a cancelled write cancels the whole gRPC call.** The drain's
+  "clean close" cancelled the sender task; grpc.aio answered by cancelling the
+  RPC, the RST discarded a `job_result` already retired from the durable
+  pending set, and the same cancellation escaped `run()` with no exit code.
+  Fixed via `SendQueue.quiesce` / `SenderQuiesced`: the sender is quiesced,
+  never cancelled mid-write. Red 12/12 before; green 56/56 after (24
+  sequential + 24 across four concurrent lanes on two pinned cores + 8
+  top-up). The same defect sat on the pgw#763 supervisor stream cycle, where
+  it would have discarded the typed death JobResult. Residual (filed, not
+  fixed): on an ABRUPT close a written-but-unflushed result is in neither the
+  wire nor the queue; closing that needs a hub-side result ack (proto change)
+  — today the hub reconciles it (a gap in the guarantee, not a silent drop).
+- **pgw#845 — `test_entry_collapse_pgw829` NameError repaired** (a helper
+  rename verified as a single-node run instead of the file: a file-wide change
+  verified as a local one), and the sibling stopwatch assertion de-clocked.
+
 ## 0.90.0 (2026-08-01) — **an AOT cell can advertise `compiled` for the first time** (pgw#844 P0: the exported lane was never asked for its guard-revocation signal, and a partially dispatchable cell claimed nothing); the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint can derive 8 entries from 72 (pgw#829, per-family opt-in); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), a drain no longer drops the result of a job that already succeeded (pgw#845 P1: a cancelled write cancels the whole gRPC call), four runner-flake classes die and the wall-clock guard can finally fail (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
 
 - **pgw#844 (P0) — an AOT cell could never advertise compiled, and one
