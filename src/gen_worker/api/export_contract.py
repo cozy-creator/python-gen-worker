@@ -444,23 +444,6 @@ def validate_contract(compile_decl: Any) -> None:
             f"(#730: conv-bearing families declare {STATIC_ROWS!r}, DiTs "
             f"{DYNAMIC_COLLAPSE!r}), got {strategy!r}")
 
-    # pgw#829: the block population's own strategy. Validated on the same
-    # vocabulary, and refused when it has no population to govern — a
-    # `regional_shape_strategy` on a whole-graph family is a declaration
-    # nothing reads, which is the shape of a fact that quietly stops being
-    # true.
-    regional_strategy = str(
-        getattr(compile_decl, "regional_shape_strategy", "") or "")
-    if regional_strategy and regional_strategy not in SHAPE_STRATEGIES:
-        raise DeclarationError(
-            f"Compile.regional_shape_strategy must be one of "
-            f"{SHAPE_STRATEGIES!r}, got {regional_strategy!r}")
-    if regional_strategy and not bool(getattr(compile_decl, "regional", False)):
-        raise DeclarationError(
-            f"Compile.regional_shape_strategy={regional_strategy!r} is "
-            f"declared without regional=True — it governs the BLOCK entries "
-            f"of a regional cell, and this family mints none")
-
     # Rows are coordinates: with classes declared, a hand-written range on a
     # named dim is exactly the endpoint hand-math #739 exists to prevent.
     for dd in compile_decl.dynamic:

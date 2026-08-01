@@ -2,27 +2,25 @@
 apart at the DISPATCH boundary, and it asks that question the way dispatch
 asks it: by ADMISSION, not by equality.
 
-pgw#829 landed a dispatch-ambiguity gate that compared a digest of each
-entry's placeholder shapes.  That catches entries whose declared contracts are
-IDENTICAL — sdxl's nine static aspect rows collapsing onto four token counts,
-which is the case it was written for.  It cannot catch the case pgw#829's own
-remedy introduces: a STATIC row and a DYNAMIC row over the same token hull
-have different digests and both admit the same call, so
-``EntryDispatch.select`` refuses ``entry_ambiguous`` on a cell the mint
-published as clean.  A partially collapsed cell — one block class collapsed,
-one still specialized, which is exactly what
-``regional_shape_strategy='dynamic-collapse'`` produces on a mixed
-conv-free/conv-bearing block population — is that shape.
+Rewritten in WHOLE-GRAPH terms for pgw#846 (regional cells are retired).  The
+failure class survives the retirement: ``EntryDispatch.select`` refuses
+``entry_ambiguous`` — per REQUEST, served eager, no refusal at mint — whenever
+two entries of one dispatch group admit the same call.  Equality of contracts
+cannot see the dangerous half of that (a static row shadowed by a dynamic
+sibling over the same hull admits identically while digesting differently),
+so the gate runs every entry's own declared call against every sibling's
+contract through :func:`aot_serve.assert_ingress` itself.
 
-The gate now runs every entry's own declared call against every sibling's
-contract through :func:`aot_serve.assert_ingress` itself.  Real
-``torch.export`` programs, real ``aot_package.input_contract``, real ingress
-assertion; CPU, no AOTInductor compile, no GPU.
+Real ``torch.export`` programs, real ``aot_package.input_contract``, real
+ingress assertion; CPU, no AOTInductor compile, no GPU.  The 36-entry case
+mirrors the real sdxl whole-graph declaration (18 declared class rows x 2
+pgw#790 adapter arms) and MUST be admitted — that is the pgw#846 revert
+precondition (part B's gate must not refuse the whole-graph cell).
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Tuple
 
 import pytest
 
@@ -33,56 +31,105 @@ import torch.nn as nn  # noqa: E402
 from gen_worker import aot_mint, aot_serve  # noqa: E402
 
 FAMILY = "sdxl"
-CHANNELS = 64
+IN_CH = 4
+XATTN = 2048
 TEXT_LEN = 77
+RANK = 64
+
+#: sdxl's nine declared aspect buckets as LATENT extents — the real class
+#: rows, whose (H_lat, W_lat) pairs are distinct coordinates even where their
+#: products collide (the collision that killed the regional shape is invisible
+#: to a whole-graph entry, whose ingress carries H and W separately).
+SDXL_BUCKETS: Tuple[Tuple[int, int], ...] = (
+    (128, 128),
+    (152, 104), (104, 152),
+    (168, 96), (96, 168), (144, 112), (112, 144),
+    (192, 80), (80, 192),
+)
 
 
-class _Block(nn.Module):
-    """A block as the regional mint sees one: it takes the FLATTENED token
-    sequence, never the latent H and W it came from."""
+class _UNet(nn.Module):
+    """The whole-graph ingress signature: `sample` carries B/C/H_lat/W_lat as
+    four SEPARATE extents."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.proj = nn.Linear(CHANNELS, CHANNELS)
-
-    def forward(self, hidden_states: Any, encoder_hidden_states: Any) -> Any:
-        return self.proj(hidden_states) + encoder_hidden_states.mean(
-            dim=1, keepdim=True)
+    def forward(self, sample: Any, encoder_hidden_states: Any) -> Any:
+        return sample.mean() + encoder_hidden_states.mean()
 
 
-def _export(tokens: int, hull: Tuple[int, int] | None = None) -> Any:
-    block = _Block().eval()
-    hidden = torch.zeros(1, tokens, CHANNELS)
-    encoder = torch.zeros(1, TEXT_LEN, CHANNELS)
+class _UNetLifted(nn.Module):
+    def forward(self, sample: Any, encoder_hidden_states: Any,
+                lora_a: Any, lora_b: Any) -> Any:
+        return (sample.mean() + encoder_hidden_states.mean()
+                + lora_a.mean() + lora_b.mean())
+
+
+def _export(b: int, h: int, w: int, *, arm: bool = False,
+            hull: Tuple[int, int] | None = None) -> Any:
+    args: list = [torch.zeros(b, IN_CH, h, w), torch.zeros(b, TEXT_LEN, XATTN)]
+    mod: nn.Module = _UNet()
+    if arm:
+        args += [torch.zeros(RANK, XATTN), torch.zeros(XATTN, RANK)]
+        mod = _UNetLifted()
     dynamic = None
     if hull is not None:
-        dim = torch.export.Dim("s_tok", min=hull[0], max=hull[1])
-        dynamic = ({1: dim}, None)
+        dim = torch.export.Dim("s_h", min=hull[0], max=hull[1])
+        dynamic = tuple([{2: dim}] + [None] * (len(args) - 1))
     return torch.export.export(
-        block, (hidden, encoder), dynamic_shapes=dynamic, strict=True)
+        mod.eval(), tuple(args), dynamic_shapes=dynamic, strict=True)
 
 
-def _entry(name: str, program: Any, *, block: str = "Block#0") -> Any:
+def _entry(name: str, program: Any, *, arm: bool | None = None,
+           cfg: bool = False) -> Any:
+    names = ("sample", "encoder_hidden_states")
+    fork: Tuple[Tuple[str, Any], ...] = (("cfg", cfg),)
+    if arm is not None:
+        fork = tuple(sorted(
+            fork + ((aot_mint.ADAPTER_FORK, bool(arm)),),
+            key=lambda kv: str(kv[0])))
+        if arm:
+            names = names + ("lora_a", "lora_b")
     return aot_mint._MintedEntry(
         name=name,
         spec=aot_mint.ExportSpec(
-            family=FAMILY, target="unet", regional=True,
-            fork=(("block", block),)),
+            family=FAMILY, target="unet", fork=fork,
+            lora_bucket=RANK if arm else 0),
         module=None,
         owner=None,
         program=program,
-        input_names=("hidden_states", "encoder_hidden_states"),
-        flat_names=("hidden_states", "encoder_hidden_states"),
+        input_names=names,
+        flat_names=names,
         files=[],
         timings={},
     )
 
 
-def test_two_static_rows_on_one_token_count_are_refused_by_admission():
-    """The measured sdxl case: 192x80 and 80x192 are the same 15360 tokens."""
+def _row_name(b: int, h: int, w: int, *, arm: bool, cfg: bool) -> str:
+    return (f"unet/adapter={str(arm).lower()},cfg={str(cfg).lower()}"
+            f"/B={b},H_lat={h},T_txt={TEXT_LEN},W_lat={w}")
+
+
+def test_the_whole_graph_sdxl_shape_is_ADMITTED():
+    """The pgw#846 revert precondition: 18 class rows (9 aspect buckets x 2
+    CFG arms) x 2 adapter arms = 36 entries, every one a distinct
+    (B, H_lat, W_lat) ingress coordinate — the gate must admit the cell the
+    fleet is going back to."""
+    minted = []
+    for cfg, b in ((False, 1), (True, 2)):
+        for h, w in SDXL_BUCKETS:
+            for arm in (True, False):
+                minted.append(_entry(
+                    _row_name(b, h, w, arm=arm, cfg=cfg),
+                    _export(b, h, w, arm=arm), arm=arm, cfg=cfg))
+    assert len(minted) == 36
+    aot_mint._gate_dispatch_ambiguity(minted)  # must not raise
+
+
+def test_two_entries_of_one_dispatch_group_admitting_one_call_are_refused():
+    """Two identical ingress coordinates in ONE (target, adapter arm) group:
+    dispatch would refuse every call `entry_ambiguous`, so the mint must."""
     minted = [
-        _entry("unet/block=Block#0/H_lat=192,W_lat=80", _export(15360)),
-        _entry("unet/block=Block#0/H_lat=80,W_lat=192", _export(15360)),
+        _entry("unet/a", _export(1, 128, 128), arm=False),
+        _entry("unet/b", _export(1, 128, 128), arm=False),
     ]
     with pytest.raises(aot_mint.MintRefused) as err:
         aot_mint._gate_dispatch_ambiguity(minted)
@@ -91,78 +138,44 @@ def test_two_static_rows_on_one_token_count_are_refused_by_admission():
     assert "admitted by more than one entry" in str(err.value)
 
 
-def test_a_static_row_shadowed_by_a_COLLAPSED_sibling_is_refused():
+def test_a_static_row_shadowed_by_a_dynamic_sibling_is_refused():
     """The case an equality digest cannot see, and the reason this gate had to
-    change: the two contracts are DIFFERENT and both admit the same call.
-
-    A partially collapsed regional cell produces exactly this — the conv-free
-    class collapses onto one dynamic entry while a conv-bearing sibling of the
-    same block class keeps its static rows.  Dispatch would admit both and
-    refuse ``entry_ambiguous`` on every call in the overlap.
-    """
+    change (pgw#844): the two contracts are DIFFERENT and both admit the same
+    call."""
     minted = [
-        _entry("unet/block=Block#0/H_lat=128,W_lat=128", _export(16384)),
-        _entry("unet/block=Block#0/collapsed",
-               _export(16384, hull=(15360, 16384))),
+        _entry("unet/static", _export(1, 128, 128), arm=False),
+        _entry("unet/dynamic", _export(1, 128, 128, hull=(80, 192)),
+               arm=False),
     ]
     with pytest.raises(aot_mint.MintRefused) as err:
         aot_mint._gate_dispatch_ambiguity(minted)
     assert "entry_ambiguous" in str(err.value)
 
-    # …and the digest the gate used BEFORE pgw#844 would have passed it: the
-    # two programs do not declare the same placeholder shapes at all.
-    static, collapsed = (row.program for row in minted)
+    # ...and the digest the gate used BEFORE pgw#844 would have passed it:
+    # the two programs do not declare the same placeholder shapes at all.
     assert (aot_mint._entry_ingress_declaration(minted[0])[0]
             != aot_mint._entry_ingress_declaration(minted[1])[0])
-    assert static is not collapsed
 
 
-def test_the_collapsed_cell_alone_dispatches_every_declared_bucket():
-    """Part B's serving-side proof: after the collapse there is ONE entry over
-    the token hull, and every declared sdxl aspect bucket admits exactly it.
-
-    This is the ``Done when`` bullet stated as a test — one call per declared
-    bucket, exactly one admitting entry — asked of the same
-    :class:`aot_serve.EntryDispatch` a pod runs.
-    """
-    buckets = ((128, 128), (152, 104), (104, 152), (168, 96), (96, 168),
-               (144, 112), (112, 144), (192, 80), (80, 192))
-    tokens = sorted({h * w for h, w in buckets})
-    program = _export(tokens[0], hull=(tokens[0], tokens[-1]))
-    minted = [_entry("unet/block=Block#0/collapsed", program)]
-
-    # The mint admits it: one entry cannot be ambiguous with itself.
-    aot_mint._gate_dispatch_ambiguity(minted)
-
-    contract, _calls = aot_mint._entry_ingress_declaration(minted[0])
-    dispatch = aot_serve.EntryDispatch(((
-        "unet/block=Block#0/collapsed",
-        aot_serve.ArtifactRunner(
-            package=lambda *feeds: feeds[0], contract=contract,
-            constants=(), module_name="unet",
-            entry="unet/block=Block#0/collapsed", bound=True, family=FAMILY),
-    ),))
-    for h, w in buckets:
-        name, _runner = dispatch.select((
-            torch.zeros(1, h * w, CHANNELS),
-            torch.zeros(1, TEXT_LEN, CHANNELS),
-        ), {})
-        assert name == "unet/block=Block#0/collapsed"
-
-
-def test_distinct_token_counts_and_distinct_block_classes_stay_admitted():
-    """The gate must not refuse a healthy cell.
-
-    Two genuinely different token counts discriminate by ingress; two
-    different BLOCK CLASSES land in different ``BlockDispatch`` objects and
-    are never asked to discriminate each other, so identical contracts there
-    are correct rather than ambiguous.
-    """
+def test_adapter_arms_partition_the_dispatch():
+    """pgw#790: the two arms of one coordinate are DIFFERENT dispatch groups
+    — the lifted pair (positively declared on one side, excluded on the
+    other) is what discriminates them, so the same (B, H, W) on both arms is
+    correct, never ambiguous."""
     aot_mint._gate_dispatch_ambiguity([
-        _entry("unet/block=Block#0/H_lat=128,W_lat=128", _export(16384)),
-        _entry("unet/block=Block#0/H_lat=192,W_lat=80", _export(15360)),
+        _entry(_row_name(1, 128, 128, arm=True, cfg=False),
+               _export(1, 128, 128, arm=True), arm=True),
+        _entry(_row_name(1, 128, 128, arm=False, cfg=False),
+               _export(1, 128, 128), arm=False),
     ])
+
+
+def test_distinct_coordinates_stay_admitted():
+    """The gate must not refuse a healthy cell: distinct (H_lat, W_lat)
+    coordinates — including a transposed aspect pair, whose token PRODUCTS
+    collide but whose whole-graph ingress shapes do not — discriminate by
+    ingress."""
     aot_mint._gate_dispatch_ambiguity([
-        _entry("unet/block=A#0/x", _export(16384), block="A#0"),
-        _entry("unet/block=B#1/x", _export(16384), block="B#1"),
+        _entry("unet/H_lat=192,W_lat=80", _export(1, 192, 80), arm=False),
+        _entry("unet/H_lat=80,W_lat=192", _export(1, 80, 192), arm=False),
     ])

@@ -70,17 +70,6 @@ logger = logging.getLogger(__name__)
 #: rather than imported so the child never pulls the whole arming brain in).
 RECIPE_DYNAMO = "dynamo"
 RECIPE_AOT = "aot"
-#: pgw#817: the AOT mint whose entries are BLOCK classes. Same child, same
-#: `_mint_aot` call — the SHAPE is decided by the family's own export
-#: declaration (`Compile(regional=True)`), which the child reads from the
-#: endpoint it loads, so the recipe name is a label the parent and the hub
-#: group by rather than a second code path to keep in step.
-RECIPE_AOT_REGIONAL = "aot-regional"
-
-#: The recipes that export through AOTInductor. Named so a pre-flight guard can
-#: test membership without reading as the recipe DISPATCH below (pgw#817 pins
-#: that the dispatch follows the parent's composition; a refusal precedes it).
-_AOT_RECIPES = (RECIPE_AOT, RECIPE_AOT_REGIONAL)
 
 
 class MintChildRefused(RuntimeError):
@@ -482,7 +471,7 @@ def mint(request: MintRequest) -> MintReport:
     if not cc.toolchain_present():
         raise MintChildRefused(
             "no C toolchain (cc/gcc/clang) — inductor cannot link a kernel")
-    if request.recipe in _AOT_RECIPES and not cc.cxx_toolchain_present():
+    if request.recipe == RECIPE_AOT and not cc.cxx_toolchain_present():
         # pgw#823: the AOT recipe's stricter requirement, asserted BEFORE the
         # weights are read. The guard above passes on a C compiler; AOTI needs
         # a C++ one, and without this the miss surfaces 336 s later as an
@@ -511,7 +500,7 @@ def mint(request: MintRequest) -> MintReport:
     if cfg.lora_bucket:
         cc.apply_lora_lane(pipe, cfg.lora_bucket)
 
-    if request.recipe in (RECIPE_AOT, RECIPE_AOT_REGIONAL):
+    if request.recipe == RECIPE_AOT:
         # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
         # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
         # model ref for an operator's mint pod): the graphs this cell must

@@ -222,12 +222,14 @@ def arm_route(mode: str) -> Optional[str]:
     adopt the kind of cell I am about to mint?" is answerable at
     ``self_mint_started``, and it is answerable HERE, from the same table
     the arm dispatches on.
-    """
-    from .. import aot_regional
 
+    pgw#846: regional cells are RETIRED, so the whole-graph arm is the only
+    row. A cell whose metadata still says ``mode='regional'`` is declined BY
+    NAME (``arm_aot`` stays eager and says why) — never handed to the
+    whole-graph arm, whose denoiser-scope bind table it cannot use (pgw#827).
+    """
     return {
         "": "aot_serve.enable",
-        aot_regional.MODE_REGIONAL: "aot_regional.enable",
     }.get(str(mode or ""))
 
 
@@ -255,7 +257,7 @@ def arm_aot(
     proven order). Rolled back on a failed arm so a dynamo fallthrough never
     traces a lifted forward it did not ask for.
     """
-    from .. import aot_regional, aot_serve, trt_engine
+    from .. import aot_serve, trt_engine
 
     if meta is None:
         try:
@@ -264,25 +266,19 @@ def arm_aot(
             meta = None
     lifted_target: Any = None
     lifted_installed = False
-    # pgw#825: a REGIONAL cell must not be armed on a lifted denoiser. Its
-    # block entries bind the branch pair as by-reference constants of each
-    # instance, and the lifted forward REASSIGNS every leaf's `lora_a`/`lora_b`
-    # to views of the flat pair on each call — the artifact would keep reading
-    # the buffers it bound at arm time and every attach would silently serve
-    # the base model. The install is skipped by name rather than left to the
-    # (currently unwired) regional arm to trip over.
     mode = str((meta or {}).get("mode") or "")
-    regional = mode == aot_regional.MODE_REGIONAL
     if arm_route(mode) is None:
         # A cell whose mode this runtime has no arm for must decline BY NAME
         # rather than be handed to whichever arm happens to be the default —
         # pgw#827 was exactly that: a regional cell routed into the
         # whole-graph arm, which built ONE bind table at denoiser scope.
+        # Since pgw#846 retired regional, `mode='regional'` cells land here
+        # and stay eager, which is the correct retirement semantics.
         logger.warning(
             "aot arm: artifact declares mode=%r, which this runtime has no "
             "arm for; staying eager", mode)
         return False
-    if bucket and not regional and get_settings().compile_prefer_aot:
+    if bucket and get_settings().compile_prefer_aot:
         from . import lora_lifted
 
         # The target module comes from the ARTIFACT's own recorded facts
@@ -305,14 +301,7 @@ def arm_aot(
                     "aot arm: lifted-binding install failed on %r (%s); a "
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
-    # pgw#827: the regional cell goes to the regional arm — the per-INSTANCE
-    # bind table — and the whole-graph cell to the whole-graph arm. Both the
-    # serve path and the delegated mint's self-adopt verification reach this
-    # one dispatch (`fleet_cells.adopt_delegated_mint`), which is why an
-    # unwired regional arm did not merely mean regional cells could not
-    # serve: it meant they could not be PUBLISHED.
-    arm = aot_regional.enable if regional else aot_serve.enable
-    if arm(pipe, cfg, cache_dir, artifact):
+    if aot_serve.enable(pipe, cfg, cache_dir, artifact):
         return True
     if lifted_installed:
         from . import lora_lifted

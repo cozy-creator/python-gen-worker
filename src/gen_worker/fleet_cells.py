@@ -84,12 +84,6 @@ logger = logging.getLogger(__name__)
 #: serving pod has ever produced because nothing on this path called it.
 RECIPE_DYNAMO = "dynamo"
 RECIPE_AOT = "aot"
-#: pgw#817: the AOT mint, one block class deep. Same exporter, same gates,
-#: same packaging; the entries are block classes of each target instead of
-#: shape coordinates of its whole forward. Named separately because a reader
-#: grouping `self_mint_started` by phase must be able to tell a 6-minute mint
-#: from a 2-hour one without reading the artifact.
-RECIPE_AOT_REGIONAL = "aot-regional"
 
 
 @dataclass(frozen=True)
@@ -608,15 +602,11 @@ def delegation_refusal(pipe: Any, cfg: Any) -> str:
     loudly rather than raise). ``compile_cache.eager_tier_available`` is the
     honest predicate and this is now its only caller-side use.
 
-    pgw#817 CORRECTION. Regional targets used to keep a blanket refusal here
-    ("the family's mint is per-block and the adopt/serve half is still gated
-    behind pgw#812/#814"). That hold is discharged: the per-block mint, the
-    bind-by-reference arm and the assembled-vs-eager adoption gate all exist
-    now, and a regional mint is exactly the one that MOST wants delegating —
-    it is the shape that finishes in single-digit minutes. The refusal
-    survives only where it is still true: a family that declares regional but
-    registered no EXPORT declaration cannot mint an aot-inductor cell at all,
-    and ``mint_recipe`` declines that by its own name.
+    `Compile.regional` (the dynamo/JIT per-block knob, ie#381) is NOT a
+    refusal here: since pgw#846 the AOT mint is always whole-graph and
+    ignores it. A family with no registered EXPORT declaration cannot mint an
+    aot-inductor cell at all, and ``mint_recipe`` declines that by its own
+    name.
     """
     try:
         if not cc.eager_tier_available(pipe):
@@ -1193,7 +1183,7 @@ def adopt_delegated_mint(
         except OSError:
             shutil.copy2(artifact, pending.target)
     try:
-        if pending.recipe in (RECIPE_AOT, RECIPE_AOT_REGIONAL):
+        if pending.recipe == RECIPE_AOT:
             # pgw#805: an exported cell arms through the AOT gates
             # (lifted-binding install -> aot_serve.enable -> rollback), not
             # the inductor seed path. Same gates a hub-delivered `.pt2`
@@ -1515,8 +1505,6 @@ def mint_recipe(
     class this issue exists to kill: five real L4 pods produced no mint and no
     refusal, which is indistinguishable from a crash.
     """
-    from . import aot_regional
-
     if not aot_cells.prefer_aot():
         return RECIPE_DYNAMO
     family = str(getattr(cfg, "family", "") or "")
@@ -1603,27 +1591,9 @@ def mint_recipe(
             f"family {family!r}'s export declaration does not fit the "
             f"composed pipeline: " + "; ".join(decl_gaps))
 
-    # pgw#817: the declaration decides the mint SHAPE. `regional=True` on the
-    # EXPORT declaration is a per-family opt-in, not a fleet default — pgw#812
-    # ranked it that way deliberately: on a small-table DiT regional is a 2x
-    # that costs a serve-path change, while pgw#811 buys a comparable win with
-    # no serve-path change at all. Where the constant table IS large it is
-    # 14.2x, which is the whole reason this lane exists.
-    if bool(getattr(export_declaration(family), "regional", False)):
-        # pgw#827: the LAST question, and the cheapest — does this runtime
-        # own an arm that can adopt the kind of cell this recipe produces?
-        # Attempt nine answered it after 354 s of L4 and a complete 72-entry
-        # artifact, at the mint's own self-adopt verification. It is
-        # answerable here, from the arm's own dispatch table, for free.
-        if provision.arm_route(aot_regional.MODE_REGIONAL) is None:
-            return _decline(
-                "regional_arm_unwired",
-                f"family {family!r} declares regional=True but this runtime "
-                f"has no arm for mode={aot_regional.MODE_REGIONAL!r} — a cell "
-                f"this worker could not adopt must not be minted, because the "
-                f"mint's own self-adopt verification would refuse it after "
-                f"the whole compile is paid for")
-        return RECIPE_AOT_REGIONAL
+    # pgw#846: the AOT mint is always WHOLE-GRAPH. `Compile.regional` keeps
+    # its dynamo/JIT meaning (ie#381) and is ignored here — regional export
+    # is retired for production.
     return RECIPE_AOT
 
 

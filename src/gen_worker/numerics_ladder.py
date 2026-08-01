@@ -17,8 +17,9 @@ exactly while the low-rank machinery around it does not:
 So this module owns the parts that are population-independent — the verdict
 ladder, the aggregate rule, the evidence formatting and the gate shape — and
 each caller brings its own :class:`Thresholds` and its own evaluator.
-:mod:`gen_worker.models.adapter_fidelity` is one caller;
-:mod:`gen_worker.aot_regional`'s assembled-vs-eager gate is the other.
+:mod:`gen_worker.models.adapter_fidelity` is one caller; the compiled-cell
+assembled-vs-eager population (whose calibrated defaults live below, moved
+here from the retired regional module by pgw#846) is the other.
 
 **The aggregate rule, kept verbatim from pgw#800 because it is the whole
 point:** one norm-weighted number over every row, never a per-row median. A
@@ -355,9 +356,91 @@ def gate(
         comparison)
 
 
+# ---------------------------------------------------------------------------
+# The compiled-cell (assembled-vs-eager) calibration — pgw#814's measured band
+# ---------------------------------------------------------------------------
+# Moved here from the retired regional module (pgw#846): the calibration is
+# family-GENERAL — it reads `Compile.numerics_floor` / `numerics_warn`, which
+# whole-graph families (sdxl: 0.995/0.999) declare too, and the adoption
+# numerics gate is the mechanism that should have caught the regional serve
+# regression.
+
+#: Cosine floor for an ASSEMBLED-vs-EAGER comparison — below it the cell is
+#: DESTROYED and refuses to arm.
+#:
+#: Derived from pgw#814's measured band on the production toolchain (torch
+#: 2.13.0+cu130, L4/sm_89), NOT inherited from pgw#800's adapter floors —
+#: pgw#814 says in as many words that those are calibrated for adapter deltas
+#: and must not be assumed here:
+#:
+#:   worst configuration we ACCEPT   0.9890  flux2 w8a8 pertensor vs eager at
+#:                                           T_img=4096 (0.9926 at 8160)
+#:   best configuration we REFUSE    0.9730  flux2 w8a8 ROWWISE whole-graph vs
+#:                                           eager — pgw#814's "do not adopt a
+#:                                           flux2 w8a8 cell until this
+#:                                           closes", i.e. the artifact the
+#:                                           platform decided is not servable.
+#:
+#: 0.98 is that band's geometric midpoint (sqrt(0.9890 * 0.9730) = 0.98097),
+#: 1.0092x of headroom below the worst accepted case and 1.0072x above the
+#: best refused one. The healthy population sits far above it: bf16 control
+#: 0.99979, sdxl w8a8 whole-graph 0.99984.
+NUMERICS_FLOOR = 0.98
+
+#: Gray-band ceiling — at or above this the arm is silent, below it the cell
+#: arms and confesses ``cell_numerics phase=degraded``.
+#:
+#: Every configuration anyone has called healthy measures 0.9998+ (bf16
+#: control 0.99979, sdxl w8a8 whole-graph 0.99984), so an artifact that has
+#: lost more than 0.1% of the output's DIRECTION has lost it to something —
+#: fp8 accumulation drift, a fused reassociation — and that is worth counting
+#: fleet-wide even when it is served.
+NUMERICS_WARN = 0.999
+
+#: Magnitude band. Cosine is scale-invariant, so an artifact that reproduces
+#: eager's direction exactly at 0.9x the magnitude scores a PERFECT cosine
+#: while serving a systematically dimmer image; nothing in pgw#800's ladder
+#: could see that, because an adapter's retention is evidence rather than a
+#: bound (a destroyed one measures 15.3).
+#:
+#: Derived from the same measured band: worst accepted 0.997 (bf16 control),
+#: best refused 0.905 (flux2 w8a8 pertensor whole-graph; rowwise 0.902).
+#: sqrt(0.997 * 0.905) = 0.9500. Applied symmetrically in the log, so
+#: retention outside [0.95, 1.0526] is at least DEGRADED.
+NUMERICS_RETENTION_FLOOR = 0.95
+
+DEFAULT_THRESHOLDS = Thresholds(
+    floor=NUMERICS_FLOOR, warn=NUMERICS_WARN,
+    retention_floor=NUMERICS_RETENTION_FLOOR,
+    label="assembled-vs-eager (pgw#814 §VERDICT)")
+
+
+def declared_thresholds(cfg: Any) -> Thresholds:
+    """The tolerance THIS family declares, falling back to the SDK default.
+
+    A declared per-family tolerance, because bf16 attention reassociation
+    makes exact equality the wrong bar and the right bar is not the same for
+    a 25-block fp8 DiT and a conv-bearing UNet. A family that declares
+    nothing gets :data:`DEFAULT_THRESHOLDS`, whose derivation is the measured
+    band above — a default with evidence, not a guess.
+    """
+    floor = getattr(cfg, "numerics_floor", None)
+    warn = getattr(cfg, "numerics_warn", None)
+    if floor is None and warn is None:
+        return DEFAULT_THRESHOLDS
+    return Thresholds(
+        floor=float(NUMERICS_FLOOR if floor is None else floor),
+        warn=float(NUMERICS_WARN if warn is None else warn),
+        retention_floor=NUMERICS_RETENTION_FLOOR,
+        label=f"assembled-vs-eager (declared by {getattr(cfg, 'family', '?')})")
+
+
 __all__ = [
+    "DEFAULT_THRESHOLDS",
+    "NUMERICS_FLOOR", "NUMERICS_RETENTION_FLOOR", "NUMERICS_WARN",
     "PHASE_DEGRADED", "PHASE_REFUSED",
     "VERDICT_DEGRADED", "VERDICT_DESTROYED", "VERDICT_HEALTHY",
     "Comparison", "RowStat", "Thresholds",
-    "compare_outputs", "flatten_outputs", "gate", "worst_of",
+    "compare_outputs", "declared_thresholds", "flatten_outputs", "gate",
+    "worst_of",
 ]

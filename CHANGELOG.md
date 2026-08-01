@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#846 (P0, Paul's ruling) — AOT-regional is DELETED.** Regional
+  (block-class) export/mint/arm is removed end to end: `aot_regional.py`, the
+  regional export fork and shell-digest machinery in `aot_mint`, the
+  `regional=`/`regional_shape_strategy` declaration plumbing
+  (`aot_declaration`, `Compile`, `export_contract`), the `aot-regional` mint
+  recipe, and the pgw#829 regional entry-collapse. The exported cell is
+  always WHOLE-GRAPH again; contract-facts stay v3 with `shell_digest`/`mode`
+  pinned `""`, so whole-graph cell identity does not move. What survives:
+  `Compile.regional` and all of `compile_cache`'s use of it (the ltx-video
+  dynamo/JIT per-block OOM workaround, ie#381/gw#472 — a different feature);
+  the numerics calibration (`NUMERICS_FLOOR`/`NUMERICS_WARN`/
+  `declared_thresholds`), moved to `numerics_ladder` — family-general, the
+  gate that should have caught the regional serve regression; pgw#844's
+  dispatch-admission gate, re-keyed on `(target, adapter arm)` and proven to
+  ADMIT the 36-entry whole-graph sdxl shape; and `provision.arm_route`'s
+  decline-by-name — a `mode='regional'` cell now declines by name and stays
+  eager (the retirement semantics), with a pinned test.
+
 ## 0.90.1 (2026-08-01) — the release that actually CONTAINS the drain fix: a drain no longer drops a COMPLETED job's result (pgw#845 P1), superseding a 0.90.0 published from a pre-fix head
 
 - **Supersedes 0.90.0 — never pin 0.90.0.** The v0.90.0 tag was cut at `9332c0e`,

@@ -82,7 +82,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    aot_compile_pool, aot_package, aot_regional, aot_serve, aot_wrapper_split,
+    aot_compile_pool, aot_package, aot_serve, aot_wrapper_split,
     cell_key)
 from .compile_cache import (
     _resolve_target,
@@ -225,17 +225,6 @@ class ExportSpec:
     source_ref: str = ""
     source_digest: str = ""
     closure_roots: Tuple[str, ...] = ()
-    #: pgw#817: this cell's entries are BLOCK CLASSES of the target, not shape
-    #: coordinates of its whole forward. Keys the ck5 ``mode`` axis, so a
-    #: regional cell can never be confused with a whole-graph cell of the same
-    #: family x lane x sm.
-    regional: bool = False
-    #: pgw#812 S3.3, MANDATORY for a regional cell. A regional artifact
-    #: describes a PART of the model, so ``combined_graph_hash`` — which is a
-    #: proxy for "the graph the fleet serves" — no longer covers the assembly.
-    #: Two models with identical blocks and different shells must not collide.
-    #: Computed by :func:`aot_regional.shell_digest` off the resolved module.
-    shell_digest: str = ""
 
     def lane_label(self) -> str:
         base, observed = lane_bucket(self.weight_lane)
@@ -558,8 +547,7 @@ def _is_tautology(expr: Any) -> bool:
     and ``3072*s + 1572864 == 64 * (48*s + 24576)``, so that is
     ``Mod(64*X, X) == 0`` — identically true, pinning nothing. The algebra
     comes from attention's ``unflatten``/``flatten`` over the concatenated
-    image+text stream, so it appears on the whole-graph AND the block export;
-    regional does not dodge it.
+    image+text stream, so every export of the graph carries it.
 
     Only a PROOF admits: anything sympy cannot reduce to ``true`` keeps
     refusing, so the gate still fails closed on an unrecognised guard.
@@ -864,26 +852,6 @@ class _MintedEntry:
     timings: Dict[str, Any]
 
 
-def _regional_dynamic(
-    declared: Sequence[DynamicDim], block_inputs: Sequence[str],
-) -> Tuple[DynamicDim, ...]:
-    """The declared dynamic rows that SURVIVE into a block's own inputs.
-
-    A block's inputs are internal and captured, never declared (pgw#812 S5) —
-    but a declared carrier frequently reaches the block under its own name
-    (flux2's ``hidden_states`` is the block's first argument). Those rows ride;
-    a carrier the block never sees is dropped, because marking an axis on an
-    input that does not exist is a mint error and inventing a range for an
-    input the declaration never described would be worse.
-
-    The result is that ``regional + dynamic`` is expressible without a second,
-    deeper contract for the endpoint to maintain — the inner gate is derived
-    from the artifact's OWN recorded ranges (S5), not from a new declaration.
-    """
-    names = set(str(n) for n in block_inputs)
-    return tuple(d for d in declared if str(d.input_name) in names)
-
-
 def adapter_arm(fork: Sequence[Tuple[str, Any]]) -> Optional[bool]:
     """The pgw#790 adapter arm a fork coordinate states, or ``None`` when the
     coordinate does not carry one (a bucket-0 family, or a target that carries
@@ -919,17 +887,8 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
     specialization = dict(spec.specialization)
-    # pgw#829: the strategy that actually governed THIS entry's population.
-    # A regional cell's entries are blocks and may collapse where the
-    # conv-bearing whole-graph route does not, so recording the family's
-    # `shape_strategy` here would put a fact in the key that did not decide
-    # anything about the artifact. Identity-inert for every existing family:
-    # without a declared regional override the effective value IS
-    # `shape_strategy`.
     specialization.setdefault(
-        "shape_strategy",
-        _decl.effective_shape_strategy(
-            decl, regional=bool(getattr(spec, "regional", False))))
+        "shape_strategy", _decl.effective_shape_strategy(decl))
     specialization.setdefault("warm_changes_key", bool(decl.warm_changes_key))
     for name, value in plan.fork:
         specialization.setdefault(f"fork.{name}", value)
@@ -1136,486 +1095,6 @@ def _export_entry(
         timings=timings)
 
 
-def _contiguous_feed(value: Any) -> Any:
-    """One example-input tensor, made contiguous before it is TRACED.
-
-    A silent wrong-answer defect, measured off-pod ($0, CPU, torch
-    2.13.0+cu130, a 3-block toy whose shell does diffusers'
-    ``permute(0,2,3,1).reshape(b, h*w, c)``, which yields a NON-contiguous
-    view):
-
-        traced non-contiguous, served with the pgw#791 realign   max|d| 0.1645
-        traced non-contiguous, served with the realign DISABLED  max|d| 0.1690
-        traced CONTIGUOUS,     served with the realign           max|d| 1.5e-08
-
-    So this is not the realign — it is the ARTIFACT. A block's feed is
-    CAPTURED from a live forward (pgw#812 S5), never constructed, so whatever
-    layout the shell happens to hand it is what gets traced; AOTInductor
-    generates against that layout, and the value computed for any other one
-    is wrong. Nothing refuses it: the ingress contract records shapes and
-    dtypes, not strides, so the call is admitted and the answer is quietly
-    off by 16 %.
-
-    The fix belongs at the MINT because that is the side with a choice.
-    ``aligned_feeds`` already stages every out-of-contract input into an
-    owned CONTIGUOUS buffer at serve, so tracing contiguous makes the two
-    sides agree by construction — for a feed that arrives contiguous
-    (diffusers' sdxl passes the block through ``proj_in``, a Linear, so it
-    does) this is a no-op and the artifact is byte-identical.
-
-    Eager is unaffected: the block still receives the shell's own tensor,
-    and a matmul on a non-contiguous input computes the same values.
-    """
-    contiguous = getattr(value, "contiguous", None)
-    return value if not callable(contiguous) else contiguous()
-
-
-def _regional_derived_dynamic(
-    entry: str,
-    names: Sequence[str],
-    shapes_by_row: Sequence[Sequence[Optional[Tuple[int, ...]]]],
-) -> Tuple[DynamicDim, ...]:
-    """The block's OWN varying axes, derived from what the shell fed it
-    across every class row the entry serves (pgw#829).
-
-    This is the derivation that makes 72 entries into 8. A block's inputs are
-    internal and never declared (pgw#812 S5), so the declared ``Dim``
-    carriers cannot describe them: sdxl declares ``H_lat``/``W_lat`` on
-    ``sample``, and the block is handed a flat ``(B, H*W/f**2, C)`` hidden
-    state that carries neither name. The axis that actually varies is
-    therefore only observable — one eager shell forward per declared class
-    row, block input shapes recorded, axes that MOVE marked dynamic over
-    their observed hull.
-
-    Two rules, both refusals rather than guesses:
-
-    * an axis whose hull reaches 1 must FORK, never collapse — torch's 0/1
-      specialization is not overridable (ie#543), so a symbol that could be 1
-      would be silently specialized and the artifact would serve one shape
-      while its contract advertised a range;
-    * slots that vary IN LOCKSTEP across the rows share one symbol. Two
-      carriers of one logical axis exported as independent symbols is exactly
-      what pgw#812 D1 measured strict export refusing outright, and here the
-      carriers are unnamed, so lockstep over the observed rows is the only
-      evidence there is.
-
-    ``multiple_of`` is deliberately 1: the divisibility a declared ``Dim``
-    carries is a fact about a DECLARED axis, and inferring one from a
-    handful of observed values would put a guard in the artifact that
-    :func:`aot_serve.assert_ingress` — which checks ranges, not multiples —
-    would never enforce at serve time.
-    """
-    rows = [tuple(row) for row in shapes_by_row]
-    if not rows:
-        return ()
-    width = len(names)
-    for row in rows:
-        if len(row) != width:
-            raise MintRefused(
-                f"entry {entry!r}: the shell fed this block {len(row)} "
-                f"argument(s) on one class row and {width} on another — the "
-                f"rows are different graph classes and cannot share one "
-                f"artifact")
-    out: List[DynamicDim] = []
-    symbol_for: Dict[Tuple[int, ...], str] = {}
-    for slot in range(width):
-        column = [row[slot] for row in rows]
-        present = [c is not None for c in column]
-        if not any(present):
-            continue
-        if not all(present):
-            raise MintRefused(
-                f"entry {entry!r}: argument {names[slot]!r} is a tensor on "
-                f"some declared class rows and absent on others — that is a "
-                f"fork, not a collapsible dim")
-        ranks = {len(c) for c in column if c is not None}
-        if len(ranks) != 1:
-            raise MintRefused(
-                f"entry {entry!r}: argument {names[slot]!r} changes RANK "
-                f"across the declared class rows ({sorted(ranks)!r})")
-        for axis in range(ranks.pop()):
-            values = tuple(int(c[axis]) for c in column if c is not None)
-            if len(set(values)) <= 1:
-                continue
-            lo, hi = min(values), max(values)
-            if lo < 2:
-                raise MintRefused(
-                    f"entry {entry!r}: {names[slot]}[{axis}] spans "
-                    f"[{lo}, {hi}] across the collapsed class rows; torch's "
-                    f"0/1 specialization is not overridable (ie#543), so an "
-                    f"axis that reaches 1 must FORK the class instead of "
-                    f"collapsing")
-            symbol = symbol_for.setdefault(values, f"{names[slot]}_{axis}")
-            out.append(DynamicDim(
-                input_name=str(names[slot]), axis=int(axis),
-                min=int(lo), max=int(hi), multiple_of=1, dim=symbol))
-    return tuple(out)
-
-
-def _merge_dynamic(
-    entry: str, derived: Sequence[DynamicDim], declared: Sequence[DynamicDim],
-) -> Tuple[DynamicDim, ...]:
-    """Union the observed rows with the declared ones that reach the block.
-
-    A declared carrier that arrives under its own name (flux2's
-    ``hidden_states``) already had a derived range from the class rows, so
-    the two can only agree or the DECLARED one is wider on purpose. Widening
-    to the hull is the safe direction — a contract that admits more than the
-    artifact was traced on is caught by :func:`declared_range_gaps`, while
-    one that admits less silently refuses live traffic to eager.
-
-    One case is refused instead of merged: a declared row that would RENAME a
-    derived symbol the observation put in a lockstep GROUP. Symbol identity
-    is what :func:`dynamic_shapes_spec` shares carriers by, so renaming one
-    member and not the others silently discards the evidence that they move
-    together, and strict export then refuses the whole declaration with a
-    ``Constraints violated`` on a symbol nobody declared (pgw#812 D1). No
-    family reaches this today — sdxl's declared carriers are all on
-    ``sample``, which no block sees — and inventing a merge for the first one
-    that does, without its rows in hand, is the guess this module refuses to
-    make anywhere else.
-    """
-    grouped = [str(d.dim) for d in derived]
-    shared = {sym for sym in grouped if grouped.count(sym) > 1}
-    by_key: Dict[Tuple[str, int], DynamicDim] = {
-        (d.input_name, int(d.axis)): d for d in derived}
-    for d in declared:
-        key = (d.input_name, int(d.axis))
-        prior = by_key.get(key)
-        if prior is None:
-            by_key[key] = d
-            continue
-        if str(prior.dim) in shared and str(d.dim) != str(prior.dim):
-            peers = sorted(
-                f"{p.input_name}[{p.axis}]" for p in derived
-                if str(p.dim) == str(prior.dim))
-            raise MintRefused(
-                f"entry {entry!r}: declared dim {d.dim!r} renames "
-                f"{d.input_name}[{d.axis}], which the class rows observed "
-                f"moving in LOCKSTEP with {peers!r} under one derived symbol "
-                f"{prior.dim!r}. Renaming one carrier of a lockstep group and "
-                f"not the others is the multi-carrier split strict export "
-                f"refuses (pgw#812 D1) — declare the whole group under one "
-                f"Dim, or fork the class")
-        multiple = max(1, int(d.multiple_of))
-        lo = (min(prior.min, d.min) // multiple) * multiple
-        hi = -(-max(prior.max, d.max) // multiple) * multiple
-        by_key[key] = DynamicDim(
-            input_name=d.input_name, axis=int(d.axis),
-            min=max(lo, multiple), max=hi, multiple_of=multiple, dim=d.dim)
-    return tuple(by_key[k] for k in sorted(by_key))
-
-
-def _export_regional_entries(
-    pipeline: Any,
-    spec: ExportSpec,
-    plan: Any,
-    decl: Any,
-    *,
-    inductor_configs: Optional[Mapping[str, Any]] = None,
-    compile_now: bool = True,
-) -> List[_MintedEntry]:
-    """Export one mint plan's target as BLOCK entries instead of one graph.
-
-    pgw#817, implementing pgw#812 S1: the cell is still one ``.pt2`` and the
-    entry grammar is unchanged — ``<target>/block=<class>#<n>/<dims>`` — but
-    the entries enumerate BLOCK CLASSES of the target instead of shape
-    coordinates of its whole forward. sdxl's 70 UNet blocks collapse to 2
-    entries; flux2's 25+25 to 2.
-
-    The shell stays EAGER (S2), which is the honest bound on the win: the
-    compiled fraction of the model equals the repeated-block fraction. The
-    alternative — exporting the shell with the blocks elided — is not
-    expressible in ``torch.export`` today, because blocks are inlined at
-    trace time.
-
-    Everything before and after this function is unchanged: the same
-    per-entry gates, the same class hashes, the same packaging, the same
-    pool. Only the module being exported and the feed it is exported on
-    change.
-    """
-    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
-    from . import aot_inputs
-
-    espec = _entry_spec(spec, plan, decl)
-    label = _decl.plan_entry_name(plan)
-
-    resolved = _resolve_target(pipeline, espec.target)
-    if resolved is None:
-        raise MintRefused(
-            f"entry {label!r}: pipeline {type(pipeline).__name__} has no "
-            f"compile target {espec.target!r}")
-    owner, attr, _fn = resolved
-    if attr != "forward":
-        raise MintRefused(
-            f"entry {label!r}: regional export needs a MODULE with declared "
-            f"repeated blocks; target {espec.target!r} resolves to a callable "
-            f"attribute ({attr!r}), which has no block structure to compile "
-            f"per class")
-    groups = aot_regional.repeated_block_groups(owner)
-    if not groups:
-        raise MintRefused(
-            f"entry {label!r}: {type(owner).__name__} declares no "
-            f"`_repeated_blocks`, so there is no repeated structure to "
-            f"compile once and reuse — mint this target whole-graph "
-            f"(regional=False) or fix the model class")
-
-    module = owner
-    builder = aot_inputs.builder_for(espec.family, espec.target)
-
-    import torch
-
-    def _feed_for(row: Any) -> Tuple[Any, ...]:
-        """The shell's example feed for ONE declared class row."""
-        row_spec = replace_spec(espec, class_dims=tuple(row.dims))
-        args, kwargs = builder(owner, row_spec)
-        if kwargs:
-            raise MintRefused(
-                f"entry {label!r}: example feed carries keyword argument(s) "
-                f"{sorted(kwargs)!r} — all-positional feeds are a mint "
-                f"obligation")
-        return tuple(args)
-
-    def _runner(args: Tuple[Any, ...]) -> Any:
-        def _run() -> None:
-            with torch.no_grad():
-                module(*args)
-        return _run
-
-    # pgw#829: which block classes may COLLAPSE their class rows into one
-    # dynamic entry, decided per class off the live module. #730's static-rows
-    # verdict is about convs; a conv-bearing block class keeps one static
-    # entry per row exactly as before.
-    rows = tuple(getattr(plan, "rows", ()) or (plan.seed,))
-    collapsing = len(rows) > 1
-    collapse: Dict[str, bool] = {
-        group.key: collapsing and not aot_regional.block_has_conv(
-            group.prototype)
-        for group in groups}
-    conv_bearing = sorted(k for k, v in collapse.items() if collapsing and not v)
-    if conv_bearing:
-        logger.info(
-            "aot-mint: regional block class(es) %s carry a convolution — "
-            "they keep one STATIC entry per class row (pgw#829: dynamic dims "
-            "cost a conv graph the channels-last layout opt)", conv_bearing)
-
-    seed_row = plan.seed
-    # Tensors are only retained for the rows an entry is actually EXPORTED
-    # from: the seed for every collapsing class, and every row for a
-    # conv-bearing one. The rest of the sweep costs one eager forward and a
-    # tuple of shapes (pgw#829) — the activations die with the forward.
-    tensor_rows = {tuple(seed_row.dims)}
-    if conv_bearing:
-        tensor_rows |= {tuple(row.dims) for row in rows}
-
-    capture_s = 0.0
-    feeds_by_row: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-    shapes_by_row: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-    for row in rows:
-        key = tuple(row.dims)
-        if key in shapes_by_row:
-            continue  # two declared rows at one coordinate probe once
-        t0 = time.monotonic()
-        run = _runner(_feed_for(row))
-        if key in tensor_rows:
-            captured = aot_regional.capture_block_feeds(groups, run)
-            feeds_by_row[key] = captured
-            probed: Dict[str, Any] = {}
-            for group in groups:
-                values, names = aot_regional.positional_feed(
-                    group.prototype, *captured[group.key])
-                probed[group.key] = (tuple(names), tuple(
-                    None if getattr(v, "shape", None) is None
-                    else tuple(int(d) for d in v.shape) for v in values))
-            shapes_by_row[key] = probed
-        else:
-            shapes_by_row[key] = aot_regional.capture_block_feed_shapes(
-                groups, run)
-        capture_s += time.monotonic() - t0
-    capture_s = round(capture_s, 2)
-
-    out: List[_MintedEntry] = []
-    for group in groups:
-        for row in (rows if not collapse[group.key] else (seed_row,)):
-            out.append(_regional_entry(
-                espec, group, row, rows,
-                feeds=feeds_by_row[tuple(row.dims)][group.key],
-                shapes_by_row=shapes_by_row,
-                collapsed=collapse[group.key],
-                capture_s=capture_s,
-                inductor_configs=inductor_configs, compile_now=compile_now))
-    return out
-
-
-def _regional_entry(
-    espec: ExportSpec,
-    group: Any,
-    row: Any,
-    rows: Sequence[Any],
-    *,
-    feeds: Tuple[Tuple[Any, ...], Mapping[str, Any]],
-    shapes_by_row: Mapping[Tuple[Any, ...], Mapping[str, Any]],
-    collapsed: bool,
-    capture_s: float,
-    inductor_configs: Optional[Mapping[str, Any]] = None,
-    compile_now: bool = True,
-) -> "_MintedEntry":
-    """One block entry: export, gate, compile.
-
-    ``collapsed`` decides the entry's SHAPE axis and nothing else. A
-    collapsed entry is named by its fork alone and admits the hull of every
-    class row's observed block shapes (pgw#829); a static one is named by
-    its row's dims and admits that row, which is exactly what every regional
-    entry did before.
-    """
-    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
-
-    block_args, block_kwargs = feeds
-    block = group.prototype
-    pos, names = aot_regional.positional_feed(
-        block, block_args, block_kwargs)
-    pos = [_contiguous_feed(v) for v in pos]
-    if collapsed:
-        probe_name = _decl.entry_name(espec.target, tuple(sorted(
-            tuple(espec.fork) + aot_regional.block_entry_fork(group.key),
-            key=lambda kv: str(kv[0]))))
-        derived = _regional_derived_dynamic(
-            probe_name, names,
-            [shapes_by_row[tuple(r.dims)][group.key][1] for r in rows])
-        block_dynamic = _merge_dynamic(
-            probe_name, derived, _regional_dynamic(espec.dynamic, names))
-    else:
-        derived = ()
-        block_dynamic = _regional_dynamic(espec.dynamic, names)
-    bspec = replace_spec(
-        espec,
-        fork=tuple(sorted(
-            tuple(espec.fork) + aot_regional.block_entry_fork(group.key),
-            key=lambda kv: str(kv[0]))),
-        class_dims=() if collapsed else tuple(row.dims),
-        dynamic=block_dynamic,
-        regional=True,
-        # pgw#825: a BLOCK never carries the lifted signature. Input lifting
-        # (pgw#725) is a whole-graph-cell mechanism — it wraps the DENOISER's
-        # forward so the flat pair arrives in the call — and the regional
-        # entry is exported one block deep, from the block's own signature.
-        # The block's branch pair stays module-resident and is bound per
-        # instance BY REFERENCE (`user_managed=True`), which gives regional
-        # the same property lifting gives the family graph: an adapter swap
-        # is an in-place buffer write, never a recompile and never a rebind.
-        # Inheriting the family's `lifted_inputs` here would record a
-        # contract this entry's program does not have.
-        lifted_inputs=(),
-        lora_fqns=(),
-    )
-    entry = _decl.entry_name(espec.target, bspec.fork, bspec.class_dims)
-    timings: Dict[str, Any] = {
-        "capture_s": capture_s, "instances": group.count,
-        "collapsed_rows": len(rows) if collapsed else 1}
-    if derived:
-        timings["derived_dynamic"] = [d.as_row() for d in derived]
-    t0 = time.monotonic()
-    dynamic = dynamic_shapes_spec(bspec.dynamic, names) \
-        if bspec.dynamic else None
-    try:
-        program = export_program(
-            block, tuple(pos), {}, dynamic_shapes=dynamic,
-            strict=bspec.strict)
-    except MintRefused as exc:
-        raise MintRefused(f"entry {entry!r}: {exc}") from exc
-    timings["export_s"] = round(time.monotonic() - t0, 2)
-
-    gaps = declared_range_gaps(program, bspec.dynamic)
-    if gaps:
-        raise MintRefused(
-            f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
-
-    # pgw#825: the block's own bind table, asked BEFORE its compile. A
-    # regional mint pays 4-6 minutes per entry, and this mismatch is a
-    # property of the exported program — the refusal must cost seconds.
-    unbindable = aot_package.unbindable_program_constants(
-        program, _state_dict_keys(block))
-    if unbindable:
-        raise MintRefused(
-            f"entry {entry!r}: pre-compile bindability gate: "
-            + "; ".join(unbindable))
-    baked = _regional_branch_gaps(block, program, int(bspec.lora_bucket or 0))
-    if baked:
-        raise MintRefused(
-            f"entry {entry!r}: regional no-baked-adapter gate (#725 G3): "
-            + "; ".join(baked))
-
-    files: List[Any] = []
-    if compile_now:
-        before = _phase_snapshot()
-        t0 = time.monotonic()
-        files = compile_entry_files(
-            program, entry, inductor_configs=inductor_configs)
-        timings["compile_s"] = round(time.monotonic() - t0, 2)
-        phases = _phase_delta(before, _phase_snapshot())
-        if phases:
-            timings["phases"] = phases
-
-    # `block` is the state_dict TEMPLATE the bindability gate compares the
-    # artifact's constant table against — and pgw#812 S4 is explicit that
-    # for a block entry that template is the BLOCK, not the target: the
-    # entry's FQNs are block-relative (`attn.to_q.weight`), and at serve
-    # time the values come from `transformer_blocks[i].state_dict()`, once
-    # per instance. Handing the gate the whole target here would compare
-    # `lin.weight` against `blocks.0.lin.weight` and refuse every correct
-    # regional mint by name.
-    return _MintedEntry(
-        name=entry, spec=bspec, module=block, owner=block,
-        program=program, input_names=tuple(names), flat_names=tuple(names),
-        files=files, timings=timings)
-
-
-def _regional_branch_gaps(
-    block: Any, program: Any, bucket: int,
-) -> List[str]:
-    """pgw#725 G3, in the shape a REGIONAL entry can be asked it.
-
-    The family gate asserts the adapter is a graph INPUT. A block cannot take
-    that form — the lift wraps the denoiser, and a block entry is exported
-    from the block's own signature — so regional's equivalent invariant is
-    that every branch pair is a NAMED, bindable buffer of the block. Two lanes
-    make that a real question rather than a formality:
-
-    * the w8a8 lane registers the pair as non-persistent buffers, which export
-      lifts under their true FQN — bindable, and the whole point of pgw#825;
-    * the cast-hook/plain-Linear lanes keep it in the module ``__dict__``,
-      where export can lift it as an ANONYMOUS tensor constant whose bytes
-      then SHIP in the literal payload. That is a baked, permanently zeroed
-      adapter: the cell arms, serves, and silently returns the base model for
-      every attach — pgw#704 S9 with no error anywhere.
-
-    Only the adapter-bearing fork class is asked (``bucket`` is zero on the
-    branchless one, whose pair is deliberately absent).
-    """
-    if not bucket:
-        return []
-    from .models import w8a8_lora
-
-    lifted = set(aot_package.program_state_dict_fqns(program))
-    missing: List[str] = []
-    for path, mod in w8a8_lora.branch_modules(block).items():
-        for slot in ("lora_a", "lora_b"):
-            if getattr(mod, slot, None) is None:
-                continue
-            fqn = f"{path}.{slot}" if path else slot
-            if fqn not in lifted:
-                missing.append(fqn)
-    if not missing:
-        return []
-    return [
-        f"{len(missing)} branch tensor(s) of this bucket-{bucket} block did "
-        f"not survive export as bindable buffers, e.g. {sorted(missing)[:6]!r}"
-        f" — a branch that is not a lifted buffer was either baked as a "
-        f"literal (a permanently ZEROED adapter that serves the base model "
-        f"silently) or traced away entirely"
-    ]
-
-
 def replace_spec(spec: ExportSpec, **changes: Any) -> ExportSpec:
     """``dataclasses.replace`` on an :class:`ExportSpec`, named so the
     deferred-import dance does not have to repeat at every call site."""
@@ -1694,10 +1173,7 @@ def declaration_module_gaps(
 
     gaps: List[str] = []
     try:
-        rows = adapter_arm_plans(
-            _decl.cell_plans(
-                decl, regional=bool(getattr(decl, "regional", False))),
-            pipeline, spec)
+        rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
         branch_owners = {
             id(m) for m in lora_lifted.branch_targets(pipeline).values()}
     except MintRefused as exc:
@@ -2015,44 +1491,20 @@ def _mint_cell(
 
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
-    # pgw#817: the declaration decides the mint SHAPE. `regional=True` means
-    # this family's entries are block classes of each target rather than shape
-    # coordinates of its whole forward — the same plans, the same forks, the
-    # same class rows, exported one block deep.
-    regional = bool(getattr(decl, "regional", False))
-    if regional:
-        spec = replace_spec(
-            spec, regional=True, shell_digest=_cell_shell_digest(pipeline, decl))
-        logger.info(
-            "aot-mint: REGIONAL cell for %s — entries are block classes; the "
-            "shell stays eager (pgw#812 S2), shell_digest=%s",
-            spec.family, spec.shell_digest)
-
-    rows = adapter_arm_plans(
-        _decl.cell_plans(decl, regional=regional), pipeline, spec)
+    # pgw#846 (Paul's ruling): the exported cell is always WHOLE-GRAPH.
+    # Regional (block-class) export is retired for production — a
+    # `Compile(regional=True)` declaration keeps its dynamo/JIT meaning
+    # (ie#381, compile_cache) and the AOT mint ignores it.
+    rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
     # pgw#809: how wide this pod may compile. Derived from the pod's REAL
     # budget (cgroup-aware vCPUs minus serving headroom, and available host
     # RAM over the measured per-entry peak) — never os.cpu_count, never a
     # constant. K=1 IS the pre-#809 serial in-process path, which is the
     # honest answer on a narrow pod.
-    # pgw#817 / pgw#812 S7 — pgw#809 RE-PRICED, not assumed. Regional changes
-    # BOTH of the pool's inputs, in opposite directions:
-    #   * the entry COUNT goes up (one entry per block class per plan, not one
-    #     per plan), which is what K parallelises over;
-    #   * the per-entry DEVICE ask goes down by roughly the block fraction of
-    #     the model, and VRAM is the bound that actually binds K.
-    # Multiplying the two levers instead of re-pricing them would size the
-    # pool for a whole-model child that regional never runs.
-    # pgw#829 moves the first lever the other way: with `dynamic-collapse` the
-    # plan set itself shrinks to the FORK coordinates, so a conv-free family
-    # has fewer entries than the whole-graph shape had, each one wider.
-    entry_count = _regional_entry_count(pipeline, decl, rows) if regional \
-        else len(rows)
+    entry_count = len(rows)
     width = aot_compile_pool.entry_workers(
         entry_count, limit=int(entry_workers or 0),
-        device_bytes=_entry_device_bytes(
-            spec, block_fraction=_block_device_fraction(pipeline, decl)
-            if regional else 1.0))
+        device_bytes=_entry_device_bytes(spec))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
     if width.underwidth:
@@ -2091,16 +1543,10 @@ def _mint_cell(
             progress.beat(
                 PHASE_TRACE_GRAPH, index, len(rows),
                 _decl.plan_entry_name(plan))
-            if regional:
-                minted.extend(_export_regional_entries(
-                    pipeline, spec, plan, decl,
-                    inductor_configs=inductor_configs,
-                    compile_now=not parallel))
-            else:
-                minted.append(_export_entry(
-                    pipeline, spec, plan, decl,
-                    inductor_configs=inductor_configs,
-                    compile_now=not parallel))
+            minted.append(_export_entry(
+                pipeline, spec, plan, decl,
+                inductor_configs=inductor_configs,
+                compile_now=not parallel))
     finally:
         if disarmed:
             _arm_branches(pipeline, int(spec.lora_bucket or 0))
@@ -2188,106 +1634,7 @@ def _mint_cell(
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
 
 
-def _regional_targets(
-    pipeline: Any, decl: Any,
-) -> Dict[str, Tuple[Any, Tuple[aot_regional.BlockGroup, ...]]]:
-    """``{target: (module, block groups)}`` for every declared target with
-    repeated blocks — the regional mint's own view of the declaration.
-
-    The resolved MODULE rides along because every caller needs it (the shell
-    digest reads its config, the device re-price reads its parameter count)
-    and re-resolving per caller is how the two would drift apart.
-    """
-    out: Dict[str, Tuple[Any, Tuple[aot_regional.BlockGroup, ...]]] = {}
-    for target in tuple(getattr(decl, "targets", ()) or ()):
-        resolved = _resolve_target(pipeline, str(target))
-        if resolved is None:
-            continue
-        owner, attr, _fn = resolved
-        if attr != "forward":
-            continue
-        groups = aot_regional.repeated_block_groups(owner)
-        if groups:
-            out[str(target)] = (owner, groups)
-    return out
-
-
-def _cell_shell_digest(pipeline: Any, decl: Any) -> str:
-    """The cell-level shell digest: every regional target's shell, together.
-
-    A cell can carry more than one regional target, so the contract fact binds
-    ALL of them — binding only the first would leave a second target's shell
-    free to drift under an unchanged key, which is the collision class this
-    axis exists to close.
-    """
-    facts = {
-        target: aot_regional.shell_facts(owner)
-        for target, (owner, _groups) in _regional_targets(pipeline, decl).items()}
-    if not facts:
-        raise MintRefused(
-            f"family {getattr(decl, 'family', '?')!r} declares regional=True "
-            f"but no declared target resolves to a module with "
-            f"`_repeated_blocks` — there is no repeated structure to compile "
-            f"once and reuse")
-    encoded = json.dumps(
-        facts, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-        default=str).encode()
-    import hashlib
-
-    return hashlib.sha256(encoded).hexdigest()[:16]
-
-
-def _regional_entry_count(pipeline: Any, decl: Any, rows: Sequence[Any]) -> int:
-    """How many ENTRIES a regional mint of these plans will produce.
-
-    One per (plan, block class) — except that pgw#829 lets a CONV-FREE block
-    class collapse a plan's whole row set into one dynamic entry while a
-    conv-bearing one keeps a static entry per row. So the count is derived
-    the same way the export loop derives it, off the same live module: a
-    pool sized on the wrong number is the pgw#812 S7 re-price mistake in
-    reverse.
-
-    sdxl before pgw#829: 36 plans (18 rows x 2 adapter arms) x 2 block
-    classes = 72. After: 4 plans (2 CFG forks x 2 arms) x 2 conv-free block
-    classes = 8.
-    """
-    by_target = _regional_targets(pipeline, decl)
-    total = 0
-    for plan, _arm in rows:
-        entry = by_target.get(str(getattr(plan, "target", "")))
-        if entry is None:
-            continue
-        plan_rows = max(1, len(tuple(getattr(plan, "rows", ()) or ())))
-        for group in entry[1]:
-            total += 1 if plan_rows <= 1 or not aot_regional.block_has_conv(
-                group.prototype) else plan_rows
-    return max(total, len(rows))
-
-
-def _block_device_fraction(pipeline: Any, decl: Any) -> float:
-    """The fraction of the model's DEVICE footprint one block-entry child
-    holds, read off the resolved module.
-
-    A whole-graph entry child loads the whole target and benchmarks kernels
-    against it; a regional child needs one BLOCK's weights and one block's
-    activation set. Measured off the module rather than assumed: the largest
-    block class's parameter count over the target's, floored at 0.1 because
-    the CUDA context, torch's own allocator arenas and the activation set do
-    NOT shrink with the block — a fraction that reads 0.014 (one of 70 sdxl
-    blocks) would license a pool the card cannot hold.
-    """
-    biggest = 0.0
-    for _target, (owner, groups) in _regional_targets(pipeline, decl).items():
-        total = float(sum(p.numel() for p in owner.parameters()))
-        if total <= 0.0:
-            continue
-        for group in groups:
-            block = float(sum(p.numel() for p in group.prototype.parameters()))
-            biggest = max(biggest, block / total)
-    return max(0.1, min(1.0, biggest)) if biggest > 0.0 else 1.0
-
-
-def _entry_device_bytes(spec: ExportSpec, *, block_fraction: float = 1.0) -> int:
+def _entry_device_bytes(spec: ExportSpec) -> int:
     """One entry child's DEVICE ask, from this process rather than a constant.
 
     An AOTI compile benchmarks kernels on the card, so an entry child holds
@@ -2309,7 +1656,7 @@ def _entry_device_bytes(spec: ExportSpec, *, block_fraction: float = 1.0) -> int
         return 0
     if not budget.probed:
         return 0
-    return int(int(budget.need_bytes) * max(0.0, min(1.0, block_fraction)))
+    return int(budget.need_bytes)
 
 
 def _compile_entries_parallel(
@@ -2467,48 +1814,32 @@ def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
     flip". It is a per-REQUEST refusal, so without this gate the cell arms,
     reports armed, and serves those coordinates 100 % eager.
 
-    Found by pgw#829's own A/B, and MEASURED on a pod eight days later
-    (pgw#844, attempt twelve, L4 `o0legpgj5olhic`): a regional entry is
-    exported one block deep, and the shell has already flattened the latent
-    extents into a token count — so two declared class rows that are genuinely
-    different coordinates upstream hand the block the identical shape. What
-    collides is the token PRODUCT, of which a transposed aspect pair is only
-    the obvious case. sdxl's nine aspect rows carry just FOUR distinct token
-    counts::
-
-        15360  1536x640, 640x1536                          (latent 80x192, 192x80)
-        15808  1216x832, 832x1216                          (104x152, 152x104)
-        16128  1344x768, 1152x896, 896x1152, 768x1344      (96x168, 112x144, ...)
-        16384  1024x1024                                   <- the only unique row
-
-    Three clash groups, one of them a QUADRUPLE spanning rows that are not
-    each other's transpose (96*168 == 112*144). The published 72-entry cell
-    served exactly one of its nine aspect ratios compiled; the other eight
-    were `entry_ambiguous` -> eager, per (CFG arm x adapter arm x block class).
+    Found and MEASURED on a pod (pgw#844, attempt twelve, L4
+    `o0legpgj5olhic`), on the retired regional shape: entries exported one
+    block deep collided on the flattened token PRODUCT (sdxl's nine aspect
+    rows reduce to four token counts), so eight of nine buckets were
+    `entry_ambiguous` -> eager while the cell reported armed. Regional is
+    gone (pgw#846), but the failure class is not regional-specific: any two
+    whole-graph entries of one dispatch whose declared contracts admit the
+    same call — e.g. a static row shadowed by a dynamic sibling over the same
+    hull — serve eager per request with no refusal at mint.
 
     THE QUESTION IS ADMISSION, NOT EQUALITY (pgw#844). This gate used to
     compare a digest of each entry's placeholder shapes, which catches only
     entries whose contracts are IDENTICAL. Dispatch does not ask that: it asks
     which entries ADMIT the call, and a static row and a dynamic row over the
-    same hull have different digests while both admitting — the exact shape
-    pgw#829's collapse introduces. So every entry's own declared call is run
-    against every sibling's contract through the real ingress assertion, and
-    more than one admitter is refused.
+    same hull have different digests while both admitting. So every entry's
+    own declared call is run against every sibling's contract through the
+    real ingress assertion, and more than one admitter is refused.
 
-    Grouped exactly the way the serve path groups — target, block class,
-    adapter arm — because those are the axes dispatch resolves BEFORE ingress
-    (`aot_regional.BlockDispatch` keys `by_arm`, and two block classes live in
-    different dispatches), and two entries on different arms are meant to
-    share a contract (pgw#825: a block never carries the lifted pair). The
-    remedy is the collapse: one entry over the hull admits every row and is
-    unique by construction.
+    Grouped exactly the way the serve path groups — target, adapter arm —
+    because those are the axes dispatch resolves BEFORE ingress, and two
+    entries on different arms are meant to differ only by the lifted pair.
     """
-    groups: Dict[Tuple[str, str, Any], List["_MintedEntry"]] = {}
+    groups: Dict[Tuple[str, Any], List["_MintedEntry"]] = {}
     for row in sorted(minted, key=lambda r: r.name):
         fork = {str(n): v for n, v in tuple(row.spec.fork)}
-        key = (str(row.spec.target),
-               str(fork.get(aot_regional.BLOCK_FORK) or ""),
-               fork.get(ADAPTER_FORK))
+        key = (str(row.spec.target), fork.get(ADAPTER_FORK))
         groups.setdefault(key, []).append(row)
 
     clashes: List[Tuple[str, List[str]]] = []
@@ -2547,10 +1878,9 @@ def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
         f"admitted by more than one entry of the same dispatch, so every call "
         f"they carry is refused 'entry_ambiguous' and served EAGER — "
         f"{detail}. Two class rows that reduce to one dispatchable shape are "
-        f"one entry: collapse them "
-        f"(Compile.regional_shape_strategy='dynamic-collapse' for a "
-        f"conv-free block population, pgw#829) rather than compiling and "
-        f"publishing a class the cell can never select")
+        f"one entry: fix the declaration so every entry's ingress contract is "
+        f"uniquely admitting, rather than compiling and publishing a class "
+        f"the cell can never select")
 
 
 def _gate_and_declare_entry(
@@ -2585,42 +1915,6 @@ def _gate_and_declare_entry(
         logger.info(
             "aot-mint: %s: %d lifted constant(s) fused away by the compiler "
             "(e.g. %s)", entry, len(fused), fused[:3])
-    if row.spec.regional and fused:
-        # pgw#827 (found by wiring the regional arm): "recorded, never fatal"
-        # is right for a WHOLE-GRAPH cell — it is minted from the very weights
-        # it serves, so a folded constant is that module's own value. It is
-        # FATAL for a regional cell. One artifact serves N INSTANCES with
-        # DIFFERENT weights, so a constant the compiler folded away carries
-        # the PROTOTYPE instance's bytes into every other instance, silently,
-        # with no unbound constant and no refusal anywhere.
-        #
-        # MEASURED off-pod (torch 2.13.0+cu130, CPU, a 3-block toy): with
-        # `ff.bias` folded, instance 0 reproduces eager exactly (0.0) and
-        # instance 1 is wrong by 0.53. Nothing in the artifact, the manifest
-        # or the bind gate can see it — which is why it is refused HERE.
-        #
-        # The remedy is proven and is NOT this refusal: compiling regional
-        # entries under `aot_inductor.use_runtime_constant_folding=True` keeps
-        # every folded constant a real bindable input (verified: `fused` goes
-        # to [] and `ff.bias` reappears in the artifact's own table). It also
-        # adds `_FOLDED_CONST_*` rows the manifest and the bind path must
-        # learn, and it re-keys every cell — so it is a change with a train,
-        # not a hotfix. Until then a cell that would serve wrong numbers must
-        # not be published.
-        state_dict_fused = [
-            name for name in fused
-            if name in set(aot_package.program_state_dict_fqns(row.program))]
-        if state_dict_fused:
-            raise MintRefused(
-                f"entry {entry!r}: the compiler folded {len(state_dict_fused)} "
-                f"state_dict constant(s) away "
-                f"({sorted(state_dict_fused)[:6]!r}). A REGIONAL entry is "
-                f"reused across every instance of its block class, so a "
-                f"folded constant bakes the PROTOTYPE instance's weights into "
-                f"all of them — the artifact is correct for instance 0 and "
-                f"silently wrong for the rest. Recompile with "
-                f"`aot_inductor.use_runtime_constant_folding=True`, which "
-                f"keeps them bindable")
     try:
         inputs, symbols = aot_package.input_contract(
             row.program, row.flat_names)
@@ -2891,12 +2185,12 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
 
     return {
         "weight_lane": str(spec.weight_lane or ""),
-        # pgw#817: recorded so a CONSUMER can recompute the identity from the
-        # artifact's own facts — the standing ck5 discipline — instead of
-        # trusting the stamp. `mode` also tells the serve path which arm to
-        # take without re-deriving it from entry names.
-        "mode": aot_regional.MODE_REGIONAL if spec.regional else "",
-        "shell_digest": str(spec.shell_digest or ""),
+        # pgw#846: an exported cell is always WHOLE-GRAPH (`mode` "").
+        # `shell_digest` likewise: both keys are recorded at their whole-graph
+        # values ("") so the v3 contract-facts shape — and therefore every
+        # existing whole-graph cell key — is byte-identical to pre-#846.
+        "mode": "",
+        "shell_digest": "",
         "sm": str(cc.runtime_key().get("sm") or ""),
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
@@ -2961,12 +2255,11 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
     published ``aot-inductor`` cell; single-graph format-1 cells are RETIRED —
     correct and expected under ck5 exact identity.
 
-    CONTRACT-FACTS SHAPE CHANGE (v2 -> v3, pgw#817): ``shell_digest`` joins the
-    facts and the ``mode`` axis stops being hardcoded ``""``. This re-keys
-    every published ``aot-inductor`` cell again — correct and expected: a v2
-    key does not bind the assembly around the graphs, so a v2 REGIONAL cell
-    could collide across shells, and there is no way to add the binding
-    without moving the key.
+    CONTRACT-FACTS SHAPE CHANGE (v2 -> v3, pgw#817): ``shell_digest`` joined
+    the facts for the (since-retired) regional kind. pgw#846 retires regional
+    but deliberately KEEPS the v3 shape with ``shell_digest`` pinned ``""``
+    and the ``mode`` axis ``""`` — the whole-graph key is byte-identical to
+    what it was before and after pgw#817, so nothing re-keys.
     """
     from . import env_seal
 
@@ -2989,27 +2282,12 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         raise MintRefused(
             f"entries {unhashed[:4]!r} carry no class_hash; a class the key "
             f"cannot name is a class a mismatch cannot name (pgw#716)")
-    # pgw#812 S3.3 / pgw#817: the shell digest is a CONTRACT FACT, not an
-    # annotation. `combined_graph_hash` describes the graphs the cell carries;
-    # for a regional cell those are BLOCKS, so nothing else in the key covers
-    # the assembly around them — a different num_layers, a different rope
-    # construction or a diffusers minor that rewrites the outer forward would
-    # produce the same key and serve different math. Mandatory rather than
-    # optional: an absent digest is exactly the collision the axis exists to
-    # prevent, and a key that is sometimes assembly-bound and sometimes not is
-    # worse than either.
-    mode = aot_regional.MODE_REGIONAL if spec.regional else ""
-    shell = str(spec.shell_digest or meta.get("shell_digest") or "")
-    if mode and not shell:
-        raise MintRefused(
-            "a regional cell must carry a shell_digest: its entries are "
-            "BLOCKS, so the combined graph hash covers only the parts and two "
-            "models with identical blocks and different shells would key "
-            "identically while serving different math (pgw#812 S3.3)")
     contract_facts: Dict[str, Any] = {
         "v": 3,
         "combined_graph_hash": combined,
-        "shell_digest": shell,
+        # pgw#846: always "" — kept in the v3 shape so the whole-graph
+        # contract digest (and every derived cell identity) does not move.
+        "shell_digest": "",
         "targets": sorted({
             str((block or {}).get("target") or "") for block in entries.values()}),
         "shapes": sorted([int(v) for v in row] for row in spec.shapes),
@@ -3024,14 +2302,10 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         "kind": aot_serve.ARTIFACT_KIND,
         "family": str(meta.get("family") or ""),
         "lane": spec.lane_label(),
-        # pgw#817/D4. This used to hardcode "" under the comment "an exported
-        # cell is always whole-graph: 'regional' is a dynamo partitioning
-        # strategy with no export counterpart". pgw#812 falsified it by
-        # measurement — an exported regional cell exists, is 1.37 MB, and
-        # serves. The ck5 `mode` axis already existed and already fed the
-        # digest; setting it is the minimal change that makes a regional cell
-        # unconfusable with a whole-graph cell of the same family x lane x sm.
-        "mode": mode,
+        # pgw#846: an exported cell is always whole-graph again; "" is the
+        # optional-axis value `from_axes` omits, matching every pre-regional
+        # whole-graph key.
+        "mode": "",
         "sm": sm,
         "contract": contract,
         "env_seal": env_seal.seal_digest(dict(meta.get(env_seal.SEAL_KEY) or {})),

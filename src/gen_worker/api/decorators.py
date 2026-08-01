@@ -801,18 +801,6 @@ class Compile(msgspec.Struct, frozen=True):
     # "dynamic-collapse". "" = undeclared; refused at mint-plan time, not
     # defaulted.
     shape_strategy: str = ""
-    # pgw#829: the shape strategy of a REGIONAL cell's entries, which are
-    # BLOCKS and not the family's whole forward. `shape_strategy` was
-    # measured on the whole graph; #730's static-rows verdict is a statement
-    # about CONVS (`decide_layout_opt` bails on conv + free symbol, +7.2% on
-    # sdxl), and a conv-free attention block has no layout opt to lose —
-    # pgw#812 measured dynamic inner dims at 0.0% on exactly that region.
-    # Declaring it separately is the point: a family whose SHELL keeps its
-    # convs and whose BLOCKS are conv-free needs to say both, and flipping
-    # `shape_strategy` to serve the block population would silently re-price
-    # the whole-graph route it also owns. "" = inherit `shape_strategy`.
-    # Only meaningful with `regional=True`; refused otherwise.
-    regional_shape_strategy: str = ""
     # Mint-warm canon (#723/#728): whether pre-warming the module changes
     # the exported graph. A declared per-family FACT, not a ritual — sdxl
     # measured False, z-image measured True (rope tables: 4327 cold vs
@@ -825,7 +813,7 @@ class Compile(msgspec.Struct, frozen=True):
     # about to arm is run against the eager forward it replaces and judged on
     # the shared verdict ladder; below `numerics_floor` it REFUSES to arm.
     # None = the SDK default (0.98 / 0.999), whose derivation is pgw#814's
-    # measured band — see `aot_regional.NUMERICS_FLOOR`. Declared per family
+    # measured band — see `numerics_ladder.NUMERICS_FLOOR`. Declared per family
     # because bf16 attention reassociation makes exact equality the wrong bar
     # and the right bar is not the same for a 25-block fp8 DiT and a
     # conv-bearing UNet.
@@ -865,27 +853,13 @@ class Compile(msgspec.Struct, frozen=True):
         if len({d.dim for d in dyn}) != len(dyn):
             raise ValueError("Compile.dynamic repeats a dim")
         force(self, "dynamic", dyn)
-        # pgw#817/D4: `regional=True` + `dynamic=(...)` is ADMITTED.
-        #
-        # It used to be refused here, on the reading that "regional is a
-        # dynamo partitioning strategy that never applies the declared marks,
-        # so the declaration would be inert while the contract digest claimed
-        # the dynamism" — and that regional was retiring in favour of
-        # whole-graph export (LTX-AOT-DESIGN §3.2).
-        #
-        # pgw#812 measured both halves of that away. Regional has an EXPORT
-        # counterpart: a block is exported with `dynamic_shapes` exactly like
-        # a whole graph, and the symbolic inner axis was measured FREE on a
-        # conv-free region (+0.2% bf16 / 0.0% w8a8, against pgw#730's +7.2%
-        # for the same axis on sdxl's conv lane). And regional is not
-        # retiring: it is 14.2x the whole-graph mint on the real sdxl w8a8
-        # cell with serve parity at +0.24%.
-        #
-        # The old refusal's CONTENT survives as a lane-side decline: the
-        # DYNAMO regional branch still calls `compile_repeated_blocks(
-        # dynamic=None)` and still cannot honour the marks, so it declines by
-        # name (`compile_cache._regional_dynamic_decline`) instead of arming
-        # a graph that does not implement the contract its key asserts. The
+        # `regional=True` + `dynamic=(...)` is ADMITTED at declaration.
+        # `regional` is the dynamo/JIT per-block knob (ie#381) — the AOT
+        # export lane ignores it entirely since pgw#846 retired regional
+        # cells. The dynamo regional branch calls `compile_repeated_blocks(
+        # dynamic=None)` and cannot honour the marks, so it declines by name
+        # (`compile_cache._regional_dynamic_decline`) instead of arming a
+        # graph that does not implement the contract its key asserts. The
         # declaration is legal; the lane that cannot serve it says so.
         for name, typ in (("dims", Dim), ("forks", Fork),
                           ("classes", GraphClass), ("inputs", Input),
