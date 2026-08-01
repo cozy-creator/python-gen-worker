@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
+from . import aot_serve
 from . import numerics_ladder
 from .activity import KIND_CELL_NUMERICS
 
@@ -480,7 +481,9 @@ def arm_blocks(
         for group in groups:
             for module in group.instances:
                 runner = runner_for(group.key)
-                state = dict(module.state_dict())
+                # pgw#825: NOT `state_dict()` — it omits the non-persistent
+                # branch buffers the block's own constant table declares.
+                state = aot_serve.resident_constants(module)
                 runner.bind(state, {}, user_managed=True)
                 # S4: per INSTANCE, before its first call.
                 runner.assert_ready()

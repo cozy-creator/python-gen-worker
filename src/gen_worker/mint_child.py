@@ -50,7 +50,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
@@ -88,7 +88,17 @@ class MintChildRefused(RuntimeError):
 
     Never retried by the parent: re-running a named refusal buys a second
     billed compile for the same sentence.
+
+    ``mint_phases`` carries the refusing mint's PARTIAL phase table when it
+    got far enough to have one (pgw#825) — the entries it exported and
+    compiled before refusing are real minutes and must reach the hub.
     """
+
+    def __init__(
+        self, *args: Any, mint_phases: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        super().__init__(*args)
+        self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
 
 
 # th#1322: per-phase spans, measured HERE because this process owns the clock
@@ -384,8 +394,12 @@ def _mint_aot(
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod
-        # that exposes no logs (pgw#760).
-        raise MintChildRefused(f"aot mint refused: {exc}") from exc
+        # that exposes no logs (pgw#760). pgw#825: the seconds it spent before
+        # refusing ride WITH the sentence — a refusal after four paid compiles
+        # and a refusal in the first second are not the same event.
+        raise MintChildRefused(
+            f"aot mint refused: {exc}",
+            mint_phases=getattr(exc, "mint_phases", None)) from exc
 
     frame(phase="seal_publish", note=f"packed {result.artifact.name}")
     artifact = Path(result.artifact)
@@ -595,7 +609,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write_report(report_path, MintReport(
             status="refused", detail=str(exc)[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0]))
+            phase=_PHASE_OPEN[0],
+            mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     except BaseException as exc:  # noqa: BLE001 — every death is classified
@@ -604,7 +619,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             status="resource" if resource_shortfall else "failed",
             detail=f"{type(exc).__name__}: {exc}"[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0]))
+            phase=_PHASE_OPEN[0],
+            # pgw#825: a CRASH's paid compiles are measurable too — the mint
+            # attaches its partial table to whatever it died with.
+            mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
         logger.exception("mint-child: mint failed")
         if resource_shortfall:
             return EXIT_RESOURCE

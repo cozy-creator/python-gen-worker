@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- **pgw#825 — a regional cell's LoRA branch pair is BINDABLE, the mismatch is
+  refused BEFORE the compile is paid for, and an aborted mint still reports
+  where it spent.** On a real L4 (0.84.0, sdxl 0.2.104, lane `w8a8-lora64`,
+  recipe `aot-regional`) the mint compiled and was refused at 351.73 s, per
+  entry and AFTER that entry's compile: `20 declared state_dict constant(s)
+  are absent from the resident module's state_dict, e.g.
+  ['attn1.to_q.lora_a', ...]`. Mechanism, reproduced off-pod with a real
+  `torch.export` + AOTI pack: `w8a8_lora.alloc_branch_buffers` registers
+  `lora_a`/`lora_b` **non-persistent** (a checkpoint must not carry a zeroed
+  adapter), `module.state_dict()` omits non-persistent buffers, and
+  `torch.export` still lifts them as BUFFER inputs that AOTInductor declares
+  `ConstantType::Buffer` under their real FQN — i.e. `source=state_dict`. The
+  gate was right and the bind TEMPLATE was wrong, on the mint side and at both
+  arm sites. New `aot_serve.resident_constants` is the ONE definition of what a
+  `state_dict`-sourced constant may bind to (parameters + ALL buffers), used by
+  the mint's bindability gate, `aot_serve`'s whole-graph arm and
+  `aot_regional.arm_blocks`. Input lifting is NOT the fix and was never the
+  defect: it wraps the DENOISER's forward, and a regional entry is exported one
+  block deep — a block's branch pair stays module-resident and binds per
+  instance by reference (`user_managed=True`), which gives regional the same
+  property lifting gives the family graph (an adapter swap is an in-place
+  buffer write, never a rebind and never a recompile). Regional block entries
+  therefore no longer inherit the family's `lifted_inputs`, and
+  `models.provision.arm_aot` refuses to install the lifted forward under a
+  regional cell, whose leaves it would reassign out from under the arm.
+- **pgw#825 — the same question, asked before the compile.** New
+  `aot_package.unbindable_program_constants` runs the bindability check on the
+  ExportedProgram, in both the whole-graph and regional export paths, so a
+  declaration/module mismatch costs milliseconds and a typed refusal instead of
+  4-6 minutes of GPU per entry. The packed gate stays: it reads the artifact's
+  own generated wrapper, which is the only proof of what shipped.
+- **pgw#825 — `aot_mint_phases` reports on EVERY terminus.** An aborted mint
+  emitted only `total_s`, so `compile_s`/`export_s`/`n_entries` parsed to `-`
+  and a run that paid for real compiles produced no measurement. `aot_mint.mint`
+  now attaches the partial phase table to whatever it fails with, the child
+  carries it into a `refused`/`failed` report, and the parent emits the table's
+  roll-up under `phase=aborted` (never `minted`) plus the per-entry
+  `entry:<name>` rows.
+
 - **pgw#783 — the parent/child process split is now the ONLY worker execution
   model; the `GEN_WORKER_PROCESS_SPLIT` flag is gone.** `entrypoint`
   unconditionally becomes the control parent and execs one compute child per

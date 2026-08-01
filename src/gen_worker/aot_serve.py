@@ -1277,6 +1277,39 @@ def split_literals(literals: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def resident_constants(module: Any) -> Dict[str, Any]:
+    """Every resident tensor a ``state_dict``-sourced constant can bind to.
+
+    ``module.state_dict()`` is NOT that set, and the difference is pgw#825:
+    it omits NON-PERSISTENT buffers. The canonical LoRA branch pair is
+    exactly that — ``w8a8_lora.alloc_branch_buffers`` registers
+    ``lora_a``/``lora_b`` with ``persistent=False`` so a checkpoint never
+    carries a zeroed adapter — yet ``torch.export`` lifts them as BUFFER
+    inputs and AOTInductor declares them ``ConstantType::Buffer`` under their
+    real FQN, i.e. ``source=state_dict``. A bind table built from
+    ``state_dict()`` alone therefore declares 20 constants per sdxl
+    ``BasicTransformerBlock`` that no lookup could ever resolve.
+
+    ONE definition, used by the mint's bindability gate and by both arm
+    sites, because a gate that models the arm differently from the arm is
+    the pgw#816/#822 class: it either refuses a cell that would have served
+    or admits one that cannot.
+
+    Binding is by FQN and :func:`resolve_constants` reads only the DECLARED
+    names, so the extra keys are inert for any artifact that does not want
+    them.
+    """
+    out: Dict[str, Any] = dict(module.state_dict())
+    try:
+        buffers = list(module.named_buffers())
+    except Exception:  # pragma: no cover — duck-typed owners in unit rigs
+        return out
+    for name, buf in buffers:
+        if buf is not None:
+            out.setdefault(str(name), buf)
+    return out
+
+
 def resolve_constants(
     specs: Sequence[ConstantSpec],
     state_dict: Mapping[str, Any],
@@ -1910,7 +1943,7 @@ def load_and_wrap(
         total_constants = 0
         for target, rows in groups.items():
             module, _attr = owners[target]
-            state_dict = dict(module.state_dict())
+            state_dict = resident_constants(module)
             runners: List[Tuple[str, ArtifactRunner]] = []
             for name, block in rows:
                 try:
@@ -2204,6 +2237,7 @@ __all__ = [
     "note_aot_key",
     "pack",
     "range_digest",
+    "resident_constants",
     "resolve_constants",
     "runtime_key",
     "set_guard_failure_callback",

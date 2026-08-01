@@ -133,7 +133,17 @@ class MintRefused(RuntimeError):
     Every mint failure is one of these with a reason that names the offending
     thing — a lane, a tensor, a missing declaration field. A mint that cannot
     say what went wrong is the silent-failure path the doctrine forbids.
+
+    ``mint_phases`` carries the PARTIAL phase table of the mint that refused
+    (pgw#825): the entries that did export and compile before the refusal
+    spent real minutes on a real pod, and a terminus that reports only a
+    wall-clock total is a measurement lost to a pod that no longer exists.
+    Populated by :func:`mint`; empty for a refusal raised before any entry.
     """
+
+    def __init__(self, *args: Any, mint_phases: Optional[Mapping[str, Any]] = None) -> None:
+        super().__init__(*args)
+        self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1098,17 @@ def _export_entry(
                 f"entry {entry!r}: no-baked-adapter gate (#725 G3): "
                 f"{exc}") from exc
 
+    # pgw#825: BEFORE the compile, not after it. The packed bindability gate
+    # runs on the artifact and is the proof of what shipped; this one asks the
+    # same question of the exported program, where it costs milliseconds
+    # instead of an entry's whole compile.
+    unbindable = aot_package.unbindable_program_constants(
+        program, _state_dict_keys(owner))
+    if unbindable:
+        raise MintRefused(
+            f"entry {entry!r}: pre-compile bindability gate: "
+            + "; ".join(unbindable))
+
     files: List[Any] = []
     if compile_now:
         before = _phase_snapshot()
@@ -1190,6 +1211,18 @@ def _export_regional_entries(
                 key=lambda kv: str(kv[0]))),
             dynamic=_regional_dynamic(espec.dynamic, names),
             regional=True,
+            # pgw#825: a BLOCK never carries the lifted signature. Input
+            # lifting (pgw#725) is a whole-graph-cell mechanism — it wraps the
+            # DENOISER's forward so the flat pair arrives in the call — and the
+            # regional entry is exported one block deep, from the block's own
+            # signature. The block's branch pair stays module-resident and is
+            # bound per instance BY REFERENCE (`user_managed=True`), which
+            # gives regional the same property lifting gives the family graph:
+            # an adapter swap is an in-place buffer write, never a recompile
+            # and never a rebind. Inheriting the family's `lifted_inputs` here
+            # would record a contract this entry's program does not have.
+            lifted_inputs=(),
+            lora_fqns=(),
         )
         entry = _decl.entry_name(espec.target, bspec.fork, bspec.class_dims)
         timings: Dict[str, Any] = {
@@ -1209,6 +1242,21 @@ def _export_regional_entries(
         if gaps:
             raise MintRefused(
                 f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
+
+        # pgw#825: the block's own bind table, asked BEFORE its compile. A
+        # regional mint pays 4-6 minutes per entry, and this mismatch is a
+        # property of the exported program — the refusal must cost seconds.
+        unbindable = aot_package.unbindable_program_constants(
+            program, _state_dict_keys(block))
+        if unbindable:
+            raise MintRefused(
+                f"entry {entry!r}: pre-compile bindability gate: "
+                + "; ".join(unbindable))
+        baked = _regional_branch_gaps(block, program, int(bspec.lora_bucket or 0))
+        if baked:
+            raise MintRefused(
+                f"entry {entry!r}: regional no-baked-adapter gate (#725 G3): "
+                + "; ".join(baked))
 
         files: List[Any] = []
         if compile_now:
@@ -1234,6 +1282,52 @@ def _export_regional_entries(
             program=program, input_names=tuple(names), flat_names=tuple(names),
             files=files, timings=timings))
     return out
+
+
+def _regional_branch_gaps(
+    block: Any, program: Any, bucket: int,
+) -> List[str]:
+    """pgw#725 G3, in the shape a REGIONAL entry can be asked it.
+
+    The family gate asserts the adapter is a graph INPUT. A block cannot take
+    that form — the lift wraps the denoiser, and a block entry is exported
+    from the block's own signature — so regional's equivalent invariant is
+    that every branch pair is a NAMED, bindable buffer of the block. Two lanes
+    make that a real question rather than a formality:
+
+    * the w8a8 lane registers the pair as non-persistent buffers, which export
+      lifts under their true FQN — bindable, and the whole point of pgw#825;
+    * the cast-hook/plain-Linear lanes keep it in the module ``__dict__``,
+      where export can lift it as an ANONYMOUS tensor constant whose bytes
+      then SHIP in the literal payload. That is a baked, permanently zeroed
+      adapter: the cell arms, serves, and silently returns the base model for
+      every attach — pgw#704 S9 with no error anywhere.
+
+    Only the adapter-bearing fork class is asked (``bucket`` is zero on the
+    branchless one, whose pair is deliberately absent).
+    """
+    if not bucket:
+        return []
+    from .models import w8a8_lora
+
+    lifted = set(aot_package.program_state_dict_fqns(program))
+    missing: List[str] = []
+    for path, mod in w8a8_lora.branch_modules(block).items():
+        for slot in ("lora_a", "lora_b"):
+            if getattr(mod, slot, None) is None:
+                continue
+            fqn = f"{path}.{slot}" if path else slot
+            if fqn not in lifted:
+                missing.append(fqn)
+    if not missing:
+        return []
+    return [
+        f"{len(missing)} branch tensor(s) of this bucket-{bucket} block did "
+        f"not survive export as bindable buffers, e.g. {sorted(missing)[:6]!r}"
+        f" — a branch that is not a lifted buffer was either baked as a "
+        f"literal (a permanently ZEROED adapter that serves the base model "
+        f"silently) or traced away entirely"
+    ]
 
 
 def replace_spec(spec: ExportSpec, **changes: Any) -> ExportSpec:
@@ -1440,6 +1534,63 @@ def mint(
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
 ) -> MintResult:
+    """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
+
+    pgw#825: an aborted mint used to report a wall-clock total and nothing
+    else — `compile_s`, `export_s` and `n_entries` all parsed to `-` — so a
+    run that paid for real compiles and then refused produced no measurement
+    at all, and the pod it happened on is gone by the time anyone reads the
+    table. The live entry list and timings dict are handed down and mutated
+    in place, so whatever completed before the terminus is reportable from
+    here whether the mint returned, refused, or died.
+    """
+    progress: Dict[str, Any] = {"inductor_configs": inductor_configs}
+    try:
+        return _mint_cell(
+            pipeline, spec, out_dir,
+            allow_regressed_lanes=allow_regressed_lanes,
+            inductor_configs=inductor_configs,
+            entry_workers=entry_workers, progress=progress)
+    except BaseException as exc:
+        _attach_partial_phases(exc, progress)
+        raise
+
+
+def _attach_partial_phases(exc: BaseException, progress: Mapping[str, Any]) -> None:
+    """Hang the partial phase table off a failed mint's exception.
+
+    Telemetry never changes an outcome, so every step is guarded: a mint that
+    refuses must refuse with ITS sentence, not with a reporting error.
+    """
+    try:
+        minted = list(progress.get("minted") or ())
+        timings = dict(progress.get("timings") or {})
+        started = progress.get("t_mint")
+        if not minted and not timings:
+            return
+        if started is not None:
+            # The mint's OWN wall clock, so an aborted total is comparable
+            # with a completed one rather than being a sum of entry seconds.
+            timings["total_s"] = round(time.monotonic() - float(started), 2)
+        table = _mint_phase_table(
+            minted, timings, progress.get("inductor_configs"),
+            progress.get("width"))
+        table["terminus"] = "aborted"
+        setattr(exc, "mint_phases", table)
+    except Exception:  # pragma: no cover — telemetry never fails a mint
+        logger.debug("aot-mint: partial phase table unavailable", exc_info=True)
+
+
+def _mint_cell(
+    pipeline: Any,
+    spec: ExportSpec,
+    out_dir: Path,
+    *,
+    allow_regressed_lanes: bool = False,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+    entry_workers: int = 0,
+    progress: Optional[Dict[str, Any]] = None,
+) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
     multi-graph cell (pgw#758).
 
@@ -1477,7 +1628,12 @@ def mint(
     work = out_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
     timings: Dict[str, float] = {}
+    # Handed to the caller BY REFERENCE and mutated in place: an aborted mint
+    # reports the seconds it did spend (pgw#825).
+    progress = {} if progress is None else progress
+    progress["timings"] = timings
     t_mint = time.monotonic()
+    progress["t_mint"] = t_mint
 
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
@@ -1517,8 +1673,10 @@ def mint(
             if regional else 1.0))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
+    progress["width"] = width
 
     minted: List[_MintedEntry] = []
+    progress["minted"] = minted
     disarmed = False
     # pgw#822: the adapter-BEARING classes are exported from the lifted
     # forward. Arming it is this function's job, not the caller's — see
@@ -1922,6 +2080,7 @@ def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
 
 def emit_phase_events(
     *, family: str, lane: str, table: Mapping[str, Any],
+    terminus: str = "",
 ) -> None:
     """Typed telemetry event — the phase table must reach observability,
     never only a pod log.
@@ -1943,13 +2102,19 @@ def emit_phase_events(
         totals = dict(table.get("totals") or {})
         lane = lane or "plain"
         total_s = float(totals.get("total_s") or 0.0)
+        # pgw#825: the roll-up's PHASE is the mint's terminus. An aborted mint
+        # measured real entries and must report them — under `aborted`, never
+        # under `minted`, or a partial table would enter an AOT-vs-JIT
+        # comparison as if a cell came out.
+        roll_up = terminus or str(table.get("terminus") or "") \
+            or activity_mod.PHASE_MINTED
         activity_mod.emit_event(
             MINT_PHASES_KIND,
-            f"family={family} lane={lane} "
+            f"family={family} lane={lane} status={roll_up} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
-            phase=activity_mod.PHASE_MINTED,
+            phase=roll_up,
             duration_ms=int(round(total_s * 1000)),
         )
         for name, timings in sorted((table.get("entries") or {}).items()):
@@ -2157,8 +2322,14 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
 
 
 def _state_dict_keys(module: Any) -> Tuple[str, ...]:
+    """The names the SERVE arm will have to bind from — pgw#825.
+
+    ``aot_serve.resident_constants``, never ``state_dict()``: the gate's whole
+    value is that it predicts the arm, and the arm binds non-persistent
+    buffers (the LoRA branch pair) that ``state_dict()`` does not report.
+    """
     try:
-        return tuple(str(k) for k in module.state_dict().keys())
+        return tuple(str(k) for k in aot_serve.resident_constants(module))
     except Exception:
         return ()
 

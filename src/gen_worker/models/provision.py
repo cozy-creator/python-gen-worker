@@ -221,7 +221,7 @@ def arm_aot(
     proven order). Rolled back on a failed arm so a dynamo fallthrough never
     traces a lifted forward it did not ask for.
     """
-    from .. import aot_serve, trt_engine
+    from .. import aot_regional, aot_serve, trt_engine
 
     if meta is None:
         try:
@@ -230,7 +230,15 @@ def arm_aot(
             meta = None
     lifted_target: Any = None
     lifted_installed = False
-    if bucket and get_settings().compile_prefer_aot:
+    # pgw#825: a REGIONAL cell must not be armed on a lifted denoiser. Its
+    # block entries bind the branch pair as by-reference constants of each
+    # instance, and the lifted forward REASSIGNS every leaf's `lora_a`/`lora_b`
+    # to views of the flat pair on each call — the artifact would keep reading
+    # the buffers it bound at arm time and every attach would silently serve
+    # the base model. The install is skipped by name rather than left to the
+    # (currently unwired) regional arm to trip over.
+    regional = str((meta or {}).get("mode") or "") == aot_regional.MODE_REGIONAL
+    if bucket and not regional and get_settings().compile_prefer_aot:
         from . import lora_lifted
 
         # The target module comes from the ARTIFACT's own recorded facts

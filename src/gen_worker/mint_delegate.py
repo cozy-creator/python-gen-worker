@@ -327,13 +327,25 @@ def _emit_aot_phases(
     table = dict(getattr(report, "mint_phases", None) or {}) \
         if report is not None else {}
     try:
-        if table:
-            aot_mint.emit_phase_events(family=family, lane=lane, table=table)
-        if outcome.minted:
-            return
         total_s = float(
             report.elapsed_s if report is not None and report.elapsed_s > 0
             else outcome.elapsed_s)
+        if table and not outcome.minted and total_s > 0:
+            # pgw#825: the CHILD's whole elapsed (load + export + compile)
+            # folded into the table rather than emitted as a second aborted
+            # event — two `phase=aborted` rows for one mint would double-count
+            # it in any duration roll-up, and the table's own total (the
+            # mint's wall clock) is the one a compile comparison wants.
+            table["totals"] = {
+                **dict(table.get("totals") or {}),
+                "child_elapsed_s": round(total_s, 2),
+            }
+        if table:
+            aot_mint.emit_phase_events(
+                family=family, lane=lane, table=table,
+                terminus="" if outcome.minted else "aborted")
+        if outcome.minted or table:
+            return
         if total_s <= 0:
             return
         activity_mod.emit_event(
