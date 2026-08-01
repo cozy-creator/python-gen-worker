@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.89.0 (2026-08-01) — the cell self-mint publisher speaks chunked sha256: the v1 (blake3) client is deleted, and the procsplit allowlist stops refusing the publisher's own payload
 - **pgw#807 item 3 — the cell self-mint publisher ships over CHUNKED SHA-256,
   and the seam it rides stops refusing its own payloads.** The first AOT mint
   in platform history (attempt ten, a real L4) compiled 72 entries, packaged
