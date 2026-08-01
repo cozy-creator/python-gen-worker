@@ -347,14 +347,39 @@ def test_wedged_child_is_killed_by_watchdog_and_pod_recovers(tmp_path, captured_
 
 
 def test_seam_cost_frame_rtt_and_throughput(tmp_path, capsys):
-    """Measure the boundary's cost: small-frame RTT (the cancel/dispatch hop)
-    and bulk throughput at the gRPC message ceiling (64 MiB)."""
+    """Measure the boundary's COST — never the runner's speed (pgw#845).
+
+    Both arms of both measurements are taken in this run, interleaved, against a
+    raw-socket echo on the same event loop and the same transport. The framed
+    arm differs from the raw one by exactly the seam: a header pack, one extra
+    read, one payload copy. That difference is the product question and it is
+    the only thing asserted.
+
+    The bulk arm used to assert an absolute `> 200 MB/s` floor with no baseline
+    at all. That is a statement about the machine, not about the frame layer,
+    and under `-n 4` on a shared box it is the flake this file was known for.
+    Interleaving matters too: measuring the arms back-to-back lets a load ramp
+    between them masquerade as seam overhead.
+    """
 
     sock = str(tmp_path / "bench.sock")
+    raw_sock = sock + ".raw"
     results = {}
 
+    # Best-of-rounds, applied identically to both arms: contention only ever
+    # makes a sample worse, so the best sample of each is the closest either
+    # arm gets to its own floor cost — and comparing floors is what isolates
+    # the seam. Never a retry-until-green: the arms cannot diverge in treatment.
+    ROUNDS = 3
+    TRIPS = 200
+    # Bulk moves 512 MiB total across both arms — the same memory traffic the
+    # single-arm version cost, now with a baseline to compare against.
+    BULK_ROUNDS = 2
+    BULK_REPS = 1
+    BULK = 64 * 1024 * 1024  # the largest message the gRPC stream allows
+
     async def _bench() -> None:
-        async def _server(reader, writer):
+        async def _framed_server(reader, writer):
             fw = frames.FrameWriter(writer)
             try:
                 while True:
@@ -366,62 +391,72 @@ def test_seam_cost_frame_rtt_and_throughput(tmp_path, capsys):
                 # py3.12 Server.wait_closed() waits for handler writers.
                 fw.close()
 
-        # Raw-socket echo baseline: the same event loop, the same transport,
-        # no frame layer. The property asserted below is the SEAM's overhead
-        # over this baseline — never the runner's absolute speed (pgw#795).
-        raw_sock = sock + ".raw"
-
         async def _raw_server(reader, writer):
             try:
                 while True:
-                    data = await reader.readexactly(64)
-                    writer.write(data)
+                    size = int.from_bytes(await reader.readexactly(8), "big")
+                    writer.write(await reader.readexactly(size))
                     await writer.drain()
             except (asyncio.IncompleteReadError, ConnectionError):
                 pass
 
         raw_server = await asyncio.start_unix_server(_raw_server, path=raw_sock)
         raw_reader, raw_writer = await asyncio.open_unix_connection(raw_sock)
-        raw = b"y" * 64
-        n = 500
-        t0 = time.perf_counter()
-        for _ in range(n):
-            raw_writer.write(raw)
-            await raw_writer.drain()
-            await raw_reader.readexactly(64)
-        baseline_rtt_ms = (time.perf_counter() - t0) / n * 1000.0
-        raw_writer.close()
-        raw_server.close()
-
-        server = await asyncio.start_unix_server(_server, path=sock)
+        server = await asyncio.start_unix_server(_framed_server, path=sock)
         reader, writer = await asyncio.open_unix_connection(sock)
         fw = frames.FrameWriter(writer)
 
-        # Small-frame round trips (the shape of a cancel or a progress event).
+        async def _raw_trip(payload: bytes) -> None:
+            raw_writer.write(len(payload).to_bytes(8, "big"))
+            raw_writer.write(payload)
+            await raw_writer.drain()
+            await raw_reader.readexactly(len(payload))
+
+        async def _framed_trip(ftype, payload: bytes) -> None:
+            await fw.frame(ftype, payload)
+            await frames.read_frame(reader)
+
         small = b"x" * 64
-        n = 500
-        t0 = time.perf_counter()
-        for _ in range(n):
-            await fw.frame(frames.T_WATCHDOG, small)
-            await frames.read_frame(reader)
-        rtt_ms = (time.perf_counter() - t0) / n * 1000.0
+        big = b"x" * BULK
+        raw_rtt_ms = framed_rtt_ms = float("inf")
+        raw_mb_s = framed_mb_s = 0.0
 
-        # Bulk: 64 MiB frames, the largest message the gRPC stream allows.
-        big = b"x" * (64 * 1024 * 1024)
-        reps = 4
-        t0 = time.perf_counter()
-        for _ in range(reps):
-            await fw.frame(frames.T_WORKER_MSG, big)
-            await frames.read_frame(reader)
-        elapsed = time.perf_counter() - t0
-        # Each rep moves the payload twice (echo), so credit 2x.
-        throughput_mb_s = (len(big) * reps * 2 / (1024 * 1024)) / elapsed
+        for _ in range(ROUNDS):
+            # Small frames: the shape of a cancel or a progress event.
+            t0 = time.perf_counter()
+            for _ in range(TRIPS):
+                await _raw_trip(small)
+            raw_rtt_ms = min(raw_rtt_ms, (time.perf_counter() - t0) / TRIPS * 1000.0)
 
-        results["rtt_ms"] = rtt_ms
-        results["baseline_rtt_ms"] = baseline_rtt_ms
-        results["throughput_mb_s"] = throughput_mb_s
+            t0 = time.perf_counter()
+            for _ in range(TRIPS):
+                await _framed_trip(frames.T_WATCHDOG, small)
+            framed_rtt_ms = min(
+                framed_rtt_ms, (time.perf_counter() - t0) / TRIPS * 1000.0)
+
+        for _ in range(BULK_ROUNDS):
+            # Bulk at the message ceiling. Each rep moves the payload twice
+            # (echo), so credit 2x — identically on both arms.
+            moved_mb = BULK * BULK_REPS * 2 / (1024 * 1024)
+
+            t0 = time.perf_counter()
+            for _ in range(BULK_REPS):
+                await _raw_trip(big)
+            raw_mb_s = max(raw_mb_s, moved_mb / (time.perf_counter() - t0))
+
+            t0 = time.perf_counter()
+            for _ in range(BULK_REPS):
+                await _framed_trip(frames.T_WORKER_MSG, big)
+            framed_mb_s = max(framed_mb_s, moved_mb / (time.perf_counter() - t0))
+
+        results.update(
+            rtt_ms=framed_rtt_ms, baseline_rtt_ms=raw_rtt_ms,
+            throughput_mb_s=framed_mb_s, baseline_throughput_mb_s=raw_mb_s,
+        )
         writer.close()
+        raw_writer.close()
         server.close()
+        raw_server.close()
         try:
             await asyncio.wait_for(server.wait_closed(), 5.0)
         except asyncio.TimeoutError:
@@ -431,18 +466,21 @@ def test_seam_cost_frame_rtt_and_throughput(tmp_path, capsys):
     print(
         f"\nseam cost: small-frame RTT {results['rtt_ms']:.3f}ms "
         f"(raw-socket baseline {results['baseline_rtt_ms']:.3f}ms), "
-        f"64MiB-frame throughput {results['throughput_mb_s']:.0f} MB/s"
+        f"64MiB-frame throughput {results['throughput_mb_s']:.0f} MB/s "
+        f"(raw-socket baseline {results['baseline_throughput_mb_s']:.0f} MB/s)"
     )
-    # The property is the seam's OVERHEAD: a framed hop is a header pack, one
-    # extra read and a payload copy over the raw echo it rides, so it must
-    # stay within a small multiple of the baseline measured in THIS run. A
-    # regression to whole milliseconds of per-hop framing cost changes the
-    # product answer; a slow runner slows both sides and cancels out.
+    # A framed hop is a header pack, one extra read and a payload copy over the
+    # raw echo it rides. A regression to whole milliseconds of per-hop framing
+    # cost changes the product answer; a slow runner slows both arms.
     assert results["rtt_ms"] <= results["baseline_rtt_ms"] * 20.0, (
         f"framed RTT {results['rtt_ms']:.3f}ms vs raw baseline "
         f"{results['baseline_rtt_ms']:.3f}ms — the frame layer itself got slow"
     )
-    assert results["throughput_mb_s"] > 200.0
+    assert results["throughput_mb_s"] >= results["baseline_throughput_mb_s"] / 4.0, (
+        f"framed bulk {results['throughput_mb_s']:.0f} MB/s vs raw baseline "
+        f"{results['baseline_throughput_mb_s']:.0f} MB/s — the frame layer is "
+        f"copying or chunking the 64MiB path, not just heading it"
+    )
 
 
 # ---------------------------------------------------------------------------
