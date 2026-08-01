@@ -153,6 +153,22 @@ _STDERR_TAIL_CAP_BYTES = 32768
 _STDERR_TAIL_DIAL_CHARS = 3000
 
 
+def _tee_stderr_chunk(chunk: bytes) -> None:
+    """Blocking tee of one child-stderr chunk to the parent's stderr.
+
+    Runs in a worker thread (asyncio.to_thread) — never on the event loop."""
+    try:
+        buf = getattr(sys.stderr, "buffer", None)
+        if buf is not None:
+            buf.write(chunk)
+            buf.flush()
+        else:
+            sys.stderr.write(chunk.decode("utf-8", errors="replace"))
+            sys.stderr.flush()
+    except Exception:
+        pass  # the ring still keeps the bytes for the dial
+
+
 def _http_call(
     method: str,
     url: str,
@@ -523,16 +539,13 @@ class _ChildSlot:
                 return
             if not chunk:
                 return
-            try:
-                buf = getattr(sys.stderr, "buffer", None)
-                if buf is not None:
-                    buf.write(chunk)
-                    buf.flush()
-                else:
-                    sys.stderr.write(chunk.decode("utf-8", errors="replace"))
-                    sys.stderr.flush()
-            except Exception:
-                pass  # the ring still keeps the bytes for the dial
+            # The tee write happens OFF the event loop: the parent's own
+            # stderr can be a pipe whose consumer stalls (pytest capture, a
+            # throttled container-log collector), and a blocking flush() on
+            # the loop thread freezes signal handling and the shutdown path —
+            # measured as test_sigterm_is_forwarded_to_the_worker timing out
+            # on a contended host (2-core repro; CI 2/2).
+            await asyncio.to_thread(_tee_stderr_chunk, chunk)
             self.stderr_tail.append(chunk)
             self.stderr_tail_len += len(chunk)
             while (self.stderr_tail_len > _STDERR_TAIL_CAP_BYTES

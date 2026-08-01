@@ -2,6 +2,19 @@
 
 ## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829)
 
+- **pgw#833 follow-on — the child-stderr tee writes OFF the event loop.** The
+  pump teed each chunk to the parent's stderr with a blocking `flush()` on the
+  loop thread; when the parent's own stderr is a pipe with a stalled consumer
+  (pytest capture, a throttled log collector), the flush froze the loop —
+  signal handling and the shutdown path included (measured:
+  `test_sigterm_is_forwarded_to_the_worker` 60 s timeout, CI 2/2 and a 2-core
+  local repro). The tee now runs per-chunk in `asyncio.to_thread`; ordering
+  within the single pump task is unchanged.
+- **th#1303 S1 (worker half) — the v1 (blake3) verify-on-fetch arms die.**
+  Every fetch-side check is unconditional v2 (chunked sha256); the test
+  harness speaks v2, v1-pinning cases are retired, and each deleted arm's
+  guard was EXECUTED red before deletion (two were wrong and are fixed).
+
 - **pgw#829 — a conv-free block class collapses its whole SHAPE axis onto ONE
   entry: sdxl's regional mint goes 72 entries -> 8.** pgw#830 measured that
   attempt nine's 72 entries were not a scheduling problem (the pool was already
