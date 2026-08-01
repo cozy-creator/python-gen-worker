@@ -390,7 +390,12 @@ def _mint_aot(
         frame(phase=phase, step=step, total=total, note=note)
 
     try:
-        result = aot_mint.mint(pipe, spec, out_dir, on_progress=_progress)
+        result = aot_mint.mint(
+            pipe, spec, out_dir, on_progress=_progress,
+            # pgw#848: banked by the parent from a previous mint on this pod.
+            # 0 on a pod that has never minted this (family, lane).
+            entry_peak_rss_bytes=int(
+                getattr(request, "entry_peak_rss_bytes", 0) or 0))
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod
@@ -419,7 +424,14 @@ def _mint_aot(
     try:
         import resource
 
-        rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        # pgw#848: SELF + CHILDREN. Under the pgw#809 pool this process is a
+        # supervisor — the entry children hold the compile, and the cc1plus
+        # under each of them is the largest single allocation of the whole
+        # mint. RUSAGE_SELF alone reports the supervisor and calls it the mint.
+        rss = (
+            int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            + int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+        ) * 1024
     except Exception:
         rss = 0
     return MintReport(
@@ -550,7 +562,14 @@ def mint(request: MintRequest) -> MintReport:
     try:
         import resource
 
-        rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        # pgw#848: SELF + CHILDREN. Under the pgw#809 pool this process is a
+        # supervisor — the entry children hold the compile, and the cc1plus
+        # under each of them is the largest single allocation of the whole
+        # mint. RUSAGE_SELF alone reports the supervisor and calls it the mint.
+        rss = (
+            int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            + int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+        ) * 1024
     except Exception:
         rss = 0
     from . import cell_key

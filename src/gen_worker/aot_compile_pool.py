@@ -939,25 +939,50 @@ def _read_report(path: Path) -> Optional[EntryReport]:
         return None
 
 
-def _peak_rss_bytes(proc: subprocess.Popen) -> int:
-    """The child tree's high-water RSS, read from the kernel while it lives."""
-    total = 0
+def _vmhwm_bytes(pid: int) -> int:
     try:
-        pids = [proc.pid] + [
-            int(p) for p in
-            Path(f"/proc/{proc.pid}/task/{proc.pid}/children").read_text().split()
-        ]
-    except (OSError, ValueError):
-        pids = [proc.pid]
-    for pid in pids:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _descendants(root: int) -> List[int]:
+    """``root`` and every process under it, TRANSITIVELY.
+
+    pgw#848: the previous reading walked ``/proc/<pid>/task/<pid>/children``
+    once — direct children of the main thread, one level, and only that
+    thread's. MEASURED on a real AOTI compile: the entry child's direct
+    children are ``g++`` (a driver that allocates nothing) and inductor's
+    ``async_compile`` subprocess workers; **``cc1plus`` — the 2.04 GiB — is at
+    depth 2**, and ``as``/``collect2``/``ld`` sit beside it. So the one number
+    the pool's memory bound exists to measure was, by construction, the one
+    number this function could not see.
+    """
+    out: List[int] = []
+    stack = [int(root)]
+    while stack:
+        pid = stack.pop()
+        out.append(pid)
         try:
-            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-                if line.startswith("VmHWM:"):
-                    total += int(line.split()[1]) * 1024
-                    break
-        except (OSError, ValueError, IndexError):
+            for task in Path(f"/proc/{pid}/task").iterdir():
+                stack.extend(
+                    int(p) for p in (task / "children").read_text().split())
+        except (OSError, ValueError):
             continue
-    return total
+    return out
+
+
+def _peak_rss_bytes(proc: subprocess.Popen) -> int:
+    """The child tree's high-water RSS, read from the kernel while it lives.
+
+    Summed across the tree because the members are concurrent: the
+    interpreter holds the loaded program while its compiler holds the TU. A
+    concurrent pool slot must reserve the pair, not the larger of the two.
+    """
+    return sum(_vmhwm_bytes(pid) for pid in _descendants(proc.pid))
 
 
 class EntryCompilePool:

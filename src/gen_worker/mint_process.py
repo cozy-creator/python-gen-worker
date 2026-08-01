@@ -179,6 +179,13 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     component_paths: Dict[str, Dict[str, str]] = {}
     device: int = -1     # CUDA ordinal; -1 = leave the child's default
     vram_cap_bytes: int = 0   # 0 = uncapped (see mint_budget.co_residency)
+    #: pgw#848: one ENTRY child's measured host high-water, banked by the
+    #: parent from a previous mint on this pod (``mint_budget.entry_peak_rss``).
+    #: 0 = never measured here, and the pool's width falls back to its
+    #: constant. It has to travel on the request because the width is computed
+    #: INSIDE the mint child, whose memory dies with it — the same reason
+    #: ``vram_cap_bytes`` is computed parent-side and handed down.
+    entry_peak_rss_bytes: int = 0
     #: The hub-resolved execution lane (``ctx.lane``) and the effective
     #: declared-parameter values per function (th#1087). Both STEER the warm
     #: forwards, so both must be the parent's values — a child warming at

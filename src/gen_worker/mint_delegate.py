@@ -165,9 +165,11 @@ def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
 
 def build_request(
     task: MintTask, *, workdir: Path, cap_bytes: int,
+    entry_peak_rss_bytes: int = 0,
 ) -> MintRequest:
     pending = task.pending
     return MintRequest(
+        entry_peak_rss_bytes=int(entry_peak_rss_bytes),
         function=task.function,
         modules=tuple(task.modules),
         family=str(pending.family),
@@ -281,7 +283,12 @@ async def build_cell(
         workdir = Path(pending.mint_root) / f"child-{attempts}"
         workdir.mkdir(parents=True, exist_ok=True)
         request = build_request(
-            task, workdir=workdir, cap_bytes=budget.need_bytes)
+            task, workdir=workdir, cap_bytes=budget.need_bytes,
+            # pgw#848: whatever a previous mint on this pod measured one entry
+            # child to peak at. Read here rather than in the child because the
+            # child is the thing that dies.
+            entry_peak_rss_bytes=mint_budget.entry_peak_rss(
+                family, task.weight_lane))
         act.phase(activity_mod.PHASE_LOAD)
         outcome = await mint_process.run_mint(
             request, workdir=workdir, on_frame=_on_frame(act),
@@ -291,6 +298,22 @@ async def build_cell(
         if outcome.report is not None and outcome.report.peak_vram_bytes:
             mint_budget.record_child_peak(
                 family, task.weight_lane, outcome.report.peak_vram_bytes)
+        if outcome.report is not None:
+            # pgw#848: the host half of the same loop. The pool has always
+            # measured `peak_child_rss_bytes` and put it in the phase table
+            # that rides `mint_phases`; nothing has ever read it, so every
+            # mint sized `mem_workers` off a 3 GiB constant. Banked on EVERY
+            # outcome, not just a minted one: an aborted mint's entries still
+            # peaked where they peaked, and the attempt that follows it is
+            # exactly the one that needs the fact.
+            try:
+                pool_block = (outcome.report.mint_phases or {}).get("pool")
+                peak_rss = int(
+                    (pool_block or {}).get("peak_child_rss_bytes") or 0)
+            except (TypeError, ValueError, AttributeError):
+                peak_rss = 0
+            mint_budget.record_entry_peak_rss(
+                family, task.weight_lane, peak_rss)
         if str(getattr(pending, "recipe", "")) == fleet_cells.RECIPE_AOT:
             _emit_aot_phases(outcome, family=family, lane=task.weight_lane)
         else:

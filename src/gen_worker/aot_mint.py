@@ -1361,6 +1361,7 @@ def mint(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
+    entry_peak_rss_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
@@ -1385,7 +1386,8 @@ def mint(
             pipeline, spec, out_dir,
             allow_regressed_lanes=allow_regressed_lanes,
             inductor_configs=inductor_configs,
-            entry_workers=entry_workers, progress=progress)
+            entry_workers=entry_workers,
+            entry_peak_rss_bytes=entry_peak_rss_bytes, progress=progress)
     except BaseException as exc:
         _attach_partial_phases(exc, progress)
         raise
@@ -1431,6 +1433,7 @@ def _mint_cell(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
+    entry_peak_rss_bytes: int = 0,
     progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
@@ -1504,7 +1507,14 @@ def _mint_cell(
     entry_count = len(rows)
     width = aot_compile_pool.entry_workers(
         entry_count, limit=int(entry_workers or 0),
-        device_bytes=_entry_device_bytes(spec))
+        device_bytes=_entry_device_bytes(spec),
+        # pgw#848: the HOST ask, measured on this pod by a previous mint of
+        # this (family, lane) and banked by the serving parent. Until this
+        # existed the argument was never passed at ALL, so `mem_workers`
+        # divided available RAM by a 3 GiB constant on every mint the fleet
+        # has run and `per_entry_rss_basis` said "default" forever. 0 keeps
+        # the constant, and keeps saying so.
+        peak_rss_bytes=int(entry_peak_rss_bytes or 0))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
     if width.underwidth:

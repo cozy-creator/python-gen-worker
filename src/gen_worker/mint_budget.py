@@ -60,6 +60,13 @@ _CUDA_CONTEXT_FLOOR_BYTES = 1 * _GIB
 #: next: the second ask on a pod is a fact, not this module's arithmetic.
 _CHILD_PEAKS: Dict[Tuple[str, str], int] = {}
 
+#: pgw#848: the same loop for the entry-compile pool's HOST ask, keyed the
+#: same way. Separate from ``_CHILD_PEAKS`` because they measure different
+#: processes on different resources: that one is the mint child's DEVICE
+#: peak, this one is ONE entry child's host high-water (interpreter + the
+#: compiler it runs), which is what bounds K.
+_ENTRY_RSS_PEAKS: Dict[Tuple[str, str], int] = {}
+
 
 def _gib(value: int) -> str:
     return f"{value / _GIB:.2f}GiB"
@@ -166,6 +173,34 @@ def child_peak(family: str, weight_lane: str) -> int:
     return _CHILD_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
 
 
+def record_entry_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> None:
+    """Bank one ENTRY child's measured HOST high-water for the next mint.
+
+    pgw#848: the device side of the pool's width has had this loop since
+    pgw#784 (``record_child_peak`` above); the host side never did.
+    ``aot_compile_pool.entry_workers`` was called with ``device_bytes=`` and
+    never with ``peak_rss_bytes=``, so ``mem_workers`` divided available RAM
+    by a 3 GiB CONSTANT on every mint the fleet has ever run and
+    ``per_entry_rss_basis`` read ``"default"`` forever — a field that exists
+    to distinguish a measured K from a guessed one, permanently pinned to
+    "guessed". The pool has measured the real figure the whole time
+    (``peak_child_rss_bytes`` in its ledger); nothing read it.
+
+    Monotone, for the same reason the device bank is: a mint that peaked
+    higher once can peak that high again, and an ask must not drift down on
+    a lucky run.
+    """
+    if peak_bytes <= 0:
+        return
+    key = (str(family or ""), str(weight_lane or ""))
+    _ENTRY_RSS_PEAKS[key] = max(_ENTRY_RSS_PEAKS.get(key, 0), int(peak_bytes))
+
+
+def entry_peak_rss(family: str, weight_lane: str) -> int:
+    """0 = never measured on this pod; the width falls back to its constant."""
+    return _ENTRY_RSS_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
+
+
 def co_residency(
     device: Optional[int] = None,
     *,
@@ -259,6 +294,8 @@ __all__ = [
     "child_peak",
     "co_residency",
     "device_of",
+    "entry_peak_rss",
     "probe",
     "record_child_peak",
+    "record_entry_peak_rss",
 ]

@@ -63,10 +63,29 @@ def _write(path: Path, report: EntryReport) -> None:
 
 
 def _peak_rss() -> int:
+    """This entry's host high-water — the interpreter AND the compiler it ran.
+
+    pgw#848, MEASURED: ``RUSAGE_SELF`` alone is not this entry's peak, it is
+    the peak of everything EXCEPT the peak. The real sdxl wrapper TU compiled
+    with the production flags on a quiet box peaks at **2.04 GiB in cc1plus**,
+    a process this interpreter never allocates a byte for — ``RUSAGE_SELF``
+    read 0.012 GiB across the same 177 s. The number feeds
+    ``aot_compile_pool.entry_workers(peak_rss_bytes=...)``, which bounds K, so
+    an instrument that cannot see the largest allocation in the entry is the
+    difference between a pool that fits and a pool the OOM killer sizes.
+
+    SUM, not max: the two overlap by construction — this process is holding
+    the loaded ``ExportedProgram`` and inductor's IR the whole time g++ runs,
+    which is precisely why the pair is what a concurrent slot must reserve.
+    ``RUSAGE_CHILDREN`` counts reaped children only, and every compiler
+    process is reaped by the time ``aot_compile`` returns.
+    """
     try:
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        me = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        kids = int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
     except (OSError, ValueError):
         return 0
+    return (me + kids) * 1024
 
 
 def _device_lock_wait_s() -> float:
