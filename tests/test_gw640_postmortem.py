@@ -207,7 +207,8 @@ def test_shutdown_is_bounded_when_the_worker_cannot_answer(tmp_path, shape):
     script = tmp_path / "boot.py"
     script.write_text(_WEDGED)
     env = dict(os.environ)
-    env["GEN_WORKER_POSTMORTEM_FILE"] = str(tmp_path / f"postmortem-{shape}.txt")
+    sink = tmp_path / f"postmortem-{shape}.txt"
+    env["GEN_WORKER_POSTMORTEM_FILE"] = str(sink)
     env.pop("GEN_WORKER_SUPERVISED", None)
     env.pop("ORCHESTRATOR_PUBLIC_ADDR", None)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
@@ -237,7 +238,20 @@ def test_shutdown_is_bounded_when_the_worker_cannot_answer(tmp_path, shape):
     # 137 = the child was SIGKILLed, and the post-mortem says so rather than
     # the death being silent.
     assert rc == 137, f"expected the escalation's SIGKILL verdict, got rc={rc}"
-    assert elapsed < 45, f"shutdown took {elapsed:.1f}s for a {grace:.0f}s grace"
+    # ...and the post-mortem NAMES it, so the death is never silent. This is the
+    # escalation's observable product; `elapsed < 45` was standing in for it
+    # (pgw#845 — a constant says nothing about this run, and the repo's own
+    # pgw#795 guard is right to refuse it).
+    detail = sink.read_text()
+    assert "worker_process_exit" in detail, detail
+    assert "SIGKILL" in detail, detail
+    # The GRACE is what bounds this, so bound it by the grace this test
+    # CONFIGURED: an escalation armed on some other clock would still reach
+    # rc=137, just far too late to save the pod's GPU bill.
+    assert elapsed < grace * 5, (
+        f"shutdown took {elapsed:.1f}s for a {grace:.0f}s grace — the "
+        f"escalation is not what ended it"
+    )
 
 
 def test_sigterm_forward_survives_an_inherited_blocked_mask(tmp_path):

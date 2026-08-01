@@ -670,11 +670,6 @@ _ELAPSED_ASSERT_BURNDOWN = {
     "test_mint_gate_pgw677.py",               # LOWER bounds on induced seed work
     "test_procsplit_pgw763.py",               # hang bound: cancel across the seam
                                               # << 3s against a 50ms handler poll
-    "test_gw640_postmortem.py",               # hang bound: shutdown << 45s for a
-                                              # named grace. OWNED by the gw#640
-                                              # lane while it lands the SIGTERM
-                                              # deadlock fix — anchor to `grace`
-                                              # there, not here
 }
 
 #: Fixtures in tests/harness/ that spend a fixed duration PRODUCING the stimulus
