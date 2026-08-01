@@ -123,8 +123,9 @@ def credentialed_split(tmp_path, captured_dials, monkeypatch, hub_http):
 def test_delta1_tenant_code_finds_no_worker_jwt_in_its_process(credentialed_split):
     """THE ATTACK: an endpoint handler reads the pod's signing identity.
 
-    It is one `os.environ["WORKER_JWT"]` away in a single-process worker, and
-    the deleted T_TOKEN frame used to re-deliver it on every rotation. The
+    It would be one `os.environ["WORKER_JWT"]` away in a worker that ran tenant
+    code in its control process, and the deleted T_TOKEN frame used to
+    re-deliver it on every rotation. The split takes that away. The
     handler sweeps all three routes — environment, loaded Settings, the
     transport object — and must come back with nothing.
     """

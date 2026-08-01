@@ -46,6 +46,19 @@
   `child_seal_s`. On the recorded run the unnamed residual is **4.8 %**, against
   44 % before.
 
+- **pgw#783 — the parent/child process split is now the ONLY worker execution
+  model; the `GEN_WORKER_PROCESS_SPLIT` flag is gone.** `entrypoint`
+  unconditionally becomes the control parent and execs one compute child per
+  execution group — there is no single-process mode to fall back to.
+  `split_enabled()`/`ENV_SPLIT` are removed from `procsplit`. G=1 behaviour is
+  byte-identical to the previous flag-on path. Re-landed on top of pgw#826
+  (the first landing, 79894b4, crash-looped a hardware-unsuitable pod forever
+  and was reverted out of the 0.85.0 cut): a compute child's terminal boot
+  verdict now ends the pod — T_BOOT_FATAL relays the typed HardwareUnsuitable
+  report through the parent's credential and the parent exits 1, no respawn —
+  and that machinery is exercised with the split always on. The boot-smoke
+  hardware-report suite asserts the split-world contract (child hands the
+  verdict to the parent; the parent's relay is what the report budget bounds).
 
 ## 0.86.0 (2026-08-01) — no mint route could publish a cell: the regional arm gets its caller, the delegated mint child gets its slots, eager serving names its reason, and the zero-based suite becomes a CI gate
 
