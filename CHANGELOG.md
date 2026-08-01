@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#808 — the zero-based suite is a CI gate.** `tests_v2/` shipped in 0.85.0 and `ci.yml`
+  ran `tests/` only, so its coverage was imaginary: nothing would have reddened if a v2
+  scenario broke. CI (and `task test`) now run both directories as two independent steps.
+  Both, not the flip: `tests_v2/` has 2 of its 14 planned suites, and nine behavior domains
+  have zero v2 coverage today, so `tests/` is still the net. The flip deletes the v1 step.
+
+  Wiring it found the drift on the first run, which is the argument in one line: pgw#810 (the
+  unknown-function refusal that sent an empty `safe_message`) was FIXED on chaos, and its
+  `xfail(strict=True)` — written to "fail loudly the moment it starts passing" — was never
+  deleted, because nothing ran the file it lived in. A strict xfail that XPASSes is a FAILURE,
+  so `tests_v2/` was already red and nobody could tell. Marker deleted; the refusal now rides
+  the names-its-cause loop with the rest of the matrix, and pgw#810 is closed.
+
 ## 0.85.0 (2026-07-31) — a regional cell's LoRA branch pair is BINDABLE: the ONE bind template, the mismatch refused before the compile is paid for, an aborted mint that reports where it spent, and the process split as the only execution model
 
 - **pgw#825 — a regional cell's LoRA branch pair is BINDABLE, the mismatch is

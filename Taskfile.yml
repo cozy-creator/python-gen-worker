@@ -39,11 +39,22 @@ tasks:
       - cmd: uv run python scripts/lint_http_timeouts.py
 
   test:
-    desc: Run tests
+    desc: Run tests (both suites, as CI does)
     # pgw#796 / TEST-SYSTEM-DESIGN.md §7: four workers, distributed by FILE so a
     # module/session fixture and everything that shares its process stay
     # together. Override with `task test WORKERS=1` to debug serially.
+    #
+    # pgw#808: `tests_v2/` runs as its own step, mirroring ci.yml — a suite CI
+    # gates on but `task test` skips is the same dead weight in a slower form.
     vars:
       WORKERS: '{{.WORKERS | default "4"}}'
     cmds:
       - uv run --extra dev pytest tests/ -n {{.WORKERS}} --dist loadfile
+      - uv run --extra dev pytest tests_v2/ -n {{.WORKERS}} --dist loadfile
+
+  test:v2:
+    desc: Run the zero-based suite only (pgw#808)
+    vars:
+      WORKERS: '{{.WORKERS | default "4"}}'
+    cmds:
+      - uv run --extra dev pytest tests_v2/ -n {{.WORKERS}} --dist loadfile

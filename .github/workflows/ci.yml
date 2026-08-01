@@ -73,8 +73,25 @@ jobs:
       # process. This is TEST-SYSTEM-DESIGN.md §7's wiring, finally landed.
       # `-v` is dropped: xdist's per-worker interleaving makes it unreadable,
       # and failures print in full either way.
-      - name: Run tests
+      - name: Run tests (v1)
         run: uv run pytest tests/ -n 4 --dist loadfile
+
+      # pgw#808: the zero-based suite, as its OWN gate.
+      #
+      # Both directories run for the whole transition, and the reason is
+      # coverage, not caution. `tests_v2/` has 2 of its 14 planned suites
+      # (`test_boot`, `test_dispatch`); nine behavior domains — fatal/crash,
+      # residency, CAS, lanes, adapters, JIT cells, AOT cells, convert, SDK
+      # and telemetry — have ZERO v2 coverage today and `tests/` is their only
+      # net. Flipping now would trade a real suite for a partial one.
+      #
+      # Two steps, not one invocation, deliberately: during a replacement the
+      # two suites are two distinct questions ("does the net still hold" /
+      # "is the replacement ready"), and a collection error in either must not
+      # erase the other's answer. The flip (pgw#808: point CI at `tests_v2/`,
+      # `git rm -r tests/`) deletes the step above and this comment with it.
+      - name: Run tests (v2, zero-based — pgw#808)
+        run: uv run pytest tests_v2/ -n 4 --dist loadfile
 
       - name: Build package
         run: uv build
