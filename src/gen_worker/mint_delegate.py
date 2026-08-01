@@ -39,6 +39,7 @@ from typing import Any, Dict, Optional, Tuple
 from . import activity as activity_mod
 from . import mint_budget
 from . import mint_process
+from . import progress as progress_mod
 from .mint_process import MintOutcome, MintRequest
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,39 @@ def _on_frame(act: Any) -> Any:
     return _apply
 
 
+def _on_evidence(act: Any) -> Any:
+    """pgw#824: the child's MEASURED progress, onto the parent's activity.
+
+    ``mint_process._observe`` has always sampled the child's own tree CPU plus
+    the growth of its capture directory, and ``run_mint`` has always accepted
+    an ``on_evidence`` callback for it — nobody ever passed one, so the number
+    existed only to decide whether to KILL the child, never to prove it was
+    working.
+
+    It is the better signal by a distance. ``activity.watchdog`` measures the
+    PARENT process (plus live children) and only proves the pod is alive;
+    capture-directory bytes are the artifact being built. Registering it as a
+    progress COUNTER means the hub's liveness rule judges an advancing number
+    rather than inferring health from a re-sent phase — which is what the
+    no-magic-timeouts doctrine asks for: liveness plus progress-staleness,
+    never a fixed duration. A silent multi-minute ``trace_graph`` now ticks.
+    """
+    # Telemetry never breaks the work it reports on: an Activity double that
+    # carries no counter registry still gets the heartbeat, which is the half
+    # the hub's liveness rule actually reads.
+    make = getattr(act, "counter", None)
+    counter = (
+        make("mint_child_evidence", progress_mod.UNIT_EVIDENCE)
+        if callable(make) else None)
+
+    def _apply(value: float) -> None:
+        if counter is not None:
+            counter.set_done(float(value))
+        act.heartbeat()
+
+    return _apply
+
+
 async def build_cell(
     task: MintTask,
     *,
@@ -251,7 +285,7 @@ async def build_cell(
         act.phase(activity_mod.PHASE_LOAD)
         outcome = await mint_process.run_mint(
             request, workdir=workdir, on_frame=_on_frame(act),
-            abandon=abandon)
+            on_evidence=_on_evidence(act), abandon=abandon)
         last = outcome.detail
 
         if outcome.report is not None and outcome.report.peak_vram_bytes:

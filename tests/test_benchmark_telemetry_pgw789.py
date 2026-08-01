@@ -90,7 +90,13 @@ def test_job_metrics_carry_the_serving_dimensions_on_the_wire() -> None:
     assert m.serving_mode == serving_mode.MODE_EAGER
     assert m.served_cell_ref == ""
     assert m.served_eager_fallback is False
-    assert m.fallback_reason == ""
+    # pgw#824: and neither may the REASON be an empty string. "" here was the
+    # same ambiguity one level down — it could not tell "this release declares
+    # no compile target, eager is the contract" from "the mint is still
+    # running" from "the mint was declined for cause". `served_eager_fallback`
+    # stays False because nothing fell back: there was nothing to fall back
+    # FROM, which is precisely what this token says.
+    assert m.fallback_reason == serving_mode.POSTURE_NO_COMPILE_DECLARED
     # The executed shape, defaults applied: steps+width came from the payload,
     # height from the struct default — because the DEFAULT is what executed.
     assert m.steps == 28
