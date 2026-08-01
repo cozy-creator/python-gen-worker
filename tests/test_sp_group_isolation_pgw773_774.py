@@ -351,15 +351,17 @@ def test_executor_close_sequence_group_runs_off_the_event_loop() -> None:
     rec = _ClassRecord(cls=object)
     rec.sp_runtime = _SlowRuntime()
 
-    async def _drive() -> float:
-        t0 = time.monotonic()
+    async def _drive() -> bool:
         ex._close_sequence_group(rec)
+        # pgw#795: the property is that the call RETURNED without waiting for
+        # the 0.5s close — proven by the close still being in flight when it
+        # did, not by an elapsed-time budget that asserts the runner instead.
+        returned_early = not closed.is_set()
         # The loop must stay responsive while close() runs elsewhere.
         await asyncio.sleep(0.05)
-        return time.monotonic() - t0
+        return returned_early
 
-    elapsed = asyncio.run(_drive())
-    assert elapsed < 0.4, f"close blocked the loop for {elapsed:.2f}s"
+    assert asyncio.run(_drive()), "close blocked the loop until it finished"
     assert closed.wait(5)
     assert loop_thread["thread"].name.startswith("sp-close")
     assert rec.sp_runtime is None

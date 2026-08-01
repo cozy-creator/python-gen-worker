@@ -12,7 +12,8 @@ Behaviour is chosen with ``MINT_STUB_MODE``:
 ``refused``     write a refusal report, exit 2
 ``resource``    write a resource report, exit 3
 ``bad_request`` exit 4
-``crash``       exit 1 with stderr noise and no report
+``crash``       exit 1 with stderr noise and no report (UNCLASSIFIED death)
+``failed``      exit 1 having written a ``status="failed"`` report (classified)
 ``sigkill``     SIGKILL itself
 ``busy``        burn CPU for MINT_STUB_SECONDS, then mint
 ``silent``      sleep for MINT_STUB_SECONDS doing nothing at all
@@ -64,6 +65,18 @@ def main() -> int:
         return 4
     if mode == "crash":
         sys.stderr.write("stub child exploded\n")
+        return 1
+    if mode == "failed":
+        # pgw#816: what the REAL child does when its own mint raises — it
+        # catches, classifies, names the exception and exits 1. Distinct from
+        # `crash` (which dies without a report) because the retry policy turns
+        # on exactly that distinction.
+        sys.stderr.write("stub child: classified failure\n")
+        _report(request, MintReport(
+            status="failed", phase="load",
+            detail="OSError: Error no file named config.json found in "
+                   "directory /tmp/tensorhub-cache/cas/snapshots/sha256:"
+                   "32fa2ba6__x76b2ae62d32f"))
         return 1
     if mode == "refused":
         _report(request, MintReport(

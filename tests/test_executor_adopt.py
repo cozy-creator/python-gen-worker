@@ -1469,6 +1469,11 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
     pack THAT capture, advertise its real digest, and publish those exact
     bytes. Reverting finalize back into the arm path (mint-then-prove)
     turns this red: the publish would happen before the warmup."""
+    # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
+    # miss delegates by default. This rig has no child process — it exists
+    # to cover the IN-PROCESS capture, which is what this switch selects
+    # (mint_delegate.ENV_IN_PROCESS, the documented red-verify knob).
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     import gen_worker.executor as executor_mod
     from gen_worker import fleet_cells
 
@@ -1595,6 +1600,11 @@ def test_pending_self_mint_unproven_fails_closed_and_never_publishes(
     advertise nothing, publish NOTHING, and abandon the capture. If packing
     or publishing ever moves ahead of the proof again, the publish below
     fires and this test goes red."""
+    # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
+    # miss delegates by default. This rig has no child process — it exists
+    # to cover the IN-PROCESS capture, which is what this switch selects
+    # (mint_delegate.ENV_IN_PROCESS, the documented red-verify knob).
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     import gen_worker.executor as executor_mod
     from gen_worker import fleet_cells
 
@@ -3918,6 +3928,11 @@ def test_two_lane_mint_with_unexercised_sibling_completes_and_withholds_publish(
     gw#607 per-object proof (gw#611 qwen variant, hits=1/misses=1).
     Publish must be WITHHELD, typed and loud, while the boot itself still
     reaches READY and advertises both targets under the minted identity."""
+    # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
+    # miss delegates by default. This rig has no child process — it exists
+    # to cover the IN-PROCESS capture, which is what this switch selects
+    # (mint_delegate.ENV_IN_PROCESS, the documented red-verify knob).
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     from gen_worker import fleet_cells
 
     class _Pub(fleet_cells.CellPublisher):
@@ -3965,6 +3980,11 @@ def test_two_lane_mint_fully_exercised_publishes_the_union_cell(
 ):
     """Coverage-complete counterpart: when the warmup exercises BOTH lanes,
     the packed cell holds the union and the publish gate ships it once."""
+    # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
+    # miss delegates by default. This rig has no child process — it exists
+    # to cover the IN-PROCESS capture, which is what this switch selects
+    # (mint_delegate.ENV_IN_PROCESS, the documented red-verify knob).
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     import threading as _threading
 
     from gen_worker import fleet_cells
@@ -4110,6 +4130,11 @@ def test_routed_two_lane_mint_synthesized_media_coverage_publishes_union(
     edit pipe records calls=0, publish is WITHHELD, and qwen self-mints on
     every boot forever. The synthesized media-variant forward must exercise
     the edit lane at mint so the union cell publishes once, complete."""
+    # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
+    # miss delegates by default. This rig has no child process — it exists
+    # to cover the IN-PROCESS capture, which is what this switch selects
+    # (mint_delegate.ENV_IN_PROCESS, the documented red-verify knob).
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     import io
     import tarfile
     import threading as _threading

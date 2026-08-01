@@ -13,13 +13,13 @@ import logging
 import time
 from typing import Callable, Optional, Tuple
 
-import requests
-
 from . import activity as activity_mod
+from .procsplit import broker
 from .request_context import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
 
+RENEW_PATH = "/v1/worker/capability/renew"
 RENEW_FRACTION = 0.8
 _MIN_SLEEP_S = 1.0
 _TRANSIENT_RETRIES = 3
@@ -44,10 +44,15 @@ def renew_once(
     ``RuntimeError`` on transient failures (5xx / malformed response).
     """
 
-    url = f"{file_base_url.rstrip('/')}/v1/worker/capability/renew"
-    resp = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {worker_jwt}"},
+    # pgw#763 delta 1: under the process split this runs in the compute child,
+    # which holds no worker JWT — the parent performs the renewal (it also
+    # proves the request is one it dispatched) and returns only the new token.
+    # Off the split, this is the same POST it always was.
+    resp = broker.request(
+        "POST",
+        RENEW_PATH,
+        base_url=file_base_url,
+        bearer=worker_jwt,
         json={
             "request_id": request_id,
             "attempt": int(attempt),

@@ -1050,17 +1050,33 @@ class Snapshot(_message.Message):
     files: _containers.RepeatedCompositeFieldContainer[SnapshotFile]
     def __init__(self, digest: _Optional[str] = ..., files: _Optional[_Iterable[_Union[SnapshotFile, _Mapping]]] = ...) -> None: ...
 
+class ChunkRef(_message.Message):
+    __slots__ = ("sha256", "url", "len")
+    SHA256_FIELD_NUMBER: _ClassVar[int]
+    URL_FIELD_NUMBER: _ClassVar[int]
+    LEN_FIELD_NUMBER: _ClassVar[int]
+    sha256: str
+    url: str
+    len: int
+    def __init__(self, sha256: _Optional[str] = ..., url: _Optional[str] = ..., len: _Optional[int] = ...) -> None: ...
+
 class SnapshotFile(_message.Message):
-    __slots__ = ("path", "size_bytes", "blake3", "url")
+    __slots__ = ("path", "size_bytes", "blake3", "url", "digest", "chunk_size_bytes", "chunks")
     PATH_FIELD_NUMBER: _ClassVar[int]
     SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
     BLAKE3_FIELD_NUMBER: _ClassVar[int]
     URL_FIELD_NUMBER: _ClassVar[int]
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    CHUNK_SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    CHUNKS_FIELD_NUMBER: _ClassVar[int]
     path: str
     size_bytes: int
     blake3: str
     url: str
-    def __init__(self, path: _Optional[str] = ..., size_bytes: _Optional[int] = ..., blake3: _Optional[str] = ..., url: _Optional[str] = ...) -> None: ...
+    digest: str
+    chunk_size_bytes: int
+    chunks: _containers.RepeatedCompositeFieldContainer[ChunkRef]
+    def __init__(self, path: _Optional[str] = ..., size_bytes: _Optional[int] = ..., blake3: _Optional[str] = ..., url: _Optional[str] = ..., digest: _Optional[str] = ..., chunk_size_bytes: _Optional[int] = ..., chunks: _Optional[_Iterable[_Union[ChunkRef, _Mapping]]] = ...) -> None: ...
 
 class JobAccepted(_message.Message):
     __slots__ = ("request_id", "attempt")

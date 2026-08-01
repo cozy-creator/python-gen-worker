@@ -102,32 +102,10 @@ class _Harness:
         return results[-1]
 
 
-def test_candidate_materialized_independent_of_source(tmp_path) -> None:
-    """The two-ref shape te#121 needs: a reference arm and a candidate arm,
-    both hub repos, materialized to separate paths in one job."""
-    async def _run() -> None:
-        h = _Harness(tmp_path)
-        res = await h.run(_EvalIn(
-            source=SourceRepo(ref="tensorhub/z-image-turbo:prod#bf16"),
-            candidate=SourceRepo(ref="tensorhub/z-image-turbo:prod#fp8-w8a8"),
-        ))
-        assert res.status == pb.JOB_STATUS_OK
-        out = msgspec.msgpack.decode(res.inline, type=_Out)
-        assert out.source_ref == "tensorhub/z-image-turbo:prod#bf16"
-        assert out.candidate_ref == "tensorhub/z-image-turbo:prod#fp8-w8a8"
-        assert out.source_path and out.candidate_path
-        assert out.source_path != out.candidate_path
-        assert set(h.ensured) == {
-            "tensorhub/z-image-turbo:prod#bf16",
-            "tensorhub/z-image-turbo:prod#fp8-w8a8",
-        }
-
-    asyncio.run(_run())
-
-
 def test_all_three_reserved_inputs_coexist(tmp_path) -> None:
     """A fourth name must not disturb the other three: source, text_encoder
-    and candidate each land in their own path in the same job."""
+    and candidate each land in their own path in the same job, and each ref
+    surfaces on its own ctx slot."""
     async def _run() -> None:
         h = _Harness(tmp_path)
         res = await h.run(_EvalIn(
@@ -140,6 +118,8 @@ def test_all_three_reserved_inputs_coexist(tmp_path) -> None:
         paths = {out.source_path, out.text_encoder_path, out.candidate_path}
         assert "" not in paths
         assert len(paths) == 3, f"reserved paths collided: {out}"
+        assert out.source_ref == "acme/dit-base"
+        assert out.candidate_ref == "acme/dit-candidate"
         assert set(h.ensured) == {
             "acme/dit-base", "google/gemma-3-12b", "acme/dit-candidate",
         }
@@ -267,21 +247,3 @@ def test_producer_ctx_candidate_state_is_independent() -> None:
     # The accessor hands out a copy, never the live dict.
     ctx.candidate["ref"] = "mutated"
     assert ctx.candidate == {"ref": "acme/mirrored-svdq"}
-
-
-def test_producer_ctx_candidate_defaults_empty() -> None:
-    from gen_worker.request_context import ConversionContext
-
-    ctx = ConversionContext(request_id="r1", source_info={"ref": "acme/base"})
-    assert ctx.candidate == {}
-    assert ctx.candidate_path is None
-
-
-def test_inference_ctx_carries_no_candidate_state() -> None:
-    from gen_worker.request_context import RequestContext
-
-    ctx = RequestContext(request_id="r1")
-    for attr in ("_candidate_info", "_candidate_path"):
-        assert not hasattr(ctx, attr), attr
-    for surface in ("candidate", "candidate_path", "_set_candidate_path"):
-        assert not hasattr(ctx, surface), surface

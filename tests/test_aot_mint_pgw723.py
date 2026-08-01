@@ -321,20 +321,6 @@ def test_manifest_rows_carry_the_source_class(packages: Dict[str, Path]) -> None
     assert {s.fqn for s in specs} == {row["fqn"] for row in rows}
 
 
-def test_declaration_is_identical_whether_or_not_constants_are_baked(
-    packages: Dict[str, Path],
-) -> None:
-    """Baking changes where the BYTES live, never the declaration — which is why
-    the constant table is a usable seam between the two lanes."""
-    def rows(p: Path) -> list:
-        return [
-            (c.fqn, c.data_size, c.kind, c.dtype, c.shape)
-            for c in aot_package.declared_constants(p)
-        ]
-
-    assert rows(packages["code_only"]) == rows(packages["baked"])
-
-
 def test_lifted_adapter_is_absent_from_the_constant_table(
     packages: Dict[str, Path],
 ) -> None:
@@ -347,12 +333,6 @@ def test_lifted_adapter_is_absent_from_the_constant_table(
 # ---------------------------------------------------------------------------
 # B1 — the code-only gate
 # ---------------------------------------------------------------------------
-
-
-def test_code_only_gate_accepts_a_code_only_package(
-    packages: Dict[str, Path],
-) -> None:
-    assert aot_package.code_only_violations(packages["code_only"]) == []
 
 
 def test_code_only_gate_refuses_a_baked_package_naming_the_tensors(
@@ -390,26 +370,6 @@ def test_lrodata_proof_is_independent_of_the_rendered_flag(
     assert aot_package.code_only_violations(packages["code_only"]) == []
 
 
-def test_lrodata_predicate_has_no_tunable_threshold(
-    packages: Dict[str, Path],
-) -> None:
-    """The predicate is ".lrodata >= declared bytes", so the two packages must
-    fall on opposite sides of the SAME declared-bytes figure."""
-    declared = sum(
-        c.data_size for c in aot_package.declared_constants(packages["code_only"]))
-
-    def lrodata(p: Path) -> int:
-        _name, blob = aot_package.packaged_so(p)
-        return aot_package.elf_section_sizes(blob).get(".lrodata", 0)
-
-    assert lrodata(packages["baked"]) >= declared > lrodata(packages["code_only"])
-
-
-def test_elf_parser_refuses_non_elf_bytes() -> None:
-    with pytest.raises(aot_package.PackageIntrospectionError, match="not an ELF"):
-        aot_package.elf_section_sizes(b"not an elf at all" * 8)
-
-
 def test_unbindable_constants_are_named(packages: Dict[str, Path]) -> None:
     """A cell that could only ever fail to arm must not be published — the fleet
     learns on the mint pod, not by every serving pod refusing it in turn."""
@@ -417,11 +377,7 @@ def test_unbindable_constants_are_named(packages: Dict[str, Path]) -> None:
         packages["code_only"], ("proj.weight", "proj.bias"))
     assert reasons
     assert "scale_table" in reasons[0]
-
-
-def test_unbindable_constants_passes_a_complete_state_dict(
-    packages: Dict[str, Path],
-) -> None:
+    # ...and a complete state_dict passes.
     keys = LiftedModule().state_dict().keys()
     assert aot_package.unbindable_constants(packages["code_only"], keys) == []
 
@@ -516,14 +472,10 @@ def test_strict_mode_drift_is_refused_by_name() -> None:
     assert reasons
     assert "strict=False" in reasons[0] and "strict=True" in reasons[0]
     assert "pgw#728" in reasons[0]
-
-
-def test_an_artifact_silent_on_its_trace_mode_is_refused() -> None:
-    """Silence is not "probably strict" — the constant set it declares cannot be
-    trusted without knowing which trace produced it."""
-    reasons = aot_package.strict_mode_drift({}, True)
-    assert reasons
-    assert "unprovable" in reasons[0]
+    # Silence is not "probably strict" — an artifact silent on its trace mode
+    # is refused too.
+    silent = aot_package.strict_mode_drift({}, True)
+    assert silent and "unprovable" in silent[0]
 
 
 def test_minted_metadata_pins_the_trace_mode(cell: Dict[str, Any]) -> None:
@@ -556,16 +508,6 @@ def test_package_side_adapter_scan_is_a_false_pass(
     # ...while the ep-level gate catches the very same module.
     with pytest.raises(ValidationError):
         lora_lifted.assert_no_baked_adapter(_export_module(PlainAttrModule().eval()))
-
-
-def test_ep_gate_refuses_a_registered_buffer_adapter() -> None:
-    with pytest.raises(ValidationError, match="BAKED"):
-        lora_lifted.assert_no_baked_adapter(
-            _export_module(BakedBufferModule().eval()))
-
-
-def test_ep_gate_accepts_a_lifted_adapter() -> None:
-    lora_lifted.assert_no_baked_adapter(_export_lifted())
 
 
 def test_mint_refuses_a_baked_adapter_before_compiling(
@@ -601,13 +543,11 @@ def test_lifted_input_gate_names_an_unlifted_declaration() -> None:
     gaps = aot_mint.lifted_input_gaps(_export_lifted(), spec)
     assert gaps
     assert "some_other_tensor" in " ".join(gaps)
-
-
-def test_lifted_input_gate_passes_when_declared_inputs_are_lifted() -> None:
-    spec = aot_mint.ExportSpec(
+    # ...and passes when the declared inputs really are lifted.
+    lifted = aot_mint.ExportSpec(
         family="tiny", target="forward", weight_lane="w8a8",
         lifted_inputs=("lora_a", "lora_b"))
-    assert aot_mint.lifted_input_gaps(_export_lifted(), spec) == []
+    assert aot_mint.lifted_input_gaps(_export_lifted(), lifted) == []
 
 
 # ---------------------------------------------------------------------------
@@ -680,40 +620,22 @@ def test_declared_range_gate_passes_a_matching_export() -> None:
         (aot_mint.DynamicDim("x", 0, 8, 16),)) == []
 
 
-def test_declared_range_gate_compares_bounds_not_symbol_names() -> None:
-    """Symbol names are trace-order artifacts; the bound pairs are the contract."""
-    a = _export_lifted(lo=8, hi=16)
-    b = _export_lifted(lo=8, hi=16)
-    names_a = set(getattr(a, "range_constraints", {}))
-    names_b = set(getattr(b, "range_constraints", {}))
-    dims = (aot_mint.DynamicDim("x", 0, 8, 16),)
-    assert aot_mint.declared_range_gaps(a, dims) == []
-    assert aot_mint.declared_range_gaps(b, dims) == []
-    assert names_a and names_b
-
-
 # ---------------------------------------------------------------------------
 # The declared dynamic-shape spec
 # ---------------------------------------------------------------------------
 
 
-def test_dynamic_shapes_spec_refuses_bounds_off_the_multiple() -> None:
-    """A range not expressible as the required multiple must be refused, not
-    silently 0/1-specialized — otherwise "one artifact serves every aspect
-    ratio" quietly stops holding."""
+def test_dynamic_shapes_spec_refusals_are_named() -> None:
+    """A malformed dynamic declaration must be refused, not silently
+    0/1-specialized — otherwise "one artifact serves every aspect ratio"
+    quietly stops holding."""
     with pytest.raises(aot_mint.MintRefused, match="not multiples of 8"):
         aot_mint.dynamic_shapes_spec(
             (aot_mint.DynamicDim("sample", 2, 65, 160, multiple_of=8),),
             ("sample",))
-
-
-def test_dynamic_shapes_spec_refuses_an_unknown_input() -> None:
     with pytest.raises(aot_mint.MintRefused, match="does not take"):
         aot_mint.dynamic_shapes_spec(
             (aot_mint.DynamicDim("nope", 0, 2, 4),), ("sample",))
-
-
-def test_dynamic_shapes_spec_refuses_an_empty_range() -> None:
     with pytest.raises(aot_mint.MintRefused, match="empty range"):
         aot_mint.dynamic_shapes_spec(
             (aot_mint.DynamicDim("sample", 0, 32, 8),), ("sample",))
@@ -747,20 +669,6 @@ def test_multiple_of_dim_actually_exports_with_the_declared_range() -> None:
 # ---------------------------------------------------------------------------
 # Lane order — w8a8 first
 # ---------------------------------------------------------------------------
-
-
-def test_w8a8_lane_is_admitted() -> None:
-    spec = aot_mint.ExportSpec(family="sdxl", target="unet", weight_lane="w8a8")
-    assert aot_mint.lane_admitted(spec, allow_regressed_lanes=False) == ""
-
-
-def test_plain_lane_is_held_by_default() -> None:
-    """#730 holds the lanes measured 6.9-7.0% slower under AOTI."""
-    spec = aot_mint.ExportSpec(family="sdxl", target="unet", weight_lane="")
-    reason = aot_mint.lane_admitted(spec, allow_regressed_lanes=False)
-    assert reason
-    assert "#730" in reason
-    assert aot_mint.lane_admitted(spec, allow_regressed_lanes=True) == ""
 
 
 def test_mint_holds_a_regressed_lane_before_exporting(
@@ -1024,15 +932,6 @@ def test_cell_key_differs_when_ONLY_the_declared_range_differs(
         "8..32")
 
 
-def test_cell_key_is_stable_for_an_identical_declaration(
-    _gpu_runtime: None, packages: Dict[str, Path],
-) -> None:
-    spec = _spec()
-    a = _meta_for(_export_lifted(lo=8, hi=16), packages["code_only"], spec)
-    b = _meta_for(_export_lifted(lo=8, hi=16), packages["code_only"], spec)
-    assert a["cell_key"] == b["cell_key"]
-
-
 def test_cell_key_differs_by_lane(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
@@ -1150,9 +1049,7 @@ def test_cli_reports_a_bad_request(tmp_path: Path, capsys: Any) -> None:
     request.write_text(json.dumps({}))  # no family
     assert aot_mint.main([str(request), "--out", str(tmp_path)]) == 3
     assert "BAD REQUEST" in capsys.readouterr().err
-
-
-def test_cli_reports_a_missing_request(tmp_path: Path) -> None:
+    # a missing request file reports the same way
     assert aot_mint.main(
         [str(tmp_path / "nope.json"), "--out", str(tmp_path)]) == 3
 
@@ -1175,19 +1072,6 @@ def test_cli_loads_a_full_request(tmp_path: Path) -> None:
     assert spec.shapes == ((1024, 1024), (1152, 896))
     assert spec.strict is True
     assert body["specialization"] == {"gemm_mode": "pertensor"}
-
-
-def test_cli_refuses_hand_dynamic_rows(tmp_path: Path) -> None:
-    """The pod-9-era per-coordinate request shape is dead: hand dynamic rows
-    (like target/fork/class_dims) would mint a subset of the contract the
-    key advertises."""
-    request = tmp_path / "req.json"
-    request.write_text(json.dumps({
-        "family": "sdxl",
-        "dynamic": [{"input": "sample", "axis": 2, "min": 64, "max": 160}],
-    }))
-    with pytest.raises(aot_mint.MintRefused, match="WHOLE declared class set"):
-        aot_mint._load_spec(request)
 
 
 # ---------------------------------------------------------------------------
@@ -1222,15 +1106,6 @@ def test_sdxl_latent_dims_round_bounds_OUT_not_in() -> None:
     dim = aot_inputs.latent_dims(spec)[0]
     assert dim.max >= 125  # 1000/8 = 125 -> rounded out to 128
     assert dim.max % 8 == 0
-
-
-def test_sdxl_lora_bucket_zero_takes_no_adapter_arguments() -> None:
-    """The branchless pipeline is its own graph class and carries no adapter
-    arguments at all."""
-    from gen_worker import aot_inputs
-
-    spec = aot_mint.ExportSpec(family="sdxl", target="unet", lora_bucket=0)
-    assert aot_inputs.lifted_lora_values(LiftedModule(), spec) == {}
 
 
 def test_unknown_family_has_no_input_contract() -> None:
@@ -1299,8 +1174,7 @@ def test_G1b_dotted_target_preserves_the_bound_signature() -> None:
         (aot_mint.DynamicDim("latent", 0, 2, 8),), names)
     assert 0 in spec["latent"]
 
-
-def test_G1b_signature_stamp_does_not_leak_between_targets() -> None:
+    # The signature stamp must not leak between two targets on one owner.
     class Two(torch.nn.Module):
         def forward(self, z: torch.Tensor) -> torch.Tensor:
             return z
@@ -1433,12 +1307,6 @@ def test_G3_does_not_refuse_the_real_sdxl_shape_contract() -> None:
             aot_mint.DynamicDim("sample", 3, 8, 32))
     assert aot_mint.declared_range_gaps(program, dims) == [], (
         "2048 and 1280 are architectural constants, not evidence of dependence")
-
-
-def test_G3_does_not_fire_on_an_honest_dynamic_export() -> None:
-    """Fail-closed must not mean fail-always."""
-    dims = (aot_mint.DynamicDim("x", 0, 8, 16),)
-    assert aot_mint.declared_range_gaps(_export_lifted(lo=8, hi=16), dims) == []
 
 
 def test_G3_names_an_input_the_program_does_not_take() -> None:

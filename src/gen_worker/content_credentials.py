@@ -374,13 +374,21 @@ def _hub_sign_claim(remote: _RemoteSigner, alg: str, claim: bytes) -> bytes:
     never the media. Any refusal raises, so the request fails instead of
     shipping an asset with a missing or bogus manifest.
     """
-    import requests
+    # pgw#763 delta 5: under the process split this callback runs in the compute
+    # child, which holds no worker JWT — so the ASK is a parent-side IPC action.
+    # The child sends a hash (the COSE to-be-signed octets) and gets a signature
+    # back; the credential that authorizes the oracle, like the key behind it,
+    # is somewhere this process cannot reach. `broker.request` is the same POST
+    # off the split, so there is one code path either way.
+    from .procsplit import broker
 
     try:
-        resp = requests.post(
-            remote.base_url + SIGN_PATH,
+        resp = broker.request(
+            "POST",
+            SIGN_PATH,
+            base_url=remote.base_url,
+            bearer=remote.worker_jwt(),
             json={"alg": alg, "claim_b64": base64.b64encode(claim).decode()},
-            headers={"Authorization": f"Bearer {remote.worker_jwt()}"},
             timeout=_SIGN_TIMEOUT_S,
         )
     except Exception as e:

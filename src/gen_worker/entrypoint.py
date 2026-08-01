@@ -34,10 +34,25 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # compile-worker subprocess. See compile_cache._disable_aot_autograd_cache.
 os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
 
+# pgw#763: with GEN_WORKER_PROCESS_SPLIT=1 this process becomes the CONTROL
+# PARENT — gRPC stream, identity, JWT, child supervision — and must run BEFORE
+# the heavy imports below so it never loads torch. It spawns/respawns compute
+# children (this same entrypoint with GEN_WORKER_COMPUTE_CHILD=1) and only
+# ever exits deliberately.
+if __name__ == "__main__":
+    from .procsplit import is_compute_child, split_enabled  # noqa: E402
+
+    if split_enabled() and not is_compute_child():
+        from .procsplit.parent import run_parent  # noqa: E402
+
+        os._exit(run_parent())
+
 # gw#640: fork the supervisor BEFORE the heavy imports below. The parent stays
 # a bare interpreter (so the OOM killer picks the fat child, not the reporter)
 # and outlives the worker to report WTERMSIG / cgroup oom_kill over the wire.
 # In the child this returns immediately; the parent never returns from it.
+# (In split mode the compute child skips this: the control parent IS the
+# survivor, and it sets GEN_WORKER_SUPERVISOR=0 in the child's env.)
 if __name__ == "__main__":
     from .supervisor import supervise  # noqa: E402
 
@@ -267,7 +282,47 @@ def _establish_env_seal() -> Dict[str, Any]:
         config=seal.get("config"),
     )
     _impose_group_host_policy()
+    _isolate_group_inductor_cache()
     return seal
+
+
+def _isolate_group_inductor_cache() -> None:
+    """pgw#783: give each compute child its OWN inductor + triton cache dir when
+    G children share this pod, so concurrent minting/compilation does not race a
+    process-global cache dir.
+
+    Set AFTER the seal — env_seal scrubs the whole ``TORCH*``/``TRITON*``
+    namespace at boot, and the sanctioned window to point the SDK's own capture
+    redirects is after that scrub (same as cell ``capture_env``). A per-group
+    PATH is plumbing, not a behaviour flag, so it does not touch the ck4 seal
+    digest or minted kernels (inductor keys are content-addressed).
+
+    Gated on ``host_siblings() > 1``: a single child (or no split) keeps torch's
+    default dir untouched — byte-identical to today. A respawned child of the
+    same group reuses its group dir, so cache hits survive a respawn.
+    """
+    import tempfile
+
+    from .procsplit import group_ordinal, host_siblings
+
+    if host_siblings() <= 1:
+        return
+    ordinal = group_ordinal()
+    base = (os.environ.get("TENSORHUB_CACHE_DIR") or tempfile.gettempdir())
+    root = os.path.join(base, "gen-worker-inductor", f"g{ordinal}")
+    try:
+        for sub, var in (("inductor", "TORCHINDUCTOR_CACHE_DIR"),
+                         ("triton", "TRITON_CACHE_DIR")):
+            d = os.path.join(root, sub)
+            os.makedirs(d, exist_ok=True)
+            os.environ[var] = d
+    except OSError:
+        logger.warning("could not isolate the group inductor cache under %s; "
+                       "the child keeps the shared default", root, exc_info=True)
+        return
+    _log_startup_phase(
+        "group_inductor_isolation", status="ok", ordinal=ordinal, root=root,
+    )
 
 
 def _impose_group_host_policy() -> None:

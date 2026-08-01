@@ -214,6 +214,13 @@ class _WarmJob:
     device: Optional[int]
     grad_mode: str  # "grad" | "no_grad" | "inference"
     autocast_dtype: Optional[Any]
+    # The requesting thread's intra-op thread count. Dynamo's GLOBAL_STATE
+    # guard snapshots torch.get_num_threads() on the COMPILING thread, and
+    # the OpenMP ICV is per-thread once lazy-initialized — so an entry
+    # compiled on the warm thread with a diverged value can never serve the
+    # requesting thread (every heal would be dead, sigs would go volatile).
+    # The warm compile imposes this value first, like grad/autocast.
+    num_threads: Optional[int] = None
     # pgw#677: the executor's background GPU turn — the compile executes
     # ONLY inside it (yields to tenant demand; mutually exclusive with
     # tenant forwards on the owning instance). None = ungated legacy.
@@ -371,7 +378,8 @@ class Router:
                 router=self, label=label, sig=sig, compiled=compiled,
                 args=_dummy_value(args), kwargs=_dummy_value(kwargs),
                 device=device, grad_mode=_grad_mode(),
-                autocast_dtype=_autocast_dtype(), turn=turn,
+                autocast_dtype=_autocast_dtype(),
+                num_threads=_num_threads(), turn=turn,
             )
         except Exception:
             with self.lock:
@@ -456,7 +464,7 @@ class Router:
                 args=_dummy_value(args), kwargs=_dummy_value(kwargs),
                 device=_first_cuda_device(args, kwargs),
                 grad_mode=_grad_mode(), autocast_dtype=_autocast_dtype(),
-                turn=turn,
+                num_threads=_num_threads(), turn=turn,
             )
         except Exception:
             logger.warning(
@@ -512,6 +520,15 @@ def _autocast_dtype() -> Optional[Any]:
     except Exception:
         pass
     return None
+
+
+def _num_threads() -> Optional[int]:
+    try:
+        import torch
+
+        return int(torch.get_num_threads())
+    except Exception:
+        return None
 
 
 def _submit(job: _WarmJob) -> bool:
@@ -635,6 +652,14 @@ def _run_warm_compile(job: _WarmJob) -> None:
         with contextlib.ExitStack() as stack:
             import torch
 
+            # Align this thread's intra-op count with the requesting
+            # thread's BEFORE compiling: the entry's GLOBAL_STATE guard
+            # snapshots the compiling thread's value, and a mismatch makes
+            # the entry unservable from every serving thread (the CI-only
+            # heal-never-converges failure of test_guard_miss_pgw680).
+            if (job.num_threads is not None
+                    and job.num_threads != torch.get_num_threads()):
+                torch.set_num_threads(job.num_threads)
             if job.grad_mode == "inference":
                 stack.enter_context(torch.inference_mode())
             elif job.grad_mode == "no_grad":

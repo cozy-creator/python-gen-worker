@@ -1,18 +1,14 @@
-"""Three defects the SDK genericity audit found (pgw#740).
+"""Two defects the SDK genericity audit found (pgw#740).
 
-None of these is a migration — they are bugs that per-family hardcoding caused:
+(The third — detection/converter signature divergence routing SDXL to the
+SD1.5 converter — is pinned generically in tests/test_repack_engine_pgw740.py:
+detection and the guard both read the ONE declared signature, dual-encoder
+trees are refused by single-encoder converters and vice versa.)
 
-1. `repackage.detect_diffusers_family` routed the SDXL two-text-encoder
-   signature to the SD1.5 converter, silently. Held shut only by an unrelated
-   allowlist in `clone.py`, while the function is publicly exported.
-   The #740 migration then made it structurally impossible: detection and the
-   guard both read the ONE signature in the family's declaration, so the two
-   cannot disagree. Section 1 below now registers those declarations the way an
-   endpoint does — the SDK itself no longer knows what "sdxl" is.
-2. `utils/lora._denoiser_fingerprint` digested UNet-only config fields, so every
+1. `utils/lora._denoiser_fingerprint` digested UNet-only config fields, so every
    DiT fingerprinted to `"|||"` — a normalized-split cache COLLISION between
    structurally different transformers.
-3. `models/memory`'s group-offload loop iterated a fixed component list, so
+2. `models/memory`'s group-offload loop iterated a fixed component list, so
    Wan's `transformer_2` and LTX's `connectors` were never offloaded — silently
    resident, with the caller believing otherwise.
 """
@@ -25,93 +21,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker.convert import registry, repackage  # noqa: E402
-from gen_worker.convert.repack_spec import (  # noqa: E402
-    ComponentRepack,
-    LayoutSignature,
-    RepackVariant,
-    RepackageFamily,
-)
 from gen_worker.models import memory  # noqa: E402
 from gen_worker.utils import lora as lora_util  # noqa: E402
 
 
 # --------------------------------------------------------------------------
-# 1. converter/signature divergence
-# --------------------------------------------------------------------------
-
-_DENOISER = ComponentRepack(name="unet", variants=(RepackVariant(out_prefix="model.diffusion_model."),))
-
-# The declarations an endpoint owns. They live here, in the test, for exactly
-# the same reason they live in the endpoint repo: the SDK must not carry them.
-SD15_SD2 = RepackageFamily(
-    family="sd15_sd2",
-    signature=LayoutSignature(
-        requires_all=("unet", "vae", "text_encoder"),
-        forbids=("text_encoder_2", "tokenizer_2"),
-    ),
-    to_singlefile=(_DENOISER,),
-)
-SDXL = RepackageFamily(
-    family="sdxl",
-    signature=LayoutSignature(
-        requires_all=("unet", "vae", "text_encoder"),
-        requires_any=(("text_encoder_2", "tokenizer_2"),),
-    ),
-    to_singlefile=(_DENOISER,),
-)
-
-
-@pytest.fixture(autouse=True)
-def _declared_families():
-    registry.reset_registries()
-    registry.register_repackage_family(SD15_SD2)
-    registry.register_repackage_family(SDXL)
-    yield
-    registry.reset_registries()
-
-
-def _sdxl_tree(tmp_path):
-    for part in ("unet", "vae", "text_encoder", "text_encoder_2", "tokenizer_2"):
-        (tmp_path / part).mkdir(parents=True)
-    return tmp_path
-
-
-def _sd15_tree(tmp_path):
-    for part in ("unet", "vae", "text_encoder"):
-        (tmp_path / part).mkdir(parents=True)
-    return tmp_path
-
-
-def test_sdxl_signature_detects_as_sdxl(tmp_path):
-    """A second text encoder IS the SDXL signature — `convert/layout.py` has
-    always said so for the identical signal."""
-    assert repackage.detect_diffusers_family(_sdxl_tree(tmp_path)) == "sdxl"
-
-
-def test_sd15_signature_is_unchanged(tmp_path):
-    assert repackage.detect_diffusers_family(_sd15_tree(tmp_path)) == "sd15_sd2"
-
-
-def test_converter_refuses_a_signature_it_does_not_match(tmp_path):
-    """The guard is independent of the detection fix: a CALLER passing the
-    wrong family must not get the wrong converter silently either."""
-    sdxl = _sdxl_tree(tmp_path / "sdxl")
-    with pytest.raises(repackage.ConverterSignatureError) as exc:
-        repackage.convert_diffusers_to_singlefile(
-            sdxl, tmp_path / "out.safetensors", family="sd15_sd2")
-    message = str(exc.value)
-    assert "sd15_sd2" in message and "text_encoder_2" in message
-
-    sd15 = _sd15_tree(tmp_path / "sd15")
-    with pytest.raises(repackage.ConverterSignatureError) as exc:
-        repackage.convert_diffusers_to_singlefile(
-            sd15, tmp_path / "out2.safetensors", family="sdxl")
-    assert "text_encoder_2" in str(exc.value)
-
-
-# --------------------------------------------------------------------------
-# 2. DiT fingerprint collision
+# 1. DiT fingerprint collision
 # --------------------------------------------------------------------------
 
 class _Cfg:
@@ -137,37 +52,35 @@ def _dit(**fields):
     return pipe
 
 
-def test_two_different_dits_do_not_share_a_fingerprint():
-    """The bug: UNet-only fields meant every DiT digested to '|||'."""
+def test_structurally_different_denoisers_never_share_a_fingerprint():
+    """The bug: UNet-only fields meant every DiT digested to '|||' — a
+    normalized-split cache collision. Three axes of the same invariant: DiT
+    configs discriminate, UNet configs still discriminate, and a config with
+    no known field falls back to structure (a fingerprint that resolves to
+    nothing is not a key, it is a collision)."""
     a = lora_util._denoiser_fingerprint(_dit(num_layers=19, num_attention_heads=24))
     b = lora_util._denoiser_fingerprint(_dit(num_layers=48, num_attention_heads=16))
     assert a and b
     assert a != b, "two structurally different DiTs share a cache fingerprint"
     assert "|||" not in a
 
-
-def test_unet_fingerprint_still_discriminates():
-    a = lora_util._denoiser_fingerprint(_dit(
+    u1 = lora_util._denoiser_fingerprint(_dit(
         down_block_types=("A", "B"), block_out_channels=(320, 640),
         layers_per_block=2))
-    b = lora_util._denoiser_fingerprint(_dit(
+    u2 = lora_util._denoiser_fingerprint(_dit(
         down_block_types=("A", "B"), block_out_channels=(320, 1280),
         layers_per_block=2))
-    assert a != b
+    assert u1 != u2
 
-
-def test_a_config_with_no_known_field_still_fingerprints_structurally():
-    """A fingerprint that resolves to nothing is not a key, it is a
-    collision — so an unrecognized config falls back to structure."""
-    a = lora_util._denoiser_fingerprint(_dit(mystery_field="x"))
+    s1 = lora_util._denoiser_fingerprint(_dit(mystery_field="x"))
     pipe = _Pipe()
     pipe.transformer = _Denoiser(_Cfg(mystery_field="x"), width=8)
-    b = lora_util._denoiser_fingerprint(pipe)
-    assert a and b and a != b
+    s2 = lora_util._denoiser_fingerprint(pipe)
+    assert s1 and s2 and s1 != s2
 
 
 # --------------------------------------------------------------------------
-# 3. group offload skipping components silently
+# 2. group offload skipping components silently
 # --------------------------------------------------------------------------
 
 class _OffloadableModule(torch.nn.Module):
@@ -235,8 +148,9 @@ def test_a_component_that_cannot_offload_is_named_loudly(monkeypatch, caplog):
     pipe.image_encoder = _Stubborn()
     _run_group_offload(pipe, monkeypatch, caplog)
 
+    # The outcome is the fail-loud report: a WARNING-or-worse record naming the
+    # component that stayed resident. The wording is the module's own business.
     warnings = [r.getMessage() for r in caplog.records
-                if "did NOT cover" in r.getMessage()]
-    assert warnings, "a component left fully resident was not reported"
-    assert "image_encoder" in warnings[0]
-    assert "stay fully resident" in warnings[0]
+                if r.levelno >= logging.WARNING]
+    assert any("image_encoder" in w for w in warnings), (
+        f"a component left fully resident was not reported: {warnings}")

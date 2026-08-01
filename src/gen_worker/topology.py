@@ -36,7 +36,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Iterator, Mapping, Optional, Tuple
 
 from .models.residency import REPLICATED, SHARDED, DeviceGroup
 

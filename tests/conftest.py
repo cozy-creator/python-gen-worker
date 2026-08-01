@@ -12,9 +12,25 @@ issue #345.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
-import gen_worker
+# pgw#802: point the postmortem carriers off the HOST before anything imports
+# `gen_worker.postmortem`, which resolves BOOT_RECORD_PATH (and its in-flight /
+# crash-registry / fault-dump siblings) ONCE at import from this variable.
+#
+# Doing it here rather than only in a fixture covers the case a fixture cannot:
+# tests that spawn a REAL child (`gen_worker.entrypoint`, the SIGSEGV boot in
+# test_native_crash_streak_pgw676) inherit os.environ, and a child that records
+# a native-crash streak into the shared /tmp registry refuses `generate` at
+# every later boot in EVERY lane's suite. Harnesses that build a replacement
+# env still set it explicitly (see tests/harness/subprocess_runner.py).
+os.environ.setdefault(
+    "GEN_WORKER_BOOT_RECORD",
+    str(Path(tempfile.mkdtemp(prefix="pgw-postmortem-")) / "boot-record.json"),
+)
+
+import gen_worker  # noqa: E402
 
 # Deterministic CPU encode wherever the suite runs (gw#476): never probe or
 # engage NVENC from tests — CI has no GPU, and dev boxes that have one must
@@ -112,6 +128,44 @@ def _fresh_boot_seal():
 
 
 @pytest.fixture(autouse=True)
+def _boot_isa_clamp():
+    """pgw#754's codegen clamp, imposed the way every real boot imposes it.
+
+    Production host-compiles ONLY ever happen in a process that ran
+    ``env_seal.establish`` — ``entrypoint`` (line 262), ``mint_child`` (399)
+    and ``aot_compile_child`` (74) all do, and ``establish`` calls
+    ``host_isa.impose``. The suite host-compiles without any of those, so
+    every real AOTI compile a test drove was built ``-march=native``: an
+    unclamped, unportable object, silently unlike anything a pod produces.
+
+    pgw#811's ``assert_command_is_clamped`` made that visible by refusing it
+    at the argv level. The honest answer is to give the suite the boot
+    precondition production has, not to soften the assert — pgw#754 is a
+    SIGILL-class defect. Tests that exercise the clamp itself monkeypatch
+    ``inductor_config.cpp`` directly and are unaffected (monkeypatch restores).
+    """
+    from gen_worker import host_isa as _isa
+
+    try:
+        _isa.impose()
+    except Exception:  # torchless/non-x86 runner: nothing to clamp
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_pinned_pool_groups():
+    """pgw#780 item 1 made `bind_topology` wire the PROCESS-GLOBAL pinned pool
+    with the delivered group count. Correct in production (one process, one
+    bind); poison in a suite: a G=4 executor in one test leaves every later
+    test's pinned budget quartered. Reset to the solo share after each test."""
+    yield
+    from gen_worker.models import staging as _staging
+
+    _staging.pinned_pool().set_group_count(1)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_receipt_gate():
     """pgw#709's receipt gate is armed once at HelloAck and stays configured
     for the process — correct in production, poison in a suite: any test that
@@ -131,3 +185,53 @@ def _fresh_receipt_gate():
     _receipts.reset()
     yield
     _receipts.reset()
+
+
+@pytest.fixture(scope="session")
+def _postmortem_root(tmp_path_factory):
+    """One private carrier directory per test process (per xdist worker)."""
+    return tmp_path_factory.mktemp("postmortem")
+
+
+@pytest.fixture(autouse=True)
+def _postmortem_paths_off_the_host(_postmortem_root):
+    """pgw#801: the postmortem carriers are HOST paths, and the suite wrote
+    to the real ones.
+
+    ``postmortem.BOOT_RECORD_PATH`` resolves at import to ``$TENSORHUB_CACHE_DIR``
+    or ``/tmp``, and the in-flight marker, crash registry and fault dump are its
+    siblings. On a pod that is correct — the point is to survive process death.
+    On a dev box or CI runner ``/tmp`` is shared by every process, every lane and
+    every run, so a suite that reaches it is asserting about the RUNNER.
+
+    Measured 2026-07-30: ``/tmp/gen-worker-crash-streaks.json`` held
+    ``{"generate": {"count": 2, ...}}`` written by another lane's run minutes
+    earlier. ``NATIVE_CRASH_REFUSE_STREAK`` is 2, so from then on EVERY boot in
+    EVERY lane's suite refused ``generate`` — 6 tests across
+    ``test_boot_compile_deferral_gw584.py`` and ``test_resolution_rekey_gw494.py``
+    failed for everyone, in isolation as well as in the full run, until someone
+    deleted the file by hand. The registry is genuinely durable-by-design, which
+    is exactly why the suite must never share the production carrier.
+
+    The carrier directory is per-process, but the FILES are removed around
+    every test: a streak one test records is that test's fact, and the crash
+    gate is boot-scoped in production.
+    """
+    from gen_worker import postmortem as _pm
+
+    names = ("BOOT_RECORD_PATH", "INFLIGHT_PATH",
+             "CRASH_REGISTRY_PATH", "FAULT_DUMP_PATH")
+    saved = {name: getattr(_pm, name) for name in names}
+    redirected = [_postmortem_root / path.name for path in saved.values()]
+
+    def _wipe() -> None:
+        for path in redirected:
+            path.unlink(missing_ok=True)
+
+    for name, path in zip(names, redirected):
+        setattr(_pm, name, path)
+    _wipe()
+    yield
+    _wipe()
+    for name, path in saved.items():
+        setattr(_pm, name, path)

@@ -106,6 +106,11 @@ def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
 
         boot_phases.bind_sink(_send, asyncio.get_running_loop())
         # Phases recorded AFTER the bind ride the same sink.
+        # pgw#797: the boot CLOSE now requires `hello` first — a worker the hub
+        # cannot reach is not servable, and closing before the stream existed is
+        # what suppressed every span on 0.78.0. Binding the sink is exactly the
+        # moment the real `on_hello_ack` records hello, so record it here too.
+        boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
         boot_phases.mark(boot_phases.PHASE_FIRST_REQUEST_SERVABLE,
                          since_process_start=True)
         await asyncio.sleep(0)  # let the fire-and-forget ship tasks run
@@ -130,6 +135,8 @@ def test_nested_phases_charge_the_child_so_the_boot_reconciles() -> None:
     with boot_phases.span(boot_phases.PHASE_CELL_ARM):
         with boot_phases.span(boot_phases.PHASE_CELL_LOAD):
             pass
+    # pgw#797: `hello` gates the boot close (see the flush test above).
+    boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     boot_phases.mark(boot_phases.PHASE_FIRST_REQUEST_SERVABLE,
                      since_process_start=True)
 

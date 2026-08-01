@@ -67,8 +67,14 @@ jobs:
 
       # th#960/pgw#609 greenfield suite (P1-P10 + harness), whole tests/ dir
       # so late additions run automatically without a CI edit.
+      #
+      # pgw#796: `-n 4` (= ubuntu-latest's vCPU count), `--dist loadfile` so a
+      # file's tests — and the module/session fixtures they share — stay in one
+      # process. This is TEST-SYSTEM-DESIGN.md §7's wiring, finally landed.
+      # `-v` is dropped: xdist's per-worker interleaving makes it unreadable,
+      # and failures print in full either way.
       - name: Run tests
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -n 4 --dist loadfile
 
       - name: Build package
         run: uv build

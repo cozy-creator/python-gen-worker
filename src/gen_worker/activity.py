@@ -68,6 +68,22 @@ KIND_GUARD_LEAK = "guard_leak"
 KIND_SERVE_DEGRADE = "serve_degrade"
 KIND_TRT_ADOPT = "trt_adopt"
 KIND_LORA_HYGIENE = "lora_hygiene"
+# pgw#794: the serve-side adapter-fidelity gate. `phase=refused` is a
+# fail-CLOSED decision (the request also gets a typed error); `phase=degraded`
+# is the gray band — served, but the delta measurably lost direction to the
+# target grid. `detail` carries the whole-adapter cosine, the grid judged, and
+# the worst per-module rows, so a release shipping an adapter its own serving
+# dtype destroys is countable hub-side without the pod's stdout.
+KIND_LORA_FIDELITY = "lora_fidelity"
+# pgw#817: the ADOPTION numerics gate — a cell about to arm is run against the
+# eager forward it replaces and judged on the shared verdict ladder. Same two
+# phases and the same fail-closed shape as `lora_fidelity`, one population
+# down: `phase=refused` means the cell did NOT arm and this pod serves eager;
+# `phase=degraded` means it armed inside the gray band. pgw#814 measured a
+# real DEGRADED artifact (flux2 w8a8 whole-graph, cos 0.931-0.973 against
+# eager) that nothing in the worker would have noticed, which is why the
+# verdict has to reach the hub whether or not it refuses.
+KIND_CELL_NUMERICS = "cell_numerics"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"
@@ -80,6 +96,14 @@ KIND_RESIDENCY_FAULT = "residency_fault"
 # routes is ONE grouped query over worker_activity_events rather than a regex
 # over free text on one side and a log grep on the other.
 KIND_JIT_COMPILE = "jit_compile"
+# pgw#805: the AOT (torch.export + AOTInductor) mint's duration, same shape.
+# The hub has read this kind since th#1322 (`worker_activity_events`,
+# /v1/admin/worker-activity-events?kind=aot_mint_phases) and the table stayed
+# EMPTY on both stacks because no producer existed: `aot_mint` was reachable
+# only from `python -m gen_worker.aot_mint`, and no serving-pod code path
+# imported it. `phase=minted` carries the roll-up, `phase=entry:<name>` one
+# declared graph class, `phase=stage:<name>` a mint-wide span (package/seal).
+KIND_AOT_MINT = "aot_mint_phases"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.

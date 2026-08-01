@@ -78,16 +78,15 @@ def _incoming_bytes(module: Any) -> int:
     return total
 
 
-def check_host_ram_move(module: Any) -> None:
-    """Raise :class:`HostRamMoveRefusedError` when moving ``module`` to CPU
-    cannot fit ``available - floor``. Shared by both patched entry points."""
-    incoming = _incoming_bytes(module)
-    if incoming < _MIN_GUARDED_GIB * _GIB:
-        return
-    kwargs = {}
-    if _probe_root is not None and _probe_self is not None:
-        kwargs = {"root": _probe_root, "proc_self_cgroup": _probe_self}
-    ram = probe_host_ram(**kwargs)
+def _refuse_if_over_budget(incoming: int, **probe_kwargs: Any) -> None:
+    """The budget decision, separated from the torch module it came from.
+
+    pgw#783: ``probe_host_ram`` now reports THIS process's share of a cgroup it
+    may split with G-1 sibling compute children, so the same 20 GiB move that
+    fits a solo worker on a 64 GiB pod is correctly refused for one of four.
+    The guard needs no group logic of its own — the share is in the probe.
+    """
+    ram = probe_host_ram(**probe_kwargs)
     available = int(ram.available_gb * _GIB)
     floor = int(_effective_ram_floor_gb() * _GIB)
     if incoming <= available - floor:
@@ -102,6 +101,18 @@ def check_host_ram_move(module: Any) -> None:
         incoming_bytes=incoming, available_bytes=available,
         floor_bytes=floor, limit_bytes=limit,
     )
+
+
+def check_host_ram_move(module: Any) -> None:
+    """Raise :class:`HostRamMoveRefusedError` when moving ``module`` to CPU
+    cannot fit ``available - floor``. Shared by both patched entry points."""
+    incoming = _incoming_bytes(module)
+    if incoming < _MIN_GUARDED_GIB * _GIB:
+        return
+    kwargs = {}
+    if _probe_root is not None and _probe_self is not None:
+        kwargs = {"root": _probe_root, "proc_self_cgroup": _probe_self}
+    _refuse_if_over_budget(incoming, **kwargs)
 
 
 def install() -> bool:

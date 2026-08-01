@@ -67,7 +67,13 @@ def test_w8a8_contract_artifact_detects_and_dequants_to_source_weights(
 
     w8a8.w8a8_gemm_mode.cache_clear() if hasattr(w8a8.w8a8_gemm_mode, "cache_clear") else None
     pipe = load_from_pretrained(DDPMPipeline, w8a8_tree)
-    assert pipeline_weight_lane(pipe) in ("", "bf16-resident")
+    # pgw#801: was `in ("", "bf16-resident")`, which could never fail —
+    # `pipeline_weight_lane` collapses "bf16-resident" to "" (loading.py: it
+    # traces identically to plain bf16), so the second arm was unreachable and
+    # the assertion was satisfied unconditionally. What the test means is that
+    # a dequanted W8A8 tree serves on the BASE lane, not fp8-hooks/w8a8 — say
+    # exactly that, so a regression that leaves fp8 hooks attached goes red.
+    assert pipeline_weight_lane(pipe) == ""
     ref = UNet2DModel.from_pretrained(str(tiny_ddpm / "unet"))
     name = art.quantized[0] + ".weight"
     a = ref.state_dict()[name].float()

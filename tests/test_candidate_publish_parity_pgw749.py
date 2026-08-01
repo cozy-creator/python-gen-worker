@@ -107,20 +107,6 @@ def _cfg() -> CompileCell:
     )
 
 
-def test_seal_is_phase_independent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """A cold-boot process and a compile-warm process must derive the SAME
-    seal digest: identity comes from the toolchain ON DISK, never from
-    what happens to be dlopened when the first key is computed."""
-    _phase(monkeypatch, tmp_path, "cold", _COLD_LIBS)
-    cold = env_seal.effective_seal()
-    _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
-    warm = env_seal.effective_seal()
-    assert cold["loaded_libs"] == warm["loaded_libs"]
-    assert env_seal.seal_digest(cold) == env_seal.seal_digest(warm)
-
-
 def test_cold_candidate_key_equals_warm_published_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

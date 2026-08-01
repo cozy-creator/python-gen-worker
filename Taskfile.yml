@@ -40,5 +40,10 @@ tasks:
 
   test:
     desc: Run tests
+    # pgw#796 / TEST-SYSTEM-DESIGN.md §7: four workers, distributed by FILE so a
+    # module/session fixture and everything that shares its process stay
+    # together. Override with `task test WORKERS=1` to debug serially.
+    vars:
+      WORKERS: '{{.WORKERS | default "4"}}'
     cmds:
-      - uv run --extra dev pytest tests/
+      - uv run --extra dev pytest tests/ -n {{.WORKERS}} --dist loadfile

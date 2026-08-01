@@ -1355,6 +1355,10 @@ class ArtifactRunner:
     module_name: str = ""
     entry: str = ""
     bound: bool = False
+    #: pgw#817/D3: True when :meth:`bind` bound BY REFERENCE. Recorded rather
+    #: than inferred so an arm report can state whether N instances cost N
+    #: weight copies or none.
+    user_managed: bool = False
     bound_fqns: Tuple[str, ...] = ()
     calls: int = 0
     refusals: Dict[str, int] = field(default_factory=dict)
@@ -1376,12 +1380,25 @@ class ArtifactRunner:
 
     def bind(
         self, state_dict: Mapping[str, Any], literals: Mapping[str, Any],
+        *, user_managed: bool = False,
     ) -> None:
         """Bind constants from the resident weights + literal payload, then
         PROVE the artifact reports them all bound.
 
         Order is load-bearing: nothing may call the package before this
         returns, and this must not mark itself bound on a partial update.
+
+        ``user_managed=True`` binds BY REFERENCE (pgw#812 D3): the artifact
+        keeps pointers to the caller's tensors instead of copying them into
+        its own constant buffer. The default False is right for a whole-graph
+        cell — one duplicate of the weights, and the artifact owns its own
+        lifetime. It is FATAL for a regional cell: N block instances each
+        load their own runner, so a copying bind means N copies of that
+        block's weights in VRAM (flux2: a second whole model). The caller
+        that passes True is asserting that the tensors outlive this runner —
+        which for a regional arm holds by construction, because the values
+        come from the resident pipeline's own ``state_dict`` and the shim
+        that calls the runner is installed ON that module.
         """
         try:
             table = self.package.get_constant_fqns()
@@ -1415,7 +1432,29 @@ class ArtifactRunner:
         # mint by name — and if runtime folding is ever deliberately enabled,
         # the change is to EXCLUDE from_folded constants from the manifest
         # and binding (they are derived), not to loosen this gate.
-        self.package.load_constants(values, check_full_update=True)
+        #
+        # pgw#817/D3: `user_managed` is passed only when asked for, so the
+        # whole-graph path's call shape is byte-identical to what pgw#721/#723
+        # measured on a pod. A torch whose `load_constants` has no such
+        # parameter is a NAMED refusal rather than a silent copy — a regional
+        # arm that silently copied would OOM the card N blocks later, which is
+        # a far worse way to learn the same fact.
+        if user_managed:
+            try:
+                self.package.load_constants(
+                    values, check_full_update=True, user_managed=True)
+            except TypeError as exc:
+                if "user_managed" not in str(exc):
+                    raise
+                raise ConstantsUnboundError(
+                    "user_managed_unsupported",
+                    f"this torch's load_constants has no user_managed "
+                    f"parameter, so every constant would be COPIED — for a "
+                    f"regional cell that is one copy of the block weights per "
+                    f"instance ({type(exc).__name__}: {exc})") from exc
+        else:
+            self.package.load_constants(values, check_full_update=True)
+        self.user_managed = bool(user_managed)
         self.bound_fqns = tuple(sorted(values))
         self.bound = True
 

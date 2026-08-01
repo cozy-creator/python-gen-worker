@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import collections.abc as cabc
 import inspect
+import logging
 import types as py_types
 import typing
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import msgspec
 
@@ -31,6 +32,8 @@ from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
 from .cell_key import contract_digest
+
+logger = logging.getLogger(__name__)
 
 _ITER_ORIGINS = (
     typing.Iterator, typing.Iterable, typing.AsyncIterator, typing.AsyncIterable,
@@ -687,12 +690,59 @@ def _apply_class_unions(specs: List[EndpointSpec]) -> List[EndpointSpec]:
     return out
 
 
+def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
+    """pgw#805: a ``compile=`` block that carries graph CLASSES *is* its
+    family's export declaration — register it at collection time.
+
+    Without this, ``export_declaration(family)`` resolves only when somebody
+    imports a separate declaration module by name, which is a MINT-REQUEST
+    concept (``aot_declaration.load_declaration``). A serving pod loads the
+    endpoint and nothing else, so `aot_mint.mint` refused every family on
+    "no registered export declaration" before it could export a single graph
+    — one half of why no serving pod has ever produced an AOT cell. The
+    declaration now travels with the endpoint that owns it, which is the
+    end state `sdxl/aot/declaration.py`'s own docstring names ("the
+    endpoint's SDK-bump lane folds these fields into the ``@endpoint
+    compile=`` block and deletes this file").
+
+    Never raises: a conflicting registration is a real defect, but it is the
+    AOT lane's defect and must not take down endpoint collection (which every
+    boot, every CLI walk and every discovery pass runs).
+    """
+    from .api.export_contract import (
+        export_declaration, register_export_declaration,
+    )
+
+    registered: List[str] = []
+    seen: set[int] = set()
+    for spec in specs:
+        compile_decl = spec.compile
+        if compile_decl is None or id(compile_decl) in seen:
+            continue
+        seen.add(id(compile_decl))
+        family = str(getattr(compile_decl, "family", "") or "").strip()
+        if not family or not getattr(compile_decl, "classes", ()):
+            continue
+        if export_declaration(family) is compile_decl:
+            continue
+        try:
+            register_export_declaration(compile_decl)
+        except Exception as exc:  # noqa: BLE001 — never fail collection
+            logger.warning(
+                "export declaration for family %r not registered from its "
+                "endpoint: %s", family, exc)
+            continue
+        registered.append(family)
+    return tuple(registered)
+
+
 def collect_endpoints(module_names: List[str]) -> List[EndpointSpec]:
     """Walk top-level modules (+ submodules) and return every EndpointSpec."""
     out: List[EndpointSpec] = []
     for found in find_endpoints(list(module_names)):
         out.extend(extract_specs(found.obj, walked_module=found.walked_module))
     _assert_unique_names(out)
+    register_declared_exports(out)
     return out
 
 
@@ -706,6 +756,7 @@ def collect_from_namespace(module: Any) -> List[EndpointSpec]:
         seen.add(id(obj))
         out.extend(extract_specs(obj))
     _assert_unique_names(out)
+    register_declared_exports(out)
     return out
 
 

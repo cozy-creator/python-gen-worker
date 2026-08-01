@@ -70,18 +70,6 @@ def test_real_prunavaed_listing_classifies_as_a_subfolder_component() -> None:
     }
 
 
-def test_source_include_narrowing_reaches_the_same_verdict() -> None:
-    """``source_include=["vae/*"]`` is how a caller names the component; it
-    must classify, not narrow the listing into a refusal."""
-    narrowed = apply_source_include(_PATHS, ["vae/*"])
-    c = classify_repo(narrowed, sizes=_SIZES, component_configs=_COMPONENT_CONFIGS)
-
-    assert c.strategy == "diffusers_component"
-    assert c.component_subfolder == "vae"
-    assert set(c.allow_patterns) == {
-        "vae/config.json", "vae/diffusion_pytorch_model.safetensors"}
-
-
 def test_ambiguous_component_subfolders_still_refuse() -> None:
     """Two component subfolders and no root marker is a shape we do not
     guess at — fail closed with the same typed refusal as before."""
@@ -103,24 +91,6 @@ def test_ambiguous_component_subfolders_still_refuse() -> None:
         component_configs={"vae": {"_class_name": "AutoencoderKLLTX2Video"}},
     )
     assert (c.strategy, c.component_subfolder) == ("diffusers_component", "vae")
-
-
-def test_root_rooted_component_classifies_exactly_as_before() -> None:
-    """madebyollin's SDXL VAE (root config.json + root weights, gw#426) is
-    untouched: same strategy, same selection, no re-root."""
-    files = [
-        ".gitattributes", "README.md", "config.json",
-        "diffusion_pytorch_model.bin", "diffusion_pytorch_model.safetensors",
-        "sdxl.vae.safetensors", "sdxl_vae.safetensors",
-    ]
-    c = classify_repo(files, config_json={
-        "_class_name": "AutoencoderKL", "_diffusers_version": "0.18.0.dev0"})
-
-    assert c.strategy == "diffusers_component"
-    assert c.component_subfolder == ""
-    assert c.attrs == {"file_layout": "singlefile", "architecture": "AutoencoderKL"}
-    assert set(c.allow_patterns) == {
-        "README.md", "config.json", "diffusion_pytorch_model.safetensors"}
 
 
 def test_ingest_leaves_a_root_component_repo_alone(

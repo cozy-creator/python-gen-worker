@@ -55,11 +55,6 @@ class Conn:
         self._recv_cond = threading.Condition()
         self._out: "queue.Queue[Any]" = queue.Queue()
         self.client_done = threading.Event()
-        # pgw#795: the staleness window these waits have EARNED on this
-        # machine, grown by every advance they sit through. Shared session-wide
-        # (Cadence default), because a runner that is slow for one hub-double
-        # test is slow for all 2000 of them.
-        self.cadence = Cadence()
 
     def send(self, **oneof: Any) -> None:
         self._out.put(pb.SchedulerMessage(**oneof))
@@ -105,13 +100,18 @@ class Conn:
         probe for ABSENCE ("no result within 2s") — there the bound IS the
         assertion, and its expiry makes the test pass rather than flake.
         """
+        # pgw#795 round 4: a FRESH cadence per wait. It used to be per-
+        # connection and, before that, session-wide — and a shared slowest
+        # sample let one slow advance widen every later wait until a
+        # zero-progress wait hung for 13 minutes. A wait that observes no
+        # advance of its own is now bounded by the floor, always.
+        cadence = Cadence()
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._recv_cond:
             last_advance = time.monotonic()
             while True:
                 got = take()
                 if got is not None:
-                    self.cadence.record(time.monotonic() - last_advance)
                     return got
                 now = time.monotonic()
                 if deadline is not None:
@@ -126,14 +126,12 @@ class Conn:
                         f"further message can arrive"
                     )
                 silent = now - last_advance
-                if silent >= self.cadence.window_s:
+                if silent >= cadence.window_s:
                     raise StalledError(
                         f"{describe()}: no such message in {silent:.1f}s "
-                        f"(staleness window {self.cadence.describe()})"
+                        f"(staleness window {cadence.describe()})"
                     )
-                self._recv_cond.wait(
-                    min(_REEVALUATE_S, self.cadence.window_s - silent)
-                )
+                self._recv_cond.wait(min(_REEVALUATE_S, cadence.window_s - silent))
 
     def wait_for(
         self,
@@ -197,7 +195,6 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         # has EXITED can never dial in — that is the definitive give-up for
         # wait_connection, and it needs no clock.
         self.worker_alive: Optional[Callable[[], bool]] = None
-        self.cadence = Cadence()
 
     def Connect(self, request_iterator: Any, context: grpc.ServicerContext) -> Any:
         if self.reject_unauthenticated:
@@ -243,6 +240,7 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         "the worker process is gone", which is definitive, plus a staleness
         window calibrated from the advances this run has measured.
         """
+        cadence = Cadence()
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._conn_cond:
             started = time.monotonic()
@@ -263,16 +261,13 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
                         f"({len(self.connections)} connections so far)"
                     )
                 waited = now - started
-                if waited >= self.cadence.window_s:
+                if waited >= cadence.window_s:
                     raise StalledError(
                         f"connection #{index} never arrived in {waited:.1f}s of "
-                        f"silence (staleness window {self.cadence.describe()}); "
+                        f"silence (staleness window {cadence.describe()}); "
                         f"{len(self.connections)} connections so far"
                     )
-                self._conn_cond.wait(
-                    min(_REEVALUATE_S, self.cadence.window_s - waited)
-                )
-            self.cadence.record(time.monotonic() - started)
+                self._conn_cond.wait(min(_REEVALUATE_S, cadence.window_s - waited))
             return self.connections[index]
 
 
@@ -347,14 +342,36 @@ class WorkerHarness:
         self._thread.start()
 
     def stop(self, timeout: float = DEFAULT_TIMEOUT_S) -> Optional[int]:
+        """Ask the worker to stop, and REQUIRE that it did.
+
+        pgw#795: this used to `join(15.0)` and throw the result away, so a
+        worker that never exited passed teardown in silence — a wedged shutdown
+        is exactly the defect this harness exists to catch, and it was the one
+        outcome nothing asserted. The join is now progress-gated (a thread that
+        is still alive is not progress) and a survivor is a loud failure.
+        """
         self.worker.stop()
-        self._thread.join(timeout)
+        self._join_or_fail(timeout, "stop()")
         return self.exit_code
 
     def join(self, timeout: float = DEFAULT_TIMEOUT_S) -> Optional[int]:
-        self._thread.join(timeout)
-        assert not self._thread.is_alive(), "worker did not exit"
+        self._join_or_fail(timeout, "join()")
         return self.exit_code
+
+    def _join_or_fail(self, timeout: float, who: str) -> None:
+        # ``timeout`` is a silence FLOOR: a caller's existing number can only
+        # make this more patient, never less.
+        cadence = Cadence(floor_s=max(timeout, Cadence().floor_s))
+        started = time.monotonic()
+        while self._thread.is_alive():
+            waited = time.monotonic() - started
+            if waited >= cadence.window_s:
+                raise StalledError(
+                    f"the worker thread was still alive {waited:.1f}s after "
+                    f"{who} (staleness window {cadence.describe()}); a wedged "
+                    f"shutdown must never pass teardown quietly"
+                )
+            self._thread.join(min(0.25, cadence.window_s - waited))
 
 
 @contextmanager

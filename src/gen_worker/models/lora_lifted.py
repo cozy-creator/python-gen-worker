@@ -465,9 +465,38 @@ def adapter_active(model: Any) -> bool:
 
 
 def install_lifted_lora_lanes(pipe: Any, bucket: int = 0) -> Dict[str, LiftedLoraBinding]:
-    """Install the lifted signature on every branch-capable denoiser."""
+    """Install the lifted signature on every branch-capable denoiser.
+
+    Requires the canonical branch CONTAINERS to be allocated already — the
+    flat layout is derived from them. Callers arming a pipeline from scratch
+    want :func:`arm_lifted_lora_lanes`, which does both halves in order.
+    """
     return {comp: install_lifted_lora_forward(model, bucket)
             for comp, model in branch_targets(pipe).items()}
+
+
+def arm_lifted_lora_lanes(
+    pipe: Any, bucket: int,
+) -> Dict[str, LiftedLoraBinding]:
+    """Put a pipeline on the LIFTED branch-bearing graph family: canonical
+    branch containers first, lifted call signature second (pgw#822).
+
+    THE arm for every AOT path — the mint's adapter-bearing classes, the
+    operator compose, and (via the same two calls) the serving arm in
+    ``models.provision.arm_aot``. Order is load-bearing in one direction:
+    the flat layout is derived from the allocated containers, so a lone
+    :func:`install_lifted_lora_lanes` on an unarmed pipeline has nothing to
+    lay out, and a lone ``enable_branch_lanes`` leaves the denoiser's own
+    forward — which is pgw#822 exactly: the declaration lifts ``lora_a``/
+    ``lora_b`` and the module handed to ``torch.export`` never took them.
+
+    Idempotent; a no-op at bucket 0 (the branchless pipeline is its own graph
+    class and carries no adapter arguments at all).
+    """
+    if not int(bucket or 0):
+        return {}
+    w8a8_lora.enable_branch_lanes(pipe, int(bucket))
+    return install_lifted_lora_lanes(pipe, int(bucket))
 
 
 def remove_lifted_lora_lanes(pipe: Any) -> None:
@@ -639,6 +668,7 @@ def assert_no_baked_adapter(compiled: Any, *, label: str = "") -> None:
 __all__ = [
     "LIFTED_INPUT_NAMES",
     "adapter_active",
+    "arm_lifted_lora_lanes",
     "LiftedLoraBinding",
     "LiftedLoraPlan",
     "ResolvedSlots",

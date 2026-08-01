@@ -177,6 +177,7 @@ def _send_with_retries(
     send: Callable[[], requests.Response],
     *,
     silence_window_s: Optional[float] = None,
+    definite: Optional[Callable[[requests.Response], bool]] = None,
 ) -> requests.Response:
     """Origin-discriminating, silence-bounded retry (pgw#715/#738/#743).
 
@@ -211,7 +212,12 @@ def _send_with_retries(
                 f"{what} failed ({type(exc).__name__}): {exc}") from exc
         else:
             code = int(resp.status_code)
-            if code != 429 and is_definite_hub_answer(resp):
+            # `definite` lets a caller supply its OWN definiteness rule for a
+            # route whose refusals are not envelope-shaped (th#1303's v2
+            # completion answers with a projection carrying an explicit
+            # `retryable` flag). The default stays the shape heuristic.
+            is_definite = definite(resp) if definite is not None else is_definite_hub_answer(resp)
+            if code != 429 and is_definite:
                 return resp  # definite hub answer
             last_resp, last_exc = resp, None
             delay = _retry_after_s(resp) or delay
@@ -691,6 +697,59 @@ class HubClient:
 
     # ---- v2: chunked sha256 CAS (th#1303 / pgw#781) ----
 
+    @staticmethod
+    def _v2_failure(resp: requests.Response) -> Optional[dict[str, Any]]:
+        """The v2 routes' TYPED failure, or None.
+
+        A v2 completion does not answer with an error envelope: it answers with
+        the th#1301 PROJECTION, and a refusal is
+        ``{"status": {"stage": "repudiated", "terminal": true,
+                      "failure": {"code", "retryable", "message"}}}``.
+        That `retryable` bit is the hub's own classification — the whole point
+        of th#1301's retryable-vs-terminal split — so it is read, never guessed
+        at from the body's shape.
+        """
+        try:
+            body = resp.json() if resp.text else {}
+        except Exception:  # noqa: BLE001 - an unparseable body is not a verdict
+            return None
+        if not isinstance(body, dict):
+            return None
+        status = body.get("status")
+        if not isinstance(status, dict):
+            return None
+        failure = status.get("failure")
+        if not isinstance(failure, dict) or not failure.get("code"):
+            return None
+        return failure
+
+    def _post_v2_complete(self, path: str) -> requests.Response:
+        """POST /complete WITHOUT the envelope-guessing retry loop.
+
+        `_send_with_retries` decides "did we hear from the hub?" from the body's
+        SHAPE, and a v2 completion's refusal is a projection rather than an
+        error envelope — so it read a real, typed, `retryable: false` refusal as
+        a proxy non-answer and retried it. MEASURED LIVE (twice): the retry
+        found the session already terminal and returned 409
+        `publish_repudiated`, so the caller was told the publish had been
+        repudiated instead of `invalid_manifest_for_kind:
+        missing_diffusers_single_file_safetensors` — a consequence in place of a
+        cause, and the actual reason was gone.
+
+        A publish is not idempotent to re-complete, so a blind retry here can
+        only ever destroy the diagnosis. Network-level failures still retry
+        (nothing was heard); an HTTP answer of any status is the hub speaking
+        and is returned as-is for the typed handling below.
+        """
+        return _send_with_retries(
+            f"POST {path}",
+            lambda: _http_session().post(
+                f"{self.base_url}{path}", headers=self._headers(),
+                timeout=(_CONNECT_TIMEOUT_S, _COMPLETE_TIMEOUT_S),
+            ),
+            definite=lambda resp: True,
+        )
+
     def publish_v2(
         self,
         *,
@@ -711,6 +770,7 @@ class HubClient:
         declared_tensors: Mapping[str, Any] | None = None,
         deletions: list[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
+        provenance: Mapping[str, Any] | None = None,
         repo_spec: Mapping[str, str] | None = None,
         progress: Any = None,
         part_progress: Optional[Callable[[int, int, int], None]] = None,
@@ -737,6 +797,11 @@ class HubClient:
         and this deliberately does NOT fall back: a silent downgrade to blake3
         would make "did this publish v2?" unanswerable from the outside (and a
         404 from a PROXY is not a 404 from the hub — th#715).
+
+        ``provenance`` carries the WORKER-ADDABLE stamp subset only, exactly as
+        :meth:`commit` does — the hub resolves the authoritative stamp from the
+        capability token (th#606/th#1331), so lineage cannot be forged from here
+        and is identical whichever protocol published it.
         """
         from ..models import chunk_upload as _cu
         from ..models.chunk_upload import UploadGrant
@@ -749,6 +814,7 @@ class HubClient:
 
         if not files:
             raise HubPublishError("publish_v2 requires at least one file")
+
         repo_path = self._repo_path(destination_repo)
 
         # ONE streaming pass per file yields the whole-file sha256 AND every
@@ -802,6 +868,19 @@ class HubClient:
             body["deletions"] = list(deletions)
         if metadata:
             body["metadata"] = dict(metadata)
+        if provenance:
+            # th#1331: the v2 declare decodes this STRICTLY into the same
+            # `commitProvenanceInput` v1 uses, so the accepted subset is exactly
+            # `step_number | epoch_number | quantization_method |
+            # quantization_library | upstream_revision | upstream_attestation`.
+            # `parents` / `derivation_op` / `upstream_ref` / `job_id` are
+            # orchestrator-derived (signed into the capability token) and are a
+            # 400 that NAMES the field — deliberately, because a silent drop
+            # would leave the worker believing it had stamped lineage it had
+            # not. The merged stamp is captured at DECLARE, where the token is
+            # presented, and replayed through `resolvePublishProvenance` at
+            # completion, so v1 and v2 mirrors record identical lineage.
+            body["provenance"] = {k: v for k, v in dict(provenance).items() if v}
         for key in ("kind", "library_name", "model_family", "class_name",
                     "adapter_for_family"):
             val = str((repo_spec or {}).get(key) or "").strip()
@@ -875,7 +954,7 @@ class HubClient:
                         f"publish re-plan failed ({again.status_code}): {again.text[:500]}")
                 grants = _grants_of(self._json(again))
 
-            done = self._post(
+            done = self._post_v2_complete(
                 f"{repo_path}/publishes/{urllib.parse.quote(publish_id, safe='')}/complete")
         except Exception:
             # Abort so the staging prefix is reclaimed and the session lands in
@@ -891,6 +970,26 @@ class HubClient:
             raise
 
         if done.status_code < 200 or done.status_code >= 300:
+            # Lead with the hub's OWN typed classification when it gave one. A
+            # refusal that reports its `code`, its `retryable` bit and the stage
+            # that produced it is actionable; a bare status code plus 800 bytes
+            # of truncated projection is what sent this lane looking in the
+            # wrong place twice.
+            failure = self._v2_failure(done)
+            if failure:
+                stage = ""
+                try:
+                    for s in (done.json().get("status") or {}).get("stages") or []:
+                        if s.get("status") == "failed":
+                            stage = str(s.get("stage") or "")
+                except Exception:  # noqa: BLE001 - the stage is a nicety
+                    pass
+                raise HubPublishError(
+                    f"publish {publish_id} {'repudiated' if not failure.get('retryable') else 'failed'}"
+                    f"{f' at {stage}' if stage else ''}: "
+                    f"{failure.get('code')}: {failure.get('message')} "
+                    f"(retryable={bool(failure.get('retryable'))})"
+                )
             raise HubPublishError(
                 f"publish complete failed ({done.status_code}): {done.text[:800]}")
         final = self._json(done)

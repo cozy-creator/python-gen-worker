@@ -197,12 +197,10 @@ def test_artifact_invalid_named_on_the_wire(
     # Identity is best-effort: an unreadable artifact still names its file.
     assert "corrupt.tar.gz" in rows[0].detail
 
-
-def test_malformed_entries_named_on_the_wire(
-    tmp_path: Path, events: List[Any], stub_runtime: None,
-) -> None:
-    art = _tar(tmp_path, _meta(entries={ENTRY: {"target": "unet"}}))
-    assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
+    # Malformed entries classify the same, with the reason in the detail.
+    events.clear()
+    malformed = _tar(tmp_path, _meta(entries={ENTRY: {"target": "unet"}}))
+    assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=malformed)
     rows = _adopt_rows(events)
     assert [e.phase for e in rows] == ["artifact_invalid"]
     assert "declares no inputs" in rows[0].detail
@@ -382,20 +380,12 @@ def _nested_contract() -> Any:
     return aot_serve.contract_from_meta(entry)
 
 
-def test_nested_kwarg_input_resolves_from_added_cond() -> None:
+def test_missing_nested_input_still_refuses_by_name() -> None:
     """Live refusal (pod ae2uc81yub0gyq): 'text_embeds' declared positional
     by the export but passed NESTED in added_cond_kwargs by every diffusers
-    caller."""
-    contract = _nested_contract()
-    sample = FakeTensor([2, 4, 128, 128])
-    te = FakeTensor([2, 1280])
-    bound = aot_serve.bind_call_inputs(
-        contract, (sample,), {"added_cond_kwargs": {"text_embeds": te}})
-    assert bound["text_embeds"] is te
-    assert bound["sample"] is sample
-
-
-def test_missing_nested_input_still_refuses_by_name() -> None:
+    caller. The resolve half lives in test_aot_adapter_fork_pgw790's nested
+    marshal test; the refusal half — nested container present, leaf absent —
+    must still name the input."""
     contract = _nested_contract()
     with pytest.raises(aot_serve.IngressContractError) as exc:
         aot_serve.bind_call_inputs(

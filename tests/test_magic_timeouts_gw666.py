@@ -451,6 +451,13 @@ def fast_hub_retries(monkeypatch) -> None:
     monkeypatch.setattr(hub, "_COMPLETE_SILENCE_WINDOW_S", 0.4)
     monkeypatch.setattr(hub, "_RETRY_BASE_DELAY_S", 0.01)
     monkeypatch.setattr(hub, "_RETRY_MAX_DELAY_S", 0.02)
+    # pgw#796: `_post` funnels through `_send_with_retries`, whose OWN silence
+    # window (pgw#738/#743, added after this fixture was written) was left at
+    # its 600s production value — so the dead-port tape below sat in that inner
+    # loop for ten real minutes before the outer loop ever saw a failure. One
+    # test was 600.0s of a 1341.7s publish gate. Scaling it with the other four
+    # changes nothing about the mechanism under test; only the clock it runs on.
+    monkeypatch.setattr(hub, "_SEND_SILENCE_WINDOW_S", 0.4)
 
 
 def _hub_client(base: str):
@@ -548,3 +555,118 @@ def test_the_wall_clock_constants_are_gone(relpath: str, gone: str) -> None:
     each one died still name them, and should)."""
     source = (SRC / relpath).read_text()
     assert re.search(rf"^{gone}\s*=", source, re.MULTILINE) is None
+
+
+# ---------------------------------------------------------------------------
+# pgw#795: the guard covers TEST code too, because a release gate runs it
+# ---------------------------------------------------------------------------
+#
+# The five tapes above pin five NAMED constants in five NAMED src files. That
+# shape missed pgw#795 twice over: it never looks at ``tests/`` at all, and it
+# is a regression pin rather than a pattern detector, so even in ``src/`` a
+# freshly-invented wall clock walks past it.
+#
+# "Tests are exempt" is the position that needed defending, and it does not
+# survive the evidence. A magic timeout in a test cannot kill a tenant's job —
+# that asymmetry is real — but the publish workflow runs `pytest tests/` as the
+# gate on every upload to PyPI, so a test that fails on the runner's mood is a
+# release-blocking defect. It cost three consecutive v0.78.0 publish jobs, each
+# queued ~4.6 h and running ~22 min, and blocked three downstream lanes; the
+# blast radius simply arrives through the release rather than through a pod.
+#
+# A blanket ban would be wrong, though, because three fixed durations in tests
+# are legitimate and none of them is a give-up decision:
+#
+#   1. INDUCED durations — the fake handler that sleeps 0.5s IS the stimulus.
+#   2. ABSENCE probes — `wait_for(..., timeout=2.0)` inside `except
+#      TimeoutError`, where expiry makes the test PASS. A slow runner weakens
+#      the assertion; it cannot flake it.
+#   3. HANG bounds with an order of magnitude of headroom — `elapsed < 15`
+#      proving a connection-refused path did not become a multi-minute
+#      pod-billing hang. The bound is the property.
+#
+# The dangerous shape is precisely the fourth: a fixed duration whose EXPIRY
+# FAILS the test — a deadline on an awaited event, or an assertion comparing
+# measured time to a constant. Those two are what these guards detect, and the
+# inventories below are burn-down lists, not exemptions: they may shrink, and
+# the guard fails if they grow.
+
+TESTS = Path(__file__).resolve().parent
+
+_LITERAL_DEADLINE = re.compile(r"time\.(?:monotonic|time)\(\)\s*\+\s*[0-9]")
+_ELAPSED_UPPER_BOUND = re.compile(
+    r"^\s*assert\s+[^#\n]*(?:elapsed|wall|_ms\b|_s\b|took)[^#\n]*<=?\s*[0-9]"
+)
+
+#: Wait loops in test modules that still race a fixed clock instead of waiting
+#: on progress (``harness.progress_wait.await_count`` is the replacement). Every
+#: one of them can fail a publish the way pgw#628 did. Owned by pgw#795's
+#: follow-up; delete lines from this list, never add them.
+_DEADLINE_BURNDOWN = {
+    "test_activity_gw601.py",
+    "test_cancel_unwind_pgw687.py",
+    "test_mint_gate_pgw677.py",
+    "test_mint_reopen_pgw677.py",
+    "test_rotation_preload_pgw674.py",
+    "test_sp_group_isolation_pgw773_774.py",
+}
+
+#: Assertions that compare measured time to a constant. Each survives review as
+#: a HANG bound (class 3 above) with at least an order of magnitude of headroom
+#: over the observed value — except the two mint_reopen entries, which are
+#: latency budgets and are the next ones to anchor to the harness's own
+#: configured quantities the way pgw#677's were.
+_ELAPSED_ASSERT_BURNDOWN = {
+    "test_boot_smoke_hardware_report.py",  # hang bound: refused connect << 15s
+    "test_hardware_report.py",             # hang bound: refused connect << 10s
+    "test_mint_process_pgw784.py",         # hang bound: reap must not wait out a 600s child
+    "test_subprocess_stall_gw665.py",      # hang bound: stall window << 30s
+    "test_mint_reopen_pgw677.py",          # LATENCY BUDGET — anchor it next
+}
+
+
+def _scan(root: Path, pattern: "re.Pattern[str]", *, match: bool = False) -> set:
+    hits = set()
+    for path in sorted(root.rglob("*.py")):
+        if path.name == Path(__file__).name:
+            continue
+        for line in path.read_text().splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            if (pattern.match(line) if match else pattern.search(line)):
+                hits.add(path.relative_to(TESTS).as_posix())
+    return hits
+
+
+def test_the_shared_test_harness_has_no_wall_clock_deadline() -> None:
+    """``tests/harness/`` is the substrate every hub-double test waits through;
+    one wall clock there is a wall clock in ~37 files. It had three (a 15s
+    ``DEFAULT_TIMEOUT_S`` on ``wait_for`` / ``wait_for_count`` /
+    ``wait_connection``), and they are gone — waits there are progress-gated
+    unless the caller passes an explicit ``timeout=`` to probe for absence."""
+    assert _scan(TESTS / "harness", _LITERAL_DEADLINE) == set()
+
+
+def test_no_new_fixed_deadline_wait_appears_in_a_test() -> None:
+    found = {p for p in _scan(TESTS, _LITERAL_DEADLINE) if not p.startswith("harness/")}
+    new = found - _DEADLINE_BURNDOWN
+    assert not new, (
+        f"new fixed-deadline wait(s) in {sorted(new)} — wait on progress "
+        f"(harness.progress_wait.await_count) rather than on a clock; pgw#795"
+    )
+    assert not (_DEADLINE_BURNDOWN - found), (
+        f"fixed! remove {sorted(_DEADLINE_BURNDOWN - found)} from the burn-down list"
+    )
+
+
+def test_no_new_wall_clock_assertion_appears_in_a_test() -> None:
+    found = _scan(TESTS, _ELAPSED_UPPER_BOUND, match=True)
+    new = found - _ELAPSED_ASSERT_BURNDOWN
+    assert not new, (
+        f"new elapsed-vs-constant assertion(s) in {sorted(new)} — assert the "
+        f"property (the work's product, an ordering, a share of a measured "
+        f"baseline), not the runner's speed; pgw#795"
+    )
+    assert not (_ELAPSED_ASSERT_BURNDOWN - found), (
+        f"fixed! remove {sorted(_ELAPSED_ASSERT_BURNDOWN - found)} from the list"
+    )

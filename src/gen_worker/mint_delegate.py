@@ -49,8 +49,17 @@ logger = logging.getLogger(__name__)
 ENV_IN_PROCESS = "GEN_WORKER_MINT_IN_PROCESS"
 
 
-def delegated() -> bool:
-    """Whether a compile-cell miss should be minted out of process.
+#: Typed refusals :func:`delegation_refusal` can return. They are the OPERATOR
+#: half of the decision (env kill switches); the PIPELINE half lives in
+#: ``fleet_cells.delegation_refusal``. pgw#813: the two were collapsed into one
+#: either/or sentence on the wire, so a real refusal named two causes that were
+#: both false and never named the one that was true.
+REFUSAL_IN_PROCESS_FORCED = "mint_in_process_forced"
+REFUSAL_EAGER_FIRST_DISABLED = "eager_first_disabled"
+
+
+def delegation_refusal() -> str:
+    """"" when this WORKER may mint out of process, else the typed reason.
 
     Delegation IS eager-first: the live pipeline is never armed, so a boot that
     has eager-first turned off has no route to serve while a child compiles.
@@ -60,8 +69,15 @@ def delegated() -> bool:
     if os.environ.get(ENV_IN_PROCESS, "").strip().lower() in (
         "1", "true", "yes", "on"
     ):
-        return False
-    return os.environ.get("GEN_WORKER_EAGER_FIRST_BOOT", "1").strip() != "0"
+        return REFUSAL_IN_PROCESS_FORCED
+    if os.environ.get("GEN_WORKER_EAGER_FIRST_BOOT", "1").strip() == "0":
+        return REFUSAL_EAGER_FIRST_DISABLED
+    return ""
+
+
+def delegated() -> bool:
+    """Whether a compile-cell miss should be minted out of process."""
+    return not delegation_refusal()
 
 
 @dataclass(frozen=True)
@@ -78,6 +94,11 @@ class MintTask:
     function: str
     modules: Tuple[str, ...]
     snapshots: Dict[str, str] = field(default_factory=dict)
+    # pgw#816: the parent's RESOLVED component overrides, slot -> comp ->
+    # local tree. Part of the composition, not a detail: the base snapshot is
+    # fetched with these components EXCLUDED (th#1330 B2), so a child handed
+    # only `snapshots` is handed a tree that cannot load.
+    component_paths: Dict[str, Dict[str, str]] = field(default_factory=dict)
     weight_lane: str = ""
     lane: str = ""
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -155,10 +176,19 @@ def build_request(
         report=str(Path(workdir) / mint_process.REPORT_NAME),
         cfg=cfg_spec(pending.cfg),
         snapshots=dict(task.snapshots),
+        component_paths={
+            slot: dict(comps)
+            for slot, comps in task.component_paths.items() if comps
+        },
         device=-1 if task.device is None else int(task.device),
         vram_cap_bytes=int(cap_bytes),
         lane=task.lane,
         configs={k: dict(v) for k, v in task.configs.items()},
+        # pgw#805: the recipe rides the pending the arming brain built. The
+        # child never decides it — the recipe determines the artifact KIND,
+        # and a pod that mints the kind its own discovery does not accept is
+        # the permanent-miss loop this issue exists to close.
+        recipe=str(getattr(pending, "recipe", "dynamo") or "dynamo"),
     )
 
 
@@ -227,9 +257,19 @@ async def build_cell(
         if outcome.report is not None and outcome.report.peak_vram_bytes:
             mint_budget.record_child_peak(
                 family, task.weight_lane, outcome.report.peak_vram_bytes)
-        _emit_jit_compile(
-            outcome, family=family, lane=task.weight_lane,
-            key=str(pending.cell_key), attempt=attempts)
+        # pgw#817: BOTH AOT recipes report through `aot_mint_phases`. A
+        # string-literal `== "aot"` here would have sent every regional mint's
+        # phase table down the `jit_compile` kind instead — and
+        # `aot_mint_phases` is the channel the minutes-scale acceptance is
+        # measured on, so the one number the whole issue turns on would have
+        # been recorded under the wrong kind.
+        if str(getattr(pending, "recipe", "")) in (
+                fleet_cells.RECIPE_AOT, fleet_cells.RECIPE_AOT_REGIONAL):
+            _emit_aot_phases(outcome, family=family, lane=task.weight_lane)
+        else:
+            _emit_jit_compile(
+                outcome, family=family, lane=task.weight_lane,
+                key=str(pending.cell_key), attempt=attempts)
 
         if outcome.status == mint_process.ABANDONED:
             return DelegatedResult(
@@ -264,6 +304,48 @@ async def build_cell(
     fleet_cells.abandon_self_mint(pending)
     return DelegatedResult(
         status=FAILED, detail=last, attempts=attempts, budget=budget)
+
+
+def _emit_aot_phases(
+    outcome: MintOutcome, *, family: str, lane: str,
+) -> None:
+    """pgw#805: one delegated AOT mint's phase table, re-emitted PARENT-side.
+
+    ``aot_mint`` already emits `aot_mint_phases` — but it runs in the mint
+    CHILD, which holds no orchestrator session, so those events reach nothing.
+    Re-emitting from the parent (which owns the connection and the 10 s beat)
+    is what finally puts rows in a table that has been empty on both stacks
+    since th#1322 shipped the column.
+
+    A mint that produced NO cell still reports its total, under
+    `phase=aborted`: the seconds are real and worth recording, and they must
+    not enter an AOT-vs-JIT comparison as if a cell came out.
+    """
+    from . import aot_mint
+
+    report = outcome.report
+    table = dict(getattr(report, "mint_phases", None) or {}) \
+        if report is not None else {}
+    try:
+        if table:
+            aot_mint.emit_phase_events(family=family, lane=lane, table=table)
+        if outcome.minted:
+            return
+        total_s = float(
+            report.elapsed_s if report is not None and report.elapsed_s > 0
+            else outcome.elapsed_s)
+        if total_s <= 0:
+            return
+        activity_mod.emit_event(
+            activity_mod.KIND_AOT_MINT,
+            f"family={family} lane={lane or 'plain'} status={outcome.status} "
+            f"total_s={round(total_s, 2)} — no cell produced",
+            phase="aborted",
+            duration_ms=int(round(total_s * 1000)),
+        )
+    except Exception:  # pragma: no cover — telemetry never fails a mint
+        logger.debug("mint-delegate: aot phase event emission failed",
+                     exc_info=True)
 
 
 def _emit_jit_compile(
@@ -335,8 +417,9 @@ def _emit_abort(
         f"family={family} key={key}: the mint PROCESS ended "
         f"{outcome.status} on attempt {attempt} "
         f"(phase={outcome.last_phase or 'unknown'}, "
-        f"exit={outcome.exit_code}) — this worker kept serving eager "
-        f"throughout: {outcome.detail[:600]}",
+        f"exit={outcome.exit_code}, "
+        f"{'retryable' if outcome.retryable else 'deterministic'}) — this "
+        f"worker kept serving eager throughout: {outcome.detail[:600]}",
         phase=f"delegated_{outcome.status}",
     )
 

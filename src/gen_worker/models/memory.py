@@ -216,6 +216,10 @@ class HostRam(msgspec.Struct, frozen=True, kw_only=True):
     source: str  # "cgroup" | "meminfo"
     # Clean cgroup page cache credited back into available_gb (pgw#752).
     reclaimable_file_gb: float = 0.0
+    # pgw#783: compute children sharing this container's memory cgroup. 1 for
+    # every pod that exists today; > 1 once the execution group is an OS
+    # process and G of them share one cap.
+    siblings: int = 1
 
 
 def _read_cgroup_int(path: Path) -> Optional[int]:
@@ -340,12 +344,51 @@ def _cgroup_reclaimable_file_bytes(
     return max(0, cache - pinned)
 
 
+def _host_ram_share(ram: HostRam, siblings: int) -> HostRam:
+    """This process's SHARE of a container it splits with G-1 siblings.
+
+    pgw#783: once the execution group is an OS process, G children sit in ONE
+    memory cgroup — and every one of them reads the WHOLE container's cap here.
+    Left alone, G children each believe the whole pod's RAM is theirs, so
+    pgw#763's host-move guard and the residency demote floor become G times too
+    permissive on precisely the pods most likely to OOM: four children each
+    admitting a 50 GiB move against a 60 GiB cap, and the kernel settles it.
+
+    The rule is deliberately the conservative one: a child may claim no more
+    than its share of the cap AND no more than actually exists. The sum of G
+    children's claims is then bounded by the cap, which is the property the
+    guard needs. Unchanged (and byte-identical) at ``siblings == 1``, which is
+    every pod today.
+    """
+    if siblings <= 1:
+        return ram
+    share_total = ram.total_gb / siblings
+    return msgspec.structs.replace(
+        ram,
+        total_gb=share_total,
+        available_gb=min(ram.available_gb, share_total),
+        cgroup_limit_gb=(
+            None if ram.cgroup_limit_gb is None else ram.cgroup_limit_gb / siblings
+        ),
+        siblings=siblings,
+    )
+
+
 def probe_host_ram(
     *,
     root: Path = _CGROUP_ROOT,
     proc_self_cgroup: Path = _PROC_SELF_CGROUP,
+    siblings: Optional[int] = None,
 ) -> HostRam:
-    """One truthful host-RAM snapshot: psutil meminfo min'd with the cgroup cap."""
+    """One truthful host-RAM snapshot: psutil meminfo min'd with the cgroup cap.
+
+    ``siblings`` defaults to the compute-child count this process shares its
+    cgroup with (pgw#783; 1 unless the process split is running G groups).
+    """
+    if siblings is None:
+        from ..procsplit import host_siblings
+
+        siblings = host_siblings()
     meminfo_total = meminfo_available = 0.0
     try:
         import psutil
@@ -357,14 +400,14 @@ def probe_host_ram(
         pass
     limit = cgroup_memory_limit_bytes(root, proc_self_cgroup)
     if limit is None:
-        return HostRam(
+        return _host_ram_share(HostRam(
             total_gb=meminfo_total,
             available_gb=meminfo_available,
             meminfo_total_gb=meminfo_total,
             meminfo_available_gb=meminfo_available,
             cgroup_limit_gb=None,
             source="meminfo",
-        )
+        ), siblings)
     limit_gb = float(limit) / float(_GIB)
     current = cgroup_memory_current_bytes(root, proc_self_cgroup)
     # #543: memory.current includes filesystem page cache. Model
@@ -379,7 +422,7 @@ def probe_host_ram(
     total = min(meminfo_total, limit_gb) if meminfo_total > 0 else limit_gb
     avail = min(meminfo_available, cg_avail_gb) if meminfo_available > 0 else cg_avail_gb
     constrained = meminfo_total <= 0 or limit_gb < meminfo_total
-    return HostRam(
+    return _host_ram_share(HostRam(
         total_gb=total,
         available_gb=avail,
         meminfo_total_gb=meminfo_total,
@@ -387,7 +430,7 @@ def probe_host_ram(
         cgroup_limit_gb=limit_gb,
         source="cgroup" if constrained else "meminfo",
         reclaimable_file_gb=float(reclaimable) / float(_GIB),
-    )
+    ), siblings)
 
 
 _ram_budget_logged = False

@@ -223,6 +223,11 @@ class _Rig:
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
+        # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
+        # miss delegates by default. This rig has no child process — it covers
+        # the IN-PROCESS capture and the pgw#672 degrade posture around it,
+        # which is exactly what this switch selects.
+        monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
         self.sim = _Sim()
         self.pipes: Dict[str, _Pipe] = {}
         model_dir = tmp_path / "model"

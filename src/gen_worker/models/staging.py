@@ -193,33 +193,53 @@ def alloc_pinned_like(torch: Any, t: Any) -> Optional[Any]:
 # ---------------------------------------------------------------------------
 
 _stream_lock = threading.Lock()
-_stream: Any = None
+_streams: dict = {}
 
 
-def copy_stream() -> Optional[Any]:
-    """The process-wide dedicated H2D copy stream; ``None`` off-CUDA."""
-    global _stream
+def copy_stream(device: Optional[Any] = None) -> Optional[Any]:
+    """The dedicated H2D copy stream FOR ONE DEVICE; ``None`` off-CUDA.
+
+    pgw#780 item 4: this used to be a process-wide singleton created on the
+    first caller's device — device 0 in practice — so a promote onto
+    ``cuda:3`` queued its copies on card 0's stream context (falling through
+    to card 3's DEFAULT/compute stream) and then synchronized card 0: the
+    overlap-with-compute property was silently lost for every group but 0,
+    and the ``finally`` sync guarded the wrong card. One stream per device,
+    keyed by the target.
+
+    ``device`` may be a ``torch.device``, an index, or ``None`` (= the
+    thread-current device, which handler threads pin per group).
+    """
     try:
         import torch
     except Exception:
         return None
     if not torch.cuda.is_available():
         return None
+    if device is None:
+        index = int(torch.cuda.current_device())
+    else:
+        dev = torch.device(device) if not isinstance(device, torch.device) else device
+        if dev.type != "cuda":
+            return None
+        index = int(dev.index) if dev.index is not None else int(torch.cuda.current_device())
     with _stream_lock:
-        if _stream is None:
-            _stream = torch.cuda.Stream()
-        return _stream
+        stream = _streams.get(index)
+        if stream is None:
+            stream = torch.cuda.Stream(device=index)
+            _streams[index] = stream
+        return stream
 
 
 @contextlib.contextmanager
-def copy_stream_ctx() -> Iterator[Optional[Any]]:
-    """Run enclosed CUDA copies on the copy stream (no-op off-CUDA).
+def copy_stream_ctx(device: Optional[Any] = None) -> Iterator[Optional[Any]]:
+    """Run enclosed CUDA copies on the device's copy stream (no-op off-CUDA).
 
     Yields the stream (or ``None``). Callers that need completion before
     returning tensors to compute streams call ``stream.synchronize()`` —
     NEVER ``torch.cuda.synchronize()``, which would also wait on the
     serving job's queued compute kernels."""
-    stream = copy_stream()
+    stream = copy_stream(device)
     if stream is None:
         yield None
         return

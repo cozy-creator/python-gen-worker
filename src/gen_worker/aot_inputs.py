@@ -18,12 +18,13 @@ is a parity requirement, not tidiness — the placement/low-VRAM flags are trace
 INTO the graph, so a cell composed differently from the serving path is a cell
 the serving path can never use (gw#391, ie#381 are both that bug).
 
-The ONE deliberate divergence is the LoRA lane: the dynamo mint calls
-``compile_cache.apply_lora_lane``, which installs zeroed branch BUFFERS —
-module state that export would bake. The exported lane installs
-``lora_lifted.install_lifted_lora_lanes`` instead, so the adapter arrives as
-call arguments (#725 option 2). Same bucket, different installation, because
-the two lanes disagree about what "dynamic" means.
+The ONE deliberate divergence is the LoRA lane: the dynamo mint stops at
+``compile_cache.apply_lora_lane``, which allocates zeroed branch BUFFERS —
+module state that export would bake. The exported lane goes one step further
+through ``lora_lifted.arm_lifted_lora_lanes``, which wraps those same
+containers in the lifted forward so the adapter arrives as call arguments
+(#725 option 2). Same bucket, one extra step, because the two lanes disagree
+about what "dynamic" means — and skipping that step is pgw#822.
 """
 
 from __future__ import annotations
@@ -222,11 +223,12 @@ def compose(
     )
     place_pipeline(pipe)
     if int(spec.lora_bucket or 0):
-        # #725 option 2, NOT compile_cache.apply_lora_lane: the dynamo lane
-        # installs zeroed branch BUFFERS (module state, which export would bake),
-        # while the exported lane needs the adapter lifted to call arguments.
-        # Same bucket, deliberately different installation.
-        lora_lifted.install_lifted_lora_lanes(pipe, int(spec.lora_bucket))
+        # #725 option 2 through pgw#822's ONE arm: containers then lifted
+        # signature. The dynamo lane stops after the containers (module state
+        # export would bake); the exported lane lifts the adapter to call
+        # arguments ON TOP of them — `install_lifted_lora_lanes` alone has no
+        # container to lay its flat pair out over.
+        lora_lifted.arm_lifted_lora_lanes(pipe, int(spec.lora_bucket))
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
     return pipe, lambda module: builder(module, spec)

@@ -548,6 +548,7 @@ def instantiate_class(cls: Optional[type]) -> Any:
 def run_setup(
     instance: Any, resolved_models: Dict[str, str], *, device: str = "",
     arm_compile: bool = True, return_loaded: bool = False,
+    component_paths: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Call ``instance.setup(...)`` once, passing exactly the resolved model
     slots its signature declares.
@@ -556,6 +557,14 @@ def run_setup(
     (pgw#784): the mint child drives its own cold arm + capture and must not
     have a cell armed under it. ``return_loaded=True`` returns the loaded slot
     objects so a caller can reach the pipeline it just built.
+
+    ``component_paths`` (slot -> component -> local override tree, pgw#816)
+    carries the caller's ALREADY-RESOLVED pgw#617 component overrides. The
+    executor resolves them from the dispatch and injects them into the same
+    ``from_pretrained(components=...)`` seam; the mint child is handed the
+    executor's map so it composes the identical pipeline. Without it a slot
+    whose base tree was fetched with the overridden component EXCLUDED
+    (th#1330 B2, ``<digest>__x<fp>``) cannot load at all.
 
     A bare ``def setup(self)`` is legitimate (#337 model-selectable endpoints
     receive their model per-request in the handler instead), so unclaimed
@@ -612,7 +621,8 @@ def run_setup(
     loaded = {
         k: _load_injected_model(
             hints.get(k), v, decl=decl, slot=k, device=device,
-            arm_compile=arm_compile)
+            arm_compile=arm_compile,
+            overrides=dict((component_paths or {}).get(k) or {}))
         for k, v in resolved_models.items()
         if k in wanted
     }
@@ -631,15 +641,36 @@ _ENDPOINT_ATTR = "__gen_worker_endpoint__"
 def _load_injected_model(
     annotation: Any, local_path: str, *, decl: Any = None, slot: str = "",
     device: str = "", arm_compile: bool = True,
+    overrides: Optional[Dict[str, str]] = None,
 ) -> Any:
     """Load one setup slot via the shared core, with a per-process warm cache
-    (so ``serve`` and repeated local dispatches never reload weights)."""
-    key = (str(annotation), str(local_path))
+    (so ``serve`` and repeated local dispatches never reload weights).
+
+    ``overrides`` (component -> local tree) are loaded from their OWN trees
+    and injected through ``from_pretrained(components=...)`` — the same seam
+    and the same loader the executor's setup uses (pgw#617/pgw#816), so a
+    composition assembled here is the composition assembled there."""
+    # The override trees are part of the slot's identity: two loads of the
+    # same base path with different overrides are different pipelines.
+    key = (
+        str(annotation),
+        str(local_path) + "".join(
+            f"|{c}={p}" for c, p in sorted((overrides or {}).items())),
+    )
     if key in _INJECTED_CACHE:
         return _INJECTED_CACHE[key]
     binding = (getattr(decl, "models", None) or {}).get(slot) if decl is not None else None
+    injected: Dict[str, Any] = {}
+    if overrides:
+        from ..models.loading import load_component_override
+
+        for comp, comp_path in sorted(overrides.items()):
+            injected[comp] = load_component_override(
+                local_path, comp, comp_path,
+                dtype=str(getattr(binding, "dtype", "") or ""))
     sl = provision.load_slot(
         annotation, local_path, binding=binding, slot=slot, device=device,
+        components=injected or None,
     )
     if not sl.is_pipeline:
         return sl.obj

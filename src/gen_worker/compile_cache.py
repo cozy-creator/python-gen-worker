@@ -2365,6 +2365,32 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     return hashlib.sha256(encoded).hexdigest(), weight_contract
 
 
+def _regional_dynamic_decline(cfg: Any, target: str) -> str:
+    """"" when the DYNAMO regional branch may arm ``target``, else the reason.
+
+    pgw#817/D4 moved the `regional + dynamic` refusal out of the declaration
+    (where it forbade a combination the EXPORT lane measured as free) and into
+    the one lane that genuinely cannot honour it. `compile_repeated_blocks(
+    dynamic=None)` never applies the declared marks, so a dynamo regional arm
+    over a declaration carrying `dynamic=(...)` would serve a graph that does
+    not implement the contract its cell key asserts — the exact failure class
+    pgw#716 exists to prevent. Declining here sends the target to the
+    whole-forward branch, which DOES mark, so the declaration is still served;
+    it is only served by the other lane.
+    """
+    dyn = tuple(getattr(cfg, "dynamic", ()) or ())
+    if not dyn:
+        return ""
+    names = ", ".join(str(getattr(d, "dim", "") or "?") for d in dyn)
+    return (
+        f"target {target!r} declares regional=True AND dynamic=({names}) — "
+        f"the dynamo regional branch calls compile_repeated_blocks("
+        f"dynamic=None) and never applies the declared marks, so it declines "
+        f"and this target takes the whole-forward branch (which does). The "
+        f"AOT export lane implements regional+dynamic directly (pgw#812 "
+        f"RESULT 3: free on a conv-free region)")
+
+
 def _apply_declared_shape_config(cfg: Any) -> None:
     """The v2 dynamo posture: nothing becomes dynamic by accident.
 
@@ -2905,6 +2931,46 @@ def operator_eager_pin(pipeline: Any) -> bool:
     return lane.execution == lanespec.EXEC_EAGER
 
 
+def eager_tier_available(pipeline: Any) -> bool:
+    """Can this pipeline answer a forward with NOTHING armed? (pgw#813)
+
+    This is the question a background/out-of-process mint actually asks, and
+    it is NOT :func:`mandatory_serving`. Using the latter as a serveability
+    proxy is a category error, and it is the one that left AOT unmintable on
+    every lane: the plain lane declines by #730's measured hold, and the w8a8
+    lane — the lane the AOT program exists to serve — declined because
+    "executes quantized activations" was read as "cannot serve eager".
+
+    A quantized lane serves eager fine. ``_Fp8ScaledLinear.forward`` and
+    ``_W4A4Linear.forward`` are complete eager forwards (``torch._scaled_mm``
+    inline, scales computed per call), the fleet's own cold-boot ladder
+    measures w8a8 eager serving, and pgw#672/#673 already retired the
+    "mandatory lanes raise instead of degrade" posture inside :func:`_guard`
+    — a mandatory lane whose compiled callable fails now serves
+    ``original(...)`` LOUDLY. What ``mandatory_serving`` still answers, and
+    should keep answering, is whether the COMPILED tier is the intended
+    production tier (router fail-closed: novel shapes stay sequential rather
+    than being routed eager behind the tenant's back).
+
+    False only when an armed non-eager backend has REPLACED the callable —
+    an AOTI export or a TRT engine — because there the eager forward is gone
+    until the artifact is unwrapped.
+    """
+    from . import aot_serve, trt_engine
+
+    try:
+        if aot_serve.is_armed(pipeline):
+            return False
+    except Exception:  # noqa: BLE001 — an unanswerable arm is not a swap
+        pass
+    try:
+        if trt_engine.is_armed(pipeline):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def mandatory_serving(pipeline: Any) -> bool:
     """ONE brain for "may this pipeline serve eager?" (pgw#677 reopen).
 
@@ -3047,14 +3113,23 @@ def apply(
             logger.debug("compile-cache: pipeline has no target %r; skipping", target)
             continue
         owner, attr, fn = resolved
+        # pgw#817/D4: computed BEFORE the branch so a declined regional target
+        # falls through to the whole-forward branch (which does apply the
+        # declared marks) instead of being skipped entirely.
+        regional_decline = _regional_dynamic_decline(cfg, target) \
+            if regional else ""
+        if regional_decline:
+            logger.info("compile-cache: %s", regional_decline)
         if (
             regional
+            and not regional_decline
             and attr == "forward"
             and callable(getattr(owner, "compile_repeated_blocks", None))
         ):
             # Per-block graphs (ie#381): bounded memory under fp8 layerwise
             # casting + much cheaper cold compile. Blocks are compiled in
             # place; the guard wrapper clears them on the first failure.
+            #
             _apply_declared_shape_config(cfg)
             owner.compile_repeated_blocks(dynamic=None)
             # pgw#681: regional entry crosses the same canonical boundary as

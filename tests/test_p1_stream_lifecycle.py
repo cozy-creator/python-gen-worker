@@ -30,6 +30,7 @@ from harness.hub_double import (
     is_ready,
     is_result_for,
 )
+from harness.progress_wait import Cadence, await_count
 from harness.toy_endpoints import EchoIn, EchoOut
 
 _TIMEOUT = 15.0
@@ -305,11 +306,18 @@ def test_auth_rejection_within_window_keeps_retrying() -> None:
     with custom_scheduler_server(
         lambda: FakeScheduler(reject_unauthenticated=True),
     ) as (_scheduler, harness, _port):
-        deadline = time.monotonic() + 3.0
-        while len(harness.worker.transport.reconnect_delays) < 4:
-            assert harness._thread.is_alive(), "worker exited inside the auth window"
-            assert time.monotonic() < deadline, "worker never retried"
-            time.sleep(0.02)
+        # pgw#795: retries are counted as PROGRESS, not raced against a 3s
+        # clock. The worker exiting is the definitive failure (and needs no
+        # clock); a worker that is alive but has stopped retrying stalls out.
+        await_count(
+            lambda: len(harness.worker.transport.reconnect_delays),
+            4,
+            what="reconnect attempts inside the auth window",
+            cadence=Cadence(),
+            gone=lambda: (
+                None if harness.alive else "the worker exited inside the auth window"
+            ),
+        )
         assert harness.exit_code is None
         harness.stop()
 

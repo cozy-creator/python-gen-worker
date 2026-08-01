@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 import uuid
 from collections import OrderedDict
@@ -96,7 +97,14 @@ class IntentRegistry:
         on_change: Optional[Callable[[], None]] = None,
         unreported_wait_timeout_s: float = _UNREPORTED_WAIT_TIMEOUT_S,
     ) -> None:
-        self.worker_session_id = uuid.uuid4().hex
+        # pgw#783: under the process split the PARENT mints the session id once
+        # and passes it down (GEN_WORKER_SESSION_ID), so it survives child
+        # respawns — child-minted it changed on every respawn and the hub
+        # rejected the cross-session shadow state. Absent the env (no split), a
+        # fresh uuid, exactly as before.
+        self.worker_session_id = (
+            os.environ.get("GEN_WORKER_SESSION_ID", "").strip() or uuid.uuid4().hex
+        )
         self.release_id = str(release_id or "").strip()
         self.function_names = frozenset(
             str(name).strip() for name in function_names if str(name).strip()

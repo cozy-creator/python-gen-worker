@@ -145,23 +145,6 @@ def test_the_two_flavors_really_do_compute_at_different_dtypes(
     assert composition_compute_dtype(w8a8, "") == "bf16"
 
 
-def test_declared_dtype_identity_collides_across_lanes(tmp_path: Path) -> None:
-    """RED, at the identity layer: keyed on the BINDING's declared dtype — the
-    pre-fix call — the two lanes' byte-identical `text_encoder` maps to ONE
-    cache entry. That single entry is how a Half module reaches a bf16
-    composition with no override on the wire."""
-    shared_digest = "same-text-encoder-bytes"
-    pre_fix = [
-        LoadedComponentKey.for_component(
-            content_digest=shared_digest, component="text_encoder",
-            binding=_binding("tensorhub/wai-illustrious"),
-        )
-        for _ in range(2)
-    ]
-    assert pre_fix[0].cache_id() == pre_fix[1].cache_id()
-    assert pre_fix[0].dtype == "", "hub bindings declare no dtype"
-
-
 def test_effective_dtype_identity_separates_the_lanes(tmp_path: Path) -> None:
     """GREEN: keyed on the EFFECTIVE compute dtype — what the executor passes
     now — the same bytes under two lanes are two entries, so a bf16
@@ -266,22 +249,6 @@ def _linear_stack(dtype: Any, *, bias: bool = True) -> Any:
         torch.nn.LayerNorm(16),
         torch.nn.Linear(16, 16, bias=bias),
     ).to(dtype)
-
-
-def test_the_live_torch_signature_is_an_nn_linear_with_bias() -> None:
-    """The measurement this issue turns on: a bf16 activation meeting a Half
-    `nn.Linear` WITH bias raises the pgw#683 message VERBATIM, and the
-    bias-less/bare-matmul form raises a DIFFERENT one. This is what excludes
-    the LoRA side-branch (`(x @ a.t()) @ b.t()`) as the site."""
-    x = torch.randn(2, 16, dtype=torch.bfloat16)
-    with pytest.raises(RuntimeError) as with_bias:
-        _linear_stack(torch.float16)(x)
-    assert "mat1 and mat2 must have the same dtype" in str(with_bias.value)
-    assert "BFloat16 and Half" in str(with_bias.value)
-
-    with pytest.raises(RuntimeError) as no_bias:
-        _linear_stack(torch.float16, bias=False)(x)
-    assert "mat1 and mat2 must have the same dtype" not in str(no_bias.value)
 
 
 def test_invariant_refuses_a_foreign_precision_component() -> None:

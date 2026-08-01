@@ -684,6 +684,16 @@ def set_guard_failure_callback(
     return True
 
 
+def is_armed(pipeline: Any) -> bool:
+    """Whether a TRT engine currently REPLACES this pipeline's forward
+    (pgw#813): while it does there is no eager tier to serve from."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    state = marker.get("state")
+    if not isinstance(state, dict):
+        return False
+    return not bool(state.get("failed", False))
+
+
 def unwrap(pipeline: Any) -> bool:
     """Restore eager forward after an unproven first-time engine adoption."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}

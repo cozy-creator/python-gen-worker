@@ -71,6 +71,7 @@ from .models import disk_gc
 from .models import disk_telemetry
 from .models import provision
 from .models import residency as residency_mod
+from .models import staging as staging_mod
 from .models.memory import (
     aflush_memory,
     deeper_offload_mode,
@@ -422,6 +423,39 @@ def _binding_wire_refs(binding: Any) -> List[str]:
     return [wire_ref(binding), *(ref for _, ref in _component_overrides(binding))]
 
 
+def _snapshot_files_without_components(
+    snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
+) -> "List[pb.SnapshotFile]":
+    """``snapshot.files`` minus every entry under an excluded ``<comp>/``
+    subfolder (th#1330 B2). The one place the worker's byte accounting agrees
+    with what the downloader will actually fetch."""
+    files = list(snapshot.files) if snapshot is not None else []
+    drop = {str(c).strip() for c in exclude if str(c or "").strip()}
+    if not drop:
+        return files
+    kept = []
+    for f in files:
+        rel = str(f.path).strip().lstrip("/")
+        top, sep, _ = rel.partition("/")
+        if sep and top in drop:
+            continue
+        kept.append(f)
+    return kept
+
+
+def _snapshot_without_components(
+    snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
+) -> "Optional[pb.Snapshot]":
+    """``snapshot`` re-stated over the narrowed file set — the manifest a
+    verifier must use when the tree on disk was fetched with an exclusion."""
+    if snapshot is None or not exclude:
+        return snapshot
+    return pb.Snapshot(
+        digest=snapshot.digest,
+        files=_snapshot_files_without_components(snapshot, exclude),
+    )
+
+
 def _alias_binding_matches(alias: "EndpointSpec", slot_key: str, ref: str) -> bool:
     """Does ``alias`` hold this load-time binding fact? ``slot_key`` is a
     slot name or ``<slot>.<component>`` override key (pgw#617)."""
@@ -562,16 +596,26 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
                 # th#1303 manifest v2: the algorithm-tagged digest and the
                 # ordered chunk list. Dropping these here is what would make
                 # every chunked snapshot look like a whole file with no URL.
-                digest=getattr(f, "digest", "") or "",
+                #
+                # DIRECT FIELD ACCESS, deliberately — not `getattr(f, "digest",
+                # "")`. These were read defensively at first, and the default
+                # turned "the generated stub does not have this field" into
+                # "the hub sent an empty value": the vendored proto WAS stale
+                # (no `digest`/`chunks` at all), so every v2 snapshot arrived
+                # blank on the production gRPC path and nothing said why. A
+                # missing field must be an AttributeError at import-adjacent
+                # code, not a silent empty string — same class as guarding a
+                # digest check on the legacy field's truthiness.
+                digest=f.digest or "",
                 chunks=tuple(
                     WorkerResolvedChunk(
                         sha256=(c.sha256 or "").strip().lower(),
                         url=c.url,
                         length=int(c.len),
                     )
-                    for c in getattr(f, "chunks", ())
+                    for c in f.chunks
                 ),
-                chunk_size_bytes=int(getattr(f, "chunk_size_bytes", 0) or 0),
+                chunk_size_bytes=int(f.chunk_size_bytes or 0),
             )
             for f in snap.files
         ],
@@ -888,6 +932,9 @@ class ModelStore:
             "materialize_intent", default=""
         )
         self._bindings: Dict[str, Any] = {}
+        # th#1330 B2: ref -> the component set last skipped for it, so the
+        # typed event fires on transitions and not once per materialization.
+        self._override_exclusions_reported: Dict[str, Tuple[str, ...]] = {}
         self.keep: list[str] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._index = disk_gc.RefIndex(self._cache_dir)
@@ -1173,6 +1220,18 @@ class ModelStore:
                 # Retarget it rather than replace it: its entries and leases
                 # are already the live bookkeeping.
                 zero.device_group = self._residency_groups[0]
+        # pgw#780 item 1: the pinned-host fair share was DEAD code — the pool's
+        # per-group cap only engages once it knows G, and nothing in src/ ever
+        # told it. Without this a G=4 degraded pod lets group 0 claim the whole
+        # pinned budget (§4.3 caveat 2).
+        staging_mod.pinned_pool().set_group_count(int(topology.groups))
+        # pgw#780 item 2: registries were created lazily on first dispatch, so
+        # the boot disk re-track (which unions over all_residencies()) was a
+        # no-op for groups 1..G-1 — their LRU/preserve/eviction views started
+        # blind to the disk tier that was already there. Create every group's
+        # registry NOW, before any boot walk unions over them.
+        for ordinal in range(int(topology.groups)):
+            self.residency_for(ordinal)
 
     def disk_ref_in_use(self, ref: str) -> bool:
         """In-use across ALL groups (§4.3 caveat 3): one group's GC must never
@@ -1198,13 +1257,34 @@ class ModelStore:
 
     def residency_snapshot(self) -> List[pb.ModelResidency]:
         out: List[pb.ModelResidency] = []
-        # Hold identity stable while Residency captures its tiers. Residency
-        # callbacks run only after releasing their own lock, so this cannot
-        # invert lock order: a transition either happens entirely before this
-        # snapshot, or its identity update waits until the captured view is
-        # complete.
+        # pgw#776 / DPA-6: union across EVERY group's registry. This runs on
+        # the event-loop thread (where _state_delta lives), whose contextvar
+        # is always the default group — reading `self.residency` here meant a
+        # G=4 pod reported 1/G of its resident set, and the hub's cache-aware
+        # victims, keep-warm objectives and warm-preference routing all
+        # decided on a quarter of the truth. Same union rule as disk_refs():
+        # one row per ref at its BEST tier, vram summed across groups (the
+        # pod's total VRAM commitment for that ref).
+        merged: Dict[str, Tuple[residency_mod.Tier, int]] = {}
+        rank = {
+            residency_mod.Tier.VRAM: 2,
+            residency_mod.Tier.RAM: 1,
+            residency_mod.Tier.DISK: 0,
+        }
+        for reg in self.all_residencies():
+            for ref, tier, vram in reg.snapshot():
+                prev = merged.get(ref)
+                if prev is None:
+                    merged[ref] = (tier, int(vram))
+                else:
+                    best = tier if rank[tier] > rank[prev[0]] else prev[0]
+                    merged[ref] = (best, prev[1] + int(vram))
+        # Hold identity stable while emitting. Residency callbacks run only
+        # after releasing their own lock, so this cannot invert lock order: a
+        # transition either happens entirely before this snapshot, or its
+        # identity update waits until the captured view is complete.
         with self._identity_lock:
-            for ref, tier, vram in self.residency.snapshot():
+            for ref, (tier, vram) in merged.items():
                 # DISK is backed by the verified disk snapshot; RAM/VRAM is
                 # backed by the loaded resident object. During stale A -> B
                 # teardown those identities intentionally differ.
@@ -1236,6 +1316,64 @@ class ModelStore:
         a dispatch gate on its own)."""
         return self._cached_disk_usage_report
 
+    def _ref_blob_sizes(self, ref: str) -> Dict[str, int]:
+        """CAS digest -> bytes for ``ref``'s banked snapshot, or ``{}`` when
+        the worker has no manifest for it. The digest is the identity the CAS
+        dedups on: ``blobs/`` is hardlinked into every snapshot tree, so a
+        blob two refs share occupies the disk ONCE."""
+        snap = self._snapshots.get(ref)
+        if snap is None or not snap.files:
+            return {}
+        sizes: Dict[str, int] = {}
+        for f in snap.files:
+            digest = (str(getattr(f, "digest", "") or "").strip()
+                      or str(getattr(f, "blake3", "") or "").strip())
+            if not digest:
+                return {}
+            sizes[digest.lower()] = int(f.size_bytes)
+        return sizes
+
+    def _reclaimable_entries(
+        self, keep: set, entries: Dict[str, Any],
+    ) -> List[Tuple[str, int]]:
+        """(path, bytes) the disk GC could ACTUALLY free (th#1330 B4).
+
+        The previous figure summed each evictable ref's whole indexed tree
+        size, which over-reports twice: two evictable refs sharing a blob had
+        it counted in both, and a blob an evictable ref shares with a RETAINED
+        one is not reclaimable at all — ``sweep_orphan_blobs`` only unlinks
+        blobs at ``st_nlink == 1``, so deleting that tree frees nothing.
+        The hub sizes every capacity decision off this number.
+
+        A ref with no banked manifest keeps its full indexed size: an unknown
+        manifest is not a claim that the ref is free."""
+        retained: set = set()
+        for ref in self.disk_refs():
+            if ref in keep or self.disk_ref_in_use(ref):
+                retained.update(self._ref_blob_sizes(ref))
+        counted: set = set()
+        out: List[Tuple[str, int]] = []
+        for ref in self.disk_refs():
+            if ref in keep or self.disk_ref_in_use(ref):
+                continue
+            ent = entries.get(ref)
+            if not ent:
+                continue
+            path = str(ent.get("path") or "")
+            blobs = self._ref_blob_sizes(ref)
+            if not blobs:
+                out.append((path, int(ent.get("bytes") or 0)))
+                continue
+            freed = 0
+            for digest, size in blobs.items():
+                if digest in retained or digest in counted:
+                    continue
+                counted.add(digest)
+                freed += size
+            if freed > 0:
+                out.append((path, freed))
+        return out
+
     def _measure_disk_usage_report(self) -> pb.DiskUsageReport:
         """Blocking measurement — statvfs on the real mounts (CAS root =
         container tier; attached endpoint volume = volume tier; a shared
@@ -1253,20 +1391,11 @@ class ModelStore:
         loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
         entries = self._index.entries()
-        reclaimable: List[Tuple[str, int]] = []
         # pgw#748: the CAS is ONE tree with one page cache, hardlinked
         # across every group, so the preserve set is the UNION across groups —
         # dropping clean pages one group is done with would drop the pages a
         # sibling group is still mmapping (§4.3 caveat 3).
-        for ref in self.disk_refs():
-            if ref in keep or self.disk_ref_in_use(ref):
-                continue
-            ent = entries.get(ref)
-            if not ent:
-                continue
-            reclaimable.append(
-                (str(ent.get("path") or ""), int(ent.get("bytes") or 0))
-            )
+        reclaimable = self._reclaimable_entries(keep, entries)
         mounts = [disk_telemetry.MountSpec(
             tier=disk_telemetry.TIER_CONTAINER, path=str(self._cache_dir),
         )]
@@ -1365,10 +1494,51 @@ class ModelStore:
                 self._snapshots[ref] = snapshot
                 self._snapshot_generations[ref] = accepted_generation
 
+        self._prune_banked_snapshots(stored)
+
         for ref in stored:
             waiter = self._snapshot_waiters.get(ref)
             if waiter is not None:
                 waiter.set()
+
+    def _prune_banked_snapshots(self, desired: Dict[str, pb.Snapshot]) -> None:
+        """Drop banked manifests for refs that are neither desired, resident,
+        in use, nor being materialized (th#1330 B5).
+
+        ``_snapshots`` was append-only: a ref dropped from DesiredResidency
+        kept its manifest forever, so a later bare ``ensure_local(ref)`` — a
+        preload, a stale spec, a retry — could materialize OBSOLETE bytes off
+        a manifest the hub stopped asking for, with no hub prompting and no
+        way to notice. ``_verified``/``_snapshot_generations`` carried the same
+        stale entries.
+
+        The conditions are deliberately conservative: on disk, in use, or mid
+        materialization all keep the manifest, so nothing in flight can lose
+        the snapshot it is working from. A dropped ref that is wanted again
+        goes through ``_await_hub_snapshot``, which is the correct path —
+        the hub re-mints a manifest with LIVE presigned URLs."""
+        try:
+            resident = set(self.disk_refs())
+        except Exception:  # pragma: no cover - residency not yet bound
+            return
+        active = set(self._materialize_active)
+        keep = set(desired) | resident | active | set(self.keep)
+        with self._identity_lock:
+            stale = [
+                ref for ref in list(self._snapshots)
+                if ref not in keep and not self.disk_ref_in_use(ref)
+            ]
+            for ref in stale:
+                self._snapshots.pop(ref, None)
+                self._snapshot_generations.pop(ref, None)
+                self._verified.discard(ref)
+        if not stale:
+            return
+        logger.info(
+            "dropped %d banked snapshot manifest(s) for refs that are neither "
+            "desired nor resident (th#1330): %s",
+            len(stale), ", ".join(sorted(stale)[:8]),
+        )
 
     def snapshot_digest(self, ref: str, snapshot: Optional[pb.Snapshot] = None) -> str:
         candidate = snapshot
@@ -1465,7 +1635,8 @@ class ModelStore:
     def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
         ``{top_level_subfolder: content_set_digest}``. Weight/data files use
-        the wire snapshot's per-file blake3; small JSON sidecars use
+        the wire snapshot's per-file digest (v2 tagged ``digest``, v1 legacy
+        ``blake3`` mirror); small JSON sidecars use
         CANONICAL digests read from ``local_path`` (save-era serialization —
         provenance stamps, explicit defaults, torch_dtype/dtype vocabulary —
         must not break sharing of byte-identical weights; see
@@ -1481,12 +1652,19 @@ class ModelStore:
         groups: Dict[str, Dict[str, str]] = {}
         for f in snap.files:
             rel = str(f.path).strip().lstrip("/")
-            if not rel or not f.blake3:
+            # th#1303 empty-guard class: this read `f.blake3`, which is EMPTY
+            # on every v2 entry, so every file of a v2 snapshot was skipped
+            # and component sharing was silently OFF fleet-wide — the
+            # fail-CLOSED half of the class (the fail-open half is
+            # `if want and got != want`). Read the tagged digest first; the
+            # legacy mirror read dies with S1.
+            digest = (str(getattr(f, "digest", "") or "").strip()
+                      or str(getattr(f, "blake3", "") or "").strip())
+            if not rel or not digest:
                 continue
             comp, _, rest = rel.partition("/")
             if not rest:
                 comp, rest = "", rel
-            digest = str(f.blake3)
             if (local_path is not None and comp
                     and rest.endswith(".json")
                     and int(f.size_bytes) <= CANONICAL_JSON_MAX_BYTES):
@@ -1617,9 +1795,34 @@ class ModelStore:
         if not self.residency.evict(ref):  # refuses in-use entries; emits EVICTED
             return
         if path is not None:
-            disk_gc.delete_ref_bytes(ref, path, self._cache_dir)
-            disk_gc.sweep_orphan_blobs(self._cache_dir)
+            # th#1330 B4: snapshot trees are keyed by DIGEST, so two refs that
+            # resolve to the same snapshot (a tag alias and its pin, the same
+            # checkpoint reached under two spellings) share ONE directory.
+            # rmtree-ing it here deleted the bytes a still-resident sibling ref
+            # was pointing at. Drop only this ref's bookkeeping in that case;
+            # the tree goes when its last holder does.
+            sharer = self._other_ref_at_path(ref, path)
+            if sharer:
+                logger.info(
+                    "disk-gc: keeping %s — %s still holds the same snapshot "
+                    "tree", path, sharer,
+                )
+            else:
+                disk_gc.delete_ref_bytes(ref, path, self._cache_dir)
+                disk_gc.sweep_orphan_blobs(self._cache_dir)
         self._index.remove(ref)
+
+    def _other_ref_at_path(self, ref: str, path: Path) -> str:
+        """A still-tracked ref (any group) materialized at the same path."""
+        target = str(path)
+        for reg in self.all_residencies():
+            for other in reg.refs_in(residency_mod.Tier.DISK):
+                if other == ref:
+                    continue
+                other_path = reg.local_path(other)
+                if other_path is not None and str(other_path) == target:
+                    return other
+        return ""
 
     async def _ensure_disk_headroom(
         self,
@@ -1662,6 +1865,53 @@ class ModelStore:
         download paths that only carry the bare ref (DesiredResidency or
         startup prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
+
+    def _override_excluded_components(
+        self, ref: str, binding: Any, snapshot: Optional[pb.Snapshot],
+    ) -> Tuple[str, ...]:
+        """Base-composition subfolders this materialization must NOT fetch
+        (th#1330 B2): the components a pgw#617 dispatch SUBSTITUTES.
+
+        The override's own tree is materialized separately and handed to
+        ``from_pretrained`` as a constructed object, so diffusers never reads
+        the base's copy — it was downloaded and discarded (~1.64 GB per SDXL
+        text-encoder override). The exclusion is derived only from the
+        binding's ``component_overrides``, i.e. from the dispatch that is
+        about to load, never from standing state.
+
+        Only components the snapshot ACTUALLY carries as a subfolder are
+        excluded, so the value is a fetch fact and not a guess — and a
+        narrowed tree therefore keys on exactly what was left out."""
+        overrides = _component_overrides(binding)
+        if not overrides:
+            return ()
+        present = {
+            str(f.path).strip().lstrip("/").partition("/")[0]
+            for f in (snapshot.files if snapshot is not None else ())
+            if "/" in str(f.path).strip().lstrip("/")
+        }
+        drop = tuple(sorted(
+            {comp for comp, _ in overrides if comp in present}))
+        if not drop:
+            return ()
+        saved = sum(
+            int(f.size_bytes) for f in (snapshot.files if snapshot else ())
+            if str(f.path).strip().lstrip("/").partition("/")[0] in drop
+        )
+        if self._override_exclusions_reported.get(ref) != drop:
+            self._override_exclusions_reported[ref] = drop
+            logger.info(
+                "not fetching %s from %s: substituted by a component override "
+                "(%d bytes skipped)", "/".join(drop), ref, saved,
+            )
+            activity_mod.emit_event(
+                "component_fetch_skipped",
+                f"base composition {ref} ships {'/'.join(drop)} that this "
+                f"dispatch substitutes with a component override; skipping "
+                f"{saved} bytes the load would discard (th#1330)",
+                phase="skipped",
+            )
+        return drop
 
     async def _await_hub_snapshot(
         self,
@@ -1750,6 +2000,11 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
+        # th#1330 B2: the components this dispatch SUBSTITUTES are not fetched
+        # from the base composition. The base is loaded with the override
+        # object handed to `from_pretrained` (pgw#617 load-then-substitute),
+        # so its own copy of that subfolder is downloaded and discarded.
+        exclude_components = self._override_excluded_components(ref, binding, snapshot)
         registry = self._intent_registry
         scoped_intent_id = self._materialize_intent_context.get()
         command_owned = bool(intent_id or scoped_intent_id)
@@ -1819,7 +2074,19 @@ class ModelStore:
             want = ""
             if snapshot is not None and snapshot.digest:
                 want = snapshot.digest.split(":", 1)[-1].strip().lower()
-            if cached is not None and cached.exists() and (not want or cached.name == want):
+            # th#1330 B2: with an override exclusion the acceptable cached
+            # names are the exclusion's own key OR the bare digest — the
+            # latter is a SUPERSET (a complete tree already on disk serves an
+            # excluded fetch for free, and is never narrowed retroactively).
+            acceptable = {want}
+            if want and exclude_components:
+                acceptable.add(cozy_snapshot.snapshot_dir_key(
+                    want, (), exclude_components))
+            cached_partial = (
+                cached is not None and want and cached.name != want
+                and cached.name in acceptable
+            )
+            if cached is not None and cached.exists() and (not want or cached.name in acceptable):
                 if ref in self._verified:
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
@@ -1828,7 +2095,9 @@ class ModelStore:
                 # pod-churn-truncated snapshot used to fatal every load until
                 # a manual delete; now it is quarantined + re-materialized.
                 ok, bad = await asyncio.to_thread(
-                    self._verify_snapshot_tree, cached, snapshot
+                    self._verify_snapshot_tree, cached,
+                    _snapshot_without_components(snapshot, exclude_components)
+                    if cached_partial else snapshot,
                 )
                 if ok:
                     self._verified.add(ref)
@@ -1865,13 +2134,19 @@ class ModelStore:
                         intent_id=intent_id,
                     )
                     operation_identity = self._snapshot_identity(ref, snapshot)
+            # th#1330 B2: every byte figure below (headroom gate, DOWNLOADING
+            # totals, the boot weights span) counts what will actually be
+            # fetched, so an override's skipped component never shows up as
+            # bytes anybody planned for or reported.
+            fetch_files = _snapshot_files_without_components(
+                snapshot, exclude_components)
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
                 failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM
                 await self._ensure_disk_headroom(
                     ref,
-                    sum(int(f.size_bytes) for f in snapshot.files),
+                    sum(int(f.size_bytes) for f in fetch_files),
                     operation_identity,
                     intent_id=intent_id,
                 )
@@ -1889,9 +2164,7 @@ class ModelStore:
             # 10s beat while an activity is open); snapshot sizes make the
             # total known up front, so the wire never shows total=0 for
             # tensorhub refs.
-            known_total = (
-                sum(int(f.size_bytes) for f in snapshot.files)
-                if snapshot is not None and snapshot.files else 0)
+            known_total = sum(int(f.size_bytes) for f in fetch_files)
             dl_counter = progress_mod.counter(
                 f"download:{ref}", progress_mod.UNIT_BYTES, total=known_total)
 
@@ -1961,6 +2234,7 @@ class ModelStore:
                                 hf_token=self._hf_token,
                                 allow_patterns=tuple(getattr(binding, "files", ()) or ()),
                                 components=tuple(getattr(binding, "components", ()) or ()),
+                                exclude_components=exclude_components,
                                 progress=_progress,
                                 fill_source_dir=self._fill_source_dir,
                             )
@@ -2342,6 +2616,17 @@ def _selection_for(
     with the fully finalized one once it packs the proven capture.
     """
     if mint is not None:
+        if (getattr(mint, "recipe", "") == "aot"
+                and getattr(mint, "artifact", None) is None):
+            # pgw#805: an AOT cell's key folds the COMBINED GRAPH HASH of the
+            # exported class set, so it does not exist until the export
+            # finishes. The dynamo pending's key is computable from static
+            # axes and is therefore honest to advertise at arm time; an AOT
+            # pending's is not, and advertising the dynamo-shaped handle would
+            # publish a self-attested ref no artifact will ever carry. Nothing
+            # is advertised until `adopt_delegated_mint` reads the real key
+            # off the packed envelope.
+            return delivered
         path = getattr(mint, "artifact", None)
         if path is None:
             path = mint.target
@@ -2384,6 +2669,22 @@ _TRANSIENT_SETUP_ERRORS = (InsufficientDiskError, RetryableError, MissingSnapsho
 MAX_TRANSIENT_SETUP_ATTEMPTS = 5
 
 
+@contextmanager
+def _pipeline_load_span(spec: EndpointSpec) -> typing.Iterator[Optional[boot_mod.BootSpan]]:
+    """Open `pipeline_load` for one setup, or yield None outside the boot
+    window (pgw#797).
+
+    A plain `boot_mod.span(...)` cannot express "measure only during boot"
+    without an `if` at every call site, and the one call site that forgot it is
+    how steady-state work lands in a boot ladder.
+    """
+    if not boot_mod.in_boot():
+        yield None
+        return
+    with boot_mod.span(boot_mod.PHASE_PIPELINE_LOAD, function=spec.name) as sp:
+        yield sp
+
+
 def _setup_error_will_retry(exc: BaseException) -> bool:
     """Whether this setup loss is contractually re-attempted (gw#661).
 
@@ -2406,6 +2707,10 @@ class _ClassRecord:
     server: Any = None  # ServerHandle for runtime="vllm"/"llama-server"
     ready: bool = False
     failed: Optional[str] = None
+    # pgw#797: ordinal of the OPEN `pipeline_load` boot span covering the
+    # in-flight setup, 0 when not booting. The nested `warmup` span names it
+    # explicitly rather than inferring a parent from an implicit stack.
+    boot_load_ordinal: int = 0
     lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
     # pgw#647 concurrency contract: one live instance == one binding set with
     # mutable buffers (resident LoRA branches, adapter attach state), so
@@ -2535,6 +2840,12 @@ class _BackgroundMint:
     # lemon host (pgw#786).
     modules: Tuple[str, ...] = ()
     snapshot_paths: Dict[str, str] = dc_field(default_factory=dict)
+    # pgw#816: and the THIRD fact, which the first delegated mint in
+    # production died without — the resolved component overrides (pgw#617),
+    # slot -> comp -> local tree. th#1330 B2 excludes an overridden
+    # component's files from the base fetch, so `snapshot_paths` alone names
+    # a narrowed tree (`<digest>__x<fp>`) that no loader can open.
+    component_paths: Dict[str, Dict[str, str]] = dc_field(default_factory=dict)
     # th#1299: WHY this mint was asked to stop. The abort event used to report
     # "(adopt-on-arm / vacate / shutdown)" — three unrelated causes in one
     # string — so a mint that died could not be told from a mint that was
@@ -2929,6 +3240,8 @@ class Executor:
         # plan. Process-local by design — allocator pool, cuBLAS/cuDNN
         # heuristics and dynamo's code cache die with the process.
         self._warm_contract_runs: Dict[Any, set] = {}
+        # pgw#797: warm forwards counted by the in-flight `warmup` span.
+        self._warm_iterations: int = 0
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
         # Runtime compile failures are owned by the exact record/target that
@@ -5304,13 +5617,23 @@ class Executor:
                 activity_mod.PHASE_LOAD,
             )
             try:
-                with activity_mod.watchdog(act):
-                    instance = await self._setup_locked(
-                        spec,
-                        rec,
-                        snapshots,
-                        intent_id=intent_id,
-                    )
+                # pgw#797: THE `pipeline_load` span, and its only owner. Every
+                # setup — boot scan, hub-delivered `dynamic` spec, hot
+                # instance, RunJob — funnels through here, which is why the two
+                # `Lifecycle` sites pgw#789 used could not see a real load.
+                # `in_boot()` keeps steady-state re-setups out of the ladder.
+                # The ordinal is threaded to the nested `warmup` span so
+                # `pipeline_load` reads as weights->VRAM by subtraction.
+                with _pipeline_load_span(spec) as load_span:
+                    rec.boot_load_ordinal = (
+                        load_span.ordinal if load_span is not None else 0)
+                    with activity_mod.watchdog(act):
+                        instance = await self._setup_locked(
+                            spec,
+                            rec,
+                            snapshots,
+                            intent_id=intent_id,
+                        )
             except BaseException as exc:
                 # gw#661: a will-retry condition is not a failure. Only
                 # exhausting the budget is, and then the hub must see it.
@@ -5390,6 +5713,16 @@ class Executor:
                 )
             else:
                 act.completed()
+                # pgw#797: WARM-COMPLETE on the non-deferred paths. pgw#789 put
+                # this milestone in `_background_mint`'s finally only, and
+                # `rec.background_mint` is set ONLY under eager-first — so a
+                # boot that minted inline, adopted a delivered cell, or served
+                # eager without minting emitted no `warm_complete` at all. That
+                # is most boots, and it was read as "compiled serving never
+                # reached" when the truth was "never measured". Reached here,
+                # setup is done and no deferred mint will run, so this boot's
+                # serving tier is final NOW.
+                self._mark_warm_complete(rec, spec.name)
             self._intent_transition(
                 intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
@@ -5398,6 +5731,94 @@ class Executor:
             self._clear_recovered_compile_failures(rec)
             self._on_state_change()
             return instance
+
+    def _mark_warm_complete(self, rec: "_ClassRecord", function: str) -> None:
+        """Close the compiled-serving milestone once per process (pgw#797).
+
+        `outcome` says whether compiled serving was reached at all; `ref` names
+        the cell that got there. `mark_once` keeps the several owners — inline
+        setup here, the deferred background mint — from double-claiming it.
+        """
+        armed = next(
+            (t.active_compile_ref for t in rec.compile_targets.values()
+             if t.active_compile_ref), "")
+        boot_mod.mark_once(
+            boot_mod.PHASE_WARM_COMPLETE,
+            since_process_start=True,
+            function=function,
+            ref=armed,
+            outcome=(boot_mod.OUTCOME_OK if armed else boot_mod.OUTCOME_REFUSED),
+            reason="" if armed else "serving_eager",
+        )
+        if armed or rec.background_mint is not None:
+            return
+        # pgw#805: a boot that DECLARED a compile target and ends with no
+        # artifact and no mint in flight must say so. This is the terminal
+        # backstop for the whole miss policy — the individual declines
+        # (fleet_cells._fail_closed, mint_recipe, mint_delegate) each name
+        # themselves, and this one catches whatever route a future decline
+        # takes. Five real L4 pods reached exactly this state and emitted
+        # nothing at all, which reads identically to a hung worker.
+        if not any(
+            s.compile is not None and s.compile.family for s in rec.specs
+        ):
+            return
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"fn={function}: setup finished with a declared compile target, "
+            f"no compiled artifact armed and no mint in flight — this worker "
+            f"serves eager for the rest of its life and publishes no cell",
+            phase="boot_ended_uncompiled",
+        )
+
+    @contextmanager
+    def _warmup_span(
+        self, spec: EndpointSpec, rec: "_ClassRecord", inj: Any
+    ) -> typing.Iterator[Optional[boot_mod.BootSpan]]:
+        """`warmup`, nested under the open `pipeline_load` (pgw#797).
+
+        The armed/unarmed tag is the point of the row, not decoration: an
+        UNARMED warm pays the compile, an ARMED one pays only the call, and the
+        difference between the two IS what a cell saves on warmup. They are
+        separate ROWS here rather than two code paths that happen to share a
+        name, so the question is a `GROUP BY`.
+        """
+        if not boot_mod.in_boot():
+            yield None
+            return
+        armed_refs = sorted(
+            {sel.ref for sel in inj.active_compile_artifacts.values() if sel.ref}
+        )
+        armed = bool(armed_refs)
+        minting = bool(inj.pending_self_mints)
+        with boot_mod.span(
+            boot_mod.PHASE_WARMUP,
+            function=spec.name,
+            # An armed warm is a LOAD-class cost; unarmed it is COMPILE.
+            klass=boot_mod.CLASS_LOAD if armed else boot_mod.CLASS_COMPILE,
+            ref=armed_refs[0] if armed_refs else "",
+            parent=rec.boot_load_ordinal or None,
+        ) as sp:
+            t0 = time.monotonic()
+            try:
+                yield sp
+            finally:
+                warm_ms = int(round((time.monotonic() - t0) * 1000))
+                sp.note(
+                    f"armed={int(armed)} minting={int(minting)} "
+                    f"iterations={self._warm_iterations} "
+                    f"refs={','.join(armed_refs[:4])}"
+                )
+                # th#1322's numeric home, so the boot span and the activity
+                # stream agree on one number rather than two derivations.
+                activity_mod.emit_event(
+                    "warmup",
+                    f"boot warmup for {spec.name} "
+                    f"({'armed' if armed else 'unarmed'})",
+                    phase=activity_mod.PHASE_WARMUP_FORWARD,
+                    duration_ms=warm_ms,
+                )
+                self._warm_iterations = 0
 
     def _warmup_plan(
         self, spec: EndpointSpec, rec: _ClassRecord,
@@ -5640,6 +6061,29 @@ class Executor:
                         torch.cuda.empty_cache()
                     return False
             evidence.count += 1
+            # pgw#797: per-ITERATION warm cost. The first forward is typically
+            # far slower than the rest (allocator growth, CUDA module load,
+            # cuDNN/cuBLAS algorithm selection), so a warmup total without the
+            # shape of the sequence cannot say what a cell removes — a cell
+            # removes the compile inside the FIRST forward, not the whole pass.
+            # One nested span per forward: counts are small and bounded by the
+            # declared handler set, and `iteration=` orders them.
+            iter_ms = int(round((time.monotonic() - t0) * 1000))
+            if boot_mod.in_boot():
+                # Counted INSIDE the gate: a steady-state warm hours later has
+                # no `warmup` span to belong to, and letting it bump the counter
+                # would misreport the next boot span's iteration total.
+                self._warm_iterations += 1
+                boot_mod.mark(
+                    boot_mod.PHASE_WARMUP_ITERATION,
+                    duration_ms=iter_ms,
+                    function=wj.spec.name,
+                    graph_class=str(getattr(wj, "graph_key", "") or "")[:200],
+                    detail=(
+                        f"iteration={self._warm_iterations} mode={mode} "
+                        f"armed={int(bool(objects))}"
+                    ),
+                )
             for obj in objects:
                 calls_before, trt_before, aot_before = before[id(obj)]
                 inductor_proven = (
@@ -6196,6 +6640,10 @@ class Executor:
                     selections=mint_selections,
                     modules=_mint_modules(spec),
                     snapshot_paths=dict(paths),
+                    component_paths={
+                        slot: dict(comps)
+                        for slot, comps in component_paths.items() if comps
+                    },
                 )
                 logger.info(
                     "eager-first boot for %s (pgw#671): READY at eager tier "
@@ -6248,6 +6696,14 @@ class Executor:
             # boot. An exported arm demands the same fail-closed boot proof
             # as a dynamo arm; only the per-object scoring differs.
             proves_exported = bool(aot_proof_before)
+            # pgw#815: every mint obligation this boot opened, snapshotted
+            # BEFORE the proof pass pops entries. The assertion after the
+            # block below reads it — a pending that reaches readiness having
+            # touched none of {sealed, publishing, withheld, aborted,
+            # abandoned} was never resolved by anything, which is exactly the
+            # 24-minute L4 mint that ended `finalize completed` with no cell,
+            # no receipt, no local arm and no error.
+            mint_obligations = list(inj.pending_self_mints.values())
             warmup = getattr(instance, "warmup", None)
 
             async def run_warmup() -> Tuple[int, Dict[int, set[str]], str]:
@@ -6257,10 +6713,20 @@ class Executor:
                         await warmup()
                     else:
                         await _to_thread_complete(warmup)
-                    if spec.compile is not None:
-                        logger.info(
-                            "compile-cache warmup %s completed in %.1fs",
-                            spec.name, time.monotonic() - warm_t0)
+                    warm_ms = int(round((time.monotonic() - warm_t0) * 1000))
+                    # pgw#797: UNGATED. This was `if spec.compile is not None`
+                    # and log-only, so a release without a `Compile`
+                    # declaration did not even log its warmup, and one with it
+                    # logged to a hub-spawned pod's unreachable stdout. The
+                    # number now rides the wire on both paths.
+                    activity_mod.emit_event(
+                        "warmup_custom",
+                        f"custom warmup() for {spec.name}",
+                        phase=activity_mod.PHASE_WARMUP_FORWARD,
+                        duration_ms=warm_ms,
+                    )
+                    logger.info("custom warmup %s completed in %.1fs",
+                                spec.name, warm_ms / 1000.0)
                     return 1, {}, ""
 
                 # gw#470: no custom warmup() — run every declared handler of
@@ -6307,32 +6773,47 @@ class Executor:
             )
             compile_seconds_before = (
                 compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
-            if inj.active_compile_artifacts:
-                # Cache-hit counters are process-global. Hold every GPU permit
-                # so each exact guard window can belong to only this warmup.
-                async with self._exclusive_gpu(
-                    intent_id,
-                    resume_stage=warmup_stage,
-                ):
-                    # pgw#672 honesty: drop stale in-memory compiled code for
-                    # every object under proof so the warmup MUST go through
-                    # the real lookup path — a mint truly compiles into its
-                    # capture, an adoption truly hits its seeded FX entries.
-                    # In a warm process, dynamo's class-keyed code cache
-                    # otherwise serves these calls counter-silently (calls>0,
-                    # hits=0, misses=0) and the proof disproves a healthy
-                    # lane. No sibling GPU work runs inside this window, so
-                    # the per-code reset is race-free; siblings re-trace to
-                    # FX hits afterwards (additive live root).
-                    for _cand in inj.compile_objects:
-                        _sel = inj.active_compile_artifacts.get(
-                            id(_cand.pipeline))
-                        if _sel is not None and not trt_engine.is_engine_ref(
-                                _sel.ref):
-                            compile_cache.reset_target_code(_cand.pipeline)
+            # pgw#797: THE warmup split. `pipeline_load` used to be
+            # load+warmup as one number, so "what does a cell save on warmup"
+            # was only ever an estimate (`pipeline_load` minus a guessed
+            # load). This span nests under the open `pipeline_load` — parent
+            # named EXPLICITLY, not inferred — so the ladder still reconciles
+            # and `pipeline_load` reads as weights->VRAM by subtraction.
+            #
+            # armed=1 and armed=0 are the two rows the question needs, and
+            # they are the SAME quantity th#1329 records as `warmup_ms` on an
+            # adopt event: what a warm pass costs with a compiled artifact
+            # already armed. Unarmed, the pass pays the compile (CLASS_COMPILE);
+            # armed, it pays only the call (CLASS_LOAD).
+            with self._warmup_span(spec, rec, inj):
+                if inj.active_compile_artifacts:
+                    # Cache-hit counters are process-global. Hold every GPU
+                    # permit so each exact guard window belongs to only this
+                    # warmup.
+                    async with self._exclusive_gpu(
+                        intent_id,
+                        resume_stage=warmup_stage,
+                    ):
+                        # pgw#672 honesty: drop stale in-memory compiled code
+                        # for every object under proof so the warmup MUST go
+                        # through the real lookup path — a mint truly compiles
+                        # into its capture, an adoption truly hits its seeded
+                        # FX entries. In a warm process, dynamo's class-keyed
+                        # code cache otherwise serves these calls
+                        # counter-silently (calls>0, hits=0, misses=0) and the
+                        # proof disproves a healthy lane. No sibling GPU work
+                        # runs inside this window, so the per-code reset is
+                        # race-free; siblings re-trace to FX hits afterwards
+                        # (additive live root).
+                        for _cand in inj.compile_objects:
+                            _sel = inj.active_compile_artifacts.get(
+                                id(_cand.pipeline))
+                            if _sel is not None and not trt_engine.is_engine_ref(
+                                    _sel.ref):
+                                compile_cache.reset_target_code(_cand.pipeline)
+                        warmed, function_proofs, warm_aborted = await run_warmup()
+                else:
                     warmed, function_proofs, warm_aborted = await run_warmup()
-            else:
-                warmed, function_proofs, warm_aborted = await run_warmup()
             compile_seconds = (
                 compile_cache.compile_wall_seconds() - compile_seconds_before
                 if proves_inductor else 0.0)
@@ -6767,6 +7248,22 @@ class Executor:
                         cache_misses=misses,
                         duration_ms=int(compile_seconds * 1000),
                     )))
+            # pgw#815: THE assertion. `finalize completed` must be
+            # unreachable while a mint obligation is unresolved — running it
+            # OUTSIDE the `proves_inductor or proves_exported` block is the
+            # point, because a boot that armed a pending and then answered
+            # "nothing proves by FX or export" skipped the whole publish gate
+            # and resolved nothing, silently. Obligations handed to the
+            # background driver (eager-first / delegated) are ITS to resolve
+            # and are excluded here — the driver's own sweep, in
+            # `_background_mint`'s `finally`, is where they are asserted.
+            driver = rec.background_mint
+            owned_by_driver = (
+                {id(p) for p in driver.pendings.values()}
+                if driver is not None else set())
+            self._assert_mint_termini(
+                spec,
+                [p for p in mint_obligations if id(p) not in owned_by_driver])
             if compile_selection and trt_engine.is_engine_ref(compile_selection.ref):
                 trt_candidates = [
                     candidate for candidate in inj.compile_objects
@@ -8304,10 +8801,25 @@ class Executor:
 
         Eager-first applies ONLY to a boot whose every armed artifact is a
         fresh self-mint on an eager-compatible lane: delivered cells keep
-        their sequential proof window (they pay ~0 compile), mandatory
-        quantized lanes never serve eager (gw#586), custom object warmups
-        have no derived plan for the driver to seed, and regional targets
-        have no separable eager callable to route to."""
+        their sequential proof window (they pay ~0 compile), custom object
+        warmups have no derived plan for the driver to seed, and regional
+        targets have no separable eager callable to route to.
+
+        pgw#813 removes two stacked misclassifications:
+
+        * the ``_mandatory_lane_of_bound`` early-out read a model ref's
+          STORAGE flavor (``#fp8-w8a8``) as "cannot serve eager" — the exact
+          proxy pgw#677's reopen removed from the router brain, still live
+          one layer up, and sdxl's mixed fp8 checkpoint (fp8 storage, w8a16
+          execution) is precisely the ref it misreads. The per-candidate
+          brains below answer the question correctly and completely;
+        * the per-candidate arm demanded a hot-swap ROUTER. A DELEGATED
+          pending never has one, because nothing is armed on its pipe by
+          construction — so EVERY delegated mint failed this test and was
+          discarded, and pgw#784's out-of-process route could not run on any
+          lane. A delegated pending's eager tier is the untouched pipeline
+          itself; the router question belongs only to an in-process capture,
+          whose eager-while-compiling routing is what a router performs."""
         if not _eager_first_boot_enabled():
             return False
         if not inj.pending_self_mints:
@@ -8322,33 +8834,80 @@ class Executor:
         # record — mixing tiers inside one proof window is not worth it.
         if set(inj.active_compile_artifacts) - set(inj.pending_self_mints):
             return False
-        if self._mandatory_lane_of_bound(
-            wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
-        ):
-            return False
         from . import compile_cache, hot_swap
 
-        saw_router = False
+        saw_candidate = False
         for candidate in inj.compile_objects:
-            if id(candidate.pipeline) not in inj.pending_self_mints:
+            pending = inj.pending_self_mints.get(id(candidate.pipeline))
+            if pending is None:
                 continue
-            # pgw#677 reopen: THE live break. The weight-lane stamp names
-            # cell identity (pgw#686), not serveability — sdxl's mixed
-            # ``#fp8-w8a8`` storage stamps ``w8a8-lora64`` while the hub
-            # serves it ``fp8-w8a16+eager``. Classifying that stamp as
-            # mandatory silently sent the whole boot down the FOREGROUND
-            # compile-then-serve mint: the first tenant request sat inside
-            # ensure_setup for the full 18-unit inline-compile plan (the
-            # measured 26-minute starvation on three cold L4 pods, zero
-            # renders, gate machinery never engaged). Serveability follows
-            # the ONE brain: hub execution lane first, stamp as fallback.
+            if getattr(pending, "delegated", False):
+                # Nothing is armed on this pipe; the child owns the compile.
+                # The only real question is whether the live object can still
+                # answer a forward — which every lane the fleet serves can,
+                # quantized ones included (pgw#813).
+                if not compile_cache.eager_tier_available(candidate.pipeline):
+                    return False
+                saw_candidate = True
+                continue
+            # In-process capture: the pipe IS armed cold, so eager serving
+            # happens through the pgw#622 router. pgw#677 reopen: the ONE
+            # serveability brain decides fail-closed here (hub execution lane
+            # first, weight-lane stamp as fallback), never the ref flavor.
             if compile_cache.mandatory_serving(candidate.pipeline):
                 return False
             router = hot_swap.router_of(candidate.pipeline)
             if router is None or router.fail_closed:
                 return False
-            saw_router = True
-        return saw_router
+            saw_candidate = True
+        return saw_candidate
+
+    def _assert_mint_termini(
+        self, spec: EndpointSpec, obligations: List[Any],
+        *, driver_owns_delegated: bool = True,
+    ) -> None:
+        """Every self-mint this boot opened must have ENDED somewhere (pgw#815).
+
+        A mint obligation has exactly five honest ends: sealed-and-publishing,
+        withheld, aborted, abandoned, or handed to a background/delegated
+        driver that still owns it. Anything else is the vanishing publish —
+        a pod pays a full GPU compile, reports `finalize completed`, and the
+        store, the receipts, the local arm and the wire are all empty. That
+        combination is unfalsifiable from outside, so it is asserted here and
+        confessed on the wire rather than left to be re-measured on a rental.
+        """
+        if not obligations:
+            return
+        from . import fleet_cells as fleet_cells_mod
+
+        for pending in obligations:
+            if fleet_cells_mod.terminus_of(pending):
+                continue
+            if driver_owns_delegated and getattr(pending, "delegated", False):
+                # The child owns it; `_delegated_mint_run` resolves it and is
+                # the one that must confess if it does not.
+                continue
+            family = str(getattr(pending, "family", "") or "")
+            key = str(getattr(pending, "cell_key", "") or "")
+            logger.error(
+                "%s: SELF_MINT_UNRESOLVED family=%s key=%s — the boot opened "
+                "a mint capture and reached readiness without packing, "
+                "publishing, withholding or abandoning it (pgw#815)",
+                spec.name, family, key)
+            activity_mod.emit_event(
+                "self_mint_abort",
+                f"family={family} key={key}: this boot opened a mint capture "
+                f"and reached readiness without packing, publishing, "
+                f"withholding or abandoning it — no cell, no receipt, no "
+                f"local arm and no refusal. The capture is discarded so the "
+                f"next pod re-mints instead of inheriting a phantom.",
+                phase="no_terminus",
+            )
+            try:
+                fleet_cells_mod.abandon_self_mint(pending)
+            except Exception:  # noqa: BLE001 — the confession is the point
+                logger.debug("abandoning the unresolved mint failed",
+                             exc_info=True)
 
     def _mint_budget_ok(
         self, spec: EndpointSpec, inj: "_InjectionResult",
@@ -8574,6 +9133,13 @@ class Executor:
         else:
             act.completed()
         finally:
+            # pgw#815: the driver's own terminus sweep. Every branch above
+            # already resolves the common shapes; this makes "resolved" an
+            # asserted property of EVERY exit rather than a property of the
+            # branches somebody remembered to write.
+            self._assert_mint_termini(
+                bg.spec, list(bg.pendings.values()),
+                driver_owns_delegated=False)
             if rec.background_mint is bg:
                 rec.background_mint = None
             # pgw#789: WARM-COMPLETE. The eager-first boot (pgw#671) advertises
@@ -8584,18 +9150,9 @@ class Executor:
             # process start (cumulative), it IS the "time to compiled serving"
             # number an AOT-vs-JIT comparison needs, and `outcome` says whether
             # compiled serving was reached at all.
-            armed = next(
-                (t.active_compile_ref for t in rec.compile_targets.values()
-                 if t.active_compile_ref), "")
-            boot_mod.mark(
-                boot_mod.PHASE_WARM_COMPLETE,
-                since_process_start=True,
-                function=bg.spec.name,
-                ref=armed,
-                outcome=(boot_mod.OUTCOME_OK if armed
-                         else boot_mod.OUTCOME_REFUSED),
-                reason="" if armed else "serving_eager",
-            )
+            # pgw#797: one owner, shared with the inline path in
+            # `ensure_setup` — see `_mark_warm_complete`.
+            self._mark_warm_complete(rec, bg.spec.name)
             self._on_state_change()
 
     async def _background_mint_run(
@@ -9031,6 +9588,10 @@ class Executor:
                     function=spec.name,
                     modules=bg.modules or _mint_modules(spec),
                     snapshots=dict(bg.snapshot_paths),
+                    component_paths={
+                        slot: dict(comps)
+                        for slot, comps in bg.component_paths.items()
+                    },
                     weight_lane=compile_cache.cell_base_lane(pipe),
                     lane=self._served_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
@@ -9051,6 +9612,19 @@ class Executor:
                 logger.warning(
                     "delegated mint for %s produced no adoptable cell (%s); "
                     "that object stays eager", spec.name, result.detail)
+                # pgw#815: resolve the obligation instead of dropping it —
+                # a `continue` here left the pending with no terminus and no
+                # wire trace whenever a SIBLING pending succeeded (the
+                # `if not finalized: raise` below never fires then).
+                fleet_cells_mod.abandon_self_mint(pending)
+                activity_mod.emit_event(
+                    "self_mint_abort",
+                    f"family={pending.family} key={pending.cell_key}: the "
+                    f"delegated child produced no adoptable cell "
+                    f"({result.detail or result.status}); this object stays "
+                    f"eager and nothing is published",
+                    phase="delegated_no_cell",
+                )
                 continue
             for pid in pids:
                 finalized[pid] = minted
@@ -9696,6 +10270,21 @@ class Executor:
                     await rollback()
                     return await fail("warmup", f"{type(exc).__name__}: {exc}")
                 warmup_s = round(time.monotonic() - warm_t0, 3)
+                # pgw#797 / th#1329: warmup AFTER arming a cell. Same quantity
+                # the hub stores as `worker_activity_events.warmup_ms` on the
+                # adopt event, recorded here as a boot row too so the ladder
+                # and the adopt event answer "what does an armed cell still pay
+                # on warmup" identically instead of by two derivations. Always
+                # armed=1 by construction — this runs after the wrap.
+                if boot_mod.in_boot():
+                    boot_mod.mark(
+                        boot_mod.PHASE_WARMUP,
+                        duration_ms=int(round(warmup_s * 1000)),
+                        function=spec.name,
+                        ref=ref,
+                        klass=boot_mod.CLASS_LOAD,
+                        detail=f"armed=1 minting=0 iterations={warmed} adopt=1",
+                    )
                 hits = 0
                 misses = 0
 
