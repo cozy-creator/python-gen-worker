@@ -411,6 +411,26 @@ def _run_main() -> int:
         probe = probe_cuda()
         if not probe.ok:
             logger.error("%s: %s", CUDA_PROBE_FAILED_MARKER, probe.reason)
+            from .procsplit import is_compute_child
+
+            if is_compute_child():
+                # pgw#826: a hardware verdict is terminal for every child this
+                # pod could spawn. This process holds no credential — hand the
+                # typed report to the parent, which relays it and exits 1.
+                from .hardware_report import build_hardware_report
+                from .procsplit.child import send_boot_fatal
+
+                report = build_hardware_report(probe, settings)
+                relayed = send_boot_fatal(msgspec.to_builtins(report))
+                _log_startup_phase(
+                    "cuda_probe_boot_fatal",
+                    status="ok" if relayed else "error",
+                    level=logging.INFO if relayed else logging.WARNING,
+                    relayed=relayed,
+                    reason_class=report.reason_class,
+                )
+                _log_worker_fatal("cuda_probe", RuntimeError(probe.reason), exit_code=1)
+                return 1
             # gw#619/th#988: dial the hub with a typed hardware-unsuitable
             # report BEFORE exiting — closes the th#986 blindness where this
             # exit was previously silent pre-hello. Best-effort/bounded: the

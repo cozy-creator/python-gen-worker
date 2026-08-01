@@ -11,8 +11,10 @@ Covers, per the lane's acceptance list:
      attributed typed (ComputeProcessDied) on the live stream;
   2. the respawned child serves the NEXT job;
   3. cancellation stays prompt across the process boundary (measured);
-  4. crash-looping children are DETECTED and reported typed while respawn
-     continues (StartLimitBurst semantics — never cap-and-brick);
+  4. a pre-Hello crash loop is DETECTED, reported typed, and BOUNDED — the
+     parent exits 1 after the boot-death limit instead of billing a respawn
+     loop forever (pgw#826); a terminal typed boot verdict (T_BOOT_FATAL)
+     exits after ONE spawn with the report relayed on the parent's credential;
   5. a wedged (SIGSTOPped) child is killed by the WatchdogSec analog and
      the pod recovers;
   6. the seam's cost is measured (frame RTT + 64 MiB throughput).
@@ -249,9 +251,13 @@ def test_cancel_stays_prompt_across_the_boundary(split):
     print(f"\ncancel latency across seam: {latency * 1000:.0f}ms")
 
 
-def test_crash_loop_is_detected_reported_and_respawn_continues(
+def test_boot_crash_loop_is_bounded_reported_and_exits_1(
     tmp_path, captured_dials,
 ):
+    """pgw#826: a child that repeatedly dies BEFORE Hello has served nothing
+    and never will — after the boot-death limit the parent reports typed and
+    exits 1 instead of billing a respawn loop forever. (Post-Hello deaths keep
+    Restart=on-failure semantics: see the respawn test above.)"""
     h = SplitHarness(
         tmp_path,
         child_cmd=[sys.executable, "-c", "import sys; sys.exit(3)"],
@@ -259,22 +265,57 @@ def test_crash_loop_is_detected_reported_and_respawn_continues(
         start_limit_interval_s=60.0,
     )
     try:
-        # pgw#795: respawns are the progress signal; the give-up is "no
-        # respawn in a staleness window", never a fixed clock.
-        await_count(
-            lambda: h.pc._spawn_count, 5,
-            what="child respawns past the StartLimitBurst",
-            cadence=Cadence(),
-            gone=lambda: None if h.alive else f"parent exited code={h.exit_code}",
-        )
-        # Restart=on-failure with StartLimitBurst DETECTION: the parent keeps
-        # respawning past the burst (never cap-and-brick)...
-        assert h.pc._spawn_count >= 5
-        assert h.alive and h.exit_code is None
-        # ...and says so, typed, distinctly from a one-off handler death.
+        code = h.wait_exit(120.0)
+        assert code == 1, f"parent should exit 1 on a boot crash loop, got {code}"
+        assert h.pc._spawn_count == 3  # the boot-death limit, then give-up
+        assert h.pc.terminal_exit_reason.startswith("boot_crash_loop:")
+        # Detection still fires distinctly, then the bound gives up typed.
         assert any("compute_crash_loop" in d for d in captured_dials)
-        assert any("deaths_before_hello" in d for d in captured_dials)
+        assert any("compute_boot_crash_loop" in d for d in captured_dials)
         # No serving Hello was ever advertised by a child that cannot boot.
+        assert not h.scheduler.connections
+    finally:
+        h.close()
+
+
+@pytest.fixture()
+def captured_reports(monkeypatch):
+    """Keep the parent's HardwareUnsuitable relay in-process and observable."""
+    from gen_worker import hardware_report
+
+    reports: List[object] = []
+
+    def _capture(settings, report):
+        reports.append(report)
+        return True
+
+    monkeypatch.setattr(hardware_report, "deliver_hardware_report", _capture)
+    return reports
+
+
+def test_boot_hardware_fatal_is_terminal_reported_and_exits_1(
+    tmp_path, captured_dials, captured_reports,
+):
+    """pgw#826: ONE typed terminal boot verdict (the compute child's CUDA probe
+    refusing) ends the pod — the parent relays the HardwareUnsuitable report on
+    its own credential and exits 1, with no respawn."""
+    code = (
+        "import sys;"
+        "from gen_worker.procsplit.child import send_boot_fatal;"
+        "send_boot_fatal({'reason_class': 'cuda_unavailable',"
+        " 'detail': 'probe says no'});"
+        "sys.exit(1)"
+    )
+    h = SplitHarness(tmp_path, child_cmd=[sys.executable, "-c", code])
+    try:
+        exit_code = h.wait_exit(120.0)
+        assert exit_code == 1, f"parent should exit 1 on a terminal boot fatal, got {exit_code}"
+        assert h.pc._spawn_count == 1  # terminal: never respawned
+        assert h.pc.terminal_exit_reason == "boot_fatal:cuda_unavailable"
+        assert any("compute_boot_fatal" in d for d in captured_dials)
+        assert len(captured_reports) == 1
+        assert captured_reports[0].reason_class == "cuda_unavailable"
+        assert captured_reports[0].detail == "probe says no"
         assert not h.scheduler.connections
     finally:
         h.close()

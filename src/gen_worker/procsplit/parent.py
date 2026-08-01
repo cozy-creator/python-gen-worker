@@ -20,15 +20,26 @@ that runs the original code verbatim; the per-child supervision machinery
 whole safety property and it is a regression test (``test_group_processes``).
 
 Supervision primitives are deliberately systemd's (Paul, 2026-07-29):
-``Restart=on-failure`` (always respawn), ``StartLimitBurst``/
-``StartLimitIntervalSec`` (loop DETECTION over a window, reported typed, never
-cap-and-brick), ``WatchdogSec``+``sd_notify`` (child frames are the liveness
+``Restart=on-failure``, ``StartLimitBurst``/``StartLimitIntervalSec``,
+``WatchdogSec``+``sd_notify`` (child frames are the liveness
 pings; loop silence ARMS a hang verdict the child's accounted work DECIDES —
 pgw#771), socket activation (the hub connection outlives the process doing the
 work). What systemd cannot do — job attribution — needs the stream, the JWT and
 the in-flight table in the survivor, which is this parent. At G>1 one child's
 death is attributed to ITS request and respawns ITS group; siblings never see
 it (**a group where one of four children dies is not a dead group**).
+
+pgw#826 — WHICH DEATHS ARE RETRYABLE. Respawn is for a child that PROVED it
+can boot (reached Hello): its death may be payload-driven, so it respawns with
+backoff and post-Hello loops stay typed DETECTION (the hub's liveness/stall
+clocks own a sick-but-serving pod). A child that dies before Hello has served
+nothing and can owe nothing: after ``boot_death_limit`` consecutive pre-Hello
+deaths — or ONE terminal typed boot verdict (``T_BOOT_FATAL``, e.g. a
+HardwareUnsuitable CUDA-probe refusal, true for every child this pod could
+ever spawn) — the parent propagates the report and exits 1. Before this, a
+hardware-unsuitable pod crash-looped its child forever: every respawn emitted
+output, so no silence window (pgw#795) could bound it, and the pod billed
+indefinitely while the hub never saw the typed refusal.
 """
 
 from __future__ import annotations
@@ -44,6 +55,8 @@ import sys
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+
+import msgspec
 
 from ..config import Settings
 from ..pb import worker_scheduler_pb2 as pb
@@ -77,6 +90,8 @@ DEATH_LABEL = "ComputeProcessDied"
 
 _DEFAULT_START_LIMIT_BURST = 3          # StartLimitBurst
 _DEFAULT_START_LIMIT_INTERVAL_S = 600.0  # StartLimitIntervalSec
+# pgw#826: consecutive pre-Hello deaths before the parent gives up and exits 1.
+_DEFAULT_BOOT_DEATH_LIMIT = 3
 _DEFAULT_WATCHDOG_BUDGET_S = 60.0        # WatchdogSec (matches th#965's reap budget)
 _DEFAULT_RESPAWN_BACKOFF_BASE_S = 1.0
 _DEFAULT_RESPAWN_BACKOFF_CAP_S = 60.0
@@ -217,6 +232,8 @@ class _ChildSlot:
         self.death_times: collections.deque = collections.deque(maxlen=64)
         self.deaths_before_hello = 0
         self.child_saw_hello = False
+        # pgw#826: a terminal typed boot verdict from the dying child.
+        self.boot_fatal: Optional[Dict[str, Any]] = None
         self.spawn_count = 0
         self.last_frame_at = time.monotonic()
         self.relaying = False
@@ -372,6 +389,16 @@ class _ChildSlot:
             msgs = [pb.WorkerMessage.FromString(b) for b in frames.unpack_meta(payload)]
             await self.p.transport.prepend_reconnect(msgs)
             return
+        if ftype == frames.T_BOOT_FATAL:
+            # pgw#826: consumed by child_loop after the child is reaped.
+            self.boot_fatal = frames.unpack_meta(payload)
+            report = (self.boot_fatal or {}).get("report") or {}
+            logger.error(
+                "compute child %s reported a TERMINAL boot verdict: kind=%s "
+                "reason_class=%s", self.label,
+                (self.boot_fatal or {}).get("kind"), report.get("reason_class"),
+            )
+            return
         if ftype == frames.T_FLUSH_REQ:
             meta = frames.unpack_meta(payload)
             timeout = meta.get("timeout")
@@ -502,6 +529,7 @@ class _ChildSlot:
         while not p._stopping.is_set():
             self.watchdog_fired = False
             self.child_saw_hello = False
+            self.boot_fatal = None
             self.hang_armed_at = None
             self.hang_hold_reported = False
             self.stall_reported = False
@@ -529,7 +557,7 @@ class _ChildSlot:
             if deliberate:
                 await self._finish_deliberate_exit(rc, lifetime_s=lifetime)
                 return
-            await self._handle_child_death(
+            cause = await self._handle_child_death(
                 rc, oom_before=oom_before, lifetime_s=lifetime, saw_hello=saw_hello,
             )
             if p._draining:
@@ -538,6 +566,14 @@ class _ChildSlot:
                     "flushing and exiting", self.label,
                 )
                 await p._finish_shutdown_flush(reason="death_during_drain")
+                return
+            # pgw#826: terminal boot outcomes never respawn (module docstring).
+            fatal = self.boot_fatal
+            if fatal is not None and fatal.get("terminal"):
+                await p._fail_boot_fatal(self, fatal)
+                return
+            if not saw_hello and self.deaths_before_hello >= p._boot_death_limit:
+                await p._fail_boot_loop(self, cause)
                 return
             if lifetime >= _BACKOFF_RESET_AFTER_ALIVE_S:
                 backoff = p._backoff_base
@@ -659,7 +695,7 @@ class _ChildSlot:
 
     async def _handle_child_death(
         self, rc: int, *, oom_before: int, lifetime_s: float, saw_hello: bool,
-    ) -> None:
+    ) -> str:
         p = self.p
         now = time.monotonic()
         oom_delta = max(0, postmortem.oom_kill_count() - oom_before)
@@ -707,7 +743,8 @@ class _ChildSlot:
         await p._dial_detail(detail)
 
         # 3) StartLimitBurst / StartLimitIntervalSec: DETECT the loop for THIS
-        # group, report it typed, keep respawning ("infinite respawn is fine").
+        # group and report it typed. Post-Hello loops keep respawning; pre-Hello
+        # loops are bounded by child_loop's boot_death_limit check (pgw#826).
         recent = [t for t in self.death_times if now - t <= p._start_limit_interval]
         looping = len(recent) >= p._start_limit_burst or self.deaths_before_hello >= 2
         if looping and now - self.last_crash_loop_report_at >= _CRASH_LOOP_REPORT_MIN_INTERVAL_S:
@@ -727,7 +764,7 @@ class _ChildSlot:
         except Exception:
             pass
         if p._draining or p._terminating or p._stopping.is_set():
-            return
+            return cause
         # Re-sync the desired state to the respawned child. At G==1 this is the
         # proven path: cycle the connection NOW so the fresh Hello re-drives
         # residency (byte-identical to the single-child parent). At G>1 the
@@ -738,6 +775,7 @@ class _ChildSlot:
         # triggers the cycle then, with every slot's link back up).
         if p.groups == 1:
             p.transport.cycle_connection()
+        return cause
 
     # ---- watchdog (WatchdogSec), per child -------------------------------
 
@@ -894,6 +932,7 @@ class ParentControl:
         respawn_backoff_cap_s: float = _DEFAULT_RESPAWN_BACKOFF_CAP_S,
         start_limit_burst: int = _DEFAULT_START_LIMIT_BURST,
         start_limit_interval_s: float = _DEFAULT_START_LIMIT_INTERVAL_S,
+        boot_death_limit: int = _DEFAULT_BOOT_DEATH_LIMIT,
         watchdog_budget_s: float = _DEFAULT_WATCHDOG_BUDGET_S,
         stop_timeout_s: float = _DEFAULT_STOP_TIMEOUT_S,
         stop_flush_timeout_s: float = _STOP_FLUSH_TIMEOUT_S,
@@ -914,6 +953,7 @@ class ParentControl:
         self._backoff_cap = respawn_backoff_cap_s
         self._start_limit_burst = max(1, int(start_limit_burst))
         self._start_limit_interval = start_limit_interval_s
+        self._boot_death_limit = max(1, int(boot_death_limit))
         self._watchdog_budget = watchdog_budget_s
         self._stop_timeout = stop_timeout_s
         self._stop_flush_timeout = stop_flush_timeout_s
@@ -966,6 +1006,9 @@ class ParentControl:
         self._child_exited_clean = False
         self._shutdown_flushed = False
         self.crash_loop_reports = 0  # observability + tests
+        # pgw#826: set when a terminal boot outcome makes the parent exit 1.
+        self._terminal_exit = False
+        self.terminal_exit_reason = ""  # observability + tests
         self._stop_deadline_task: Optional[asyncio.Task] = None
         self._reported_unretired = False
         self.unretired_results_at_exit = 0  # observability + tests
@@ -1697,6 +1740,58 @@ class ParentControl:
             "for authority outside the allowlisted action table"
         )
 
+    # ---- terminal boot outcomes (pgw#826) --------------------------------
+
+    async def _fail_boot_fatal(self, slot: _ChildSlot, fatal: Dict[str, Any]) -> None:
+        """A terminal typed boot verdict: relay the child's HardwareUnsuitable
+        report on the parent's credential and exit 1 — a hardware verdict holds
+        for every child this parent could ever spawn."""
+        report_raw = fatal.get("report") or {}
+        reason_class = str(report_raw.get("reason_class") or "unknown")
+        delivered = False
+        try:
+            from ..hardware_report import HardwareReport, deliver_hardware_report
+
+            report = msgspec.convert(report_raw, HardwareReport, strict=False)
+            delivered = await asyncio.to_thread(
+                deliver_hardware_report, self._settings, report
+            )
+        except Exception:
+            logger.warning("terminal boot report relay failed", exc_info=True)
+        await self._dial_detail(
+            f"phase=compute_boot_fatal group={slot.ordinal} terminal=true "
+            f"reason_class={reason_class} report_delivered={delivered} "
+            f"spawns={slot.spawn_count} — a hardware verdict is not a "
+            "transient fault; the parent exits 1 instead of respawning"
+        )
+        self._give_up(f"boot_fatal:{reason_class}")
+
+    async def _fail_boot_loop(self, slot: _ChildSlot, cause: str) -> None:
+        """N consecutive pre-Hello deaths: the child has never served and never
+        will — report typed and exit 1 rather than billing a respawn loop."""
+        await self._dial_detail(
+            f"phase=compute_boot_crash_loop group={slot.ordinal} "
+            f"deaths_before_hello={slot.deaths_before_hello} "
+            f"limit={self._boot_death_limit} last_cause={cause} "
+            f"spawns={slot.spawn_count} — a child that repeatedly dies before "
+            "Hello will never serve; the parent exits 1 instead of respawning"
+        )
+        self._give_up(f"boot_crash_loop:{cause}")
+
+    def _give_up(self, reason: str) -> None:
+        logger.error("control parent giving up (%s): exiting 1, no respawn", reason)
+        self._terminal_exit = True
+        self.terminal_exit_reason = reason
+        self._stopping.set()
+        for slot in self._slots:
+            proc = slot.proc
+            if proc is not None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        self.transport.stop()
+
     async def _dial_detail(self, detail: str) -> None:
         logger.error("compute.postmortem\n%s", detail)
         try:
@@ -1890,6 +1985,8 @@ class ParentControl:
                     )
                 except Exception:
                     pass
+            if self._terminal_exit:
+                return 1   # pgw#826: a terminal boot outcome, already reported
             return 0 if (
                 self._child_exited_clean
                 or self._draining
