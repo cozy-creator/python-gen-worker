@@ -120,6 +120,12 @@ def _msg_kind(msg: pb.WorkerMessage) -> str:
     return _EVENT
 
 
+#: How long the channel itself waits for a keepalive answer before calling the
+#: peer dead. Anything that needs "we tried, and the peer is not taking bytes"
+#: derives its bound from this rather than inventing one.
+KEEPALIVE_TIMEOUT_S = 10.0
+
+
 class SendQueue:
     """Bounded outbound queue with results-never-dropped semantics."""
 
@@ -550,7 +556,7 @@ class Transport:
     def _channel_options(self) -> List[Tuple[str, int]]:
         return [
             ("grpc.keepalive_time_ms", 20000),
-            ("grpc.keepalive_timeout_ms", 10000),
+            ("grpc.keepalive_timeout_ms", int(KEEPALIVE_TIMEOUT_S * 1000)),
             ("grpc.keepalive_permit_without_calls", 1),
             ("grpc.http2.max_pings_without_data", 0),
             ("grpc.max_send_message_length", 64 * 1024 * 1024),

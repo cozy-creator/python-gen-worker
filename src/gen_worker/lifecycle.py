@@ -22,7 +22,12 @@ from .executor import Executor
 from .intent_registry import IntentRegistry, UnreportedIntentWait
 from .pb import worker_scheduler_pb2 as pb
 from .runtime_config import ConfigSnapshotWriteError, extract_config_push
-from .transport import FatalTransportError, PROTOCOL_VERSION, Transport
+from .transport import (
+    FatalTransportError,
+    KEEPALIVE_TIMEOUT_S,
+    PROTOCOL_VERSION,
+    Transport,
+)
 from .api.binding import wire_ref
 # module import: tests monkeypatch worker_fatal.report_worker_error_async; stay late-bound.
 from . import worker_fatal
@@ -1452,7 +1457,19 @@ class Lifecycle:
                     pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
                 )
                 await self.maybe_send_state_delta()
-                flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
+                # pgw#845: this used to be `max(0.0, deadline_at - loop.time())`,
+                # which is exactly 0.0 on every path that gets here after the
+                # tenant wait expired — i.e. precisely when `abort_all` above has
+                # just produced the typed RETRYABLE results whose entire purpose
+                # is to tell the hub to re-dispatch. A bound that is provably
+                # zero is not a bound. The deadline governs waiting for TENANT
+                # WORK; shipping results we already hold is not that, so the
+                # floor is the channel's own peer-dead threshold: we try for as
+                # long as the transport would still call the hub alive.
+                flush_timeout = (
+                    None if deadline_at is None
+                    else max(KEEPALIVE_TIMEOUT_S, deadline_at - loop.time())
+                )
                 await self.intent_registry.guard_await(
                     drain_intent,
                     self.transport.close_after_flush(timeout=flush_timeout),
