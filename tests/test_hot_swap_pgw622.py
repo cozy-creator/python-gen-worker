@@ -288,9 +288,16 @@ def test_real_compile_eager_while_compiling_roundtrip():
     assert torch.allclose(out, original(novel))
     sig = ("toy.forward", hot_swap.signature((novel,), {}))
     assert _wait(lambda: sig in router.warm, timeout=120)
+    compile_wall = time.monotonic() - t0
     assert torch.allclose(wrapper(novel), original(novel))  # compiled path
-    # the eager serve never waited on the background dynamo+inductor compile
-    assert first_latency < 5.0
+    # The eager serve never waited on the background dynamo+inductor compile.
+    # Asserted as a share of the compile this run actually paid, not as an
+    # absolute 5s: a slow runner slows both, and the property is the ratio
+    # (pgw#845).
+    assert first_latency < compile_wall / 5.0, (
+        f"the eager serve took {first_latency:.2f}s of a {compile_wall:.2f}s "
+        f"background compile — it is waiting on the compile, not dodging it"
+    )
 
 
 # ---------------------------------------------------------------------------

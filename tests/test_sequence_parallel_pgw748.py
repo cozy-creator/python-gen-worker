@@ -154,7 +154,15 @@ def test_a_follower_that_dies_before_the_rendezvous_fails_form_bounded() -> None
     start = time.monotonic()
     with pytest.raises(RankGroupError, match="rank 1|exited"):
         group.form()
-    assert time.monotonic() - start < 60
+    # The bound is the stall this replaces, not a number: the backend's own
+    # collective timeout was the only thing that ended form() before, so
+    # failing typed must cost a small fraction of it (pgw#845).
+    from gen_worker.parallel import group as _group_mod
+    blind_stall_s = float(_group_mod._COLLECTIVE_TIMEOUT_S)
+    assert time.monotonic() - start < blind_stall_s / 5.0, (
+        f"form() took longer than a fifth of the {blind_stall_s:.0f}s blind "
+        f"rendezvous it replaces — it is not failing typed, it is stalling"
+    )
     group.close()
 
 

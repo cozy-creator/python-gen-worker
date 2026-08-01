@@ -402,11 +402,21 @@ def test_worker_survives_hub_restart_and_reconnects(tmp_path, monkeypatch) -> No
         before = len(worker.transport.reconnect_delays)
         assert server.stop(grace=0).wait(_TIMEOUT)
 
-        deadline = time.monotonic() + _TIMEOUT
-        while len(worker.transport.reconnect_delays) < before + 4:
-            assert thread.is_alive(), "worker exited while hub was down"
-            assert time.monotonic() < deadline, "worker did not keep reconnecting"
-            time.sleep(0.02)
+        # pgw#845: this was a 15s deadline hiding behind a name — the exact
+        # pgw#795 shape, invisible to the source guard because the digit was
+        # spelled `_TIMEOUT`. The property is that the worker KEEPS retrying
+        # while the hub is down, so wait on the retries and give up only when
+        # the worker is gone.
+        await_count(
+            lambda: len(worker.transport.reconnect_delays) - before,
+            4,
+            what="reconnect attempts while the hub is down",
+            cadence=Cadence(),
+            gone=lambda: (
+                None if thread.is_alive()
+                else "the worker exited while the hub was down"
+            ),
+        )
 
         replacement_scheduler = FakeScheduler()
         replacement = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
