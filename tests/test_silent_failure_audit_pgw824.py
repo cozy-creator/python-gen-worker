@@ -462,3 +462,60 @@ def test_an_eager_request_on_a_compile_declaring_release_names_its_reason() -> N
     # nothing fell back -- there was nothing to fall back FROM
     assert m.served_eager_fallback is False
     assert m.served_cell_ref == ""
+
+
+# ---------------------------------------------------------------------------
+# Invariant 1 — quantized-lane partial application: the coalescing rule
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mod_name,phase", [
+    ("w8a8", "w8a8_partial_swap"),
+    ("w4a4", "w4a4_partial_swap"),
+])
+def test_a_partially_swapped_quant_lane_confesses_with_counts(
+    mod_name: str, phase: str,
+) -> None:
+    """RED before pgw#824.
+
+    Every layer the swap loop skips stays DEQUANTIZED at full precision inside
+    a pipeline that reports the quantized lane to placement, to billing and to
+    every AOT-vs-eager comparison. One skip class was a `logger.warning`; the
+    dimension-alignment skip had no report of ANY kind.
+
+    Asserted as COALESCED: a 300-Linear denoiser must produce one row carrying
+    counts, not 300 rows. Counts are the pattern the doctrine names — dropping
+    is not, and neither is flooding.
+    """
+    import importlib
+    import inspect
+
+    mod = importlib.import_module(f"gen_worker.models.{mod_name}")
+    src = inspect.getsource(mod)
+
+    assert f'phase="{phase}"' in src
+    # both skip classes are counted, including the one that was fully silent
+    assert '_skip("not_plain_linear"' in src
+    assert '_skip("dim_unaligned"' in src
+    # the emit is OUTSIDE the per-layer loop (coalesced, once per model)
+    emit_at = src.index(f'phase="{phase}"')
+    loop_at = src.index("for layer in art.quantized:")
+    tail = src[loop_at:emit_at]
+    assert "logger.info" in tail, (
+        "the confession must come after the loop's summary line, i.e. once "
+        "per model — not once per skipped layer")
+
+
+def test_an_unqualified_fp8_gemm_is_a_lane_decision_that_reports_itself() -> None:
+    """The whole point of the w8a8 artifact is the fused fp8 GEMM. Falling to
+    the dequant lane keeps the memory saving and gives up the speed, so every
+    request is slower than the lane the pod advertises — and a fleet-wide
+    qualification regression (a driver or torch bump that stops the kernel
+    qualifying) would have surfaced as "everything got slower", with the cause
+    written only to a pod log nobody can read."""
+    import inspect
+
+    from gen_worker.models import w8a8
+
+    src = inspect.getsource(w8a8._choose_gemm_mode)
+    assert 'phase="w8a8_gemm_unqualified"' in src
