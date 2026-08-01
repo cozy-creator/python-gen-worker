@@ -59,7 +59,8 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
 
 import msgspec
 
@@ -623,6 +624,7 @@ class EntryCompilePool:
 
     def compile(
         self, entries: Sequence[Tuple[str, Any]],
+        *, on_entry: Optional[Callable[[str, int, int], None]] = None,
     ) -> Dict[str, List[str]]:
         """``[(entry, ExportedProgram)] -> {entry: [file, ...]}``.
 
@@ -630,6 +632,13 @@ class EntryCompilePool:
         after tearing down every sibling group. Returns a dict ordered by
         entry NAME, never by completion, so the packaged cell cannot depend
         on which child finished first.
+
+        ``on_entry(name, done, total)`` (pgw#824) fires as each entry lands.
+        This loop is the longest wire-silent stretch of a mint — an 18-entry
+        sdxl cell spends the bulk of its wall clock right here — and until now
+        it reported nothing between "compiling" and "packed". Progress
+        reporting is best-effort by construction: a raising callback must never
+        cost the mint the entries it already has.
         """
         pending: List[Tuple[int, str, Any]] = [
             (i, name, prog) for i, (name, prog) in enumerate(entries)]
@@ -665,6 +674,12 @@ class EntryCompilePool:
                 except EntryCompileFailed as exc:
                     failure = exc
                     break
+                if on_entry is not None:
+                    try:
+                        on_entry(finished.entry, len(done), len(entries))
+                    except Exception:  # noqa: BLE001 — telemetry never fails a mint
+                        logger.debug(
+                            "entry-pool progress callback failed", exc_info=True)
             if failure is not None:
                 raise failure
         finally:

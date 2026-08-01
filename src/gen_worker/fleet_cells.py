@@ -188,11 +188,21 @@ class ArmOutcome:
     pod_events, unchanged) while this same call proceeds to self-mint —
     the ordinary MISS recovery — instead of leaving the pipeline stuck
     retrying the identical unusable cell on every subsequent request.
+
+    ``eager_reason`` (pgw#824) is the CLASSIFIED token for why this pipeline is
+    not serving from a cell — the same token the decline's
+    ``self_mint_skipped``/``self_mint_started`` event carries in ``phase``, so a
+    request row's ``fallback_reason`` and the worker's activity events join on
+    one string. "" only when ``armed`` is true. Without it every eager request
+    on a compile-declaring release reported ``serving_mode=eager,
+    fallback_reason=""``, and "why is this fleet eager right now" was a question
+    no query could answer.
     """
 
     armed: bool
     self_mint: Optional[Any] = None
     selection_bug: Optional["cc.CellSelectionBugError"] = None
+    eager_reason: str = ""
 
     def __bool__(self) -> bool:
         return self.armed
@@ -728,11 +738,16 @@ def enable_compiled(
         logger.info("fleet-cells: no delivered cell for mandatory lane; self-minting")
 
     if not family:
-        return _fail_closed(pipe, "Compile decl has no family", selection_bug)
+        return _fail_closed(
+            pipe, "Compile decl has no family", selection_bug,
+            phase="no_family")
     if not _cuda_ready():
-        return _fail_closed(pipe, "CUDA unavailable", selection_bug)
+        return _fail_closed(
+            pipe, "CUDA unavailable", selection_bug, phase="no_cuda")
     if not cc.toolchain_present():
-        return _fail_closed(pipe, "no C compiler for the self-mint", selection_bug)
+        return _fail_closed(
+            pipe, "no C compiler for the self-mint", selection_bug,
+            phase="no_toolchain")
     # gw#608 ROOT CAUSE gates (order matters — BEFORE any process-global
     # cache-dir mutation):
     # (a) a slot object with no resolvable compile target (the LTX upsampler
@@ -745,7 +760,8 @@ def enable_compiled(
     #     lanes eager, mandatory lanes typed refusal).
     if not cc.has_compile_target(pipe, cfg):
         return _fail_closed(
-            pipe, "no compile target resolves on this pipeline", selection_bug)
+            pipe, "no compile target resolves on this pipeline", selection_bug,
+            phase="no_compile_target")
     if cc.delivered_cell_seeded() and not delegate:
         # pgw#784: this gate exists ONLY because an in-process capture moves
         # the process-global inductor cache dir. A DELEGATED mint's capture
@@ -756,7 +772,8 @@ def enable_compiled(
             pipe,
             "a delivered cell is seeded in this process; a self-mint "
             "capture would re-point the process-global inductor cache dir "
-            "away from it (gw#608)", selection_bug)
+            "away from it (gw#608)", selection_bug,
+            phase="delivered_cell_seeded")
 
     # gw#561: the eager-miss rollback in provision.enable_compiled dropped
     # the branch lane; the mint must key + trace the DECLARED graph family.
@@ -781,7 +798,8 @@ def enable_compiled(
         if bucket:
             cc.drop_lora_lane(pipe)
         return _fail_closed(
-            pipe, f"self-mint key computation failed: {exc}", selection_bug)
+            pipe, f"self-mint key computation failed: {exc}", selection_bug,
+            phase="key_computation_failed")
 
     # pgw#672: consult the process ledgers BEFORE opening a capture.
     key_ref = f"{cc.system_repo(family)}#{key}"
@@ -796,7 +814,22 @@ def enable_compiled(
             "eager (pgw#672)", family, key)
         if bucket:
             cc.drop_lora_lane(pipe)
-        return ArmOutcome(armed=False, selection_bug=selection_bug)
+        # pgw#824: the ONE eager exit in this function that never rode a typed
+        # event — it returns before `_fail_closed` and only logged. A pod that
+        # quarantined its own cell serves eager for the rest of its life, which
+        # is precisely the state the hub most needs named.
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"family={family} key={key} lane="
+            f"{loading.pipeline_weight_lane(pipe) or 'plain'}: this identity "
+            f"was quarantined by a failed serve/finalize proof earlier in this "
+            f"process; re-minting it is the churn loop, so this worker serves "
+            f"eager for the rest of its life and publishes nothing",
+            phase="cell_quarantined",
+        )
+        return ArmOutcome(
+            armed=False, selection_bug=selection_bug,
+            eager_reason="cell_quarantined")
     finalized_prior = finalized_in_process(key)
     if finalized_prior is not None:
         # This process already minted, proved, and FOLDED this exact cell
@@ -848,7 +881,7 @@ def enable_compiled(
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe, f"another self-mint capture is pending (key {conflict})",
-            selection_bug)
+            selection_bug, phase="capture_conflict")
 
     if existing is not None:
         mint_root, capture_dir = existing.mint_root, existing.capture_dir
@@ -904,7 +937,13 @@ def enable_compiled(
             phase=recipe,
         )
         return ArmOutcome(
-            armed=False, self_mint=pending, selection_bug=selection_bug)
+            armed=False, self_mint=pending, selection_bug=selection_bug,
+            # pgw#824: eager RIGHT NOW, but for a reason with an end — the
+            # child is building the cell. A request row carrying
+            # `mint_in_progress` is a fleet that is warming up; one carrying
+            # `no_toolchain` is a fleet that never will. Reading them as the
+            # same "" was the whole gap.
+            eager_reason="mint_in_progress")
 
     # pgw#777 / DPA-8: the IN-PROCESS capture moves the process-global
     # TORCHINDUCTOR_CACHE_DIR and clears inductor's latch for the whole
@@ -928,7 +967,7 @@ def enable_compiled(
             pipe,
             f"in-process mint refused at groups={topo.groups}: the inductor "
             "capture env is process-global (pgw#777/DPA-8)",
-            selection_bug)
+            selection_bug, phase="multi_group_in_process")
 
     try:
         cc.begin_fleet_mint(pipe, cfg, capture_dir)
@@ -939,7 +978,8 @@ def enable_compiled(
         if bucket:
             cc.drop_lora_lane(pipe)
         return _fail_closed(
-            pipe, f"self-mint arm failed: {exc}", selection_bug)
+            pipe, f"self-mint arm failed: {exc}", selection_bug,
+            phase="capture_arm_failed")
 
     if existing is not None:
         logger.info(
@@ -1591,6 +1631,7 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
 def _fail_closed(
     pipe: Any, reason: str,
     selection_bug: Optional["cc.CellSelectionBugError"] = None,
+    *, phase: str = "mint_unavailable",
 ) -> ArmOutcome:
     """The quantized-lane policy at every exit that cannot produce a cell:
     plain lanes serve eager (never-raise miss policy), w8a8/w4a4 keep the
@@ -1616,14 +1657,22 @@ def _fail_closed(
     # nothing, refused nothing" was the whole observable behaviour of five
     # real L4 pods. A plain lane DEGRADING to eager is a legitimate policy
     # outcome; being unable to say so is not.
+    #
+    # pgw#824: the phase is the CLASSIFIED cause, not the constant
+    # ``mint_unavailable`` every one of the nine exits used to share. The cause
+    # was only ever in the free-text detail, so counting "how much of this fleet
+    # is eager because there is no C toolchain" meant substring-matching a
+    # sentence. It is the same token the request row's ``fallback_reason``
+    # carries, so the two join.
     logger.info("fleet-cells: serving eager (%s)", reason)
     activity_mod.emit_event(
         "self_mint_skipped",
         f"lane={lane or 'plain'}: no cell and no mint — {reason}; this "
         f"worker serves eager and publishes nothing",
-        phase="mint_unavailable",
+        phase=phase,
     )
-    return ArmOutcome(armed=False, selection_bug=selection_bug)
+    return ArmOutcome(
+        armed=False, selection_bug=selection_bug, eager_reason=phase)
 
 
 def _cuda_ready() -> bool:

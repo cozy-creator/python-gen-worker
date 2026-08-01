@@ -689,13 +689,40 @@ class Residency:
             )
             if not repair_device_placement(obj, device):
                 return True
-            # Unrepairable: book the truth (RAM) and refuse.
+            # Unrepairable: book the truth and refuse.
             with self._lock:
                 e = self._entries.get(ref)
                 if e is None:
                     return False
-                if not self._move_verified(e.obj, "cpu", ref=ref):
-                    logger.critical("residency: %s stuck mixed-device", ref)
+                evicted = self._move_verified(e.obj, "cpu", ref=ref)
+                if not evicted:
+                    # pgw#824 ACCOUNTING BUG. The booking below used to be
+                    # UNCONDITIONAL, so a failed eviction still wrote
+                    # `tier=RAM, vram_bytes=0` — while `_move_verified`'s own
+                    # rollback had just put the object back on CUDA, where it
+                    # physically remains. The registry then believed this entry
+                    # held ZERO VRAM, so `make_room` handed out headroom that
+                    # does not exist and the OOM landed on an unrelated
+                    # `promote()` later, with nothing tying it back here.
+                    #
+                    # "Book the truth" has to mean the truth in BOTH branches.
+                    # The object is on the card, so it is booked on the card,
+                    # and the promotion is still refused.
+                    logger.critical(
+                        "residency: %s could not be evicted to CPU; it stays "
+                        "booked in VRAM (%d bytes) and is refused for serving",
+                        ref, e.vram_bytes)
+                    activity_mod.emit_event(
+                        activity_mod.KIND_RESIDENCY_FAULT,
+                        f"ref={ref}: a mixed-device VRAM entry could not be "
+                        f"repaired OR evicted to CPU. It stays on the card and "
+                        f"stays BOOKED at {e.vram_bytes} bytes — booking it as "
+                        f"RAM/0 would hand `make_room` headroom that does not "
+                        f"exist and OOM an unrelated promote later. This ref is "
+                        f"refused for serving until it is reloaded",
+                        phase="eviction_failed_still_resident",
+                    )
+                    return False
                 e.tier = Tier.RAM
                 e.vram_bytes = 0
             flush_memory()

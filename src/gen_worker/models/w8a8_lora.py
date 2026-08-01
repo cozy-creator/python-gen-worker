@@ -53,6 +53,7 @@ import math
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
 from . import adapter_fidelity
@@ -700,6 +701,30 @@ def _stage_for(
         fresh = entry is None
         if entry is None:
             mapped = map_adapter(sd, model, ref=ref)
+            if not mapped:
+                # pgw#824 VACUOUS GUARD. `evaluate_branch` returns None for an
+                # empty mapping and `gate(None)` is a no-op, so an adapter that
+                # maps to ZERO modules sails through the fidelity gate that
+                # exists to catch exactly this. The request then renders with
+                # NO adapter applied while reporting success — the user asked
+                # for a LoRA and got an image without one, and nothing
+                # anywhere says so.
+                #
+                # Reachable: `_normalize_lora_keys` falls back to RAW keys when
+                # `lora_state_dict` normalization raises, and raw kohya keys
+                # match no module path on this model.
+                logger.error(
+                    "adapter %s mapped ZERO modules on %s; the request will "
+                    "render WITHOUT it", ref, type(model).__name__)
+                activity_mod.emit_event(
+                    activity_mod.KIND_LORA_FIDELITY,
+                    f"ref={ref} model={type(model).__name__} "
+                    f"keys={len(sd)}: the adapter mapped ZERO branch modules, "
+                    f"so this request renders with NO adapter applied. The "
+                    f"fidelity gate cannot see it — an empty mapping has "
+                    f"nothing to measure — so it is reported here",
+                    phase="not_applied",
+                )
             entry = _stage_adapter(mapped)
             entry["survival"] = adapter_fidelity.evaluate_branch(
                 mapped, branch_modules(model), ref=ref)

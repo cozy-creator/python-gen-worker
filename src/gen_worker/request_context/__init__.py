@@ -232,6 +232,10 @@ class RequestContext(Generic[D]):
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
+        # pgw#824: one confession per context for an unparseable
+        # destination_repo (see `_repo_job_upload_scope`) — coalesced, because
+        # the getter is called once per uploaded file.
+        self._repo_scope_parse_reported = False
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
         self._slots = _SlotTable(resolved_slots or {}, slot_errors or {})
@@ -618,6 +622,27 @@ class RequestContext(Generic[D]):
             owner, repo = _parse_owner_repo(destination_repo)
         except Exception:
             logger.debug("_repo_job_upload_scope: destination_repo=%r did not parse as owner/repo", destination_repo, exc_info=True)
+            # pgw#824: returning None here does not mean "no repo was asked
+            # for" — a destination_repo WAS supplied and could not be parsed,
+            # so this job's outputs silently stop being repo-CAS writes and
+            # land on the user-files/media path instead. That is exactly the
+            # fallback `_require_repo_job_scope_for_tensors` exists to prevent,
+            # and it was reachable past that guard for every non-training kind
+            # on a `logger.debug`. Emitted ONCE per context: an upload loop
+            # must not turn one config defect into a per-file flood.
+            if not self._repo_scope_parse_reported:
+                self._repo_scope_parse_reported = True
+                from .. import activity as activity_mod
+
+                activity_mod.emit_event(
+                    activity_mod.KIND_SERVE_DEGRADE,
+                    f"job={self._job_id} destination_repo="
+                    f"{destination_repo!r}: not parseable as owner/repo, so "
+                    f"this job's outputs are NOT written as repo-CAS and fall "
+                    f"back to the user-files/media path — a release-config "
+                    f"defect, not a transient",
+                    phase="repo_scope_unparseable",
+                )
             return None
 
         result = (owner, repo, job_id)

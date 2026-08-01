@@ -1525,6 +1525,65 @@ def _arm_branches(pipeline: Any, bucket: int) -> None:
     lora_lifted.arm_lifted_lora_lanes(pipeline, int(bucket or 0))
 
 
+# pgw#824: the phase tokens the in-mint progress callback reports under.
+# Wire-shared with ``activity.PHASE_*`` and framed verbatim by ``mint_child``,
+# so a reader groups a delegated mint's progress on the SAME strings whether it
+# came from the child's frames or from the parent's own activity.
+PHASE_TRACE_GRAPH = "trace_graph"
+PHASE_INDUCTOR_COMPILE = "inductor_compile"
+PHASE_SEAL_PUBLISH = "seal_publish"
+
+
+@dataclass
+class MintProgress:
+    """The ONE record of where a mint IS — live and post-mortem.
+
+    pgw#824 and pgw#825 arrived at the same question from opposite ends and
+    must not answer it twice. pgw#825 needs the partial state (`minted`,
+    `timings`, `width`, the mint's own clock) so a mint that ABORTS still
+    reports the seconds it spent instead of a bare wall clock. pgw#824 needs
+    those same positions pushed out LIVE, because a 20-minute export that
+    reports nothing is indistinguishable from a hung one.
+
+    One object carries both, so a live beat and an abort table can never
+    disagree about which entry the mint was on: :meth:`beat` records the
+    position it reports, and :func:`_attach_partial_phases` stamps that same
+    position onto the aborted table as ``at``. That closes pgw#825's one
+    remaining blind spot — its per-entry rows name the entries that FINISHED,
+    and the entry a mint dies ON is the one a reader most needs named.
+
+    Handed down and mutated in place; ``on_progress`` is optional and
+    best-effort by construction — a raising callback never costs a mint.
+    """
+
+    inductor_configs: Optional[Mapping[str, Any]] = None
+    on_progress: Optional[Callable[[str, int, int, str], None]] = None
+    t_mint: Optional[float] = None
+    timings: Dict[str, float] = field(default_factory=dict)
+    minted: List[_MintedEntry] = field(default_factory=list)
+    width: Optional[aot_compile_pool.PoolWidth] = None
+    #: The last position :meth:`beat` reported, verbatim.
+    at: Dict[str, Any] = field(default_factory=dict)
+
+    def beat(self, phase: str, step: int, total: int, note: str = "") -> None:
+        """Report a position, and REMEMBER it.
+
+        Recording precedes reporting: the position must survive into the abort
+        table even when there is no ``on_progress`` sink and even when the sink
+        raises, or the two halves of this object would tell different stories.
+        """
+        phase, step, total = str(phase), int(step), int(total)
+        note = str(note)[:180]
+        self.at = {
+            "phase": phase, "step": step, "total": total, "note": note}
+        if self.on_progress is None:
+            return
+        try:
+            self.on_progress(phase, step, total, note)
+        except Exception:  # noqa: BLE001 — telemetry never fails a mint
+            logger.debug("aot-mint progress callback failed", exc_info=True)
+
+
 def mint(
     pipeline: Any,
     spec: ExportSpec,
@@ -1533,6 +1592,7 @@ def mint(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
+    on_progress: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
 
@@ -1543,8 +1603,14 @@ def mint(
     table. The live entry list and timings dict are handed down and mutated
     in place, so whatever completed before the terminus is reportable from
     here whether the mint returned, refused, or died.
+
+    pgw#824 rides the SAME record (:class:`MintProgress`) rather than a second
+    one: ``on_progress(phase, step, total, note)`` is where those in-flight
+    positions are pushed out live, and the last one pushed is what an aborted
+    table reports as ``at``.
     """
-    progress: Dict[str, Any] = {"inductor_configs": inductor_configs}
+    progress = MintProgress(
+        inductor_configs=inductor_configs, on_progress=on_progress)
     try:
         return _mint_cell(
             pipeline, spec, out_dir,
@@ -1556,26 +1622,32 @@ def mint(
         raise
 
 
-def _attach_partial_phases(exc: BaseException, progress: Mapping[str, Any]) -> None:
+def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
     """Hang the partial phase table off a failed mint's exception.
 
     Telemetry never changes an outcome, so every step is guarded: a mint that
     refuses must refuse with ITS sentence, not with a reporting error.
     """
     try:
-        minted = list(progress.get("minted") or ())
-        timings = dict(progress.get("timings") or {})
-        started = progress.get("t_mint")
-        if not minted and not timings:
+        minted = list(progress.minted)
+        timings = dict(progress.timings)
+        started = progress.t_mint
+        where = dict(progress.at)
+        if not minted and not timings and not where:
             return
         if started is not None:
             # The mint's OWN wall clock, so an aborted total is comparable
             # with a completed one rather than being a sum of entry seconds.
             timings["total_s"] = round(time.monotonic() - float(started), 2)
         table = _mint_phase_table(
-            minted, timings, progress.get("inductor_configs"),
-            progress.get("width"))
+            minted, timings, progress.inductor_configs, progress.width)
         table["terminus"] = "aborted"
+        if where:
+            # pgw#824 x pgw#825: the entries block names what FINISHED; this
+            # names what the mint was ON. Without it an 18-entry mint that
+            # dies in entry 12's export reports 11 rows and no twelfth, and
+            # the row that matters is the missing one.
+            table["at"] = where
         setattr(exc, "mint_phases", table)
     except Exception:  # pragma: no cover — telemetry never fails a mint
         logger.debug("aot-mint: partial phase table unavailable", exc_info=True)
@@ -1589,7 +1661,7 @@ def _mint_cell(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
-    progress: Optional[Dict[str, Any]] = None,
+    progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
     multi-graph cell (pgw#758).
@@ -1598,6 +1670,18 @@ def _mint_cell(
     width is derived from the pod (see :func:`aot_compile_pool.entry_workers`),
     and this argument exists so an operator or a test can force the serial
     path (``1``) without pretending a 4-vCPU pod is an H100 host.
+
+    ``progress`` (:class:`MintProgress`) is the mint's own position record —
+    handed down by :func:`mint`, mutated in place, and read back by
+    :func:`_attach_partial_phases` on any terminus. ``progress.beat()``
+    reports progress WITHIN the mint (pgw#824). This function used to be one
+    opaque call spanning the family's whole declared class set — sdxl declares
+    18 — so the mint child framed ``trace_graph`` once and said nothing again
+    until ``seal_publish``. A real export measured ~5 minutes of complete wire
+    silence, and the pod's only liveness evidence was that its CPU was warm.
+    "Entry 12 of 18" is the difference between a pod that is alive and a pod
+    that is working, which is exactly the distinction the no-magic-timeouts
+    doctrine runs on.
 
     Does NOT publish — :func:`publish` is a separate step so a mint can be
     inspected, byte-compared (#699 double-mint), or produced on a box with no
@@ -1627,13 +1711,13 @@ def _mint_cell(
     out_dir = Path(out_dir)
     work = out_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
-    timings: Dict[str, float] = {}
     # Handed to the caller BY REFERENCE and mutated in place: an aborted mint
-    # reports the seconds it did spend (pgw#825).
-    progress = {} if progress is None else progress
-    progress["timings"] = timings
+    # reports the seconds it did spend (pgw#825) and the position it was on
+    # (pgw#824), out of ONE record.
+    progress = MintProgress() if progress is None else progress
+    timings = progress.timings
     t_mint = time.monotonic()
-    progress["t_mint"] = t_mint
+    progress.t_mint = t_mint
 
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
@@ -1673,18 +1757,20 @@ def _mint_cell(
             if regional else 1.0))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
-    progress["width"] = width
+    progress.width = width
 
-    minted: List[_MintedEntry] = []
-    progress["minted"] = minted
+    minted = progress.minted
     disarmed = False
     # pgw#822: the adapter-BEARING classes are exported from the lifted
     # forward. Arming it is this function's job, not the caller's — see
     # `_arm_branches`.
     _arm_branches(pipeline, int(spec.lora_bucket or 0))
     t_export = time.monotonic()
+    progress.beat(
+        PHASE_TRACE_GRAPH, 0, len(rows),
+        f"{len(rows)} declared class row(s)")
     try:
-        for plan, arm in rows:
+        for index, (plan, arm) in enumerate(rows, start=1):
             if arm is False and not disarmed:
                 # ONE toggle for the whole branchless group (the rows are
                 # ordered adapter-bearing first): disable/enable reallocates
@@ -1692,6 +1778,12 @@ def _mint_cell(
                 # be N times the VRAM churn for the same graphs.
                 _disarm_branches(pipeline)
                 disarmed = True
+            # Reported BEFORE the work, not after: a row that never returns
+            # is the one a reader most needs named, and an after-the-fact tick
+            # names only the rows that finished.
+            progress.beat(
+                PHASE_TRACE_GRAPH, index, len(rows),
+                _decl.plan_entry_name(plan))
             if regional:
                 minted.extend(_export_regional_entries(
                     pipeline, spec, plan, decl,
@@ -1708,11 +1800,19 @@ def _mint_cell(
 
     if parallel:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
+        progress.beat(
+            PHASE_INDUCTOR_COMPILE, 0, len(minted),
+            f"{len(minted)} entries, {width.workers} wide")
         _compile_entries_parallel(
-            minted, work, width, inductor_configs=inductor_configs)
+            minted, work, width, inductor_configs=inductor_configs,
+            on_entry=lambda name, done, total: progress.beat(
+                PHASE_INDUCTOR_COMPILE, done, total, name))
     timings["entry_workers"] = float(width.workers)
 
     t0 = time.monotonic()
+    progress.beat(
+        PHASE_SEAL_PUBLISH, len(minted), len(minted),
+        f"packaging {len(minted)} entries")
     package = package_cell(
         {row.name: row.files for row in minted}, work / aot_serve.PACKAGE_NAME)
     timings["package_s"] = round(time.monotonic() - t0, 2)
@@ -1888,6 +1988,7 @@ def _compile_entries_parallel(
     width: aot_compile_pool.PoolWidth,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
+    on_entry: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     """pgw#809: fill every entry's ``files`` K-wide, out of process.
 
@@ -1907,7 +2008,8 @@ def _compile_entries_parallel(
         inductor_configs=inductor_configs)
     t0 = time.monotonic()
     try:
-        by_entry = pool.compile([(row.name, row.program) for row in minted])
+        by_entry = pool.compile(
+            [(row.name, row.program) for row in minted], on_entry=on_entry)
     except aot_compile_pool.EntryCompileFailed as exc:
         # Named, and terminal: the siblings are already torn down group-wide
         # by the pool. A mint that says only "a compile failed" over 18

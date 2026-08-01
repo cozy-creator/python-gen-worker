@@ -72,6 +72,91 @@
   child never imports the executor. The regression asserts the two contexts are
   the SAME construction, slot by slot — a child that resolved different slot
   defaults would trace different shapes and the parent's proof would miss.
+- **pgw#824 — the fleet-wide silent-failure audit (SDK half): eager serving names its reason,
+  a silent mint phase ticks, and two swallowed failures that were corrupting DECISIONS.**
+  Ordered by Paul after the five-silent-blockers retrospective: five defects hid for weeks
+  because failures were log-only, success events did not exist, refusals carried empty reasons,
+  and eager-first masked every symptom. pgw#760 swept `except` handlers; this closes the three
+  pattern classes that sweep structurally missed, plus the files it deferred and everything
+  written since.
+
+  **Eager serving is an EVENT, not a default.** `serving_mode`'s four fallback classes
+  (`guard_miss`/`ingress_refused`/`healing`/`volatile`) all presuppose an ARMED cell, so the
+  commonest eager case by far — nothing armed at all — reported `serving_mode=eager,
+  fallback_reason=""`. That empty string could not distinguish a release that declares no
+  compile target from a pod still minting from a pod that declined for cause, so "why is this
+  fleet eager right now" had no query. One level down, the declines that DID emit shared one
+  constant phase: `_fail_closed`'s nine distinct exits all sent
+  `self_mint_skipped phase=mint_unavailable` with the cause in free text only — the th#1250
+  lesson (kind-only coalescing erases the reason) repeating. Now: `ArmOutcome.eager_reason`
+  carries the arming brain's token out of its own decision; the nine exits carry nine tokens
+  (`no_family`, `no_cuda`, `no_toolchain`, `no_compile_target`, `delivered_cell_seeded`,
+  `key_computation_failed`, `capture_conflict`, `multi_group_in_process`,
+  `capture_arm_failed`); the in-process cell-QUARANTINE exit — the one eager exit that returned
+  before `_fail_closed` and only `logger.error`'d, on a pod that then serves eager for the rest
+  of its life — is typed (`cell_quarantined`); the delegated arm reports `mint_in_progress`,
+  because eager with an END must never read the same as eager forever; `serving_mode.POSTURE_*`
+  + `resolve(eager_posture=)` reports it per request, applying ONLY when the mode is already
+  eager and never setting `served_eager_fallback` (nothing fell back — there was nothing to
+  fall back FROM), so every existing compiled-vs-eager comparison keeps its meaning; and five
+  `_install_compile_targets` omission branches that were `logger.warning`+`continue` type
+  themselves. `fallback_reason` on the request row is now the SAME string as `phase` on the
+  worker's activity event, so the question is one `GROUP BY` joining the two on a token.
+
+  **A multi-entry AOT mint reports every entry.** `aot_mint.mint` was ONE opaque call spanning
+  the family's whole declared graph-class set (sdxl declares 18), so `mint_child` framed
+  `trace_graph` once and said nothing until `seal_publish` — a real export measured ~5 minutes
+  of complete wire silence, with the pod's only liveness evidence being that its CPU was warm.
+  That proves ALIVE, not PROGRESSING, and the distinction is the content of the
+  no-magic-timeouts doctrine. `mint(on_progress=)` reports per class row BEFORE the row runs (a
+  row that never returns is the one a reader most needs named);
+  `EntryCompilePool.compile(on_entry=)` fires as each entry lands, covering the longest
+  wire-silent stretch of a mint; `mint_child` frames both through the protocol that already
+  exists, so the parent's `_on_frame` lands them on the same `self_mint_compile` activity with
+  step/total. `mint_delegate` also finally passes `on_evidence` — `run_mint` has accepted it
+  since pgw#784 and nobody ever did, so the child's measured progress (tree CPU + capture-dir
+  growth) existed only to decide whether to KILL it, never to prove it was working.
+
+  **A cell-discovery MISS says why every candidate lost, as counts.** `_candidates` dropped
+  rows on `logger.debug`/bare `continue` and the `miss` event reported only "no matching cell
+  among N checkpoint(s)" — so a family with 12 published cells that rejects all 12 read
+  identically to a family with none, and those are different bugs with different owners. The
+  rejections are counted by class and ride the miss detail.
+
+  **Two swallowed failures that corrupt decisions, fixed at the decision.** (1) An emergency
+  nf4 quant landing on ZERO modules was SELF-SUPPRESSING: the failure did `adaptive_rung = ""`,
+  and the `if adaptive_rung:` stamp below it is the very mechanism that reports rung outcomes to
+  placement — so the worst outcome the fit ladder can produce (serving full precision over the
+  budgeted VRAM, on a host already too tight for stored precision) was the only one that
+  reported nothing, while every sibling rung reported itself. Now `RUNG_NF4_UNLANDED`, routed
+  through `SlotLoad.rung` -> `_record_adaptive_rung` -> ServePlan/FnDegraded like every other
+  rung. (2) A failed residency eviction booked `tier=RAM, vram_bytes=0` while
+  `_move_verified`'s own rollback had just put the object back on CUDA: the registry believed
+  the entry held ZERO VRAM, `make_room` handed out headroom that does not exist, and the OOM
+  landed on an unrelated `promote()` later with nothing tying it back. "Book the truth" now
+  means the truth in both branches.
+
+  Also: the block-window offload engagement (every forward now streams weights over PCIe from
+  host RAM — the biggest per-request latency change the loader can make) is typed, the sibling
+  the pgw#760 `apply_fp8_storage` fix missed; and an unparseable `destination_repo` confesses
+  once per context instead of silently redirecting a job's outputs off the repo-CAS path.
+
+  The endpoint half is **ie#589** — the sweep's root finding was that `activity.emit_event` has
+  ZERO adopters across all 27 endpoint families.
+
+  **Reconciled with pgw#825, into ONE mechanism.** 0.85.0's cut merged this branch textually
+  clean and got 16 failed / 6 errored: pgw#825 had split `mint()` into
+  `mint` / `_attach_partial_phases` / `_mint_cell`, so this branch's `on_progress` parameter
+  landed on one function and its `_beat` helper inside another —
+  `NameError: name 'on_progress' is not defined`. Both issues had arrived at the same question
+  ("where is this mint?") from opposite ends: pgw#825 accumulates the partial state so an
+  ABORTED mint reports the seconds it spent, pgw#824 pushes those positions out LIVE. Rather
+  than thread a second parameter past the first mechanism, both now ride one
+  `aot_mint.MintProgress` — it owns `timings`/`minted`/`width`/`t_mint` (pgw#825) and
+  `beat()` (pgw#824), and `beat` RECORDS the position before reporting it, so the two halves
+  cannot disagree. The dividend is pgw#825's one remaining blind spot closed: its per-entry
+  rows name the entries that FINISHED, and an aborted table now also carries `at` — the entry
+  the mint died ON, which is the row a reader is actually asking about.
 
 ## 0.85.0 (2026-07-31) — a regional cell's LoRA branch pair is BINDABLE: the ONE bind template, the mismatch refused before the compile is paid for, an aborted mint that reports where it spent, and the process split as the only execution model
 
