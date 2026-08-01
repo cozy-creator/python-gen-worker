@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.85.0 (2026-07-31) — a regional cell's LoRA branch pair is BINDABLE: the ONE bind template, the mismatch refused before the compile is paid for, an aborted mint that reports where it spent, and the process split as the only execution model
 
 - **pgw#825 — a regional cell's LoRA branch pair is BINDABLE, the mismatch is
   refused BEFORE the compile is paid for, and an aborted mint still reports
@@ -41,12 +41,41 @@
   roll-up under `phase=aborted` (never `minted`) plus the per-entry
   `entry:<name>` rows.
 
-- **pgw#783 — the parent/child process split is now the ONLY worker execution
-  model; the `GEN_WORKER_PROCESS_SPLIT` flag is gone.** `entrypoint`
-  unconditionally becomes the control parent and execs one compute child per
-  execution group — there is no single-process mode to fall back to.
-  `split_enabled()`/`ENV_SPLIT` are removed from `procsplit`. G=1 behaviour is
-  byte-identical to the previous flag-on path.
+- **th#1355 (worker half) — a published cell states its own identity and
+  cost.** The publish payload now carries `identity_axes` (the axes the cell
+  was keyed on) and `mint_duration_ms` (what the mint actually cost), so the
+  hub's cell inventory records what a cell IS and what it took to make
+  instead of inferring both. `CellPublisher.publish` grows a
+  `mint_duration_ms` parameter and `fleet_cells.publish_self_mint` threads
+  the mint's measured duration through to it.
+
+- **pgw#823 (SDK half) — ask for a C++ compiler before spending 336s
+  discovering there isn't one.** An AOT mint on an image with no `g++` (or no
+  CUDA crt/nv headers) ran the full load-and-trace and only failed once
+  inductor tried to build a kernel — 336 s of rented GPU for a question
+  answerable at boot. `compile_cache` now probes the C++/CUDA toolchain and
+  `fleet_cells.mint_recipe` declines by name before the pod is spent;
+  `mint_child` refuses typed on the same predicate.
+
+- **pgw#818 — the worker's fabric gate adopts the hub's full predicate.** The
+  Hello-time demote read `interconnect` alone while the hub's grew a measured
+  bandwidth floor, so in the band `nvlink AND peer_gbps < 200` a 2x2 pod refused
+  half of every dispatch RETRYABLE forever and a 1x4 pod overstated capacity 4x.
+  `delivered_topology` now demotes unless `sp_admits(interconnect, peer_gbps)` —
+  `nvlink AND >= SP_MIN_PEER_GBPS (200.0)`, the hub's `topology.SPAdmits`
+  verbatim — and a WEDGED fabric (`peer_access AND peer_gbps == 0.0`, the
+  collective that hangs with no error) raises
+  `topology_fabric_wedged_peer_access_zero_bandwidth` typed at boot for any
+  multi-GPU topology, closing the race against the hub's quarantine drain.
+  Deliberately still no HelloAck demote field: two independent gates over one
+  measurement is the design; th#1285 interpretation 4's "agree by construction"
+  holds only while the predicates match, which they now again do.
+
+- **pgw#808 — `tests_v2` scaffold: the declarative endpoint catalog and the
+  first two scenario suites.** A new `tests_v2/` tree describes endpoints as
+  DATA (`catalog.py`) and drives boot and dispatch scenarios from that
+  description rather than from hand-built fixtures per test. Additive only —
+  no existing suite or shipped module changes.
 
 ## 0.84.0 (2026-07-31) — the AOT mint exports the module it DECLARED: one lifted arm for the export, a declaration/module check before a pod is rented, and the process split becomes an N-group AUTHORIZATION boundary (dark)
 
@@ -310,19 +339,6 @@
   decline that read as a skip would be an uncompiled target) and drops the two
   premises pgw#812 measured away. Red-verified against the v0.82.0 source: 4 of
   the 8 fail there.
-- **pgw#818 — the worker's fabric gate adopts the hub's full predicate.** The
-  Hello-time demote read `interconnect` alone while the hub's grew a measured
-  bandwidth floor, so in the band `nvlink AND peer_gbps < 200` a 2x2 pod refused
-  half of every dispatch RETRYABLE forever and a 1x4 pod overstated capacity 4x.
-  `delivered_topology` now demotes unless `sp_admits(interconnect, peer_gbps)` —
-  `nvlink AND >= SP_MIN_PEER_GBPS (200.0)`, the hub's `topology.SPAdmits`
-  verbatim — and a WEDGED fabric (`peer_access AND peer_gbps == 0.0`, the
-  collective that hangs with no error) raises
-  `topology_fabric_wedged_peer_access_zero_bandwidth` typed at boot for any
-  multi-GPU topology, closing the race against the hub's quarantine drain.
-  Deliberately still no HelloAck demote field: two independent gates over one
-  measurement is the design; th#1285 interpretation 4's "agree by construction"
-  holds only while the predicates match, which they now again do.
 
 - **pgw#812 D1 + D2 — the two defects that make flux2 unmintable, and neither is
   about regional compilation.** D1: `dynamic_shapes_spec` minted one torch symbol per
