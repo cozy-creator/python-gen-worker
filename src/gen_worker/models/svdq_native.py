@@ -452,11 +452,23 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
 
     from .svdq import _read_safetensors_metadata
     from .svdq_awq import decode_awq_linear, is_awq_linear
-    from .svdq_layout import decode_linear
+    from .svdq_layout import (
+        LOWRANK_QUANT_KEY,
+        LOWRANK_QUANT_SCHEMES,
+        decode_linear,
+    )
 
     compute = compute_dtype or torch.bfloat16
     meta = _read_safetensors_metadata(art.file)
     model_class = str(meta.get("model_class") or "")
+    # te#148: the metadata flag declares the branch scheme; absent = bf16
+    # (the historical format). decode_linear enforces bytes == declaration.
+    lowrank_quant = str(meta.get(LOWRANK_QUANT_KEY) or "bf16")
+    if lowrank_quant not in ("bf16",) + LOWRANK_QUANT_SCHEMES:
+        raise SvdqNativeError(
+            f"svdq checkpoint {art.file.name} declares "
+            f"{LOWRANK_QUANT_KEY}={lowrank_quant!r} — not a known low-rank "
+            f"branch scheme (bf16, {', '.join(LOWRANK_QUANT_SCHEMES)})")
     cfg_raw = meta.get("config")
     try:
         cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else dict(cfg_raw or {})
@@ -498,7 +510,8 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                 targets = plan_targets(model, prefix)
                 out_f = sum(o for _, o in targets)
                 in_f = int(_module_at(model, targets[0][0]).in_features)
-                dec = decode_linear(tensors, out_f, in_f)
+                dec = decode_linear(tensors, out_f, in_f,
+                                    lowrank_quant=lowrank_quant)
                 swapped += swap_svdq_linears(
                     model, {prefix: dec}, compute_dtype=compute,
                     mode=mode)["linears"]
@@ -522,9 +535,9 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     model._cozy_svdq_engine = SVDQ_ENGINE_NATIVE
     model._cozy_svdq_mode = mode
     logger.info(
-        "svdq native loader: %s mode=%s — %d W4A4 linears, %d AWQ modulation "
-        "layers, %d plain tensors", type(model).__name__, mode, swapped, awq,
-        len(plain))
+        "svdq native loader: %s mode=%s lowrank=%s — %d W4A4 linears, %d AWQ "
+        "modulation layers, %d plain tensors", type(model).__name__, mode,
+        lowrank_quant, swapped, awq, len(plain))
     return model
 
 

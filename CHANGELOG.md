@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **te#148 — svdq low-rank branch can arrive QUANTIZED (int8 | fp8_e4m3).**
+  `decode_linear`/`load_svdq_native_denoiser` accept a branch pair stored
+  int8 or fp8_e4m3 with fp32 per-block-32 scales along each factor's
+  contraction dim (LoRaQ, arXiv 2604.18117), declared by the new
+  `__metadata__` key `lowrank_quant` (absent = bf16, historical format —
+  byte-identical behavior). Declaration and bytes must agree; either mismatch
+  refuses. v1 dequantizes on load (bf16 downstream — SvdqLinear /
+  fold_to_dense / split_decoded untouched); `quantize_lowrank` /
+  `dequantize_lowrank` are the format's encode/decode pair for the te#148
+  producer half. Quantized branch tensors are plain row-major (the 16x16
+  lowrank fragment pack is a 16-bit-operand convention; nunchaku cannot read
+  a quantized-branch file regardless).
+
 - **pgw#846 (P0, Paul's ruling) — AOT-regional is DELETED.** Regional
   (block-class) export/mint/arm is removed end to end: `aot_regional.py`, the
   regional export fork and shell-digest machinery in `aot_mint`, the
