@@ -589,6 +589,23 @@ def apply_block_window_offload(
             name, len(windows), parked_bytes / float(1 << 30),
             "pinned" if pin else "pageable",
         )
+        # pgw#824: the SIBLING the pgw#760 apply_fp8_storage fix missed. This
+        # is the same class of fact and a larger one: every forward on this
+        # component now streams its weights over PCIe from host RAM, which is
+        # the single biggest per-request latency change the loader can make,
+        # and it was a `logger.warning` on a pod with no stdout. `pinned` vs
+        # `pageable` rides the detail because the two differ by roughly 2x on
+        # the transfer that now sits in the critical path.
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            f"component={name} obj={type(obj).__name__}: block-window offload "
+            f"ENGAGED — {len(windows)} block(s) / "
+            f"{parked_bytes / float(1 << 30):.1f} GiB rest in "
+            f"{'pinned' if pin else 'pageable'} host RAM and stream to the "
+            f"device per forward; every request on this component pays that "
+            f"transfer",
+            phase="block_offload_engaged",
+        )
     return applied
 
 

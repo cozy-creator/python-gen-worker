@@ -342,3 +342,39 @@ def test_a_failed_eviction_stays_booked_in_vram(
         "the failed-eviction branch must refuse BEFORE booking RAM/0 — "
         "booking it as RAM/0 is the headroom lie that OOMs a later promote")
     assert "eviction_failed_still_resident" in failure_branch
+
+
+def test_block_offload_engagement_is_typed_not_just_logged() -> None:
+    """The sibling the pgw#760 `apply_fp8_storage` fix missed, and the larger
+    of the two: every forward now streams this component's weights over PCIe
+    from host RAM, which is the biggest per-request latency change the loader
+    can make. It was a `logger.warning` on a pod with no stdout."""
+    import inspect
+
+    from gen_worker.models import loading
+
+    src = inspect.getsource(loading.apply_block_window_offload)
+    assert 'phase="block_offload_engaged"' in src
+    # pinned vs pageable differ by ~2x on the transfer that is now in the
+    # critical path, so the detail has to carry which one it got.
+    assert "pinned" in src.split('phase="block_offload_engaged"')[0][-700:]
+
+
+def test_an_unparseable_destination_repo_confesses_once() -> None:
+    """RED before pgw#824: `logger.debug` + `return None`.
+
+    Returning None does not mean "no repo was asked for" — a destination_repo
+    WAS supplied and did not parse, so the job's outputs silently stop being
+    repo-CAS writes and land on the user-files/media path instead. That is the
+    exact fallback `_require_repo_job_scope_for_tensors` exists to prevent, and
+    it was reachable past that guard for every non-training kind.
+    """
+    import inspect
+
+    from gen_worker import request_context
+
+    src = inspect.getsource(request_context.RequestContext._repo_job_upload_scope)
+    assert 'phase="repo_scope_unparseable"' in src
+    # coalesced: the getter runs once per uploaded file, so one config defect
+    # must not become a per-file flood
+    assert "_repo_scope_parse_reported" in src
