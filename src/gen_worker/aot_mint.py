@@ -1967,6 +1967,42 @@ def _gate_and_declare_entry(
         logger.info(
             "aot-mint: %s: %d lifted constant(s) fused away by the compiler "
             "(e.g. %s)", entry, len(fused), fused[:3])
+    if row.spec.regional and fused:
+        # pgw#827 (found by wiring the regional arm): "recorded, never fatal"
+        # is right for a WHOLE-GRAPH cell — it is minted from the very weights
+        # it serves, so a folded constant is that module's own value. It is
+        # FATAL for a regional cell. One artifact serves N INSTANCES with
+        # DIFFERENT weights, so a constant the compiler folded away carries
+        # the PROTOTYPE instance's bytes into every other instance, silently,
+        # with no unbound constant and no refusal anywhere.
+        #
+        # MEASURED off-pod (torch 2.13.0+cu130, CPU, a 3-block toy): with
+        # `ff.bias` folded, instance 0 reproduces eager exactly (0.0) and
+        # instance 1 is wrong by 0.53. Nothing in the artifact, the manifest
+        # or the bind gate can see it — which is why it is refused HERE.
+        #
+        # The remedy is proven and is NOT this refusal: compiling regional
+        # entries under `aot_inductor.use_runtime_constant_folding=True` keeps
+        # every folded constant a real bindable input (verified: `fused` goes
+        # to [] and `ff.bias` reappears in the artifact's own table). It also
+        # adds `_FOLDED_CONST_*` rows the manifest and the bind path must
+        # learn, and it re-keys every cell — so it is a change with a train,
+        # not a hotfix. Until then a cell that would serve wrong numbers must
+        # not be published.
+        state_dict_fused = [
+            name for name in fused
+            if name in set(aot_package.program_state_dict_fqns(row.program))]
+        if state_dict_fused:
+            raise MintRefused(
+                f"entry {entry!r}: the compiler folded {len(state_dict_fused)} "
+                f"state_dict constant(s) away "
+                f"({sorted(state_dict_fused)[:6]!r}). A REGIONAL entry is "
+                f"reused across every instance of its block class, so a "
+                f"folded constant bakes the PROTOTYPE instance's weights into "
+                f"all of them — the artifact is correct for instance 0 and "
+                f"silently wrong for the rest. Recompile with "
+                f"`aot_inductor.use_runtime_constant_folding=True`, which "
+                f"keeps them bindable")
     try:
         inputs, symbols = aot_package.input_contract(
             row.program, row.flat_names)

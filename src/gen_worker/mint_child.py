@@ -309,22 +309,21 @@ def _run_warm_job(instance: Any, job: Any, config: Dict[str, Any], lane: str) ->
     """
     import asyncio
 
-    from .request_context import RequestContext
+    from . import warmup
 
     spec = job.spec
     with tempfile.TemporaryDirectory(prefix="gw-mintchild-") as tmp:
         payload = job.build(tmp)
         if payload is None:
             return
-        ctx: RequestContext[Any] = RequestContext(
-            request_id=f"mint-child-{spec.name}",
-            local_output_dir=tmp,
-            boot_warmup=True,
-        )
-        if lane:
-            ctx._set_lane(lane)
-        if config:
-            ctx._set_config(dict(config))
+        # pgw#828: the SAME construction the executor's warm path uses. This
+        # was three hand-rolled contexts, and the child's had no slots at
+        # all — `ctx.slots["pipeline"]` raised `KeyError: 'pipeline'` on a
+        # real L4 after a 16.45 s load, so the dynamo mint route published
+        # nothing.
+        ctx = warmup.warm_context(
+            spec, request_id=f"mint-child-{spec.name}",
+            local_output_dir=tmp, lane=lane, config=config)
         bound = getattr(instance, spec.attr_name)
         kwargs = {spec.ctx_param: ctx, spec.payload_param: payload}
         if spec.is_async_gen:

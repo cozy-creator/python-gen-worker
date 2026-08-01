@@ -197,6 +197,27 @@ def load_slot(
     return out
 
 
+def arm_route(mode: str) -> Optional[str]:
+    """The name of the arm that serves cells of ``mode``, or ``None``.
+
+    ONE registry, asked by :func:`arm_aot` when it arms and by the mint
+    BEFORE it spends anything (``fleet_cells.mint_recipe``). pgw#827 is the
+    fourth defect in the "a gate that models the arm differently from the
+    arm" class (pgw#816, #822, #825): the regional recipe minted 72 entries
+    in 354 s of L4 and only then discovered that this runtime had no arm
+    that could adopt the kind of cell it had just built. "Can this runtime
+    adopt the kind of cell I am about to mint?" is answerable at
+    ``self_mint_started``, and it is answerable HERE, from the same table
+    the arm dispatches on.
+    """
+    from .. import aot_regional
+
+    return {
+        "": "aot_serve.enable",
+        aot_regional.MODE_REGIONAL: "aot_regional.enable",
+    }.get(str(mode or ""))
+
+
 def arm_aot(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], artifact: Path,
     bucket: int, meta: Optional[Dict[str, Any]] = None,
@@ -237,7 +258,17 @@ def arm_aot(
     # the buffers it bound at arm time and every attach would silently serve
     # the base model. The install is skipped by name rather than left to the
     # (currently unwired) regional arm to trip over.
-    regional = str((meta or {}).get("mode") or "") == aot_regional.MODE_REGIONAL
+    mode = str((meta or {}).get("mode") or "")
+    regional = mode == aot_regional.MODE_REGIONAL
+    if arm_route(mode) is None:
+        # A cell whose mode this runtime has no arm for must decline BY NAME
+        # rather than be handed to whichever arm happens to be the default —
+        # pgw#827 was exactly that: a regional cell routed into the
+        # whole-graph arm, which built ONE bind table at denoiser scope.
+        logger.warning(
+            "aot arm: artifact declares mode=%r, which this runtime has no "
+            "arm for; staying eager", mode)
+        return False
     if bucket and not regional and get_settings().compile_prefer_aot:
         from . import lora_lifted
 
@@ -261,7 +292,14 @@ def arm_aot(
                     "aot arm: lifted-binding install failed on %r (%s); a "
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
-    if aot_serve.enable(pipe, cfg, cache_dir, artifact):
+    # pgw#827: the regional cell goes to the regional arm — the per-INSTANCE
+    # bind table — and the whole-graph cell to the whole-graph arm. Both the
+    # serve path and the delegated mint's self-adopt verification reach this
+    # one dispatch (`fleet_cells.adopt_delegated_mint`), which is why an
+    # unwired regional arm did not merely mean regional cells could not
+    # serve: it meant they could not be PUBLISHED.
+    arm = aot_regional.enable if regional else aot_serve.enable
+    if arm(pipe, cfg, cache_dir, artifact):
         return True
     if lifted_installed:
         from . import lora_lifted

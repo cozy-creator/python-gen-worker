@@ -1441,6 +1441,8 @@ def mint_recipe(
     class this issue exists to kill: five real L4 pods produced no mint and no
     refusal, which is indistinguishable from a crash.
     """
+    from . import aot_regional
+
     if not aot_cells.prefer_aot():
         return RECIPE_DYNAMO
     family = str(getattr(cfg, "family", "") or "")
@@ -1534,6 +1536,19 @@ def mint_recipe(
     # no serve-path change at all. Where the constant table IS large it is
     # 14.2x, which is the whole reason this lane exists.
     if bool(getattr(export_declaration(family), "regional", False)):
+        # pgw#827: the LAST question, and the cheapest — does this runtime
+        # own an arm that can adopt the kind of cell this recipe produces?
+        # Attempt nine answered it after 354 s of L4 and a complete 72-entry
+        # artifact, at the mint's own self-adopt verification. It is
+        # answerable here, from the arm's own dispatch table, for free.
+        if provision.arm_route(aot_regional.MODE_REGIONAL) is None:
+            return _decline(
+                "regional_arm_unwired",
+                f"family {family!r} declares regional=True but this runtime "
+                f"has no arm for mode={aot_regional.MODE_REGIONAL!r} — a cell "
+                f"this worker could not adopt must not be minted, because the "
+                f"mint's own self-adopt verification would refuse it after "
+                f"the whole compile is paid for")
         return RECIPE_AOT_REGIONAL
     return RECIPE_AOT
 

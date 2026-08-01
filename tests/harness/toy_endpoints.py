@@ -16,7 +16,9 @@ from typing import AsyncIterator
 
 import msgspec
 
-from gen_worker import ConfigParam, Hub, RequestContext, Slot, ValidationError, endpoint
+from gen_worker import (
+    ConfigParam, Hub, RequestContext, Resources, Slot, ValidationError, endpoint,
+)
 from gen_worker.api.streaming import StreamResult, TokenUsage
 from gen_worker.families.base import GenerationDefaults, family
 
@@ -395,3 +397,28 @@ class OptionalLaneEndpoint:
             )
         weights = Path(self.edit_path) / "model.safetensors"
         return EchoOut(response=f"edit:{weights.read_text()}")
+
+
+# ---------------------------------------------------------------------------
+# pgw#828: the sdxl SHAPE — a GPU inference endpoint with one declared slot
+# whose handler dereferences ``ctx.slots``. The delegated mint child ran this
+# with an EMPTY slot table (`KeyError: 'pipeline'` at `sdxl/main.py:326`), so
+# a warm job that never touches ``ctx`` could not have caught it.
+# ---------------------------------------------------------------------------
+
+WARM_SLOT_PIPELINE = Hub("harness/warm-slot-base", tag="prod")
+
+
+@endpoint(
+    models={"pipeline": Slot(str, default_checkpoint=WARM_SLOT_PIPELINE)},
+    resources=Resources(gpu=True),
+)
+class WarmSlotEndpoint:
+    def setup(self, pipeline: str) -> None:
+        self.pipeline_path = pipeline
+
+    def warm_slot_echo(
+        self, ctx: RequestContext[_ToyDefaults], data: EchoIn,
+    ) -> EchoOut:
+        resolved = ctx.slots["pipeline"]
+        return EchoOut(response=f"{resolved.ref.path}:{data.text}")

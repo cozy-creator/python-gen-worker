@@ -37,6 +37,7 @@ from . import cpu_budget
 from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
+from . import warmup
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -321,71 +322,12 @@ class _AllComponents(frozenset):
 _ALL_COMPONENTS = _AllComponents()
 
 
-def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dict[str, Any]:
-    """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
-    Slot-declared slot's repo-metadata ``ModelBinding.inference_defaults``
-    over its code fallback preset, then apply each riding lora's
-    ``LoraOverlay.inference_defaults`` as a FIELD-LEVEL override, in lora
-    order (pgw#516 composition rule — see ``api.slot._apply_lora_overrides``).
-    Returns the ``resolved_slots=``/``slot_errors=`` kwargs for
-    ``RequestContext.__init__`` — a slot that fails to resolve (no metadata +
-    no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access error
-    instead of failing the whole dispatch."""
-    if not spec.slots:
-        return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
-    from .api.slot import resolve_slot
-
-    run_models = list(run.models) if run is not None else []
-    raw_defaults = {b.slot: b.inference_defaults for b in run_models if b.inference_defaults}
-    lora_defaults = {
-        b.slot: tuple(lo.inference_defaults for lo in b.loras if lo.inference_defaults)
-        for b in run_models if b.loras
-    }
-    # pgw#654: the resolved checkpoint's stamped objective/distilled facts
-    # ride the binding; the per-function declaration is the backstop (the
-    # hub gates checkpoint<->function compatibility at deploy/dispatch).
-    objectives = {
-        b.slot: str(getattr(b, "objective", "") or "") for b in run_models
-    }
-    distilled_facts = {
-        b.slot: bool(getattr(b, "distilled", False)) for b in run_models
-    }
-    resolved: Dict[str, Any] = {}
-    errors: Dict[str, str] = {}
-    for name, slot in spec.slots.items():
-        try:
-            resolved[name] = resolve_slot(
-                name, slot,
-                ref=spec.models.get(name),
-                defaults_cls=spec.defaults_type,
-                family=spec.slot_family.get(name, ""),
-                raw_metadata_json=raw_defaults.get(name, ""),
-                lora_metadata_json=lora_defaults.get(name, ()),
-                objective=objectives.get(name, ""),
-                distilled=distilled_facts.get(name, False),
-                allowed_objectives=spec.objectives,
-                allowed_distilled=spec.distilled,
-            )
-        except ValueError as exc:
-            errors[name] = str(exc)
-    return {
-        "resolved_slots": resolved,
-        "slot_errors": errors,
-        "root_slot": _spec_root_slot(spec),
-    }
-
-
-def _spec_root_slot(spec: EndpointSpec) -> str:
-    """The declared root slot name (pgw#654 gap #7): Slot(root=True), else
-    "pipeline", else the single slot; "" when nothing resolves a root."""
-    for name, slot in spec.slots.items():
-        if getattr(slot, "root", False):
-            return name
-    if "pipeline" in spec.slots:
-        return "pipeline"
-    if len(spec.slots) == 1:
-        return next(iter(spec.slots))
-    return ""
+#: pgw#828: the slot-resolution chain and the root-slot rule moved to
+#: ``warmup`` so the delegated mint child can reach them WITHOUT importing
+#: the executor. These names stay as aliases because the dispatch path and
+#: several tests call them here; there is one implementation.
+_resolve_slots_kwargs = warmup.resolved_slots_kwargs
+_spec_root_slot = warmup.spec_root_slot
 
 
 def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
@@ -6022,15 +5964,11 @@ class Executor:
                     return True
                 if payload is None:
                     return True  # variant base already carries media
-                ctx: RequestContext[Any] = RequestContext(
-                    request_id=f"boot-warmup-{wj.spec.name}",
+                ctx: RequestContext[Any] = warmup.warm_context(
+                    wj.spec, request_id=f"boot-warmup-{wj.spec.name}",
                     local_output_dir=tmp,
-                    models={slot: wire_ref(b) for slot, b in wj.spec.models.items()},
-                    **_resolve_slots_kwargs(wj.spec, None),
-                    boot_warmup=True,
-                )
-                ctx._set_lane(self._served_lane(wj.spec))
-                ctx._set_config(self._effective_config(wj.spec))
+                    lane=self._served_lane(wj.spec),
+                    config=self._effective_config(wj.spec))
                 try:
                     await self._invoke_warmup(wj.spec, instance, ctx, payload, handler_kwargs)
                 except Exception as exc:
@@ -9234,18 +9172,11 @@ class Executor:
                 payload = wj.build(tmp)
                 if payload is None:
                     return
-                ctx: RequestContext[Any] = RequestContext(
-                    request_id=f"bg-mint-{wj.spec.name}",
+                ctx: RequestContext[Any] = warmup.warm_context(
+                    wj.spec, request_id=f"bg-mint-{wj.spec.name}",
                     local_output_dir=tmp,
-                    models={
-                        slot: wire_ref(b)
-                        for slot, b in wj.spec.models.items()
-                    },
-                    **_resolve_slots_kwargs(wj.spec, None),
-                    boot_warmup=True,
-                )
-                ctx._set_lane(self._served_lane(wj.spec))
-                ctx._set_config(self._effective_config(wj.spec))
+                    lane=self._served_lane(wj.spec),
+                    config=self._effective_config(wj.spec))
                 if preemptible:
                     bg.seed_ctx = ctx
                     # Registration race: demand that arrived after the turn

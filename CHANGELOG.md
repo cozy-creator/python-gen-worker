@@ -1,5 +1,78 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#827 — a REGIONAL cell is adopted through the REGIONAL arm, so it can be
+  PUBLISHED at all.** On a real L4 (0.85.0, sdxl 0.2.105, lane `w8a8-lora64`,
+  recipe `aot-regional`, pod `o7y87kfunc3rmm`) the platform's first successful
+  AOT mint — `aot_mint_phases phase=minted n_entries=72 total_s=354.45` — was
+  then discarded at the mint's own self-adopt verification with `aot_adopt
+  constants_constant_unresolved`: all 30 declared constants of every entry
+  unresolvable. `models.provision.arm_aot` DETECTED the regional cell (pgw#825
+  added that, to skip the lifted install) and handed it to `aot_serve.enable`
+  anyway — the whole-graph arm, which builds ONE bind table per TARGET from
+  `resident_constants(unet)`. A regional entry's FQNs are block-relative
+  (`attn1.to_k.weight`); the denoiser carries them under their full path; and
+  `resolve_constants` is a direct FQN lookup by design. Because
+  `fleet_cells.adopt_delegated_mint` runs that same `arm_aot`, an unwired
+  regional arm did not merely mean regional cells could not serve — it meant
+  they could not be published. New `aot_regional.load_and_arm`/`enable` is the
+  regional twin of `aot_serve.load_and_wrap`/`enable`: the same gates in the
+  same order, differing only in that the bind table is built per block
+  INSTANCE. It publishes the SAME format-2 pipeline marker, so `is_armed`,
+  `execution_count`, `proven_since`, `set_guard_failure_callback` and `unwrap`
+  need no regional variant — without which the executor's adoption proof
+  (pgw#735) could never pass for a regional cell and the mint would publish and
+  then be rolled back as unproven.
+- **pgw#827 — the arm is asked BEFORE the mint spends.** New
+  `models.provision.arm_route(mode)` is one registry, consulted by the arm when
+  it arms and by `fleet_cells.mint_recipe` before the child is spawned. A cell
+  whose mode this runtime has no arm for is refused by name rather than routed
+  to whichever arm is the default, and a regional recipe with no wired arm
+  declines `regional_arm_unwired` at `self_mint_started` instead of after
+  354 s of L4.
+- **pgw#827 — the regional lane gets the whole-graph lane's fail-soft
+  contract.** `aot_regional.BlockShim` had no guard: an artifact fault was a
+  failed REQUEST. It now serves eager on an ingress refusal (named, counted,
+  still armed) and on any other artifact fault marks the instance failed,
+  revokes scheduler-visible compiled proof, and serves eager for the rest of
+  the process.
+- **pgw#827 — the adapter fork routes by module STATE for a regional cell.**
+  pgw#790 discriminates the two arms by ingress, which works because the lift
+  wraps the DENOISER. A regional entry is exported one block deep from the
+  block's own signature, which never carries the lifted pair, so both arms
+  declare the same contract, both admit every call, and `EntryDispatch`
+  correctly refuses `entry_ambiguous` on every forward — the cell arms, reports
+  armed, and serves 100% eager. New `aot_regional.BlockDispatch` picks the arm
+  from the denoiser's live adapter state (`lora_lifted.adapter_active`, the
+  same fact `aot_serve.adapter_call_kwargs` already reads), and ingress then
+  discriminates cfg/shape within the arm.
+- **pgw#831 (gated here, fixed on its own train) — a folded constant bakes the
+  PROTOTYPE block's weights into every other instance.**
+  `eliminated_constants`' "routine compiler fusion, recorded, never fatal" is
+  right for a whole-graph cell and FATAL for a regional one, which reuses one
+  artifact across instances that do not share weights. Measured off-pod with
+  `ff.bias` folded: instance 0 reproduces eager at 0.0, instance 1 is wrong by
+  0.53, with nothing unbound and nothing refused. A regional entry that folded
+  any `state_dict` constant is now REFUSED before packing. The remedy —
+  `aot_inductor.use_runtime_constant_folding=True`, verified to keep them
+  bindable — re-keys every cell and needs `_FOLDED_CONST_*` handling, so it
+  rides pgw#831.
+- **pgw#828 — the delegated mint child runs the endpoint's warm job with the
+  SAME context the serving path builds.** On a real L4 the child loaded the
+  pipeline in 16.45 s (pgw#816 holding) and then died at
+  `ctx.slots["pipeline"]` with `KeyError: 'pipeline'`: it hand-rolled a
+  `RequestContext` with no slots, no models and no root slot. Nothing was
+  missing from the wire — warm-shape slot resolution needs only the spec, which
+  the child builds itself; it simply never asked. New `warmup.warm_context`
+  (plus `warmup.resolved_slots_kwargs` / `warmup.spec_root_slot`, moved out of
+  `executor`) is now the ONE construction, called by the boot warm path, the
+  in-process mint seed and the child; `executor._resolve_slots_kwargs` and
+  `executor._spec_root_slot` are aliases of it. It lives in `warmup` so the
+  child never imports the executor. The regression asserts the two contexts are
+  the SAME construction, slot by slot — a child that resolved different slot
+  defaults would trace different shapes and the parent's proof would miss.
+
 ## 0.85.0 (2026-07-31) — a regional cell's LoRA branch pair is BINDABLE: the ONE bind template, the mismatch refused before the compile is paid for, an aborted mint that reports where it spent, and the process split as the only execution model
 
 - **pgw#825 — a regional cell's LoRA branch pair is BINDABLE, the mismatch is

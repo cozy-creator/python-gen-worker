@@ -1560,6 +1560,50 @@ class EntryDispatch:
 
     runners: Tuple[Tuple[str, ArtifactRunner], ...]
 
+    def bind(
+        self, state_dict: Mapping[str, Any],
+        literals: Mapping[str, Mapping[str, Any]],
+        *, user_managed: bool = False,
+    ) -> None:
+        """Bind EVERY entry of this dispatch from one resident table.
+
+        ``literals`` is keyed by ENTRY NAME (the shape
+        :func:`split_literals` produces), because the literal payload is a
+        property of a graph class, not of the module the class serves.
+
+        This exists so the regional arm binds through the same code the
+        whole-graph arm does: pgw#827 was one bind table built at the wrong
+        SCOPE, and the fix must not introduce a second bind implementation
+        that can drift from this one.
+        """
+        for name, runner in self.runners:
+            runner.bind(
+                state_dict, dict(literals.get(name, {}) or {}),
+                user_managed=user_managed)
+
+    def assert_ready(self) -> None:
+        """B1 for every entry — an unbound one is a segfault, not a miss."""
+        for _name, runner in self.runners:
+            runner.assert_ready()
+
+    @property
+    def bound(self) -> bool:
+        return bool(self.runners) and all(
+            runner.bound for _n, runner in self.runners)
+
+    @property
+    def user_managed(self) -> bool:
+        """True only when EVERY entry bound by reference — one copying entry
+        is one copy of the block's weights per instance."""
+        return bool(self.runners) and all(
+            runner.user_managed for _n, runner in self.runners)
+
+    def declared_fqns(self) -> Tuple[str, ...]:
+        names: List[str] = []
+        for _n, runner in self.runners:
+            names.extend(runner.declared_fqns())
+        return tuple(sorted(set(names)))
+
     def select(
         self, args: Sequence[Any], kwargs: Mapping[str, Any],
     ) -> Tuple[str, ArtifactRunner]:
