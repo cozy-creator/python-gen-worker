@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.90.0 (2026-08-01) — **an AOT cell can advertise `compiled` for the first time** (pgw#844 P0: the exported lane was never asked for its guard-revocation signal, and a partially dispatchable cell claimed nothing); the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint can derive 8 entries from 72 (pgw#829, per-family opt-in); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), four runner-flake classes die and the wall-clock guard can finally fail (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
+## 0.90.0 (2026-08-01) — **an AOT cell can advertise `compiled` for the first time** (pgw#844 P0: the exported lane was never asked for its guard-revocation signal, and a partially dispatchable cell claimed nothing); the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint can derive 8 entries from 72 (pgw#829, per-family opt-in); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), a drain no longer drops the result of a job that already succeeded (pgw#845 P1: a cancelled write cancels the whole gRPC call), four runner-flake classes die and the wall-clock guard can finally fail (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
 
 - **pgw#844 (P0) — an AOT cell could never advertise compiled, and one
   undispatchable aspect bucket cost the pod every other shape.** Attempt
@@ -47,6 +47,40 @@
   runs on a pod — grouped by (target, block class, adapter arm) exactly as
   dispatch groups. Still pre-compile: seconds to refuse, not a full compile
   bill.
+- **pgw#845 (P1) — a drain dropped the result of a job that had already
+  SUCCEEDED.** Roughly one drain in six, measured: `job finished r-last
+  status=1` -> `drain complete` -> stream closed, and the tenant's completed
+  request returned nothing. Every scale-down could swallow a request that
+  finished in the drain window; the GPU time was spent and billed either way.
+  The cycle, in one line: the clean close did `send_task.cancel()`, and if the
+  sender happened to be inside `stream.write()` of the next post-flush event,
+  **grpc.aio answers a cancelled write by cancelling the whole RPC**
+  (`_call._write` calls `self.cancel()` on CancelledError) — the RST discarded
+  the `job_result` that was buffered one message earlier and that
+  `mark_result_shipped` had already retired from the durable queue, so the
+  half-close had nothing left to flush; `read()` then raised the same
+  cancellation (`_raise_for_status`), which escaped
+  `except (TimeoutError, ConnectionError) / except Exception`, skipped the
+  wait for the peer to end the call, and rode out of `run()` -> `arun()` ->
+  `Worker.run()`, killing the process with no exit code at all. Note what
+  `wait_empty` proves and what it does not: it proved the result was WRITTEN,
+  and the write was then thrown away underneath it.
+  The sender now ends BETWEEN writes — `SendQueue.quiesce()` ends the loop
+  once nothing is left to write (never with a message queued), bounded by the
+  keepalive window; cancelling is the last resort and marks the close abrupt
+  (`_clean_close = False`) instead of pretending it was clean. The peer-close
+  wait is `asyncio.wait`, which neither cancels the receiver nor re-raises
+  what it ended with, so an RPC-level cancellation can no longer escape a
+  graceful close; and a cancelled call reaching the generic path is re-raised
+  as the `ConnectionError` it actually is, which reconnects instead of ending
+  the process. Both close paths — hub drain and the pgw#763 supervisor stream
+  cycle, whose comment already named the supervisor's typed death JobResult as
+  the thing at stake — share the two helpers. Guard: the pre-existing
+  `test_drain_finishes_in_flight_then_closes_and_rejects_new_work`, left red
+  on purpose by the previous commit, plus a new assertion that the drained
+  worker exits 0. Red 12/12 on the parent commit (5 lost the result outright,
+  7 shipped it and died by exception); green 48/48 after — 24 sequential and
+  24 across four concurrent lanes, all on a two-core pin.
 - **pgw#845 — the wall-clock source guard could not fail, and two more
   "flakes" were the test.** `_LITERAL_DEADLINE` required a DIGIT after
   `time.monotonic() +`, so `deadline = time.monotonic() + _TIMEOUT` was

@@ -197,7 +197,7 @@ def test_kill_mid_job_reconcile_ships_result_exactly_once() -> None:
 
 
 def test_drain_finishes_in_flight_then_closes_and_rejects_new_work() -> None:
-    with hub_double() as (scheduler, _harness):
+    with hub_double() as (scheduler, harness):
         conn = scheduler.wait_connection(0)
         conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
@@ -220,6 +220,11 @@ def test_drain_finishes_in_flight_then_closes_and_rejects_new_work() -> None:
         finished = conn.wait_for(is_result_for("r-last")).job_result
         assert finished.status == pb.JOB_STATUS_OK
         assert conn.client_done.wait(15.0), "worker must close the stream after drain"
+        # pgw#845's other half. The drain that dropped r-last also left run()
+        # by exception — grpc.aio's cancelled RPC surfaces as a CancelledError
+        # out of read(), which rode past every handler — so the process died
+        # with no exit code at all. A drain ends at exit 0 or it did not end.
+        assert harness.join() == 0
 
 
 def test_cancel_mid_job_is_cooperative_abort() -> None:

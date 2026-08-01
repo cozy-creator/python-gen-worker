@@ -125,6 +125,21 @@ def _msg_kind(msg: pb.WorkerMessage) -> str:
 #: derives its bound from this rather than inventing one.
 KEEPALIVE_TIMEOUT_S = 10.0
 
+#: How long to wait for the peer to end a half-closed call before giving up on
+#: a graceful close. Unchanged value, named so both close paths share it.
+_PEER_CLOSE_WAIT_S = 5.0
+
+
+class SenderQuiesced(Exception):
+    """The send loop was asked to stop and the queue is empty (pgw#845).
+
+    Ending the sender BETWEEN writes is not cosmetic: in grpc.aio a cancelled
+    ``write()`` cancels the whole RPC (``_call._write`` calls ``self.cancel()``
+    on CancelledError), which RSTs the stream and discards every byte buffered
+    but not yet flushed — including a JobResult that ``mark_result_shipped``
+    has already retired from the durable queue.
+    """
+
 
 class SendQueue:
     """Bounded outbound queue with results-never-dropped semantics."""
@@ -162,6 +177,9 @@ class SendQueue:
         # (request_id, attempt) -> JobResult WorkerMessage, until written to a
         # live stream. Survives reconnects; drives Hello.in_flight.
         self._pending_results: dict[Tuple[str, int], pb.WorkerMessage] = {}
+        # pgw#845: set when this stream's sender must end. It ends only once
+        # nothing is left to write, so quiescing never drops a queued message.
+        self._quiescing = False
 
     def __len__(self) -> int:
         return len(self._capacity) + len(self._reconnect) + len(self._items)
@@ -360,9 +378,17 @@ class SendQueue:
                 self._reconnect.append((_msg_kind(msg), msg))
             self._cond.notify_all()
 
+    async def quiesce(self) -> None:
+        """Ask this stream's send loop to end at its next between-writes point."""
+        async with self._cond:
+            self._quiescing = True
+            self._cond.notify_all()
+
     async def get(self) -> Tuple[str, pb.WorkerMessage]:
         async with self._cond:
             while not self._capacity and not self._reconnect and not self._items:
+                if self._quiescing:
+                    raise SenderQuiesced
                 await self._cond.wait()
             if self._capacity:
                 # Dict insertion order is causal: the live executor outbox
@@ -427,6 +453,7 @@ class SendQueue:
     async def reset_for_reconnect(self) -> None:
         """Drop transient lanes; executor state replays capacity after HelloAck."""
         async with self._cond:
+            self._quiescing = False   # the quiesce belonged to the dead stream
             self._reconnect.clear()
             self._reconnect_seen.clear()
             self._in_flight.clear()
@@ -773,14 +800,8 @@ class Transport:
                     # JobResult, which mark_result_shipped has already retired
                     # from the durable queue. Half-close and wait briefly for
                     # the peer to end the call, then reconnect.
-                    send_task.cancel()
-                    try:
-                        await stream.done_writing()
-                        await asyncio.wait_for(asyncio.shield(recv_task), 5.0)
-                    except (asyncio.TimeoutError, ConnectionError):
-                        pass
-                    except Exception:
-                        pass
+                    await self._close_sender(send_task)
+                    await self._await_peer_close(stream, recv_task)
                     raise ConnectionError(
                         "stream cycled by supervisor (compute process restart)"
                     )
@@ -789,20 +810,28 @@ class Transport:
                     # peer to end the call. Closing the channel immediately
                     # after done_writing() RSTs the call and can discard the
                     # final buffered writes (e.g. the last JobResult).
-                    send_task.cancel()
-                    try:
-                        await stream.done_writing()
-                        await asyncio.wait_for(asyncio.shield(recv_task), 5.0)
-                    except (asyncio.TimeoutError, ConnectionError):
-                        pass
-                    except Exception:
-                        pass
+                    await self._close_sender(send_task)
+                    await self._await_peer_close(stream, recv_task)
                     return
                 for t in pending:
                     t.cancel()
                 for t in done:
                     if t is not stop_task:
-                        t.result()  # re-raise stream errors
+                        try:
+                            t.result()  # re-raise stream errors
+                        except asyncio.CancelledError:
+                            # NOT this worker being cancelled: grpc.aio raises
+                            # CancelledError out of read()/write() when the CALL
+                            # is locally cancelled (`_call._raise_for_status`).
+                            # Nothing here was cancelled by us — `pending` was,
+                            # and `pending` is not `done` — so this is a dead
+                            # stream, and it reconnects like any other. Left to
+                            # propagate it rode out of run() -> arun() ->
+                            # Worker.run() and killed the process with no exit
+                            # code (pgw#845).
+                            raise ConnectionError(
+                                "stream cancelled by the transport layer"
+                            ) from None
             finally:
                 for t in (send_task, recv_task, stop_task, cycle_task):
                     if not t.done():
@@ -814,9 +843,57 @@ class Transport:
             self._connected.clear()
             await channel.close()
 
+    async def _close_sender(self, send_task: "asyncio.Task[None]") -> bool:
+        """End this stream's sender BETWEEN writes, never inside one (pgw#845).
+
+        Measured: `send_task.cancel()` here dropped a COMPLETED job's result
+        about one drain in six. The sender had already written that result
+        (so `mark_result_shipped` had retired the only durable copy) and was
+        inside `stream.write()` of the next event when the cancel landed —
+        and grpc.aio answers a cancelled write by cancelling the whole RPC,
+        which RSTs the call and throws away everything buffered behind it,
+        the result included. The half-close that follows then had nothing
+        left to flush, and `read()` raised CancelledError past every handler.
+
+        So: ask the queue to end the sender once it has nothing left to write,
+        and give it the peer-alive window to get there. Cancelling remains the
+        last resort, and it makes the close abrupt — which the hub reconciles
+        — rather than a clean close that silently lost bytes.
+        """
+        await self.queue.quiesce()
+        done, _pending = await asyncio.wait({send_task}, timeout=KEEPALIVE_TIMEOUT_S)
+        if send_task in done:
+            return True
+        logger.warning(
+            "send loop did not stop within %.0fs of the close; cancelling it "
+            "mid-write, which RSTs the stream — unretired results: %s",
+            KEEPALIVE_TIMEOUT_S, self.queue.pending_result_keys,
+        )
+        send_task.cancel()
+        self._clean_close = False
+        return False
+
+    async def _await_peer_close(self, stream: Any, recv_task: "asyncio.Task[None]") -> None:
+        """Half-close, then wait for the peer to end the call — the only
+        evidence that the writes we buffered actually landed.
+
+        `asyncio.wait` rather than `wait_for(shield(...))`: it neither cancels
+        the receiver nor re-raises what it ended with, so an RPC-level
+        cancellation cannot escape a graceful close (pgw#845). The `finally`
+        in `_connect_once` retrieves the outcome.
+        """
+        try:
+            await stream.done_writing()
+        except Exception:
+            return
+        await asyncio.wait({recv_task}, timeout=_PEER_CLOSE_WAIT_S)
+
     async def _send_loop(self, stream: Any) -> None:
         while True:
-            kind, msg = await self.queue.get()
+            try:
+                kind, msg = await self.queue.get()
+            except SenderQuiesced:
+                return
             if not await self.queue.should_ship_capacity(msg):
                 continue
             await stream.write(msg)
