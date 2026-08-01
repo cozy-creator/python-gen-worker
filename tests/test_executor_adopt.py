@@ -1398,7 +1398,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
             family=FAMILY, cell_key=mint_key,
             ref=f"root/family-{FAMILY}#{mint_key}",
-            snapshot_digest="blake3:" + "0" * 64, artifact=mint_artifact))
+            snapshot_digest="sha256:" + "0" * 64, artifact=mint_artifact))
 
     monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
     _NoProofEndpoint.setups = _NoProofEndpoint.warmups = _NoProofEndpoint.runs = 0
@@ -1569,15 +1569,15 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
     (target,) = ex.compile_targets()
     assert target.active_compile_ref == f"root/family-{FAMILY}#{mint_key}"
     digest = target.active_compile_snapshot_digest
-    assert digest.startswith("blake3:")
+    assert digest.startswith("sha256:")
     # The advertised digest is the digest of exactly the published bytes,
     # and those bytes contain the graphs the WARMUP (not any producer warm
     # loop) compiled.
-    from gen_worker.convert.hub import blake3_file
+    from gen_worker.models.chunk_cas import sha256_file
 
     copy = tmp_path / "published-copy.tar.gz"
     copy.write_bytes(published["bytes"])
-    assert digest == "blake3:" + blake3_file(copy)
+    assert digest == "sha256:" + sha256_file(copy)
     import io
     import tarfile
 
@@ -3963,7 +3963,7 @@ def test_two_lane_mint_with_unexercised_sibling_completes_and_withholds_publish(
     assert len(refs) == 1 and len(digests) == 1, (
         "sibling rides the SAME minted identity — the hub fence must "
         "collapse same-identity targets (th-side lockstep fix)")
-    assert next(iter(digests)).startswith("blake3:")
+    assert next(iter(digests)).startswith("sha256:")
 
     assert any(
         "SELF_MINT_PUBLISH_WITHHELD" in r.message for r in caplog.records

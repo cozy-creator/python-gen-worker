@@ -701,7 +701,7 @@ def test_action_table_admits_exactly_the_named_actions():
         {"method": "POST", "path": "/v1/worker/c2pa/sign",
          "json": {"alg": "es256", "claim_b64": "AA=="}},
         {"method": "GET", "path": "/v1/worker/cells/receipt",
-         "query": {"blake3": "b3", "cell_key": "k"}},
+         "query": {"cell_key": "k", "artifact_digest": ["sha256:" + "a" * 64]}},
         {"method": "GET", "path": "/v1/worker/cells/revocations"},
         {"method": "GET", "path": "/api/v1/repos/root/system-sdxl/checkpoints",
          "query": {"limit": "50"}},

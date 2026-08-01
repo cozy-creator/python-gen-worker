@@ -36,7 +36,7 @@ import pytest
 
 from gen_worker import aot_cells, aot_serve, cell_key, fleet_cells
 from gen_worker.config import get_settings
-from gen_worker.convert.hub import blake3_file
+from gen_worker.models.chunk_cas import sha256_file
 
 FAMILY = "sdxl"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
@@ -299,8 +299,10 @@ def test_discover_downloads_newest_and_registers_key(
         assert adopted.cell_key == key
         assert adopted.ref == f"root/family-{FAMILY}#{key}"
         assert adopted.artifact.is_file()
-        assert blake3_file(adopted.artifact) == _blake3_bytes(blob)
-        assert adopted.snapshot_digest == "blake3:" + _blake3_bytes(blob)
+        import hashlib
+        assert sha256_file(adopted.artifact) == hashlib.sha256(blob).hexdigest()
+        assert adopted.snapshot_digest == (
+            "sha256:" + hashlib.sha256(blob).hexdigest())
         # The executor's kind dispatch (#734/#735) must now classify the
         # ck5-flavored ref as an exported cell.
         assert aot_serve.is_aot_ref(adopted.ref)

@@ -1,17 +1,23 @@
-"""Tensorhub commit client — the ONE publish path (tensorhub #515).
+"""Tensorhub publish client — the ONE publish path, CHUNKED SHA-256 (th#1303).
 
-The write API is HF `create_commit`-shaped:
+  POST /api/v1/repos/{org}/{name}/publishes
+      {files: [{path, size_bytes, digest:"sha256:<hex>", chunks?}], mode,
+       tags, flavor/dtype/file_layout/file_type, metadata, provenance, ...}
+  → {publish_id, have: [...], need: [{digest, put_url, headers, ...}]}
 
-  POST /api/v1/repos/{tenant}/{name}/commits
-      {operations: [{type:"add", path, blake3, size_bytes}, ...],
-       tags: [{tag, default_flavor?}], mode: "merge"|"replace",
-       flavor/dtype/file_layout/file_type, metadata, provenance, repo spec}
-  → {revision_id, uploads: [{path, exists, upload_id, part_urls, part_size,
-                             complete_url, ...}]}
+Then PUT every `need` grant VERBATIM (the sha256 is signed into the presigned
+URL, so the store itself refuses bytes that do not hash to the key), re-plan
+`.../grants` to resume, and POST `.../complete`. One publish == one checkpoint
+== one flavor.
 
-Then per non-dedup'd upload: PUT the parts, POST …/uploads/{id}/complete
-with the ETags, and finally POST …/commits/{revision_id}/finalize (no body;
-202 → poll). One commit == one checkpoint == one flavor.
+THE v1 (blake3) `/commits` PROTOCOL IS GONE FROM THIS CLIENT (pgw#807). It was
+frozen hub-side (th#1303 phase 3.5 — every new v1 commit answers 410
+`unsupported_digest_algorithm`), and a retired protocol left resident in the
+tree is a runtime failure on a rented pod instead of a compile failure in CI.
+Deleted with it: `blake3_file`, `CommitFile.resolve`/`.blake3`, the
+by-reference add, `BankedBlobGoneError`, and the th#592 download-skip bank
+(`lookup_clone_manifests` / `record_clone_manifests`), whose adds were
+by-reference and therefore un-migratable by construction.
 """
 
 from __future__ import annotations
@@ -23,11 +29,10 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 import requests
 import socket
-from blake3 import blake3
 from ..api.errors import AuthError
 from ..request_context._helpers import _parse_owner_repo
 from ..stall import SilenceWindow
@@ -43,56 +48,25 @@ _RETRY_MAX_DELAY_S = 30.0
 # consuming the whole read budget.
 _CONNECT_TIMEOUT_S = 15.0
 
-# gw#462: bounded re-uploads of ONE file whose staged bytes the hub lost
-# (409 staging_object_missing from /complete, th#699). Each attempt re-opens
-# the upload via POST .../commits/<rev>/uploads and re-PUTs just that file.
+# Bounded RE-PLAN passes for a publish whose granted objects did not all land.
+# Resume needs no client state: the need set comes back smaller because what
+# landed is now resident, so a pass costs only the objects still missing.
 _REUPLOAD_ATTEMPTS = 2
 
-# tensorhub's /complete verifies the whole object synchronously (streams it
-# back from R2 and hashes it) before responding, holding a per-upload lock
-# for the duration. For large single files this can outlast whatever timeout
-# sits in front of tensorhub -- the client sees a 5xx/timeout on an attempt
-# that is still running server-side, retries, and races the first attempt
-# into 409 upload_complete_in_progress. Found live mirroring a ~6.94GB SDXL
-# checkpoint: the default 120s request timeout expired while the server was
-# still hashing, the retry got 409, and _upload_one raised immediately --
-# aborting the whole commit even though the first attempt was about to
-# succeed (e2e tracker #110).
+# tensorhub's /complete verifies the publish synchronously before answering.
+# For a large tree that can outlast whatever timeout sits in front of the hub,
+# and the client must not read its own impatience as a failure.
 _COMPLETE_TIMEOUT_S = 600.0
-_COMPLETE_IN_PROGRESS_POLL_S = 5.0
 
-# A severed /complete connection is NOT fatal either: middleboxes on the
-# worker->hub path (NAT idle eviction, tunnel circuit caps) kill the idle
-# ~5-minute verify of multi-GB shards, so the client sees a network error
-# while the server may finish (sess.Finalized fast path answers the re-POST)
-# or may have aborted (a re-POST restarts the verify). Re-POST patiently —
-# each attempt can legitimately take a full verify. Found live twice on the
-# flux2-klein-4b clone (te#44 J9 runs 7+8: RemoteDisconnected at ~4m50s).
-_COMPLETE_NETWORK_RETRY_DELAY_S = 15.0
-
-# gw#666 (th#1166 finding D): the old `_COMPLETE_NETWORK_MAX_WAIT_S = 1800.0`
-# abandoned the publish at 30 minutes of wall time — throwing away a commit
-# whose bytes were already uploaded, because a stopwatch expired while the
-# hub was still verifying them.
-#
-# The hub tells us which case we are in. A `409 upload_complete_in_progress`
-# is a DEFINITE answer: the hub is up and something holds the completion lock
-# (which the hub sets NX with a TTL and never renews, so the 409 cannot
-# outlive a dead holder). While those keep arriving the verify is advancing
-# and there is nothing to give up on. What is NOT definite is silence — a
-# severed connection or an edge-masked 5xx tells us nothing — so only those
-# accumulate the window below. It is derived from the call cadence: two full
-# verify-length attempts' worth of hearing nothing definite.
-#
-# pgw#743 RESIZED it from 2 to 6 verify-lengths on measured evidence. Two
-# 58-minute clones died here: the chaos hub's container was being rebuilt, its
-# tunnel served an HTML 503 for LONGER THAN THE 20-MINUTE WINDOW, and the
-# publish was declared fatal with 53 GiB of already-paid download in hand. The
-# window is a statement about how long the channel may plausibly be gone, and
-# a container rebuild is tens of minutes, not two. The arithmetic also favours
-# waiting: an hour parked on the CPU rig that runs these jobs costs about what
-# re-downloading costs, and unlike the re-download it cannot fail again the
-# same way. Waiting stays observable — the loop beats liveness every pass.
+# pgw#738/#743 (gw#666): how long the client tolerates hearing NOTHING
+# DEFINITE from the hub before giving up — network errors, edge-masked 5xx,
+# proxy-shaped 404s. Silence-bounded, never attempt-counted: a hub restart is
+# seconds and a tunnel re-dial is minutes, and the old 5-attempt cap (~2 min)
+# classified both FATAL and threw away paid GPU work at the finish line (two
+# 58-minute clones, pgw#743). Six verify-lengths, because a container rebuild
+# is tens of minutes and an hour parked on the CPU rig costs about what
+# re-downloading costs — and unlike the re-download it cannot fail the same
+# way twice. Waiting stays observable: the loop beats liveness every pass.
 _COMPLETE_SILENCE_WINDOW_S = 6.0 * _COMPLETE_TIMEOUT_S
 
 _SESSION: Optional[requests.Session] = None
@@ -125,19 +99,22 @@ def _http_session() -> requests.Session:
 
 
 class HubPublishError(RuntimeError):
-    """Terminal failure talking to tensorhub's commit API."""
+    """Terminal failure talking to tensorhub's commit API.
 
+    ``status`` and ``code`` carry the hub's OWN classification when it gave
+    one (the ``{"error": {"code": ...}}`` envelope, or a th#1301 projection's
+    ``status.failure.code``). Callers that report a publish outcome to the
+    fleet need a stable token to put on the wire; re-deriving one by matching
+    substrings of ``str(exc)`` is how a refusal reason turns into prose that
+    nothing can group by. "" / 0 honestly mean "the hub named nothing".
+    """
 
-class BankedBlobGoneError(HubPublishError):
-    """A commit referenced a banked CAS blob (no local bytes) that the hub
-    no longer has — the bank lied (GC race). Callers fall back to a full
-    download (th#592 download-skip is fail-open)."""
-
-
-class _StagingLostError(HubPublishError):
-    """/complete reported 409 staging_object_missing: the staged bytes are
-    gone server-side and retrying complete can never succeed. Internal —
-    _upload_one converts it into a re-open + re-upload of just that file."""
+    def __init__(self, message: str, *, status: int = 0, code: str = "",
+                 retryable: Optional[bool] = None) -> None:
+        super().__init__(message)
+        self.status = int(status or 0)
+        self.code = str(code or "")
+        self.retryable = retryable
 
 
 def _retry_after_s(resp: requests.Response) -> Optional[float]:
@@ -242,42 +219,18 @@ def _send_with_retries(
         delay = min(delay * 2, _RETRY_MAX_DELAY_S)
 
 
-def blake3_file(path: Path, *, chunk: int = 8 * 1024 * 1024) -> str:
-
-    h = blake3()
-    with open(path, "rb") as f:
-        while True:
-            buf = f.read(chunk)
-            if not buf:
-                break
-            h.update(buf)
-    return h.hexdigest()
-
-
 @dataclass
 class CommitFile:
-    """One file to add: repo path + local bytes.
+    """One file to publish: repo path + the LOCAL BYTES.
 
-    ``local_path=None`` is a *by-reference* add (th#592 download-skip):
-    blake3 + size_bytes are pre-known from the bank and the blob must
-    already exist in CAS — there are no bytes to upload."""
+    There is no by-reference form. v2's guarantee is that a digest is proven
+    from bytes in hand — a caller who cannot supply them has nothing the
+    protocol can attest, and the th#592 by-reference bank that used to rely on
+    the opposite died with the v1 route it was built on."""
 
     path: str
     local_path: Optional[Path] = None
     size_bytes: int = 0
-    blake3: str = ""
-
-    def resolve(self) -> "CommitFile":
-        if self.local_path is None:
-            if not self.blake3:
-                raise HubPublishError(
-                    f"by-reference commit file {self.path!r} needs a blake3")
-            return self
-        if not self.size_bytes:
-            self.size_bytes = int(Path(self.local_path).stat().st_size)
-        if not self.blake3:
-            self.blake3 = blake3_file(Path(self.local_path))
-        return self
 
 
 @dataclass
@@ -351,351 +304,6 @@ class HubClient:
         except Exception:
             out = {}
         return out if isinstance(out, dict) else {}
-
-    def _post_complete(self, complete_path: str, payload: dict) -> requests.Response:
-        """POST .../complete with a generous timeout (large single files
-        verify synchronously server-side, see _COMPLETE_TIMEOUT_S), then poll
-        through a 409 upload_complete_in_progress race instead of treating it
-        as fatal: /complete is idempotent once finalized (tensorhub's
-        sess.Finalized fast path returns the same success payload), so
-        re-POSTing catches up to whatever the in-flight attempt decides.
-        Network-severed attempts get the same treatment, bounded by SILENCE
-        rather than a clock (gw#666): every 409 in-progress answer is proof
-        the hub is up and verifying, so the loop waits as long as the hub
-        keeps saying so, and gives up only after _COMPLETE_SILENCE_WINDOW_S
-        with no definite answer at all."""
-        contact = SilenceWindow(_COMPLETE_SILENCE_WINDOW_S)
-        while True:
-            try:
-                resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
-            except HubPublishError:
-                if contact.stalled():
-                    raise
-                logger.warning(
-                    "POST %s network-severed; re-POSTing (idempotent complete; "
-                    "no definite answer for %.0fs of %.0fs)",
-                    complete_path, contact.silent_for(), contact.window_s)
-                time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
-                continue
-            if resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
-                # The hub is alive AND a verify holds the lock: that is
-                # progress, not a reason to give up. Wait it out.
-                contact.touch()
-                time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
-                continue
-            if resp.status_code >= 500:
-                # gw#565: an edge/tunnel in front of tensorhub (ngrok) times
-                # out DURING the synchronous verify and answers 5xx while the
-                # server is still working. A returned 5xx is the same case as
-                # a severed connection — it says nothing definite, so it does
-                # NOT refresh the window; the sess.Finalized fast path answers
-                # the catch-up POST if the verify did land.
-                if contact.stalled():
-                    return resp
-                logger.warning(
-                    "POST %s returned %d (edge-masked verify?); re-POSTing "
-                    "(idempotent complete; no definite answer for %.0fs of %.0fs)",
-                    complete_path, resp.status_code,
-                    contact.silent_for(), contact.window_s)
-                time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
-                continue
-            return resp
-
-    def _reopen_upload(self, repo_path: str, revision_id: str, path: str) -> dict[str, Any]:
-        """Mint a fresh presigned upload for one stashed add whose staged
-        bytes were lost (th#699). Returns the same entry shape as the
-        create-commit `uploads` array (may be a dedup hit: `exists: true`)."""
-        resp = self._post(
-            f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}/uploads",
-            {"path": path},
-        )
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise HubPublishError(
-                f"upload re-open failed ({resp.status_code}) for {path!r}: {resp.text[:500]}")
-        return self._json(resp)
-
-    def _upload_one(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
-                    local_path: Path,
-                    part_progress: Optional[Callable[[int, int, int], None]] = None) -> None:
-        """Upload one file, surviving server-side staging loss: on
-        409 staging_object_missing from /complete, re-open the upload and
-        re-send just this file (bounded — the rest of the commit is unaffected)."""
-        path = str(entry.get("path") or "")
-        for attempt in range(_REUPLOAD_ATTEMPTS + 1):
-            try:
-                self._upload_entry_once(repo_path, revision_id, entry, local_path,
-                                        part_progress=part_progress)
-                return
-            except _StagingLostError as exc:
-                if attempt == _REUPLOAD_ATTEMPTS:
-                    raise HubPublishError(
-                        f"upload for {path!r} failed: staged bytes lost server-side "
-                        f"{attempt + 1} time(s) (last: {exc})") from exc
-                logger.warning(
-                    "staged bytes for %r lost server-side; re-opening upload "
-                    "(re-upload %d/%d)", path, attempt + 1, _REUPLOAD_ATTEMPTS)
-                entry = self._reopen_upload(repo_path, revision_id, path)
-                if entry.get("exists"):
-                    return  # landed in CAS meanwhile — server recorded the dedup
-
-    def _upload_entry_once(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
-                           local_path: Path,
-                           part_progress: Optional[Callable[[int, int, int], None]] = None) -> None:
-        upload_id = str(entry.get("upload_id") or "").strip()
-        if not upload_id:
-            raise HubPublishError(f"commit upload entry missing upload_id for {entry.get('path')!r}")
-        complete_path = (
-            f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}"
-            f"/uploads/{urllib.parse.quote(upload_id, safe='')}/complete"
-        )
-
-        # SDK transfer-grant path (R2): the server returns a scoped temporary
-        # credential instead of presigned multipart part URLs. Upload the
-        # object directly with the S3 SDK, then complete with the transfer
-        # block (same wire shape gen_worker.presigned_upload uses for media).
-        grant_raw = entry.get("transfer_grant")
-        if isinstance(grant_raw, Mapping):
-            from gen_worker.s3_transfer import S3TransferGrant, upload_file_with_grant
-
-            grant = S3TransferGrant.from_mapping(grant_raw)
-            size_bytes = int(entry.get("size_bytes") or local_path.stat().st_size)
-            # pgw#738: the SDK lane was upload-progress-BLIND — a multi-GB
-            # publish produced zero signals for its whole transfer, so a live
-            # publish was indistinguishable from a dead one (and got killed
-            # on the dead-signature). Forward boto3's byte callback.
-            sdk_progress = None
-            if part_progress is not None:
-                def sdk_progress(done_flag: int, _total: int, bytes_up: int) -> None:
-                    part_progress(int(done_flag), 1, int(bytes_up))
-            result = upload_file_with_grant(
-                file_path=local_path,
-                grant=grant,
-                blake3_hex=str(entry.get("blake3") or ""),
-                size_bytes=size_bytes,
-                on_progress=sdk_progress,
-            )
-            resp = self._post_complete(complete_path, {"transfer": {
-                "mode": "s3_sdk",
-                "bucket": result.bucket,
-                "key": result.key,
-                "size_bytes": result.size_bytes,
-                "blake3": result.blake3,
-                "etag": result.etag,
-            }})
-            self._check_complete(resp, str(entry.get("path") or ""))
-            if part_progress is not None:
-                part_progress(1, 1, int(size_bytes))
-            return
-
-        part_urls = list(entry.get("part_urls") or [])
-        part_size = int(entry.get("part_size") or 0)
-        if not part_urls or part_size <= 0:
-            raise HubPublishError(f"commit upload entry missing presign data for {entry.get('path')!r}")
-        parts: list[dict[str, Any]] = []
-        bytes_up = 0
-        with open(local_path, "rb") as f:
-            for i, url in enumerate(part_urls):
-                buf = f.read(part_size)
-                if not buf and i > 0:
-                    break
-                def _put(u: str = url, b: bytes = buf) -> requests.Response:
-                    return _http_session().put(
-                        u, data=b, timeout=(_CONNECT_TIMEOUT_S, self.timeout_s * 5))
-
-                resp = _send_with_retries(f"part PUT {entry.get('path')!r} #{i + 1}", _put)
-                if resp.status_code == 403:
-                    # gw#570: presigned part URLs share the session's fixed
-                    # expiry; on a long publish a later file's URLs are stale
-                    # before its first byte moves (S3 signals expiry as 403).
-                    # Re-open for fresh URLs — bounded by _REUPLOAD_ATTEMPTS,
-                    # so a genuine auth failure still fails typed.
-                    raise _StagingLostError(
-                        f"part PUT for {entry.get('path')!r} part #{i + 1} "
-                        f"rejected (403 — presigned URL likely expired)")
-                if resp.status_code < 200 or resp.status_code >= 300:
-                    raise HubPublishError(
-                        f"part PUT failed ({resp.status_code}) for {entry.get('path')!r} "
-                        f"part #{i + 1} after retries")
-                etag = str(resp.headers.get("ETag") or "").strip().strip('"')
-                parts.append({"part_number": i + 1, "etag": etag})
-                bytes_up += len(buf)
-                if part_progress is not None:
-                    part_progress(len(parts), len(part_urls), bytes_up)
-        resp = self._post_complete(complete_path, {"parts": parts})
-        self._check_complete(resp, str(entry.get("path") or ""))
-
-    @staticmethod
-    def _check_complete(resp: requests.Response, path_label: str) -> None:
-        if 200 <= resp.status_code < 300:
-            return
-        if resp.status_code == 409 and _error_code_of(resp) == "staging_object_missing":
-            raise _StagingLostError(
-                f"staged bytes for {path_label!r} are gone server-side "
-                f"(409 staging_object_missing)")
-        if resp.status_code == 410 and _error_code_of(resp) == "upload_session_expired":
-            # gw#570: commit-create mints every file's session up-front with a
-            # fixed expiry; a long publish (slow uplink, many shards) outlives
-            # it for later files. The session is unusable but nothing is wrong
-            # with the bytes — re-open for a fresh session and re-send just
-            # this file, same as staging loss.
-            raise _StagingLostError(
-                f"upload session for {path_label!r} expired server-side "
-                f"(410 upload_session_expired)")
-        raise HubPublishError(
-            f"upload complete failed ({resp.status_code}) for {path_label!r} "
-            f"after retries: {resp.text[:500]}")
-
-    def _finalize(self, repo_path: str, revision_id: str, *, poll_timeout_s: float = 1800.0) -> dict[str, Any]:
-        path = f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}/finalize"
-        deadline = time.monotonic() + poll_timeout_s
-        delay = 2.0
-        while True:
-            resp = self._post(path)
-            if resp.status_code == 202:
-                if time.monotonic() > deadline:
-                    raise HubPublishError("commit finalize timed out")
-                time.sleep(delay)
-                delay = min(delay * 1.5, 15.0)
-                continue
-            if 200 <= resp.status_code < 300:
-                return self._json(resp)
-            raise HubPublishError(
-                f"commit finalize failed ({resp.status_code}): {resp.text[:800]}")
-
-    # ---- public ----
-
-    def commit(
-        self,
-        *,
-        destination_repo: str,
-        files: list[CommitFile],
-        tags: list[str] | None = None,
-        mode: str = "merge",
-        flavor: str = "",
-        flavors: list[str] | None = None,
-        default_flavor: str = "",
-        dtype: str = "",
-        file_layout: str = "",
-        file_type: str = "",
-        message: str = "",
-        metadata: Mapping[str, Any] | None = None,
-        provenance: Mapping[str, Any] | None = None,
-        repo_spec: Mapping[str, str] | None = None,
-        progress: Any = None,
-        part_progress: Optional[Callable[[int, int, int], None]] = None,
-    ) -> CommitResult:
-        """Publish one checkpoint: one POST /commits, PUT the parts, finalize.
-
-        ``files`` are hashed locally (blake3); server-side dedup skips PUTs
-        for blobs tensorhub already has. ``mode="replace"`` publishes exactly
-        this file set; ``"merge"`` (default) unions with the prior :latest.
-        """
-        if not files:
-            raise HubPublishError("commit requires at least one file")
-        repo_path = self._repo_path(destination_repo)
-        resolved = [f.resolve() for f in files]
-
-        body: dict[str, Any] = {
-            "operations": [
-                {"type": "add", "path": f.path, "blake3": f.blake3, "size_bytes": f.size_bytes}
-                for f in resolved
-            ],
-            "mode": mode,
-        }
-        # Wire-boundary token hygiene (gw#488): tensorhub derives a flavor
-        # row from the DTYPE (derivePublishFlavors) and validates every
-        # token against [a-z0-9][a-z0-9._-]{0,63} — the internal dtype-axis
-        # colon forms ("gguf:q4_k_m", "int8:awq") publish as "-" forms.
-        # ONE implementation: gen_worker.models.refs.flavor_token (gw#492).
-
-        if tags:
-            df = _token(default_flavor)
-            body["tags"] = [
-                {"tag": t, **({"default_flavor": df} if df else {})}
-                for t in tags
-            ]
-        for key, val in (
-            ("message", message), ("flavor", _token(flavor)),
-            ("default_flavor", _token(default_flavor)),
-            ("dtype", _token(dtype)), ("file_layout", file_layout),
-            ("file_type", file_type),
-        ):
-            if val:
-                body[key] = val
-        if flavors:
-            body["flavors"] = [_token(f) for f in flavors]
-        if metadata:
-            body["metadata"] = dict(metadata)
-        if provenance:
-            # th#606: WORKER-ADDABLE stamp fields only (step_number,
-            # epoch_number, quantization_method, quantization_library,
-            # upstream_revision). Parents / derivation_op / upstream_ref are
-            # orchestrator-derived (signed into the capability token) — the
-            # server 400s any attempt to send them from here.
-            body["provenance"] = {k: v for k, v in dict(provenance).items() if v}
-        for key in ("kind", "library_name", "model_family", "class_name",
-                    "adapter_for_family"):
-            val = str((repo_spec or {}).get(key) or "").strip()
-            if val:
-                body[key] = val
-
-        resp = self._post(f"{repo_path}/commits", body)
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise HubPublishError(
-                f"commit create failed ({resp.status_code}): {resp.text[:800]}")
-        created = self._json(resp)
-        revision_id = str(created.get("revision_id") or "").strip()
-        if not revision_id:
-            raise HubPublishError("commit response missing revision_id")
-
-        by_path = {f.path: f for f in resolved}
-        uploaded = 0
-        deduped = 0
-        total = len(resolved)
-        try:
-            for entry in list(created.get("uploads") or []):
-                if not isinstance(entry, dict):
-                    continue
-                if entry.get("exists"):
-                    deduped += 1
-                    continue
-                f = by_path.get(str(entry.get("path") or ""))
-                if f is None:
-                    raise HubPublishError(f"server returned unknown upload path {entry.get('path')!r}")
-                if f.local_path is None:
-                    raise BankedBlobGoneError(
-                        f"banked blob for {f.path!r} is gone from CAS "
-                        f"(blake3 {f.blake3[:12]}…) — no local bytes to upload")
-                self._upload_one(repo_path, revision_id, entry, Path(f.local_path),
-                                 part_progress=part_progress)
-                uploaded += 1
-                if callable(progress):
-                    progress(uploaded + deduped, total)
-        except Exception:
-            # Abort the revision so tensorhub can GC the staging bytes.
-            try:
-                _http_session().delete(
-                    f"{self.base_url}{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}",
-                    headers=self._headers(), timeout=30,
-                )
-            except Exception:
-                pass
-            raise
-
-        final = self._finalize(repo_path, revision_id)
-        # tensorhub nests the minted id under `checkpoint.checkpoint_id`
-        # (repo_publish.go).
-        ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
-        return CommitResult(
-            revision_id=revision_id,
-            uploaded=uploaded,
-            deduped=deduped,
-            total_bytes=sum(f.size_bytes for f in resolved),
-            checkpoint_id=str((ckpt or {}).get("checkpoint_id") or "").strip(),
-            response=final,
-        )
-
-    # ---- v2: chunked sha256 CAS (th#1303 / pgw#781) ----
 
     @staticmethod
     def _v2_failure(resp: requests.Response) -> Optional[dict[str, Any]]:
@@ -774,6 +382,7 @@ class HubClient:
         repo_spec: Mapping[str, str] | None = None,
         progress: Any = None,
         part_progress: Optional[Callable[[int, int, int], None]] = None,
+        on_stage: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> CommitResult:
         """Publish one checkpoint over the CHUNKED SHA-256 CAS (th#1303).
 
@@ -802,6 +411,14 @@ class HubClient:
         :meth:`commit` does — the hub resolves the authoritative stamp from the
         capability token (th#606/th#1331), so lineage cannot be forged from here
         and is identical whichever protocol published it.
+
+        ``on_stage(stage, facts)`` reports the protocol's own legs —
+        ``declared`` (publish_id + the have/need split, i.e. what dedup
+        actually saved), ``uploading`` (objects and bytes this pass will
+        move), ``committing`` — so a caller whose publish is otherwise a
+        silent background thread can put the LEG on the wire instead of only
+        its terminus. Never load-bearing: a raising callback is the caller's
+        bug and must not fail a publish that is transferring correctly.
         """
         from ..models import chunk_upload as _cu
         from ..models.chunk_upload import UploadGrant
@@ -890,16 +507,26 @@ class HubClient:
         resp = self._post(f"{repo_path}/publishes", body)
         if resp.status_code < 200 or resp.status_code >= 300:
             raise HubPublishError(
-                f"publish declare failed ({resp.status_code}): {resp.text[:800]}")
+                f"publish declare failed ({resp.status_code}): {resp.text[:800]}",
+                status=resp.status_code, code=_error_code_of(resp))
         session = self._json(resp)
         publish_id = str(session.get("publish_id") or "").strip()
         if not publish_id:
-            raise HubPublishError("publish response missing publish_id")
+            raise HubPublishError("publish response missing publish_id",
+                                  code="publish_id_missing")
 
         distinct = int(session.get("distinct_objects") or 0)
         resident = int(session.get("resident_objects") or 0)
         uploaded_objects = 0
         total_bytes = sum(d.size_bytes for d in decls)
+
+        def _stage(stage: str, **facts: Any) -> None:
+            if on_stage is None:
+                return
+            try:
+                on_stage(stage, dict(facts))
+            except Exception:  # noqa: BLE001 — reporting never fails a publish
+                logger.debug("publish_v2 on_stage(%s) raised", stage, exc_info=True)
 
         def _grants_of(payload: Mapping[str, Any]) -> list["UploadGrant"]:
             out = []
@@ -925,9 +552,13 @@ class HubClient:
 
         try:
             grants = _grants_of(session)
+            _stage("declared", publish_id=publish_id, objects=distinct,
+                   resident=resident, need=len(grants), bytes=total_bytes)
             for attempt in range(_REUPLOAD_ATTEMPTS + 1):
                 if not grants:
                     break
+                _stage("uploading", publish_id=publish_id, objects=len(grants),
+                       bytes=sum(g.size_bytes for g in grants), attempt=attempt)
                 report = _cu.upload_grants(
                     grants, _source_for,
                     on_bytes=(lambda n: part_progress(0, 0, n))
@@ -951,9 +582,12 @@ class HubClient:
                                    f"{urllib.parse.quote(publish_id, safe='')}/grants")
                 if again.status_code < 200 or again.status_code >= 300:
                     raise HubPublishError(
-                        f"publish re-plan failed ({again.status_code}): {again.text[:500]}")
+                        f"publish re-plan failed ({again.status_code}): {again.text[:500]}",
+                        status=again.status_code, code=_error_code_of(again))
                 grants = _grants_of(self._json(again))
 
+            _stage("committing", publish_id=publish_id, objects=distinct,
+                   resident=resident, uploaded=uploaded_objects)
             done = self._post_v2_complete(
                 f"{repo_path}/publishes/{urllib.parse.quote(publish_id, safe='')}/complete")
         except Exception:
@@ -988,17 +622,20 @@ class HubClient:
                     f"publish {publish_id} {'repudiated' if not failure.get('retryable') else 'failed'}"
                     f"{f' at {stage}' if stage else ''}: "
                     f"{failure.get('code')}: {failure.get('message')} "
-                    f"(retryable={bool(failure.get('retryable'))})"
+                    f"(retryable={bool(failure.get('retryable'))})",
+                    status=done.status_code, code=str(failure.get("code") or ""),
+                    retryable=bool(failure.get("retryable")),
                 )
             raise HubPublishError(
-                f"publish complete failed ({done.status_code}): {done.text[:800]}")
+                f"publish complete failed ({done.status_code}): {done.text[:800]}",
+                status=done.status_code, code=_error_code_of(done))
         final = self._json(done)
         ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
         checkpoint_id = str((ckpt or {}).get("checkpoint_id") or "").strip()
         if not checkpoint_id:
             raise HubPublishError(
                 f"publish {publish_id} completed without a checkpoint id: "
-                f"{json.dumps(final)[:500]}")
+                f"{json.dumps(final)[:500]}", code="checkpoint_id_missing")
         # Surfaced, not swallowed: the hub names which canonical th#1301 checks
         # it did NOT run. A list that promises 19 and silently runs 14 is worse
         # than one promising 14.
@@ -1019,43 +656,6 @@ class HubClient:
             checkpoint_id=checkpoint_id,
             response=final,
         )
-
-    def lookup_clone_manifests(
-        self, destination_repo: str, keys: list[str],
-    ) -> dict[str, dict[str, Any]]:
-        """th#592 download-skip: batch bank lookup. Returns key -> result
-        ({found, ready, payload?}); raises HubPublishError on failure —
-        callers treat that as a miss (fail-open)."""
-        if not keys:
-            return {}
-        repo_path = self._repo_path(destination_repo)
-        resp = self._post(f"{repo_path}/clone-manifests/lookup", {"keys": list(keys)})
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise HubPublishError(
-                f"clone-manifest lookup failed ({resp.status_code}): {resp.text[:300]}")
-        out: dict[str, dict[str, Any]] = {}
-        for r in self._json(resp).get("results") or []:
-            if isinstance(r, dict) and r.get("key"):
-                out[str(r["key"])] = r
-        return out
-
-    def record_clone_manifests(
-        self, destination_repo: str, manifests: list[dict[str, Any]],
-    ) -> dict[str, str]:
-        """th#592 download-skip: record published manifests under their bank
-        keys ([{key, payload}]). Returns key -> status."""
-        if not manifests:
-            return {}
-        repo_path = self._repo_path(destination_repo)
-        resp = self._post(f"{repo_path}/clone-manifests", {"manifests": list(manifests)})
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise HubPublishError(
-                f"clone-manifest record failed ({resp.status_code}): {resp.text[:300]}")
-        return {
-            str(r.get("key")): str(r.get("status") or "")
-            for r in self._json(resp).get("results") or []
-            if isinstance(r, dict)
-        }
 
 
 _DATASET_PAGE_LIMIT = 200  # tensorhub's cap; a larger value is clamped there.
@@ -1264,12 +864,10 @@ def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
 
 
 __all__ = [
-    "BankedBlobGoneError",
     "HubClient",
     "HubPublishError",
     "CommitFile",
     "CommitResult",
-    "blake3_file",
     "files_from_tree",
     "publish_dataset_revision",
 ]

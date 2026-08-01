@@ -69,7 +69,7 @@ from . import aot_cells, cell_key
 from . import compile_cache as cc
 from . import guard_closure
 from . import topology as topology_mod
-from .convert.hub import blake3_file
+from .models.chunk_cas import sha256_file
 from .procsplit import broker
 # module import (not `from .loading import pipeline_weight_lane`): tests
 # monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
@@ -110,7 +110,7 @@ class SelfMint:
     family: str
     cell_key: str
     ref: str  # "root/family-<f>#<key>" — compile_cache.system_repo + key
-    snapshot_digest: str  # "blake3:<hex>" of the packed artifact (self-attested)
+    snapshot_digest: str  # "sha256:<hex>" of the packed artifact (self-attested)
     artifact: Path
 
 
@@ -311,9 +311,9 @@ class CellPublisher:
         """Publish one self-minted cell. Returns the checkpoint id.
 
         Steps: attested intent (worker JWT; hub corroborates the axes and
-        mints a key-pinned capability token) -> the standard commit flow
-        (create-commit -> presigned CAS upload -> finalize; mode=replace, no
-        tags — the hub refuses any tag bind under the claim anyway) ->
+        mints a key-pinned capability token) -> the CHUNKED SHA-256 publish
+        (declare -> {have, need} -> PUT -> complete; mode=replace, no tags —
+        the hub refuses any tag bind under the claim anyway) ->
         publish-complete bookkeeping. Raises on any failure; the caller
         treats every raise as non-fatal to serving.
         """
@@ -366,28 +366,29 @@ class CellPublisher:
         try:
             from .convert.hub import CommitFile, HubClient
 
-            # th#1303/pgw#807 — STAGED FLIP to `publish_v2`, deliberately not
-            # taken yet. The receipt half is done (receipts are algorithm-
-            # agnostic on both sides as of this train), but TWO gates remain
-            # and each failure is silent:
-            #   1. HUB: the v2 publish route carries no cell-publish claim at
-            #      all — no cell_store row, no receipt minted. A v2 self-mint
-            #      today publishes a cell nothing can arm (th#1340).
-            #   2. FLEET: a worker on <= 0.79 reads only `artifact.blake3` and
-            #      fetches by `?blake3=`, so it cannot resolve a sha256-bound
-            #      receipt for a v2 cell. Flipping while any such worker
-            #      serves turns every delivery into a self-mint. The flip
-            #      waits on the fleet floor moving past the release that
-            #      carries this module's reader — the same serving-floor rule
-            #      that gates ctx.save_checkpoint.
+            # th#1303/pgw#807 item 3 — THE FLIP, taken. Both gates that held
+            # it are discharged: th#1340 gave the v2 route the cell-publish
+            # claim (receipt + `cell_store` + `cell_receipts`, the same three
+            # writes v1 does), and the receipt reader dispatches on the
+            # receipt's OWN algorithm tag, so a sha256-bound cell resolves.
+            # The v1 (blake3) route is FROZEN hub-side — it answers a cell
+            # publish with 410 `unsupported_digest_algorithm` — so this is
+            # the only transport a cell can ship over at all.
+            #
+            # What v2 buys a 40 MB cell beyond being accepted: the digest is
+            # signed into each presigned PUT, so R2 itself refuses bytes that
+            # do not hash to the key; and resume needs no client state — a
+            # re-plan comes back with the landed objects already resident, so
+            # a pod that dies mid-upload costs only the in-flight chunks.
             client = HubClient(base_url=self.base_url, token=token, owner="root")
-            result = client.commit(
+            result = client.publish_v2(
                 destination_repo=repo,
                 files=[CommitFile(path=artifact.name, local_path=artifact)],
                 mode="replace",
                 flavor=key,
                 metadata={k: v for k, v in dict(meta).items() if v is not None},
-                message=f"self-mint {family} {key}",
+                on_stage=lambda stage, facts: _publish_leg(
+                    family, key, stage, facts),
             )
             checkpoint_id = result.checkpoint_id
         except Exception as exc:
@@ -403,27 +404,58 @@ class CellPublisher:
                 logger.debug("publish-complete failure report failed", exc_info=True)
             raise
 
-        # pgw#711 (SDK half): the publish carries the artifact's byte digest
-        # and the manifest digest, so the hub can byte-compare a SECOND
-        # independent publish for the same key (unconfirmed -> confirmed;
-        # inequality = the live double-mint alarm) without fetching bytes.
-        complete: Dict[str, Any] = {
-            "family": family, "cell_key": key,
-            "checkpoint_id": checkpoint_id, "ok": True,
-            "artifact_digest": "blake3:" + blake3_file(artifact),
-        }
-        manifest = meta.get(guard_closure.MANIFEST_KEY)
-        if isinstance(manifest, dict) and manifest:
-            complete["manifest_digest"] = guard_closure.manifest_digest(manifest)
+        _publish_leg(family, key, "committed", {
+            "checkpoint": checkpoint_id[:24], "publish_id": result.revision_id,
+            "uploaded": result.uploaded, "resident": result.deduped,
+            "bytes": result.total_bytes,
+        })
         self._post(
             "/v1/worker/cells/publish-complete",
-            complete,
+            {"family": family, "cell_key": key,
+             "checkpoint_id": checkpoint_id, "ok": True},
             timeout=_COMPLETE_TIMEOUT_S,
         )
         logger.info(
-            "fleet-cells: published %s#%s (checkpoint %s, %.1f MB)",
-            family, key, checkpoint_id, artifact.stat().st_size / 1e6)
+            "fleet-cells: published %s#%s (checkpoint %s, %.1f MB, "
+            "%d uploaded / %d resident)",
+            family, key, checkpoint_id, artifact.stat().st_size / 1e6,
+            result.uploaded, result.deduped)
         return checkpoint_id
+
+
+def _publish_leg(family: str, key: str, stage: str, facts: Dict[str, Any]) -> None:
+    """One typed `self_mint_publish` event per LEG of the publish protocol.
+
+    The publish is a background thread on a pod that may not outlive it, and
+    until now it emitted exactly two things: `started` and a terminus. "Ships
+    40 MB" and "was refused before a byte moved" were therefore the same
+    observation for as long as the thread lived — and the ONE run in program
+    history that reached a cell publish spent a whole L4 mint to learn that
+    distinction from a stack trace. Each leg is one wire event, so
+    `worker_activity_events` can answer where a publish stopped.
+    """
+    detail = " ".join(f"{k}={v}" for k, v in sorted(facts.items()))
+    activity_mod.emit_event(
+        "self_mint_publish", f"family={family} key={key}: {detail}", phase=stage)
+
+
+def _publish_failure_phase(exc: BaseException) -> str:
+    """The stable, greppable token for WHY a publish stopped.
+
+    The hub's own `error.code` (or a th#1301 projection's `failure.code`)
+    when it named one — `unsupported_digest_algorithm`,
+    `cell_publish_flavor_mismatch`, `cell_receipt_signer_unavailable` — else
+    the status class, else the exception type. Never prose: a phase that
+    varies with the message cannot be grouped, and grouping refusals by
+    reason is the whole point of putting them on the wire.
+    """
+    code = str(getattr(exc, "code", "") or "").strip()
+    if code:
+        return code[:120]
+    status = int(getattr(exc, "status", 0) or 0)
+    if status:
+        return f"http_{status}"
+    return type(exc).__name__
 
 
 def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
@@ -530,7 +562,9 @@ def _publish_async(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
                 f"{type(exc).__name__}: {exc}",
-                phase="error",
+                # The hub's OWN code when it gave one, so a fleet-wide
+                # refusal is one `phase=` group instead of N prose strings.
+                phase=_publish_failure_phase(exc),
             )
         else:
             activity_mod.emit_event(
@@ -1064,7 +1098,7 @@ def finalize_self_mint(
     minted = SelfMint(
         family=pending.family, cell_key=key,
         ref=f"{cc.system_repo(pending.family)}#{key}",
-        snapshot_digest="blake3:" + blake3_file(pending.target),
+        snapshot_digest="sha256:" + sha256_file(pending.target),
         artifact=pending.target,
     )
     state["minted"] = minted
@@ -1205,7 +1239,7 @@ def adopt_delegated_mint(
     minted = SelfMint(
         family=pending.family, cell_key=key,
         ref=f"{cc.system_repo(pending.family)}#{key}",
-        snapshot_digest="blake3:" + blake3_file(pending.target),
+        snapshot_digest="sha256:" + sha256_file(pending.target),
         artifact=pending.target,
     )
     state["minted"] = minted

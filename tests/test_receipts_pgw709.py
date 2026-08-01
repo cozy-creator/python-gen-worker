@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-import blake3
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -63,8 +62,9 @@ def make_claims(
     """Build receipt claims binding an ALGORITHM-TAGGED artifact digest.
 
     ``legacy_blake3_only`` reproduces a receipt minted before pgw#807: the
-    bare-hex ``blake3`` claim and no ``digest`` at all. Every cell already
-    delivered to the deployed fleet has that shape, so it must keep arming.
+    bare-hex ``blake3`` claim and no ``digest`` at all. It exists so the tests
+    can prove that shape is now REFUSED — the v1 protocol that minted it is
+    gone from this SDK, so a cell it names is re-minted, never armed.
     """
     algo, _, hex_part = artifact_digest.partition(":")
     artifact: Dict[str, Any] = {"path": "cell.tar.gz", "size_bytes": size_bytes}
@@ -73,8 +73,6 @@ def make_claims(
         artifact["blake3"] = hex_part
     else:
         artifact["digest"] = artifact_digest
-        if algo == "blake3":
-            artifact["blake3"] = hex_part
     claims: Dict[str, Any] = {
         "crv": "cell-receipt-v1",
         "family": FAMILY,
@@ -124,47 +122,47 @@ def make_artifact(tmp_path: Path, *, cell_key: str = CELL_KEY, family: str = FAM
 
 class TestVerifyReceiptJWS:
     def test_round_trip(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        jws = sign_receipt(rsa_key, make_claims("blake3:" + B3_HEX, 4096))
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096))
         receipt = receipts.verify_receipt_jws(jws, pub_map)
         assert receipt.cell_key == CELL_KEY
         assert receipt.family == FAMILY
         assert receipt.snapshot_digest == SNAPSHOT
-        assert receipt.artifact_digest == "blake3:" + B3_HEX
+        assert receipt.artifact_digest == "sha256:" + SHA_HEX
         assert receipt.artifact_size_bytes == 4096
         assert receipt.axes["sku"] == "rtx-4090"
 
     def test_tampered_payload_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
         # RED: re-point the signed payload at a different cell key — the
         # poisoning move receipts exist to prevent.
-        jws = sign_receipt(rsa_key, make_claims("blake3:" + B3_HEX, 4096))
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096))
         head, _, sig = jws.split(".")
-        forged_claims = make_claims("blake3:" + B3_HEX, 4096, cell_key="ck5-" + "f" * 56)
+        forged_claims = make_claims("sha256:" + SHA_HEX, 4096, cell_key="ck5-" + "f" * 56)
         forged = head + "." + _b64url(json.dumps(forged_claims).encode()) + "." + sig
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(forged, pub_map)
         assert exc.value.reason == "receipt_signature_invalid"
 
     def test_unknown_kid_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        jws = sign_receipt(rsa_key, make_claims("blake3:" + B3_HEX, 4096), kid="rogue-kid")
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096), kid="rogue-kid")
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, pub_map)
         assert exc.value.reason == "receipt_unknown_kid"
 
     def test_alg_downgrade_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        jws = sign_receipt(rsa_key, make_claims("blake3:" + B3_HEX, 4096), alg="none")
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096), alg="none")
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, pub_map)
         assert exc.value.reason == "receipt_alg_unsupported"
 
     def test_wrong_key_refused(self, rsa_key: rsa.RSAPrivateKey) -> None:
         other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        jws = sign_receipt(rsa_key, make_claims("blake3:" + B3_HEX, 4096))
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096))
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, {KID: other.public_key()})
         assert exc.value.reason == "receipt_signature_invalid"
 
     def test_wrong_version_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        jws = sign_receipt(rsa_key, make_claims("blake3:" + B3_HEX, 4096, crv="cell-receipt-v0"))
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096, crv="cell-receipt-v0"))
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, pub_map)
         assert exc.value.reason == "receipt_version_unsupported"
@@ -214,9 +212,9 @@ class HubStub:
                     q = parse_qs(parsed.query)
                     cell_key = q.get("cell_key", [""])[0]
                     # The real route matches on the SET of tagged digests the
-                    # worker offers (plus the legacy bare-hex param).
+                    # worker offers. pgw#807 deleted the bare-hex `blake3`
+                    # param with the protocol that needed it.
                     offered = list(q.get("artifact_digest", []))
-                    offered += ["blake3:" + b for b in q.get("blake3", []) if b]
                     stub.last_query = (offered, cell_key)
                     jws = None
                     for ref in offered:
@@ -253,7 +251,7 @@ class HubStub:
         self.server.server_close()
 
     def serve_receipt_for(
-        self, artifact: Path, *, algo: str = "blake3", **claim_overrides: Any
+        self, artifact: Path, *, algo: str = "sha256", **claim_overrides: Any
     ) -> str:
         """Publish a receipt for ``artifact`` bound with ``algo``; returns the ref."""
         ref = algo + ":" + receipts.artifact_digests(artifact)[algo]
@@ -299,13 +297,13 @@ class TestGateDeliveredArtifact:
         # (the delivery-substitution attack).
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(artifact)
-        original_ref = "blake3:" + receipts.artifact_digests(artifact)["blake3"]
+        original_ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
         with artifact.open("ab") as f:
             f.write(b"\x00poison")
         # Serve the original receipt under the NEW digest too, so the fetch
         # succeeds and the refusal is the digest binding, not a 404.
         jws = hub.receipts[(original_ref, CELL_KEY)]
-        new_ref = "blake3:" + receipts.artifact_digests(artifact)["blake3"]
+        new_ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
         hub.receipts[(new_ref, CELL_KEY)] = jws
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
@@ -314,7 +312,7 @@ class TestGateDeliveredArtifact:
         # Receipt signed for a DIFFERENT key than the artifact claims: the
         # Nix Deriver lesson — key binding must be inside the signature.
         artifact = make_artifact(tmp_path)
-        ref = "blake3:" + receipts.artifact_digests(artifact)["blake3"]
+        ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
         claims = make_claims(ref, artifact.stat().st_size, cell_key="ck5-" + "e" * 56)
         hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
@@ -426,6 +424,8 @@ class TestAlgorithmAgnosticReceipts:
     A v2 (chunked sha256 CAS) publish has no blake3 anywhere. If arming still
     reads a blake3-named field, every newly minted cell fails to arm and the
     fleet silently re-mints — a fleet-wide re-mint through the receipt door.
+    pgw#807 finished the job: blake3 is not a second supported arm, it is a
+    refusal, because the protocol that could mint one is gone from this SDK.
     """
 
     def test_v2_receipt_arms_a_v2_cell(self, tmp_path: Path, hub: HubStub) -> None:
@@ -444,26 +444,34 @@ class TestAlgorithmAgnosticReceipts:
             assert f"{algo}:{hex_digest}" in offered
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
 
-    def test_legacy_blake3_receipt_still_verifies(self, tmp_path: Path, hub: HubStub) -> None:
-        # DUAL-READ: every cell the deployed fleet already holds has a receipt
-        # with a bare-hex `blake3` claim and no `digest` at all.
-        artifact = make_artifact(tmp_path)
-        ref = hub.serve_receipt_for(artifact, algo="blake3", legacy_blake3_only=True)
-        _configure(hub)
-        receipt = receipts.verify_delivered_artifact(artifact, FAMILY)
-        assert receipt.artifact_digest == ref
-        assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
+    def test_legacy_blake3_receipt_is_refused_not_dual_read(
+        self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]
+    ) -> None:
+        """pgw#807: the pre-v2 receipt shape (bare-hex `blake3`, no `digest`)
+        no longer verifies. Its cell cannot be republished over v1 either, so
+        the worker refuses it and self-mints a sha256-bound replacement — the
+        designed miss policy, not a silent arm on a retired algorithm."""
+        claims = make_claims("blake3:" + B3_HEX, 4096, legacy_blake3_only=True)
+        jws = sign_receipt(rsa_key, claims)
+        with pytest.raises(receipts.ReceiptError) as exc:
+            receipts.verify_receipt_jws(jws, pub_map)
+        assert exc.value.reason == "receipt_no_artifact_digest"
 
-    def test_wrong_algorithm_digest_refused(self, tmp_path: Path, hub: HubStub) -> None:
-        # RED: a receipt that labels this artifact's BLAKE3 bytes as sha256.
-        # Dispatching on the tag catches it; hardcoding one algorithm does not.
-        # The hub's INDEX row is keyed correctly (so the fetch succeeds), but
-        # the signed claim labels those blake3 bytes "sha256". Only dispatching
-        # on the receipt's own tag catches it.
+        # And a TAGGED blake3 digest is refused by algorithm, not read.
+        tagged = make_claims("blake3:" + B3_HEX, 4096)
+        with pytest.raises(receipts.ReceiptError) as exc:
+            receipts.verify_receipt_jws(sign_receipt(rsa_key, tagged), pub_map)
+        assert exc.value.reason == "receipt_digest_algorithm_unsupported"
+
+    def test_wrong_bytes_under_a_correct_tag_refused(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        # A receipt whose sha256 claim names OTHER bytes: the index row is
+        # keyed so the fetch succeeds, and only the digest COMPARE catches it.
         artifact = make_artifact(tmp_path)
-        b3 = receipts.artifact_digests(artifact)["blake3"]
-        claims = make_claims("sha256:" + b3, artifact.stat().st_size)
-        hub.receipts[("blake3:" + b3, CELL_KEY)] = sign_receipt(hub.key, claims)
+        ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
+        claims = make_claims("sha256:" + SHA_HEX, artifact.stat().st_size)
+        hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_delivered_artifact(artifact, FAMILY)
@@ -474,7 +482,7 @@ class TestAlgorithmAgnosticReceipts:
         # THE trap this migration keeps setting: a receipt binding no digest
         # must REFUSE, not compare an empty string to an empty string.
         artifact = make_artifact(tmp_path)
-        ref = "blake3:" + receipts.artifact_digests(artifact)["blake3"]
+        ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
         claims = make_claims(ref, artifact.stat().st_size)
         claims["artifact"] = {"path": "cell.tar.gz", "size_bytes": artifact.stat().st_size}
         hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
@@ -494,7 +502,7 @@ class TestAlgorithmAgnosticReceipts:
             "sha256:": "receipt_digest_malformed",        # tag with no value
         }
         for raw, reason in cases.items():
-            claims = make_claims("blake3:" + B3_HEX, 4096)
+            claims = make_claims("sha256:" + SHA_HEX, 4096)
             claims["artifact"] = {"path": "cell.tar.gz", "digest": raw, "size_bytes": 4096}
             jws = sign_receipt(rsa_key, claims)
             with pytest.raises(receipts.ReceiptError) as exc:
@@ -504,7 +512,6 @@ class TestAlgorithmAgnosticReceipts:
     def test_digests_are_computed_in_one_pass(self, tmp_path: Path) -> None:
         artifact = make_artifact(tmp_path)
         got = receipts.artifact_digests(artifact)
-        assert set(got) == set(receipts.ARTIFACT_DIGEST_ALGORITHMS)
+        assert set(got) == set(receipts.ARTIFACT_DIGEST_ALGORITHMS) == {"sha256"}
         raw = artifact.read_bytes()
         assert got["sha256"] == hashlib.sha256(raw).hexdigest()
-        assert got["blake3"] == blake3.blake3(raw).hexdigest()

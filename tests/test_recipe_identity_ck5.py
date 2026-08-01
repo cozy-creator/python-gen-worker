@@ -220,7 +220,7 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
         pub.publish(FAMILY, artifact, meta)
 
 
-def test_publish_complete_carries_confirmation_digests(
+def test_publish_complete_carries_only_what_the_hub_decodes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     posts: list = []
@@ -250,9 +250,13 @@ def test_publish_complete_carries_confirmation_digests(
     class _FakeHub:
         def __init__(self, **kw: Any) -> None: ...
 
-        def commit(self, **kw: Any) -> Any:
+        def publish_v2(self, **kw: Any) -> Any:
             class _R:
                 checkpoint_id = "cp-1"
+                revision_id = "pub-1"
+                uploaded = 1
+                deduped = 0
+                total_bytes = 10
 
             return _R()
 
@@ -270,7 +274,9 @@ def test_publish_complete_carries_confirmation_digests(
     complete_url, body = posts[-1]
     assert complete_url.endswith("/publish-complete")
     assert body["ok"] is True
-    assert body["artifact_digest"].startswith("blake3:")
-    assert len(body["artifact_digest"]) == len("blake3:") + 64
-    assert body["manifest_digest"] == gc.manifest_digest(_manifest())
-    assert body["manifest_digest"].startswith("sha256:")
+    # pgw#807: `artifact_digest`/`manifest_digest` are GONE. The hub's
+    # publish-complete route decodes family, cell_key, checkpoint_id, ok and
+    # error — nothing else — so the SDK was paying a whole-artifact blake3
+    # pass to send two fields no reader had, and the delta-1 seam refuses
+    # unlisted body keys outright.
+    assert set(body) == {"family", "cell_key", "checkpoint_id", "ok"}

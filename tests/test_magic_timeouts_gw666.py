@@ -446,9 +446,6 @@ def test_a_hub_that_stops_answering_fails_the_finalize(fast_finalize_polls) -> N
 def fast_hub_retries(monkeypatch) -> None:
     from gen_worker.convert import hub
 
-    monkeypatch.setattr(hub, "_COMPLETE_IN_PROGRESS_POLL_S", 0.05)
-    monkeypatch.setattr(hub, "_COMPLETE_NETWORK_RETRY_DELAY_S", 0.05)
-    monkeypatch.setattr(hub, "_COMPLETE_SILENCE_WINDOW_S", 0.4)
     monkeypatch.setattr(hub, "_RETRY_BASE_DELAY_S", 0.01)
     monkeypatch.setattr(hub, "_RETRY_MAX_DELAY_S", 0.02)
     # pgw#796: `_post` funnels through `_send_with_retries`, whose OWN silence
@@ -460,29 +457,44 @@ def fast_hub_retries(monkeypatch) -> None:
     monkeypatch.setattr(hub, "_SEND_SILENCE_WINDOW_S", 0.4)
 
 
+from gen_worker.convert.hub import HubPublishError
+
+
 def _hub_client(base: str):
     from gen_worker.convert.hub import HubClient
 
     return HubClient(base_url=base, token="t", owner="o")
 
 
-def test_publish_complete_waits_while_the_hub_keeps_verifying(fast_hub_retries) -> None:
-    ok = _json_body({"ok": True})
-    with _Server(_n_then_ok(
-        15, (409, _IN_PROGRESS, None), (200, ok, {"Content-Type": "application/json"}),
-    )) as srv:
-        start = time.monotonic()
-        resp = _hub_client(srv.base)._post_complete("/complete", {})
-        assert time.monotonic() - start > 0.4  # outlived the give-up window
-    assert resp.status_code == 200
-
-
-def test_publish_complete_gives_up_once_the_hub_goes_silent(fast_hub_retries) -> None:
-    from gen_worker.convert.hub import HubPublishError
-
+def test_v2_complete_retries_only_when_nothing_was_heard(fast_hub_retries) -> None:
+    """gw#666 on the surviving completion path. pgw#807 deleted the v1
+    `_post_complete` (and with it the 409 `upload_complete_in_progress` poll —
+    a v2 publish is NOT idempotent to re-complete, so a blind retry there can
+    only destroy the diagnosis). What the rule still requires: a completion
+    that heard NOTHING keeps trying on liveness rather than a stopwatch."""
     client = _hub_client(f"http://127.0.0.1:{_free_port()}")  # nothing listening
+    start = time.monotonic()
     with pytest.raises(HubPublishError):
-        client._post_complete("/complete", {})
+        client._post_v2_complete("/complete")
+    # It did not give up on the first refused connection: the silence window
+    # (0.4 s here, 600 s in production) is what bounds it, not an attempt count.
+    assert time.monotonic() - start >= 0.4
+
+
+def test_v2_complete_returns_any_hub_answer_without_retrying(fast_hub_retries) -> None:
+    """A refusal is a th#1301 PROJECTION, not an error envelope. Retrying it
+    found the session already terminal and reported `publish_repudiated` — a
+    consequence in place of a cause. Any HTTP answer comes back as-is, once."""
+    body = _json_body({"status": {"stage": "repudiated", "terminal": True,
+                                  "failure": {"code": "invalid_manifest_for_kind",
+                                              "retryable": False}}})
+    with _Server(_n_then_ok(
+        0, (409, body, {"Content-Type": "application/json"}),
+        (409, body, {"Content-Type": "application/json"}),
+    )) as srv:
+        resp = _hub_client(srv.base)._post_v2_complete("/complete")
+    assert resp.status_code == 409
+    assert resp.json()["status"]["failure"]["code"] == "invalid_manifest_for_kind"
 
 
 # ---------------------------------------------------------------------------
