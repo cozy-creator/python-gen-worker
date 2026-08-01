@@ -26,7 +26,6 @@ import math
 import re
 import shutil
 import struct
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional, Sequence
 import os
