@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+## 0.90.2 (2026-08-01) — **the mint's VRAM ceiling was its own estimate, not the card**: a whole-graph AOT mint died for 30 MiB with 21.48 GiB free (pgw#848), an OOM-killed entry child is no longer laundered into a never-retried refusal, the pool's host-RAM bound finally sees the compiler, and AOT-regional is deleted (pgw#846)
+
+- **pgw#848 (CRITICAL PATH) — the mint's VRAM cap was the ESTIMATE, not the card.**
+  Measured on two pods, two card sizes, one number:
+
+        pod   card total   free at OOM   cap imposed   entries exported
+        4090   23.52 GiB      660 MiB     11.09 GiB     1 of 36
+        L40S   44.39 GiB    21.48 GiB     11.08 GiB     5 of 36
+
+  The cap moved with neither a 2x card change nor `vram_gb` 12 -> 20, because it
+  was a property of neither: `mint_budget.co_residency().need_bytes` was handed
+  to the child as a hard `set_per_process_memory_fraction`, and for sdxl that is
+  `4.87 x 1.25 + 4 + 1 = 11.09 GiB` — exactly what both pods printed, derived
+  from `_UNMEASURED_ACTIVATION_FRACTION`, which nobody ever measured. The mint
+  was never out of GPU; it was enforcing a self-imposed ceiling and then
+  reporting the result as a deterministic refusal.
+  **`need_bytes` now answers only "should this start"; a new `cap_bytes` answers
+  "how far may it go"** and is `free - activation` — what the card has, less what
+  the tenant needs for its NEXT forward (its weights are already allocated, so
+  already outside `free`). On the L40S: **11.08 -> 20.26 GiB**. pgw#784 is not
+  weakened: the tenant's next peak is still reserved by construction on every
+  card, and a tight card still falls back to the estimate.
+  `_UNMEASURED_ACTIVATION_FRACTION` is deliberately **not** replaced with a
+  different off-pod constant — substituting one unmeasured number for another is
+  a move this program has already paid for; it now bounds only the admission
+  estimate and the tenant reserve, never the child. Widen-on-OOM now exists on
+  the device half too, so a child that dies inside `torch.export` no longer
+  banks nothing and leaves attempt N+1 to re-ask identically.
+
+- **pgw#848 item 4 — an OOM-killed entry child was reported as a DETERMINISTIC
+  REFUSAL,** so the one failure a narrower K would fix could never try one.
+  Every entry-pool failure converged on `EntryCompileFailed -> MintRefused ->
+  EXIT_REFUSED`, which `mint_process` documents as terminal and never retries —
+  while the pool's own `_exit_note` has said since pgw#809 that a SIGKILL there
+  "is the OOM killer far more often than a compiler bug". `EntryCompileFailed`
+  now carries `resource`, `basis` and the dead entry's measured
+  `peak_rss_bytes` (a child the OOM killer takes writes no report, so the
+  parent's live per-row sample is the only measurement that will ever exist).
+  `cgroup_oom_kills()` reads the kernel's counter, with `cgroup` (the counter
+  moved — a fact) and `sigkill` (an inference, worth one retry) kept distinct
+  and unreadable reported as -1, never a silent 0. New
+  `aot_mint.MintResourceExhausted` is deliberately NOT a `MintRefused` subclass.
+  Reproduced against a REAL kernel OOM kill of a real entry child under a
+  cgroup v2 cap, with `memory.events` `oom_kill` asserted to have moved.
+
+- **pgw#848 — the pool's memory bound had never seen the memory.**
+  `aot_compile_child._peak_rss` read `RUSAGE_SELF` (blind to the compiler) and
+  `aot_compile_pool._peak_rss_bytes` walked ONE level of `/proc` children — but
+  on a real `aoti_compile_and_package` the entry child's direct children are
+  `g++` (a driver that allocates nothing) and inductor's async_compile workers;
+  **`cc1plus` is at DEPTH 2 and `ld` at depth 3**. Measured off-pod on the real
+  sdxl AOTI wrapper TU (6,324,290 bytes, production flags, g++ 13.3): ground
+  truth **2.052 GiB**, of which one `cc1plus` is 2.049 — against 0.012 GiB from
+  instrument 1 (**171x low**) and 0.015 GiB from instrument 2 (**133x low**).
+  Nothing banked the pool's own `peak_child_rss_bytes`, and `aot_mint` never
+  passed `peak_rss_bytes` to `entry_workers()` at all, so `mem_workers` divided
+  available RAM by a 3 GiB constant on every mint the fleet has ever run and
+  `per_entry_rss_basis` read `"default"` permanently.
+
+- **pgw#846 (P0, Paul's ruling) — AOT-regional is DELETED** (full entry under
+  Unreleased history below; the exported cell is always WHOLE-GRAPH again and
+  whole-graph cell identity does not move).
+
 - **te#148 — svdq low-rank branch can arrive QUANTIZED (int8 | fp8_e4m3).**
   `decode_linear`/`load_svdq_native_denoiser` accept a branch pair stored
   int8 or fp8_e4m3 with fp32 per-block-32 scales along each factor's
