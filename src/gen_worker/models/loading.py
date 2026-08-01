@@ -223,6 +223,14 @@ _fp8_storage_components = denoiser_components
 # The "+te" rung (component fit-ladder rung 2): the pipeline's text encoders.
 _fp8_text_encoder_components = text_encoder_components
 
+#: pgw#824: the emergency nf4 rung was engaged and landed on ZERO modules. A
+#: rung OUTCOME, not the absence of one — the pipeline serves full precision on
+#: a host whose free VRAM was already below the stored-precision footprint,
+#: which is the worst outcome the ladder can produce. Distinct from "nf4" (it
+#: landed) and from "" (no rung was needed), because placement must be able to
+#: tell those three apart. Consumed by ``models.provision``.
+RUNG_NF4_UNLANDED = "nf4-unlanded"
+
 class _Fp8WeightWindow:
     """Weight-only fp8 storage for one transformer block: the block's
     Linear/conv WEIGHTS live in fp8 at rest; a forward-pre hook upcasts them
@@ -1734,7 +1742,31 @@ def load_from_pretrained(
                 "serving full precision; the offload ladder carries it",
                 path, targets, type(pipe).__name__,
             )
-            adaptive_rung = ""
+            # pgw#824: this was `adaptive_rung = ""`, which made the failure
+            # SELF-SUPPRESSING — the `if adaptive_rung:` stamp below is the
+            # very mechanism that reports rung outcomes to placement, and
+            # clearing the variable is exactly what switches it off. So the
+            # worst rung outcome on the ladder (serving FULL PRECISION over
+            # the budgeted VRAM, on a host that was already too tight for
+            # stored precision) was the only one that reported nothing at all,
+            # while every sibling rung reported itself.
+            #
+            # A distinct token instead: `provision` routes it to
+            # SlotLoad.rung/rung_detail, so it reaches placement through the
+            # SAME ServePlan/FnDegraded path as every other rung
+            # (`_record_adaptive_rung`) rather than through a log line no
+            # hub-spawned pod can expose.
+            adaptive_rung = RUNG_NF4_UNLANDED
+            activity_mod.emit_event(
+                activity_mod.KIND_SERVE_DEGRADE,
+                f"model={path} pipeline={type(pipe).__name__} "
+                f"targets={targets}: the emergency nf4 rung was engaged "
+                f"because free VRAM was below the stored-precision footprint, "
+                f"and it landed on ZERO modules (the config's component names "
+                f"miss this pipeline). Serving FULL PRECISION over the "
+                f"budgeted VRAM; only the offload ladder carries it now",
+                phase="nf4_rung_did_not_land",
+            )
     if adaptive_rung:
         # gw#491: a silently-engaged emergency rung is the th#736 bug class —
         # the executor reconciles this stamp into ServePlan.ran / FnDegraded.

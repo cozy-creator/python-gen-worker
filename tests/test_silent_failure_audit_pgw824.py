@@ -280,3 +280,65 @@ def test_a_miss_with_no_candidates_at_all_says_so_explicitly() -> None:
     src = inspect.getsource(aot_cells._discover_inner)
     assert "rejected by class" in src
     assert "no published cells at all" in src
+
+
+# ---------------------------------------------------------------------------
+# Invariant 1 — the two high-severity finds: both corrupt DECISIONS, not just
+# visibility, so both are asserted on the decision, not only on the event.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unlanded_nf4_rung_is_a_rung_OUTCOME_not_the_absence_of_one() -> None:
+    """RED before pgw#824: the failure did `adaptive_rung = ""`, and the
+    `if adaptive_rung:` stamp below it is the very mechanism that reports rung
+    outcomes to placement — so clearing the variable SELF-SUPPRESSED the
+    report. The worst outcome the ladder can produce (serving full precision
+    over the budgeted VRAM, on a host already too tight for stored precision)
+    was the only one that reported nothing, while every sibling rung reported
+    itself.
+    """
+    from gen_worker.models import loading, provision
+
+    # Three states placement must be able to tell apart.
+    assert loading.RUNG_NF4_UNLANDED not in ("", "nf4")
+    assert provision.RUNG_NF4_UNLANDED == loading.RUNG_NF4_UNLANDED
+
+
+def test_the_unlanded_rung_reaches_placement_through_SlotLoad() -> None:
+    """An event alone would not be enough: every sibling rung reaches
+    ServePlan/FnDegraded via SlotLoad.rung -> `_record_adaptive_rung`, and a
+    fix that only logged-but-typed would still leave placement blind."""
+    import inspect
+
+    from gen_worker.models import provision
+
+    src = inspect.getsource(provision)
+    assert "if rung == RUNG_NF4_UNLANDED:" in src
+    assert "out.rung = rung" in src
+
+
+def test_a_failed_eviction_stays_booked_in_vram(
+    events: List[Any],
+) -> None:
+    """RED before pgw#824, and an ACCOUNTING bug before it is a visibility one.
+
+    The booking was unconditional, so a failed eviction still wrote
+    `tier=RAM, vram_bytes=0` while `_move_verified`'s own rollback had just put
+    the object back on CUDA. The registry then believed the entry held ZERO
+    VRAM, `make_room` handed out headroom that does not exist, and the OOM
+    landed on an unrelated `promote()` later with nothing tying it back here.
+    """
+    import inspect
+
+    from gen_worker.models import residency
+
+    src = inspect.getsource(residency.Residency.promote)
+    # the booking is now GATED on the eviction actually succeeding
+    assert "evicted = self._move_verified" in src
+    assert "if not evicted:" in src
+    # and the failure returns BEFORE the RAM/0 booking
+    failure_branch = src.split("if not evicted:")[1].split("e.tier = Tier.RAM")[0]
+    assert "return False" in failure_branch, (
+        "the failed-eviction branch must refuse BEFORE booking RAM/0 — "
+        "booking it as RAM/0 is the headroom lie that OOMs a later promote")
+    assert "eviction_failed_still_resident" in failure_branch
