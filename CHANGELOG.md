@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
+  0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
+  toolchain `.so` the image ships (36 files, 3.96 GB); its memo was per
+  PROCESS, and the pgw#809 pool's worker is a process that compiles one entry
+  and exits — so a 72-entry mint re-paid the pass 72 times, K-wide (~28 % of
+  per-entry `compile_s`, pgw#830's measurement). The pool parent now seeds an
+  on-disk digest memo (`write_library_memo`, keyed by `(path, mtime_ns,
+  size)`) once per pool — near-free when the parent already sealed — and each
+  child, pointed at it via `GEN_WORKER_SEAL_LIB_MEMO`, still enumerates and
+  stats every file ITSELF, using a memo digest only on an exact triple match
+  and falling back to the full rehash on any mismatch. The seal value is
+  byte-identical to a full rehash in every detectable case (proven by test);
+  the one undetectable case — same-size content rewritten with `mtime_ns`
+  restored — is exactly the trust boundary the in-process `lru_cache` (same
+  key) always had, asserted as such rather than papered over. Seeding cost is
+  named (`seal_seed_s` on the pool ledger, outside the capacity identity);
+  seeding failure emits a typed `aot_mint_phases phase=pool` event and children
+  rehash in full (the safe path). `seal_libhash_s` is now timed where the pass
+  runs instead of inferred from `seal_effective_s`, so the span stays honest
+  under a memo.
 - **pgw#830 — the dark 44 % of AOT compile time is named, and the attribution
   can no longer rot in silence.** Attempt nine recorded `compile_s=1331.72` with
   five phases summing to 742.6 s (56 %); the other 589 s had no name. The cause

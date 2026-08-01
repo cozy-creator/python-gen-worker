@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -278,6 +279,89 @@ def _lib_digest(path: str, mtime_ns: int, size: int) -> str:
     return h.hexdigest()[:16]
 
 
+# ---------------------------------------------------------------------------
+# pgw#832: cross-process digest memo for short-lived workers
+# ---------------------------------------------------------------------------
+# The identity pass SHA-256s every toolchain .so the image ships (measured:
+# 36 files, 3.96 GB, ~8 s). The lru_cache above amortizes it to once per
+# PROCESS — which stopped being "once" the moment pgw#809's pool made the
+# unit of parallelism a process that compiles one entry and exits: a
+# 72-entry mint re-paid the pass 72 times, K-wide, on the cores the
+# compiles wanted (28 % of per-entry compile_s, measured by pgw#830).
+#
+# The memo moves WHERE a digest comes from, never what it is. A parent that
+# already paid the pass writes {(path, mtime_ns, size) -> digest} to a file
+# (:func:`write_library_memo`); a child pointed at it via
+# :data:`SEAL_LIB_MEMO_ENV` still enumerates the tree and stats every file
+# ITSELF, and uses a memo digest only when its own (path, mtime_ns, size)
+# matches an entry exactly — any mismatch, absence, or unreadable memo falls
+# back to the full rehash of that file. So the seal is byte-identical to a
+# full rehash in every detectable case, and the ONE undetectable case — a
+# file rewritten with content of the same size and its mtime_ns restored —
+# is exactly the case the in-process lru_cache (keyed on the same triple)
+# has always trusted. The memo widens that existing trust boundary across
+# processes; it does not create a new one.
+SEAL_LIB_MEMO_ENV = "GEN_WORKER_SEAL_LIB_MEMO"
+
+_MEMO_V = 1
+
+# Loaded once per process from SEAL_LIB_MEMO_ENV; {} when unset/unreadable.
+_DISK_MEMO: Optional[Dict[str, str]] = None
+
+
+def _memo_key(path: str, mtime_ns: int, size: int) -> str:
+    # NUL-joined: a path can contain anything except NUL.
+    return f"{path}\x00{mtime_ns}\x00{size}"
+
+
+def _disk_memo() -> Dict[str, str]:
+    global _DISK_MEMO
+    if _DISK_MEMO is None:
+        memo: Dict[str, str] = {}
+        memo_path = os.environ.get(SEAL_LIB_MEMO_ENV, "")
+        if memo_path:
+            try:
+                doc = json.loads(Path(memo_path).read_text())
+                digests = doc.get("digests") if isinstance(doc, dict) else None
+                if doc.get("memo_v") == _MEMO_V and isinstance(digests, dict):
+                    memo = {str(k): str(v) for k, v in digests.items()}
+            except (OSError, ValueError):
+                memo = {}  # unreadable memo: full rehash, the safe path
+        _DISK_MEMO = memo
+    return _DISK_MEMO
+
+
+def _lib_digest_memoized(path: str, mtime_ns: int, size: int) -> str:
+    got = _disk_memo().get(_memo_key(path, mtime_ns, size))
+    return got if got is not None else _lib_digest(path, mtime_ns, size)
+
+
+def write_library_memo(path: Path) -> int:
+    """Persist this process's toolchain digests for short-lived children.
+
+    Cheap in a process that already sealed (the lru_cache is warm: the pass
+    degenerates to stats); pays the full hash exactly once otherwise. The
+    write is atomic (tmp + rename) so a reader never sees a torn file.
+    Raises ``OSError`` on an unwritable destination — the CALLER decides
+    whether that is worth a typed event; children fall back to the full
+    rehash either way."""
+    digests: Dict[str, str] = {}
+    for _base, lib_path in sorted(_toolchain_lib_paths().items()):
+        try:
+            st = os.stat(lib_path)
+            digests[_memo_key(lib_path, st.st_mtime_ns, st.st_size)] = (
+                _lib_digest_memoized(lib_path, st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue  # the child will record <unreadable> on its own stat
+    encoded = json.dumps(
+        {"memo_v": _MEMO_V, "digests": digests},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(encoded)
+    os.replace(tmp, path)
+    return len(digests)
+
+
 def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
     """(basename, content digest) of every relevant native library the
     LOADER actually mapped into this process (``/proc/self/maps``).
@@ -353,12 +437,9 @@ def _toolchain_lib_dirs() -> Tuple[Path, ...]:
     return tuple(dirs)
 
 
-def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
-    """(basename, content digest) of every userspace toolchain native lib
-    the python env SHIPS — deterministic in the installed content,
-    independent of what has been dlopened so far. Duplicate basenames
-    resolve by sorted path (deterministic); unreadable files record
-    ``<unreadable>``."""
+def _toolchain_lib_paths() -> Dict[str, str]:
+    """{basename: path} of every toolchain native lib the python env ships.
+    Duplicate basenames resolve by sorted path (deterministic)."""
     paths: Dict[str, str] = {}
     for root in _toolchain_lib_dirs():
         if not root.is_dir():
@@ -372,11 +453,23 @@ def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
             if path.is_symlink() or not path.is_file():
                 continue  # digest real files once; alias links add nothing
             paths.setdefault(base, str(path))
+    return paths
+
+
+def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
+    """(basename, content digest) of every userspace toolchain native lib
+    the python env SHIPS — deterministic in the installed content,
+    independent of what has been dlopened so far. Unreadable files record
+    ``<unreadable>``. Enumeration and stat are always THIS process's own;
+    only the per-file digest may come from the pgw#832 memo, and only on an
+    exact (path, mtime_ns, size) match."""
     out: Dict[str, str] = {}
+    paths = _toolchain_lib_paths()
     for base in sorted(paths):
         try:
             st = os.stat(paths[base])
-            out[base] = _lib_digest(paths[base], st.st_mtime_ns, st.st_size)
+            out[base] = _lib_digest_memoized(
+                paths[base], st.st_mtime_ns, st.st_size)
         except OSError:
             out[base] = "<unreadable>"
     return tuple(sorted(out.items()))
@@ -384,15 +477,23 @@ def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
 
 # The identity manifest is FROZEN at first computation: the disk content is
 # already phase-independent (pgw#749), so the freeze is purely an
-# amortization — one multi-GB hashing pass per process, never a semantic
-# phase pin.
+# amortization — one hashing pass per process (multi-GB cold, near-free when
+# a pgw#832 memo serves the digests), never a semantic phase pin.
 _LIB_SNAPSHOT: Optional[Tuple[Tuple[str, str], ...]] = None
+
+#: Seconds the last COLD identity pass took (telemetry only, read by
+#: :func:`establish` into ``seal_libhash_s``). With a memo this measures the
+#: stat-and-lookup pass; without one, the full SHA-256 pass — which is the
+#: whole point of naming it.
+_LAST_LIBHASH_S: float = 0.0
 
 
 def frozen_library_digests() -> Tuple[Tuple[str, str], ...]:
-    global _LIB_SNAPSHOT
+    global _LIB_SNAPSHOT, _LAST_LIBHASH_S
     if _LIB_SNAPSHOT is None:
+        t0 = time.monotonic()
         _LIB_SNAPSHOT = toolchain_library_digests()
+        _LAST_LIBHASH_S = round(time.monotonic() - t0, 3)
     return _LIB_SNAPSHOT
 
 
@@ -490,13 +591,12 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     boot seal, return it. Never refuses on env content — only on an
     imposition that does not take effect or an undeclared knob."""
     global _BOOT_SEAL
-    import time as _time
 
     spans: Dict[str, float] = {}
-    marks = [_time.monotonic()]
+    marks = [time.monotonic()]
 
     def mark(name: str) -> None:
-        marks.append(_time.monotonic())
+        marks.append(time.monotonic())
         spans[name] = round(marks[-1] - marks[-2], 3)
 
     scrub_env()
@@ -513,10 +613,13 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     cold_libs = _LIB_SNAPSHOT is None
     _BOOT_SEAL = effective_seal()
     mark("seal_effective_s")
-    # The whole of `seal_effective_s` is the library hash when the snapshot
-    # was cold; naming it separately is what turns "the seal is slow" into a
-    # line item somebody can act on.
-    spans["seal_libhash_s"] = spans["seal_effective_s"] if cold_libs else 0.0
+    # The library pass is timed where it runs (frozen_library_digests), not
+    # inferred from `seal_effective_s`: with a pgw#832 memo the pass shrinks
+    # to stats while the rest of the seal (config read-back, inductor digest)
+    # does not, and naming the wrong part "libhash" would hide exactly the
+    # cost this span exists to expose. Still a split of `seal_effective_s`,
+    # never a partition member.
+    spans["seal_libhash_s"] = _LAST_LIBHASH_S if cold_libs else 0.0
     LAST_ESTABLISH_SPANS.clear()
     LAST_ESTABLISH_SPANS.update(spans)
     return dict(_BOOT_SEAL)
@@ -529,6 +632,7 @@ __all__ = [
     "EnvSealError",
     "SCRUB_PREFIXES",
     "SEAL_KEY",
+    "SEAL_LIB_MEMO_ENV",
     "SEAL_VERSION",
     "assert_seal_unchanged",
     "effective_config",
@@ -540,4 +644,5 @@ __all__ = [
     "loaded_library_digests",
     "scrub_env",
     "seal_digest",
+    "write_library_memo",
 ]

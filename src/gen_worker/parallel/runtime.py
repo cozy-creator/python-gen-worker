@@ -44,7 +44,6 @@ from .cp import (
     ContextParallelUnavailable,
     CpComms,
     gated_call,
-    in_gated_call,
     install_context_parallel,
     refuse_unless_shard_invariant_quant,
 )

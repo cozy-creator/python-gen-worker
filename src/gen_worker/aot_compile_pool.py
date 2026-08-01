@@ -64,7 +64,7 @@ from typing import (
 
 import msgspec
 
-from . import aot_compile_spans, aot_device_lock
+from . import aot_compile_spans, aot_device_lock, env_seal
 from .postmortem import effective_cpu_count
 
 logger = logging.getLogger(__name__)
@@ -481,6 +481,11 @@ class PoolLedger:
     #: children); the idle FRACTION of it is ``idle_staging_s``.
     stage_total_s: float = 0.0
     spawn_total_s: float = 0.0
+    #: pgw#832: parent-serial cost of seeding the seal library memo, paid
+    #: BEFORE the pool wall starts (so never part of the capacity identity).
+    #: Near-zero in a sealed parent; one full hashing pass in a cold one —
+    #: which is the pass every CHILD used to pay.
+    seal_seed_s: float = 0.0
     entries: int = 0
 
     @property
@@ -506,6 +511,7 @@ class PoolLedger:
             "idle_other_s": round(self.idle_other_s, 3),
             "stage_total_s": round(self.stage_total_s, 3),
             "spawn_total_s": round(self.spawn_total_s, 3),
+            "seal_seed_s": round(self.seal_seed_s, 3),
             "pool_entries": int(self.entries),
             "pool_workers": int(self.workers),
         }
@@ -517,6 +523,7 @@ def child_argv(job_path: Path, *, python: str = "") -> List[str]:
 
 def child_env(
     cache_dir: str, *, base: Optional[Mapping[str, str]] = None,
+    seal_memo: str = "",
 ) -> Dict[str, str]:
     """The entry child's environment.
 
@@ -533,11 +540,18 @@ def child_env(
       it is how the parent reads the loose files the children produced.
     * ``GEN_WORKER_AOT_ENTRY_CHILD=1`` so anything that must not run twice on
       a pod can tell.
+    * ``GEN_WORKER_SEAL_LIB_MEMO`` (pgw#832), when the pool seeded one: the
+      parent's toolchain digests, so the child's ``env_seal.establish()``
+      stats instead of re-hashing 4 GB. A LOCATION of digests, never a
+      recipe: the child verifies every file's (path, mtime_ns, size) itself
+      and rehashes on any mismatch, so the seal value cannot move.
     """
     env = dict(os.environ if base is None else base)
     env["GEN_WORKER_AOT_ENTRY_CHILD"] = "1"
     if cache_dir:
         env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_dir)
+    if seal_memo:
+        env[env_seal.SEAL_LIB_MEMO_ENV] = str(seal_memo)
     return env
 
 
@@ -660,6 +674,11 @@ class EntryCompilePool:
         # its inductor GPU benchmarks through it, so no two entries ever time
         # a kernel on the card at the same moment.
         self.device_lock_path = self.workdir / aot_device_lock.LOCK_NAME
+        # pgw#832: the parent's toolchain digests, seeded once per pool so N
+        # short-lived children stop re-paying a multi-GB SHA-256 pass each.
+        # Emptied if seeding fails — children then rehash in full (safe path).
+        self.seal_memo = str(self.workdir / "seal-lib-memo.json")
+        self.seal_seed_s = 0.0
         self.python = python
         self.peak_rss_bytes = 0
         self.peak_concurrency = 0
@@ -713,7 +732,7 @@ class EntryCompilePool:
                 child_argv(job_path, python=self.python),
                 stdout=subprocess.DEVNULL,
                 stderr=handle,
-                env=child_env(self.cache_dir),
+                env=child_env(self.cache_dir, seal_memo=self.seal_memo),
                 start_new_session=True,   # own group -> group-wide reaping
             )
         finally:
@@ -763,6 +782,9 @@ class EntryCompilePool:
         # whatever the parent was doing — so `pool_idle_s` is not a residual
         # anybody has to trust, it is a sum with named causes.
         self.ledger.entries = len(entries)
+        # pgw#832: seed BEFORE the pool wall starts, so the cost is its own
+        # named line (`seal_seed_s`) and never inside the capacity identity.
+        self._seed_seal_memo()
         pool_t0 = mark = time.monotonic()
 
         def charge(bucket: str, free: int) -> None:
@@ -836,6 +858,45 @@ class EntryCompilePool:
             self._sweep()
             self._emit_ledger()
         return {name: done[name] for name in sorted(done)}
+
+    def _seed_seal_memo(self) -> None:
+        """pgw#832: write the parent's toolchain digests where every entry
+        child can verify-and-reuse them instead of re-hashing ~4 GB apiece.
+
+        Near-free in a sealed parent (warm cache -> stats only); pays the
+        full pass exactly once in a cold one — instead of once per ENTRY.
+        Failure is not a mint problem (children fall back to the full rehash,
+        which is the safe path), but a systematically unusable snapshot is a
+        cost regression somebody must see, so it emits the typed event the
+        hub already ingests rather than a bare log."""
+        t0 = time.monotonic()
+        try:
+            count = env_seal.write_library_memo(Path(self.seal_memo))
+        except Exception as exc:  # noqa: BLE001 — the fallback path is safe
+            detail = f"{type(exc).__name__}: {exc}"
+            self.seal_memo = ""
+            logger.warning(
+                "aot-pool: pgw#832 seal memo seeding failed (%s) — every "
+                "entry child will re-pay the full toolchain hash", detail)
+            try:
+                from . import activity as activity_mod
+
+                activity_mod.emit_event(
+                    activity_mod.KIND_AOT_MINT,
+                    "seal library memo seeding failed (pgw#832): "
+                    f"{detail} — entry children fall back to a full "
+                    "per-child toolchain rehash (correct, but re-pays a "
+                    "multi-GB SHA-256 pass once per entry)",
+                    phase="pool",
+                )
+            except Exception:  # pragma: no cover — telemetry never fails a mint
+                logger.debug("aot-pool: seed-failure event failed", exc_info=True)
+            return
+        self.seal_seed_s = round(time.monotonic() - t0, 3)
+        self.ledger.seal_seed_s = self.seal_seed_s
+        logger.info(
+            "aot-pool: pgw#832 seal memo seeded (%d lib(s), %.2fs) at %s",
+            count, self.seal_seed_s, self.seal_memo)
 
     def _emit_ledger(self) -> None:
         """The pool's own typed event. Separate from the mint's roll-up on
