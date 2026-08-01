@@ -179,6 +179,36 @@ class MintResourceExhausted(RuntimeError):
         self.peak_rss_bytes = int(peak_rss_bytes)
 
 
+def raise_if_device_oom(exc: BaseException, where: str) -> None:
+    """Re-raise a CUDA OOM as the RESOURCE type instead of letting a broad
+    ``except Exception`` launder it into a deterministic refusal (pgw#848).
+
+    The mint path is full of broad catches that exist to name a failure. They
+    are right about naming and wrong about classification: an out-of-memory is
+    the one failure whose whole remedy is "try again with more room", and
+    every one of these sites was converting it to the verdict that guarantees
+    it never will be.
+    """
+    from .models.memory import is_cuda_oom
+
+    if not is_cuda_oom(exc):
+        return
+    peak = 0
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            peak = int(torch.cuda.max_memory_allocated())
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        peak = 0
+    raise MintResourceExhausted(
+        f"{where}: OUT OF DEVICE MEMORY ({type(exc).__name__}: {exc}). "
+        f"This process peaked at {peak / (1 << 30):.2f} GiB against the cap "
+        f"the parent set from `mint_budget.co_residency`; it is a resource "
+        f"shortfall to be retried with more room, NOT a deterministic "
+        f"refusal", peak_rss_bytes=0) from exc
+
+
 # ---------------------------------------------------------------------------
 # The declared export contract
 # ---------------------------------------------------------------------------
@@ -406,6 +436,14 @@ def export_program(
             strict=strict,
         )
     except Exception as exc:
+        # pgw#848: a CUDA OOM here is NOT a refusal. This broad catch turned
+        # "the child hit its own memory cap on entry 1 of 36" into
+        # `MintRefused` -> `EXIT_REFUSED` -> never retried — so the mint that
+        # a bigger cap would fix was the one mint that could never be given
+        # one. Same defect as the entry pool's (item 4), at the other end.
+        raise_if_device_oom(
+            exc,
+            f"torch.export(strict={strict}) for {type(module).__name__}")
         raise MintRefused(
             f"torch.export(strict={strict}) failed for "
             f"{type(module).__name__}: {type(exc).__name__}: {exc}"
@@ -957,6 +995,7 @@ def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
         with torch.no_grad():
             module(*args)
     except Exception as exc:
+        raise_if_device_oom(exc, f"entry {entry!r}: declared mint-warm forward")
         raise MintRefused(
             f"entry {entry!r}: declared mint-warm forward failed "
             f"({type(exc).__name__}: {exc}) — warm_changes_key=True makes "
@@ -2833,6 +2872,7 @@ __all__ = [
     "ExportSpec",
     "MintRefused",
     "MintResourceExhausted",
+    "raise_if_device_oom",
     "MINT_COMPILE_THREADS",
     "MintResult",
     "PARITY_LANES",

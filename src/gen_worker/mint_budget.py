@@ -84,6 +84,12 @@ class MintBudget:
     need_bytes: int = 0
     resident_bytes: int = 0
     activation_bytes: int = 0
+    #: pgw#848: the CEILING the child is actually given, which is NOT
+    #: ``need_bytes``. See :func:`co_residency` — the estimate answers "should
+    #: this start", the ceiling answers "how far may it go", and using one
+    #: number for both is what capped two mints at 11.09 GiB on cards with
+    #: 21.48 GiB free.
+    cap_bytes: int = 0
 
     def line(self, event: str, reason: str) -> str:
         """The one structured line a decline logs and puts on the wire."""
@@ -94,7 +100,8 @@ class MintBudget:
             f"needed~={_gib(self.need_bytes)} "
             f"resident={_gib(self.resident_bytes)} "
             f"activation={_gib(self.activation_bytes)}"
-            f"({'measured' if self.measured else 'estimated'})"
+            f"({'measured' if self.measured else 'estimated'}) "
+            f"cap={_gib(self.cap_bytes)}"
         )
 
 
@@ -154,6 +161,7 @@ def probe(device: Optional[int] = None) -> MintBudget:
         need_bytes=need,
         resident_bytes=allocated,
         activation_bytes=activation,
+        cap_bytes=need,
     )
 
 
@@ -245,14 +253,44 @@ def co_residency(
     serves eager, the cell stays absent, and a roomier pod mints it. That is
     pgw#737's existing policy, unchanged.
 
-    Enforcement, not hope
-    ---------------------
-    ``need_bytes`` is handed to the child as a hard
-    ``set_per_process_memory_fraction`` cap. An under-estimate therefore
-    becomes the CHILD's OOM — a typed failed mint reported by a live worker —
-    instead of the tenant's, which is the failure the wan-2.2 incident was.
-    And the child's measured peak is banked (``record_child_peak``), so the
-    second ask on a pod is a fact.
+    Enforcement, not hope — and the ESTIMATE IS NOT THE CEILING (pgw#848)
+    --------------------------------------------------------------------
+    The child gets a hard ``set_per_process_memory_fraction`` cap. For most of
+    this module's life that cap was ``need_bytes``, i.e. the estimate above,
+    and that conflation cost the program its whole-graph proof twice:
+
+        pod   card total   free at OOM   cap imposed   entries exported
+        4090   23.52 GiB      660 MiB     11.09 GiB     1 of 36
+        L40S   44.39 GiB    21.48 GiB     11.08 GiB     5 of 36
+
+    **21.48 GiB free, and the mint died for 30 MiB.** The cap did not move
+    across a 2x card change or a ``vram_gb`` 12->20 change, because it was a
+    property of neither: sdxl's UNet is ~4.87 GiB resident and
+    4.87 x 1.25 + 5 = 11.09 GiB, exactly what both pods printed. The mint was
+    not running out of GPU. It was enforcing a self-imposed ceiling derived
+    from :data:`_UNMEASURED_ACTIVATION_FRACTION` — a fraction nobody measured —
+    and then reporting the result as a deterministic refusal.
+
+    So the two questions are separated, because they are different questions:
+
+    * ``need_bytes`` — *should this start?* An estimate of what the child will
+      use, deliberately conservative, and the thing ``fits`` compares.
+    * ``cap_bytes`` — *how far may it go?* ``free_bytes - activation``: what
+      the card actually has, less what the tenant needs for its next forward
+      (its weights are already allocated and so already outside ``free``).
+      A property of the CARD, not of a guess.
+
+    This does NOT weaken pgw#784's premise. The tenant's next peak is still
+    reserved by construction, and an under-estimate still becomes the CHILD's
+    OOM rather than the tenant's — which is the failure the wan-2.2 incident
+    was. What changes is that a roomy card now licenses a roomy child.
+
+    On :data:`_UNMEASURED_ACTIVATION_FRACTION`: it is still a guess, and it is
+    deliberately NOT replaced with a different off-pod constant — substituting
+    one unmeasured number for another is a move this program has already paid
+    for. It now bounds only the admission estimate and the tenant reserve,
+    never the child, and the child's measured peak is banked
+    (``record_child_peak``) so the second ask on a pod is a fact.
     """
     try:
         import torch
@@ -278,6 +316,14 @@ def co_residency(
         allocated + activation + _COMPILE_WORKSPACE_BYTES
         + _CUDA_CONTEXT_FLOOR_BYTES,
     )
+    # pgw#848: the CEILING, which is a property of the CARD and not of the
+    # estimate. Everything the tenant will need for its next forward is
+    # `activation` — its weights are already allocated and therefore already
+    # out of `free_bytes` — so what is genuinely spare is `free - activation`,
+    # and that is what the child may have. Never BELOW `need`: if the card is
+    # so tight that the reserve eats the estimate, `fits` has already declined
+    # and no cap is issued at all.
+    cap = max(need, free_bytes - activation)
     return MintBudget(
         fits=free_bytes >= need,
         probed=True,
@@ -286,6 +332,7 @@ def co_residency(
         need_bytes=need,
         resident_bytes=allocated,
         activation_bytes=activation,
+        cap_bytes=cap,
     )
 
 

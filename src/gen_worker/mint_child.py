@@ -413,14 +413,7 @@ def _mint_aot(
         os.replace(artifact, target)
     frame(phase="finalize", note=f"cell {result.cell_key}")
 
-    peak = 0
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            peak = int(torch.cuda.max_memory_allocated())
-    except Exception:
-        peak = 0
+    peak = _peak_vram()
     try:
         import resource
 
@@ -551,14 +544,7 @@ def mint(request: MintRequest) -> MintReport:
         expected_graphs=max(0, cc.cache_miss_count(pipe) - miss_before))
     frame(phase="finalize", note=f"packed {target.name}")
 
-    peak = 0
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            peak = int(torch.cuda.max_memory_allocated())
-    except Exception:
-        peak = 0
+    peak = _peak_vram()
     try:
         import resource
 
@@ -591,6 +577,25 @@ def mint(request: MintRequest) -> MintReport:
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
     )
+
+
+def _peak_vram() -> int:
+    """This process's device high-water.
+
+    pgw#848: read on EVERY terminus, not just the minted one. A mint that
+    died against its own cap is precisely the mint whose peak the next
+    attempt has to widen against, and until now the crash and refusal
+    reports carried no ``peak_vram_bytes`` at all — so the parent banked
+    nothing and re-asked identically, forever.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        return int(torch.cuda.max_memory_allocated())
+    except Exception:  # noqa: BLE001 — a probe never fails a report
+        return 0
 
 
 def _is_resource_error(exc: BaseException) -> bool:
@@ -637,7 +642,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write_report(report_path, MintReport(
             status="refused", detail=str(exc)[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0],
+            phase=_PHASE_OPEN[0], peak_vram_bytes=_peak_vram(),
             mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -647,7 +652,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             status="resource" if resource_shortfall else "failed",
             detail=f"{type(exc).__name__}: {exc}"[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0],
+            phase=_PHASE_OPEN[0], peak_vram_bytes=_peak_vram(),
             # pgw#825: a CRASH's paid compiles are measurable too — the mint
             # attaches its partial table to whatever it died with.
             mint_phases=dict(getattr(exc, "mint_phases", None) or {})))

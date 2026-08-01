@@ -283,7 +283,10 @@ async def build_cell(
         workdir = Path(pending.mint_root) / f"child-{attempts}"
         workdir.mkdir(parents=True, exist_ok=True)
         request = build_request(
-            task, workdir=workdir, cap_bytes=budget.need_bytes,
+            # pgw#848: the CEILING, not the estimate. `need_bytes` answers
+            # "should this start"; handing it to the child as a hard cap is
+            # what pinned two mints at 11.09 GiB on cards with 21.48 GiB free.
+            task, workdir=workdir, cap_bytes=budget.cap_bytes,
             # pgw#848: whatever a previous mint on this pod measured one entry
             # child to peak at. Read here rather than in the child because the
             # child is the thing that dies.
@@ -295,10 +298,17 @@ async def build_cell(
             on_evidence=_on_evidence(act), abandon=abandon)
         last = outcome.detail
 
-        if outcome.report is not None and outcome.report.peak_vram_bytes:
-            mint_budget.record_child_peak(
-                family, task.weight_lane, outcome.report.peak_vram_bytes)
         if outcome.report is not None:
+            # pgw#848: banked on EVERY outcome, not only a minted one. This
+            # was gated on a truthy `peak_vram_bytes`, which a child dying
+            # inside `torch.export` never produced — so attempt N+1 re-asked
+            # identically, forever, which is most of why the failure presented
+            # as deterministic. The device side now has the shape the host
+            # side got below: the attempt that FAILED is exactly the attempt
+            # whose measurement the next one needs.
+            mint_budget.record_child_peak(
+                family, task.weight_lane,
+                int(outcome.report.peak_vram_bytes or 0))
             # pgw#848: the host half of the same loop. The pool has always
             # measured `peak_child_rss_bytes` and put it in the phase table
             # that rides `mint_phases`; nothing has ever read it, so every
