@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import faulthandler
 import json
 import logging
 import os
@@ -1934,6 +1935,23 @@ class ParentControl:
                 self._loop.add_signal_handler(sig, self._forward_signal, sig)
             except (NotImplementedError, RuntimeError):
                 pass
+        # pgw#639 under the split: SIGUSR2 dumps every process's stacks and
+        # kills none. The forward is installed first, then faulthandler with
+        # chain=True, so one signal yields parent + children stacks in the pod
+        # log (children inherit stderr and register their own dump handler).
+        def _forward_usr2(signum: int, _frame: object) -> None:
+            for slot in self._slots:
+                proc = slot.proc
+                if proc is not None and proc.pid is not None:
+                    try:
+                        os.kill(proc.pid, signum)
+                    except (ProcessLookupError, OSError):
+                        pass
+        try:
+            signal.signal(signal.SIGUSR2, _forward_usr2)
+            faulthandler.register(signal.SIGUSR2, all_threads=True, chain=True)
+        except (AttributeError, ValueError, OSError):
+            pass
         # One unix server per group's child socket.
         for slot in self._slots:
             await slot.start_server()

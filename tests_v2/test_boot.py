@@ -296,14 +296,24 @@ def test_gpu_boot_refusal_is_typed_and_reaches_the_hub(tmp_path: Path) -> None:
         assert fatal.get("exit_code") == 1
         assert "Starting worker..." not in combined
 
+        # pgw#783/pgw#826: the probe fails in the compute child, which holds no
+        # credential — it hands the typed report to the parent (boot_fatal,
+        # relayed=true) and the PARENT delivers it to the hub before exiting 1.
         report = next(
-            p for p in phases if p.get("phase") == "cuda_probe_hardware_report")
-        assert report.get("delivered") is True, report
-        msg = servicer.wait_for_message()
-        assert msg.WhichOneof("msg") == "hardware_unsuitable"
-        hw = msg.hardware_unsuitable
+            p for p in phases if p.get("phase") == "cuda_probe_boot_fatal")
+        assert report.get("relayed") is True, report
+        servicer.wait_for_message()
+        reports = [
+            m.hardware_unsuitable for m in servicer.received
+            if m.WhichOneof("msg") == "hardware_unsuitable"
+        ]
+        hw = next(
+            (r for r in reports
+             if r.reason_class in ("cuda_unavailable", "driver_too_old")),
+            None,
+        )
+        assert hw is not None, [r.reason_class for r in reports]
         assert hw.worker_id == "v2-gpu-refusal"
-        assert hw.reason_class in ("cuda_unavailable", "driver_too_old")
         assert hw.detail
 
 
