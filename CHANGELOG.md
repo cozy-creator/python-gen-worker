@@ -2,6 +2,90 @@
 
 ## Unreleased
 
+- **th#1362 — retire safetensors sharding: read-tolerant, write-invariant.**
+  Sharding exists upstream to solve resumable transfer, parallel download,
+  object-size caps and partial-failure re-upload. Chunked CAS solves all four
+  BELOW the file, and uniformly — including for files that were never sharded —
+  so the shard planner was a second, coarser answer to solved problems, plus an
+  index that can disagree with the bytes it describes (the klein-4b unloadable
+  publish). Four changes, split by WHO OWNS THE BYTES:
+  - `models/chunk_cas.py` materialises POSITIONALLY: each worker `pwrite`s its
+    chunk into its own byte range as blocks arrive, and the whole-file hash runs
+    on its own thread over the contiguous VERIFIED prefix. RAM per worker drops
+    from a 64 MiB chunk to one read block, so the default window goes 6 -> 16:
+    measured 188.0 -> 274.3 MB/s at 3.6x LESS peak RSS. Resume is now per chunk,
+    out of order, via a sidecar journal that is re-verified off disk — which
+    also makes resume WORK for the first time (the part file used to carry a
+    fresh uuid per call). Disk is proven up front with `posix_fallocate`.
+  - Mirror ingest DE-shards (`deshard_mirror_tree`,
+    `merge_safetensors_by_offset`) instead of re-sharding, including pure
+    pass-through mirrors, so the corpus we own has one shape. The merge verifies
+    its result against the index it consumed. `_reshard_indexed_safetensors` and
+    `_stage_oversize_safetensors` are gone.
+  - The planner is DELETED: `MAX_SAFETENSORS_SHARD_BYTES`, `ShardPlan`,
+    `plan_shards`, `build_index`, `shard_safetensors_by_offset`, and
+    `shard_threshold` from eight signatures. `shard_prefix` is `output_stem`;
+    `ConversionResult.index_path` is gone.
+  - `assert_one_file_per_component` fails closed at every producer output check
+    and at `publish_flavors`, and those `save_pretrained` calls pass
+    `NEVER_SHARD_MAX_SIZE` — save_pretrained shards on its own, which is why
+    this is checked rather than assumed.
+  READING a sharded artifact stays supported PERMANENTLY, and a user's own
+  sharded upload is never refused or rewritten — it does not pass through
+  `publish_flavors` at all.
+  BREAKING for endpoint repos importing the deleted names (training-endpoints
+  `conversion/fuse.py` is updated on its chaos branch and needs the pin bump).
+
+- **pgw#842 — the entry pool's width is now explainable, and monotone in the
+  box.** Two real L4 mints of the SAME 72-entry sdxl regional cell, back to
+  back: attempt ten (0.86.0, 16 vcpu / 62 GB) `entry_workers=5`, `compile_s`
+  1314.94, wall **347.94 s**; attempt eleven (0.89.0, 21 vcpu / 83 GB)
+  `entry_workers=3`, `compile_s` 1327.23 (+0.9 % — identical work), wall
+  **554.78 s (+59 %)**. Pool efficiency was ~97 % in both: the entire
+  regression is K, on a bigger host.
+  Why nobody could say which bound bound: `_mint_phase_table` has always built
+  a `pool` block holding every input (`cpu_workers`/`mem_workers`/
+  `device_workers`, the free-VRAM and available-RAM readings, the per-entry
+  asks) and `emit_phase_events` **never emitted it** — only the scalar
+  `entry_workers` reached a hub row, folded into `totals`. And pgw#830's pool
+  ledger IS emitted, from the mint CHILD, which holds no orchestrator session
+  (`mint_delegate._emit_aot_phases` exists because of exactly that) — so it
+  died in a pod log. Verified against the chaos hub: **zero `phase='pool'`
+  rows for either release**, on a stack where both mints are otherwise fully
+  recorded. The two pods are gone, so their binding constraint is
+  unrecoverable — that is the defect, not a footnote to it.
+  Fixed on both halves. (1) The pool's decision is a typed hub event:
+  `kind=aot_mint_phases phase=pool`, `duration_ms` = the pool's wall clock,
+  detail leading with `entry_workers=`, `binding=` and `underwidth=` (workers
+  the pod could have run but didn't, named with the constraint that held
+  them), then every reading and the pgw#830 ledger — relayed parent-side like
+  the rest of the table, and emitted for aborted mints too. `PoolWidth` now
+  carries `CpuFacts`/`MemoryFacts`/`DeviceFacts`: which of quota / affinity /
+  host cores the vCPU number came from (RunPod advertises `host_vcpus`; the
+  kernel enforces a quota, and they are routinely different), which of
+  meminfo / cgroup bounded RAM, every free-VRAM sample, and whether the
+  per-entry asks were `measured` or a `default` constant. A narrow pool also
+  logs WARNING with its inputs.
+  (2) Two readings that were not monotone in the box are corrected. The cgroup
+  RAM headroom counted PAGE CACHE against the pool (`memory.max -
+  memory.current`), so the bound shrank in proportion to how much I/O the pod
+  had already done — a mint reads GBs (weights, the toolchain the seal hashes,
+  every staged program). It now subtracts reclaimable file pages, i.e. sizes
+  on the working set, as every container runtime does: on a 62 GB pod with
+  50 GiB charged and 40 GiB of it cache, 12 GiB -> 52 GiB, K=2 -> K=8. And
+  free VRAM was a SINGLE `mem_get_info` taken on a card the pool shares with a
+  live tenant by construction (pgw#784): a sample landing inside a tenant
+  forward reads that forward's activation set as gone, while
+  `DEVICE_RESERVE_BYTES` reserves the tenant's peak anyway — the same bytes
+  charged twice, and worth exactly the observed 5-vs-3 (21 GiB steady vs
+  13 GiB dipped, at 3 GiB/entry: K=6 vs K=3). `device_facts` now takes the max
+  over three samples 50 ms apart and records all of them.
+  Red/green on the real path: 11 new tests, all 11 red on the unfixed tip;
+  the hub-visibility one drives a REAL 2-entry pool, its real ledger and real
+  width through the real parent-side relay into a bound activity sink.
+  Projected at a corrected K=5, attempt eleven's own numbers give ~374 s
+  against the measured 554.78 s.
+
 - **pgw#840 — the entry-compile child must BE the parent's own gen_worker.**
   pgw#830's attribution invariant went red on a tree nobody had changed: one
   entry's table had no child spans at all, so its entire 19.5 s compile fell
