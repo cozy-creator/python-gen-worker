@@ -2387,28 +2387,75 @@ def _compile_entries_parallel(
     }
 
 
-def _entry_dispatch_signature(row: "_MintedEntry") -> str:
-    """What DISPATCH can see of one entry's exported program.
+@dataclass(frozen=True)
+class _DeclaredArg:
+    """One declared input as the INGRESS ASSERTION sees a tensor: a shape and
+    a dtype, and nothing else. Nothing is allocated — the gate has to stay
+    cheap enough to run before a single kernel is built."""
 
-    The packed ingress contract is derived from these placeholders, so two
-    entries with the same signature necessarily declare the same contract —
-    which makes this an exact discriminator that is available BEFORE the
-    compile is paid for, rather than a second implementation of the contract
-    that could drift from it.
+    shape: Tuple[int, ...]
+    dtype: str
+
+
+def _entry_ingress_declaration(
+    row: "_MintedEntry",
+) -> Tuple[Any, Tuple[Dict[str, Any], ...]]:
+    """``(contract, representative calls)`` for one entry.
+
+    The contract is built from ``aot_package.input_contract`` — the exact rows
+    the packed cell will carry — and read back through
+    :func:`aot_serve.contract_from_meta`, the serve path's OWN parser, so the
+    gate cannot drift from what dispatch will actually do.
+
+    The calls are that entry's own declared shapes: one per corner of its
+    symbol hull (all symbols at their lower bound, all at their upper, all at
+    the midpoint), deduplicated. A fully specialized entry — the sdxl case —
+    yields exactly one call, which is the call its class row exists to serve.
     """
-    shapes = _placeholder_shapes(row.program)
-    by_node: Dict[str, Any] = {}
-    graph = getattr(getattr(row.program, "graph_module", None), "graph", None)
-    for node in getattr(graph, "nodes", ()) or ():
-        if getattr(node, "op", "") == "placeholder":
-            by_node[str(node.name)] = node.meta.get("val")
-    parts = []
-    for name in sorted(shapes):
-        val = by_node.get(name)
-        parts.append(
-            f"{name}:{getattr(val, 'dtype', '?')}:"
-            + ",".join(str(d) for d in shapes[name]))
-    return "|".join(parts)
+    inputs, symbols = aot_package.input_contract(row.program, row.flat_names)
+    meta: Dict[str, Any] = {"inputs": inputs, "symbols": symbols}
+    if adapter_arm(row.spec.fork) is False:
+        # The NEGATIVE half of a branchless class's contract, exactly as
+        # `_gate_and_declare_entry` will pack it (pgw#790). Without it here the
+        # gate would ask a question the serve path never asks.
+        from .models import lora_lifted
+
+        meta["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
+    contract = aot_serve.contract_from_meta(meta)
+
+    def _at(pick: Callable[[int, int], int]) -> Dict[str, Any]:
+        return {
+            spec.name: _DeclaredArg(
+                tuple(
+                    dim if isinstance(dim, int)
+                    else pick(*contract.symbols[dim])
+                    for dim in spec.shape),
+                spec.dtype,
+            )
+            for spec in contract.inputs
+        }
+
+    calls: List[Dict[str, Any]] = []
+    for pick in (lambda lo, _hi: lo,
+                 lambda _lo, hi: hi,
+                 lambda lo, hi: (lo + hi) // 2):
+        call = _at(pick)
+        if call not in calls:
+            calls.append(call)
+    return contract, tuple(calls)
+
+
+def _admits(contract: Any, call: Mapping[str, Any]) -> bool:
+    """Does this entry admit this call? Asked of
+    :func:`aot_serve.assert_ingress` itself — the same function, on the same
+    contract shape, that :meth:`aot_serve.EntryDispatch.select` runs on a pod.
+    Keyword-fed, because that is how the negative contract (an EXCLUDED input
+    the call carries) is visible at all."""
+    try:
+        aot_serve.assert_ingress(contract, (), call)
+    except aot_serve.IngressContractError:
+        return False
+    return True
 
 
 def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
@@ -2417,16 +2464,17 @@ def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
     :meth:`aot_serve.EntryDispatch.select` calls two entries admitting one
     call ``entry_ambiguous`` — "a declaration that cannot discriminate two
     graph classes by ingress, which is a defect to surface, never a coin to
-    flip". It is a per-REQUEST refusal, so today the cell arms, reports
-    armed, and serves those coordinates 100 % eager. Nothing fails.
+    flip". It is a per-REQUEST refusal, so without this gate the cell arms,
+    reports armed, and serves those coordinates 100 % eager.
 
-    Found by pgw#829's own A/B, and it is not hypothetical. A REGIONAL entry
-    is exported one block deep, and the shell has already flattened the
-    latent extents into a token count — so two declared class rows that are
-    genuinely different coordinates upstream can hand the block the identical
-    shape. What actually collides is the token PRODUCT, of which a transposed
-    aspect pair is only the obvious case. sdxl's nine aspect rows carry just
-    FOUR distinct token counts::
+    Found by pgw#829's own A/B, and MEASURED on a pod eight days later
+    (pgw#844, attempt twelve, L4 `o0legpgj5olhic`): a regional entry is
+    exported one block deep, and the shell has already flattened the latent
+    extents into a token count — so two declared class rows that are genuinely
+    different coordinates upstream hand the block the identical shape. What
+    collides is the token PRODUCT, of which a transposed aspect pair is only
+    the obvious case. sdxl's nine aspect rows carry just FOUR distinct token
+    counts::
 
         15360  1536x640, 640x1536                          (latent 80x192, 192x80)
         15808  1216x832, 832x1216                          (104x152, 152x104)
@@ -2434,41 +2482,72 @@ def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
         16384  1024x1024                                   <- the only unique row
 
     Three clash groups, one of them a QUADRUPLE spanning rows that are not
-    each other's transpose (96*168 == 112*144). So attempt nine's 72-entry
-    cell could have served exactly one of its nine aspect ratios compiled;
-    the other eight were `entry_ambiguous` -> eager, per (CFG arm x adapter
-    arm x block class).
+    each other's transpose (96*168 == 112*144). The published 72-entry cell
+    served exactly one of its nine aspect ratios compiled; the other eight
+    were `entry_ambiguous` -> eager, per (CFG arm x adapter arm x block class).
+
+    THE QUESTION IS ADMISSION, NOT EQUALITY (pgw#844). This gate used to
+    compare a digest of each entry's placeholder shapes, which catches only
+    entries whose contracts are IDENTICAL. Dispatch does not ask that: it asks
+    which entries ADMIT the call, and a static row and a dynamic row over the
+    same hull have different digests while both admitting — the exact shape
+    pgw#829's collapse introduces. So every entry's own declared call is run
+    against every sibling's contract through the real ingress assertion, and
+    more than one admitter is refused.
 
     Grouped exactly the way the serve path groups — target, block class,
-    adapter arm — because those are the axes dispatch resolves BEFORE
-    ingress, and two entries on different arms are meant to share a contract
-    (pgw#825: a block never carries the lifted pair, so both arms declare the
-    same one). The remedy is the collapse: one entry over the hull admits
-    both rows and is unique by construction.
+    adapter arm — because those are the axes dispatch resolves BEFORE ingress
+    (`aot_regional.BlockDispatch` keys `by_arm`, and two block classes live in
+    different dispatches), and two entries on different arms are meant to
+    share a contract (pgw#825: a block never carries the lifted pair). The
+    remedy is the collapse: one entry over the hull admits every row and is
+    unique by construction.
     """
-    groups: Dict[Tuple[str, str, Any], Dict[str, List[str]]] = {}
+    groups: Dict[Tuple[str, str, Any], List["_MintedEntry"]] = {}
     for row in sorted(minted, key=lambda r: r.name):
         fork = {str(n): v for n, v in tuple(row.spec.fork)}
         key = (str(row.spec.target),
                str(fork.get(aot_regional.BLOCK_FORK) or ""),
                fork.get(ADAPTER_FORK))
-        groups.setdefault(key, {}).setdefault(
-            _entry_dispatch_signature(row), []).append(row.name)
-    clashes = [
-        names for by_digest in groups.values()
-        for names in by_digest.values() if len(names) > 1]
+        groups.setdefault(key, []).append(row)
+
+    clashes: List[Tuple[str, List[str]]] = []
+    for rows in groups.values():
+        if len(rows) < 2:
+            continue
+        declared: Dict[str, Tuple[Any, Tuple[Dict[str, Any], ...]]] = {}
+        for row in rows:
+            try:
+                declared[row.name] = _entry_ingress_declaration(row)
+            except (aot_package.PackageIntrospectionError, ValueError) as exc:
+                # An unreadable declaration is not "probably fine": it is a
+                # cell whose dispatchability nobody can prove.
+                raise MintRefused(
+                    f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
+                    f"the declared ingress contract, so this cell cannot be "
+                    f"shown to be dispatchable at all: {exc}") from exc
+        for name, (_own, calls) in declared.items():
+            admitting = sorted({
+                other
+                for call in calls
+                for other, (contract, _c) in declared.items()
+                if _admits(contract, call)
+            })
+            if len(admitting) > 1:
+                clashes.append((name, admitting))
     if not clashes:
         return
     detail = "; ".join(
-        f"{names[0]!r} and {names[1]!r}" + (
-            f" (+{len(names) - 2} more)" if len(names) > 2 else "")
-        for names in clashes[:4])
+        f"{name!r} is admitted by {len(admitting)} entries "
+        f"({admitting[:3]!r}" + (
+            f" +{len(admitting) - 3} more)" if len(admitting) > 3 else ")")
+        for name, admitting in clashes[:4])
     raise MintRefused(
-        f"dispatch-ambiguity gate: {len(clashes)} group(s) of entries "
-        f"declare the SAME ingress contract and route to the same dispatch, "
-        f"so every call they both admit is refused 'entry_ambiguous' and "
-        f"served EAGER — {detail}. Two class rows that reduce to one graph "
-        f"shape are one entry: collapse them "
+        f"dispatch-ambiguity gate: {len(clashes)} declared class row(s) are "
+        f"admitted by more than one entry of the same dispatch, so every call "
+        f"they carry is refused 'entry_ambiguous' and served EAGER — "
+        f"{detail}. Two class rows that reduce to one dispatchable shape are "
+        f"one entry: collapse them "
         f"(Compile.regional_shape_strategy='dynamic-collapse' for a "
         f"conv-free block population, pgw#829) rather than compiling and "
         f"publishing a class the cell can never select")

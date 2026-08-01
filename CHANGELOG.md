@@ -37,6 +37,17 @@
   sample from an armed lane stops being counted as `serving_mode=aot_cell`
   with no reason. Only reachable now that a partially dispatchable cell stays
   armed, which is why it lands with the fix rather than before it.
+- **pgw#844 part B — the mint's dispatch-ambiguity gate asks about ADMISSION,
+  not equality.** pgw#829's gate compared a digest of each entry's placeholder
+  shapes, which catches identical contracts (sdxl's 9 static rows) but not the
+  case its own remedy introduces: a static row and a collapsed row over the
+  same token hull have different digests and both admit the same call. Every
+  entry's declared call now runs against every sibling's contract through
+  `aot_serve.assert_ingress` itself — the same function `EntryDispatch.select`
+  runs on a pod — grouped by (target, block class, adapter arm) exactly as
+  dispatch groups. Still pre-compile: seconds to refuse, not a full compile
+  bill.
+
 ## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), two more runner-flake classes die (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
 
 - **pgw#833 follow-on — forwarding a signal is not draining a pod.** The
