@@ -85,6 +85,22 @@
   width through the real parent-side relay into a bound activity sink.
   Projected at a corrected K=5, attempt eleven's own numbers give ~374 s
   against the measured 554.78 s.
+- **pgw#842 (second item) — pgw#832's headline was the HASH, not the seal:
+  2.76 s/entry on a pod, not "0.10 s".** 0.87.0 recorded "9.8 s -> 0.10 s per
+  entry, MEASURED"; that 0.10 s is `seal_libhash_s` alone, measured off-pod.
+  Attempt eleven measured the span the pod actually pays, `child_seal_s`, at
+  **199.085 s / 72 = 2.76 s/entry** — a ~3x cut against 8.14 s, not ~98x, and
+  still 15 % of `compile_s`. The gap is measured, not guessed: with a warm
+  memo on this box a child's seal splits into `seal_config_s` 3.62-4.70 s and
+  `seal_libhash_s` **0.056-0.080 s** (bare `import torch`: 1.895 s). The memo
+  did everything claimed OF THE HASH (~8 s -> ~0.07 s); what remains in
+  `child_seal_s` is the child's own `import torch`, which `establish_config`
+  owns by design — untouched by pgw#832, and now the largest per-entry fixed
+  cost in the pool (~199 s of a 72-entry mint).
+  So the overlays travel with the phase table too: per entry under
+  `timings.overlays` and summed into the roll-up as `overlays=` beside
+  `phases=` (never inside it — that was pgw#830's second attribution bug). A
+  reader who sees `child_seal_s` alone re-opens a question the split answers.
 
 - **pgw#840 — the entry-compile child must BE the parent's own gen_worker.**
   pgw#830's attribution invariant went red on a tree nobody had changed: one
@@ -355,7 +371,13 @@
 
 ## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
 - **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
-  0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
+  0.10 s per entry, MEASURED.**
+  *(Corrected by pgw#842: those figures are `seal_libhash_s` — the hash pass
+  alone, off-pod. The span a pod pays, `child_seal_s`, went 8.14 -> **2.76
+  s/entry** (attempt eleven, 199.085 s / 72): a ~3x cut, not ~98x. The
+  remainder is the child's `import torch`, which `establish_config` owns.
+  Quote 2.76 s/entry.)*
+  `env_seal`'s identity manifest SHA-256s every
   toolchain `.so` the image ships (36 files, 3.96 GB); its memo was per
   PROCESS, and the pgw#809 pool's worker is a process that compiles one entry
   and exits — so a 72-entry mint re-paid the pass 72 times, K-wide (~28 % of

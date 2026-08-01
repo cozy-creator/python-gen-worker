@@ -2364,6 +2364,15 @@ def _compile_entries_parallel(
         phases = pool.entry_phases.get(row.name) or {}
         if phases:
             row.timings["phases"] = dict(phases)
+        # pgw#842: the overlays travel too. `child_seal_s` is a partition
+        # member and its SPLIT is an overlay — and the split is the whole
+        # answer to "what is the seal still costing": pgw#832 cut the library
+        # hash to ~0.07 s (measured), while the child's `import torch`, which
+        # `establish_config` owns, is the rest. Without the overlay a reader
+        # sees only the sum and re-opens a closed question.
+        overlays = pool.entry_overlays.get(row.name) or {}
+        if overlays:
+            row.timings["overlays"] = dict(overlays)
     logger.info(
         "aot-mint: pgw#809 pool compiled %d entr%s at K=%d in %.0fs "
         "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",
@@ -2588,10 +2597,17 @@ def _mint_phase_table(
             float(row.timings.get("warm_s") or 0) for row in minted), 2),
     }
     phase_totals: Dict[str, float] = {}
+    overlay_totals: Dict[str, float] = {}
     for row in minted:
         for label, value in (row.timings.get("phases") or {}).items():
             phase_totals[label] = round(
                 phase_totals.get(label, 0.0) + float(value), 3)
+        # Kept OUT of `phases` on purpose (pgw#830): overlays nest inside
+        # partition members, and summing them in was the original
+        # attribution bug. Reported beside it, never inside it.
+        for label, value in (row.timings.get("overlays") or {}).items():
+            overlay_totals[label] = round(
+                overlay_totals.get(label, 0.0) + float(value), 3)
     # The ONE resolved inductor config every entry compiled under, recorded
     # verbatim: #757's open seal-bypass concern is a per-call config the
     # seal cannot see, so whatever the mint passed is either identity-inert
@@ -2609,6 +2625,7 @@ def _mint_phase_table(
         "inductor_configs": resolved,
         "totals": {**totals, **{k: v for k, v in timings.items()}},
         "phases": phase_totals,
+        "overlays": overlay_totals,
         "entries": entries,
         # pgw#842: the width's INPUTS and the pool's own ledger ride the same
         # block, because the two questions a slow mint raises — "why this K"
@@ -2735,6 +2752,7 @@ def emit_phase_events(
             f"family={family} lane={lane} status={roll_up} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
+            f"overlays={dict(table.get('overlays') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
             phase=roll_up,
             duration_ms=int(round(total_s * 1000)),
