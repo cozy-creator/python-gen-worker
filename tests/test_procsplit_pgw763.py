@@ -44,7 +44,7 @@ from gen_worker.procsplit import frames
 from gen_worker.procsplit.parent import DEATH_LABEL, ParentControl
 
 from harness.hub_double import FakeScheduler, is_accept_for, is_ready, is_result_for
-from harness.progress_wait import Cadence, await_count
+from harness.progress_wait import Cadence, await_count, await_progress
 
 TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = TESTS_DIR.parent / "src"
@@ -670,15 +670,41 @@ def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
         conn.send(run_job=pb.RunJob(
             request_id="r-marker", attempt=1, function_name="die-hard",
             input_payload=_payload()))
-        died = conn.wait_for(is_result_for("r-marker"), timeout=30.0)
+        died = conn.wait_for(is_result_for("r-marker"))
         assert died.job_result.status == pb.JOB_STATUS_FATAL
-        exits = [d for d in captured_dials if "compute_process_exit" in d]
-        assert exits, captured_dials
+
+        # pgw#845: the job_result is NOT the event these assertions want. The
+        # durable attribution is deliberately emitted first (parent.py
+        # `_handle_child_death` step 1) and the post-mortem — signal
+        # attribution, streak write, dial — is step 2, several awaits and one
+        # network hop later. Asserting step 2 the instant step 1 lands is a race
+        # the parent wins on an idle box and loses under `-n 4`; that is what
+        # "parallel-load flake" meant. Wait for the forensics themselves, giving
+        # up only when the parent is gone.
+        def _parent_gone():
+            return None if h.alive else f"the parent exited code={h.exit_code}"
+
+        exits = await_progress(
+            lambda: [d for d in captured_dials if "compute_process_exit" in d],
+            bool,
+            what="the compute_process_exit dial for the dead child",
+            cadence=Cadence(),
+            gone=_parent_gone,
+            render=lambda ds: f"{len(ds)} exit dial(s)",
+        )
         assert "native_crash_streaks" in exits[0], exits[0]
         assert "die-hard" in exits[0]
-        streaks = postmortem.native_crash_streaks(registry)
-        assert streaks.get("die-hard", {}).get("count") == 1, streaks
-        # Consumed: a stale marker would misattribute the next death.
+        streaks = await_progress(
+            lambda: postmortem.native_crash_streaks(registry),
+            lambda seen: "die-hard" in seen,
+            what="the die-hard native-crash streak recorded on disk",
+            cadence=Cadence(),
+            gone=_parent_gone,
+        )
+        assert streaks["die-hard"]["count"] == 1, streaks
+        # Consumed: a stale marker would misattribute the next death. Checked
+        # after the streak, which proves the attribution actually ran — a bare
+        # `not exists()` would also pass if it had never run at all.
         assert not inflight.exists()
     finally:
         h.close()
@@ -791,12 +817,14 @@ def test_wedged_child_keeps_the_stream_alive_and_is_reported_not_hidden(
             input_payload=_payload()))
         # SIGSTOP freezes every thread: the loop, the frame ping, the liveness
         # thread. Nothing the child owns can speak for it.
-        waited = 0.0
-        while waited < 40.0 and not any("compute_child_stalled" in d for d in captured_dials):
-            time.sleep(0.5)
-            waited += 0.5
-        assert any("compute_child_stalled" in d for d in captured_dials), captured_dials
-        stall = [d for d in captured_dials if "compute_child_stalled" in d][0]
+        stall = await_progress(
+            lambda: [d for d in captured_dials if "compute_child_stalled" in d],
+            bool,
+            what="the compute_child_stalled dial for the frozen child",
+            cadence=Cadence(),
+            gone=lambda: None if h.alive else f"the parent exited code={h.exit_code}",
+            render=lambda ds: f"{len(ds)} stall dial(s)",
+        )[0]
         assert "r-wedge-beat#1" in stall, stall
         assert "measured by the parent from /proc" in stall
         # The pod stayed reachable across the wedge: the parent's beats landed
