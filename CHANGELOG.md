@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.86.0 (2026-08-01) — no mint route could publish a cell: the regional arm gets its caller, the delegated mint child gets its slots, eager serving names its reason, and the zero-based suite becomes a CI gate
 
 - **pgw#827 — a REGIONAL cell is adopted through the REGIONAL arm, so it can be
   PUBLISHED at all.** On a real L4 (0.85.0, sdxl 0.2.105, lane `w8a8-lora64`,
