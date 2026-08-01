@@ -418,7 +418,7 @@ def build_flavor_tree(
                 break
         result = run_inline_conversion(
             source_path=entry, out_dir=dest, target_dtype=spec.dtype,
-            target_file_type="safetensors", shard_prefix=stem or "model",
+            target_file_type="safetensors", output_stem=stem or "model",
             source_repo_dir=comp_dir, fp8_block_scope=fp8_block_scope,
         )
         attrs.update({k: v for k, v in result.attributes.items() if k not in attrs})

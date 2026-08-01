@@ -1,16 +1,20 @@
-"""The ONE streaming safetensors shard writer.
+"""The ONE streaming safetensors writer.
 
 Collapses gen_worker.conversion's seven IO modules (writer, streaming_primitives,
 _sharding, _tensor_iter, _streaming_incremental, _streaming_convert,
 safetensors_io) into one:
 
-  - shard planning (HF 5 GB convention) + index.json emit
   - IncrementalSafetensorsWriter: header first, then tensor bytes — O(1) memory
   - tensor iteration over single/sharded/pickle sources
   - streaming_dtype_cast / streaming_fp8_storage_cast: read one tensor,
-    transform, write into its planned shard (peak RAM ~ largest tensor)
+    transform, write into the component's ONE output file (peak RAM ~ largest
+    tensor)
   - streaming_cast_snapshot / streaming_fp8_snapshot: whole-tree variants
-  - shard_safetensors_by_offset: raw byte-range re-shard, zero decode
+  - merge_safetensors_by_offset: raw byte-range de-shard, zero decode
+
+th#1362: the re-shard planner (byte budgets, tensor packing, index.json
+rewriting) is GONE. Every producer here emits exactly one file per component;
+reading a sharded input stays supported forever.
 
 torch/safetensors imports are deferred so importing gen_worker.convert stays cheap.
 """
@@ -40,7 +44,6 @@ class ConversionImplementationError(RuntimeError):
     """A conversion primitive can't proceed (bad input, missing dep)."""
 
 
-MAX_SAFETENSORS_SHARD_BYTES: int = 2 * 1024 * 1024 * 1024
 # Was 5GB (HF's own default shard size) until e2e tracker #110: tensorhub's
 # per-upload /complete verifies the whole shard synchronously (streams it
 # back from R2 and hashes it) in one HTTP request, and something in front of
@@ -83,75 +86,6 @@ def torch_dtype_to_st(dtype: Any) -> str:
 # ---------------------------------------------------------------------------
 # Shard planning
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class ShardPlan:
-    shard_names: list[str]
-    weight_map: dict[str, str]
-    shard_sizes: dict[str, int]
-    total_size: int
-
-
-def plan_shards(
-    tensor_bytes: Mapping[str, int],
-    *,
-    max_shard_bytes: int = MAX_SAFETENSORS_SHARD_BYTES,
-    shard_prefix: str = "model",
-) -> ShardPlan:
-    """Greedy first-fit shard plan in sorted tensor-name order (matches HF)."""
-    if int(max_shard_bytes) <= 0:
-        raise ValueError("max_shard_bytes must be > 0")
-    entries: list[tuple[str, int]] = []
-    for key in sorted(str(k).strip() for k in tensor_bytes.keys()):
-        if key == "":
-            continue
-        size = int(tensor_bytes.get(key, 0) or 0)
-        if size < 0:
-            raise ValueError(f"tensor_size_invalid:{key}")
-        # A tensor larger than max_shard_bytes gets its own oversized shard
-        # (HF split_torch_state_dict_into_shards semantics) — the greedy loop
-        # below already isolates it. Raising here killed every cast of fp32
-        # trees whose excluded lm_head/embedding exceeds 2GiB (hidream-o1,
-        # found live ie#480/gw#562).
-        entries.append((key, size))
-
-    single = f"{shard_prefix}.safetensors"
-    total = sum(s for _, s in entries)
-    if not entries or total <= int(max_shard_bytes):
-        return ShardPlan(
-            shard_names=[single],
-            weight_map={k: single for k, _ in entries},
-            shard_sizes={single: total},
-            total_size=total,
-        )
-
-    shards: list[list[tuple[str, int]]] = []
-    current: list[tuple[str, int]] = []
-    current_size = 0
-    for key, size in entries:
-        if current and current_size + size > int(max_shard_bytes):
-            shards.append(current)
-            current, current_size = [], 0
-        current.append((key, size))
-        current_size += size
-    if current:
-        shards.append(current)
-
-    n = len(shards)
-    names = [f"{shard_prefix}-{i + 1:05d}-of-{n:05d}.safetensors" for i in range(n)]
-    weight_map: dict[str, str] = {}
-    sizes: dict[str, int] = {}
-    for name, group in zip(names, shards):
-        sizes[name] = sum(s for _, s in group)
-        for key, _ in group:
-            weight_map[key] = name
-    return ShardPlan(shard_names=names, weight_map=weight_map, shard_sizes=sizes, total_size=total)
-
-
-def build_index(plan: ShardPlan) -> dict[str, object]:
-    """HF-compatible ``model.safetensors.index.json`` payload."""
-    return {"metadata": {"total_size": int(plan.total_size)}, "weight_map": dict(plan.weight_map)}
-
 
 def list_shard_files_from_index(index_path: Path) -> list[Path]:
     """Shard file paths in weight-map order (deduped, first appearance)."""
@@ -371,8 +305,7 @@ def _stream_reencode(
     *,
     out_st_dtype_for: Any,   # (name, src_st_dtype, shape) -> output st dtype
     transform: Any,          # (name, tensor, out_st_dtype) -> tensor
-    shard_prefix: str,
-    shard_threshold: int,
+    output_stem: str,
 ) -> dict[str, Any]:
     """Two-pass streaming re-encode over safetensors input(s).
 
@@ -406,40 +339,35 @@ def _stream_reencode(
                 metas.append((name, out_dtype, shape, shard_path))
                 size_map[name] = numel * _ST_DTYPE_SIZES[out_dtype]
 
-    plan = plan_shards(size_map, max_shard_bytes=shard_threshold, shard_prefix=shard_prefix)
-    per_shard: dict[str, list[tuple[str, str, list[int], Path]]] = {n: [] for n in plan.shard_names}
-    for row in metas:
-        dest = plan.weight_map.get(row[0])
-        if dest is not None:
-            per_shard[dest].append(row)
+    # th#1362: ONE file per component. Tensor order is sorted-name, which is
+    # what the planner produced for a single-shard plan, so nothing about the
+    # output changed except that there is now always exactly one of them.
+    metas.sort(key=lambda row: row[0])
+    out_path = out_dir / f"{output_stem}.safetensors"
 
     tensor_count = 0
     converted = 0
     handles: dict[Path, Any] = {}
     try:
-        for shard_name in plan.shard_names:
-            entries = per_shard[shard_name]
-            with IncrementalSafetensorsWriter(
-                out_dir / shard_name, metadata=source_metadata,
-            ) as w:
-                for name, out_dtype, shape, _src in entries:
-                    w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
-                w.write_header()
-                for name, out_dtype, _shape, src in entries:
-                    f = handles.get(src)
-                    if f is None:
-                        f = handles[src] = safe_open(str(src), framework="pt", device="cpu")
-                    t = f.get_tensor(name)
-                    tensor_count += 1
-                    result = transform(name, t, out_dtype)
-                    if result is not t:
-                        converted += 1
-                    if torch_dtype_to_st(result.dtype) != out_dtype:
-                        raise ConversionImplementationError(
-                            f"transform produced {result.dtype} for {name!r}; "
-                            f"planned {out_dtype}")
-                    w.write_tensor(name, _tensor_to_bytes(result))
-                    del t, result
+        with IncrementalSafetensorsWriter(out_path, metadata=source_metadata) as w:
+            for name, out_dtype, shape, _src in metas:
+                w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
+            w.write_header()
+            for name, out_dtype, _shape, src in metas:
+                f = handles.get(src)
+                if f is None:
+                    f = handles[src] = safe_open(str(src), framework="pt", device="cpu")
+                t = f.get_tensor(name)
+                tensor_count += 1
+                result = transform(name, t, out_dtype)
+                if result is not t:
+                    converted += 1
+                if torch_dtype_to_st(result.dtype) != out_dtype:
+                    raise ConversionImplementationError(
+                        f"transform produced {result.dtype} for {name!r}; "
+                        f"planned {out_dtype}")
+                w.write_tensor(name, _tensor_to_bytes(result))
+                del t, result
     finally:
         for f in handles.values():
             try:
@@ -447,19 +375,10 @@ def _stream_reencode(
             except Exception:  # noqa: BLE001
                 pass
 
-    index_path: Optional[Path] = None
-    if len(plan.shard_names) > 1:
-        index_path = out_dir / f"{shard_prefix}.safetensors.index.json"
-        index_path.write_text(
-            json.dumps(build_index(plan), separators=(",", ":"), sort_keys=True),
-            encoding="utf-8",
-        )
     return {
         "tensor_count": tensor_count,
         "converted_count": converted,
-        "output_paths": [out_dir / n for n in plan.shard_names],
-        "index_path": index_path,
-        "shard_sizes": dict(plan.shard_sizes),
+        "output_paths": [out_path],
         "metadata": dict(source_metadata),
     }
 
@@ -469,8 +388,7 @@ def streaming_dtype_cast(
     out_dir: Path,
     *,
     target_dtype: "torch.dtype",
-    shard_prefix: str = "model",
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+    output_stem: str = "model",
 ) -> dict[str, Any]:
     """Cast float tensors to ``target_dtype``, streaming directly into N shards.
 
@@ -491,7 +409,7 @@ def streaming_dtype_cast(
     return _stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
-        shard_prefix=shard_prefix, shard_threshold=shard_threshold,
+        output_stem=output_stem,
     )
 
 
@@ -550,8 +468,7 @@ def streaming_fp8_storage_cast(
     input_path: Path,
     out_dir: Path,
     *,
-    shard_prefix: str = "model",
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+    output_stem: str = "model",
     skip_patterns: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS,
     block_scope: bool = False,
 ) -> dict[str, Any]:
@@ -583,7 +500,7 @@ def streaming_fp8_storage_cast(
     return _stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
-        shard_prefix=shard_prefix, shard_threshold=shard_threshold,
+        output_stem=output_stem,
     )
 
 
@@ -635,8 +552,7 @@ def streaming_w8a8_cast(
     input_path: Path,
     out_dir: Path,
     *,
-    shard_prefix: str = "model",
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+    output_stem: str = "model",
     skip_patterns: tuple[str, ...] = W8A8_SKIP_TENSOR_PATTERNS,
 ) -> dict[str, Any]:
     """Per-channel-scaled fp8 requant of one weight set, streaming.
@@ -697,52 +613,42 @@ def streaming_w8a8_cast(
         "calibration_corpus": "",
         "modelopt_version": "",
     })
-    plan = plan_shards(size_map, max_shard_bytes=shard_threshold,
-                       shard_prefix=shard_prefix)
-    per_shard: dict[str, list[tuple[str, str, list[int], Optional[Path]]]] = {
-        n: [] for n in plan.shard_names}
-    for row in metas:
-        dest = plan.weight_map.get(row[0])
-        if dest is not None:
-            per_shard[dest].append(row)
+    metas.sort(key=lambda row: row[0])
+    out_path = out_dir / f"{output_stem}.safetensors"
 
     tensor_count = 0
     pending_scales: dict[str, "torch.Tensor"] = {}
     handles: dict[Path, Any] = {}
     try:
-        for shard_name in plan.shard_names:
-            entries = per_shard[shard_name]
-            with IncrementalSafetensorsWriter(
-                out_dir / shard_name, metadata=out_metadata,
-            ) as w:
-                for name, out_dtype, shape, _src in entries:
-                    w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
-                w.write_header()
-                for name, _out_dtype, _shape, src in entries:
-                    if src is None:  # synthesized weight_scale
-                        w.write_tensor(
-                            name, _tensor_to_bytes(pending_scales.pop(name)))
-                        continue
-                    f = handles.get(src)
-                    if f is None:
-                        f = handles[src] = safe_open(
-                            str(src), framework="pt", device="cpu")
-                    t = f.get_tensor(name)
-                    tensor_count += 1
-                    if name in quantized_names:
-                        wf = t.float()
-                        scale = (wf.abs().amax(dim=1, keepdim=True)
-                                 / _FP8_E4M3_MAX).clamp(min=1e-12)
-                        q = (wf / scale).clamp(
-                            -_FP8_E4M3_MAX, _FP8_E4M3_MAX,
-                        ).to(torch.float8_e4m3fn)
-                        scale_name = name[: -len(".weight")] + _SCALE_SUFFIX
-                        pending_scales[scale_name] = scale.reshape(-1).contiguous()
-                        w.write_tensor(name, _tensor_to_bytes(q))
-                        del wf, q
-                    else:
-                        w.write_tensor(name, _tensor_to_bytes(t))
-                    del t
+        with IncrementalSafetensorsWriter(out_path, metadata=out_metadata) as w:
+            for name, out_dtype, shape, _src in metas:
+                w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
+            w.write_header()
+            for name, _out_dtype, _shape, src in metas:
+                if src is None:  # synthesized weight_scale
+                    w.write_tensor(
+                        name, _tensor_to_bytes(pending_scales.pop(name)))
+                    continue
+                f = handles.get(src)
+                if f is None:
+                    f = handles[src] = safe_open(
+                        str(src), framework="pt", device="cpu")
+                t = f.get_tensor(name)
+                tensor_count += 1
+                if name in quantized_names:
+                    wf = t.float()
+                    scale = (wf.abs().amax(dim=1, keepdim=True)
+                             / _FP8_E4M3_MAX).clamp(min=1e-12)
+                    q = (wf / scale).clamp(
+                        -_FP8_E4M3_MAX, _FP8_E4M3_MAX,
+                    ).to(torch.float8_e4m3fn)
+                    scale_name = name[: -len(".weight")] + _SCALE_SUFFIX
+                    pending_scales[scale_name] = scale.reshape(-1).contiguous()
+                    w.write_tensor(name, _tensor_to_bytes(q))
+                    del wf, q
+                else:
+                    w.write_tensor(name, _tensor_to_bytes(t))
+                del t
     finally:
         for f in handles.values():
             try:
@@ -754,19 +660,10 @@ def streaming_w8a8_cast(
             f"w8a8 cast left {len(pending_scales)} orphan scale tensor(s) "
             f"(e.g. {sorted(pending_scales)[:3]})")
 
-    index_path: Optional[Path] = None
-    if len(plan.shard_names) > 1:
-        index_path = out_dir / f"{shard_prefix}.safetensors.index.json"
-        index_path.write_text(
-            json.dumps(build_index(plan), separators=(",", ":"), sort_keys=True),
-            encoding="utf-8",
-        )
     return {
         "tensor_count": tensor_count,
         "converted_count": len(quantized_names),
-        "output_paths": [out_dir / n for n in plan.shard_names],
-        "index_path": index_path,
-        "shard_sizes": dict(plan.shard_sizes),
+        "output_paths": [out_path],
         "metadata": out_metadata,
     }
 
@@ -880,7 +777,7 @@ def apply_objective_scheduler_config(
     cfg_path.write_text(json.dumps(cfg, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _group_shard_prefix(entry: Path) -> str:
+def _component_output_stem(entry: Path) -> str:
     stem = entry.name
     for suffix in (".safetensors.index.json", ".safetensors"):
         if stem.endswith(suffix):
@@ -894,7 +791,6 @@ def streaming_cast_snapshot(
     *,
     file_layout: str,
     target_dtype: "torch.dtype",
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
 ) -> dict[str, Any]:
     """Streaming dtype cast of a whole snapshot: every weight group is cast
     per-tensor (peak anon RAM ≈ largest tensor); configs/tokenizers hardlink
@@ -909,8 +805,7 @@ def streaming_cast_snapshot(
         result = streaming_dtype_cast(
             entry, (out_dir / comp) if comp else out_dir,
             target_dtype=target_dtype,
-            shard_prefix=_group_shard_prefix(entry),
-            shard_threshold=shard_threshold,
+            output_stem=_component_output_stem(entry),
         )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1044,8 +939,7 @@ def streaming_fp8_te_cast(
     out_dir: Path,
     *,
     castable_keys: frozenset[str],
-    shard_prefix: str = "model",
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+    output_stem: str = "model",
 ) -> dict[str, Any]:
     """fp8-E4M3 storage cast of one transformers weight set: exactly the
     ``castable_keys`` (the loader's block-window weight set) become
@@ -1066,7 +960,7 @@ def streaming_fp8_te_cast(
     return _stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
-        shard_prefix=shard_prefix, shard_threshold=shard_threshold,
+        output_stem=output_stem,
     )
 
 
@@ -1077,7 +971,6 @@ def streaming_fp8_snapshot(
     file_layout: str,
     components: tuple[str, ...] | None = None,
     te_components: tuple[str, ...] = (),
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
 ) -> dict[str, Any]:
     """Produce the ``#fp8`` flavor of a diffusers snapshot, streaming.
 
@@ -1108,8 +1001,7 @@ def streaming_fp8_snapshot(
         entry = root_groups[0][1]
         result = streaming_fp8_storage_cast(
             entry, out_dir,
-            shard_prefix=_group_shard_prefix(entry),
-            shard_threshold=shard_threshold,
+            output_stem=_component_output_stem(entry),
             block_scope=True,
         )
         if not int(result["converted_count"]):
@@ -1134,14 +1026,12 @@ def streaming_fp8_snapshot(
             result = streaming_fp8_te_cast(
                 entry, out_dir / comp,
                 castable_keys=te_fp8_castable_keys(source_dir / comp),
-                shard_prefix=_group_shard_prefix(entry),
-                shard_threshold=shard_threshold,
+                output_stem=_component_output_stem(entry),
             )
         else:
             result = streaming_fp8_storage_cast(
                 entry, out_dir / comp,
-                shard_prefix=_group_shard_prefix(entry),
-                shard_threshold=shard_threshold,
+                output_stem=_component_output_stem(entry),
             )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1188,7 +1078,6 @@ def streaming_w8a8_snapshot(
     components: tuple[str, ...] | None = None,
     te_components: tuple[str, ...] = (),
     weight_set_patterns: tuple[str, ...] = (),
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
 ) -> dict[str, Any]:
     """Produce the ``#fp8-w8a8`` flavor of a diffusers snapshot, streaming.
 
@@ -1244,8 +1133,7 @@ def streaming_w8a8_snapshot(
         for rel, entry, members in selected:
             result = streaming_w8a8_cast(
                 entry, out_dir / Path(rel).parent,
-                shard_prefix=_group_shard_prefix(entry),
-                shard_threshold=shard_threshold,
+                output_stem=_component_output_stem(entry),
             )
             tensor_count += int(result["tensor_count"])
             converted += int(result["converted_count"])
@@ -1287,8 +1175,7 @@ def streaming_w8a8_snapshot(
         if comp in denoiser_set:
             result = streaming_w8a8_cast(
                 entry, out_dir / comp,
-                shard_prefix=_group_shard_prefix(entry),
-                shard_threshold=shard_threshold,
+                output_stem=_component_output_stem(entry),
             )
             if not int(result["converted_count"]):
                 raise ConversionImplementationError(
@@ -1300,8 +1187,7 @@ def streaming_w8a8_snapshot(
             result = streaming_fp8_te_cast(
                 entry, out_dir / comp,
                 castable_keys=te_fp8_castable_keys(source_dir / comp),
-                shard_prefix=_group_shard_prefix(entry),
-                shard_threshold=shard_threshold,
+                output_stem=_component_output_stem(entry),
             )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1599,89 +1485,6 @@ def merge_safetensors_by_offset(
             os.close(fd)
 
 
-def shard_safetensors_by_offset(
-    src_path: Path,
-    out_dir: Path,
-    *,
-    max_shard_bytes: int = MAX_SAFETENSORS_SHARD_BYTES,
-    shard_prefix: str = "model",
-) -> tuple[list[Path], Path, dict[str, int]]:
-    """Split an oversized safetensors file into HF-convention shards by raw
-    byte-range copy — the input never enters Python as a tensor.
-
-    Returns (shard_paths, index_path, shard_sizes). The index is always
-    written; callers skip uploading it for single-shard plans.
-    """
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(src_path), os.O_RDONLY)
-    try:
-        header, data_base = _read_safetensors_header(fd)
-        sizes: dict[str, int] = {}
-        for name, meta in header.items():
-            if name == "__metadata__" or not isinstance(meta, dict):
-                continue
-            offs = meta.get("data_offsets")
-            if not isinstance(offs, list) or len(offs) != 2 or int(offs[1]) < int(offs[0]):
-                raise ValueError(f"safetensors: tensor {name!r} has invalid data_offsets")
-            sizes[name] = int(offs[1]) - int(offs[0])
-
-        plan = plan_shards(sizes, max_shard_bytes=max_shard_bytes, shard_prefix=shard_prefix)
-        reserved_md = header.get("__metadata__")
-
-        groups: dict[str, list[tuple[str, int, int]]] = {n: [] for n in plan.shard_names}
-        for tname, shard_name in plan.weight_map.items():
-            offs = header[tname]["data_offsets"]
-            groups[shard_name].append((tname, int(offs[0]), int(offs[1])))
-        for g in groups.values():
-            g.sort(key=lambda r: r[1])  # sequential source reads
-
-        shard_paths: list[Path] = []
-        for shard_name in plan.shard_names:
-            entries = groups[shard_name]
-            new_header: dict[str, Any] = {}
-            if isinstance(reserved_md, dict):
-                new_header["__metadata__"] = dict(reserved_md)
-            cursor = 0
-            for tname, s, e in entries:
-                src_meta = header[tname]
-                new_header[tname] = {
-                    "dtype": src_meta["dtype"],
-                    "shape": list(src_meta["shape"]),
-                    "data_offsets": [cursor, cursor + (e - s)],
-                }
-                cursor += e - s
-            blob = json.dumps(new_header, separators=(",", ":")).encode("utf-8")
-            shard_path = out_dir / shard_name
-            dst = os.open(str(shard_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            try:
-                os.write(dst, len(blob).to_bytes(_HEADER_LEN_PREFIX, "little"))
-                os.write(dst, blob)
-                for tname, s, e in entries:
-                    remaining = e - s
-                    src_abs = data_base + s
-                    while remaining > 0:
-                        buf = os.pread(fd, min(remaining, _RAW_COPY_CHUNK), src_abs)
-                        if not buf:
-                            raise IOError(f"safetensors: short read on {tname!r} at {src_abs}")
-                        os.write(dst, buf)
-                        remaining -= len(buf)
-                        src_abs += len(buf)
-            finally:
-                os.close(dst)
-            shard_paths.append(shard_path)
-
-        index_path = out_dir / f"{shard_prefix}.safetensors.index.json"
-        index_path.write_text(
-            json.dumps(build_index(plan), separators=(",", ":"), sort_keys=True),
-            encoding="utf-8",
-        )
-        return shard_paths, index_path, dict(plan.shard_sizes)
-    finally:
-        os.close(fd)
-
-
 # ---------------------------------------------------------------------------
 # Canonical published filenames (gw#466 / gw#522)
 # ---------------------------------------------------------------------------
@@ -1755,12 +1558,8 @@ def normalize_variant_filenames(tree: Path) -> None:
 __all__ = [
     "ConversionImplementationError",
     "CAST_NORMALIZE_DTYPES",
-    "MAX_SAFETENSORS_SHARD_BYTES",
     "VARIANT_WEIGHT_NAME_RE",
     "normalize_variant_filenames",
-    "ShardPlan",
-    "plan_shards",
-    "build_index",
     "list_shard_files_from_index",
     "IncrementalSafetensorsWriter",
     "torch_dtype_to_st",
@@ -1785,5 +1584,4 @@ __all__ = [
     "fp8_te_components",
     "te_fp8_castable_keys",
     "streaming_fp8_te_cast",
-    "shard_safetensors_by_offset",
 ]
