@@ -821,14 +821,38 @@ class IntentRegistry:
         *,
         operation: str,
     ) -> _T:
-        """Assert that a long protocol-owned await already has typed state."""
-        task = asyncio.ensure_future(awaitable)
+        """Assert that a long protocol-owned await already has typed state.
+
+        pgw#845 — an already-reported wait is awaited DIRECTLY, in the caller's
+        own task. It used to be wrapped in ``ensure_future`` like the unreported
+        one, and that wrapper opened a window: the inner task completes, the
+        caller is cancelled before it resumes, and asyncio discards the result.
+        When the result is an ACQUISITION the resource is then held by nobody
+        for the life of the process — a tenant job preempting the residency
+        reconcile (``Lifecycle.on_message`` cancels it on every run_job) at the
+        instant the ref lock was granted left that ref, and every desired ref
+        behind it in the serialized pass, permanently unmaterializable. Awaited
+        inline, ``Lock.acquire``/``Semaphore.acquire`` handle their own
+        cancel-after-grant (they re-wake the next waiter) and the leak is
+        structurally impossible.
+
+        An UNREPORTED wait still needs its own task, because the fail-closed
+        timer must fire while the awaitable is still running. There the inner
+        task is cancelled explicitly on every exit path: ``asyncio.wait`` does
+        not cancel what it was given, so a cancellation arriving mid-window used
+        to orphan it.
+        """
         if self._reported(intent_id):
-            return await task
-        done, _pending = await asyncio.wait(
-            {task},
-            timeout=self._unreported_wait_timeout_s,
-        )
+            return await awaitable
+        task = asyncio.ensure_future(awaitable)
+        try:
+            done, _pending = await asyncio.wait(
+                {task},
+                timeout=self._unreported_wait_timeout_s,
+            )
+        except BaseException:
+            task.cancel()
+            raise
         if task in done:
             return task.result()
         self._fail_unreported_wait(intent_id, operation)
