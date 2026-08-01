@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#830 — the dark 44 % of AOT compile time is named, and the attribution
+  can no longer rot in silence.** Attempt nine recorded `compile_s=1331.72` with
+  five phases summing to 742.6 s (56 %); the other 589 s had no name. The cause
+  was structural, not a missing metric key: in the pgw#809 pooled path
+  `compile_s` is the parent's Popen-to-reap wall of an entry CHILD PROCESS,
+  while `phases` only ever measured the inside of `aot_compile`. New
+  `aot_compile_spans` defines three nested partitions, each with an explicit
+  residual — `compile_s = child_boot_s + child_wall_s + reap_lag_s`,
+  `child_wall_s = child_seal_s + child_torch_import_s + child_devlock_s +
+  child_program_load_s + compile_wall_s + child_other_s`, and
+  `compile_wall_s = lowering_s + codegen_s + graph_passes_s + host_compile_s +
+  compile_other_s` — so a phase that stops being measured shows up as a growing
+  residual instead of as time silently vanishing. `triton_s`,
+  `device_lock_wait_s` (counted by pgw#809's lock since it existed, never read
+  until now) and `inductor_total_s` are reported as OVERLAYS, never summed into
+  the partition: they nest inside members above them, and adding them in was
+  the second attribution bug.
+- **pgw#830 — what the dark time actually was: `env_seal.establish()`, once per
+  ENTRY.** MEASURED off-pod on a real 8-entry pooled compile through real
+  children: `child_seal_s` is **37 % of one entry's `compile_s`** (18.36 s of
+  49.49 s), of which `seal_libhash_s` is 10.47 s — the identity manifest
+  SHA-256s **36 toolchain `.so` files, 3.96 GB**, and its memo is an
+  `lru_cache`, i.e. per PROCESS. A pool whose worker is a process that exits
+  therefore re-pays a multi-GB hashing pass for every entry. `env_seal` now
+  publishes `LAST_ESTABLISH_SPANS` (scrub / config / isa / posture / effective /
+  libhash) so the cost is a line item rather than an anonymous setup charge.
+  Telemetry only — no digest, no decision and no identity depends on it.
+- **pgw#830 — POOL IDLE is a separate line item from serial dark time, because
+  the two have opposite fixes.** New `PoolLedger` closes
+  `capacity = busy + idle` exactly and splits idle by CAUSE
+  (`idle_staging_s` — a freed slot waiting on the parent's serial
+  `torch.export.save`; `idle_drain_s` — the straggler tail; `idle_spawn_s`;
+  `idle_other_s`), charged as free-slot-seconds at the moment they occur rather
+  than divided out afterwards. The pool emits its own typed
+  `aot_mint_phases phase=pool` event, and per-entry `parent_stage_s` /
+  `parent_spawn_s` ride the existing phase channel under a distinct prefix so
+  nobody sums parent work into a compile total.
+- **pgw#830 — the invariant is a TEST.** `test_compile_attribution_pgw830.py`
+  drives the real `EntryCompilePool` through real `aot_compile` children and
+  asserts each partition equals the sum of its members, that the residual stays
+  under 15 % of `compile_s`, and that the seal split still covers
+  `child_seal_s`. On the recorded run the unnamed residual is **4.8 %**, against
+  44 % before.
+
+
 ## 0.86.0 (2026-08-01) — no mint route could publish a cell: the regional arm gets its caller, the delegated mint child gets its slots, eager serving names its reason, and the zero-based suite becomes a CI gate
 
 - **pgw#827 — a REGIONAL cell is adopted through the REGIONAL arm, so it can be
@@ -169,7 +216,6 @@
   deleted, because nothing ran the file it lived in. A strict xfail that XPASSes is a FAILURE,
   so `tests_v2/` was already red and nobody could tell. Marker deleted; the refusal now rides
   the names-its-cause loop with the rest of the matrix, and pgw#810 is closed.
-
 ## 0.85.0 (2026-07-31) — a regional cell's LoRA branch pair is BINDABLE: the ONE bind template, the mismatch refused before the compile is paid for, an aborted mint that reports where it spent, and the process split as the only execution model
 
 - **pgw#825 — a regional cell's LoRA branch pair is BINDABLE, the mismatch is

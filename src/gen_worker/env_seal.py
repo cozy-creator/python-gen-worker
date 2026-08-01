@@ -472,26 +472,60 @@ def assert_seal_unchanged(label: str = "") -> None:
             + "; ".join(diffs))
 
 
+#: pgw#830: what the LAST :func:`establish` call spent, per step. Telemetry
+#: only — nothing reads it to decide anything, and no digest depends on it.
+#: It exists because ``establish()`` is called once per pgw#809 entry-compile
+#: CHILD, so on a 72-entry mint its cost is multiplied by 72 and lands inside
+#: the recorded ``compile_s`` with no name. ``seal_libhash_s`` is the one that
+#: matters: the identity manifest SHA-256s every toolchain ``.so`` the env
+#: ships (measured off-pod: 36 files, 3.96 GB, ~8 s at 0.49 GB/s), and the
+#: memo that makes it "once" is an lru_cache — per PROCESS, so a pool of
+#: short-lived children re-pays it in full every time.
+LAST_ESTABLISH_SPANS: Dict[str, float] = {}
+
+
 def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """The boot entry (entrypoint wiring): SCRUB the behavior namespaces,
     IMPOSE the canonical config (+ declared knobs) and posture, store the
     boot seal, return it. Never refuses on env content — only on an
     imposition that does not take effect or an undeclared knob."""
     global _BOOT_SEAL
+    import time as _time
+
+    spans: Dict[str, float] = {}
+    marks = [_time.monotonic()]
+
+    def mark(name: str) -> None:
+        marks.append(_time.monotonic())
+        spans[name] = round(marks[-1] - marks[-2], 3)
+
     scrub_env()
+    mark("seal_scrub_s")
     establish_config(overrides)
+    mark("seal_config_s")
     try:
         host_isa.impose()
     except host_isa.HostIsaError as exc:
         raise EnvSealError(str(exc)) from exc
+    mark("seal_isa_s")
     guard_closure.establish_posture()
+    mark("seal_posture_s")
+    cold_libs = _LIB_SNAPSHOT is None
     _BOOT_SEAL = effective_seal()
+    mark("seal_effective_s")
+    # The whole of `seal_effective_s` is the library hash when the snapshot
+    # was cold; naming it separately is what turns "the seal is slow" into a
+    # line item somebody can act on.
+    spans["seal_libhash_s"] = spans["seal_effective_s"] if cold_libs else 0.0
+    LAST_ESTABLISH_SPANS.clear()
+    LAST_ESTABLISH_SPANS.update(spans)
     return dict(_BOOT_SEAL)
 
 
 __all__ = [
     "CANONICAL_CONFIG",
     "EPOCH_ENV",
+    "LAST_ESTABLISH_SPANS",
     "EnvSealError",
     "SCRUB_PREFIXES",
     "SEAL_KEY",

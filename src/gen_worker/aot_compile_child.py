@@ -20,16 +20,25 @@ rather than a published one.
 
 from __future__ import annotations
 
+import time
+
+#: pgw#830: the FIRST statement of the module, before any gen_worker import.
+#: The parent's ``compile_s`` starts at its own ``Popen`` return, so the
+#: interpreter's boot and this package's import are inside the measured total;
+#: without this stamp they can only ever land in a residual. Wall-clock (not
+#: monotonic) because the span it closes is measured across two processes.
+MODULE_IMPORT_EPOCH = time.time()
+
 import logging
 import os
 import resource
 import sys
-import time
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import msgspec
 
+from . import aot_compile_spans
 from .aot_compile_pool import (
     COMPILED,
     arm_parent_death_signal,
@@ -58,10 +67,30 @@ def _peak_rss() -> int:
         return 0
 
 
+def _device_lock_wait_s() -> float:
+    """Seconds this child spent BLOCKED on the pool-wide GPU benchmark lock.
+
+    pgw#809 has counted it since the lock existed (``DeviceBenchmarkLock``
+    tracks ``waited_s``) and nobody ever read the counter. At K=5 it is time
+    inside ``compile_s`` during which the entry is doing nothing at all — the
+    single most misleading second in the table if it stays anonymous, because
+    it looks like compile cost and is actually pool contention.
+    """
+    from . import aot_device_lock
+
+    lock = aot_device_lock.installed()
+    return round(float(getattr(lock, "waited_s", 0.0) or 0.0), 3) if lock else 0.0
+
+
 def run(job: EntryJob) -> int:
     from . import aot_device_lock, aot_mint, env_seal
 
     started = time.monotonic()
+    # pgw#830: the child's own wall, partitioned. `close()` at every exit,
+    # including the refusal paths — an entry that died still spent its
+    # seconds somewhere, and an aborted mint's table is the one a reader
+    # needs most.
+    ledger = aot_compile_spans.SpanLedger()
     report_path = Path(job.report)
     # Before anything expensive: if the mint child dies, this compile dies
     # with it. A serving pod must never be left burning CPU on a cell nobody
@@ -71,17 +100,35 @@ def run(job: EntryJob) -> int:
     # process emits the very bytes the seal describes. A child that sealed
     # differently would produce an artifact the parent's verify() rejects on
     # an axis nobody changed (pgw#784's rule, same reason).
-    env_seal.establish()
+    # NOT reordered to put `import torch` first, tempting as that is for the
+    # attribution: `scrub_env()` must run before torch reads the environment
+    # (env_seal's whole contract), and `establish_config` imports torch itself.
+    # So the seal legitimately OWNS the torch import, and the split below —
+    # published by env_seal as telemetry — is how it gets named anyway.
+    with ledger.span("child_seal_s"):
+        env_seal.establish()
+    seal_detail = dict(env_seal.LAST_ESTABLISH_SPANS)
     # Before ANY compile touches the card: every inductor GPU benchmark in
     # this process goes through the pool-wide lock, so K concurrent entries
     # cannot time kernels against each other and bake contention-chosen
     # configs into a cell whose key would not move (pgw#809).
-    if job.device_lock:
-        aot_device_lock.install(Path(job.device_lock))
+    with ledger.span("child_devlock_s"):
+        if job.device_lock:
+            aot_device_lock.install(Path(job.device_lock))
     try:
-        import torch
+        # Timed SEPARATELY from the program load. On a 72-entry mint this is
+        # paid 72 times — one cold interpreter per entry — and the pool's
+        # process boundary is the reason it exists at all, so it has to be a
+        # line item before anyone can argue about a persistent worker.
+        with ledger.span("child_torch_import_s"):
+            import torch
 
-        program = torch.export.load(job.program)
+        # The other half of the process boundary: pgw#809 hands the child its
+        # ExportedProgram on disk (`torch.export.save` in the parent, here the
+        # matching `load`). Named because "serialization across the pool's
+        # process boundary" was a prime suspect for the dark 44 %.
+        with ledger.span("child_program_load_s"):
+            program = torch.export.load(job.program)
     except Exception as exc:  # noqa: BLE001
         _write(report_path, EntryReport(
             entry=job.entry, status=REFUSED,
@@ -89,30 +136,80 @@ def run(job: EntryJob) -> int:
                 f"could not load the exported program from {job.program!r}: "
                 f"{type(exc).__name__}: {exc}"),
             elapsed_s=round(time.monotonic() - started, 2),
-            peak_rss_bytes=_peak_rss()))
+            peak_rss_bytes=_peak_rss(),
+            **_span_fields(ledger, {}, {}, seal_detail)))
         return EXIT_REFUSED
 
     # pgw#757's phase split is read from dynamo's IN-PROCESS counters, so it
     # has to be measured here, in the process that does the compiling.
-    before = aot_mint._phase_snapshot()
+    before = aot_compile_spans.phase_snapshot()
     try:
-        files = aot_mint.compile_entry_files(
-            program, job.entry, inductor_configs=job.inductor_configs)
+        with ledger.span("compile_wall_s"):
+            files = aot_mint.compile_entry_files(
+                program, job.entry, inductor_configs=job.inductor_configs)
     except aot_mint.MintRefused as exc:
+        partition, overlays, _raw = aot_compile_spans.phase_delta(
+            before, aot_compile_spans.phase_snapshot())
         _write(report_path, EntryReport(
             entry=job.entry, status=REFUSED, detail=str(exc),
             elapsed_s=round(time.monotonic() - started, 2),
-            peak_rss_bytes=_peak_rss()))
+            peak_rss_bytes=_peak_rss(),
+            **_span_fields(ledger, partition, overlays, seal_detail)))
         return EXIT_REFUSED
 
-    phases = aot_mint._phase_delta(before, aot_mint._phase_snapshot())
+    partition, overlays, raw = aot_compile_spans.phase_delta(
+        before, aot_compile_spans.phase_snapshot())
     _write(report_path, EntryReport(
         entry=job.entry, status=COMPILED, files=[str(f) for f in files],
-        phases=dict(phases or {}),
+        phases=dict(partition),
         detail=f"{len(files)} loose file(s)",
         elapsed_s=round(time.monotonic() - started, 2),
-        peak_rss_bytes=_peak_rss()))
+        peak_rss_bytes=_peak_rss(),
+        metrics_raw={k: v for k, v in sorted(raw.items())},
+        **_span_fields(ledger, partition, overlays, seal_detail)))
     return EXIT_COMPILED
+
+
+def _span_fields(
+    ledger: aot_compile_spans.SpanLedger,
+    partition: Dict[str, float],
+    overlays: Dict[str, float],
+    seal_detail: Dict[str, float],
+) -> Dict[str, Any]:
+    """Seal the child's ledger and shape it for :class:`EntryReport`.
+
+    Order matters: the child's own wall is closed FIRST, against only the
+    spans the ledger itself timed, so ``child_other_s`` is a true residual.
+    The inductor leaves are folded in AFTERWARDS, as the sub-partition of
+    ``compile_wall_s`` — folding them in earlier would let them count twice
+    and make the residual negative.
+
+    Neither residual may be implied by subtraction at read time: a reader who
+    has to do the subtraction himself is exactly how 44 % went dark.
+    """
+    spans = ledger.close("child_wall_s", "child_other_s")
+    compile_wall = float(spans.get("compile_wall_s", 0.0))
+    for label in aot_compile_spans.PARTITION_KEYS:
+        spans[label] = round(float(partition.get(label, 0.0)), 3)
+    spans["compile_other_s"] = round(compile_wall - sum(
+        spans[label] for label in aot_compile_spans.PARTITION_KEYS), 3)
+    overlay = dict(overlays)
+    # A split of `child_seal_s`, never a member of any partition: the seal's
+    # own steps, published by env_seal. `seal_libhash_s` is the identity
+    # manifest's SHA-256 pass over every toolchain .so the image ships — paid
+    # once per ENTRY here, because the pool's worker is a process that exits.
+    overlay.update({k: float(v) for k, v in seal_detail.items()})
+    waited = _device_lock_wait_s()
+    if waited:
+        overlay["device_lock_wait_s"] = waited
+    return {
+        "spans": spans,
+        "overlays": overlay,
+        "spans_v": aot_compile_spans.SPANS_V,
+        "module_import_epoch": MODULE_IMPORT_EPOCH,
+        "run_start_epoch": ledger.start_epoch,
+        "report_epoch": time.time(),
+    }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

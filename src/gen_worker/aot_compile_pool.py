@@ -64,7 +64,7 @@ from typing import (
 
 import msgspec
 
-from . import aot_device_lock
+from . import aot_compile_spans, aot_device_lock
 from .postmortem import effective_cpu_count
 
 logger = logging.getLogger(__name__)
@@ -391,6 +391,26 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     #: the compile leaves it — so without this the phase table silently goes
     #: dark the moment the pool turns on. Caught by pgw#758's own test.
     phases: Dict[str, float] = {}
+    #: pgw#830: the child's COMPLETE wall partition — `phases` above measures
+    #: only the inside of `aot_compile`, while the recorded `compile_s` is the
+    #: parent's Popen-to-reap wall. Everything between those two definitions
+    #: (interpreter boot, `import torch`, the seal, the device-lock install,
+    #: `torch.export.load` of the staged program) was the dark 44 %.
+    spans: Dict[str, float] = {}
+    #: Named, and deliberately NOT summed with `spans`: these nest inside
+    #: partition members (triton keys inside codegen/host compile; a device
+    #: benchmark-lock wait inside `aot_compile`). Adding them to the total was
+    #: the second attribution bug.
+    overlays: Dict[str, float] = {}
+    spans_v: int = 0
+    #: Wall-clock stamps that close the spans crossing the process boundary.
+    module_import_epoch: float = 0.0
+    run_start_epoch: float = 0.0
+    report_epoch: float = 0.0
+    #: Every `compilation_time_metrics` key that moved. The evidence for
+    #: naming whatever `compile_other_s` turns out to contain — a residual
+    #: nobody can look inside is only half an attribution.
+    metrics_raw: Dict[str, float] = {}
 
 
 COMPILED = "compiled"
@@ -420,6 +440,75 @@ class _Running:
     program_path: Path
     started: float
     stderr_path: Path
+    #: Wall clock at the moment ``Popen`` returned — the other end of the
+    #: child's boot span, which no monotonic clock can close across processes.
+    spawn_epoch: float = 0.0
+
+
+@dataclass
+class PoolLedger:
+    """pgw#830: where the POOL's seconds went, as against where the entries'
+    seconds went. The two are different questions with opposite fixes.
+
+    ``compile_s`` (the sum of entry walls) is SERIAL work: shrinking it means
+    compiling less or compiling faster. ``pool_idle_s`` is SCHEDULING loss:
+    workers with nothing to run. Attempt nine's 75 % pool efficiency at K=5 is
+    the second number, and collapsing the entry count (pgw#829) moves it
+    without touching a single compile — so a table that adds the two into one
+    "dark 44 %" figure would send that work at the wrong target.
+
+    The idle split is exact, not sampled: the loop charges every free-slot
+    second to the state the parent was actually in.
+    """
+
+    workers: int = 1
+    wall_s: float = 0.0
+    #: Sum of the per-entry Popen-to-reap walls (== the mint's ``compile_s``).
+    busy_s: float = 0.0
+    #: ``workers * wall_s`` — the seconds the pool COULD have compiled for.
+    capacity_s: float = 0.0
+    #: Free-slot seconds while the parent was inside ``torch.export.save``.
+    #: The pool refills a freed slot only after staging the next program, so
+    #: this is export-vs-compile SERIALIZATION, measured.
+    idle_staging_s: float = 0.0
+    #: Free-slot seconds with nothing left to start: the straggler tail.
+    idle_drain_s: float = 0.0
+    #: Free-slot seconds inside ``Popen`` itself.
+    idle_spawn_s: float = 0.0
+    #: Free-slot seconds that were neither — the residual of the idle split.
+    idle_other_s: float = 0.0
+    #: Parent-serial staging cost, summed. Not idle time (it overlaps running
+    #: children); the idle FRACTION of it is ``idle_staging_s``.
+    stage_total_s: float = 0.0
+    spawn_total_s: float = 0.0
+    entries: int = 0
+
+    @property
+    def idle_s(self) -> float:
+        return round(
+            self.idle_staging_s + self.idle_drain_s
+            + self.idle_spawn_s + self.idle_other_s, 3)
+
+    @property
+    def efficiency(self) -> float:
+        return round(self.busy_s / self.capacity_s, 4) if self.capacity_s else 0.0
+
+    def facts(self) -> Dict[str, Any]:
+        return {
+            "pool_wall_s": round(self.wall_s, 3),
+            "pool_busy_s": round(self.busy_s, 3),
+            "pool_capacity_s": round(self.capacity_s, 3),
+            "pool_idle_s": self.idle_s,
+            "pool_efficiency": self.efficiency,
+            "idle_staging_s": round(self.idle_staging_s, 3),
+            "idle_drain_s": round(self.idle_drain_s, 3),
+            "idle_spawn_s": round(self.idle_spawn_s, 3),
+            "idle_other_s": round(self.idle_other_s, 3),
+            "stage_total_s": round(self.stage_total_s, 3),
+            "spawn_total_s": round(self.spawn_total_s, 3),
+            "pool_entries": int(self.entries),
+            "pool_workers": int(self.workers),
+        }
 
 
 def child_argv(job_path: Path, *, python: str = "") -> List[str]:
@@ -576,6 +665,16 @@ class EntryCompilePool:
         self.peak_concurrency = 0
         self.entry_seconds: Dict[str, float] = {}
         self.entry_phases: Dict[str, Dict[str, float]] = {}
+        # pgw#830: parent-side per-entry spans (staging + spawn) and the
+        # pool-level idle split. Kept separate from `entry_phases` because
+        # they are NOT inside `compile_s`: staging happens in the parent while
+        # other children run, so summing it into the compile total would
+        # invent seconds nobody spent compiling.
+        self.entry_stage_seconds: Dict[str, float] = {}
+        self.entry_spawn_seconds: Dict[str, float] = {}
+        self.entry_overlays: Dict[str, Dict[str, float]] = {}
+        self.entry_metrics_raw: Dict[str, Dict[str, float]] = {}
+        self.ledger = PoolLedger(workers=int(width.workers))
 
     # -- staging ----------------------------------------------------------
 
@@ -587,6 +686,9 @@ class EntryCompilePool:
         program_path = slot / "program.pt2"
         t0 = time.monotonic()
         torch.export.save(program, program_path)
+        self.entry_stage_seconds[entry] = round(time.monotonic() - t0, 3)
+        self.ledger.stage_total_s = round(
+            self.ledger.stage_total_s + self.entry_stage_seconds[entry], 3)
         logger.info(
             "aot-pool: staged %r (%.1f MB) in %.1fs",
             entry, program_path.stat().st_size / 1e6, time.monotonic() - t0)
@@ -605,6 +707,7 @@ class EntryCompilePool:
     def _spawn(self, job: EntryJob, job_path: Path, program_path: Path) -> _Running:
         stderr_path = job_path.parent / "stderr.log"
         handle = stderr_path.open("wb")
+        t0 = time.monotonic()
         try:
             proc = subprocess.Popen(
                 child_argv(job_path, python=self.python),
@@ -615,10 +718,14 @@ class EntryCompilePool:
             )
         finally:
             handle.close()
+        started, spawn_epoch = time.monotonic(), time.time()
+        self.entry_spawn_seconds[job.entry] = round(started - t0, 3)
+        self.ledger.spawn_total_s = round(
+            self.ledger.spawn_total_s + (started - t0), 3)
         logger.info("aot-pool: entry %r -> pid %s", job.entry, proc.pid)
         return _Running(
             entry=job.entry, proc=proc, job=job, program_path=program_path,
-            started=time.monotonic(), stderr_path=stderr_path)
+            started=started, stderr_path=stderr_path, spawn_epoch=spawn_epoch)
 
     # -- the run ----------------------------------------------------------
 
@@ -651,23 +758,54 @@ class EntryCompilePool:
         # that without turning an 18-entry sdxl cell into ~46 GB on disk.
         staged_cap = max(1, self.width.workers + INFLIGHT_PROGRAM_SLACK)
         failure: Optional[EntryCompileFailed] = None
+        # pgw#830: exact idle accounting. Every wall second is multiplied by
+        # the number of FREE worker slots at that moment and charged to
+        # whatever the parent was doing — so `pool_idle_s` is not a residual
+        # anybody has to trust, it is a sum with named causes.
+        self.ledger.entries = len(entries)
+        pool_t0 = mark = time.monotonic()
+
+        def charge(bucket: str, free: int) -> None:
+            nonlocal mark
+            now = time.monotonic()
+            if free > 0:
+                setattr(self.ledger, bucket,
+                        getattr(self.ledger, bucket) + (now - mark) * free)
+            mark = now
+
         try:
             while pending or staged or running:
                 while (pending and not failure
                        and len(staged) + len(running) < staged_cap):
                     index, name, program = pending.pop(0)
+                    free = self.width.workers - len(running)
                     staged.append(self._stage(name, program, index))
+                    # The freed slot waits for the NEXT program to be written
+                    # before it can be refilled: export-vs-compile
+                    # serialization, charged where it happens.
+                    charge("idle_staging_s", free)
                 while staged and not failure \
                         and len(running) < self.width.workers:
                     job, job_path = staged.pop(0)
+                    free = self.width.workers - len(running)
                     running.append(
                         self._spawn(job, job_path, Path(job.program)))
+                    charge("idle_spawn_s", free)
                 if not running:
                     break
+                free = self.width.workers - len(running)
+                # Nothing left to start: the free slots are the straggler
+                # tail, which is a SCHEDULING loss and not a compile cost.
+                # pgw#829's entry collapse moves this number; nothing about
+                # the compiler does.
+                bucket = "idle_drain_s" if not (pending or staged) \
+                    else "idle_other_s"
                 finished = self._reap(running)
                 if finished is None:
                     time.sleep(_POLL_S)
+                    charge(bucket, free)
                     continue
+                charge(bucket, free)
                 running.remove(finished)
                 try:
                     done[finished.entry] = self._collect(finished)
@@ -680,13 +818,42 @@ class EntryCompilePool:
                     except Exception:  # noqa: BLE001 — telemetry never fails a mint
                         logger.debug(
                             "entry-pool progress callback failed", exc_info=True)
+                # Collection (report read, program unlink) and pgw#824's
+                # progress callback both run with the slot ALREADY FREE, so
+                # they are charged as idle rather than left outside the split
+                # — a callback that blocked would otherwise vanish from a
+                # ledger whose whole point is that nothing vanishes.
+                charge("idle_other_s", self.width.workers - len(running))
             if failure is not None:
                 raise failure
         finally:
+            self.ledger.wall_s = round(time.monotonic() - pool_t0, 3)
+            self.ledger.busy_s = round(sum(self.entry_seconds.values()), 3)
+            self.ledger.capacity_s = round(
+                self.ledger.wall_s * self.width.workers, 3)
             for row in running:
                 _terminate_group(row.proc)
             self._sweep()
+            self._emit_ledger()
         return {name: done[name] for name in sorted(done)}
+
+    def _emit_ledger(self) -> None:
+        """The pool's own typed event. Separate from the mint's roll-up on
+        purpose: pool idle is not a mint phase, and a reader who groups them
+        together would price a scheduling loss as compile work."""
+        try:
+            from . import activity as activity_mod
+
+            facts = self.ledger.facts()
+            activity_mod.emit_event(
+                activity_mod.KIND_AOT_MINT,
+                f"pool ledger (pgw#830) {facts}",
+                phase="pool",
+                duration_ms=int(round(self.ledger.wall_s * 1000)),
+            )
+            logger.info("aot-pool: pgw#830 ledger %s", facts)
+        except Exception:  # pragma: no cover — telemetry never fails a mint
+            logger.debug("aot-pool: ledger emission failed", exc_info=True)
 
     def _reap(self, running: Sequence[_Running]) -> Optional[_Running]:
         # Observed concurrency, not intended: the ONLY load-independent
@@ -703,6 +870,7 @@ class EntryCompilePool:
 
     def _collect(self, row: _Running) -> List[str]:
         elapsed = time.monotonic() - row.started
+        reap_epoch = time.time()
         self.entry_seconds[row.entry] = round(elapsed, 2)
         code = row.proc.returncode
         report = _read_report(Path(row.job.report))
@@ -721,10 +889,14 @@ class EntryCompilePool:
                     f"compiled file(s) but {len(missing)} do not exist "
                     f"(first: {missing[0]}) — the pool's shared inductor cache "
                     f"dir {self.cache_dir!r} is not visible to this process")
-            self.entry_phases[row.entry] = dict(report.phases or {})
+            self.entry_phases[row.entry] = self._close_entry_partition(
+                row, report, elapsed=elapsed, reap_epoch=reap_epoch)
+            self.entry_overlays[row.entry] = dict(report.overlays or {})
+            self.entry_metrics_raw[row.entry] = dict(report.metrics_raw or {})
             logger.info(
-                "aot-pool: entry %r compiled in %.1fs (%d file(s))",
-                row.entry, elapsed, len(report.files))
+                "aot-pool: entry %r compiled in %.1fs (%d file(s)) spans=%s",
+                row.entry, elapsed, len(report.files),
+                self.entry_phases[row.entry])
             return list(report.files)
         detail = report.detail if report is not None else ""
         if not detail:
@@ -733,6 +905,58 @@ class EntryCompilePool:
             row.entry,
             f"entry {row.entry!r}: compile child exited {code} after "
             f"{elapsed:.0f}s ({_exit_note(code)}): {detail or 'no detail'}")
+
+    def _close_entry_partition(
+        self, row: _Running, report: EntryReport, *,
+        elapsed: float, reap_epoch: float,
+    ) -> Dict[str, float]:
+        """pgw#830: close the outermost partition — the one that spans the
+        process boundary and therefore could never be closed inside the child.
+
+        ``compile_s = child_boot_s + child_wall_s + reap_lag_s``, where
+        ``child_boot_s`` is interpreter startup plus this package's import
+        (paid once per ENTRY, because the pool's unit of parallelism is a
+        process that exits) and ``reap_lag_s`` is the child's exit plus the
+        parent's poll granularity.
+
+        A child that predates this instrumentation reports no epochs; rather
+        than invent a split, the whole wall lands in the residual and the
+        invariant check says so out loud.
+        """
+        spans = dict(report.spans or {})
+        spans["compile_s"] = round(elapsed, 3)
+        if report.run_start_epoch and row.spawn_epoch:
+            spans["child_boot_s"] = round(
+                report.run_start_epoch - row.spawn_epoch, 3)
+        if report.module_import_epoch and row.spawn_epoch:
+            # Split of `child_boot_s`, reported as an overlay-style detail:
+            # interpreter exec + gen_worker import, before any of the child's
+            # own code runs. It is what a persistent worker would delete.
+            spans["child_interp_s"] = round(
+                report.module_import_epoch - row.spawn_epoch, 3)
+        if report.report_epoch:
+            spans["reap_lag_s"] = round(reap_epoch - report.report_epoch, 3)
+        if "child_boot_s" not in spans or "reap_lag_s" not in spans:
+            spans["child_boot_s"] = spans.get("child_boot_s", 0.0)
+            spans["reap_lag_s"] = round(
+                spans["compile_s"] - spans["child_boot_s"]
+                - float(spans.get("child_wall_s", 0.0)), 3)
+        violations = aot_compile_spans.check(spans)
+        if violations:
+            # Named, loud, and non-fatal: an attribution defect must never
+            # fail a mint, and must never be silent either (pgw#824's class).
+            logger.warning(
+                "aot-pool: pgw#830 attribution defect on entry %r: %s",
+                row.entry, "; ".join(violations))
+        spans["child_interp_s"] = spans.get("child_interp_s", 0.0)
+        # Parent-side work for THIS entry. Prefixed, and listed in
+        # `aot_compile_spans.SUBSPANS`, because it is not inside `compile_s`:
+        # staging overlaps other children, so summing it into the compile
+        # total would invent seconds nobody spent compiling. Its idle FRACTION
+        # is `ledger.idle_staging_s`, which is a pool number, not an entry one.
+        spans["parent_stage_s"] = self.entry_stage_seconds.get(row.entry, 0.0)
+        spans["parent_spawn_s"] = self.entry_spawn_seconds.get(row.entry, 0.0)
+        return spans
 
     def _sweep(self) -> None:
         """Every staged program, gone. The loose compiled files stay: they
