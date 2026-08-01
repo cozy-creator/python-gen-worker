@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829)
+
 - **pgw#829 — a conv-free block class collapses its whole SHAPE axis onto ONE
   entry: sdxl's regional mint goes 72 entries -> 8.** pgw#830 measured that
   attempt nine's 72 entries were not a scheduling problem (the pool was already
