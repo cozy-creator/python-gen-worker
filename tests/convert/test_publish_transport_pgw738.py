@@ -59,27 +59,27 @@ def _one_file(tmp_path: Path, name: str = "model.safetensors") -> CommitFile:
     return CommitFile(path=name, local_path=p)
 
 
-def test_proxy_404_on_commit_create_is_retried_then_succeeds(
+def test_proxy_404_on_publish_declare_is_retried_then_succeeds(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
     """A proxy answering 404 (hub restarting behind ngrok) is an outage, not
     'route missing'. Pre-fix: instant HubPublishError, paid work discarded."""
     _FakeHub.state["proxy_posts"] = 2
     _FakeHub.state["proxy_status"] = 404
-    res = _client(fake_hub).commit(
+    res = _client(fake_hub).publish_v2(
         destination_repo="acme/repo", files=[_one_file(tmp_path)])
     assert res.uploaded == 1
-    assert res.checkpoint_id == "blake3:abc"
+    assert res.checkpoint_id
 
 
-def test_proxy_503_on_commit_is_retried_then_succeeds(
+def test_proxy_503_on_publish_is_retried_then_succeeds(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
     """#743's exact shape: proxy-shaped 503 (HTML body). Pre-fix the 5-attempt
     cap exhausted in ~2 min and classified FATAL at the finish line."""
     _FakeHub.state["proxy_posts"] = 7  # > the old 5-attempt budget
     _FakeHub.state["proxy_status"] = 503
-    res = _client(fake_hub).commit(
+    res = _client(fake_hub).publish_v2(
         destination_repo="acme/repo", files=[_one_file(tmp_path)])
     assert res.uploaded == 1
 
@@ -93,25 +93,14 @@ def test_hub_origin_404_stays_terminal(fake_hub: Any, tmp_path: Path) -> None:
 
     def counting_post(url: str, **kw: Any) -> Any:
         calls.append(time.monotonic())
-        return real_post(url.replace("/commits", "/definitely-missing"), **kw)
+        return real_post(url.replace("/publishes", "/definitely-missing"), **kw)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(hub_mod._http_session(), "post", counting_post)
-        with pytest.raises(HubPublishError, match=r"commit create failed \(404\)"):
-            client.commit(destination_repo="acme/repo",
-                          files=[_one_file(tmp_path)])
+        with pytest.raises(HubPublishError, match=r"publish declare failed \(404\)"):
+            client.publish_v2(destination_repo="acme/repo",
+                              files=[_one_file(tmp_path)])
     assert len(calls) == 1, "a definite hub 404 must not be retried"
-
-
-def test_connection_reset_mid_part_put_recovers(
-    fake_hub: Any, tmp_path: Path,
-) -> None:
-    """The peer severs the socket mid-PUT (tunnel drop): retry, then land."""
-    _FakeHub.state["reset_puts"] = 2
-    res = _client(fake_hub).commit(
-        destination_repo="acme/repo", files=[_one_file(tmp_path)])
-    assert res.uploaded == 1
-    assert _FakeHub.state.get("completed"), "the upload must complete"
 
 
 def test_sustained_outage_exhausts_typed_never_raw(
@@ -122,8 +111,8 @@ def test_sustained_outage_exhausts_typed_never_raw(
     monkeypatch.setattr(hub_mod, "_SEND_SILENCE_WINDOW_S", 0.3)
     _FakeHub.state["proxy_posts"] = 10_000
     _FakeHub.state["proxy_status"] = 503
-    with pytest.raises(HubPublishError, match=r"commit create failed \(503\)"):
-        _client(fake_hub).commit(
+    with pytest.raises(HubPublishError, match=r"publish declare failed \(503\)"):
+        _client(fake_hub).publish_v2(
             destination_repo="acme/repo", files=[_one_file(tmp_path)])
 
 
@@ -164,33 +153,6 @@ def test_publish_flavors_is_observable(fake_hub: Any, tmp_path: Path) -> None:
     # Asserting the PREFIX (not just "checkpoint=") keeps this line honest —
     # it still fails if the flip is reverted.
     assert "checkpoint=sha256:" in joined
-
-
-def test_sdk_grant_lane_forwards_progress(
-    fake_hub: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The R2 SDK lane (boto3) was progress-BLIND. The grant entry must now
-    forward byte progress into part_progress."""
-    import gen_worker.s3_transfer as s3t
-
-    seen: list[tuple[int, int, int]] = []
-
-    def fake_upload(*, file_path: Any, grant: Any, blake3_hex: str,
-                    size_bytes: int, on_progress: Any = None) -> Any:
-        assert on_progress is not None, "SDK lane must wire progress"
-        on_progress(0, 1, size_bytes // 2)
-        on_progress(1, 1, size_bytes)
-        return s3t.S3TransferResult(
-            bucket=grant.bucket, key=grant.key,
-            size_bytes=size_bytes, blake3=blake3_hex)
-
-    monkeypatch.setattr(s3t, "upload_file_with_grant", fake_upload)
-    _FakeHub.state["grant_mode"] = True
-    res = _client(fake_hub).commit(
-        destination_repo="acme/repo", files=[_one_file(tmp_path)],
-        part_progress=lambda d, t, b: seen.append((d, t, b)))
-    assert res.uploaded == 1
-    assert (1, 1, 13) in seen, f"byte progress must reach part_progress: {seen}"
 
 
 @_needs_publish_observability

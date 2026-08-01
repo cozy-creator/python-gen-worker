@@ -317,16 +317,17 @@ class _RequestOutputStream:
         self._ctx._emit_event("request.warning", payload)
 
     def _finalize_checkpoint_commit(self) -> Tensors:
-        """Publish the buffered checkpoint file as ONE tensorhub commit.
+        """Publish the buffered checkpoint file as ONE tensorhub publish.
 
-        gw#471: the hub's write API is commit-only (th#514/#515) — operations
-        are declared up front with blake3 + size, then presigned parts are
-        PUT and the revision finalized. The blake3 is already rolled during
-        write(), so the temp file commits directly through the same client
-        conversion's publish_flavors uses daily (gen_worker.convert.hub).
-        One save_checkpoint == one commit == one finalized repo revision;
-        the repo is auto-created server-side under the job's create_repo
-        grant on first publish."""
+        pgw#807: this rode the v1 (blake3) `/commits` route, which the hub
+        froze and this SDK no longer speaks. It now goes over the chunked
+        sha256 route (th#1303) through the same client `publish_flavors` and
+        the cell self-mint use — one save_checkpoint == one publish == one
+        finalized repo revision, and the repo is still auto-created
+        server-side under the job's create_repo grant on first publish. A
+        multi-GB adapter now retries a 64 MiB chunk instead of a whole shard,
+        and the digest is signed into each presigned PUT.
+        """
         from ..convert.hub import CommitFile, HubClient  # lazy: keeps `import gen_worker` off the convert/requests stack
 
         assert self._tmp_path is not None
@@ -334,7 +335,6 @@ class _RequestOutputStream:
         file_size = os.path.getsize(self._tmp_path)
         if file_size <= 0:
             raise RuntimeError("file save failed (empty file)")
-        blake3_hex = self._blake3_hasher.hexdigest()
 
         repo_owner, repo, _job_id = self._repo_job_scope
         ctx = self._ctx
@@ -356,16 +356,14 @@ class _RequestOutputStream:
                 self._chunks_uploaded = parts_done
             self._maybe_emit_progress(stage="stream_upload")
 
-        result = client.commit(
+        result = client.publish_v2(
             destination_repo=f"{repo_owner}/{repo}",
             files=[CommitFile(
                 path=self._ref,
                 local_path=Path(self._tmp_path),
                 size_bytes=int(file_size),
-                blake3=blake3_hex,
             )],
             mode="merge",
-            message=f"checkpoint {self._ref}",
             provenance=provenance,
             part_progress=_part_progress,
         )
@@ -382,8 +380,10 @@ class _RequestOutputStream:
             format=fmt,
             size_bytes=int(file_size),
             sha256=self._sha.hexdigest(),
-            blake3=blake3_hex,
-            blob_digest=f"blake3:{blake3_hex}",
+            # pgw#807: the published blob is sha256-addressed, so the digest
+            # this reports is the one the hub actually stored it under. A
+            # `blake3:` blob_digest here named a key nothing could resolve.
+            blob_digest=f"sha256:{self._sha.hexdigest()}",
             snapshot_digest=str((ckpt or {}).get("snapshot_digest") or "").strip() or None,
             stream_mode=self.stream_mode,
         )

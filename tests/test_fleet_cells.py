@@ -245,8 +245,8 @@ def test_finalize_packs_the_proven_capture_and_publishes_it(
     # the pin, not the fake value.
     assert minted.cell_key.startswith("ck1-")
     assert minted.ref == f"root/family-fam#{minted.cell_key}"
-    assert minted.snapshot_digest.startswith("blake3:")
-    assert len(minted.snapshot_digest) == len("blake3:") + 64
+    assert minted.snapshot_digest.startswith("sha256:")
+    assert len(minted.snapshot_digest) == len("sha256:") + 64
     assert published.wait(5), "a finalized mint must attempt publish"
     (family, tar_bytes, meta, mint_duration_ms) = calls[0]
     assert family == "fam"
@@ -266,11 +266,11 @@ def test_finalize_packs_the_proven_capture_and_publishes_it(
     # publish.
     # The published bytes ARE the packed proven capture, and the advertised
     # digest is the digest of exactly those bytes.
-    from gen_worker.convert.hub import blake3_file
+    from gen_worker.models.chunk_cas import sha256_file
 
     copy = tmp_path / "published-copy.tar.gz"
     copy.write_bytes(tar_bytes)
-    assert minted.snapshot_digest == "blake3:" + blake3_file(copy)
+    assert minted.snapshot_digest == "sha256:" + sha256_file(copy)
     import io
     import tarfile
 
@@ -386,7 +386,7 @@ class _FakeResp:
         return json.loads(self.text)
 
 
-def test_publisher_drives_intent_commit_complete(monkeypatch, tmp_path):
+def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     posts: list = []
     key = "ck1-" + "c" * 56
 
@@ -410,17 +410,35 @@ def test_publisher_drives_intent_commit_complete(monkeypatch, tmp_path):
         def __init__(self, **kw):
             committed.append(("client", kw))
 
-        def commit(self, **kw):
-            committed.append(("commit", kw))
+        def commit(self, **kw):  # pragma: no cover - the frozen v1 route
+            raise AssertionError(
+                "the cell publisher must never call the v1 (blake3) commit "
+                "route: it is frozen hub-side and 410s (pgw#807 item 3)")
+
+        def publish_v2(self, **kw):
+            committed.append(("publish_v2", kw))
+            on_stage = kw.get("on_stage")
+            if on_stage is not None:
+                on_stage("declared", {"publish_id": "pub-1", "need": 1})
+                on_stage("uploading", {"publish_id": "pub-1", "objects": 1})
 
             class _R:
                 checkpoint_id = "cp-42"
+                revision_id = "pub-1"
+                uploaded = 1
+                deduped = 0
+                total_bytes = 5
 
             return _R()
 
     import gen_worker.convert.hub as hub_mod
 
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
+
+    events: list = []
+    monkeypatch.setattr(
+        fc.activity_mod, "emit_event",
+        lambda kind, detail, phase="", duration_ms=0: events.append((kind, phase)))
 
     artifact = tmp_path / "cell.tar.gz"
     artifact.write_bytes(b"bytes")
@@ -440,15 +458,28 @@ def test_publisher_drives_intent_commit_complete(monkeypatch, tmp_path):
     kind, kw = committed[0]
     assert kind == "client" and kw["token"] == "cap-token"
     kind, kw = committed[1]
-    assert kind == "commit"
+    assert kind == "publish_v2", "the cell publisher ships over chunked sha256"
     assert kw["destination_repo"] == "root/family-fam"
     assert kw["mode"] == "replace"
     assert kw["flavor"] == key
     assert "tags" not in kw  # a cell publish never binds tags
+    # th#1340 refuses a body that names the cell identity: it is hub-derived
+    # and rides the capability token.
+    for forbidden in ("cell_publish", "cell_key", "family", "owning_endpoint_id",
+                      "axes", "default_flavor"):
+        assert forbidden not in kw
 
     complete_url, complete_body = posts[-1]
     assert complete_url.endswith("/v1/worker/cells/publish-complete")
     assert complete_body["ok"] is True and complete_body["checkpoint_id"] == "cp-42"
+    # pgw#711's artifact_digest/manifest_digest are gone: the hub's
+    # publish-complete route has no such fields (it decodes family, cell_key,
+    # checkpoint_id, ok, error) and the delta-1 seam refuses unlisted keys.
+    assert set(complete_body) == {"family", "cell_key", "checkpoint_id", "ok"}
+
+    # Every LEG of the publish is on the wire, not just its terminus.
+    assert [p for k, p in events if k == "self_mint_publish"] == [
+        "declared", "uploading", "committed"]
 
 
 def test_publisher_typed_refusal_is_terminal(monkeypatch, tmp_path):
@@ -486,7 +517,7 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
         def __init__(self, **kw):
             pass
 
-        def commit(self, **kw):
+        def publish_v2(self, **kw):
             raise RuntimeError("upload exploded")
 
     import gen_worker.convert.hub as hub_mod

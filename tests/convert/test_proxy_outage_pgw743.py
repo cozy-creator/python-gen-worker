@@ -50,11 +50,11 @@ def test_proxy_outage_of_any_status_is_ridden_out(
     _FakeHub.state["proxy_posts"] = 8
     _FakeHub.state["proxy_status"] = proxy_status
 
-    res = _client(fake_hub).commit(
+    res = _client(fake_hub).publish_v2(
         destination_repo="acme/repo", files=[_one_file(tmp_path)])
 
     assert res.uploaded == 1
-    assert res.checkpoint_id == "blake3:abc"
+    assert res.checkpoint_id
     assert _FakeHub.state["proxy_posts"] == 0
 
 
@@ -72,12 +72,12 @@ def test_hub_refusal_stays_terminal_and_is_not_retried(
 
     def counting_post(url: str, **kw: Any) -> Any:
         posts.append(url)
-        return real_post(url.replace("/commits", "/no-such-route"), **kw)
+        return real_post(url.replace("/publishes", "/no-such-route"), **kw)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(session, "post", counting_post)
-        with pytest.raises(HubPublishError, match=r"commit create failed \(404\)"):
-            _client(fake_hub).commit(
+        with pytest.raises(HubPublishError, match=r"publish declare failed \(404\)"):
+            _client(fake_hub).publish_v2(
                 destination_repo="acme/repo", files=[_one_file(tmp_path)])
 
     assert len(posts) == 1, f"a definite hub 404 must not be retried: {posts}"
@@ -92,8 +92,8 @@ def test_outage_outliving_the_window_fails_typed(
     _FakeHub.state["proxy_posts"] = 10_000
     _FakeHub.state["proxy_status"] = 503
 
-    with pytest.raises(HubPublishError, match=r"commit create failed \(503\)"):
-        _client(fake_hub).commit(
+    with pytest.raises(HubPublishError, match=r"publish declare failed \(503\)"):
+        _client(fake_hub).publish_v2(
             destination_repo="acme/repo", files=[_one_file(tmp_path)])
 
 

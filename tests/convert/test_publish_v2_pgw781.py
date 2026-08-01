@@ -331,7 +331,7 @@ def test_by_reference_adds_are_REFUSED(hub, tmp_path):
     with pytest.raises(HubPublishError, match="by-reference"):
         client(hub).publish_v2(
             destination_repo="org/model",
-            files=[CommitFile(path="w.safetensors", size_bytes=10, blake3="ab" * 32)],
+            files=[CommitFile(path="w.safetensors", size_bytes=10)],
             tags=["prod"],
         )
 

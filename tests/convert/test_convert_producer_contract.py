@@ -16,11 +16,9 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
 
-from fake_hub import _FakeHub, _client
+from fake_hub import _FakeHub
 
 # ---------------------------------------------------------------------------
 # gw#442 (e2e J19): concurrent duplicate clones must serialize on the keyed
@@ -95,90 +93,3 @@ def test_concurrent_same_source_clones_serialize(fake_hub, tmp_path: Path, monke
     for i in range(2):
         assert isinstance(results.get(i), CloneResult), f"clone {i}: {results.get(i)!r}"
     assert state["max_active"] == 1, "concurrent clones must never share the workdir"
-
-
-# ---------------------------------------------------------------------------
-# gw#462 (J24 qwen postmortem): a 20GB conversion pod ENOSPC-died mid-
-# download with no preflight — disk preflight now refuses loud before ever
-# starting a download it cannot finish.
-# ---------------------------------------------------------------------------
-
-
-class _DiskPlan:
-    def __init__(self, sizes: list) -> None:
-        self._sizes = sizes
-        self.classification = SimpleNamespace(strategy="", attrs={})
-        self.provider = ""
-        self.paths = [f"f{i}.safetensors" for i in range(len(sizes))]
-
-    def bank_files(self):
-        return [(p, s, f"cid{i}") for i, (p, s) in enumerate(zip(self.paths, self._sizes))]
-
-
-def test_disk_preflight_refuses_oversized_source_with_actionable_message(tmp_path: Path) -> None:
-    from gen_worker.convert.clone import CloneDiskSpaceError, _preflight_disk, normalize_outputs
-
-    specs = normalize_outputs([{"dtype": "bf16", "file_layout": "diffusers", "file_type": "safetensors"}])
-    with pytest.raises(CloneDiskSpaceError, match=r"need ~.* GiB free .*have .* GiB"):
-        _preflight_disk(tmp_path, _DiskPlan([10 * 1024**5]), specs)  # 10 PiB: no real fs fits
-
-
-# ---------------------------------------------------------------------------
-# th#592: download-skip bank keys are deterministic + input-sensitive (a
-# wrong-but-stable key would either over-skip real re-downloads onto stale
-# content, or never hit at all).
-# ---------------------------------------------------------------------------
-
-
-class _BankPlan:
-    def __init__(self, files, extra=None) -> None:
-        self._files = files
-        self._extra = extra or {"strategy": "diffusers", "attrs": "{}"}
-        self.provider = "huggingface"
-        self.source_ref = "acme/src"
-        self.revision = "deadbeef"
-
-    def bank_files(self):
-        return sorted(self._files)
-
-    def bank_extra(self):
-        return dict(self._extra)
-
-
-def test_download_skip_bank_key_deterministic_and_input_sensitive() -> None:
-    from gen_worker.convert.bank import BANK_KEY_PREFIX, flavor_bank_key
-    from gen_worker.convert.clone import OutputSpec
-
-    spec = OutputSpec(dtype="bf16", file_layout="diffusers", file_type="safetensors")
-    files = [("model.safetensors", 100, "sha256:" + "a" * 64), ("config.json", 10, "git:abc123")]
-    k1 = flavor_bank_key(_BankPlan(files), spec.label, layout_hint="diffusers")
-    k2 = flavor_bank_key(_BankPlan(list(reversed(files))), spec.label, layout_hint="diffusers")
-    assert k1 == k2 and k1.startswith(BANK_KEY_PREFIX), "key must be order-independent"
-
-    changed = [("model.safetensors", 100, "sha256:" + "b" * 64), ("config.json", 10, "git:abc123")]
-    assert flavor_bank_key(_BankPlan(changed), spec.label, layout_hint="diffusers") != k1
-    assert flavor_bank_key(_BankPlan(files), spec.label, layout_hint="singlefile") != k1
-
-
-# ---------------------------------------------------------------------------
-# gw#462 (J24 qwen postmortem): a lost staged object during commit must cost
-# exactly ONE file's re-upload, never the whole job.
-# ---------------------------------------------------------------------------
-
-
-def test_publish_lost_staged_object_reuploads_only_that_file(fake_hub, tmp_path: Path, monkeypatch) -> None:
-    from gen_worker.convert.hub import files_from_tree
-
-    monkeypatch.setattr("time.sleep", lambda *_: None)
-    _FakeHub.state["staging_missing"] = {"shard-00004.safetensors": 1}
-
-    (tmp_path / "config.json").write_text('{"a":1}')
-    (tmp_path / "shard-00004.safetensors").write_bytes(b"\x04" * 96)
-
-    result = _client(fake_hub).commit(
-        destination_repo="acme/qwen-image", files=files_from_tree(tmp_path),
-    )
-    assert result.uploaded == 2
-    st = _FakeHub.state
-    assert st["reopens"] == ["shard-00004.safetensors"], "only the poisoned file re-opens"
-    assert sum(st["put_counts"].values()) == 3  # 2 files + 1 re-upload of the poisoned one

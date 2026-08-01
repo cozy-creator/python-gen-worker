@@ -296,7 +296,7 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
         (target,) = h.ex.compile_targets()
         assert target.active_compile_ref.startswith(
             cc.system_repo(FAMILY))
-        assert target.active_compile_snapshot_digest.startswith("blake3:")
+        assert target.active_compile_snapshot_digest.startswith("sha256:")
         assert h.ex.serving_tiers() == {"generate": "compiled"}
         assert cc.cell_proven_in_process(target.active_compile_ref)
         # pgw#654 memory: the full plan is inheritable by the next instance.

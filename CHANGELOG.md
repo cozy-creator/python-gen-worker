@@ -1,7 +1,111 @@
 # Changelog
 
-## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
+## 0.89.0 (2026-08-01) — the cell self-mint publisher speaks chunked sha256: the v1 (blake3) client is deleted, and the procsplit allowlist stops refusing the publisher's own payload
+- **pgw#807 item 3 — the cell self-mint publisher ships over CHUNKED SHA-256,
+  and the seam it rides stops refusing its own payloads.** The first AOT mint
+  in platform history (attempt ten, a real L4) compiled 72 entries, packaged
+  them, adopted the cell into its own runtime — and then lost the artifact at
+  `seal_publish`, because `fleet_cells.CellPublisher.publish` was still on the
+  frozen v1 (blake3) `commits` route: `410 unsupported_digest_algorithm`. The
+  publisher now calls `HubClient.publish_v2` (th#1303's declare -> `{have,
+  need}` -> PUT -> complete). Both gates the staged flip waited on are
+  discharged upstream — th#1340 gave the v2 route the cell-publish claim (the
+  same receipt + `cell_store` + `cell_receipts` writes v1 does), and the
+  receipt reader already dispatches on the receipt's OWN algorithm tag, so a
+  `sha256:`-bound cell resolves. Digest identity is sha256 end to end; no new
+  blake3 anywhere. Proven against a real tensorhub: a 50.4 MB cell tarball
+  published, `cell_store` row written with the post-0080 axes (`lane=w8a8-
+  lora64 sm=89 sku=l4 gen_worker_version mint_duration_ms minted_by_pod_id
+  minted_for_release_id`), a `sha256:`-bound signed receipt minted and
+  verified against the local bytes, and a re-publish of the same bytes
+  uploading nothing (`resident=1 uploaded=0`).
+  - **The delta-1 seam allowlist was refusing the live publish bodies.**
+    `cells.publish_intent` permitted `(family, cell_key, axes)` while the
+    publisher has sent `identity_axes` + `mint_duration_ms` since th#1355, and
+    `cells.publish_complete` permitted `(…, status, detail, axes)` — three
+    names no caller and no hub route ever had — while refusing `ok`/`error`.
+    An unlisted key is an `ActionRefused`, and the compute child is the process
+    that publishes, so under the split (the only execution model since
+    pgw#783) the publish-intent would have been refused before the 410 could
+    even be reached. The table now enumerates exactly what the publisher
+    sends, pinned by a test that drives the real publisher and authorizes its
+    real payloads.
+  - **pgw#711's `artifact_digest`/`manifest_digest` on publish-complete are
+    gone.** The hub's route decodes `family, cell_key, checkpoint_id, ok,
+    error` and nothing else, so the blake3 pass over the artifact computed a
+    value no reader had — dead weight that the seam then refused.
+  - **The publish LEG is on the wire.** `publish_v2` gained an `on_stage`
+    callback and the publisher emits `self_mint_publish` `declared` /
+    `uploading` / `committing` / `committed` beside the existing `started` /
+    `published`, so `worker_activity_events` can say WHERE a publish stopped
+    rather than only that it did. `HubPublishError` now carries the hub's own
+    `status` / `code` / `retryable`, and a failed publish reports that code as
+    its `phase` (`unsupported_digest_algorithm`, `cell_publish_flavor_
+    mismatch`, …) instead of a prose string nothing can group by.
 
+- **THE v1 (blake3) PUBLISH CLIENT IS DELETED (Paul's ruling: one transport in
+  the tree, ever).** Item 3 survived as "accepted as dark" for a whole release
+  cycle precisely because two transports could coexist — a caller of deleted
+  code fails CI the same day, a caller of a frozen protocol fails at runtime
+  with a 410 and a rented pod. `HubClient.commit` and its whole apparatus
+  (`_upload_one`/`_upload_entry_once`/`_reopen_upload`/`_check_complete`/
+  `_finalize`, the SDK grant lane, `_StagingLostError`, `BankedBlobGoneError`,
+  `blake3_file`, `CommitFile.resolve`/`.blake3` and the by-reference add) are
+  gone. `gen_worker.convert.hub` now speaks exactly one protocol.
+  - **`ctx.save_checkpoint` publishes v2** (`request_context/_stream.py`, the
+    pgw#807 item-4 site). Its fleet-floor blocker closed at 0.79.0. A multi-GB
+    adapter now retries a 64 MiB chunk instead of a whole shard, and the
+    `Tensors.blob_digest` it returns is `sha256:` — the key the blob is
+    actually stored under, where it used to name a `blake3:` key nothing
+    could resolve.
+  - **The th#592 download-skip bank is DELETED** (`convert/bank.py`,
+    `_publish_from_bank`, `lookup_clone_manifests`, `record_clone_manifests`,
+    the bank-record leg of `run_clone`). Its adds were BY REFERENCE with a
+    caller-asserted blake3 and no local bytes — exactly what a protocol whose
+    guarantee is "the digest is proven from the bytes in hand" cannot accept,
+    so it was un-migratable by construction and already dead in practice under
+    the hub's write freeze (every bank publish 410'd into the full-clone
+    fallback). Clones are unaffected in outcome; they lose an optimisation
+    that had stopped working. **Follow-up for the coordinator: if download-skip
+    is wanted back, it needs a v2-shaped design (bank the sha256 CAS refs and
+    replay through `publishes` with `have`), not a revival of this code.**
+  - **The receipt reader is sha256-ONLY** (`receipts.py` "phase 4"):
+    `ARTIFACT_DIGEST_ALGORITHMS == ("sha256",)`, one hash pass per arm, the
+    legacy bare-hex `artifact.blake3` claim and the `?blake3=` fetch param are
+    gone (and with them that key on the delta-1 seam allowlist). A
+    blake3-bound receipt is now a typed refusal, so its cell is re-minted and
+    republished sha256-bound — the designed miss policy.
+  - **Self-attested artifact digests are sha256** (`aot_cells`, `fleet_cells`,
+    `mint_child`): the digest a pod advertises for the cell it armed now EQUALS
+    the digest the hub recorded for those bytes, so the two are joinable.
+  - **Sweep result — `blake3` remaining in `src/gen_worker`: 0 in the publish
+    and receipt paths.** What remains is deliberately retained and is NOT the
+    v1 publish protocol: (a) the model/artifact READ side (`models/cozy_cas`,
+    `cozy_snapshot`, `hub_client`, `refs`, `residency`, `volume_verify`,
+    `config_identity`, `executor`, `lifecycle`, `provision`, `api/types`) —
+    th#1303's own rule is that READS ARE NEVER FROZEN, since freezing them
+    would dark every artifact ever published; (b) `presigned_upload` /
+    `s3_transfer` / `input_assets` / `request_context/_datasets` — the media,
+    dataset-CAS and input-asset manifest protocols, each with its own hub
+    routes and its own migration, none of them repo-CAS v1.
+
+## 0.88.0 (2026-08-01) — the author ENVELOPE has an SDK carrier: `Resources(max_gpu_count=, parallel=)` (pgw#748, the SP fast-tier declaration surface)
+- **pgw#748/th#1285 — `Resources` gains `max_gpu_count` and `parallel`: the
+  author ENVELOPE has an SDK carrier.** The hub's builder has parsed
+  `resources["max_gpu_count"]` / `resources["parallel"]` since th#1285
+  (`extractStaffingEnvelope`), and the whole tier→degree product (typed
+  admission, cohort-exact buys, degree-exact dispatch, the th#1347 flip) keys
+  off `requirement_payload["parallel"]` — but the SDK could not declare either
+  field, so no real endpoint could opt into the hardware-fast tier through the
+  build path. Both fields are elided from the manifest when they carry nothing
+  (`omit_defaults`): every existing release's payload is byte-identical.
+  Validation mirrors the builder's ingest refusals at declaration time
+  (whole-number ceiling >= `gpu_count`, known mechanisms only —
+  `sequence`/`cfg`, a mechanism requires device headroom); declaring either
+  implies `gpu=True`. The author never writes a degree, a tier, a packing or
+  a device id.
+
+## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
 - **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
   0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
   toolchain `.so` the image ships (36 files, 3.96 GB); its memo was per

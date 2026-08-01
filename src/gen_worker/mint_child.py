@@ -367,7 +367,7 @@ def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
 
 def _mint_aot(
     request: MintRequest, pipe: Any, cfg: Any, target: Path, *,
-    started: float, blake3_file: Any,
+    started: float, sha256_file: Any,
 ) -> MintReport:
     """pgw#805: the AOT recipe — torch.export + AOTInductor over the family's
     whole declared graph-class set, packed as ONE multi-graph cell (pgw#758).
@@ -436,7 +436,7 @@ def _mint_aot(
     return MintReport(
         status="minted",
         artifact=str(target),
-        digest=blake3_file(target),
+        digest=sha256_file(target),
         cell_key=str(result.cell_key),
         detail=(
             f"exported {len((result.metadata.get('entries') or {}))} graph "
@@ -465,7 +465,7 @@ def mint(request: MintRequest) -> MintReport:
     from . import compile_cache as cc
     from . import env_seal
     from .cli.run import run_setup
-    from .convert.hub import blake3_file
+    from .models.chunk_cas import sha256_file
     from .registry import collect_endpoints
 
     started = time.monotonic()
@@ -520,7 +520,7 @@ def mint(request: MintRequest) -> MintReport:
         # pod cannot adopt.
         return _mint_aot(
             request, pipe, cfg, target, started=started,
-            blake3_file=blake3_file)
+            sha256_file=sha256_file)
 
     jobs = _warm_jobs(siblings)
     # Arm COLD, pointed at our own capture dir: the warm forwards below are
@@ -574,7 +574,7 @@ def mint(request: MintRequest) -> MintReport:
     return MintReport(
         status="minted",
         artifact=str(target),
-        digest=blake3_file(target),
+        digest=sha256_file(target),
         cell_key=str(minted_key or request.cell_key),
         detail=f"packed {target.name} for family {cfg.family!r}",
         phase="finalize",

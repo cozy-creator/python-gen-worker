@@ -55,7 +55,7 @@ from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .procsplit import broker
 from .config import get_settings
-from .convert.hub import blake3_file
+from .models.chunk_cas import sha256_file
 from .models.chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
     ChunkSpec,
@@ -91,7 +91,7 @@ class AdoptedAotCell:
 
     Duck-compatible with ``fleet_cells.SelfMint`` where the executor reads
     it (``_selection_for``): ``ref``/``snapshot_digest``/``artifact``. The
-    advertised digest is the artifact tar's blake3 — the worker's own view
+    advertised digest is the artifact tar's sha256 — the worker's own view
     of the exact bytes it armed, receipt-verified downstream — so the
     advertisement never names bytes this pipe does not serve.
     """
@@ -99,7 +99,7 @@ class AdoptedAotCell:
     family: str
     cell_key: str
     ref: str  # "root/family-<f>#<stamped ck5 key>"
-    snapshot_digest: str  # "blake3:<hex>" of the artifact tarball
+    snapshot_digest: str  # "sha256:<hex>" of the artifact tarball
     artifact: Path
 
 
@@ -458,7 +458,7 @@ def _discover_inner(
             family=family,
             cell_key=key,
             ref=f"{cc.system_repo(family)}#{key}",
-            snapshot_digest="blake3:" + blake3_file(artifact),
+            snapshot_digest="sha256:" + sha256_file(artifact),
             artifact=artifact,
         )
         _emit("hit",

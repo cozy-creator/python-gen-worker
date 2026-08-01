@@ -107,13 +107,14 @@ ACTIONS: Dict[str, HubAction] = {
         ),
         # pgw#709 cell-receipt gate: fetch one receipt, fetch the revocation
         # list. Read-only, and the gate fails closed without them.
-        # ``artifact_digest`` repeats (pgw#807 v2: one request offers every
+        # ``artifact_digest`` repeats (pgw#807: one request offers every
         # tagged digest; a per-algorithm 404-and-retry chain is a downgrade).
+        # The bare ``blake3`` key is gone with the v1 publish protocol.
         _a(
             "cells.receipt",
             "GET",
             r"^/v1/worker/cells/receipt$",
-            query=("blake3", "cell_key", "artifact_digest"),
+            query=("cell_key", "artifact_digest"),
         ),
         _a(
             "cells.revocations",
@@ -123,18 +124,26 @@ ACTIONS: Dict[str, HubAction] = {
         # Self-mint publish (gw#587/th#910). publish-intent returns a
         # key-pinned capability token — a short-TTL, least-authority grant, the
         # one credential shape the child is explicitly allowed to hold.
+        # The body enumerations are the LIVE payloads `fleet_cells.publish`
+        # sends, and nothing else. An unlisted key is an ActionRefused, not a
+        # silent drop — so a publisher that grows a field the table does not
+        # know refuses the whole publish under the split (the only execution
+        # model since pgw#783). `identity_axes`/`mint_duration_ms` (th#1355)
+        # were exactly that gap; `status`/`detail`/`axes` were names on
+        # `publish-complete` that no caller and no hub route ever had.
         _a(
             "cells.publish_intent",
             "POST",
             r"^/v1/worker/cells/publish-intent$",
-            body=("family", "cell_key", "axes"),
+            body=("family", "cell_key", "axes", "identity_axes",
+                  "mint_duration_ms"),
             timeout_s=60.0,
         ),
         _a(
             "cells.publish_complete",
             "POST",
             r"^/v1/worker/cells/publish-complete$",
-            body=("family", "cell_key", "checkpoint_id", "status", "detail", "axes"),
+            body=("family", "cell_key", "checkpoint_id", "ok", "error"),
             timeout_s=60.0,
         ),
         # AOT cell discovery: list a system repo's checkpoints, resolve one

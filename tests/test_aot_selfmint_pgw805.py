@@ -412,7 +412,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         cfg=cfg_spec(_Cfg()), recipe="aot")
     report = mint_child._mint_aot(
         request, _Pipe(), _Cfg(), target,
-        started=0.0, blake3_file=lambda p: "deadbeef")
+        started=0.0, sha256_file=lambda p: "deadbeef")
 
     assert report.status == "minted"
     assert report.recipe == "aot"
@@ -449,7 +449,7 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
     with pytest.raises(mint_child.MintChildRefused, match="lane held on dynamo"):
         mint_child._mint_aot(
             request, _Pipe(), _Cfg(), tmp_path / "cell.tar.gz",
-            started=0.0, blake3_file=lambda p: "x")
+            started=0.0, sha256_file=lambda p: "x")
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +475,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     monkeypatch.setattr(
         fleet_cells, "_packed_metadata",
         lambda artifact: {"cell_key": "ck5-real", "kind": "aot-inductor"})
-    monkeypatch.setattr(fleet_cells, "blake3_file", lambda p: "beef")
+    monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
 
     artifact = tmp_path / "cell.tar.gz"
