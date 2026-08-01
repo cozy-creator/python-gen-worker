@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.90.0 (2026-08-01) — **an AOT cell can advertise `compiled` for the first time** (pgw#844 P0: the exported lane was never asked for its guard-revocation signal, and a partially dispatchable cell claimed nothing); the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint can derive 8 entries from 72 (pgw#829, per-family opt-in); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), four runner-flake classes die and the wall-clock guard can finally fail (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
 
 - **pgw#844 (P0) — an AOT cell could never advertise compiled, and one
   undispatchable aspect bucket cost the pod every other shape.** Attempt
@@ -47,8 +47,24 @@
   runs on a pod — grouped by (target, block class, adapter arm) exactly as
   dispatch groups. Still pre-compile: seconds to refuse, not a full compile
   bill.
-
-## 0.90.0 (2026-08-01) — the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint derives 8 entries from 72 (pgw#829); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), two more runner-flake classes die (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
+- **pgw#845 — the wall-clock source guard could not fail, and two more
+  "flakes" were the test.** `_LITERAL_DEADLINE` required a DIGIT after
+  `time.monotonic() +`, so `deadline = time.monotonic() + _TIMEOUT` was
+  invisible and six `tests/harness/` files hid deadlines that way — the harness
+  guard was asserting an empty set. Widened to see a name bound to a literal
+  duration, the clock call itself, latency/rtt, and BOTH directions (a lower
+  bound fails on a FAST runner). Five test files and two harness fixtures were
+  exposed and each dispositioned rather than allowlisted. Separately,
+  `test_procsplit_pgw763.py::test_signal_death_consumes_the_inflight_marker_*`
+  asserted the parent's post-mortem at the instant it observed the durable
+  job_result — `_handle_child_death` does attribution first and forensics
+  second, so under two-core contention 3 of 5 runs had no dial yet; it now
+  waits on the forensics via `await_progress`, giving up only when the parent
+  process is gone. And the bounded-shutdown tests now assert the escalation's
+  PRODUCT — the post-mortem naming `worker_process_exit` / `SIGKILL` — with the
+  wall bounded by the grace the test itself CONFIGURED instead of a literal 45,
+  so the gw#640 entry leaves the burndown rather than living there. Tests only;
+  no product change.
 
 - **pgw#833 follow-on — forwarding a signal is not draining a pod.** The
   gw#640 SIGTERM test hung CI three runs running. It was not the stderr tee
