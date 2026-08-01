@@ -141,6 +141,7 @@ def _lane_of_meta(meta: Dict[str, Any]) -> str:
 
 def _candidates(
     items: List[Dict[str, Any]], family: str, want_lane: str,
+    rejected: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[str, str, Dict[str, Any]]]:
     """(updated_at, checkpoint_id, metadata) rows that pass the filter, best
     candidate first.
@@ -151,6 +152,16 @@ def _candidates(
     board, so it is preferred when one exists, and a same-sm cell from
     another SKU is adopted rather than refused when one does not.
     """
+    # pgw#824: every rejection is COUNTED by class. Each of these filters was
+    # a `logger.debug` or a bare `continue`, and the caller's `miss` event then
+    # said only "no matching cell among N checkpoint(s)" — so a family with 12
+    # published cells that rejects all 12 was indistinguishable from a family
+    # with none, and the two have completely different fixes. Coalescing with
+    # counts is the pattern; dropping is not.
+    def _reject(cls: str) -> None:
+        if rejected is not None:
+            rejected[cls] = rejected.get(cls, 0) + 1
+
     out: List[Tuple[str, str, Dict[str, Any]]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -159,13 +170,19 @@ def _candidates(
         if not isinstance(meta, dict):
             continue
         if str(meta.get("kind") or "") != aot_serve.ARTIFACT_KIND:
+            _reject("not_an_aot_cell")
             continue
         key = str(meta.get("cell_key") or "").strip()
         if not cell_key.is_key(key):
+            _reject("unreadable_cell_key")
             continue
         reason = aot_serve.verify(meta, family=family)
         if reason:
             logger.debug("aot-cells: %s filtered: %s", key, reason)
+            # The verify reason is already a classified token — keep it, so a
+            # fleet-wide sm/torch/ISA/contract mismatch surfaces as itself
+            # rather than as a generic "verify failed".
+            _reject(f"verify:{reason}")
             continue
         # Pre-clamp retirement (arm-events lane, live-proven 2026-07-29):
         # a cell minted before the pgw#754 host-ISA stamp carries no
@@ -178,8 +195,10 @@ def _candidates(
             logger.debug(
                 "aot-cells: %s filtered: no host_isa stamp (pre-clamp cell)",
                 key)
+            _reject("no_host_isa_stamp")
             continue
         if _lane_of_meta(meta) != want_lane:
+            _reject("lane_mismatch")
             continue
         out.append((
             str(item.get("updated_at") or ""),
@@ -406,11 +425,21 @@ def _discover_inner(
                   f"family={family}: checkpoint listing -> {resp.status_code}")
             return None
         items = (resp.json() or {}).get("items") or []
-        rows = _candidates(items, family, want_lane)
+        rejected: Dict[str, int] = {}
+        rows = _candidates(items, family, want_lane, rejected)
         if not rows:
+            # pgw#824: WHY every candidate lost, as counts. "No matching cell
+            # among 12 checkpoints" was true and useless — it could not tell an
+            # empty family from a family whose every cell is one sm short, and
+            # those are different bugs with different owners.
+            histogram = ", ".join(
+                f"{cls}={n}" for cls, n in sorted(
+                    rejected.items(), key=lambda kv: (-kv[1], kv[0])))
             _emit("miss",
                   f"family={family} lane={want_lane or 'plain'}: no matching "
-                  f"aot-inductor cell among {len(items)} checkpoint(s)")
+                  f"aot-inductor cell among {len(items)} checkpoint(s)"
+                  + (f" — rejected by class: {histogram}" if histogram
+                     else " (the family has no published cells at all)"))
             return None
         _updated, checkpoint_id, meta = rows[0]
         key = str(meta.get("cell_key") or "")
