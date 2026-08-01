@@ -32,10 +32,11 @@ class MarcoAttachOutput(msgspec.Struct):
 
 @endpoint(
     # th#1087: an org can only attach envs the RELEASE declares. GEN_WORKER_OOM_PROBE
-    # is genuinely this endpoint's own switch, so declaring it is correct.
-    # GEN_WORKER_PROCESS_SPLIT is deliberately absent: pgw#763 delta 0 moved it into
-    # the platform-reserved namespace, so declaring it now earns a reserved_name
-    # refusal — a tenant cannot decline the boundary that contains it.
+    # is genuinely this endpoint's own switch, so declaring it is correct. The
+    # process split's own envs (GEN_WORKER_COMPUTE_CHILD, ...) are deliberately
+    # absent: pgw#763 delta 0 put them in the platform-reserved namespace, so
+    # declaring one earns a reserved_name refusal — a tenant cannot decline the
+    # boundary that contains it.
     env=["GEN_WORKER_OOM_PROBE"],
 )
 class MarcoPolo:

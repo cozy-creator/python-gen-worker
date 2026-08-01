@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#783 — the parent/child process split is now the ONLY worker execution
+  model; the `GEN_WORKER_PROCESS_SPLIT` flag is gone.** `entrypoint`
+  unconditionally becomes the control parent and execs one compute child per
+  execution group — there is no single-process mode to fall back to.
+  `split_enabled()`/`ENV_SPLIT` are removed from `procsplit`. G=1 behaviour is
+  byte-identical to the previous flag-on path.
+
 ## 0.84.0 (2026-07-31) — the AOT mint exports the module it DECLARED: one lifted arm for the export, a declaration/module check before a pod is rented, and the process split becomes an N-group AUTHORIZATION boundary (dark)
 
 - **pgw#822 — the AOT mint exports the module it DECLARED: ONE lifted arm, plus a

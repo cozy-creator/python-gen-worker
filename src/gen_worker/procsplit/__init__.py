@@ -5,7 +5,8 @@ imports torch. Child = compute plane (executor, CUDA context, models, endpoint
 handler code). On child death the parent reports typed FATALs for in-flight
 jobs, keeps the pod's connection identity alive, and respawns the child.
 
-Off by default: ``GEN_WORKER_PROCESS_SPLIT=1`` enables the split.
+The split is unconditional: every worker process runs as a control parent that
+execs one compute child per execution group. There is no single-process mode.
 
 Delta 0: every name in this module is PLATFORM-RESERVED hub-side (tensorhub
 ``internal/api/endpoint_env_reserved.go`` + the orchestrator twin) and injected
@@ -19,7 +20,6 @@ from __future__ import annotations
 
 import os
 
-ENV_SPLIT = "GEN_WORKER_PROCESS_SPLIT"
 ENV_CHILD = "GEN_WORKER_COMPUTE_CHILD"
 ENV_SOCKET = "GEN_WORKER_CHILD_SOCKET"
 ENV_CHILD_CMD = "GEN_WORKER_CHILD_CMD"
@@ -67,10 +67,6 @@ def group_ordinal() -> int:
         return 0
 
 
-def split_enabled() -> bool:
-    return os.environ.get(ENV_SPLIT, "").strip().lower() in ("1", "true", "yes")
-
-
 def is_compute_child() -> bool:
     return bool(os.environ.get(ENV_CHILD, "").strip())
 
@@ -83,11 +79,9 @@ __all__ = [
     "ENV_LIVENESS_FD",
     "ENV_SESSION_ID",
     "ENV_SOCKET",
-    "ENV_SPLIT",
     "ENV_TOPOLOGY",
     "ENV_WATCHDOG_PING_S",
     "group_ordinal",
     "host_siblings",
     "is_compute_child",
-    "split_enabled",
 ]
