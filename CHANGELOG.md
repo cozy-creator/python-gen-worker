@@ -90,6 +90,28 @@
   remedy: the collapse, under which one entry over the hull is unique by
   construction.
 
+- **pgw#833 — the "split cannot boot a hub pod" P0 root-caused: a wheel-omitted
+  endpoint module, and the two gates that let it reach a paid pod.** The first
+  hub-launched 0.88.0 pod crash-looped its compute child untyped (`exit:1`
+  pre-Hello, ×3, `compute_boot_crash_loop`) — reproduced OFF-POD in the real
+  wan-2.2 image: `wan_2_2/finish.py` imports package-root `cozy_finish`, which
+  the wheel's hatch `only-include` never shipped, so `collect_endpoints` dies
+  with `ModuleNotFoundError` at boot. The split executes fine (G=1 and G=2
+  boots proven; with the module present the same image boots past the death
+  point). Three gen-worker fixes: (1) **bake gate parity** —
+  `discover_functions` refuses a walk that imported source-tree-only modules
+  when the project is installed (`SourceOnlyModuleError`; the bake previously
+  passed because it injects `root`/`root/src` into `sys.path`, a weaker
+  predicate than the runtime walker); (2) **child stderr in the post-mortem**
+  — the control parent captures each compute child's stderr (teed byte-for-byte
+  back to the container log), and a child death dial now carries
+  `child_stderr_tail` (and the `compute_boot_crash_loop` give-up names the last
+  lines) — a pre-Hello death is diagnosable from `pod_events` alone, no
+  container-logs API needed; (3) **T_BOOT_FATAL ack** (the pgw#826 follow-on
+  race) — the parent acks after RECORDING a terminal boot verdict and the
+  dying child waits (bounded) for it, so the typed verdict can no longer lose
+  to the reap on a slow host.
+
 ## 0.89.0 (2026-08-01) — the cell self-mint publisher speaks chunked sha256: the v1 (blake3) client is deleted, and the procsplit allowlist stops refusing the publisher's own payload
 - **pgw#807 item 3 — the cell self-mint publisher ships over CHUNKED SHA-256,
   and the seam it rides stops refusing its own payloads.** The first AOT mint

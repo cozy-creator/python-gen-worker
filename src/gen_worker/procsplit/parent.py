@@ -143,6 +143,14 @@ _CAPABILITY_REPORT_MIN_INTERVAL_S = 300.0
 # Bounded: an observation is dropped when its result passes back, so this only
 # has to survive jobs whose results never arrive (child deaths).
 _OBSERVATION_CAP = 512
+# pgw#833: the child's stderr is captured by the parent (teed through to the
+# container log unchanged) so a pre-Hello death carries its OWN crash text in
+# the post-mortem dial. RunPod exposes no container-logs API (gw#640), so a
+# child that dies before it can dial — and it never can, it holds no JWT —
+# was a bare `exit:1` on the wire; diagnosing pgw#833 took three paid probe
+# pods for want of these bytes. Ring-buffered, bounded, reset per spawn.
+_STDERR_TAIL_CAP_BYTES = 32768
+_STDERR_TAIL_DIAL_CHARS = 3000
 
 
 def _http_call(
@@ -235,6 +243,10 @@ class _ChildSlot:
         self.child_saw_hello = False
         # pgw#826: a terminal typed boot verdict from the dying child.
         self.boot_fatal: Optional[Dict[str, Any]] = None
+        # pgw#833: ring buffer of THIS child's most recent stderr bytes.
+        self.stderr_tail: collections.deque = collections.deque()
+        self.stderr_tail_len = 0
+        self.stderr_task: Optional[asyncio.Task] = None
         self.spawn_count = 0
         self.last_frame_at = time.monotonic()
         self.relaying = False
@@ -399,6 +411,15 @@ class _ChildSlot:
                 "reason_class=%s", self.label,
                 (self.boot_fatal or {}).get("kind"), report.get("reason_class"),
             )
+            # pgw#833 (the pgw#826 follow-on race): ack AFTER the verdict is
+            # recorded, so a child that waits for this ack can only exit once
+            # the parent has consumed the frame — the respawn decision can no
+            # longer race the socket buffer on a slow host.
+            try:
+                await link.writer.frame(frames.T_BOOT_FATAL_ACK, frames.pack_meta({}))
+            except Exception:
+                logger.debug("boot-fatal ack write failed (child may already "
+                             "be gone)", exc_info=True)
             return
         if ftype == frames.T_FLUSH_REQ:
             meta = frames.unpack_meta(payload)
@@ -458,14 +479,73 @@ class _ChildSlot:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self.p._child_cmd, env=env, pass_fds=(write_fd,),
+                # pgw#833: capture the child's stderr so its death carries its
+                # own last words in the post-mortem dial. The pump tees every
+                # byte straight back to the parent's stderr, so the container
+                # log (and the pgw#639 SIGUSR2 stack dumps) are unchanged.
+                stderr=asyncio.subprocess.PIPE,
                 # pgw#783: die with the parent so a crashed group never strands
                 # its VRAM as an orphaned torch process.
                 preexec_fn=_set_pdeathsig if sys.platform == "linux" else None,
             )
         finally:
             os.close(write_fd)   # the child owns it now
+        self._start_stderr_pump(proc)
         await self._start_liveness_reader(read_fd)
         return proc
+
+    # ---- child stderr capture (pgw#833) ----------------------------------
+
+    def _start_stderr_pump(self, proc: asyncio.subprocess.Process) -> None:
+        old = self.stderr_task
+        if old is not None and not old.done():
+            old.cancel()
+        self.stderr_tail.clear()
+        self.stderr_tail_len = 0
+        self.stderr_task = asyncio.create_task(
+            self._stderr_pump(proc), name=f"parent-stderr-{self.label}"
+        )
+
+    async def _stderr_pump(self, proc: asyncio.subprocess.Process) -> None:
+        """Tee the child's stderr to the parent's own (the container log keeps
+        every byte, exactly as before the pipe) while ring-buffering the tail
+        for the death dial. Reading continuously also keeps the pipe from ever
+        backpressuring the child."""
+        stream = proc.stderr
+        if stream is None:
+            return
+        while True:
+            try:
+                chunk = await stream.read(8192)
+            except (asyncio.CancelledError, GeneratorExit):
+                raise
+            except Exception:
+                return
+            if not chunk:
+                return
+            try:
+                buf = getattr(sys.stderr, "buffer", None)
+                if buf is not None:
+                    buf.write(chunk)
+                    buf.flush()
+                else:
+                    sys.stderr.write(chunk.decode("utf-8", errors="replace"))
+                    sys.stderr.flush()
+            except Exception:
+                pass  # the ring still keeps the bytes for the dial
+            self.stderr_tail.append(chunk)
+            self.stderr_tail_len += len(chunk)
+            while (self.stderr_tail_len > _STDERR_TAIL_CAP_BYTES
+                    and len(self.stderr_tail) > 1):
+                dropped = self.stderr_tail.popleft()
+                self.stderr_tail_len -= len(dropped)
+
+    def stderr_tail_text(self, max_chars: int = _STDERR_TAIL_DIAL_CHARS) -> str:
+        raw = b"".join(self.stderr_tail)
+        if not raw:
+            return ""
+        text = raw.decode("utf-8", errors="replace")
+        return text[-max_chars:]
 
     async def _start_liveness_reader(self, read_fd: int) -> None:
         old = self.liveness_task
@@ -583,6 +663,16 @@ class _ChildSlot:
 
     async def _settle_link(self) -> None:
         """Let the reaped child's buffered frames finish relaying, then close."""
+        # pgw#833: drain the stderr pipe to EOF first (bounded) so the death
+        # dial below carries the child's actual last words, not a prefix. A
+        # grandchild holding the fd open cannot stall the death path: on
+        # timeout the ring simply keeps what has arrived so far.
+        task = self.stderr_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), 1.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
         try:
             await asyncio.wait_for(self.link_closed.wait(), _LINK_SETTLE_TIMEOUT_S)
         except asyncio.TimeoutError:
@@ -727,6 +817,10 @@ class _ChildSlot:
                 logger.warning("signal-death attribution failed", exc_info=True)
         else:
             postmortem.clear_inflight()
+        # pgw#833: the dying child's own stderr tail rides the dial — the only
+        # forensic channel that survives a pre-Hello death on a provider with
+        # no container-logs API.
+        stderr_tail = self.stderr_tail_text()
         detail = postmortem.format_detail(
             phase="compute_process_exit",
             verdict=verdict,
@@ -739,6 +833,7 @@ class _ChildSlot:
                 "in_flight": sorted(f"{r}#{a}" for (r, a) in died_jobs),
                 "spawn_count": self.spawn_count,
                 "saw_hello": saw_hello,
+                **({"child_stderr_tail": stderr_tail} if stderr_tail else {}),
             },
         )
         await p._dial_detail(detail)
@@ -1770,12 +1865,14 @@ class ParentControl:
     async def _fail_boot_loop(self, slot: _ChildSlot, cause: str) -> None:
         """N consecutive pre-Hello deaths: the child has never served and never
         will — report typed and exit 1 rather than billing a respawn loop."""
+        tail = slot.stderr_tail_text(1500)
         await self._dial_detail(
             f"phase=compute_boot_crash_loop group={slot.ordinal} "
             f"deaths_before_hello={slot.deaths_before_hello} "
             f"limit={self._boot_death_limit} last_cause={cause} "
             f"spawns={slot.spawn_count} — a child that repeatedly dies before "
             "Hello will never serve; the parent exits 1 instead of respawning"
+            + (f"\nlast child stderr:\n{tail}" if tail else "")
         )
         self._give_up(f"boot_crash_loop:{cause}")
 
