@@ -65,7 +65,7 @@ from typing import (
 import msgspec
 
 from . import aot_compile_spans, aot_device_lock, env_seal
-from .postmortem import effective_cpu_count
+from .postmortem import cpu_quota_cores
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,82 @@ _KILL_GRACE_S = 10.0
 _POLL_S = 0.25
 
 
+#: pgw#842: how many times the device bound samples free VRAM before it
+#: believes a number, and how far apart. The pool shares the card with a
+#: SERVING process by construction (pgw#784), so a single ``mem_get_info``
+#: can land inside a tenant forward and read that forward's activation set as
+#: "gone". :data:`DEVICE_RESERVE_BYTES` already reserves the tenant's peak;
+#: subtracting an in-flight peak on top of it charges the same bytes twice —
+#: measured as a 5 -> 3 width swing on identical work. The MAX over a short
+#: window is the steady figure the reserve was written against. Three samples
+#: over 0.1 s costs nothing against a mint that runs for minutes.
+DEVICE_FREE_SAMPLES = 3
+DEVICE_FREE_SAMPLE_GAP_S = 0.05
+
+
+@dataclass(frozen=True)
+class CpuFacts:
+    """What the pod's cores actually are, and which reading said so.
+
+    pgw#842: a provider ADVERTISES vCPUs (RunPod's ``host_vcpus``) and the
+    kernel ENFORCES a quota, and the two are routinely different numbers. The
+    pool must size on the enforced one — and must SAY which one it read, or a
+    K that came out narrow than the advertisement is indistinguishable from a
+    bug in the formula.
+    """
+
+    vcpus: int
+    basis: str
+    os_cpu_count: int
+    affinity_cpus: int
+    quota_cores: float
+
+    def facts(self) -> Dict[str, Any]:
+        return {
+            "vcpus": int(self.vcpus),
+            "cpu_basis": self.basis,
+            "os_cpu_count": int(self.os_cpu_count),
+            "affinity_cpus": int(self.affinity_cpus),
+            "quota_cores": round(float(self.quota_cores), 2),
+        }
+
+
+@dataclass(frozen=True)
+class MemoryFacts:
+    """Host RAM the pool may take, and the reading that bounded it."""
+
+    available_bytes: int
+    basis: str
+    host_available_bytes: int
+    cgroup_available_bytes: int
+    cgroup_reclaimable_bytes: int
+
+    def facts(self) -> Dict[str, Any]:
+        return {
+            "available_bytes": int(self.available_bytes),
+            "mem_basis": self.basis,
+            "host_available_bytes": int(self.host_available_bytes),
+            "cgroup_available_bytes": int(self.cgroup_available_bytes),
+            "cgroup_reclaimable_bytes": int(self.cgroup_reclaimable_bytes),
+        }
+
+
+@dataclass(frozen=True)
+class DeviceFacts:
+    """Free VRAM the pool may divide, and every sample behind it."""
+
+    free_bytes: int
+    basis: str
+    samples: Tuple[int, ...]
+
+    def facts(self) -> Dict[str, Any]:
+        return {
+            "free_device_bytes": int(self.free_bytes),
+            "device_basis": self.basis,
+            "free_device_samples": [int(x) for x in self.samples],
+        }
+
+
 @dataclass(frozen=True)
 class PoolWidth:
     """The chosen K and every input that chose it — so a mint's telemetry can
@@ -221,9 +297,29 @@ class PoolWidth:
     per_entry_device_bytes: int
     device_lock: bool
     reason: str
+    #: pgw#842: the constraint that ACTUALLY held K down, by name, plus the
+    #: readings each bound was taken from. A width narrower than the pod could
+    #: carry is a performance defect, and it has to be legible from one record
+    #: rather than inferred by diffing two pods that no longer exist.
+    binding: str = ""
+    ceiling: int = MAX_ENTRY_WORKERS
+    cpu: Optional[CpuFacts] = None
+    memory: Optional[MemoryFacts] = None
+    device: Optional[DeviceFacts] = None
+    #: "measured" when the caller handed a probed per-entry ask, "default"
+    #: when the width fell back to a constant. A default is a guess, and a K
+    #: chosen off a guess must not read like a K chosen off a measurement.
+    per_entry_device_basis: str = "default"
+    per_entry_rss_basis: str = "default"
+
+    @property
+    def underwidth(self) -> int:
+        """Workers the pod would have run had the binding constraint not
+        bound — 0 when K is already the most this cell can use."""
+        return max(0, min(self.entries, self.ceiling) - self.workers)
 
     def facts(self) -> Dict[str, Any]:
-        return {
+        out: Dict[str, Any] = {
             "entry_workers": int(self.workers),
             "entries": int(self.entries),
             "vcpus": int(self.vcpus),
@@ -235,47 +331,136 @@ class PoolWidth:
             "per_entry_rss_bytes": int(self.per_entry_rss_bytes),
             "per_entry_device_bytes": int(self.per_entry_device_bytes),
             "device_lock": bool(self.device_lock),
+            "binding": self.binding,
+            "ceiling": int(self.ceiling),
+            "underwidth": int(self.underwidth),
+            "per_entry_device_basis": self.per_entry_device_basis,
+            "per_entry_rss_basis": self.per_entry_rss_basis,
             "width_reason": self.reason,
         }
+        for block in (self.cpu, self.memory, self.device):
+            if block is not None:
+                out.update(block.facts())
+        return out
 
 
-def available_memory_bytes() -> int:
+def _read_int(path: Path) -> Optional[int]:
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return None
+    if raw == "max":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    # A cgroup v1 "unlimited" is a huge sentinel, not a limit.
+    return value if 0 <= value < (1 << 62) else None
+
+
+def _cgroup_reclaimable_bytes(stat: Path) -> int:
+    """File pages this cgroup is charged for that the kernel will hand back
+    under pressure — page cache, and reclaimable slab.
+
+    pgw#842: ``memory.current`` counts page cache. A mint reads GBs (weights,
+    the toolchain the seal hashes, every staged program) and every one of
+    those pages inflates ``current`` until something needs the memory. Sizing
+    a pool on ``max - current`` therefore shrinks the pool in proportion to
+    how much I/O the pod has already done — a bound that moves with history
+    instead of with the box. Subtracting what is reclaimable is the same
+    working-set definition every container runtime uses.
+    """
+    total = 0
+    try:
+        lines = stat.read_text().splitlines()
+    except OSError:
+        return 0
+    wanted = {
+        "inactive_file", "slab_reclaimable",          # cgroup v2
+        "total_inactive_file", "total_slab_reclaimable",  # cgroup v1
+    }
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in wanted:
+            try:
+                total += int(parts[1])
+            except ValueError:
+                continue
+    return total
+
+
+def memory_facts(
+    *,
+    meminfo: Path = Path("/proc/meminfo"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> MemoryFacts:
     """Host RAM this process may actually take, cgroup-aware.
 
     ``MemAvailable`` is the host's answer and a container's limit is not; the
     narrower of the two is the only honest one — the same rule
-    ``effective_cpu_count`` applies to cores.
+    ``effective_cpu_count`` applies to cores. Both readings are kept, so the
+    telemetry can say WHICH one bounded the pool.
+
+    The paths are arguments so a test can drive this function against a real
+    (synthetic) cgroup tree instead of re-implementing its arithmetic.
     """
     host = 0
     try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
+        for line in meminfo.read_text().splitlines():
             if line.startswith("MemAvailable:"):
                 host = int(line.split()[1]) * 1024
                 break
     except (OSError, ValueError, IndexError):
         host = 0
-    limits: List[int] = [host] if host > 0 else []
-    for path, usage in (
-        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
-        ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
-         "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    cgroup = -1
+    reclaimable = 0
+    for limit_name, usage_name, stat_name in (
+        ("memory.max", "memory.current", "memory.stat"),
+        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes",
+         "memory/memory.stat"),
     ):
-        try:
-            raw = Path(path).read_text().strip()
-            if raw == "max":
-                continue
-            limit = int(raw)
-            used = int(Path(usage).read_text().strip())
-        except (OSError, ValueError):
+        limit = _read_int(cgroup_root / limit_name)
+        used = _read_int(cgroup_root / usage_name)
+        if limit is None or used is None or limit <= 0:
             continue
-        # A cgroup v1 "unlimited" is a huge sentinel, not a limit.
-        if 0 < limit < (1 << 62):
-            limits.append(max(0, limit - used))
-    return min(limits) if limits else 0
+        reclaimable = _cgroup_reclaimable_bytes(cgroup_root / stat_name)
+        working_set = max(0, used - reclaimable)
+        cgroup = max(0, limit - working_set)
+        break
+    if host > 0 and cgroup >= 0:
+        basis = "cgroup" if cgroup < host else "meminfo"
+        return MemoryFacts(min(host, cgroup), basis, host, cgroup, reclaimable)
+    if cgroup >= 0:
+        return MemoryFacts(cgroup, "cgroup", host, cgroup, reclaimable)
+    if host > 0:
+        return MemoryFacts(host, "meminfo", host, -1, 0)
+    return MemoryFacts(0, "unreadable", 0, -1, 0)
 
 
-def free_device_bytes(device: int = -1) -> int:
-    """Free VRAM on the mint's card, or 0 when there is no card to read.
+def available_memory_bytes() -> int:
+    """The single number :func:`memory_facts` bounds the pool with."""
+    return memory_facts().available_bytes
+
+
+def cpu_facts() -> CpuFacts:
+    """The pod's honest core count, and which of the three readings it is."""
+    os_count = os.cpu_count() or 1
+    try:
+        affinity = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        affinity = os_count
+    quota = cpu_quota_cores()
+    quota_cores = float(quota) if quota is not None else -1.0
+    candidates = [(os_count, "cpu_count"), (affinity, "affinity")]
+    if quota is not None:
+        candidates.append((max(1, int(quota + 0.5)), "quota"))
+    vcpus, basis = min(candidates)
+    return CpuFacts(max(1, vcpus), basis, os_count, affinity, quota_cores)
+
+
+def _probe_free_device_bytes(device: int = -1) -> int:
+    """One reading of free VRAM on the mint's card, 0 when there is no card.
 
     Reads the ALLOCATOR's view of free plus what this process has reserved
     but not allocated, exactly as ``mint_budget`` does — a cached block the
@@ -296,6 +481,40 @@ def free_device_bytes(device: int = -1) -> int:
         return 0
 
 
+def device_facts(
+    device: int = -1,
+    *,
+    samples: int = DEVICE_FREE_SAMPLES,
+    gap_s: float = DEVICE_FREE_SAMPLE_GAP_S,
+    probe: Optional[Callable[[int], int]] = None,
+) -> DeviceFacts:
+    """Free VRAM the pool may divide — the STEADY figure, not an instant.
+
+    pgw#842: the mint shares the card with the serving process, so one
+    ``mem_get_info`` taken while a tenant forward holds its activation set
+    reads several GiB below the steady free figure — and the pool then
+    subtracts :data:`DEVICE_RESERVE_BYTES` for that same tenant peak on top.
+    The MAX over a short window is the reading the reserve was written
+    against; every sample is kept so the choice is auditable.
+    """
+    read = probe if probe is not None else _probe_free_device_bytes
+    taken: List[int] = []
+    for i in range(max(1, int(samples))):
+        if i and gap_s > 0:
+            time.sleep(gap_s)
+        value = int(read(device))
+        taken.append(value)
+        if value <= 0:
+            # No card, or no reading — sampling an absence is not evidence.
+            return DeviceFacts(0, "absent", tuple(taken))
+    return DeviceFacts(max(taken), "sampled", tuple(taken))
+
+
+def free_device_bytes(device: int = -1) -> int:
+    """The single free-VRAM number :func:`device_facts` sizes the pool with."""
+    return device_facts(device).free_bytes
+
+
 def entry_workers(
     entries: int,
     *,
@@ -314,19 +533,28 @@ def entry_workers(
     * **VRAM — the one that actually binds.** An AOTI compile benchmarks
       kernels on the card, so every concurrent entry child holds its own
       weight copy, activation set and CUDA context. On a 24 GB card with the
-      tenant's model resident that is K=2-3 whatever the CPU says.
-    * **vCPU**, from :func:`postmortem.effective_cpu_count` (cgroup quota AND
-      affinity mask AND host cores, whichever is narrowest) minus
+      tenant's model resident that is K=2-3 whatever the CPU says. Read via
+      :func:`device_facts` — the STEADY free figure, never one sample.
+    * **vCPU**, from :func:`cpu_facts` (cgroup quota AND affinity mask AND
+      host cores, whichever is narrowest) minus
       :data:`SERVING_HEADROOM_CPUS`. ~94 % of an entry compile is ONE core of
       serial host work, so this bound is generous and scales near-perfectly.
     * **Host RAM**, the loosest of the three: the wrapper ``cc1plus`` peaks at
       ~2.1 GiB, so a pod that has VRAM for K has RAM for K several times over.
+      Read via :func:`memory_facts`, whose cgroup half counts the WORKING SET
+      rather than everything the pod has ever paged in.
 
     ``device_lock=False`` FORCES K=1 on a GPU cell: without torch's
     ``set_gpu_benchmark_lock_context`` hook the pool cannot stop two entries
     benchmarking at once, and a cell whose kernel configs were chosen under
     self-inflicted contention publishes under an unchanged key. Refusing to
     widen is the only safe answer.
+
+    pgw#842: every bound records the READING behind it (:class:`CpuFacts`,
+    :class:`MemoryFacts`, :class:`DeviceFacts`) and the returned width names
+    the constraint that actually bound. K is the mint's only multiplicative
+    lever — two mints of one cell differed 5-vs-3 with nothing recorded to
+    say why — so an unexplained K is a defect in itself.
     """
     entries = max(0, int(entries))
     locked = aot_device_lock.supported() if device_lock is None \
@@ -336,15 +564,23 @@ def entry_workers(
             workers=1, entries=entries, vcpus=0, cpu_workers=1, mem_workers=1,
             device_workers=1, available_bytes=0, free_device_bytes=0,
             per_entry_rss_bytes=0, per_entry_device_bytes=0,
-            device_lock=locked,
+            device_lock=locked, binding="entries", ceiling=1,
             reason=f"{entries} entr{'y' if entries == 1 else 'ies'}: serial")
 
-    vcpus = int(vcpus) if vcpus > 0 else effective_cpu_count()
+    if vcpus > 0:
+        cpu = CpuFacts(int(vcpus), "caller", int(vcpus), int(vcpus), -1.0)
+    else:
+        cpu = cpu_facts()
+    vcpus = cpu.vcpus
     budget = vcpus - SERVING_HEADROOM_CPUS
     cpu_workers = max(1, budget // CPUS_PER_ENTRY_WORKER)
 
-    avail = int(available_bytes) if available_bytes >= 0 \
-        else available_memory_bytes()
+    if available_bytes >= 0:
+        memory = MemoryFacts(
+            int(available_bytes), "caller", int(available_bytes), -1, 0)
+    else:
+        memory = memory_facts()
+    avail = memory.available_bytes
     per_entry = int(peak_rss_bytes) if peak_rss_bytes > 0 \
         else DEFAULT_ENTRY_PEAK_RSS_BYTES
     if avail <= 0:
@@ -354,8 +590,14 @@ def entry_workers(
         mem_workers = max(
             1, int(max(0, avail - ENTRY_RSS_RESERVE_BYTES) // per_entry))
 
-    free_vram = int(free_vram_bytes) if free_vram_bytes >= 0 \
-        else free_device_bytes()
+    if free_vram_bytes >= 0:
+        device = DeviceFacts(
+            int(free_vram_bytes),
+            "caller" if free_vram_bytes > 0 else "absent",
+            (int(free_vram_bytes),))
+    else:
+        device = device_facts()
+    free_vram = device.free_bytes
     per_device = int(device_bytes) if device_bytes > 0 \
         else DEFAULT_ENTRY_DEVICE_BYTES
     if free_vram <= 0:
@@ -370,16 +612,27 @@ def entry_workers(
     # asking for more than the ceiling allows, and the ceiling wins.
     ceiling = min(MAX_ENTRY_WORKERS, int(limit)) if limit > 0 \
         else MAX_ENTRY_WORKERS
-    workers = max(
-        1, min(cpu_workers, mem_workers, device_workers, ceiling, entries))
-    if workers > 1 and free_vram > 0 and not locked:
-        workers = 1
+    def _width(
+        workers: int, *, binding: str, reason: str, lock: bool,
+    ) -> PoolWidth:
         return PoolWidth(
-            workers=1, entries=entries, vcpus=vcpus,
+            workers=workers, entries=entries, vcpus=vcpus,
             cpu_workers=cpu_workers, mem_workers=mem_workers,
             device_workers=device_workers, available_bytes=avail,
             free_device_bytes=free_vram, per_entry_rss_bytes=per_entry,
-            per_entry_device_bytes=per_device, device_lock=False,
+            per_entry_device_bytes=per_device, device_lock=lock,
+            reason=reason, binding=binding, ceiling=ceiling, cpu=cpu,
+            memory=memory, device=device,
+            per_entry_device_basis=(
+                "measured" if device_bytes > 0 else "default"),
+            per_entry_rss_basis=(
+                "measured" if peak_rss_bytes > 0 else "default"))
+
+    workers = max(
+        1, min(cpu_workers, mem_workers, device_workers, ceiling, entries))
+    if workers > 1 and free_vram > 0 and not locked:
+        return _width(
+            1, binding="device-lock", lock=False,
             reason=(
                 "serial: this torch has no GPU-benchmark lock hook, so a wide "
                 "pool would let entries benchmark against each other and bake "
@@ -390,16 +643,13 @@ def entry_workers(
         (device_workers, "vram"), (ceiling, "ceiling"),
         (entries, "entries"))[1]
     reason = (
-        f"K={workers} ({binding}-bound): {vcpus} vCPU -> {cpu_workers}, "
-        f"{avail / 1024**3:.1f} GiB RAM -> {mem_workers}, "
-        f"{free_vram / 1024**3:.1f} GiB VRAM / "
-        f"{per_device / 1024**3:.1f} GiB per entry -> {device_workers}")
-    return PoolWidth(
-        workers=workers, entries=entries, vcpus=vcpus,
-        cpu_workers=cpu_workers, mem_workers=mem_workers,
-        device_workers=device_workers, available_bytes=avail,
-        free_device_bytes=free_vram, per_entry_rss_bytes=per_entry,
-        per_entry_device_bytes=per_device, device_lock=locked, reason=reason)
+        f"K={workers} ({binding}-bound): {vcpus} vCPU ({cpu.basis}) -> "
+        f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) -> "
+        f"{mem_workers}, {free_vram / 1024**3:.1f} GiB VRAM ({device.basis}) "
+        f"/ {per_device / 1024**3:.1f} GiB per entry "
+        f"({'measured' if device_bytes > 0 else 'default'}) -> "
+        f"{device_workers}")
+    return _width(workers, binding=binding, reason=reason, lock=locked)
 
 
 # ---------------------------------------------------------------------------
@@ -1193,11 +1443,18 @@ __all__ = [
     "PACKAGE_ROOT",
     "REFUSED",
     "SERVING_HEADROOM_CPUS",
+    "CpuFacts",
+    "DeviceFacts",
+    "MemoryFacts",
+    "PoolLedger",
     "PoolWidth",
     "available_memory_bytes",
     "child_argv",
     "child_env",
+    "cpu_facts",
+    "device_facts",
     "entry_workers",
     "free_device_bytes",
     "free_disk_bytes",
+    "memory_facts",
 ]

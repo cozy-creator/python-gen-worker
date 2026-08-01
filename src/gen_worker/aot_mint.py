@@ -1851,6 +1851,10 @@ class MintProgress:
     timings: Dict[str, float] = field(default_factory=dict)
     minted: List[_MintedEntry] = field(default_factory=list)
     width: Optional[aot_compile_pool.PoolWidth] = None
+    #: pgw#842: the pool's own ledger (pgw#830) once it has run, carried here
+    #: so it reaches the phase table — and therefore the hub — instead of
+    #: dying in the mint child's log with the pod.
+    pool_ledger: Dict[str, Any] = field(default_factory=dict)
     #: The last position :meth:`beat` reported, verbatim.
     at: Dict[str, Any] = field(default_factory=dict)
 
@@ -1929,7 +1933,8 @@ def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
             # with a completed one rather than being a sum of entry seconds.
             timings["total_s"] = round(time.monotonic() - float(started), 2)
         table = _mint_phase_table(
-            minted, timings, progress.inductor_configs, progress.width)
+            minted, timings, progress.inductor_configs, progress.width,
+            progress.pool_ledger)
         table["terminus"] = "aborted"
         if where:
             # pgw#824 x pgw#825: the entries block names what FINISHED; this
@@ -2050,6 +2055,15 @@ def _mint_cell(
             if regional else 1.0))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
+    if width.underwidth:
+        # pgw#842: a pool narrower than the cell could use is a COST, and it
+        # is the mint's only multiplicative lever. Say so at WARNING with the
+        # readings behind it — the same facts ride the `pool` event.
+        logger.warning(
+            "aot-mint: pgw#842 entry pool runs %d worker(s) narrower than "
+            "this cell could use (K=%d of %d), held by %s — inputs %s",
+            width.underwidth, width.workers,
+            min(entry_count, width.ceiling), width.binding, width.facts())
     progress.width = width
 
     minted = progress.minted
@@ -2105,7 +2119,7 @@ def _mint_cell(
         progress.beat(
             PHASE_INDUCTOR_COMPILE, 0, len(minted),
             f"{len(minted)} entries, {width.workers} wide")
-        _compile_entries_parallel(
+        progress.pool_ledger = _compile_entries_parallel(
             minted, work, width, inductor_configs=inductor_configs,
             on_entry=lambda name, done, total: progress.beat(
                 PHASE_INDUCTOR_COMPILE, done, total, name))
@@ -2148,7 +2162,8 @@ def _mint_cell(
 
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
-    phase_table = _mint_phase_table(minted, timings, inductor_configs, width)
+    phase_table = _mint_phase_table(
+        minted, timings, inductor_configs, width, progress.pool_ledger)
     _emit_phase_event(spec, phase_table)
 
     meta["cell_key"] = key = cell_identity(meta, spec).digest
@@ -2304,8 +2319,12 @@ def _compile_entries_parallel(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     on_entry: Optional[Callable[[str, int, int], None]] = None,
-) -> None:
+) -> Dict[str, Any]:
     """pgw#809: fill every entry's ``files`` K-wide, out of process.
+
+    Returns the pool's own ledger (pgw#830) so it reaches the phase table:
+    the pool emits it as a typed event too, but that emission happens in the
+    mint CHILD, which holds no orchestrator session — pgw#842.
 
     Mutates ``minted`` in place, and every entry MUST come back with files —
     a pool that quietly returned fewer entries than it was given would pack a
@@ -2350,6 +2369,13 @@ def _compile_entries_parallel(
         "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",
         len(minted), "y" if len(minted) == 1 else "ies", width.workers, wall,
         sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
+    return {
+        **pool.ledger.facts(),
+        # Observed, not intended: the only load-independent evidence that the
+        # pool actually overlapped rather than looping K-wide on paper.
+        "peak_concurrency": int(pool.peak_concurrency),
+        "peak_child_rss_bytes": int(pool.peak_rss_bytes),
+    }
 
 
 def _entry_dispatch_signature(row: "_MintedEntry") -> str:
@@ -2541,6 +2567,7 @@ def _mint_phase_table(
     timings: Mapping[str, float],
     inductor_configs: Optional[Mapping[str, Any]],
     width: Optional[aot_compile_pool.PoolWidth] = None,
+    pool_ledger: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The per-mint phase table (#757's instrument-first deliverable): one
     readable record of where the mint's seconds went, per entry and in
@@ -2583,7 +2610,16 @@ def _mint_phase_table(
         "totals": {**totals, **{k: v for k, v in timings.items()}},
         "phases": phase_totals,
         "entries": entries,
-        "pool": width.facts() if width is not None else {"entry_workers": 1},
+        # pgw#842: the width's INPUTS and the pool's own ledger ride the same
+        # block, because the two questions a slow mint raises — "why this K"
+        # and "what did K buy" — are answered by different halves of it, and a
+        # record that carries only the scalar K (as this one did through
+        # attempts ten and eleven) can answer neither.
+        "pool": {
+            **(width.facts() if width is not None
+               else {"entry_workers": 1, "binding": "serial"}),
+            **dict(pool_ledger or {}),
+        },
     }
 
 
@@ -2616,6 +2652,52 @@ def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
         return
     emit_phase_events(family=family, lane=lane, table=table)
+
+
+#: pgw#842: the mint's WIDTH decision, as its own hub row.
+POOL_PHASE = "pool"
+
+
+def _emit_pool_event(
+    *, family: str, lane: str, table: Mapping[str, Any],
+) -> None:
+    """pgw#842: one event that says what K was, what chose it, and what it
+    bought — the standing "no silent decisions" rule applied to the mint's
+    only multiplicative lever.
+
+    Attempts ten and eleven compiled the same 72-entry sdxl cell for the same
+    seconds (1314.94 vs 1327.23) and took 347.94 s vs 554.78 s, because K was
+    5 and then 3. Nothing hub-side recorded WHY: the width block existed in
+    the phase table and was never emitted, and the pgw#830 pool ledger was
+    emitted from the mint CHILD, which holds no orchestrator session (see
+    ``mint_delegate._emit_aot_phases``) — so both were pod-log-only and died
+    with the pod. A width narrower than the pod could carry is a performance
+    defect; it must be READABLE from one mint's record, not inferred by
+    diffing two pods that no longer exist.
+    """
+    pool = dict(table.get("pool") or {})
+    if not pool:
+        return
+    from . import activity as activity_mod
+
+    workers = int(pool.get("entry_workers") or 1)
+    binding = str(pool.get("binding") or "unknown")
+    under = int(pool.get("underwidth") or 0)
+    wall_s = float(pool.get("pool_wall_s") or 0.0)
+    head = (
+        f"family={family} lane={lane} entry_workers={workers} "
+        f"binding={binding} underwidth={under}")
+    if under > 0:
+        # Named in the FIRST line, so a narrow pool is legible without
+        # parsing the dict: this is the number that cost attempt eleven 59 %.
+        head += (
+            f" — the pool ran {under} worker(s) narrower than this cell could "
+            f"use, held by {binding}")
+    activity_mod.emit_event(
+        MINT_PHASES_KIND, f"{head} pool={pool}",
+        phase=POOL_PHASE,
+        duration_ms=int(round(wall_s * 1000)),
+    )
 
 
 def emit_phase_events(
@@ -2657,6 +2739,7 @@ def emit_phase_events(
             phase=roll_up,
             duration_ms=int(round(total_s * 1000)),
         )
+        _emit_pool_event(family=family, lane=lane, table=table)
         for name, timings in sorted((table.get("entries") or {}).items()):
             if not isinstance(timings, Mapping):
                 continue
