@@ -1,6 +1,7 @@
 # Changelog
 
-## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
+## 0.88.0 (2026-08-01) — the author ENVELOPE has an SDK carrier: `Resources(max_gpu_count=, parallel=)` (pgw#748, the SP fast-tier declaration surface)
+
 - **pgw#748/th#1285 — `Resources` gains `max_gpu_count` and `parallel`: the
   author ENVELOPE has an SDK carrier.** The hub's builder has parsed
   `resources["max_gpu_count"]` / `resources["parallel"]` since th#1285
@@ -16,6 +17,7 @@
   implies `gpu=True`. The author never writes a degree, a tier, a packing or
   a device id.
 
+## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
 - **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
   0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
   toolchain `.so` the image ships (36 files, 3.96 GB); its memo was per
