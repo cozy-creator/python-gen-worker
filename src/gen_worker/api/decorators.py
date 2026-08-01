@@ -101,6 +101,13 @@ def _normalize_compute_capability(raw: float | str) -> float:
     return round(value, 1)
 
 
+# pgw#748/th#1285: the parallel mechanisms the PLATFORM implements. Kept in
+# lockstep with the hub's builder ingest (internal/builder/staffing_envelope.go
+# parallelMechanisms) and orchestrator/topology's Parallel* constants — an
+# unknown token refuses here, at declaration, before a build is spent.
+_PARALLEL_MECHANISMS = frozenset({"sequence", "cfg"})
+
+
 class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     """Hardware envelope for one function (SDK v2): ONLY what the endpoint
     CANNOT RUN WITHOUT — ``Resources(gpu, gpu_count, libraries, vcpus)``.
@@ -161,6 +168,18 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     it does not imply ``gpu=True``. ``gpu_count`` (>1 later feeds
     ``DeviceRequest`` — pgw#648) declares how many devices one instance
     needs; endpoint code NEVER picks devices.
+
+    ``max_gpu_count`` + ``parallel`` (pgw#748/th#1285) are the author
+    ENVELOPE — the SDK half of the hub builder's ``extractStaffingEnvelope``
+    contract. ``gpu_count`` is the floor (devices ONE materialization
+    requires); ``max_gpu_count`` is the ceiling the hub MAY staff up to;
+    ``parallel`` names the platform mechanisms the function survives at
+    degree > 1 (``"sequence"`` is the only one with a worker runtime). The
+    author never writes a degree, a tier, a packing or a device id — those
+    are the hub's decisions. Both are elided from the manifest when they
+    carry nothing (``omit_defaults``), so every existing release's payload
+    is byte-identical. Validation mirrors the builder's ingest refusals so a
+    contradiction costs a declaration-time ValueError instead of a build.
     """
 
     gpu: bool = False
@@ -171,6 +190,8 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     vram_gb_hint: float | None = None
     ram_gb_hint: float | None = None
     compute_capability: float | str | None = None
+    max_gpu_count: int | None = None
+    parallel: tuple[str, ...] = ()
 
     def manifest_dict(self) -> dict:
         """The manifest ``resources{}`` projection (pgw#670).
@@ -227,6 +248,37 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             if c <= 0:
                 raise ValueError(f"vcpus must be positive, got {c}")
             force(self, "vcpus", c)
+        # pgw#748/th#1285 author envelope — mirror the builder's
+        # extractStaffingEnvelope refusals at declaration time.
+        if self.max_gpu_count is not None:
+            m = int(self.max_gpu_count)
+            if m != self.max_gpu_count or m <= 0:
+                raise ValueError(
+                    f"max_gpu_count must be a positive whole number of "
+                    f"devices, got {self.max_gpu_count}")
+            if m < n_gpu:
+                raise ValueError(
+                    f"max_gpu_count {m} is below gpu_count {n_gpu}")
+            force(self, "max_gpu_count", m)
+            force(self, "gpu", True)
+        if self.parallel:
+            mechanisms = tuple(
+                str(x).strip().lower() for x in self.parallel if str(x).strip()
+            )
+            unknown = [m for m in mechanisms if m not in _PARALLEL_MECHANISMS]
+            if unknown:
+                raise ValueError(
+                    f"parallel mechanism(s) {unknown} not implemented by the "
+                    f"platform; known: {sorted(_PARALLEL_MECHANISMS)}")
+            if len(set(mechanisms)) != len(mechanisms):
+                raise ValueError(f"parallel repeats a mechanism: {mechanisms}")
+            if self.max_gpu_count is None or self.max_gpu_count <= n_gpu:
+                raise ValueError(
+                    f"parallel {list(mechanisms)} declared without a "
+                    f"max_gpu_count above gpu_count {n_gpu} — a mechanism "
+                    f"is only reachable with device headroom")
+            force(self, "parallel", mechanisms)
+            force(self, "gpu", True)
 
 
 class NoWarmup(msgspec.Struct, frozen=True):

@@ -1,6 +1,20 @@
 # Changelog
 
 ## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
+- **pgw#748/th#1285 — `Resources` gains `max_gpu_count` and `parallel`: the
+  author ENVELOPE has an SDK carrier.** The hub's builder has parsed
+  `resources["max_gpu_count"]` / `resources["parallel"]` since th#1285
+  (`extractStaffingEnvelope`), and the whole tier→degree product (typed
+  admission, cohort-exact buys, degree-exact dispatch, the th#1347 flip) keys
+  off `requirement_payload["parallel"]` — but the SDK could not declare either
+  field, so no real endpoint could opt into the hardware-fast tier through the
+  build path. Both fields are elided from the manifest when they carry nothing
+  (`omit_defaults`): every existing release's payload is byte-identical.
+  Validation mirrors the builder's ingest refusals at declaration time
+  (whole-number ceiling >= `gpu_count`, known mechanisms only —
+  `sequence`/`cfg`, a mechanism requires device headroom); declaring either
+  implies `gpu=True`. The author never writes a degree, a tier, a packing or
+  a device id.
 
 - **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
   0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
