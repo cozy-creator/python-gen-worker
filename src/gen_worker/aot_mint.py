@@ -82,8 +82,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    aot_compile_pool, aot_package, aot_serve, aot_wrapper_split,
-    cell_key)
+    aot_compile_pool, aot_export_reuse, aot_package, aot_serve,
+    aot_wrapper_split, cell_key)
 from .compile_cache import (
     _resolve_target,
     lane_bucket,
@@ -1060,11 +1060,22 @@ def _export_entry(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     compile_now: bool = True,
+    reuse: Optional[aot_export_reuse.ReuseState] = None,
+    reuse_key: Any = None,
+    rows: int = 0,
 ) -> _MintedEntry:
     """Resolve, feed, (warm,) export, gate, and compile ONE declared graph
     class. Every refusal is prefixed with the entry name — a multi-graph
     mint that cannot say WHICH class failed is the silent-failure path in
     a new hat (pgw#758).
+
+    ``reuse`` (pgw#847, OFF unless `GEN_WORKER_AOT_EXPORT_REUSE` is set) may
+    hand back a program re-specialized from an earlier row's graph instead of
+    a fresh `torch.export.export`, but only after its own gate has PROVEN, by
+    byte-comparing every emitted file including the linked `.so`, that the two
+    routes agree for this family. It falls back to a full export on anything
+    it cannot prove, so this parameter can only change how long the export
+    takes, never what comes out.
 
     ``compile_now=False`` stops after the export-side gates and returns the
     entry with no files: pgw#809's pool then compiles every entry K-wide out
@@ -1153,13 +1164,24 @@ def _export_entry(
     dynamic = dynamic_shapes_spec(espec.dynamic, input_names) \
         if espec.dynamic else None
 
+    def _full_export() -> Any:
+        try:
+            return export_program(
+                module, args, kwargs, dynamic_shapes=dynamic,
+                strict=espec.strict)
+        except MintRefused as exc:
+            raise MintRefused(f"entry {entry!r}: {exc}") from exc
+
     t0 = time.monotonic()
-    try:
-        program = export_program(
-            module, args, kwargs, dynamic_shapes=dynamic, strict=espec.strict)
-    except MintRefused as exc:
-        raise MintRefused(f"entry {entry!r}: {exc}") from exc
+    if reuse is None:
+        program, how = _full_export(), "full"
+    else:
+        program, how = reuse.program(
+            (espec.target, reuse_key), entry=entry, rows=rows,
+            args=args, kwargs=kwargs, full_export=_full_export)
     timings["export_s"] = round(time.monotonic() - t0, 2)
+    if how != "full":
+        timings["export_how"] = how
     # pgw#847, telemetry only: the one number that sizes "export once,
     # re-propagate per row". Once per process, so a 36-entry mint pays it once.
     prop_probe = _probe_prop_s(program)
@@ -1660,6 +1682,12 @@ def _mint_cell(
     # forward. Arming it is this function's job, not the caller's — see
     # `_arm_branches`.
     _arm_branches(pipeline, int(spec.lora_bucket or 0))
+    # pgw#847, OFF unless opted in: one export per (target, adapter arm) and a
+    # re-specialization per row, admitted only by a gate that byte-compares
+    # every emitted file. Built HERE, per mint, so a verdict can never outlive
+    # the family it was reached for.
+    reuse_state = aot_export_reuse.ReuseState(
+        work, inductor_configs=inductor_configs)
     t_export = time.monotonic()
     progress.beat(
         PHASE_TRACE_GRAPH, 0, len(rows),
@@ -1682,10 +1710,21 @@ def _mint_cell(
             minted.append(_export_entry(
                 pipeline, spec, plan, decl,
                 inductor_configs=inductor_configs,
-                compile_now=not parallel))
+                compile_now=not parallel,
+                reuse=reuse_state, reuse_key=bool(arm), rows=len(rows)))
     finally:
         if disarmed:
             _arm_branches(pipeline, int(spec.lora_bucket or 0))
+    if reuse_state.active:
+        # FLAT scalars: `timings` is a float table and a nested dict there
+        # would be a shape nothing downstream parses. The gate's REASONS are
+        # logged at INFO by ReuseState, where a reader needs prose anyway.
+        timings["export_reuse_rows_full"] = float(reuse_state.exported)
+        timings["export_reuse_rows_reused"] = float(reuse_state.reused)
+        timings["export_reuse_respecialize_s"] = round(
+            reuse_state.respecialize_s, 2)
+        timings["export_reuse_gate_s"] = round(sum(
+            float(e.get("gate_s") or 0.0) for e in reuse_state.events), 2)
 
     # Asked of the EXPORTED programs: a cell whose entries cannot be told
     # apart at dispatch must cost seconds to refuse, not a full compile bill

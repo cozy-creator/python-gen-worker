@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **pgw#847 — one export can serve every shape row, behind a gate that must PROVE it (OFF by
+  default).** A cell's N entries are one module traced at N shape rows, and an `ExportedProgram`'s
+  `graph_module.code` is byte-identical across them — the row lives entirely in node metadata. So
+  `gen_worker.aot_export_reuse` re-specializes one exported graph per row (deep copy +
+  `FakeTensorProp` + torch's own `_update`) instead of re-running `torch.export.export`, which
+  `aot_mint` does once per declared class row, **serially, in the parent** — ~22 minutes of an sdxl
+  mint that pgw#809's K-wide pool divides by one. Measured byte-identical on every emitted file
+  including the **linked `.so`**, with `torch.export.export` monkeypatched to raise for the whole
+  reuse arm. Worth **11-21 minutes of serial mint wall per 36-entry sdxl cell**; the range is that
+  wide only because `prop_s` on a real family has never been measured, and the new
+  `timings["prop_probe_s"]` (one pass per mint, read by nobody) is there to close it.
+  **Gated, because the invariant is a property of the module and not a law:** a family branching on
+  a size traces a different graph per row, so the gate requires graph-text equality AND a
+  byte-identical artifact from a re-specialization of a witness row, both arms built in the same
+  cleared cache dir (`-g1` bakes the source path into the object). Every failure mode — exception,
+  missing artifact, empty digest set, unplaceable input — falls back to a full per-row export;
+  absence of evidence is never a pass. The verdict is per `(target, adapter arm)` per MINT and is
+  never memoised across families. Enable with `GEN_WORKER_AOT_EXPORT_REUSE=1`. No inductor config,
+  compiler, flag or library changes, and neither module is in the code closure, so **no cell
+  re-keys**.
+
 ## 0.90.2 (2026-08-01) — **the mint's VRAM ceiling was its own estimate, not the card**: a whole-graph AOT mint died for 30 MiB with 21.48 GiB free (pgw#848), an OOM-killed entry child is no longer laundered into a never-retried refusal, the pool's host-RAM bound finally sees the compiler, and AOT-regional is deleted (pgw#846)
 
 - **pgw#848 (CRITICAL PATH) — the mint's VRAM cap was the ESTIMATE, not the card.**
