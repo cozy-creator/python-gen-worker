@@ -80,6 +80,19 @@ def target_forks(decl: Compile, target: str) -> Tuple[Fork, ...]:
     return tuple(f for f in decl.forks if not f.targets or target in f.targets)
 
 
+def arg_carriers(decl: Compile, target: str) -> frozenset:
+    """Names of TEMPLATED args a dim may be carried by (pgw#853).
+
+    An extent that enters the traced call as a python int inside a container
+    — qwen-image's ``img_shapes[b][0] = (frames, H_pat, W_pat)`` — is a real
+    binding and the declaration should say so. But it is NOT a tensor axis:
+    a python int SPECIALIZES the graph, so it can never become a
+    ``torch.export.Dim``. Every derivation below keeps that distinction.
+    """
+    return frozenset(
+        a.name for a in target_args(decl, target) if a.template is not None)
+
+
 def _target_input_names(decl: Compile, target: str) -> Optional[frozenset]:
     """Top-level input names declared for a target; None when the declaration
     carries no input templates (bindings then pass through unfiltered and
@@ -111,11 +124,26 @@ def derived_dynamic(
     the class rows — the ``Compile`` -> :class:`aot_mint.DynamicDim` bridge
     for the class vocabulary."""
     names = _target_input_names(decl, target)
+    by_arg = arg_carriers(decl, target)
     out: List[DynamicDim] = []
     for dim in decl.dims:
         values = {row.dim_map[dim.name] for row in rows}
         if len(values) <= 1:
             continue  # static across this artifact's rows
+        # pgw#853: an extent carried ONLY by a templated Arg is a python int
+        # in the traced call. It specializes, so collapsing rows that differ
+        # on it would mint ONE artifact that silently serves only the seed
+        # row — the same class of silent-wrongness as the 0/1 refusal below,
+        # and worth refusing for the same reason.
+        if all(b.split(".", 1)[0] in by_arg or b in by_arg
+               for b, _ in dim.carried_by):
+            raise MintRefused(
+                f"dim {dim.name!r} varies across the collapsed rows "
+                f"({sorted(values)!r}) but is carried only by templated "
+                f"arg(s) {sorted({b for b, _ in dim.carried_by})!r} — a "
+                f"python-int argument SPECIALIZES the traced graph, so these "
+                f"rows cannot share one artifact. Declare this family "
+                f"{STATIC_ROWS!r}, or move the extent onto a tensor axis")
         lo, hi = dim_hull(rows, dim)
         if lo < 2:
             raise MintRefused(
@@ -124,6 +152,8 @@ def derived_dynamic(
                 f"(ie#543), so an axis that reaches 1 must FORK the class "
                 f"instead of collapsing")
         for bound, axis in dim.carried_by:
+            if bound in by_arg or bound.split(".", 1)[0] in by_arg:
+                continue  # a python int is never a torch symbol
             if names is not None and bound.split(".", 1)[0] not in names \
                     and bound not in names:
                 continue
@@ -139,12 +169,15 @@ def named_dynamic_rows(decl: Compile, target: str) -> Tuple[DynamicDim, ...]:
     hand-written) into per-binding :class:`aot_mint.DynamicDim` rows."""
     by_name = {d.name: d for d in decl.dims}
     names = _target_input_names(decl, target)
+    by_arg = arg_carriers(decl, target)
     out: List[DynamicDim] = []
     for dd in decl.dynamic:
         dim = by_name.get(dd.dim)
         if dim is None:
             continue  # "batch"/"sequence" are the dynamo lane's business
         for bound, axis in dim.carried_by:
+            if bound in by_arg or bound.split(".", 1)[0] in by_arg:
+                continue  # pgw#853: a python int is never a torch symbol
             if names is not None and bound.split(".", 1)[0] not in names \
                     and bound not in names:
                 continue
@@ -441,6 +474,75 @@ def _resolve_axis(
     return int(raw)
 
 
+def _resolve_template(
+    node: Any, seed: GraphClass, config: Any, *, input_name: str, family: str,
+) -> Any:
+    """Resolve a canonical ``Arg.template`` against the selected class row.
+
+    Nested tuples stay nested; every leaf goes through the SAME
+    :func:`_resolve_axis` a tensor axis does, so "1024 here" and "1024 in a
+    shape" cannot disagree about where the number came from. Emits LISTS for
+    nesting and TUPLES only for the innermost group, which is the shape
+    qwen-image's ``img_shapes`` takes: ``[[(1, H_pat, W_pat)]]``.
+    """
+    if isinstance(node, tuple) and len(node) == 2 and node[0] == "config":
+        return _resolve_axis(node, seed, config,
+                             input_name=input_name, family=family)
+    if isinstance(node, tuple):
+        resolved = [
+            _resolve_template(x, seed, config,
+                              input_name=input_name, family=family)
+            for x in node
+        ]
+        # Innermost group (all leaves) is a tuple; anything holding
+        # containers is a list. That is the python shape real signatures
+        # take, and it is derived from the template rather than declared.
+        if all(isinstance(x, int) for x in resolved):
+            return tuple(resolved)
+        return resolved
+    return _resolve_axis(node, seed, config,
+                         input_name=input_name, family=family)
+
+
+def container_arities(
+    decl: Compile, spec: ExportSpec, module: Any = None,
+) -> Dict[str, int]:
+    """``{input name: element count}`` for every declared LIST input.
+
+    ``dynamic_shapes`` must mirror the example feed's container structure or
+    ``torch.export`` refuses by name — z-image measured the exact sentence:
+
+        Detected mismatch between the structure of `inputs` and
+        `dynamic_shapes`: `inputs['x']` is a <class 'list'>, but
+        `dynamic_shapes['x']` is a <class 'dict'>
+
+    so the arity the feed used has to reach the spec builder. Derived from
+    the same row the feed was built from, never re-guessed.
+    """
+    rows = [r for r in target_inputs(decl, spec.target) if r.repeat is not None]
+    if not rows:
+        return {}
+    plan = select_plan(
+        decl, spec.target, fork=dict(spec.fork),
+        class_dims=dict(spec.class_dims) if spec.class_dims else None)
+    config = getattr(module, "config", None)
+    return {
+        r.name: _container_arity(r, plan.seed, config, decl.family)
+        for r in rows
+    }
+
+
+def _container_arity(row: Input, seed: GraphClass, config: Any, family: str) -> int:
+    arity = _resolve_axis(row.repeat, seed, config,
+                          input_name=row.name, family=family)
+    if arity < 1:
+        raise MintRefused(
+            f"input {row.name!r} declares repeat={row.repeat!r}, which the "
+            f"selected class row resolves to {arity} — a container input "
+            f"with no elements cannot be traced")
+    return arity
+
+
 def declared_inputs(
     module: Any, spec: ExportSpec, decl: Compile,
 ) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
@@ -494,19 +596,50 @@ def declared_inputs(
             _resolve_axis(e, seed, config, input_name=row.name,
                           family=decl.family)
             for e in row.shape)
-        if not shape:
-            tensor = torch.tensor(
-                row.value if row.value is not None else 1.0,
-                dtype=dtype, device=device)
-        elif row.value is not None:
-            tensor = torch.full(shape, row.value, dtype=dtype, device=device)
-        elif dtype.is_floating_point:
-            tensor = torch.randn(shape, dtype=dtype, device=device)
+
+        def _one() -> Any:
+            if not shape:
+                return torch.tensor(
+                    row.value if row.value is not None else 1.0,
+                    dtype=dtype, device=device)
+            if row.value is not None:
+                return torch.full(shape, row.value, dtype=dtype, device=device)
+            if dtype.is_floating_point:
+                return torch.randn(shape, dtype=dtype, device=device)
+            return torch.ones(shape, dtype=dtype, device=device)
+
+        if row.repeat is None:
+            _nest(values, row.name, _one())
         else:
-            tensor = torch.ones(shape, dtype=dtype, device=device)
-        _nest(values, row.name, tensor)
+            # pgw#853: a declared LIST parameter. z-image's `x` is a python
+            # list over the CFG-doubled batch, and the #739 vocabulary could
+            # not say so — `_nest` built a DICT from the dotted name, so
+            # `Input('x.0', ...)` yielded {'0': tensor} where the target takes
+            # [tensor]. That is blocker B1, and it is an SDK gap, not a torch
+            # one: the nested form torch wants exports fine (control rc=4).
+            arity = _container_arity(row, seed, config, decl.family)
+            _nest(values, row.name, [_one() for _ in range(arity)])
     for arg in target_args(decl, spec.target):
-        _nest(values, arg.name, arg.value)
+        if arg.template is None:
+            _nest(values, arg.name, arg.value)
+            continue
+        # pgw#853: a ROW-DERIVED structured argument. qwen-image's
+        # `img_shapes` is the class row restated as python ints, which
+        # `Arg.value` could not express on two counts — a scalar type, and
+        # declaration-GLOBAL where the value is per-row (blocker B1).
+        resolved = _resolve_template(
+            arg.template, seed, config, input_name=arg.name,
+            family=decl.family)
+        if arg.repeat is not None:
+            arity = _resolve_axis(
+                arg.repeat, seed, config, input_name=arg.name,
+                family=decl.family)
+            if arity < 1:
+                raise MintRefused(
+                    f"arg {arg.name!r} declares repeat={arg.repeat!r}, which "
+                    f"the selected class row resolves to {arity}")
+            resolved = [resolved for _ in range(arity)]
+        _nest(values, arg.name, resolved)
     values.update(lifted_lora_values(module, spec))
     return _positionalize(module, spec.target, decl.family, values), {}
 

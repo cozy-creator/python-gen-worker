@@ -357,6 +357,7 @@ def lane_admitted(spec: ExportSpec, *, allow_regressed_lanes: bool) -> str:
 
 def dynamic_shapes_spec(
     dims: Sequence[DynamicDim], input_names: Sequence[str],
+    containers: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, Any]:
     """``torch.export`` ``dynamic_shapes`` for the declared dims.
 
@@ -416,7 +417,30 @@ def dynamic_shapes_spec(
         raise MintRefused(
             f"declared dynamic dims name inputs the target does not take: "
             f"{unknown!r} (target inputs: {list(input_names)!r})")
-    return {name: by_input.get(name) for name in input_names}
+    # pgw#853: `dynamic_shapes` must MIRROR the example feed's container
+    # structure or torch refuses by name. z-image measured the sentence:
+    #
+    #     Detected mismatch between the structure of `inputs` and
+    #     `dynamic_shapes`: `inputs['x']` is a <class 'list'>, but
+    #     `dynamic_shapes['x']` is a <class 'dict'>
+    #
+    # and the nested form torch wants — {'x': [{2: Dim, 3: Dim}]} — exports
+    # fine, so this was an SDK gap, not a torch limitation. The arity comes
+    # from the SAME class row the feed was built from
+    # (`aot_declaration.container_arities`), never re-guessed here.
+    arities = dict(containers or {})
+    out: Dict[str, Any] = {}
+    for name in input_names:
+        spec = by_input.get(name)
+        arity = arities.get(name)
+        if arity is None:
+            out[name] = spec
+        else:
+            # One entry per element; every element of a declared container
+            # shares the container's declared axes, which is what makes the
+            # elements one graph class rather than N.
+            out[name] = [spec for _ in range(int(arity))]
+    return out
 
 
 def export_program(
@@ -1162,8 +1186,10 @@ def _export_entry(
 
     input_names = _input_names(module, args, kwargs)
     flat_names = flat_input_names(module, args, kwargs)
-    dynamic = dynamic_shapes_spec(espec.dynamic, input_names) \
-        if espec.dynamic else None
+    dynamic = dynamic_shapes_spec(
+        espec.dynamic, input_names,
+        _decl.container_arities(decl, espec, module),
+    ) if espec.dynamic else None
 
     def _full_export() -> Any:
         try:

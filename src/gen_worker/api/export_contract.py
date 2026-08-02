@@ -60,6 +60,10 @@ ForkValue = Union[bool, int, str]
 #: with a different width exports correctly instead of failing in the trace.
 AxisSpec = Union[int, str, Tuple[str, str]]
 
+#: Max nesting depth of an ``Arg.template``. qwen-image's img_shapes is 3
+#: (list -> list -> tuple); anything deeper is a boundary-shrink problem.
+_TEMPLATE_MAX_DEPTH = 4
+
 STATIC_ROWS = "static-rows"
 DYNAMIC_COLLAPSE = "dynamic-collapse"
 SHAPE_STRATEGIES = (STATIC_ROWS, DYNAMIC_COLLAPSE)
@@ -77,6 +81,65 @@ def _identifier(kind: str, name: Any) -> str:
     if not text or not text.replace(".", "_").isidentifier():
         raise DeclarationError(f"{kind} name {name!r} is not a valid identifier")
     return text
+
+
+def _axis_spec(entry: Any, what: str) -> AxisSpec:
+    """Validate and canonicalise one :data:`AxisSpec`.
+
+    Lifted out of ``Input.__post_init__`` (pgw#853) so the SAME three-way
+    rule — literal / declared-dim name / ``("config", field)`` — governs
+    every place the vocabulary lets a number come from the class row:
+    tensor axes, ``Input.repeat`` container arity, and the leaves of
+    ``Arg.template``. One rule, one error sentence, one resolver
+    (``aot_declaration._resolve_axis``) downstream.
+    """
+    if isinstance(entry, bool):
+        raise DeclarationError(f"{what}: bool is not an axis spec")
+    if isinstance(entry, int):
+        if entry <= 0:
+            raise DeclarationError(f"{what}: literal {entry} must be positive")
+        return entry
+    if isinstance(entry, str):
+        return _identifier(what, entry)
+    try:
+        ref = tuple(entry)
+    except TypeError:
+        ref = ()
+    if len(ref) != 2 or ref[0] != "config" or not str(ref[1]).strip():
+        raise DeclarationError(
+            f"{what}: {entry!r} is not an int, a dim name, or "
+            f"(\"config\", field)")
+    return ("config", str(ref[1]).strip())
+
+
+def _canon_template(node: Any, what: str, _depth: int = 0) -> Any:
+    """Canonicalise a nested :data:`AxisSpec` template to tuples.
+
+    Lists and tuples nest; anything else is a leaf and must be an
+    ``AxisSpec``. Tuples (not lists) so the structure stays hashable and a
+    ``Compile`` remains comparable by value — which registration idempotence
+    depends on.
+    """
+    if _depth > _TEMPLATE_MAX_DEPTH:
+        raise DeclarationError(
+            f"{what}: nested more than {_TEMPLATE_MAX_DEPTH} deep — a traced "
+            f"call argument that deep is a boundary problem, not a "
+            f"declaration one")
+    if isinstance(node, (list, tuple)):
+        if not node:
+            raise DeclarationError(f"{what}: empty container in the template")
+        return tuple(_canon_template(x, what, _depth + 1) for x in node)
+    return _axis_spec(node, what)
+
+
+def _template_rows(node: Any) -> Any:
+    """A JSON-able mirror of a canonical template (lists, not tuples), used
+    only for ``as_row``/mint-request serialisation."""
+    if isinstance(node, tuple) and len(node) == 2 and node[0] == "config":
+        return ["config", node[1]]
+    if isinstance(node, tuple):
+        return [_template_rows(x) for x in node]
+    return node
 
 
 class Dim(msgspec.Struct, frozen=True):
@@ -291,30 +354,23 @@ class Input(msgspec.Struct, frozen=True):
     dtype: str = ""
     value: Optional[float] = None
     targets: Tuple[str, ...] = ()
+    #: pgw#853: the parameter is a LIST of this many tensors, each of
+    #: ``shape`` — an :data:`AxisSpec`, so the arity may be a literal, a
+    #: declared :class:`Dim` resolved from the class row, or ``("config",
+    #: field)``. ``None`` (the default) means a single tensor: every
+    #: declaration written before this field existed is unchanged, by
+    #: construction. See :data:`REPEAT_RATIONALE`.
+    repeat: Optional[AxisSpec] = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
         force(self, "name", _identifier("Input", self.name))
-        shape: list[AxisSpec] = []
-        for entry in tuple(self.shape):
-            if isinstance(entry, bool):
-                raise DeclarationError(
-                    f"Input {self.name!r}: bool is not an axis spec")
-            if isinstance(entry, int):
-                if entry <= 0:
-                    raise DeclarationError(
-                        f"Input {self.name!r}: literal axis {entry} must be positive")
-                shape.append(entry)
-            elif isinstance(entry, str):
-                shape.append(_identifier(f"Input {self.name!r} axis", entry))
-            else:
-                ref = tuple(entry)
-                if len(ref) != 2 or ref[0] != "config" or not str(ref[1]).strip():
-                    raise DeclarationError(
-                        f"Input {self.name!r}: axis spec {entry!r} is not an "
-                        f"int, a dim name, or (\"config\", field)")
-                shape.append(("config", str(ref[1]).strip()))
-        force(self, "shape", tuple(shape))
+        if self.repeat is not None:
+            force(self, "repeat",
+                  _axis_spec(self.repeat, f"Input {self.name!r} repeat"))
+        force(self, "shape", tuple(
+            _axis_spec(entry, f"Input {self.name!r} axis spec")
+            for entry in tuple(self.shape)))
         force(self, "dtype", str(self.dtype or "").strip())
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
 
@@ -323,31 +379,91 @@ class Input(msgspec.Struct, frozen=True):
         return self.name.split(".", 1)[0]
 
     def as_row(self) -> Dict[str, Any]:
-        return {
+        row: Dict[str, Any] = {
             "name": self.name,
             "shape": [list(e) if isinstance(e, tuple) else e for e in self.shape],
             "dtype": self.dtype,
             "value": self.value,
             "targets": list(self.targets),
         }
+        # pgw#846: an absent field is OMITTED, so every declaration written
+        # before this vocabulary existed serialises byte-identically.
+        if self.repeat is not None:
+            row["repeat"] = (list(self.repeat)
+                             if isinstance(self.repeat, tuple) else self.repeat)
+        return row
 
 
 class Arg(msgspec.Struct, frozen=True):
-    """A non-tensor literal argument of the export call (``return_dict=False``
-    — a dataclass output is not a valid export output; the consumer
-    re-wraps)."""
+    """A non-tensor argument of the export call.
+
+    Two forms, and the second is pgw#853's:
+
+    * ``value=`` — a LITERAL, declaration-global (``return_dict=False`` — a
+      dataclass output is not a valid export output; the consumer re-wraps).
+    * ``template=`` — a **row-derived structure**. A nested list/tuple whose
+      leaves are :data:`AxisSpec` (literal, declared :class:`Dim` name, or
+      ``("config", field)``), resolved to python ints against the SELECTED
+      CLASS ROW. ``repeat=`` then makes the value a LIST OF THAT MANY COPIES
+      of the resolved template, so it reads as the ``x * n`` the call site
+      itself writes: qwen's ``[[(1, H_pat, W_pat)]] * B`` is
+      ``template=[(1, "H_pat", "W_pat")], repeat="B"``.
+
+    ``template`` exists because a real family's traced signature takes one:
+    qwen-image's ``img_shapes`` is ``[[(1, H_pat, W_pat)]] * B`` — literally
+    the class row restated as python ints. ``value`` could not express it on
+    two counts, both structural: its type is a scalar union, and an ``Arg``
+    is declaration-GLOBAL while this value is PER-ROW. That gap is
+    qwen-image's blocker B1, and it is the whole reason the family's
+    declaration carries no ``args`` rows at all.
+
+    Exactly one of ``value``/``template`` may be given. A specializing
+    python scalar that does NOT vary by row stays a ``value``: the point of
+    the vocabulary is that a declaration states which of the two a number is.
+    """
 
     name: str
-    value: Union[bool, int, float, str, None]
+    value: Union[bool, int, float, str, None] = None
     targets: Tuple[str, ...] = ()
+    #: Nested list/tuple of :data:`AxisSpec` leaves, resolved per class row.
+    template: Optional[Any] = None
+    #: Wrap the resolved ``template`` in a list of this arity (an
+    #: :data:`AxisSpec`, so it too may come from the row).
+    repeat: Optional[AxisSpec] = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
         force(self, "name", _identifier("Arg", self.name))
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
+        if self.template is not None:
+            if self.value is not None:
+                raise DeclarationError(
+                    f"Arg {self.name!r} declares both value= and template= — "
+                    f"a literal and a row-derived structure are different "
+                    f"claims about where the number comes from; state one")
+            force(self, "template",
+                  _canon_template(self.template, f"Arg {self.name!r} template"))
+        elif self.repeat is not None:
+            raise DeclarationError(
+                f"Arg {self.name!r} declares repeat= without template= — "
+                f"there is no structure to repeat")
+        if self.repeat is not None:
+            force(self, "repeat",
+                  _axis_spec(self.repeat, f"Arg {self.name!r} repeat"))
 
     def as_row(self) -> Dict[str, Any]:
-        return {"name": self.name, "value": self.value, "targets": list(self.targets)}
+        row: Dict[str, Any] = {
+            "name": self.name, "value": self.value,
+            "targets": list(self.targets),
+        }
+        # pgw#846: absent fields are OMITTED, so every declaration written
+        # before this vocabulary existed serialises byte-identically.
+        if self.template is not None:
+            row["template"] = _template_rows(self.template)
+        if self.repeat is not None:
+            row["repeat"] = (list(self.repeat)
+                             if isinstance(self.repeat, tuple) else self.repeat)
+        return row
 
 
 def validate_contract(compile_decl: Any) -> None:
@@ -475,15 +591,29 @@ def validate_contract(compile_decl: Any) -> None:
             names.add(inp.name)
 
     # A binding may belong to any target's inputs; refuse only when NO
-    # declared Input row knows the name at all.
+    # declared row knows the name at all.
+    #
+    # pgw#853: a TEMPLATED Arg is a legal carrier. qwen-image's H_pat/W_pat
+    # genuinely enter the traced call at tuple positions 1 and 2 of
+    # `img_shapes[b][0] = (frames, height, width)` — the endpoint's own
+    # comment says the (name, index) pair is accurate and that "the
+    # vocabulary means 'tensor axis' by it is exactly blocker B1". So the
+    # vocabulary now means either, and `aot_declaration` keeps them apart
+    # where it matters: an Arg-carried extent is a PYTHON INT, which
+    # specializes the graph and can never become a torch symbol.
     if inputs:
         known = {i.name for i in inputs} | {i.top_name for i in inputs}
+        templated = {a.name for a in args if a.template is not None}
         for d in dims:
             for bound, _axis in d.carried_by:
-                if bound not in known and bound.split(".", 1)[0] not in known:
-                    raise DeclarationError(
-                        f"Dim {d.name!r} binds input {bound!r}, which no "
-                        f"declared Input row names")
+                head = bound.split(".", 1)[0]
+                if bound in known or head in known:
+                    continue
+                if bound in templated or head in templated:
+                    continue
+                raise DeclarationError(
+                    f"Dim {d.name!r} binds {bound!r}, which no declared "
+                    f"Input row names and no declared Arg templates")
 
 
 # ---------------------------------------------------------------------------
