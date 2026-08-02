@@ -62,9 +62,22 @@ _EVIDENCE = "evidence"
 _EVIDENCE_MSGS = ("activity_update", "boot_phase")
 
 _MAX_REDIRECT_HOPS = 3
-_AUTH_FAILURE_EXIT_THRESHOLD = 3
 # UNAUTHENTICATED can be transient hub-side (duplicate stream teardown, pg
 # blip): exit only when failures persist across a real time window.
+#
+# pgw#869 — WHAT THIS LADDER MAY AND MAY NOT JUDGE. A rejected credential is a
+# verdict about US; an ABSENT hub is a verdict about nothing. Before this
+# change the ladder could not tell them apart, and the difference is the whole
+# outbox: a worker that outlives a hub outage ages past its 30 min JWT, redials,
+# is refused because its token expired, and DIES WITH A FULL QUEUE — every
+# property the outbox proves, right up to the moment it matters. See
+# `_auth_rejection_is_fatal`: an expired presented credential never reaches this
+# ladder.
+#
+# The 3/60 s pair is a magic number and is left ONLY because it now governs the
+# genuinely-about-us case that #372's tests pin. Replacing it with an
+# evidence-keyed rule is filed separately (pgw#873), not smuggled in here.
+_AUTH_FAILURE_EXIT_THRESHOLD = 3
 _AUTH_FAILURE_EXIT_WINDOW_S = 60.0
 
 #: pgw#848: how long before its own expiry a worker starts SAYING SO. Wider
@@ -760,6 +773,11 @@ class Transport:
         self.reconnect_delays: List[float] = []  # observability + tests
         self._consecutive_auth_failures = 0
         self._first_auth_failure_at: Optional[float] = None
+        #: pgw#869: the `jti` the streak above is about. A rotation makes the
+        #: accumulated evidence stale, so the streak restarts.
+        self._auth_credential_id = ""
+        #: Credentials whose expired-rejection has already been confessed.
+        self._expired_rejection_reported: set = set()
         #: pgw#848: the last remaining-lifetime this worker reported, so a
         #: reconnect storm does not emit one event per attempt.
         self._last_credential_left: Optional[float] = None
@@ -852,6 +870,125 @@ class Transport:
             return None
         self._report_credential_age(token)
         return [("authorization", f"Bearer {token}")]
+
+    # ---- pgw#869: which auth rejections are a verdict about US ------------
+
+    def _presented_credential(self) -> str:
+        from . import worker_credential
+
+        return (self._worker_jwt or worker_credential.current() or "").strip()
+
+    @staticmethod
+    def _credential_claims(token: str) -> dict:
+        try:
+            from .request_context import _decode_unverified_jwt_claims
+
+            return _decode_unverified_jwt_claims(token) or {}
+        except Exception:  # noqa: BLE001 — a probe never breaks a connect
+            return {}
+
+    @classmethod
+    def _credential_id(cls, token: str) -> str:
+        """`jti` — the same key the hub's admission and wedge streaks use."""
+        return str(cls._credential_claims(token).get("jti") or "").strip()
+
+    def _auth_rejection_is_fatal(self, details: str) -> bool:
+        """Whether THIS UNAUTHENTICATED is evidence against this worker.
+
+        **An expired presented credential is never such evidence**, and the hub
+        agrees — measured in tensorhub, not inferred:
+
+        * `AdmitExpiredBootToken` (`repository/expected_worker_store.go:311`)
+          admits an expired-but-valid token while
+          `now < ew.IssuedAtUnix + BootGraceWindow`, keyed on the `jti` the hub
+          itself last minted;
+        * `DefaultWorkerJWTTTL = 30 min` vs `DefaultWorkerJWTBootGrace = 4 h`
+          (`config/config.go:619,675`), and `RotateExpectedWorkerJTI` moves
+          `IssuedAtUnix` forward on every rotation — so a worker is admissible
+          for ~3.5 h PAST its expiry, counted from its last rotation;
+        * on admission the hub pushes a `TokenRefresh` immediately
+          (`connect_worker.go:392`, "credential rotated on connect"), which
+          fully heals the worker.
+
+        So retrying with an expired token is not a doomed loop — it is the
+        documented recovery path, and the ONLY thing that was preventing the
+        heal was this worker killing itself first. `_report_credential_age`
+        already said as much ("the hub has a boot-grace admission for exactly
+        that case — so shortcutting the reconnect here would break a path that
+        legitimately heals"); the ladder shortcut it anyway.
+
+        And the billing risk that motivated the ladder is owned by the party
+        that can actually see the pod: `grpc/worker_wedge.go` terminates a pod
+        after `wedgeAuthRejectThreshold` consecutive auth rejects through the
+        tracked provider path. A worker cannot reap itself when it cannot reach
+        the hub, and it does not have to.
+
+        A LIVE (or absent) credential refused by an answering hub IS about us —
+        revoked, superseded, misconfigured — and keeps the existing ladder. The
+        streak resets whenever the presented credential CHANGES, because a
+        rotation means the next attempt genuinely differs.
+        """
+        token = self._presented_credential()
+        exp = float(self._credential_claims(token).get("exp") or 0.0)
+        if exp > 0 and exp <= time.time():
+            self._consecutive_auth_failures = 0
+            self._first_auth_failure_at = None
+            self._report_expired_rejection(token, details, exp)
+            return False
+
+        cred = self._credential_id(token)
+        if cred != self._auth_credential_id:
+            # A different credential is a different attempt: the evidence the
+            # streak had accumulated was about the old one.
+            self._auth_credential_id = cred
+            self._consecutive_auth_failures = 0
+            self._first_auth_failure_at = None
+
+        now = time.monotonic()
+        if self._first_auth_failure_at is None:
+            self._first_auth_failure_at = now
+        self._consecutive_auth_failures += 1
+        logger.error(
+            "stream rejected UNAUTHENTICATED (%d consecutive over %.0fs) while "
+            "presenting a LIVE credential — this is a verdict about this "
+            "worker, not about the hub's availability: %s",
+            self._consecutive_auth_failures,
+            now - self._first_auth_failure_at, details,
+        )
+        return (
+            self._consecutive_auth_failures >= _AUTH_FAILURE_EXIT_THRESHOLD
+            and now - self._first_auth_failure_at >= _AUTH_FAILURE_EXIT_WINDOW_S
+        )
+
+    def _report_expired_rejection(
+        self, token: str, details: str, exp: float,
+    ) -> None:
+        """Patient is not the same as silent. Once per credential."""
+        cred = self._credential_id(token) or "<undecodable>"
+        if cred in self._expired_rejection_reported:
+            return
+        self._expired_rejection_reported.add(cred)
+        ago = time.time() - exp
+        logger.error(
+            "stream rejected UNAUTHENTICATED with an EXPIRED credential "
+            "(jti=%s, expired %.0fs ago): %s — NOT treating this as a verdict "
+            "against this worker. The hub admits an expired boot token inside "
+            "its grace window and rotates on admission, so this worker keeps "
+            "retrying rather than dying with its queue full (pgw#869).",
+            cred, ago, details,
+        )
+        try:
+            from . import activity as activity_mod
+
+            activity_mod.emit_event(
+                "worker_credential",
+                f"expired credential refused by the hub (jti={cred}, "
+                f"expired {ago:.0f}s ago): {details} — retrying patiently; "
+                f"the queued evidence is held, not dropped",
+                phase="expired_rejected_retrying",
+            )
+        except Exception:  # noqa: BLE001 — telemetry never breaks a connect
+            logger.debug("expired-rejection event failed", exc_info=True)
 
     def _report_credential_age(self, token: str) -> None:
         """Say something BEFORE the credential dies, not after the pod does.
@@ -972,20 +1109,11 @@ class Transport:
             except grpc.aio.AioRpcError as e:
                 code, details = e.code(), str(e.details() or "")
                 if code == grpc.StatusCode.UNAUTHENTICATED:
-                    now = time.monotonic()
-                    if self._first_auth_failure_at is None:
-                        self._first_auth_failure_at = now
-                    self._consecutive_auth_failures += 1
-                    logger.error("stream rejected UNAUTHENTICATED (%d consecutive over %.0fs): %s",
-                                 self._consecutive_auth_failures,
-                                 now - self._first_auth_failure_at, details)
-                    if (
-                        self._consecutive_auth_failures >= _AUTH_FAILURE_EXIT_THRESHOLD
-                        and now - self._first_auth_failure_at >= _AUTH_FAILURE_EXIT_WINDOW_S
-                    ):
+                    if self._auth_rejection_is_fatal(details):
                         raise FatalTransportError(
                             f"authentication rejected {self._consecutive_auth_failures} times "
-                            f"over {now - self._first_auth_failure_at:.0f}s: {details}"
+                            f"over {time.monotonic() - (self._first_auth_failure_at or 0):.0f}s "
+                            f"while presenting a live credential: {details}"
                         ) from e
                 elif code == grpc.StatusCode.FAILED_PRECONDITION:
                     if details.startswith("not_leader:"):
@@ -1092,6 +1220,8 @@ class Transport:
             self._connected_at = time.monotonic()
             self._consecutive_auth_failures = 0
             self._first_auth_failure_at = None
+            self._auth_credential_id = ""
+            self._expired_rejection_reported.clear()   # pgw#869: healed
             self._connected.set()
             logger.info("connected to %s (HelloAck ok)", target)
             await self._handlers.on_hello_ack(ack)
@@ -1254,6 +1384,8 @@ class Transport:
                         logger.debug("credential publish failed", exc_info=True)
                     self._consecutive_auth_failures = 0
                     self._first_auth_failure_at = None
+                    self._auth_credential_id = ""
+                    self._expired_rejection_reported.clear()
                     logger.info(
                         "worker JWT rotated by hub (exp=%d)",
                         msg.token_refresh.expires_at_unix,

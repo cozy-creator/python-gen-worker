@@ -41,13 +41,21 @@ the mint anyway. No disk persistence is built or tested here.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import json
 import time
 from typing import List, Tuple
 
 from gen_worker import activity as activity_mod
+from gen_worker import worker_credential
+from gen_worker.config import load_settings
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.transport import SendQueue
+from gen_worker.transport import (
+    _AUTH_FAILURE_EXIT_WINDOW_S,
+    SendQueue,
+    Transport,
+)
 
 from harness.hub_double import hub_double, is_ready
 
@@ -341,6 +349,113 @@ def test_a_producer_never_blocks_on_a_dead_connection() -> None:
         assert q.pending_evidence_count == 200
 
     asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------
+# the edge that defeats everything above: an absent hub outlives the JWT
+# --------------------------------------------------------------------------
+
+def _jwt(exp_unix: float, jti: str = "jti-1") -> str:
+    """An UNSIGNED JWT. The worker only ever decodes `exp`/`jti` unverified for
+    its own diagnostics — nothing here is presented to a real verifier."""
+    def seg(obj) -> str:
+        raw = json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return f"{seg({'alg': 'none'})}.{seg({'exp': exp_unix, 'jti': jti})}.sig"
+
+
+def _transport() -> Transport:
+    return Transport(load_settings(worker_id="auth-probe"), object())
+
+
+def test_an_expired_credential_refused_by_the_hub_is_never_fatal() -> None:
+    """Wall #2 through a different door.
+
+    A worker that outlives a hub outage ages past its 30 min JWT, redials, and
+    is refused BECAUSE its token expired. Under the old ladder that is three
+    strikes and death — with a full queue, in exactly the scenario the outbox
+    exists for. It must not count at all.
+
+    The hub agrees, measured: `AdmitExpiredBootToken` admits an expired token
+    while `now < IssuedAtUnix + BootGraceWindow`, and
+    `DefaultWorkerJWTBootGrace = 4 h` against `DefaultWorkerJWTTTL = 30 min`
+    (tensorhub `config/config.go:619,675`) — ~3.5 h of admissibility past
+    expiry, counted from the last rotation, with a `TokenRefresh` pushed on
+    admission. Retrying is the documented recovery path; the only thing that
+    was defeating it was this worker killing itself first.
+    """
+    worker_credential.reset()
+    try:
+        worker_credential.install(_jwt(time.time() - 600.0), 0.0)
+        t = _transport()
+        for _ in range(50):
+            assert t._auth_rejection_is_fatal("invalid worker token state") is False
+        # and the ladder is not merely out-run — it is UNREACHABLE.
+        assert t._consecutive_auth_failures == 0
+    finally:
+        worker_credential.reset()
+
+
+def test_an_expired_rejection_confesses_once_per_credential() -> None:
+    """Patient is not the same as silent — and the confession is a hub ROW,
+    which the evidence lane now holds through the very outage that caused it."""
+    worker_credential.reset()
+    captured: List[pb.ActivityUpdate] = []
+    prior = activity_mod._sink
+    activity_mod._sink = captured.append
+    try:
+        worker_credential.install(_jwt(time.time() - 60.0, "jti-A"), 0.0)
+        t = _transport()
+        for _ in range(5):
+            t._auth_rejection_is_fatal("invalid worker token state")
+        worker_credential.install(_jwt(time.time() - 60.0, "jti-B"), 0.0)
+        for _ in range(5):
+            t._auth_rejection_is_fatal("invalid worker token state")
+    finally:
+        activity_mod._sink = prior
+        worker_credential.reset()
+
+    rows = [u for u in captured if u.kind == "worker_credential"]
+    assert len(rows) == 2, f"one confession per credential, got {len(rows)}"
+    assert all(u.phase == "expired_rejected_retrying" for u in rows)
+    assert "jti-A" in rows[0].detail and "jti-B" in rows[1].detail
+
+
+def test_a_LIVE_credential_refused_by_an_answering_hub_still_escalates() -> None:
+    """The other half must not regress: revoked/superseded/misconfigured is a
+    verdict about this worker, and a pod that can never re-join must not spin
+    forever. Only the expired case was exempted."""
+    worker_credential.reset()
+    try:
+        worker_credential.install(_jwt(time.time() + 3600.0), 0.0)
+        t = _transport()
+        t._auth_rejection_is_fatal("invalid worker token state")
+        assert t._consecutive_auth_failures == 1
+        t._auth_rejection_is_fatal("invalid worker token state")
+        assert t._consecutive_auth_failures == 2
+        # the window is what the third strike is measured against; backdate it
+        # rather than sleeping 60s for a clock this issue does not own.
+        t._first_auth_failure_at -= _AUTH_FAILURE_EXIT_WINDOW_S + 1.0
+        assert t._auth_rejection_is_fatal("invalid worker token state") is True
+    finally:
+        worker_credential.reset()
+
+
+def test_a_rotation_restarts_the_evidence() -> None:
+    """The streak is about a credential. A different one is a different
+    attempt, so the evidence accumulated against the old one is stale."""
+    worker_credential.reset()
+    try:
+        worker_credential.install(_jwt(time.time() + 3600.0, "jti-old"), 0.0)
+        t = _transport()
+        t._auth_rejection_is_fatal("invalid worker token state")
+        t._auth_rejection_is_fatal("invalid worker token state")
+        assert t._consecutive_auth_failures == 2
+        worker_credential.install(_jwt(time.time() + 3600.0, "jti-new"), 0.0)
+        t._auth_rejection_is_fatal("invalid worker token state")
+        assert t._consecutive_auth_failures == 1
+    finally:
+        worker_credential.reset()
 
 
 def test_shedding_is_bounded_and_reports_itself() -> None:
