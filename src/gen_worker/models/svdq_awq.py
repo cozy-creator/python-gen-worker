@@ -158,7 +158,7 @@ def undo_adanorm_splits(weight: Any, bias: Optional[Any], splits: int,
 
 def decode_awq_linear(tensors: dict[str, Any], out_features: int,
                       in_features: int, *, adanorm_splits: int = 1,
-                      compute_dtype: Any = None) -> Any:
+                      compute_dtype: Any = None, device: Any = None) -> Any:
     """One AWQ W4A16 layer -> a plain ``nn.Linear`` for the diffusers module.
 
     ``adanorm_splits`` MUST be given for a modulation layer (qwen ``img_mod``/
@@ -176,7 +176,7 @@ def decode_awq_linear(tensors: dict[str, Any], out_features: int,
     bias = tensors.get("bias")
     w, bias = undo_adanorm_splits(w, bias, int(adanorm_splits))
     lin = nn.Linear(int(in_features), int(out_features), bias=bias is not None,
-                    dtype=compute)
+                    dtype=compute, device=device)
     with torch.no_grad():
         lin.weight.copy_(w.to(compute))
         if bias is not None:

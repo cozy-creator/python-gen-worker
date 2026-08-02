@@ -180,7 +180,8 @@ def unpack_qweight(qweight: Any, out_features: int, in_features: int) -> Any:
     n_tiles, k_tiles = n // g["mem_n"], k // g["mem_k"]
     words = qweight.reshape(-1).view(torch.int32)
     nib = (words.unsqueeze(-1)
-           >> torch.arange(0, 32, 4, dtype=torch.int32)) & 0xF
+           >> torch.arange(0, 32, 4, dtype=torch.int32,
+                           device=words.device)) & 0xF
     logical = (n_tiles, g["num_n_packs"], g["n_pack_size"], g["num_n_lanes"],
                g["reg_n"], k_tiles, g["num_k_packs"], g["k_pack_size"],
                g["num_k_lanes"], g["reg_k"])
@@ -306,7 +307,8 @@ def pack_qweight(codes: Any) -> Any:
         g["reg_n"], k_tiles, g["num_k_packs"], g["k_pack_size"],
         g["num_k_lanes"], g["reg_k"])
     w = w.permute(*_FWD_PERM).contiguous().bitwise_and(0xF)
-    w = w.bitwise_left_shift(torch.arange(0, 32, 4, dtype=torch.int32))
+    w = w.bitwise_left_shift(torch.arange(0, 32, 4, dtype=torch.int32,
+                                          device=w.device))
     return w.sum(dim=-1, dtype=torch.int32).view(torch.int8).view(n, -1)
 
 
