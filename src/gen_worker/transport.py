@@ -4,6 +4,33 @@ backoff, `not_leader` redirects. Liveness is HTTP/2 keepalive only.
 Send-queue policy (CONTRACT.md §1): JobResult is NEVER dropped — results
 persist across reconnects until written to a live stream. Under overflow the
 drop order is JobProgress (oldest first); everything else blocks the producer.
+
+pgw#869 — THE EVIDENCE LANE. Results had a durable lane; measurements did not.
+`reset_for_reconnect` cleared `_items` wholesale and restored only
+`_pending_results`, so every queued ActivityUpdate/BootPhase — every
+`self_mint_compile` phase, every `aot_mint phase=pool` ledger, every terminal —
+was destroyed on each disconnect, and any evidence already popped by the sender
+when the write failed had no durable copy at all. That is wall #7's mechanism:
+the pod stayed alive with its numbers, the route to them did not.
+
+Evidence now rides its own durable lane on the same principle as results:
+enqueue-and-return (never blocks a producer), survives reconnect in FIFO order,
+and retires only when a live stream has taken it. Coalescing is deliberately
+asymmetric — detail-free RUNNING beats (`Activity.heartbeat` /
+`progress_beat`) collapse to the latest per (kind, phase); anything carrying a
+`detail`, an `error`, or a non-RUNNING state is evidence and is never dropped.
+That split is not a guess: the hub's own upsert conflict key is
+`(worker_id, kind, phase, state, self_stalled, payload_digest)` with
+`payload_digest = sha256(error || 0x00 || detail)`
+(tensorhub `internal/db/gen/worker_activity_events.sql.go`,
+`repository/worker_activity_event_store.go`), so exactly what this coalesces is
+what the hub would itself have folded into one row via `occurrences + 1`, while
+everything it preserves is a distinct row hub-side.
+
+In-memory only, deliberately (pgw#869 §1): the worker process did not restart in
+the motivating incident, and a mint is a child of the worker, so a worker restart
+ends the mint anyway. Disk persistence is out of scope and must be argued on its
+own merits, not borrowed from this one.
 """
 
 from __future__ import annotations
@@ -28,6 +55,11 @@ logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = pb.PROTOCOL_VERSION_CURRENT
 
 _RESULT, _PROGRESS, _EVENT = "result", "progress", "event"
+#: pgw#869: a hub-bound FACT with no live-state replay behind it. Results have
+#: `_pending_results`; state has `LifecycleSnapshot`/`StateDelta`/the capacity
+#: lane. These two carry measurements and terminals and had neither.
+_EVIDENCE = "evidence"
+_EVIDENCE_MSGS = ("activity_update", "boot_phase")
 
 _MAX_REDIRECT_HOPS = 3
 _AUTH_FAILURE_EXIT_THRESHOLD = 3
@@ -123,6 +155,8 @@ def _msg_kind(msg: pb.WorkerMessage) -> str:
         return _RESULT
     if which == "job_progress":
         return _PROGRESS
+    if which in _EVIDENCE_MSGS:
+        return _EVIDENCE
     return _EVENT
 
 
@@ -147,11 +181,58 @@ class SenderQuiesced(Exception):
     """
 
 
+#: pgw#869 §5: how many undelivered evidence facts the outbox holds before it
+#: shortens itself. Sized against the motivating outage rather than guessed: a
+#: whole-graph sdxl mint emits O(10^2) phase/measurement facts per hour, so this
+#: is hours of a real mint's evidence. Growth is bounded by SHEDDING, and a shed
+#: is itself a reported fact — silence about a loss is the thing this issue
+#: exists to delete.
+EVIDENCE_MAX = 4096
+
+#: The shed report's own slot. Exempt from shedding: the one fact that must
+#: never be lost is the fact that facts were lost.
+_SHED_KEY = ("shed",)
+
+#: pgw#869: how many just-shipped facts are re-offered after a DIRTY reconnect.
+#:
+#: `stream.write()` returning means BUFFERED, not delivered — the codebase
+#: already knows this and says so in `_close_sender`: cancelling a write "RSTs
+#: the call and throws away everything buffered behind it". So retiring a fact
+#: the instant its write returns loses exactly the tail of facts produced in the
+#: moments around a stream death, which is the window this whole issue is about.
+#: MEASURED: the acceptance test below fails without this — three measurements
+#: emitted immediately after the hub died were written into a socket that was
+#: already gone, retired, and never replayed.
+#:
+#: A trailing ring makes that window recoverable at bounded cost. Re-offering is
+#: safe by construction: the hub folds an identical redelivery into
+#: `occurrences + 1` on one row (see the module docstring), so the choice is
+#: between a duplicate and a hole, and a hole is not a choice.
+RESHIP_WINDOW = 256
+
+
 class SendQueue:
     """Bounded outbound queue with results-never-dropped semantics."""
 
-    def __init__(self, maxsize: int = 1024) -> None:
+    def __init__(self, maxsize: int = 1024, evidence_max: int = EVIDENCE_MAX) -> None:
         self._maxsize = maxsize
+        # pgw#869: the durable evidence lane. Ordered (dict preserves insertion
+        # order), so replay is FIFO. A coalescible beat REPLACES its slot in
+        # place, which keeps a phase's beat where the phase began rather than
+        # letting liveness chatter reorder the record.
+        self._evidence_max = evidence_max
+        self._pending_evidence: dict[Any, pb.WorkerMessage] = {}
+        # serialized bytes -> evidence key, so retiring a shipped message is a
+        # dict pop rather than a scan, and a superseded copy cannot retire the
+        # newer one that replaced it.
+        self._evidence_key: dict[bytes, Any] = {}
+        self._evidence_ordinal = 0
+        self._shed_total = 0
+        # Facts whose write returned on the stream that has since died. See
+        # RESHIP_WINDOW: a returned write is a buffered write.
+        self._recent_shipped: collections.deque[Tuple[Any, pb.WorkerMessage]] = (
+            collections.deque(maxlen=RESHIP_WINDOW)
+        )
         self._items: collections.deque[Tuple[str, pb.WorkerMessage]] = collections.deque()
         # Reconnect evidence is inserted atomically ahead of preserved results.
         # It is a small state replay, not ordinary producer traffic, so it is
@@ -205,7 +286,120 @@ class SendQueue:
         # Durable JobResults are explicitly exempt from the queue bound. They
         # must not consume event/progress capacity merely because they share
         # the same deque (especially after reconnect requeues several results).
-        return sum(1 for kind, _msg in self._items if kind != _RESULT)
+        # pgw#869: evidence is exempt for the same reason and one stronger —
+        # it has its own bound (`_evidence_max`) with its own shed policy, and
+        # a producer that just MEASURED something must never block on a dead
+        # connection to report it.
+        return sum(
+            1 for kind, _msg in self._items if kind not in (_RESULT, _EVIDENCE)
+        )
+
+    # ---- pgw#869: the evidence lane ---------------------------------------
+
+    @staticmethod
+    def _is_coalescible_beat(msg: pb.WorkerMessage) -> bool:
+        """A pure liveness re-report: RUNNING, carrying no payload.
+
+        `Activity.heartbeat` and `Activity.progress_beat` re-state the current
+        phase with a fresh seq/counter and nothing else. Only the latest can
+        matter — and the hub agrees by construction: its conflict key covers
+        (kind, phase, state, payload_digest), and `seq`/`step`/`counter_*` are
+        taken from EXCLUDED on conflict, so N beats of one phase were always
+        going to become ONE row holding the last one's numbers.
+        """
+        if msg.WhichOneof("msg") != "activity_update":
+            return False
+        u = msg.activity_update
+        return (
+            u.state == pb.ActivityState.ACTIVITY_STATE_RUNNING
+            and not u.detail
+            and not u.error
+        )
+
+    def _evidence_slot(self, msg: pb.WorkerMessage) -> Any:
+        """The coalescing slot: shared for beats, unique for everything else."""
+        if self._is_coalescible_beat(msg):
+            u = msg.activity_update
+            return ("beat", u.kind, u.phase)
+        self._evidence_ordinal += 1
+        return ("fact", self._evidence_ordinal)
+
+    def _remove_item(self, msg: pb.WorkerMessage) -> None:
+        key = self._message_key(msg)
+        self._items = collections.deque(
+            (kind, queued)
+            for kind, queued in self._items
+            if self._message_key(queued) != key
+        )
+
+    def _put_evidence(self, msg: pb.WorkerMessage) -> None:
+        """Record a fact durably and queue it. NEVER blocks, never raises."""
+        slot = self._evidence_slot(msg)
+        prior = self._pending_evidence.get(slot)
+        if prior is not None:
+            # A superseded beat leaves no copy behind to be written after the
+            # newer one; its slot position is retained by the dict.
+            self._evidence_key.pop(self._message_key(prior), None)
+            self._remove_item(prior)
+        self._pending_evidence[slot] = msg
+        self._evidence_key[self._message_key(msg)] = slot
+        self._items.append((_EVIDENCE, msg))
+        self._shed_evidence()
+
+    def _shed_evidence(self) -> None:
+        """Bound the lane. Coalescible first, evidence last (pgw#869 §5)."""
+        if len(self._pending_evidence) <= self._evidence_max:
+            return
+        shed = 0
+        for pool in ("beat", "fact"):
+            for slot in list(self._pending_evidence):
+                if len(self._pending_evidence) <= self._evidence_max:
+                    break
+                if slot == _SHED_KEY or slot[0] != pool:
+                    continue
+                victim = self._pending_evidence.pop(slot)
+                self._evidence_key.pop(self._message_key(victim), None)
+                self._remove_item(victim)
+                shed += 1
+        if shed:
+            self._record_shed(shed)
+
+    def _record_shed(self, shed: int) -> None:
+        """Shedding evidence must itself emit a fact (pgw#869 §5).
+
+        Built here rather than through `activity.emit_event` so it cannot
+        recurse into the queue it is reporting on. It occupies the reserved
+        slot, so the count is always the running total and the hub's row is the
+        final one.
+        """
+        self._shed_total += shed
+        prior = self._pending_evidence.pop(_SHED_KEY, None)
+        if prior is not None:
+            self._evidence_key.pop(self._message_key(prior), None)
+            self._remove_item(prior)
+        msg = pb.WorkerMessage(activity_update=pb.ActivityUpdate(
+            kind="outbox_shed",
+            phase="overflow",
+            state=pb.ActivityState.ACTIVITY_STATE_RUNNING,
+            detail=(
+                f"outbox shed {self._shed_total} undelivered fact(s) at the "
+                f"{self._evidence_max}-entry bound — the hub was unreachable "
+                f"long enough that this worker could not keep every "
+                f"measurement it produced (pgw#869)"
+            ),
+            updated_at_unix_ms=int(time.time() * 1000),
+        ))
+        self._pending_evidence[_SHED_KEY] = msg
+        self._evidence_key[self._message_key(msg)] = _SHED_KEY
+        self._items.append((_EVIDENCE, msg))
+
+    @property
+    def pending_evidence_count(self) -> int:
+        return len(self._pending_evidence)
+
+    @property
+    def shed_total(self) -> int:
+        return self._shed_total
 
     @staticmethod
     def _message_key(msg: pb.WorkerMessage) -> Optional[bytes]:
@@ -304,6 +498,10 @@ class SendQueue:
                 r = msg.job_result
                 self._pending_results[(r.request_id, r.attempt)] = msg
                 self._items.append((kind, msg))       # results exempt from the bound
+                self._cond.notify_all()
+                return
+            if kind == _EVIDENCE:
+                self._put_evidence(msg)               # pgw#869: never blocks
                 self._cond.notify_all()
                 return
             if self._host_capacity_key(msg) is not None:
@@ -441,6 +639,14 @@ class SendQueue:
             return
         async with self._cond:
             self._in_flight.discard(key)
+            # pgw#869: a fact retires from the durable lane only once a LIVE
+            # stream has taken it. `_evidence_key` holds only the currently
+            # stored copy, so a superseded beat can never retire the newer one.
+            slot = self._evidence_key.pop(key, None)
+            if slot is not None:
+                shipped = self._pending_evidence.pop(slot, None)
+                if shipped is not None:
+                    self._recent_shipped.append((slot, shipped))
             identity = self._reconnect_identity(msg)
             if identity is not None and identity[0] == "host_capacity":
                 generation = self._host_capacity_generation(msg)
@@ -457,7 +663,15 @@ class SendQueue:
             self._cond.notify_all()  # wake wait_empty (drain flush)
 
     async def reset_for_reconnect(self) -> None:
-        """Drop transient lanes; executor state replays capacity after HelloAck."""
+        """Drop transient lanes; executor state replays capacity after HelloAck.
+
+        pgw#869: DURABLE lanes are requeued, not dropped. Results were already;
+        evidence now is, in the order it was produced. Anything a live stream
+        took but never confirmed (`mark_event_shipped` did not run because the
+        write failed) is still in `_pending_evidence` and comes back with it —
+        which is the second of the two loss sites this closes, and the one no
+        amount of queueing would have covered on its own.
+        """
         async with self._cond:
             self._quiescing = False   # the quiesce belonged to the dead stream
             self._reconnect.clear()
@@ -469,6 +683,21 @@ class SendQueue:
             self._items.clear()
             for msg in self._pending_results.values():
                 self._items.append((_RESULT, msg))
+            # Re-offer the trailing window of facts whose write RETURNED on the
+            # stream that just died — buffered is not delivered (RESHIP_WINDOW).
+            # Oldest first, and never over a slot a newer fact has since taken.
+            reship = list(self._recent_shipped)
+            self._recent_shipped.clear()
+            revived: dict[Any, pb.WorkerMessage] = {}
+            for slot, msg in reship:
+                if slot in self._pending_evidence:
+                    continue          # superseded by a newer fact; that one wins
+                revived[slot] = msg
+            for slot, msg in revived.items():
+                self._evidence_key[self._message_key(msg)] = slot
+            self._pending_evidence = {**revived, **self._pending_evidence}
+            for msg in self._pending_evidence.values():
+                self._items.append((_EVIDENCE, msg))
             self._cond.notify_all()
 
     async def wait_empty(self, timeout: Optional[float] = None) -> bool:
@@ -481,6 +710,7 @@ class SendQueue:
                 or self._in_flight
                 or self._capacity_in_flight
                 or self._pending_results
+                or self._pending_evidence   # pgw#869: a drain flushes facts too
             ):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
