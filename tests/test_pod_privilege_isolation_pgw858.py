@@ -334,9 +334,14 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     _probe(dropped, "report-identity")           # a live, serving child
     proc = dropped.pc._proc
     assert proc is not None and proc.returncode is None
-    started = time.monotonic()
+    # gw#666/pgw#795: NO `assert time.monotonic() - started < 120.0` here. That
+    # asserted the RUNNER'S SPEED, and the two assertions below already state
+    # the property it was standing in for — the parent exited and the child was
+    # reaped. A slow runner made the old form fail for being slow; a hung
+    # `close()` makes the new form fail by never reaping, which is the actual
+    # defect. Hang containment belongs to the job timeout, not to a literal in
+    # a correctness assertion.
     dropped.close()
-    assert time.monotonic() - started < 120.0
     assert not dropped.alive, "the parent did not exit after SIGTERM"
     assert proc.returncode is not None, "the dropped child was never reaped"
 
