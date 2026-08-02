@@ -371,7 +371,16 @@ def _mint_aot(
     Runs against the pipeline the child ALREADY loaded through the endpoint's
     own ``setup()``, so the exported graphs are the serving graphs.
     """
-    from . import aot_mint, fleet_cells
+    from . import aot_mint, aot_resume, fleet_cells
+
+    # pgw#848 item 5: install the cross-attempt resume bank before anything is
+    # exported. Process-global rather than a parameter threaded through
+    # `aot_mint.mint` -> `_mint_cell` -> `_compile_entries_parallel`: the bank
+    # is opened by the entry pool, three call frames down, and the intervening
+    # signatures describe WHAT to compile rather than where a previous attempt
+    # left its work. Empty request field = no bank, and the mint runs exactly
+    # as it did before.
+    aot_resume.set_root(request.resume)
 
     frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
     spec = fleet_cells.aot_export_spec(pipe, cfg)

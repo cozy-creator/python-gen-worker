@@ -183,6 +183,15 @@ def build_request(
         # back what it measured.
         phases_snapshot=str(
             Path(workdir) / mint_process.PHASES_SNAPSHOT_NAME),
+        # pgw#848 item 5: a sibling of `workdir`, not a child of it. Every
+        # other path here is per-attempt by design; this one must outlive the
+        # attempt or the crash-only mint has nothing to resume FROM. It also
+        # outlives the mint CHILD, so a launch driver that restarts the child
+        # in place on the same pod gets the same recovery for free — the
+        # `mint_root` of an existing pending is reused verbatim
+        # (`fleet_cells.arm_self_mint`), which is what makes the two compose
+        # without either knowing about the other.
+        resume=str(Path(pending.mint_root) / "resume"),
         cfg=cfg_spec(pending.cfg),
         snapshots=dict(task.snapshots),
         component_paths={

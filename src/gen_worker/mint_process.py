@@ -189,6 +189,11 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: pgw#848: where the child rewrites its live phase table, so a mint the
     #: parent KILLS still leaves its measurements behind. Empty = no snapshot.
     phases_snapshot: str = ""
+    #: pgw#848 item 5: the CROSS-ATTEMPT resume bank root (``aot_resume``).
+    #: Deliberately NOT under the per-attempt ``child-<n>`` workdir — that is
+    #: precisely why a crash at entry 30 of 36 used to discard ~5.2 h of
+    #: compile. Empty = this mint does not resume and behaves as it did before.
+    resume: str = ""
     #: pgw#848: one ENTRY child's measured host high-water, banked by the
     #: parent from a previous mint on this pod (``mint_budget.entry_peak_rss``).
     #: 0 = never measured here, and the pool's width falls back to its
