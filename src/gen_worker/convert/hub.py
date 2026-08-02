@@ -364,7 +364,18 @@ class HubClient:
         destination_repo: str,
         files: list[CommitFile],
         tags: list[str] | None = None,
-        mode: str = "merge",
+        # th#1400: "replace" — a checkpoint is COMPLETE IN ITSELF. "merge"
+        # unions this publish with the repo's prior :latest, so a caller that
+        # never mentioned a sibling inherits its bytes; te#44 shipped an #fp8
+        # checkpoint carrying 5.2 GB of fp16 base weights that way, and a
+        # differently-sharded base splices into a quantization the same way.
+        # te#44 was fixed at ONE call site (publish_flavors' own default)
+        # instead of here, so every future caller re-acquired the bug — the
+        # hub's normalizePublishMode("") had the same default until th#1400.
+        # Both are "replace" now; pass mode="merge" explicitly and only for
+        # what it is for: assembling ONE checkpoint across several commits
+        # (clone.py's chunked full-clone, _stream.py's streamed output).
+        mode: str = "replace",
         flavor: str = "",
         flavors: list[str] | None = None,
         default_flavor: str = "",

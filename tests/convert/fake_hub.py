@@ -198,7 +198,11 @@ class _FakeHub(BaseHTTPRequestHandler):
                        if op["type"] == "add")
             self._send(201, {"revision_id": "rev-1", "uploads": uploads,
                              "deletions": [], "copies": [], "tags": req.get("tags") or [],
-                             "mode": req.get("mode") or "merge"})
+                             # th#1400: the hub's normalizePublishMode("")
+                             # returns "replace" on BOTH routes now. A double
+                             # that still echoed "merge" would assert the
+                             # retired default back into existence.
+                             "mode": req.get("mode") or "replace"})
             return
         if "/commits/" in self.path and self.path.endswith("/uploads"):
             # th#699 re-open: fresh presigned upload for one stashed add whose
