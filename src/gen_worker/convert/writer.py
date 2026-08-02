@@ -298,7 +298,7 @@ _ST_FLOAT_DTYPES: frozenset[str] = frozenset(
     {"F64", "F32", "F16", "BF16", "F8_E4M3", "F8_E5M2"})
 
 
-def _stream_reencode(
+def stream_reencode(
     input_path: Path,
     out_dir: Path,
     *,
@@ -406,7 +406,7 @@ def streaming_dtype_cast(
             return t.to(dtype=target_dtype)
         return t
 
-    return _stream_reencode(
+    return stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
         output_stem=output_stem,
@@ -497,7 +497,7 @@ def streaming_fp8_storage_cast(
             return t.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
         return t
 
-    return _stream_reencode(
+    return stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
         output_stem=output_stem,
@@ -557,7 +557,7 @@ def streaming_w8a8_cast(
 ) -> dict[str, Any]:
     """Per-channel-scaled fp8 requant of one weight set, streaming.
 
-    Two passes like :func:`_stream_reencode`, but eligible weights emit TWO
+    Two passes like :func:`stream_reencode`, but eligible weights emit TWO
     output tensors — the fp8 ``weight`` and its F32 [out] ``weight_scale``
     (``scale = amax(row)/448``, ``q = round(w/scale)`` in fp32; the probe's
     exact recipe). Peak anonymous memory ~ the largest single tensor.
@@ -778,7 +778,7 @@ def apply_objective_scheduler_config(
     cfg_path.write_text(json.dumps(cfg, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _component_output_stem(entry: Path) -> str:
+def component_output_stem(entry: Path) -> str:
     stem = entry.name
     for suffix in (".safetensors.index.json", ".safetensors"):
         if stem.endswith(suffix):
@@ -806,7 +806,7 @@ def streaming_cast_snapshot(
         result = streaming_dtype_cast(
             entry, (out_dir / comp) if comp else out_dir,
             target_dtype=target_dtype,
-            output_stem=_component_output_stem(entry),
+            output_stem=component_output_stem(entry),
         )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -824,7 +824,7 @@ def fp8_te_components() -> tuple[str, ...]:
     return text_encoder_components()
 
 
-def _component_stored_tensor_names(component_dir: Path) -> frozenset[str]:
+def component_stored_tensor_names(component_dir: Path) -> frozenset[str]:
     """Tensor names as stored in the component's safetensors file(s)."""
     names: set[str] = set()
     idx = sorted(component_dir.glob("*.safetensors.index.json"))
@@ -921,7 +921,7 @@ def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
     graph_keys = {
         n for n, p in model.named_parameters() if id(p) in castable}
 
-    stored = _component_stored_tensor_names(component_dir)
+    stored = component_stored_tensor_names(component_dir)
     if not stored:
         raise ConversionImplementationError(
             f"no safetensors tensor names found in {component_dir}")
@@ -958,7 +958,7 @@ def streaming_fp8_te_cast(
             return t.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
         return t
 
-    return _stream_reencode(
+    return stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
         output_stem=output_stem,
@@ -1002,7 +1002,7 @@ def streaming_fp8_snapshot(
         entry = root_groups[0][1]
         result = streaming_fp8_storage_cast(
             entry, out_dir,
-            output_stem=_component_output_stem(entry),
+            output_stem=component_output_stem(entry),
             block_scope=True,
         )
         if not int(result["converted_count"]):
@@ -1027,12 +1027,12 @@ def streaming_fp8_snapshot(
             result = streaming_fp8_te_cast(
                 entry, out_dir / comp,
                 castable_keys=te_fp8_castable_keys(source_dir / comp),
-                output_stem=_component_output_stem(entry),
+                output_stem=component_output_stem(entry),
             )
         else:
             result = streaming_fp8_storage_cast(
                 entry, out_dir / comp,
-                output_stem=_component_output_stem(entry),
+                output_stem=component_output_stem(entry),
             )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1134,7 +1134,7 @@ def streaming_w8a8_snapshot(
         for rel, entry, members in selected:
             result = streaming_w8a8_cast(
                 entry, out_dir / Path(rel).parent,
-                output_stem=_component_output_stem(entry),
+                output_stem=component_output_stem(entry),
             )
             tensor_count += int(result["tensor_count"])
             converted += int(result["converted_count"])
@@ -1176,7 +1176,7 @@ def streaming_w8a8_snapshot(
         if comp in denoiser_set:
             result = streaming_w8a8_cast(
                 entry, out_dir / comp,
-                output_stem=_component_output_stem(entry),
+                output_stem=component_output_stem(entry),
             )
             if not int(result["converted_count"]):
                 raise ConversionImplementationError(
@@ -1188,7 +1188,7 @@ def streaming_w8a8_snapshot(
             result = streaming_fp8_te_cast(
                 entry, out_dir / comp,
                 castable_keys=te_fp8_castable_keys(source_dir / comp),
-                output_stem=_component_output_stem(entry),
+                output_stem=component_output_stem(entry),
             )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1637,6 +1637,9 @@ __all__ = [
     "verify_w8a8_snapshot",
     "snapshot_weight_groups",
     "copy_non_weight_files",
+    "component_output_stem",
+    "component_stored_tensor_names",
+    "stream_reencode",
     "fp8_cast_eligible",
     "FP8_SKIP_TENSOR_PATTERNS",
     "fp8_default_components",
