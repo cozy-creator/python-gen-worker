@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+## 0.90.3 (2026-08-01) — **three families that could never be wired to the AOT lane now can** (pgw#853: a declaration that refuses to MINT was refusing to IMPORT), and `prop_s` is measured so the export-reuse change can be decided on its own sign (pgw#847)
+
+- **pgw#853 — a declaration that REFUSES must not be able to refuse the ENDPOINT.**
+  ltx-2.3, qwen-image and z-image express their mint blockers by raising
+  `MintRefused` at MODULE SCOPE — and module-scope import is the only mechanism
+  the platform has for registering a declaration. **So the three families most
+  in need of the AOT lane were exactly the three that could not be wired to it:
+  doing so would have taken the endpoint DOWN AT BOOT.** A refusal to MINT was
+  being expressed as a refusal to IMPORT.
+  `register_export_declaration()` now accepts a zero-arg **callable** with an
+  explicit `family=`, and `export_declaration()` evaluates it so the refusal
+  surfaces where the mint is asking. `has_export_declaration()` /
+  `registered_entry()` read the registry WITHOUT evaluating (a blocked family
+  is declared; it just refuses to mint), and `register_declared_exports` uses
+  the non-evaluating accessor — reading it back through the evaluating one
+  would have detonated a thunk inside endpoint COLLECTION, the exact blast
+  radius this removes. `fleet_cells.mint_recipe` turns the refusal into a typed
+  `self_mint_skipped` under a new `declaration_refused` phase **with the
+  blocker text intact** (the evidence is the point; a try/except that swallowed
+  it would be a different defect). The mint gate's catch is `Exception`, not
+  `BaseException` — swallowing a `KeyboardInterrupt` or a cancellation inside
+  the SERVING process would be its own defect; the import boundary keeps
+  `BaseException` deliberately, because it runs at BOOT where nothing outranks
+  the endpoint coming up.
+
+- **pgw#847 — `prop_s` is measured, once per mint.** `torch.export.export` runs
+  once per declared class row, serially, in the parent: sdxl is **36 entries**
+  at a banked `export_s` of 37.8 s, so that loop is **~22 min of wall the
+  pgw#809 pool never covered**. An exported graph's `graph_module.code` is
+  byte-identical across shape rows, and one export plus a per-row
+  `FakeTensorProp` reproduces `wrapper.cpp`, `kernel.cpp` and the linked `.so`
+  byte for byte (proven with `torch.export.export` monkeypatched to **raise**,
+  so the reuse path cannot have silently fallen back). The saving is
+  `export_s - prop_s`, and `prop_s` had never been measured on a real family —
+  off-pod probes bound it only to 0.25-0.97x, which is not enough to know the
+  change's SIGN. Now recorded as `timings['prop_probe_s']` ONCE per mint
+  process, on a FRESH `program.module()` so the program is untouched, and
+  recorded not at all on any failure. **Telemetry only — no decision reads it.**
+
+- **pgw#847 — export ONCE per module, re-specialize per shape row** — the change
+  `prop_probe_s` exists to size. **Behind a fail-closed gate and OFF by
+  default**; it does not affect any mint in this release unless explicitly
+  enabled.
+
 - **pgw#847 — one export can serve every shape row, behind a gate that must PROVE it (OFF by
   default).** A cell's N entries are one module traced at N shape rows, and an `ExportedProgram`'s
   `graph_module.code` is byte-identical across them — the row lives entirely in node metadata. So
