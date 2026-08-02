@@ -29,7 +29,7 @@ import pathlib
 from typing import Any
 
 import pytest
-from hypothesis import HealthCheck, assume, example, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from gen_worker.models.chunk_cas import parse_cas_ref
@@ -92,7 +92,7 @@ def _known_grammar_hole_th1387(parsed: Any) -> bool:
 @example("owner/repo")
 @example("owner/repo:latest#fp8")
 @example(f"owner/repo@sha256:{HEX64}")
-@example(f"owner/rİpo@SHA256:{HEX64}")   # th#1388 index/slice mismatch
+@example(f"owner/rİpo@SHA256:{HEX64}")   # pgw#872 index/slice mismatch (fixed)
 @example("owner/repo/extra")                   # th#1387 unbounded path segments
 @example("0/::")                               # th#1387 round-trip break
 def test_ref_normal_form_is_a_fixed_point(raw: str) -> None:
@@ -137,29 +137,32 @@ def test_ref_acceptance_implies_well_formed_components(raw: str) -> None:
         assert algo in ("sha256", "blake3"), f"{raw!r} accepted digest algorithm {algo!r}"
 
 
-def test_ref_grammar_lower_index_ledger_pgw872() -> None:
-    """LEDGER for pgw#872 (tensorhub twin: th#1388).
+def test_ref_grammar_lower_index_pgw872() -> None:
+    """pgw#872 FIXED (tensorhub twin: th#1388) — revert-turns-red guard.
 
-    ``parse_model_ref`` computes ``low = s.lower()``, finds ``@sha256:`` with
-    ``low.index(...)``, and slices ``s`` with that index. ``str.lower()`` is not
-    length-preserving (``len("İ") == 1`` but ``len("İ".lower()) == 2``),
-    so the split lands in the wrong place: the repo keeps a stray ``@`` and the
-    digest silently loses a hex character while still LOOKING like a digest — a
-    wrong CAS address with no error anywhere.
+    ``parse_model_ref`` used to compute ``low = s.lower()``, find ``@sha256:``
+    with ``low.index(...)``, and slice ``s`` with that index. ``str.lower()`` is
+    not length-preserving (``len("\u0130") == 1`` but ``len("\u0130".lower()) == 2``),
+    so the split landed in the wrong place: the repo kept a stray ``@`` and the
+    digest silently lost a hex character while still LOOKING like a digest — a
+    wrong CAS address with no error anywhere. The Go twin PANICKED on the
+    mirror-image input (``slice bounds out of range``), because ToLower GROWS
+    invalid UTF-8.
 
-    The Go twin panics instead (``slice bounds out of range``) because Go slices
-    bytes; same cause, louder symptom. Recorded, not fixed here.
+    The fix on both sides is the same: index and slice the SAME string. Here
+    ``_ascii_lower`` is a 1:1 character map, so an index taken on it is a valid
+    index into the original.
     """
-    parsed = parse_model_ref(f"owner/rİpo@SHA256:{HEX64}").tensorhub
+    parsed = parse_model_ref(f"owner/r\u0130po@SHA256:{HEX64}").tensorhub
     assert parsed is not None
-    if parsed.repo == "rİpo" and parsed.digest == f"sha256:{HEX64}":
-        pytest.fail(
-            "pgw#872 appears fixed — remove this ledger and the th#1387/#1388 "
-            "skips from the property tests above"
-        )
-    assert parsed.repo.endswith("@"), "pgw#872 ledger drifted: the stray '@' is gone"
-    _, _, hexpart = (parsed.digest or "").partition(":")
-    assert len(hexpart) == 63, f"pgw#872 ledger drifted: digest width is {len(hexpart)}"
+    assert parsed.repo == "r\u0130po", (
+        f"repo={parsed.repo!r}: the split landed on an index taken from a lowercased copy"
+    )
+    assert parsed.digest == f"sha256:{HEX64}", f"digest={parsed.digest!r}"
+    # The fold itself: every case spelling of the marker finds the same split.
+    for spelling in ("@sha256:", "@SHA256:", "@ShA256:", "@sHa256:"):
+        th = parse_model_ref(f"owner/repo{spelling}{HEX64}").tensorhub
+        assert th is not None and th.repo == "repo" and th.digest == f"sha256:{HEX64}"
 
 
 # ---------------------------------------------------------------------------
