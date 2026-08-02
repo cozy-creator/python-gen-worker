@@ -69,6 +69,41 @@ annotation (`FluxPipeline` → `from_pretrained`; `str`/`Path` → the local
 snapshot dir), and owns device placement and low-VRAM offload. Endpoint code
 never calls `.to("cuda")`, `enable_model_cpu_offload()`, or `empty_cache()`.
 
+## Tensor state: `register_buffer`, never a plain attribute (pgw#857)
+
+If your model class holds a tensor that is **not** a learned parameter — a rope
+frequency table, a precomputed mask, any "just a cache" — **register it as a
+buffer**:
+
+```python
+# WRONG — a plain attribute
+self.pos_freqs = torch.cat([...])          # not in state_dict
+
+# RIGHT
+self.register_buffer("pos_freqs", torch.cat([...]), persistent=False)
+```
+
+**The discriminator is ASSIGNMENT STYLE, not class ancestry.** It is tempting to
+assume "it is an `nn.Module`, so its tensors are tracked" — that is false.
+Measured: diffusers' `QwenEmbedRope` **is** an `nn.Module` and its
+`state_dict()` is **empty**, because its two 2 MB rope tables are plain
+attributes. z-image's `RopeEmbedder` has the same problem for a different
+reason (it is not an `nn.Module` at all), which is why "is it a module" is the
+wrong test to carry away.
+
+**Why it matters beyond tidiness.** A tensor outside `state_dict` is not a
+weight the CAS delivers and rebinds at load. `torch.export` lifts it as an
+anonymous `_tensor_constant{N}` **literal**, and a literal's bytes ship *inside*
+the compiled cell — so it becomes part of the artifact rather than part of the
+checkpoint. Two checkpoints of your family that differ only in the config that
+derives that table then need *different* cells. The cell key handles this
+correctly today (pgw#857 folds literal VALUES into the identity), so nothing
+breaks — but you have moved several MB out of the deduplicated weight store and
+into every compiled artifact, and you have coupled your cell identity to a
+number you probably meant to be a cache.
+
+A registered buffer costs nothing and stays a weight.
+
 ## Imports go at module top — including torch
 
 Write `import torch` (and every other heavy dep) at module top like any
