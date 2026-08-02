@@ -89,6 +89,22 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
         "-q", "-p", "no:cacheprovider", "--no-header",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    # The container failing to START is not the rows failing, and conflating
+    # them is how this test read as a pgw#858 regression on GitHub CI while
+    # passing on every developer box. Measured there: exit 127 with
+    #   [FATAL tini (7)] exec .../.venv/bin/python failed: No such file or directory
+    # — `ubuntu:24.04` cannot exec the runner's uv-managed interpreter (the
+    # venv's python is a symlink into a prefix whose loader the image does not
+    # have). No row ran, so there is nothing to report about the uid boundary.
+    # Skip by NAME rather than assert: this is the same distinction the file's
+    # own `shutil.which("docker")` guard already makes, one layer deeper.
+    if proc.returncode == 127 and "exec" in proc.stderr and "failed" in proc.stderr:
+        pytest.skip(
+            "the container cannot exec this interpreter, so no row ran: "
+            f"{proc.stderr.strip().splitlines()[-1][:200]} — pgw#858 needs an "
+            "image that can run the host's python, not a verdict from a "
+            "container that never started"
+        )
     assert proc.returncode == 0, (
         "the pgw#858 rows failed under a real root parent:\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
