@@ -66,7 +66,7 @@ def fused_shape_supported(out_features: int, in_features: int,
 
 
 @functools.lru_cache(maxsize=1)
-def _build_fused_ops() -> Optional[tuple[Any, Any]]:
+def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
     """Compile-register both fused ops. ``None`` when triton is unavailable."""
     try:
         import torch

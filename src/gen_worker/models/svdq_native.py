@@ -511,9 +511,13 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                   else "cpu")
     dev = torch.device(device)
 
+    from .native_kernels import svdq_execution_lane
+    from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
+
+    lane = svdq_execution_lane() if mode == "blockwise" else "baseline"
     t0 = time.perf_counter()
     plain: Dict[str, Any] = {}
-    swapped = awq = 0
+    swapped = awq = awq_packed = 0
     with safe_open(str(art.file), framework="pt", device=str(dev)) as fh:
         groups = _group_by_prefix(fh.keys())
         for prefix, leaves in sorted(groups.items()):
@@ -525,10 +529,20 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                         f"AWQ layer {prefix!r} has no Linear in "
                         f"{type(model).__name__}")
                 splits = adanorm_splits_for(type(model).__name__, prefix)
-                _set_module(model, prefix, decode_awq_linear(
-                    tensors, int(target.out_features), int(target.in_features),
-                    adanorm_splits=splits, compute_dtype=compute, device=dev))
-                awq += 1
+                out_f = int(target.out_features)
+                in_f = int(target.in_features)
+                # pgw#864: modulation stays packed-resident on the fused lane
+                # (the +6.8 GB delta was this dequant); degrade per-layer.
+                if lane == "fused" and awq_packed_supported(out_f, in_f):
+                    _set_module(model, prefix, build_awq_packed_linear(
+                        tensors, out_f, in_f, adanorm_splits=splits,
+                        compute_dtype=compute, device=dev))
+                    awq_packed += 1
+                else:
+                    _set_module(model, prefix, decode_awq_linear(
+                        tensors, out_f, in_f, adanorm_splits=splits,
+                        compute_dtype=compute, device=dev))
+                    awq += 1
                 continue
             if "qweight" in tensors and "wscales" in tensors:
                 targets = plan_targets(model, prefix)
@@ -560,9 +574,10 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     model._cozy_svdq_mode = mode
     logger.info(
         "svdq native loader: %s mode=%s lowrank=%s device=%s — %d W4A4 "
-        "linears, %d AWQ modulation layers, %d plain tensors in %.1fs",
-        type(model).__name__, mode, lowrank_quant, dev, swapped, awq,
-        len(plain), time.perf_counter() - t0)
+        "linears, %d AWQ modulation layers (%d packed-resident), %d plain "
+        "tensors in %.1fs",
+        type(model).__name__, mode, lowrank_quant, dev, swapped,
+        awq + awq_packed, awq_packed, len(plain), time.perf_counter() - t0)
     return model
 
 

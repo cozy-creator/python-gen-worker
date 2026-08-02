@@ -67,9 +67,16 @@ def _probe_fused_lane() -> Optional[str]:
         return (f"fused svdq lane needs Blackwell block-scaled MMA "
                 f"(sm_{'/'.join(str(s) for s in FUSED_SMS)}); this GPU is "
                 f"sm_{sm}")
+    from .svdq_awq_packed import awq_packed_self_check
     from .svdq_fused import fused_self_check
 
-    return fused_self_check()
+    reason = fused_self_check()
+    if reason is not None:
+        return reason
+    reason = awq_packed_self_check()
+    if reason is not None:
+        return f"awq packed lane: {reason}"
+    return None
 
 
 def svdq_execution_lane() -> str:
