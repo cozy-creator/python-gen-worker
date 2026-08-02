@@ -1424,8 +1424,13 @@ class Transport:
                         "worker JWT rotated by hub (exp=%d)",
                         msg.token_refresh.expires_at_unix,
                     )
-                    # pgw#763: the split parent forwards rotations to the
-                    # compute child (capability renewal reads the fresh JWT).
+                    # pgw#763 delta 1: the rotation is OFFERED to the handler,
+                    # which is NOT the same as forwarded to the compute child
+                    # — `ParentControl.on_token_refresh` deliberately does
+                    # nothing with it, because the child holds no credential
+                    # and renews through `procsplit.broker` instead. The old
+                    # comment here said the parent "forwards rotations to the
+                    # compute child"; it never has (pgw#876 §2).
                     refreshed = getattr(self._handlers, "on_token_refresh", None)
                     if refreshed is not None:
                         try:

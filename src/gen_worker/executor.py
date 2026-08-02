@@ -38,6 +38,7 @@ from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
 from . import warmup
+from . import worker_credential
 from . import worker_mode
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
@@ -3145,9 +3146,13 @@ class Executor:
         # settings-pathed store; the default keeps embedded/CLI runs working.
         self.runtime_config = ConfigStore()
         # Current worker JWT for hub HTTP calls (capability renewal). Worker
-        # wiring points this at the transport's rotated credential.
+        # wiring points this at the transport's rotated credential; until then
+        # the process-wide credential source answers (pgw#848). It read
+        # `getattr(settings, "worker_jwt", "")` until pgw#876 §2 — a field
+        # pgw#848 RENAMED, so the getattr default swallowed the AttributeError
+        # the rename exists to raise and this provider silently returned "".
         self.worker_jwt_provider: Callable[[], str] = (
-            lambda: str(getattr(settings, "worker_jwt", "") or "").strip()
+            lambda: worker_credential.current()
         )
         self.draining = False
         self.jobs: Dict[Tuple[str, int], _Job] = {}

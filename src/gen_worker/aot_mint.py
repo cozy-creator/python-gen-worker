@@ -3072,6 +3072,7 @@ def _publisher_from_settings() -> Any:
     from settings. Refuses by name when either is absent rather than attempting
     an unauthenticated publish.
     """
+    from . import worker_credential
     from .config import get_settings
     from .fleet_cells import CellPublisher
 
@@ -3079,7 +3080,11 @@ def _publisher_from_settings() -> Any:
     base_url = str(
         getattr(settings, "tensorhub_public_url", "")
         or getattr(settings, "tensorhub_url", "") or "").strip()
-    token = str(getattr(settings, "worker_jwt", "")
+    # pgw#876 §2: this read `getattr(settings, "worker_jwt", "")`, a field
+    # pgw#848 RENAMED — the getattr default swallowed the AttributeError the
+    # rename exists to raise, so WORKER_JWT was silently invisible here and
+    # `--publish` refused on every pod that had one and no TENSORHUB_TOKEN.
+    token = str(worker_credential.current()
                 or getattr(settings, "tensorhub_token", "") or "").strip()
     if not base_url or not token:
         raise MintRefused(

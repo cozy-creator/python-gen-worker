@@ -26,6 +26,7 @@ resume design keys on.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -574,3 +575,30 @@ def test_the_old_name_is_gone_so_a_stale_read_cannot_compile() -> None:
         "the old field name is back — a call site can read the frozen token "
         "again and nothing will refuse it")
     assert hasattr(Settings(), "bootstrap_worker_jwt")
+
+
+def test_no_reader_defeats_the_rename_with_a_getattr_default() -> None:
+    """pgw#876 §2. The rename makes a stale read raise — UNLESS the reader
+    supplies a default, and two did, for months, undetected.
+
+    `getattr(settings, "worker_jwt", "")` is valid Python that returns "" now
+    that the field is gone, so the AttributeError never happens and the caller
+    reads an empty credential instead of a frozen one. `executor.py` built its
+    whole `worker_jwt_provider` this way, and `aot_mint._publisher_from_settings`
+    used it to authorize `--publish`. The sibling sweep above could not see
+    either one: it searches for the NEW name, and these name the OLD one.
+    """
+    root = Path(pool.PACKAGE_ROOT) / "gen_worker"
+    offenders = []
+    pattern = re.compile(r"""getattr\(\s*[A-Za-z_.]*settings\s*,\s*["']worker_jwt["']""")
+    for path in sorted(root.rglob("*.py")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if pattern.search(code):
+                offenders.append(
+                    f"{path.relative_to(root)}:{n}: {line.strip()[:90]}")
+    assert not offenders, (
+        "these defeat the pgw#848 rename with a getattr default — the field "
+        "does not exist, so each silently yields the empty string instead of "
+        "raising. Read `worker_credential.current()`:\n  "
+        + "\n  ".join(offenders))

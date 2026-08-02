@@ -1170,8 +1170,9 @@ class ParentControl:
         self._reported_unretired = False
         self.unretired_results_at_exit = 0  # observability + tests
         # delta 1: parent-mediated action accounting (observability + tests).
-        self._jwt_rotations = 0
-        self.actions_performed = 0
+        # pgw#876 §2: `_jwt_rotations` and `actions_performed` lived here too
+        # and were WRITE-ONLY — incremented, never logged, never asserted.
+        # Deleted rather than wired: nothing wanted them.
         self.actions_refused = 0
         self._last_action_refusal_report_at = _NEVER_REPORTED
         self._action_slots = asyncio.Semaphore(_MAX_CONCURRENT_ACTIONS)
@@ -1646,8 +1647,15 @@ class ParentControl:
                     pass
 
     async def on_token_refresh(self, token: str, expires_at_unix: int) -> None:
-        """The rotated worker JWT stays HERE (delta 1) — never sent to a child."""
-        self._jwt_rotations += 1
+        """The rotated worker JWT stays HERE (delta 1) — never sent to a child.
+
+        Present so the non-forward is DECLARED rather than accidental: the
+        transport calls this hook if it exists, and its absence would read as
+        an oversight. The body is empty on purpose — the compute child holds
+        no credential (`ChildTransport.current_worker_jwt` is always ""), and
+        every identity-bearing call it makes goes through `procsplit.broker`,
+        where the parent presents `worker_credential.current()`.
+        """
 
     # ---- fan-in: N children -> ONE worker view (pgw#783, Paul ruling 2) ----
 
@@ -1885,7 +1893,6 @@ class ParentControl:
             reply = {"id": rid, "ok": False,
                      "error": f"{type(exc).__name__}: {exc}"}
         else:
-            self.actions_performed += 1
             reply = {"id": rid, "ok": True, **result}
         try:
             await link.writer.frame(frames.T_ACTION_RESP, frames.pack_meta(reply))
