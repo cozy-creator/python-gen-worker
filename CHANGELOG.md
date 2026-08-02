@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **pgw#847/#868 A4 — export-once is a MEASURED NEGATIVE for sdxl, and every mint now says so for
+  free.** The feature shipped in 0.90.3/0.90.5 behind an off-by-default flag on the strength of a
+  byte-identity proof taken on a CONV probe. Re-asked of attention, and then of the real
+  `diffusers.Transformer2DModel` — sdxl's own block container — the answer inverts: the exported
+  graph keeps the same 86 nodes but its TEXT moves with the row, because the token<->spatial
+  conversion bakes the sequence length and the spatial extents into `reshape` ARGUMENTS
+  (`reshape(permute, [1, 64, 32])` vs `[1, 60, 32]`; `reshape(add_2, [1, 8, 8, 32])` vs
+  `[1, 6, 10, 32]`), on the aspect axis AND the batch axis. Node arguments are not metadata:
+  `FakeTensorProp` re-derives none of them, and rewriting them would be altering the traced graph,
+  which pgw#846 forbids. **So the gate declines sdxl for free at check 1 and the saving for that
+  family is ZERO — the "11-21 min/cell" figure never applied to it.** Attention itself is
+  row-invariant when the head reshape uses `-1` (which is how diffusers writes it) and is pinned
+  admitted; it is the spatial round trip that disqualifies. Both facts are now tests, so the
+  negative cannot rot into an assumption in either direction.
+  **New, always on and free:** `timings["export_reuse_eligible"]` (1.0 / 0.0 / -1.0) — the mint
+  already exports every row, so comparing two rows' graph text costs one string compare and no
+  compiles. Every mint anyone runs, on any family, now reports whether export-once could ever fire
+  there, without enabling anything. The flag stays OFF and no lane should spend a pod validating it
+  on sdxl.
+
 ## 0.90.5 (2026-08-02) — **the credential and the durability release**: the two long fuses that killed attempts sixteen and seventeen are cut, the mint stops reading as finished before its cell is durable, and every arm confesses the missing numerics gate
 
 Cut for the first forge pod. **PATCH, so it rides the existing `0.90` entry in

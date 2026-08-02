@@ -1852,6 +1852,17 @@ def _mint_cell(
     finally:
         if disarmed:
             _arm_branches(pipeline, int(spec.lora_bucket or 0))
+    # pgw#868 A4: ALWAYS recorded, flag or no flag, because it is free — the
+    # mint already exported these rows. 1.0 = one export could serve this
+    # family's rows; 0.0 = its graph text moves with the row (measured true of
+    # sdxl, whose Transformer2DModel bakes the sequence length and the spatial
+    # extents), so reuse can never fire and no lane should spend a mint
+    # proving it. -1.0 = not determinable (fewer than two rows for any key).
+    if reuse_state.eligible:
+        timings["export_reuse_eligible"] = (
+            1.0 if all(reuse_state.eligible.values()) else 0.0)
+    else:
+        timings["export_reuse_eligible"] = -1.0
     if reuse_state.active:
         # FLAT scalars: `timings` is a float table and a nested dict there
         # would be a shape nothing downstream parses. The gate's REASONS are

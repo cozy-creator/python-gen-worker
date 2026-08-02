@@ -44,6 +44,68 @@ class _Stack(nn.Module):
         return self.out(h)
 
 
+class _Attn(nn.Module):
+    """The shape the conv probe does NOT cover: attention.
+
+    sdxl's compiled scope is conv shell + `BasicTransformerBlock`s, and every
+    DiT family is attention end to end. Attention is where a graph could
+    legitimately move with the shape row — the sequence length is H*W, and the
+    head reshape/transpose chain is written in terms of it. If one export can
+    serve every row HERE, the claim covers the families that matter and not
+    just a conv stack.
+    """
+
+    def __init__(self, depth: int = 3, dim: int = 32, heads: int = 4,
+                 text: int = 7) -> None:
+        super().__init__()
+        self.heads = heads
+        self.dim = dim
+        self.proj_in = nn.Linear(dim, dim)
+        self.blocks = nn.ModuleList()
+        for _ in range(depth):
+            self.blocks.append(nn.ModuleDict({
+                "n1": nn.LayerNorm(dim), "qkv": nn.Linear(dim, dim * 3),
+                "n2": nn.LayerNorm(dim), "q": nn.Linear(dim, dim),
+                "kv": nn.Linear(dim, dim * 2),
+                "n3": nn.LayerNorm(dim),
+                "ff1": nn.Linear(dim, dim * 2), "ff2": nn.Linear(dim * 2, dim),
+            }))
+        self.proj_out = nn.Linear(dim, dim)
+        self.text = text
+
+    def _heads(self, t):
+        # `-1` for the sequence dim, which is how diffusers' AttnProcessor2_0
+        # writes it (`attention_processor.py:1450-1452`,
+        # `view(batch_size, -1, attn.heads, head_dim)`). Writing the concrete
+        # length here instead BAKES it into the graph text and makes the
+        # family ineligible for reuse — see `_AttnBakedSeq` below, which is
+        # that exact module and is correctly DECLINED.
+        return t.view(t.shape[0], -1, self.heads,
+                      self.dim // self.heads).transpose(1, 2)
+
+    def forward(self, t, ctx):
+        # TOKENS in, TOKENS out. Deliberately no token<->spatial round trip:
+        # that conversion is what bakes the sequence length and the spatial
+        # extents into the graph, and it is covered by
+        # `test_the_REAL_diffusers_transformer2d_is_INELIGIBLE`. Attention
+        # ITSELF is row-invariant when the head reshape uses `-1`, which is
+        # how diffusers writes it — that is what this pins.
+        t = self.proj_in(t)
+        for blk in self.blocks:
+            r = blk["n1"](t)
+            q, k, v = blk["qkv"](r).chunk(3, dim=-1)
+            a = torch.nn.functional.scaled_dot_product_attention(
+                self._heads(q), self._heads(k), self._heads(v))
+            t = t + a.transpose(1, 2).reshape(t.shape[0], -1, self.dim)
+            r = blk["n2"](t)
+            ck, cv = blk["kv"](ctx).chunk(2, dim=-1)        # cross-attention
+            a = torch.nn.functional.scaled_dot_product_attention(
+                self._heads(blk["q"](r)), self._heads(ck), self._heads(cv))
+            t = t + a.transpose(1, 2).reshape(t.shape[0], -1, self.dim)
+            t = t + blk["ff2"](torch.nn.functional.gelu(blk["ff1"](blk["n3"](t))))
+        return self.proj_out(t)
+
+
 class _BranchesOnSize(nn.Module):
     """The family the gate exists for: its GRAPH moves with the shape row."""
 
@@ -212,6 +274,100 @@ def test_the_gate_never_reaches_the_wrapper_host_compile(tmp_path, monkeypatch):
     aot_export_reuse.prove(
         base, witness, example, {}, workdir=tmp_path, entry="probe")
     assert seen == [], "an arm compiled the wrapper TU"
+
+
+def test_gate_admits_an_ATTENTION_family_too(tmp_path, _refuse_export):
+    """Widens the claim past the conv probe to the shape sdxl and every DiT
+    actually compile: sequence length = H*W, head reshape/transpose written in
+    terms of it, self- AND cross-attention. Same gate, same byte-compare."""
+    module = _Attn()
+    ctx = torch.randn(1, 7, 32)
+    with torch.no_grad():
+        base = torch.export.export(
+            module, (torch.randn(1, 64, 32), ctx), strict=False)
+        witness_inputs = (torch.randn(1, 60, 32), ctx)   # a DIFFERENT seq len
+        witness = torch.export.export(module, witness_inputs, strict=False)
+
+    # the graph text must be row-invariant even with the head reshapes
+    assert base.graph_module.code == witness.graph_module.code
+
+    _refuse_export()
+    verdict = aot_export_reuse.prove(
+        base, witness, witness_inputs, {}, workdir=tmp_path, entry="attn")
+
+    assert verdict.admitted, verdict.reason
+    assert verdict.artifacts_equal is True
+    assert verdict.own_digests == verdict.reuse_digests
+
+
+def test_the_REAL_diffusers_transformer2d_is_INELIGIBLE(tmp_path):
+    """pgw#868 A4, the measured negative that sizes this whole feature.
+
+    `Transformer2DModel` is sdxl's own block container. Exported at two aspect
+    rows it produces the SAME 86 nodes but its graph TEXT differs, because the
+    token<->spatial conversion bakes the sequence length and the spatial
+    extents into `reshape` ARGUMENTS:
+
+        reshape(permute, [1, 64, 32])     vs  reshape(permute, [1, 60, 32])
+        reshape(add_2,  [1, 8, 8, 32])    vs  reshape(add_2,  [1, 6, 10, 32])
+
+    Those are node arguments, not metadata: `FakeTensorProp` re-derives none
+    of them, and rewriting them would be altering the traced graph, which
+    pgw#846 forbids. So export-once CANNOT fire for sdxl, the gate declines it
+    for free at check 1, and the honest saving for this family is ZERO.
+
+    Pinned as a test so the negative cannot quietly rot into an assumption
+    either way — if a future diffusers writes these with `-1`, this goes RED
+    and the feature becomes live for sdxl.
+    """
+    from diffusers.models.transformers.transformer_2d import Transformer2DModel
+
+    module = Transformer2DModel(
+        num_attention_heads=2, attention_head_dim=16, in_channels=32,
+        num_layers=1, cross_attention_dim=16, norm_num_groups=8).eval()
+
+    def export(h, w, b=1):
+        with torch.no_grad():
+            return torch.export.export(
+                module, (torch.randn(b, 32, h, w),),
+                {"encoder_hidden_states": torch.randn(b, 7, 16)}, strict=False)
+
+    base, aspect, batch = export(8, 8), export(6, 10), export(8, 8, b=2)
+
+    # identical STRUCTURE ...
+    assert len(list(base.graph.nodes)) == len(list(aspect.graph.nodes)) == 86
+    # ... and non-identical TEXT, on both the aspect axis and the batch axis
+    assert base.graph_module.code != aspect.graph_module.code
+    assert base.graph_module.code != batch.graph_module.code
+
+    verdict = aot_export_reuse.prove(
+        base, aspect, (torch.randn(1, 32, 6, 10),), {}, workdir=tmp_path,
+        entry="t2d")
+    assert not verdict.admitted
+    assert verdict.code_equal is False
+    assert verdict.artifacts_equal is None      # declined before any compile
+
+
+def test_eligibility_is_recorded_for_free_even_with_the_flag_OFF(tmp_path):
+    """A4: every mint answers "would export-once fire here?" at no cost."""
+    state = aot_export_reuse.ReuseState(tmp_path, active=False)
+
+    class _P:
+        def __init__(self, code):
+            self.graph_module = type("G", (), {"code": code})()
+
+    same = [_P("def forward(x): return x"), _P("def forward(x): return x")]
+    for prog in same:
+        state.program(("unet", True), entry="e", rows=4, args=(), kwargs={},
+                      full_export=lambda p=prog: p)
+    assert state.eligible[("unet", True)] is True
+
+    moved = [_P("reshape(x, [1, 64])"), _P("reshape(x, [1, 60])")]
+    for prog in moved:
+        state.program(("vae", True), entry="e", rows=4, args=(), kwargs={},
+                      full_export=lambda p=prog: p)
+    assert state.eligible[("vae", True)] is False
+    assert state.reused == 0            # nothing was enabled by observing it
 
 
 def test_gate_declines_a_family_whose_graph_moves_with_the_row(tmp_path):

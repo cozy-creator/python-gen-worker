@@ -459,6 +459,13 @@ class ReuseState:
         self.reused = 0
         self.exported = 0
         self.respecialize_s = 0.0
+        #: pgw#868 A4, ALWAYS ON and FREE: the mint already exports every row,
+        #: so comparing two rows' graph TEXT costs one string compare and no
+        #: compiles. It answers "would export-once fire for this family?" on
+        #: every mint anybody runs, without enabling anything. Only the string
+        #: is retained, never the program — no lifetime, no memory.
+        self._row0_code: Dict[Any, str] = {}
+        self.eligible: Dict[Any, bool] = {}
 
     def verdict(self, key: Any) -> Optional[GateVerdict]:
         return self._verdicts.get(key)
@@ -474,22 +481,26 @@ class ReuseState:
         ``torch.export.export`` — called for the base row, for the gate's
         witness row, and for every row whenever reuse is not admitted.
         """
-        if not self.active or rows < MIN_ROWS:
-            self.exported += 1
-            return full_export(), "full"
-
         seen = self._seen.get(key, 0)
         self._seen[key] = seen + 1
+
+        if not self.active or rows < MIN_ROWS:
+            program = full_export()
+            self.exported += 1
+            self._note_eligibility(key, seen, program)
+            return program, "full"
 
         if seen == 0:
             program = full_export()
             self._bases[key] = program
             self.exported += 1
+            self._note_eligibility(key, seen, program)
             return program, "full"
 
         if seen == 1:
             program = full_export()
             self.exported += 1
+            self._note_eligibility(key, seen, program)
             base = self._bases.get(key)
             if base is None:
                 return program, "full"
@@ -523,9 +534,32 @@ class ReuseState:
         self.respecialize_s += round(time.monotonic() - t0, 3)
         return program, "reused"
 
+    def _note_eligibility(self, key: Any, seen: int, program: Any) -> None:
+        """Row 0 banks its graph text; row 1 compares against it. Free.
+
+        A family whose exported graph text moves with the shape row cannot be
+        served by one export — the row is baked into node ARGUMENTS (a
+        `reshape` size list), which `FakeTensorProp` re-derives nothing of,
+        and rewriting them would be altering the traced graph, which pgw#846
+        forbids outright. MEASURED on the real diffusers `Transformer2DModel`
+        — sdxl's own block container — where 2 of 63 lines move with the
+        aspect row AND with the batch row. So this is not hypothetical, and
+        recording it per family is how the next lane learns it for free
+        instead of by renting a pod.
+        """
+        try:
+            code = program.graph_module.code
+        except Exception:  # noqa: BLE001
+            return
+        if seen == 0:
+            self._row0_code[key] = code
+        elif seen == 1 and key in self._row0_code:
+            self.eligible[key] = (self._row0_code.pop(key) == code)
+
     def telemetry(self) -> Dict[str, Any]:
         return {
             "active": self.active,
+            "eligible": {str(k): v for k, v in self.eligible.items()},
             "rows_exported": self.exported,
             "rows_reused": self.reused,
             "respecialize_s": round(self.respecialize_s, 2),
