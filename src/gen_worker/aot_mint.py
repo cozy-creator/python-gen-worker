@@ -83,8 +83,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    aot_compile_pool, aot_export_reuse, aot_package, aot_serve,
-    aot_wrapper_split, cell_key)
+    aot_compile_pool, aot_export_parallel, aot_export_reuse, aot_package,
+    aot_serve, aot_wrapper_split, cell_key)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
     DynamicDim,
@@ -1798,6 +1798,18 @@ def _mint_cell(
                     _t.cuda.max_memory_reserved())
         except Exception:  # noqa: BLE001 — a probe never changes an outcome
             pass
+        # pgw#868 A4: THE CONNECTION. The probe above is exactly
+        # `aot_export_parallel.width_for(per_export_device_bytes=)`. Both were
+        # built and neither ever called the other, so the flag was inert.
+        # Recorded on EVERY mint, flag or no flag: the DECISION is the
+        # observable, and a reader must be able to see what width export would
+        # have run at — and which fact bound it — from a mint that changed
+        # nothing.
+        try:
+            timings.update(aot_export_parallel.decide(rows, timings))
+        except Exception:  # noqa: BLE001 — telemetry never fails a mint
+            logger.debug("aot-mint: export-parallel decision failed",
+                         exc_info=True)
         progress.beat(
             PHASE_INDUCTOR_COMPILE, 0, len(minted),
             f"{len(minted)} entries, {width.workers} wide")

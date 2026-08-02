@@ -101,4 +101,52 @@ def width_for(
             "per_export_device_bytes": int(per_export_device_bytes)}
 
 
-__all__ = ["ENV_FLAG", "MIN_GROUP", "enabled", "groups", "width_for"]
+__all__ = ["ENV_FLAG", "MIN_GROUP", "decide", "enabled", "groups",
+           "width_for"]
+
+
+def decide(
+    rows: Sequence[Any], timings: Dict[str, Any], *,
+    free_device_bytes: int = -1, cpu_workers: int = 0,
+) -> Dict[str, float]:
+    """The CALL SITE's decision, as flat telemetry. Emitted on EVERY mint.
+
+    pgw#868 A4: `timings["export_peak_device_bytes"]` (shipped 0.90.6) is
+    exactly :func:`width_for`'s ``per_export_device_bytes``. Producer and
+    consumer were both built and never joined — so the flag was inert and
+    "shipped OFF behind a flag" described a seam that had never been cut.
+    This is the join, and it records the decision **whether or not the flag is
+    on**, because the decision is the OBSERVABLE: a reader sees the width the
+    export phase would have run at and which fact bound it, on a mint that
+    changed nothing. That is what makes turning it on a measurement rather than
+    a leap.
+    """
+    if cpu_workers <= 0 or free_device_bytes < 0:
+        from . import aot_compile_pool
+
+        try:
+            if cpu_workers <= 0:
+                cpu_workers = max(1, aot_compile_pool.cpu_facts().vcpus // 2)
+            if free_device_bytes < 0:
+                free_device_bytes = aot_compile_pool.device_facts().free_bytes
+        except Exception:  # noqa: BLE001 — telemetry never fails a mint
+            cpu_workers = max(1, cpu_workers)
+            free_device_bytes = max(0, free_device_bytes)
+
+    per_export = int(float(timings.get("export_peak_device_bytes") or 0))
+    runs = groups(rows)
+    largest = max((len(g) for g in runs), default=0)
+    width = width_for(
+        largest, free_device_bytes=int(free_device_bytes),
+        per_export_device_bytes=per_export, cpu_workers=int(cpu_workers))
+    return {
+        "export_parallel_enabled": 1.0 if enabled() else 0.0,
+        "export_parallel_groups": float(len(runs)),
+        "export_parallel_largest_group": float(largest),
+        "export_parallel_width": float(width["workers"]),
+        "export_parallel_binding": float(
+            {"vram": 1, "cpu": 2, "ceiling": 3, "group": 4,
+             "export-footprint-unmeasured": 5, "no-device-reading": 6,
+             "group-too-small": 7}.get(str(width["binding"]), 0)),
+        "export_parallel_per_export_bytes": float(per_export),
+    }

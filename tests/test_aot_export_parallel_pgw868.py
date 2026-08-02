@@ -133,3 +133,40 @@ def test_flag_is_off_by_default(monkeypatch):
     assert aot_export_parallel.enabled() is False
     monkeypatch.setenv(aot_export_parallel.ENV_FLAG, "1")
     assert aot_export_parallel.enabled() is True
+
+
+def test_the_CALL_SITE_exists_and_reads_the_shipped_measurement():
+    """pgw#868 A4: the connection, proven as an OBSERVABLE not as a construction.
+
+    Every instance of this program's signature defect passed its own unit
+    tests — a module with a correct API that nothing imports. So this asserts
+    the JOIN: `aot_mint` imports the module, and `decide()` consumes exactly
+    the key `aot_mint` ships (`export_peak_device_bytes`, 0.90.6) and produces
+    a width decision from it.
+    """
+    import inspect
+
+    from gen_worker import aot_mint
+
+    # 1. aot_mint actually imports it, and actually calls it
+    assert aot_mint.aot_export_parallel is aot_export_parallel
+    src = inspect.getsource(aot_mint)
+    assert "aot_export_parallel.decide(rows, timings)" in src
+
+    # 2. the consumer reads the producer's key, and the width MOVES with it
+    rows = [("p", True)] * 18 + [("p", False)] * 18
+    unmeasured = aot_export_parallel.decide(
+        rows, {}, free_device_bytes=40 << 30, cpu_workers=32)
+    assert unmeasured["export_parallel_width"] == 1.0
+    assert unmeasured["export_parallel_binding"] == 5.0   # unmeasured
+
+    measured = aot_export_parallel.decide(
+        rows, {"export_peak_device_bytes": float(5 << 30)},
+        free_device_bytes=40 << 30, cpu_workers=32)
+    assert measured["export_parallel_width"] == 8.0
+    assert measured["export_parallel_groups"] == 2.0
+    assert measured["export_parallel_largest_group"] == 18.0
+    assert measured["export_parallel_per_export_bytes"] == float(5 << 30)
+
+    # 3. the flag has a real caller now, and is reported either way
+    assert measured["export_parallel_enabled"] == 0.0
