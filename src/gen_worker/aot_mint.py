@@ -2509,8 +2509,23 @@ def entry_graph_block(
     pytree spec, and the python branches export FROZE at trace time.
     Constant BYTE SIZES are deliberately absent — they are a property of the
     resident weights, and a fine-tune of one family must keep sharing
-    cells, which is the premise of family-scoped cells."""
-    return {
+    cells, which is the premise of family-scoped cells.
+
+    pgw#857: that exclusion is right for a WEIGHT and wrong for a LITERAL, and
+    both were excluded. A weight is rebound from the resident ``state_dict``
+    at load, so two fine-tunes should share a cell. A literal ships INSIDE the
+    artifact and is never rebound — *"nothing outside the artifact knows its
+    value"* — so for a literal the VALUE IS THE ARTIFACT, and two checkpoints
+    needing different literals were sharing a key. ``literal_values`` closes
+    that and nothing else: state_dict-sourced constants are still keyed by
+    NAME only, so fine-tune sharing is untouched.
+
+    **Emitted ONLY when the program lifts a literal.** A family with none
+    (sdxl: measured zero across five real mints) produces a byte-identical
+    block and does not re-key — the discipline ``range_digest`` already uses
+    for ``excluded``, and for the same reason: a field that says "unchanged"
+    must not strand already-published cells."""
+    block: Dict[str, Any] = {
         "v": 2,
         "constant_fqns": sorted(aot_package.constant_names(package, entry)),
         "fused_constants": sorted(
@@ -2519,6 +2534,10 @@ def entry_graph_block(
         "pytree": _pytree_facts(program),
         "specialization": _specialization_facts(spec),
     }
+    literals = aot_package.literal_values_digest(program)
+    if literals:
+        block["literal_values"] = literals
+    return block
 
 
 def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
