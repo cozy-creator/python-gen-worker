@@ -1087,6 +1087,10 @@ class EntryCompilePool:
         self.workdir = Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.width = width
+        #: pgw#842/th#1359: the width facts as last EMITTED, so a re-emit
+        #: happens only when they actually moved.
+        self._emitted_width_facts: Optional[Dict[str, Any]] = None
+        self._emit_width("construction")
         self.inductor_configs = dict(inductor_configs or {})
         self.cache_dir = str(cache_dir or (self.workdir / "inductor-cache"))
         # pgw#809: ONE lock file for the whole pool. Every entry child routes
@@ -1283,6 +1287,9 @@ class EntryCompilePool:
             for row in running:
                 _terminate_group(row.proc)
             self._sweep()
+            # Re-emit only if the width moved since construction (no-op
+            # otherwise); the ledger row keeps carrying the timing facts.
+            self._emit_width("terminus")
             self._emit_ledger()
         return {name: done[name] for name in sorted(done)}
 
@@ -1324,6 +1331,47 @@ class EntryCompilePool:
         logger.info(
             "aot-pool: pgw#832 seal memo seeded (%d lib(s), %.2fs) at %s",
             count, self.seal_seed_s, self.seal_memo)
+
+    def _emit_width(self, when: str) -> None:
+        """Emit K, its binding and the underwidth THE MOMENT THEY ARE DECIDED.
+
+        th#1359: these facts are settled at pool construction, before the first
+        entry compiles — and they were reported with the phase table, which is
+        flushed at the TERMINUS. Three mints have now died before producing
+        them: pgw#846 attempt sixteen emitted exactly one row
+        (``status=abandoned total_s=1741.33``), zero ``entry:`` rows and no
+        ``pool`` row, and 29 minutes of measurement went with it. A datum that
+        only survives a successful run is not a measurement of a regime where
+        runs keep dying. Moving the emission — not adding a harness read —
+        makes it robust to the mint dying, which on this program's record is
+        the way to bet.
+
+        Emitted at construction AND on any later change, never replacing a
+        late-and-complete row with an early-and-stale one: if K is ever
+        re-sized, the changed facts emit again and the last row is the true
+        one. An early row that lies would be worse than a late row that is
+        missing.
+        """
+        try:
+            from . import activity as activity_mod
+
+            facts = self.width.facts()
+            if facts == self._emitted_width_facts:
+                return
+            first = self._emitted_width_facts is None
+            self._emitted_width_facts = dict(facts)
+            activity_mod.emit_event(
+                activity_mod.KIND_AOT_MINT,
+                f"pool width ({when}) {facts}",
+                phase="pool",
+            )
+            logger.info("aot-pool: pgw#842 width (%s) %s", when, facts)
+            if not first:
+                logger.warning(
+                    "aot-pool: pool width CHANGED after construction — the "
+                    "row above supersedes the earlier one")
+        except Exception:  # pragma: no cover — telemetry never fails a mint
+            logger.debug("aot-pool: width emission failed", exc_info=True)
 
     def _emit_ledger(self) -> None:
         """The pool's own typed event. Separate from the mint's roll-up on
