@@ -209,16 +209,59 @@ def test_the_retry_decision_is_untouched_by_recovered_telemetry() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::FutureWarning")
-def test_the_pool_ledger_is_live_not_end_of_run() -> None:
+@pytest.mark.filterwarnings("ignore::UserWarning")
+def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
     """A ledger written only at the end is a ledger an abandoned mint never
-    gets. `_compile_entries_parallel` must refresh it per completed entry."""
-    import inspect
+    gets — so this asserts it BEHAVIOURALLY, from inside the run.
 
-    source = inspect.getsource(aot_mint._compile_entries_parallel)
-    assert "progress.pool_ledger = _pool_facts(pool)" in source
-    assert "on_entry=_tick" in source, (
-        "the refresh must be on the per-entry callback, not after the pool "
-        "returns — a mint killed at entry 30 of 36 never reaches after")
+    Was a source-text assertion, and that was the wrong instrument twice over:
+    a wiring claim proven by reading the file is not proven, and
+    `inspect.getsource` goes stale the moment the file is edited under a
+    running session (which is exactly how it failed — I edited `aot_mint.py`
+    mid-gate). This drives the REAL `_compile_entries_parallel` over a REAL
+    two-entry pool and reads `progress.pool_ledger` from inside the per-entry
+    callback: if it is already populated when entry 1 lands, the ledger is
+    live, and no amount of refactoring can make that pass falsely.
+    """
+    import torch
+
+    from gen_worker.aot_mint import _MintedEntry
+
+    class Tiny(torch.nn.Module):
+        def __init__(self, seed: int) -> None:
+            super().__init__()
+            self.a = torch.nn.Linear(64, 64)
+            self.seed = seed
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.tanh(self.a(x)) * (1.0 + self.seed)
+
+    minted = [
+        _MintedEntry(
+            name=f"unet/row={i}", spec=None, module=None, owner=None,
+            program=torch.export.export(Tiny(i), (torch.randn(4, 64),)),
+            input_names=(), flat_names=(), files=[], timings={})
+        for i in range(2)
+    ]
+    width = pool.entry_workers(
+        2, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+        device_lock=True, limit=2)
+    progress = aot_mint.MintProgress()
+    seen: list[Dict[str, Any]] = []
+
+    aot_mint._compile_entries_parallel(
+        minted, tmp_path / "work", width, progress=progress,
+        inductor_configs={"compile_threads": 2},
+        on_entry=lambda name, done, total: seen.append(
+            dict(progress.pool_ledger)))
+
+    assert seen, "the pool never reported a completed entry"
+    assert seen[0], (
+        "the ledger was still EMPTY when the first entry landed — it is being "
+        "written at the end of the run, which is the one moment an abandoned "
+        "mint never reaches")
+    assert seen[0].get("pool_workers") == width.workers
+    assert "peak_child_rss_bytes" in seen[0]
 
 
 # ---------------------------------------------------------------------------
