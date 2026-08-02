@@ -302,12 +302,59 @@ def arm_aot(
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
     if aot_serve.enable(pipe, cfg, cache_dir, artifact):
+        _announce_unchecked_numerics(cfg)
         return True
     if lifted_installed:
         from . import lora_lifted
 
         lora_lifted.remove_lifted_lora_forward(lifted_target)
     return False
+
+
+def _announce_unchecked_numerics(cfg: Any) -> None:
+    """Say out loud that this cell armed with NO numerics check (pgw#848).
+
+    This is NOT a gate and must never be mistaken for one. It exists because
+    the gate does not: `numerics_ladder` is imported by nothing in `src/`
+    except the pgw#800 ADAPTER gate, and `compare_outputs` / `Comparison` /
+    `flatten_outputs` have ZERO consumers anywhere. Nothing in the mint or
+    arm path ever computes a compiled-vs-eager comparison, so there is no
+    `Comparison` for a gate to consult.
+
+    Wiring `numerics_ladder.gate()` in here would have been worse than this.
+    It opens `if comparison is None: return None` — so with nothing computing
+    a comparison it would pass EVERY cell, always, while looking in the diff
+    and in the call graph exactly like a working gate, and pgw#849's guard 2
+    would then mark the surface covered. An absent gate that is obvious beats
+    an absent gate that is invisible.
+
+    So: every arm says so, on the wire, naming the floor the family DECLARED
+    and nobody checked. A future reader must not be able to mistake silence
+    for a pass — the declaration (`Compile.numerics_floor`, sdxl 0.995/0.999),
+    the thresholds, this activity kind and the ladder are all present and all
+    correct; the thing that MEASURES is what is missing, and it needs a
+    device, real weights and a real forward, so it cannot be built off-pod.
+
+    Best-effort: telemetry never fails an arm.
+    """
+    try:
+        from .. import activity as activity_mod, numerics_ladder
+
+        thresholds = numerics_ladder.declared_thresholds(cfg)
+        declared = getattr(cfg, "numerics_floor", None)
+        activity_mod.emit_event(
+            activity_mod.KIND_CELL_NUMERICS,
+            f"family={getattr(cfg, 'family', '?')} ARMED WITHOUT A NUMERICS "
+            f"CHECK — no compiled-vs-eager comparison is computed anywhere in "
+            f"this worker, so the declared floor was NOT enforced "
+            f"(floor={thresholds.floor} warn={thresholds.warn} "
+            f"source={'declared' if declared is not None else 'sdk-default'}). "
+            f"This is an absence, not a pass: nothing verified this cell's "
+            f"numerics (pgw#848 CP12)",
+            phase="unchecked",
+        )
+    except Exception:  # noqa: BLE001 — telemetry never fails an arm
+        logger.debug("could not announce unchecked numerics", exc_info=True)
 
 
 def enable_compiled(
