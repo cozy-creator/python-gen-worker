@@ -339,6 +339,38 @@ def test_beats_coalesce_in_place_and_facts_never_do() -> None:
     asyncio.run(_run())
 
 
+def test_a_result_never_enters_the_evidence_lane() -> None:
+    """The precondition that makes `_evidence_bytes` total.
+
+    `_message_key` returns None for a JobResult deliberately — a result is not
+    a fact, it is durable under (request_id, attempt) and is never coalesced.
+    The evidence map therefore keys on something results do not have, and the
+    mypy error that caught this was telling the truth. Pin the invariant so it
+    is executable rather than only asserted in a docstring.
+    """
+    async def _run() -> None:
+        q = SendQueue(maxsize=4)
+        result = pb.WorkerMessage(job_result=pb.JobResult(
+            request_id="r1", attempt=1))
+        assert SendQueue._message_key(result) is None
+        await q.put(result)
+        await q.put(_fact("k", "pool", "K=2"))
+        await q.put(_beat("k", "compiling", 1))
+        # only the two facts are booked as evidence; the result rides its own
+        # durable lane and is untouched by coalescing or shedding.
+        assert q.pending_evidence_count == 2
+        assert q.pending_result_keys == [("r1", 1)]
+
+        kinds = []
+        while len(q):
+            kind, _msg = await q.get()
+            kinds.append(kind)
+        assert kinds.count("result") == 1
+        assert kinds.count("evidence") == 2
+
+    asyncio.run(_run())
+
+
 def test_a_producer_never_blocks_on_a_dead_connection() -> None:
     """`maxsize` backpressure must not reach a path that just MEASURED
     something. 200 facts into a 2-slot queue, with no consumer, must return."""

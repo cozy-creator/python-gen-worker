@@ -352,10 +352,10 @@ class SendQueue:
         if prior is not None:
             # A superseded beat leaves no copy behind to be written after the
             # newer one; its slot position is retained by the dict.
-            self._evidence_key.pop(self._message_key(prior), None)
+            self._evidence_key.pop(self._evidence_bytes(prior), None)
             self._remove_item(prior)
         self._pending_evidence[slot] = msg
-        self._evidence_key[self._message_key(msg)] = slot
+        self._evidence_key[self._evidence_bytes(msg)] = slot
         self._items.append((_EVIDENCE, msg))
         self._shed_evidence()
 
@@ -371,7 +371,7 @@ class SendQueue:
                 if slot == _SHED_KEY or slot[0] != pool:
                     continue
                 victim = self._pending_evidence.pop(slot)
-                self._evidence_key.pop(self._message_key(victim), None)
+                self._evidence_key.pop(self._evidence_bytes(victim), None)
                 self._remove_item(victim)
                 shed += 1
         if shed:
@@ -388,7 +388,7 @@ class SendQueue:
         self._shed_total += shed
         prior = self._pending_evidence.pop(_SHED_KEY, None)
         if prior is not None:
-            self._evidence_key.pop(self._message_key(prior), None)
+            self._evidence_key.pop(self._evidence_bytes(prior), None)
             self._remove_item(prior)
         msg = pb.WorkerMessage(activity_update=pb.ActivityUpdate(
             kind="outbox_shed",
@@ -403,7 +403,7 @@ class SendQueue:
             updated_at_unix_ms=int(time.time() * 1000),
         ))
         self._pending_evidence[_SHED_KEY] = msg
-        self._evidence_key[self._message_key(msg)] = _SHED_KEY
+        self._evidence_key[self._evidence_bytes(msg)] = _SHED_KEY
         self._items.append((_EVIDENCE, msg))
 
     @property
@@ -416,8 +416,42 @@ class SendQueue:
 
     @staticmethod
     def _message_key(msg: pb.WorkerMessage) -> Optional[bytes]:
+        """The wire identity of a message, or None for a JobResult.
+
+        **The None is load-bearing, not a gap.** A result is not a fact: it is
+        durable under `(request_id, attempt)` in `_pending_results`, it is
+        exempt from the queue bound, and it must never be folded with anything.
+        So it deliberately has no content key, and **every keyed structure here
+        is therefore a structure results do not belong in** — `_in_flight`, the
+        reconnect fences, and the pgw#869 evidence map all key on this and all
+        exclude results by construction. A consumer that treats this map as
+        covering every message has an unhandled case, not a typing nuisance.
+        """
         if msg.WhichOneof("msg") == "job_result":
             return None
+        return msg.SerializeToString(deterministic=True)
+
+    @staticmethod
+    def _evidence_bytes(msg: pb.WorkerMessage) -> bytes:
+        """`_message_key` for a message already classified as `_EVIDENCE`.
+
+        pgw#869 semantics, decided rather than defaulted. The two candidate
+        answers for "what does the evidence map do with a keyless message" are
+        both wrong, because **the question cannot arise**: `_msg_kind` admits
+        exactly `activity_update` and `boot_phase` to this lane, and the only
+        keyless message is `job_result`.
+
+        * *Skip it* would make the map silently lossy — in the one module whose
+          entire purpose is that facts are not silently lost.
+        * *Give results their own evidence key* would put them in two durable
+          lanes at once (`_pending_results` and `_pending_evidence`), which
+          double-ships a result on reconnect and coalesces something the queue
+          contract says is never coalesced.
+
+        So this is total by precondition, and it says so here — at the boundary
+        where the invariant could be violated — instead of narrowing an
+        Optional at five call sites and leaving the reason nowhere.
+        """
         return msg.SerializeToString(deterministic=True)
 
     @classmethod
@@ -707,7 +741,7 @@ class SendQueue:
                     continue          # superseded by a newer fact; that one wins
                 revived[slot] = msg
             for slot, msg in revived.items():
-                self._evidence_key[self._message_key(msg)] = slot
+                self._evidence_key[self._evidence_bytes(msg)] = slot
             self._pending_evidence = {**revived, **self._pending_evidence}
             for msg in self._pending_evidence.values():
                 self._items.append((_EVIDENCE, msg))
