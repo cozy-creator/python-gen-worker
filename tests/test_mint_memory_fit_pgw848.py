@@ -41,7 +41,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -49,6 +48,8 @@ import pytest
 
 from gen_worker import aot_compile_pool as pool
 from gen_worker import mint_budget
+
+from harness import progress_wait
 
 _GIB = 1 << 30
 _MIB = 1 << 20
@@ -106,11 +107,21 @@ def test_the_pools_sampler_sees_the_process_that_holds_the_memory(
          f"{sys.executable} {spawn_py} {alloc_py} {alloc} {marker} 20 & wait"],
         start_new_session=True)
     try:
-        deadline = time.monotonic() + 60
-        while not marker.exists() and time.monotonic() < deadline:
-            assert proc.poll() is None, "the fixture died before allocating"
-            time.sleep(0.05)
-        assert marker.exists(), "grandchild never came up"
+        # pgw#795/gw#666: bounded on PROGRESS, never on a clock. The advance
+        # is the grandchild's RSS climbing — which is the very quantity under
+        # test — and `gone` ends the wait immediately and definitively if the
+        # fixture dies, with no duration involved.
+        progress_wait.await_progress(
+            lambda: (marker.exists(), pool._peak_rss_bytes(proc)),
+            lambda seen: bool(seen[0]),
+            what="the grandchild to finish allocating",
+            cadence=progress_wait.Cadence(),
+            gone=lambda: (
+                f"the fixture exited {proc.returncode} before allocating"
+                if proc.poll() is not None else None),
+            render=lambda seen: (
+                f"marker={seen[0]} tree_rss={seen[1] / _MIB:.0f}MiB"),
+        )
 
         depth1 = [proc.pid] + [
             int(p) for p in Path(
