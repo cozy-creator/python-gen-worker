@@ -101,16 +101,32 @@ def attest(
             )
         metrics.rss_at_end_bytes = int(child_rss_bytes)
 
-    # Named, not enforced: the parent cannot see the output without pulling the
-    # data plane through its own interpreter. th#1309 owns the hub-side bound.
-    if status_ok:
-        if float(getattr(metrics, "output_media_duration_s", 0.0) or 0.0) <= 0.0 \
-                and int(getattr(metrics, "output_count", 0) or 0) > 0:
-            found.append(
-                "output_media_duration_s=0 on a successful job with "
-                f"output_count={int(metrics.output_count)} — the child-reported "
-                "billing quantity the parent cannot corroborate (th#1309)"
-            )
+    # th#1364: the `output_media_duration_s == 0` divergence is DELETED, and
+    # deleting it is the fix rather than relabelling what it emitted.
+    #
+    # `_scan_output_assets` sums `Asset.duration_s`, which only a TEMPORAL asset
+    # has. A still image legitimately reports 0.0, so the check fired on every
+    # successful image job — the overwhelming majority of the fleet's work — and
+    # it could never have done otherwise, because the parent has no way to tell
+    # "correctly zero for an image" from "wrongly zero for a video". Its own
+    # comment said as much: the parent cannot see the output without pulling the
+    # data plane through its own interpreter.
+    #
+    # It was not merely noisy. Each divergence dials the post-mortem carrier,
+    # which opens a SEPARATE Connect authenticated with `settings.worker_jwt` —
+    # the boot token, which rotation never updates — so past pod-create + TTL
+    # every dial is `worker_token_expired`, and three of them terminate the pod
+    # (`worker_auth_wedge`). pgw#846 attempt sixteen died exactly there, 35
+    # minutes into the longest AOT mint in the program's history. **A false
+    # positive in a billing attestation became the proximate cause of a pod
+    # death.** The carrier's credential bug and the hub's strike counting are
+    # fixed separately (pgw#848 / th#1359); this removes the trigger.
+    #
+    # th#1309 keeps the property, on the side that can actually hold it: the HUB
+    # knows the endpoint's settlement model, so it alone can say whether a zero
+    # duration is meaningful (`per_output_second` — fail closed) or expected
+    # (`per_output` on images). Re-adding a worker-side version of this check
+    # needs a temporal-asset count on the wire, not a heuristic over `output_count`.
     obs.divergences = found
     return found
 

@@ -437,9 +437,19 @@ def test_delta3_forged_billables_are_replaced_by_the_parents_observation(
     # The divergence is BANKED, not merely clamped away in silence.
     assert billing_split.pc.metric_divergences >= 1
     assert any("compute_billing_attestation" in d for d in captured_dials)
-    # ...and the quantity the parent CANNOT corroborate is named, not faked:
-    # output_media_duration_s=0 with outputs present is th#1309's $0 bill.
-    assert any("output_media_duration_s=0" in d for d in captured_dials)
+    # th#1364: `output_media_duration_s=0` is NO LONGER a divergence, and its
+    # absence is the assertion. `_scan_output_assets` sums `Asset.duration_s`,
+    # which only a TEMPORAL asset has, so a still image legitimately reports
+    # 0.0 — the check fired on every successful image job and the parent could
+    # never tell "correctly zero for an image" from "wrongly zero for a video".
+    # It was not merely noisy: each divergence dials the post-mortem carrier on
+    # an unrefreshable boot token, and three rejected dials terminate the pod
+    # (pgw#846 attempt sixteen, 35 min into the longest AOT mint on record).
+    # th#1309's property moves to the HUB, which knows the settlement model.
+    assert not any("output_media_duration_s" in d for d in captured_dials), (
+        "the image-job false positive is back — it manufactures a dial per "
+        "5 min and three rejected dials terminate the pod (th#1364)"
+    )
 
 
 def test_delta3_an_honest_report_passes_through_unchanged():
@@ -738,3 +748,34 @@ def test_no_frame_carries_the_worker_jwt():
         assert "TOKEN" not in name and "JWT" not in name, (
             f"frame {name} looks like it carries a credential to the compute child"
         )
+
+
+def test_th1364_a_still_image_job_is_not_a_billing_divergence():
+    """th#1364 ROOT: an image job reports 0.0 media seconds because that is the
+    correct answer, and it must not manufacture an attestation dial.
+
+    The regression this pins is not cosmetic. Every divergence dials the
+    post-mortem carrier, which opens a separate Connect on `settings.worker_jwt`
+    — the boot token nothing refreshes — so past pod-create + TTL each dial is
+    `worker_token_expired`, and three of them terminate the pod. A false
+    positive on the majority of production jobs became the proximate cause of a
+    pod death.
+    """
+    from gen_worker.procsplit import attest
+
+    metrics = pb.JobMetrics(
+        runtime_ms=1200, queue_ms=30, concurrency_at_start=2,
+        rss_at_end_bytes=4 << 30,
+        output_media_duration_s=0.0,  # a still image: correct, not under-reported
+        output_count=1,
+    )
+    obs = attest.JobObservation(
+        function="generate", relayed_at=0.0, concurrency_at_relay=2)
+    divergences = attest.attest(
+        metrics, obs, now=1.6, child_rss_bytes=(4 << 30) + 1000, status_ok=True)
+
+    assert divergences == [], (
+        f"an ordinary image job produced billing divergences {divergences} — "
+        "this fires on most of the fleet's work and each one dials the "
+        "pod-killing carrier (th#1364)"
+    )
