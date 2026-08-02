@@ -56,7 +56,28 @@ BARRIER_TIMEOUT_S = 5.0
 
 @pytest.fixture(autouse=True)
 def _restore_process_state() -> Any:
-    """The impositions under test are deliberately process-global."""
+    """The impositions under test are deliberately process-global.
+
+    That is precisely why every one of them must be put back. This fixture
+    restored `torch` thread count and the encode semaphore but **not the
+    INSTALLED TOPOLOGY**, and the tests here boot four-group workers
+    (`{"gpu_count":4,"group_degree":1,"groups":4}`). `monkeypatch` puts the ENV
+    VAR back; it cannot put back the module global that the boot path writes
+    through `install_topology()`.
+
+    Measured cost: a leaked 4-group topology made
+    `test_guard_miss_pgw680.py::test_tenant_guard_miss_end_to_end` fail 7 files
+    later with `in-process mint refused at groups=4` — `fleet_cells.py:1050`
+    doing its job exactly right (pgw#777/DPA-8 forbids an in-process inductor
+    capture on a multi-group worker) against state that belonged to this file.
+    The victim passes alone and failed only in suite order, which is why it read
+    as flaky for as long as nobody ran the full suite.
+
+    The sibling `test_group_device_map_pgw773.py` already does this correctly;
+    this is the same two lines.
+    """
+    from gen_worker.topology import install_topology
+
     try:
         import torch
 
@@ -65,10 +86,12 @@ def _restore_process_state() -> Any:
         torch = None  # type: ignore[assignment]
         threads = 0
     video_encode._finalize_sem = None
+    install_topology(None)
     yield
     if torch is not None:
         torch.set_num_threads(threads)
     video_encode._finalize_sem = None
+    install_topology(None)
 
 
 # ---------------------------------------------------------------------------

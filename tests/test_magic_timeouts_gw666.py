@@ -637,6 +637,25 @@ _ELAPSED_UPPER_BOUND = re.compile(
     rf"^\s*assert\s+[^#\n]*{_MEASURED}[^#\n]*[<>]=?\s*([0-9][0-9_]*(?:\.[0-9]*)?)"
 )
 
+#: A clock-plus-duration handed to a TOKEN CONSTRUCTOR is a credential's
+#: lifetime — the SUBJECT under test — not a budget for an awaited event.
+#:
+#: pgw#848's `dc7bf6b` builds JWTs that are already expired, about to expire, or
+#: healthy (`_jwt(time.time() + 120)`, `+ 3600`, `- 90`) and asserts on the
+#: event `_transport_probe` emits SYNCHRONOUSLY. Nothing waits on the value and
+#: its expiry cannot fail the test — the probe returns in microseconds. Class 4
+#: ("a fixed duration whose EXPIRY FAILS the test") does not apply.
+#:
+#: This is a CARVE-OUT, not an exemption list: it is keyed on the shape
+#: (`jwt(`/`token(` immediately before the clock), so a genuine deadline in the
+#: same file is still caught, and `token_deadline = time.monotonic() + 15` — no
+#: call parenthesis — still fails as it should. Same spirit as the `> 0`
+#: positivity carve-out in `_scan` below: keep the guard broad, and make the
+#: places where the pattern MISREADS the code precise rather than blanket a file
+#: into a burn-down list that would assert a debt this file does not have.
+_TOKEN_EXPIRY_ARG = re.compile(
+    rf"(?:jwt|token)\w*\([^#\n]*{_CLOCK}\s*[-+]", re.IGNORECASE)
+
 #: Wait loops in test modules that still race a fixed clock instead of waiting
 #: on progress (``harness.progress_wait.await_count`` is the replacement). Every
 #: one of them can fail a publish the way pgw#628 did. Owned by pgw#795's
@@ -700,6 +719,9 @@ def _scan(root: Path, pattern: "re.Pattern[str]", *, match: bool = False) -> set
                 continue
             if pattern is _ELAPSED_UPPER_BOUND and float(found.group(1)) == 0:
                 continue  # `> 0` is a positivity check, not a budget
+            if (pattern in (_LITERAL_DEADLINE, _NAMED_DEADLINE)
+                    and _TOKEN_EXPIRY_ARG.search(line)):
+                continue  # a token's `exp` claim is data, not a wait
             hits.add(path.relative_to(TESTS).as_posix())
     return hits
 
