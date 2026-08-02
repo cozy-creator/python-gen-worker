@@ -428,3 +428,41 @@ def test_a_healthy_credential_is_silent() -> None:
     # An unreadable or exp-less token is not an event either.
     _, said = _transport_probe("not-a-jwt")
     assert said == []
+
+
+def test_every_hub_dial_reads_ONE_refreshable_credential() -> None:
+    """pgw#848: the defect was a SPLIT, not a value.
+
+    `transport._worker_jwt` is rotated; `Settings.worker_jwt` is frozen at pod
+    create and updated by nothing — and the attestation carrier, which opens
+    its OWN gRPC Connect every 300 s forever, read the frozen one. Past T+30
+    min every one of those dials is a fresh `worker_token_expired`; three
+    wedge the pod. That is what killed attempts 16 and 17, with the scheduler
+    stream healthy throughout.
+
+    Not a mint-only concern: ANY worker that reports past its TTL burns
+    strikes. A mint is just the first workload that reliably lives that long.
+    """
+    import inspect
+
+    from gen_worker import hardware_report, worker_credential
+
+    worker_credential.reset()
+    try:
+        # Before any rotation: the boot token is the honest answer.
+        assert worker_credential.current() == "" or isinstance(
+            worker_credential.current(), str)
+        worker_credential.install("rotated-token", 1234.0)
+        assert worker_credential.current() == "rotated-token"
+        assert worker_credential.expires_at() == 1234.0
+        # An empty install must not erase a good credential.
+        worker_credential.install("")
+        assert worker_credential.current() == "rotated-token"
+
+        # The dialer must READ that source, not the frozen settings value.
+        src = inspect.getsource(hardware_report)
+        assert "worker_credential.current()" in src
+        assert src.count("settings.worker_jwt or") == 2, (
+            "both attestation dials must prefer the rotated credential")
+    finally:
+        worker_credential.reset()

@@ -1005,6 +1005,17 @@ class Transport:
                 token = (msg.token_refresh.token or "").strip()
                 if token:
                     self._worker_jwt = token
+                    # pgw#848: publish it where EVERY hub dial reads, not just
+                    # this stream. The attestation carrier opens its own
+                    # Connect and used to authenticate with the frozen boot
+                    # token — which is what wedged attempts 16 and 17.
+                    try:
+                        from . import worker_credential
+
+                        worker_credential.install(
+                            token, float(msg.token_refresh.expires_at_unix or 0))
+                    except Exception:  # noqa: BLE001 — never break a rotation
+                        logger.debug("credential publish failed", exc_info=True)
                     self._consecutive_auth_failures = 0
                     self._first_auth_failure_at = None
                     logger.info(
