@@ -38,6 +38,7 @@ from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
 from . import warmup
+from . import worker_mode
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -5823,6 +5824,17 @@ class Executor:
             outcome=(boot_mod.OUTCOME_OK if armed else boot_mod.OUTCOME_REFUSED),
             reason="" if armed else "serving_eager",
         )
+        # th#1359: reaching here means this boot's mint disposition is FINAL
+        # on every path (inline setup, adopted cell, eager-without-mint, and
+        # the background mint's own `finally`). A forge pod waits on exactly
+        # that fact rather than inventing a second notion of "boot is over"
+        # that could disagree with the one boot telemetry publishes.
+        try:
+            from . import forge as forge_mod
+
+            forge_mod.note_disposition_final()
+        except Exception:  # pragma: no cover - a latch never breaks a boot
+            logger.debug("forge disposition latch failed", exc_info=True)
         if armed or rec.background_mint is not None:
             return
         # pgw#805: a boot that DECLARED a compile target and ends with no
@@ -9866,6 +9878,34 @@ class Executor:
                 return 0
         return 0
 
+    def background_mint_tasks(self) -> List["asyncio.Task"]:
+        """th#1359: every still-running background mint on this worker.
+
+        A forge pod joins these before it calls itself done — a release may
+        declare more than one compile family, and retiring on the first one to
+        finish would abandon the rest, which is the exact failure (pgw#846
+        attempt sixteen: `self_mint_abort/abandoned_shutdown`) this mode
+        exists to make impossible.
+        """
+        tasks: List["asyncio.Task"] = []
+        for rec in self._classes.values():
+            bg = rec.background_mint
+            task = getattr(bg, "task", None) if bg is not None else None
+            if task is not None and not task.done():
+                tasks.append(task)
+        return tasks
+
+    def declares_compile(self) -> bool:
+        """Whether ANY discovered spec declares a compile family.
+
+        A forge pod for a release that declares none has nothing to mint, and
+        must say `nothing_owed` and retire rather than sit on a paid card.
+        """
+        return any(
+            s.compile is not None and getattr(s.compile, "family", "")
+            for s in self.specs.values()
+        )
+
     async def shutdown_instances(self) -> None:
         for rec in self._classes.values():
             await self.abandon_background_mint(
@@ -10692,6 +10732,32 @@ class Executor:
                 self._arm_cancel_unwind_watch(job)
 
         intent_id = self._job_intent(run)
+        if worker_mode.is_forge():
+            # th#1359: a forge pod is not in the serving rotation. The hub
+            # excludes it at placement; this is the WORKER-side half of the
+            # same promise, and it is the one that actually holds — a pod that
+            # accepted a tenant job would put a tenant's latency behind a
+            # multi-hour compile and give the drain path a reason to exist
+            # here. RETRYABLE, not INVALID: the request is perfectly valid and
+            # belongs on a serving worker.
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="forge mode: mint-only worker, no tenant dispatch",
+            )
+            activity_mod.emit_event(
+                "forge_dispatch_refused",
+                f"request {run.request_id} attempt {run.attempt} for "
+                f"{run.function_name!r} reached a MINT-ONLY worker — the hub "
+                f"placed tenant work on a forge pod (th#1359)",
+                phase="forge_mode",
+            )
+            await self._send_result(
+                run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE,
+                safe_message="worker is in mint-only (forge) mode",
+            )
+            return
         if self.draining:
             self._intent_transition(
                 intent_id,

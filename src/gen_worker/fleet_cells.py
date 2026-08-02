@@ -504,12 +504,32 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
 _IN_FLIGHT_LOCK = threading.Lock()
 _IN_FLIGHT: Dict[str, Tuple[str, float]] = {}
 
+#: th#1359: the SETTLED half of the same ledger — ``{cell_key: checkpoint_id}``
+#: for publishes the hub acknowledged, and ``{cell_key: phase}`` for the ones
+#: it refused. In-flight alone answers "is an upload running"; a forge pod also
+#: has to answer "did this pod produce a cell for the fleet, or not", and that
+#: fact otherwise exists only as a wire event this process cannot read back.
+_PUBLISHED: Dict[str, str] = {}
+_REFUSED: Dict[str, str] = {}
+
 
 def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
     """``{cell_key: (family, started_monotonic)}`` for every publish whose
     thread has neither succeeded nor failed yet (pgw#815)."""
     with _IN_FLIGHT_LOCK:
         return dict(_IN_FLIGHT)
+
+
+def published_cells() -> Dict[str, str]:
+    """``{cell_key: checkpoint_id}`` the hub accepted from this process."""
+    with _IN_FLIGHT_LOCK:
+        return dict(_PUBLISHED)
+
+
+def refused_publishes() -> Dict[str, str]:
+    """``{cell_key: failure phase}`` for publishes this process could not land."""
+    with _IN_FLIGHT_LOCK:
+        return dict(_REFUSED)
 
 
 def _publish_async(
@@ -545,6 +565,8 @@ def _publish_async(
                 family, artifact, meta, mint_duration_ms)
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
+            with _IN_FLIGHT_LOCK:
+                _REFUSED[key] = "refused"
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
@@ -552,6 +574,8 @@ def _publish_async(
             )
         except Exception as exc:  # noqa: BLE001 — reported, never fatal
             logger.warning("fleet-cells: publish failed; the next worker on this key re-mints", exc_info=True)
+            with _IN_FLIGHT_LOCK:
+                _REFUSED[key] = _publish_failure_phase(exc)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
@@ -561,6 +585,8 @@ def _publish_async(
                 phase=_publish_failure_phase(exc),
             )
         else:
+            with _IN_FLIGHT_LOCK:
+                _PUBLISHED[key] = str(checkpoint_id or "")
             activity_mod.emit_event(
                 "self_mint_publish",
                 f"family={family} key={key} checkpoint={checkpoint_id}: "

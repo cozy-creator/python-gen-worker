@@ -289,6 +289,9 @@ class Lifecycle:
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
+        # th#1359: the forge driver, on a mint-only pod. None on every
+        # serving worker.
+        self._forge_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._disk_report_at = 0.0
         self._disk_report_refresh_task: Optional[asyncio.Task] = None
@@ -1340,6 +1343,18 @@ class Lifecycle:
         # out. If no function is ever advertised the boot has no closing
         # milestone, and that is the finding (same doctrine as an open span).
         await self.set_phase(pb.WORKER_PHASE_READY)
+
+        # th#1359: a forge pod's boot is not the end of its story — it is the
+        # start of the only work it was bought for. The driver waits for the
+        # mint disposition to be final, joins the publish, states a typed
+        # terminal and drains itself. Started AFTER READY so the mint's own
+        # setup path is byte-identical to a serving pod's: the forge is a
+        # MODE, and a mode that boots differently is a fork.
+        if worker_mode.is_forge():
+            from . import forge as forge_mod
+
+            self._forge_task = asyncio.create_task(
+                forge_mod.run(self), name="forge-driver")
 
     def _mark_servable(self) -> None:
         """Close the boot: mark first-request-servable from process start.
