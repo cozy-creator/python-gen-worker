@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+## 0.90.5 (2026-08-02) — **the credential and the durability release**: the two long fuses that killed attempts sixteen and seventeen are cut, the mint stops reading as finished before its cell is durable, and every arm confesses the missing numerics gate
+
+Cut for the first forge pod. **PATCH, so it rides the existing `0.90` entry in
+`TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` (major.minor match) — no gate widen, no hub bounce, no
+deploy operator.**
+
+**Range verified by ancestry, not by cut notes** — `git merge-base --is-ancestor` run for every
+commit against both `HEAD` and `v0.90.4`, plus `git rev-list --count v0.90.4..HEAD` = **10** (the
+nine inherited, plus this lane's own test fix `9fafbd3`). The range differed from its brief three
+times before this cut (7 → 8 → 9); **a cut documents its RANGE, not its intent.**
+
+- **pgw#848 `dc7bf6b` — the worker never read its own credential's expiry.** It holds a JWT
+  carrying `exp` and learned of expiry only by being REJECTED, at which point it cannot recover:
+  the refresh arrives only as a `token_refresh` down the stream it can no longer open. **Measured
+  in hub `pod_events`: attempts 16 and 17 expired at T+32.4 / T+31.2 min and said nothing**, and
+  ten minutes of silence later the hub recorded a silent death. `transport._report_credential_age`
+  now reports it.
+- **pgw#848 `7fa4eeb` — the credential SPLIT was the defect, and it corrects CP10.** The scheduler
+  stream never dropped; there is no reconnect storm. What burned the auth strikes was the
+  DIAGNOSTIC telemetry: `hardware_report` opens a brand-new gRPC Connect per report and
+  authenticated it with `settings.worker_jwt`, the BOOT token. **One refreshable source for every
+  hub dial.** This is the fix for attempt seventeen's `worker_auth_wedge`.
+- **th#1364 `bf204b4` (ROOT) + `674243d` — an image job is not a billing divergence.** The check
+  fired on most of the fleet's work and **each false positive dialled the pod-killing carrier**.
+  `674243d` keeps the carrier-credential comment true after `7fa4eeb` moved it.
+- **pgw#849 `e833f62` — the two mechanical guards against "correct code that nothing calls."**
+  Twelve instances, all green on their own unit tests, none ever executed on the production path;
+  **a unit test is structurally blind to wiring because the unit test IS the caller the production
+  path is not.** Guard 1 (`tests/entrypoint_ladder.py`) records per rung whether PRODUCTION or the
+  TEST was the caller, riding a ContextVar so it survives `create_task` and `to_thread`. Guard 2
+  lints unreached surface. Test-side and lint-side only — neither is in the wheel's runtime path.
+- **pgw#849 `cc79db9` — the tally is ELEVEN, not twelve.** `warm_changes_key` was relayed as a
+  twelfth instance and written into a check's header as its motivating example; the filing lane
+  withdrew it the same day (the pre-warm HAS been performed since pgw#758). **The withdrawal is
+  propagated as far as the claim went** — a retraction that does not travel as far as the claim is
+  not a retraction.
+- **pgw#853 `749a588` — the #739 vocabulary learns containers and row-derived structures.** Three
+  of eight declaring families' blockers reduced to ONE missing capability: an argument that is not
+  a single tensor (z-image B1 `list[Tensor]`, qwen-image B1 `img_shapes`, qwen B2). This is what
+  lets ltx/qwen/z-image ADOPT declarations they have recorded as "pending B1" for a week.
+  Fingerprint-proven inert: flux2 4b/9b, wan x3 and sdxl BYTE-IDENTICAL before/after, and
+  `declared_contract_facts` digests no input/arg rows, so it cannot re-key a cell.
+- **pgw#848 `c47dc46` — every arm now CONFESSES the missing numerics gate.** There is no
+  compiled-vs-eager comparison anywhere in this worker: `numerics_ladder` is imported by nothing in
+  `src/` except the pgw#800 adapter gate, and `compare_outputs` / `Comparison` / `flatten_outputs`
+  have ZERO consumers. **Wiring `gate()` in would have been WORSE** — it opens
+  `if comparison is None: return None`, so with nothing computing a comparison it would pass EVERY
+  cell, always, while looking in the diff and in the call graph exactly like a working gate.
+  Instead every arm emits `cell_numerics phase=unchecked` naming the floor the family DECLARED and
+  nobody checked (sdxl 0.995/0.999). **An absence that is obvious beats one that is invisible.**
+  The gate itself needs a device, real weights and a real forward, so it cannot be built off-pod.
+- **pgw#848 `e559098` — the mint's activity stays RUNNING until the cell is DURABLE**, and a
+  failing publish retry loop provably does NOT read as progress. Closes the tail gap where a mint
+  read as finished while its cell was not yet safe.
+
+**Not in this cut:** th#1359's pool-row early emission, banked at
+`cozy-creator-tracker/scripts/held-patches/th1359-pool-row-early-emit.patch`. It was out of the
+working tree when the freeze was asserted and **rides the next cut**; the forge run reads K, its
+binding and the underwidth LIVE from `fleet-status` at the first phase transition instead.
+- **pgw#846 `9fafbd3` — the two failures the first held gate found, both test-side.** A false
+  positive in `test_magic_timeouts_gw666` (a JWT `exp` claim is not a deadline on an awaited event)
+  and a leaked process-global 4-group topology in `test_group_host_policy_pgw782` that made
+  `test_guard_miss_pgw680`'s end-to-end test fail seven files later. **No `src/` change: the
+  wheel's contents are identical to what the nine commits produced.**
+
+**Gate:** `frozen_gate` PASSED on a tree PROVEN unchanged for 1,664 s — **2,683 passed, 18 skipped,
+1 xfailed, 0 failed** at `9fafbd3`, `moved: []`. **This is the first FULL-SUITE green recorded in
+this arc**; `v0.90.4` was validated on "93 passed SERIALLY" (release scope), which is why both
+failures above had gone unseen rather than being regressions.
+
+
 ## 0.90.4 (2026-08-01) — **the release that stops us losing measurements**: an ABANDONED mint keeps its phase table (three mints have died and taken K, per-entry timings, `prop_probe_s` and the peak-VRAM matrix with them), the forge lands as a MODE, and the export-reuse gate becomes the cheap one
 
 - **pgw#848 `7322722` — an ABANDONED mint kept nothing.** `f9c1b2d` closed this for the ABORTED
