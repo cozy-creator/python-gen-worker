@@ -489,13 +489,24 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
 
 
 # ---------------------------------------------------------------------------
-# The INERT-DECLARATION check (pgw#849, added after the twelfth instance).
+# The INERT-DECLARATION check (pgw#849) — REPORT MODE, never a gate.
 #
-# The twelfth instance is a DIFFERENT SHAPE and the reachability scan above is
-# blind to it: z-image declares ``warm_changes_key=True``, and that field is
-# validated, keyed and recorded — six production readers, a perfectly healthy
-# call-site count — while nothing PERFORMS the pre-warm. Used everywhere except
-# the one place it must act.
+# "A declared fact with no consequence" is a DIFFERENT SHAPE and the
+# reachability scan above is blind to it: a per-family flag that is validated,
+# keyed into the cell identity and recorded into the spec has three or more
+# production readers and a perfectly healthy call-site count, while nothing
+# performs the EFFECT it exists to cause. Used everywhere except the one place
+# it must act, and strictly harder to see than an unused function, because
+# every grep for it finds hits.
+#
+# HISTORY, because it decides how much this check is trusted: it was built
+# against z-image's ``warm_changes_key=True`` as a live example, and that
+# example was WITHDRAWN by the lane that filed it — the pre-warm has been
+# performed since pgw#758 (``aot_mint.py``, "The WARM CANON, EXECUTED"). The
+# blocker text was true when written and stale when relayed. So this check has
+# never had a confirmed live instance, and measures 1 hit over 72 declaration
+# fields today (``warm_reason``, a recorded rationale). That is why it reports
+# and does not gate. The shape is real; the example was not.
 #
 # So classify each read of a declared field by what the reading site DOES with
 # it. A field whose every read is validate / key / record is INERT: the fleet
@@ -618,7 +629,7 @@ def main() -> int:
                     help="print every exemption and its reason")
     ap.add_argument("--inert-declarations", action="store_true",
                     help="declared fields that are keyed and recorded but "
-                         "steer nothing (the pgw#849 twelfth-instance shape)")
+                         "steer nothing — report only; see the header note")
     ap.add_argument("--write-baseline", action="store_true",
                     help="rewrite the ratchet file from the current tree")
     args = ap.parse_args()
