@@ -9,12 +9,14 @@
 # These are not equivalent. Roughly, by what the absence COSTS:
 #
 #   A gate that never runs
-#     numerics_ladder.gate / compare_outputs / declared_thresholds — pgw#817's
-#       ADOPTION numerics gate. `api/decorators.py` declares numerics_floor and
-#       numerics_warn per family, `activity.py` declares KIND_CELL_NUMERICS, and
-#       NOTHING IN src/ IMPORTS numerics_ladder AT ALL. A cell about to arm is
-#       supposed to be run against the eager forward it replaces and REFUSE
-#       below the floor. It never is.
+#     (numerics_ladder.gate / compare_outputs / declared_thresholds LIVED HERE.
+#       DELISTED 2026-08-02 by the pgw#868 A1 lane as part of the 0.90.6 cut:
+#       pgw#868's numerics gate (chaos 8670f73) wired them into `arm_aot`, so
+#       all three now have production callers and this guard correctly failed on
+#       them as STALE. That is the ratchet doing its job — it caught the entry
+#       becoming live, not a regression. Kept as a comment because the entry is
+#       the clearest example in this file of what delisting is FOR: the whole
+#       point of the baseline is that lines leave it.)
 #     compile_cache.assert_closure_complete — the ck5 code-closure completeness
 #       gate ("a dynamic import is hiding trace-relevant code from the recipe
 #       key"). Its only caller is a test.
@@ -66,6 +68,3 @@ gen_worker.compile_cache.build()
 gen_worker.compile_cache.live_fx_lines()
 gen_worker.compile_cache.prepare()
 gen_worker.guard_closure.manifest_digest()
-gen_worker.numerics_ladder.compare_outputs()
-gen_worker.numerics_ladder.declared_thresholds()
-gen_worker.numerics_ladder.gate()
