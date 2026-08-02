@@ -234,10 +234,13 @@ def test_the_mint_feeds_the_pod_side_reapers_progress_signal(
     token file that `podguard-progress` writes, and **nothing in the SDK has
     ever written it** (zero references to podguard in gen_worker).
 
-    So the pod-side progress path had no producer, and the only thing keeping
-    a minting pod alive was podguard's renewal thread — the thread that was
-    never started. Two independent failures were required to reap attempt
-    sixteen and only one was visible.
+    So the pod-side progress path had no producer. SCOPE: `PODGUARD_STATE` is
+    injected by `podguard.arm()`, which runs only when podguard creates the
+    pod — so this is live on lane-rented pods and INERT on hub-created ones,
+    which is most of them and will include forge pods. It did not cause
+    attempt sixteen (verdict UNREACHABLE -> reaped on renter liveness alone)
+    and would not have prevented it; it closes the gap wherever the oracle is
+    reachable, and CP5's correction records what closes the rest.
     """
     state = tmp_path / "podguard"
     monkeypatch.setenv(aot_mint.PODGUARD_STATE_ENV, str(state))

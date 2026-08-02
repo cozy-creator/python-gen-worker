@@ -1611,12 +1611,22 @@ def _touch_pod_progress(note: str) -> None:
     so the pod-side progress path had no producer and the ONLY signal keeping
     a minting pod alive was podguard's own renewal thread.
 
-    That thread was the thing that was never started (`attend()` returned an
-    unstarted Keeper), which turned a single missing producer into a 30-minute
-    fixed fuse — `lease_seconds` 900 x `REAP_LEASE_MULTIPLE` 2.0 — under a
-    29-minute mint. Two independent failures were required and only one was
-    visible; this closes the other, so the fuse can never again be the sole
-    thing between a working mint and a terminate.
+    SCOPE, stated because it is narrower than it looks. `PODGUARD_STATE` is
+    injected by `podguard.arm()`, which runs only when PODGUARD creates the
+    pod. A HUB-created pod never passes through it, carries no watchdog and no
+    state dir, and this call is therefore a no-op there — which is most pods,
+    and will include th#1359 forge pods. So this makes lane-rented pods
+    progress-keyed and leaves hub-created pods on renter-liveness plus a fixed
+    1800 s grace (`lease_seconds` 900 x `REAP_LEASE_MULTIPLE` 2.0).
+
+    It did NOT cause pgw#846 attempt sixteen and would not have prevented it:
+    that pod's verdict was UNREACHABLE (podguard cannot ssh a hub-created pod
+    — no lane key), so `reap()` fell through to `box_stale=1950s > 1800s` and
+    terminated on RENTER liveness alone, which an unstarted Keeper had frozen.
+    One failure, not two. The structural fix for hub-created pods is for
+    `reap()` to ask the HUB whether a pod is progressing — the signal already
+    exists (`SelfMintActivityRunning`, refreshed every ~5 s by
+    `mint_process._observe`) — rather than to ssh the pod at all.
 
     Best-effort and unconditional-safe: a mint must not fail because a
     telemetry file could not be written, and the whole call is inert when
