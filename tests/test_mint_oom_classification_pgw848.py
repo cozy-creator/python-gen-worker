@@ -134,9 +134,29 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
             inductor_configs={"compile_threads": 2},
             cache_dir=str(tmp_path / "cache"), python=str(launcher))
 
-        with pytest.raises(pool.EntryCompileFailed) as caught:
+        # pgw#868, gating the 0.90.6 cut: a delegated cgroup root EXISTING is
+        # not the same as that cgroup ENFORCING `memory.max` on this process
+        # tree, and the difference is invisible until the child calmly
+        # succeeds. Measured on GitHub CI: no raise at all, i.e. the cap never
+        # killed anything — reported as `DID NOT RAISE EntryCompileFailed`,
+        # which reads as a pgw#848 classification regression and is nothing of
+        # the kind. The kernel's own counter is the arbiter, so ask it before
+        # concluding anything: no OOM means no OOM to classify, which is a
+        # missing capability (skip), not a wrong verdict (fail).
+        try:
             box.compile([("probe/entry", program)])
-        failure = caught.value
+        except pool.EntryCompileFailed as exc:
+            failure = exc
+        else:
+            if _oom_kills(cgroup) == kills_before:
+                pytest.skip(
+                    "the memory cap did not OOM-kill the child: this box has a "
+                    "delegated cgroup v2 memory controller but it did not "
+                    "enforce memory.max on this process tree, so there is no "
+                    "OOM here to classify")
+            raise AssertionError(
+                "the kernel recorded an OOM kill but the pool reported success "
+                "— that IS the pgw#848 defect, not an environment gap")
 
         # The reproduction is real: the KERNEL's own counter moved.
         assert _oom_kills(cgroup) > kills_before, (
