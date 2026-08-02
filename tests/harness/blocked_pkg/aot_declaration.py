@@ -13,10 +13,15 @@ from ..blocked_declaration_parts import BLOCKER_TEXT, FAMILY, build_declaration
 _FAMILY = FAMILY
 
 
-def _declaration() -> Compile:
-    decl = build_declaration()
+def _refuse_if_blocked() -> None:
     raise MintRefused(BLOCKER_TEXT)
-    return decl  # noqa: unreachable — mirrors the endpoints' own shape
+
+
+def _declaration() -> Compile:
+    """Mirrors the endpoints' own shape exactly: build, then blocker-check."""
+    decl = build_declaration()
+    _refuse_if_blocked()
+    return decl
 
 
 register_export_declaration(_declaration, family=_FAMILY)
