@@ -60,6 +60,38 @@ ForkValue = Union[bool, int, str]
 #: with a different width exports correctly instead of failing in the trace.
 AxisSpec = Union[int, str, Tuple[str, str]]
 
+#: pgw#853/ie#591: WHY an unserved fork arm is closed. Five kinds, because a
+#: fleet audit found `unserved` was recording five materially different
+#: guarantees as one word — and only ONE of them means "unreachable".
+#:
+#: * ``absent_path``      — the code that reaches the arm is never imported or
+#:                          instantiated (flux2's ``kv_cache``: KV caching
+#:                          lives in a pipeline class the endpoint does not
+#:                          import). The guarantee the word implies.
+#: * ``unpassed_arg``     — reachable code; the endpoint simply never passes
+#:                          the argument that arms it (ltx's
+#:                          ``isolate_modalities``, ``stg``). ONE code change
+#:                          away.
+#: * ``default_value``    — fully plumbed end to end; only the VALUE keeps it
+#:                          closed (ltx's ``cfg``: guidance flows all the way
+#:                          to the pipeline and is 1.0). Needs no code change
+#:                          at all — a recipe number does it.
+#: * ``checkpoint_config`` — decided by the resolved checkpoint's own config,
+#:                          not by this repo (wan's ``expand_timesteps``).
+#: * ``eager_by_choice``  — reachable AND served; excluded from the COMPILED
+#:                          set on purpose (qwen's edit lane). The opposite of
+#:                          unreachable, and it used to be spelled the same.
+FORK_REASONS: Tuple[str, ...] = (
+    "absent_path",
+    "unpassed_arg",
+    "default_value",
+    "checkpoint_config",
+    "eager_by_choice",
+)
+
+#: The two kinds a single payload field or recipe number can flip.
+WEAK_FORK_REASONS: Tuple[str, ...] = ("unpassed_arg", "default_value")
+
 #: Max nesting depth of an ``Arg.template``. qwen-image's img_shapes is 3
 #: (list -> list -> tuple); anything deeper is a boundary-shrink problem.
 _TEMPLATE_MAX_DEPTH = 4
@@ -235,7 +267,20 @@ class Fork(msgspec.Struct, frozen=True):
     unserved: Tuple[ForkValue, ...] = ()
     source: Optional[Tuple[str, str]] = None
     targets: Tuple[str, ...] = ()
+    #: Prose, for humans: the evidence and its citations. KEPT alongside
+    #: ``reason`` rather than replaced — the failure this pair exists to fix
+    #: was prose doing a MACHINE's job, not prose existing.
     why: str = ""
+    #: One of :data:`FORK_REASONS`: the KIND of guarantee that closes the
+    #: unserved arm, for machines. ``None`` means the declaration has not
+    #: answered the question yet.
+    #:
+    #: OPTIONAL BY DESIGN, FOR NOW. Every fleet declaration predates this
+    #: field, so requiring it would break them all at import. **Phase 2 makes
+    #: it required whenever ``unserved`` is non-empty** — an un-annotated
+    #: unserved arm is a declaration that has not said how strong its own
+    #: guarantee is, which is exactly the state this field exists to end.
+    reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -262,15 +307,43 @@ class Fork(msgspec.Struct, frozen=True):
             force(self, "source", (str(src[0]), str(src[1]).strip()))
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
         force(self, "why", str(self.why or ""))
+        if self.reason is not None:
+            reason = str(self.reason).strip()
+            if reason not in FORK_REASONS:
+                raise DeclarationError(
+                    f"Fork {self.name!r}: reason must be one of "
+                    f"{list(FORK_REASONS)!r}, got {self.reason!r}")
+            if not unserved and reason != "eager_by_choice":
+                raise DeclarationError(
+                    f"Fork {self.name!r} declares reason={reason!r} with no "
+                    f"unserved arm — a reason explains what keeps an arm "
+                    f"CLOSED, and this fork closes nothing")
+            force(self, "reason", reason)
 
     def as_row(self) -> Dict[str, Any]:
-        return {
+        row: Dict[str, Any] = {
             "name": self.name,
             "served": list(self.served),
             "unserved": list(self.unserved),
             "source": list(self.source) if self.source else None,
             "targets": list(self.targets),
         }
+        # pgw#846: OMITTED when absent, so every declaration written before
+        # this field existed serialises byte-identically.
+        if self.reason is not None:
+            row["reason"] = self.reason
+        return row
+
+    @property
+    def weak(self) -> bool:
+        """Is this arm one payload field or one recipe number from opening?
+
+        ``True`` for ``unpassed_arg`` and ``default_value``. ``None`` reads as
+        FALSE deliberately — an unanswered question is not evidence of a weak
+        guarantee, and phase 2 (making ``reason`` required) is what removes
+        the ambiguity rather than a guess here.
+        """
+        return bool(self.unserved) and self.reason in WEAK_FORK_REASONS
 
 
 def _sorted_pairs(kind: str, owner: str, value: Any) -> Tuple[Tuple[str, Any], ...]:
@@ -752,6 +825,43 @@ def export_declaration(family: str) -> Optional[Any]:
     return entry.build() if isinstance(entry, _Thunk) else entry
 
 
+def weak_arms(decl: Any) -> Tuple[Any, ...]:
+    """Forks whose unserved arm is closed by a VALUE rather than by absent code.
+
+    i.e. the arms that are ONE payload field or ONE recipe number away from
+    serving a graph class the declaration says is never traced. Under AOT
+    that is a hard refusal (a minted cell has no entry for it); under dynamo
+    it is a guard miss that merely looks like an unexplained slowdown.
+
+    This function is the point of :data:`FORK_REASONS`. The same question was
+    answered once, by hand, across three repos and two vendored pipelines, and
+    the answer was three forks — a day of work that nobody would repeat. It is
+    now a call.
+    """
+    return tuple(f for f in getattr(decl, "forks", ()) if getattr(f, "weak", False))
+
+
+def weak_arms_by_family() -> Dict[str, Tuple[Any, ...]]:
+    """:func:`weak_arms` across every registered family, for a fleet sweep.
+
+    Skips families whose declaration REFUSES (a blocked family is not a
+    silent one — its refusal is the pgw#853 typed event, and it should not
+    take a fleet query down).
+    """
+    out: Dict[str, Tuple[Any, ...]] = {}
+    for family in registered_export_families():
+        try:
+            decl = export_declaration(family)
+        except Exception:  # noqa: BLE001 — a blocked family is not a query error
+            continue
+        if decl is None:
+            continue
+        arms = weak_arms(decl)
+        if arms:
+            out[family] = arms
+    return out
+
+
 def registered_entry(family: str) -> Optional[Any]:
     """The RAW registry entry — a ``Compile`` or an unevaluated thunk.
 
@@ -831,6 +941,8 @@ __all__ = [
     "Input",
     "SHAPE_STRATEGIES",
     "STATIC_ROWS",
+    "FORK_REASONS",
+    "WEAK_FORK_REASONS",
     "export_declaration",
     "has_export_declaration",
     "registered_entry",
@@ -839,4 +951,6 @@ __all__ = [
     "registered_export_families",
     "reset_export_declarations",
     "validate_contract",
+    "weak_arms",
+    "weak_arms_by_family",
 ]
