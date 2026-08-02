@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **pgw#876 §4 — the `worker_mode=""` fingerprint is now a red test instead of a paid pod.**
+  `tests/test_wire_facts_pgw876.py` pins the two-builder hazard from both sides. **(a)** Feed
+  `ParentControl._parent_resources()` — the builder the hub actually receives, because the process
+  split is unconditional and the parent overwrites the child's copy wholesale — an all-distinct
+  measurement, and assert no `WorkerResources` field comes back at its protobuf default (except
+  `git_commit`, dead on both ends since pgw#514/P4). A default value there is not a choice the hub
+  can read; it is the signature of a field that was never assigned, which is exactly what th#1359
+  Part 2 left on two forge pods. Red-verified: stub `worker_mode.declared()` to `""` and the guard
+  names `worker_mode` and nothing else. **(b)** Source-scan both builders' `pb.WorkerResources(...)`
+  keyword sets and require them equal, so teaching one and not the other goes red here rather than
+  as a `cold_idle_never_dispatched` reap.
+
 - **pgw#876 §4 (where facts are built) — two dead fields on the billing-attestation observation.**
   `JobObservation.accepted_at` had zero references anywhere in the repo, including tests.
   `JobObservation.divergences` was write-only: `attest()` assigned it on the last line and nothing
