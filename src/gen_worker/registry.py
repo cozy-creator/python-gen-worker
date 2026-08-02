@@ -710,7 +710,7 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
     boot, every CLI walk and every discovery pass runs).
     """
     from .api.export_contract import (
-        export_declaration, register_export_declaration,
+        register_export_declaration, registered_entry,
     )
 
     registered: List[str] = []
@@ -723,7 +723,11 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
         family = str(getattr(compile_decl, "family", "") or "").strip()
         if not family or not getattr(compile_decl, "classes", ()):
             continue
-        if export_declaration(family) is compile_decl:
+        # pgw#853: `registered_entry`, NOT `export_declaration` — reading the
+        # registry back through the evaluating accessor would detonate a
+        # blocked family's thunk inside endpoint COLLECTION, which is the
+        # exact blast radius this issue exists to remove.
+        if registered_entry(family) is compile_decl:
             continue
         try:
             register_export_declaration(compile_decl)

@@ -1540,7 +1540,20 @@ def mint_recipe(
 
     from .api.export_contract import export_declaration
 
-    if export_declaration(family) is None:
+    # pgw#853: THIS is where a declaration is allowed to refuse. A family with
+    # open mint blockers (ltx/qwen/z-image) registers a THUNK, so its refusal
+    # arrives here — as a typed `self_mint_skipped` carrying every word of the
+    # blocker text — instead of as an ImportError that takes the endpoint
+    # down at boot. A refusal to MINT is not a refusal to IMPORT.
+    try:
+        decl = export_declaration(family)
+    except BaseException as exc:  # noqa: BLE001 — serving outranks compiling
+        return _decline(
+            "declaration_refused",
+            f"family {family!r}'s export declaration refuses to mint "
+            f"({type(exc).__name__}): {exc}")
+
+    if decl is None:
         return _decline(
             "no_export_declaration",
             f"family {family!r} registered no export declaration (a "
@@ -1583,8 +1596,7 @@ def mint_recipe(
     # child, no pod and no compile can resolve it, so spending one to
     # rediscover the sentence is pure waste. Declines only the mint; the
     # pipeline serves eager exactly as it did.
-    decl_gaps = aot_mint.declaration_module_gaps(
-        pipe, spec, export_declaration(family))
+    decl_gaps = aot_mint.declaration_module_gaps(pipe, spec, decl)
     if decl_gaps:
         return _decline(
             "declaration_module_mismatch",

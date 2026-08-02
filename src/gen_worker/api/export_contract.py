@@ -34,6 +34,7 @@ The vocabulary, per the #739 ratification:
 
 from __future__ import annotations
 
+import logging
 from threading import RLock
 from typing import (
     Any,
@@ -45,6 +46,8 @@ from typing import (
 )
 
 import msgspec
+
+_logger = logging.getLogger(__name__)
 
 #: A graph-class fork arm value. Bools are the common case (LTX's
 #: ``isolate_modalities``); ints/strs cover arity-style forks (z-image's CFG
@@ -492,31 +495,125 @@ _lock = RLock()
 _declared: Dict[str, Any] = {}
 
 
-def register_export_declaration(compile_decl: Any, *, replace: bool = False) -> Any:
-    """Register one family's export declaration (a ``Compile`` carrying
-    classes). Idempotent for an identical declaration; refuses a conflicting
-    one by name."""
-    family = str(getattr(compile_decl, "family", "") or "").strip()
-    if not family:
-        raise DeclarationError(
-            "cannot register an export declaration with no Compile.family")
-    if not getattr(compile_decl, "classes", ()):
-        raise DeclarationError(
-            f"export declaration for {family!r} carries no graph classes — "
-            f"there is nothing to derive from")
-    with _lock:
-        existing = _declared.get(family)
-        if existing is not None and existing != compile_decl and not replace:
+class _Thunk:
+    """A registered declaration that has not been built yet (pgw#853).
+
+    A family whose declaration REFUSES TO MINT (open blockers, an unresolved
+    config width, a shape it cannot legally export) used to express that by
+    raising at module scope — which made registering it equivalent to taking
+    the endpoint down at boot. A refusal to mint and a refusal to import are
+    different events with different blast radii; conflating them is the bug.
+    The thunk moves the evaluation to :func:`export_declaration`, i.e. to the
+    moment the MINT asks, where ``fleet_cells.mint_recipe`` already turns a
+    refusal into a typed ``self_mint_skipped`` carrying the blocker text.
+    """
+
+    __slots__ = ("family", "factory", "_built")
+
+    def __init__(self, family: str, factory: Any) -> None:
+        self.family = family
+        self.factory = factory
+        self._built: Any = None
+
+    def build(self) -> Any:
+        """Evaluate (once on success) and validate. Lets the factory's own
+        exception out — the blocker text IS the diagnostic."""
+        if self._built is not None:
+            return self._built
+        decl = self.factory()
+        got = str(getattr(decl, "family", "") or "").strip()
+        if got != self.family:
             raise DeclarationError(
-                f"family {family!r} already has a DIFFERENT export "
+                f"export declaration thunk registered for family "
+                f"{self.family!r} built a Compile for {got!r}")
+        if not getattr(decl, "classes", ()):
+            raise DeclarationError(
+                f"export declaration for {self.family!r} carries no graph "
+                f"classes — there is nothing to derive from")
+        self._built = decl
+        return decl
+
+    def __eq__(self, other: Any) -> bool:
+        return (isinstance(other, _Thunk) and other.family == self.family
+                and other.factory == self.factory)
+
+    def __hash__(self) -> int:
+        return hash((self.family, self.factory))
+
+
+def register_export_declaration(
+    compile_decl: Any, *, family: Optional[str] = None, replace: bool = False,
+) -> Any:
+    """Register one family's export declaration.
+
+    ``compile_decl`` is either a ``Compile`` carrying classes, or a ZERO-ARG
+    CALLABLE returning one (pgw#853), in which case ``family=`` is required
+    because there is nothing to read the name off yet. Idempotent for an
+    identical declaration; refuses a conflicting one by name.
+
+    Prefer the callable form for any family that can REFUSE — the refusal
+    then reaches the mint gate as a typed event instead of killing the import
+    that registers it.
+    """
+    if callable(compile_decl) and not hasattr(compile_decl, "classes"):
+        fam = str(family or "").strip()
+        if not fam:
+            raise DeclarationError(
+                "a callable export declaration must be registered with an "
+                "explicit family= (the Compile does not exist yet)")
+        entry: Any = _Thunk(fam, compile_decl)
+    else:
+        fam = str(getattr(compile_decl, "family", "") or "").strip()
+        if not fam:
+            raise DeclarationError(
+                "cannot register an export declaration with no Compile.family")
+        if family is not None and str(family).strip() != fam:
+            raise DeclarationError(
+                f"family= {family!r} does not match Compile.family {fam!r}")
+        if not getattr(compile_decl, "classes", ()):
+            raise DeclarationError(
+                f"export declaration for {fam!r} carries no graph classes — "
+                f"there is nothing to derive from")
+        entry = compile_decl
+    with _lock:
+        existing = _declared.get(fam)
+        if existing is not None and existing != entry and not replace:
+            raise DeclarationError(
+                f"family {fam!r} already has a DIFFERENT export "
                 f"declaration registered; pass replace=True only if you own both")
-        _declared[family] = compile_decl
+        _declared[fam] = entry
     return compile_decl
 
 
 def export_declaration(family: str) -> Optional[Any]:
+    """The family's ``Compile``, or ``None`` if none is registered.
+
+    pgw#853: a THUNK registration is evaluated HERE, and its exception is let
+    out HERE — this is "the mint asking", and every caller on the mint path
+    turns that into a typed refusal that keeps the blocker text. Callers that
+    only need to know whether a declaration EXISTS must use
+    :func:`has_export_declaration`, which never evaluates anything.
+    """
+    with _lock:
+        entry = _declared.get(str(family or "").strip())
+    return entry.build() if isinstance(entry, _Thunk) else entry
+
+
+def registered_entry(family: str) -> Optional[Any]:
+    """The RAW registry entry — a ``Compile`` or an unevaluated thunk.
+
+    For callers that need registration IDENTITY (has this exact declaration
+    already been registered?) without triggering a blocked family's refusal.
+    """
     with _lock:
         return _declared.get(str(family or "").strip())
+
+
+def has_export_declaration(family: str) -> bool:
+    """Whether a declaration is registered — never evaluates a thunk, so a
+    blocked family still reads as DECLARED (it is; it just refuses to mint)."""
+    with _lock:
+        return str(family or "").strip() in _declared
 
 
 def registered_export_families() -> Tuple[str, ...]:
@@ -528,6 +625,45 @@ def reset_export_declarations() -> None:
     """Drop every registration. Tests only."""
     with _lock:
         _declared.clear()
+
+
+def import_export_declaration(
+    module: str, *, package: Optional[str] = None,
+) -> bool:
+    """Import a module whose only job is to register a declaration, and NEVER
+    let its failure past this call (pgw#853, backstop (3)).
+
+    ``register_export_declaration``'s thunk form fixes declarations that opt
+    into it; any other module-scope work in a declaration file can still
+    throw. A compile feature must never be able to break serving, so this
+    reports the failure as a typed ``aot_declaration_import_failed`` activity
+    event carrying the exception and returns ``False`` — the pod serves
+    eager, uncompiled, and says why.
+
+    Returns ``True`` when the module imported.
+    """
+    import importlib
+
+    try:
+        importlib.import_module(module, package=package)
+        return True
+    except BaseException as exc:  # noqa: BLE001 — serving outranks compiling
+        detail = (
+            f"export declaration module {module!r} raised at import "
+            f"({type(exc).__name__}: {exc}) — this endpoint serves EAGER and "
+            f"mints nothing for its family; the AOT lane is off until the "
+            f"import is fixed. Registration must never be able to take an "
+            f"endpoint down (pgw#853)"
+        )
+        try:
+            from ..activity import emit_event
+
+            emit_event("aot_declaration_import_failed", detail,
+                       phase="declaration_import")
+        except BaseException:  # noqa: BLE001 — reporting must not raise either
+            pass
+        _logger.warning("%s", detail, exc_info=True)
+        return False
 
 
 __all__ = [
@@ -543,6 +679,9 @@ __all__ = [
     "SHAPE_STRATEGIES",
     "STATIC_ROWS",
     "export_declaration",
+    "has_export_declaration",
+    "registered_entry",
+    "import_export_declaration",
     "register_export_declaration",
     "registered_export_families",
     "reset_export_declarations",
