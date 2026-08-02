@@ -284,3 +284,31 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
         "a banked measurement that cannot cross the process boundary is a "
         "measurement the width will never see — the width is computed in the "
         "child, whose memory dies with it")
+
+
+def test_the_harness_import_cannot_depend_on_collection_order() -> None:
+    """pgw#848: this file's `from harness import progress_wait` errored at
+    COLLECTION under `-n 4` while passing 5/5 standalone.
+
+    Mechanism, reproduced: pytest's `prepend` import mode puts a test file's
+    rootdir on `sys.path` as it imports that file, so whichever module in
+    `tests/` is imported FIRST is what makes `harness` importable for the ~15
+    modules that assume it. Nobody declared that dependency and nothing
+    enforced it. Exec'ing this module with `src/` on the path but not `tests/`
+    raises `ModuleNotFoundError: No module named 'harness'` — and an import
+    error at collection fails a whole run, not a test, which is why a release
+    cut hit it and a standalone run did not.
+
+    Fixed in `tests/conftest.py`, which pytest guarantees to import before any
+    test module in this directory, in every mode including each xdist worker.
+    Asserted here rather than trusted: a guarantee nothing checks is the
+    ordering assumption again, one level up.
+    """
+    import sys
+
+    conftest = Path(__file__).resolve().parent
+    assert str(conftest) in sys.path, (
+        f"{conftest} is not on sys.path — every `from harness import ...` in "
+        f"this suite is back to depending on which module pytest happened to "
+        f"import first")
+    assert progress_wait.await_progress is not None
