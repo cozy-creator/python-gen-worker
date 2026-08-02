@@ -135,14 +135,16 @@ def _tiny_decoded(out_f: int = 256, in_f: int = 256, rank: int = 32,
 def test_build_fused_linear_resident_swizzle() -> None:
     if svdq_fused.fused_ops() is None:
         pytest.skip("triton unavailable")
+    from gen_worker.models.nvfp4_quant import to_blocked_scales
+
     dec = _tiny_decoded()
     mod = svdq_fused.build_svdq_fused_linear(dec)
-    assert mod.weight_kn.dtype == torch.uint8
-    assert tuple(mod.weight_kn.shape) == (dec.in_features // 2,
-                                          dec.out_features)
-    assert torch.equal(mod.weight_kn, pack_e2m1(dec.codes).t().contiguous())
-    assert tuple(mod.wscales.shape) == (dec.out_features,
-                                        dec.in_features // BLOCK)
+    assert mod.weight.dtype == torch.uint8
+    assert tuple(mod.weight.shape) == (dec.out_features,
+                                       dec.in_features // 2)
+    assert torch.equal(mod.weight, pack_e2m1(dec.codes))
+    assert torch.equal(mod.weight_scale.view(torch.uint8),
+                       to_blocked_scales(dec.scales).view(torch.uint8))
     assert mod.second.dtype == torch.float32
     assert mod.proj_down.shape == (dec.in_features, dec.rank)
     assert mod.proj_up.shape == (dec.out_features, dec.rank)

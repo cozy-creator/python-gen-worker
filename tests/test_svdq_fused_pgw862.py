@@ -68,15 +68,16 @@ def _get_jit_fns() -> dict:
     import gc
 
     from triton.runtime.autotuner import Autotuner
+    from triton.runtime.jit import JITFunction
 
     assert svdq_fused.fused_ops() is not None
     out = {}
     for obj in gc.get_objects():
-        if isinstance(obj, Autotuner):
-            fn = obj.fn
-            name = getattr(fn, "__name__", "")
-            if name in ("_quant_lora_kernel", "_gemm_lora_kernel"):
-                out[name] = fn
+        fn = obj.fn if isinstance(obj, Autotuner) else (
+            obj if isinstance(obj, JITFunction) else None)
+        if fn is not None and getattr(fn, "__name__", "") in (
+                "_quant_smooth_kernel", "_gemm_lora_kernel"):
+            out[fn.__name__] = fn
     return out
 
 
@@ -120,13 +121,13 @@ def test_fused_quant_kernel_compiles(cap: int) -> None:
 
     fns = _get_jit_fns()
     src = ASTSource(
-        fn=fns["_quant_lora_kernel"],
+        fn=fns["_quant_smooth_kernel"],
         signature={"x_ptr": "*bf16", "sm_ptr": "*bf16", "s2_ptr": "*fp32",
-                   "down_ptr": "*bf16", "q_ptr": "*u8", "s_ptr": "*fp8e4nv",
-                   "la_ptr": "*bf16", "M": "i32", "K": "i32",
-                   "R": "constexpr", "HAS_SMOOTH": "constexpr",
-                   "BM": "constexpr", "BK": "constexpr"},
-        constexprs={"R": 128, "HAS_SMOOTH": True, "BM": 64, "BK": 128},
+                   "q_ptr": "*u8", "s_ptr": "*fp8e4nv",
+                   "K": "i32", "KB": "i32", "NCB": "i32",
+                   "HAS_SMOOTH": "constexpr", "BLOCKED": "constexpr",
+                   "BPP": "constexpr"},
+        constexprs={"HAS_SMOOTH": True, "BLOCKED": True, "BPP": 128},
     )
     ptx = tt_compile(src, target=GPUTarget("cuda", cap, 32)).asm["ptx"]
     assert "e4m3" in ptx  # the block-scale cast made it to silicon code
