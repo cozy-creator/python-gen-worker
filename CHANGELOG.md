@@ -59,8 +59,14 @@
   `timings["prop_probe_s"]` (one pass per mint, read by nobody) is there to close it.
   **Gated, because the invariant is a property of the module and not a law:** a family branching on
   a size traces a different graph per row, so the gate requires graph-text equality AND a
-  byte-identical artifact from a re-specialization of a witness row, both arms built in the same
-  cleared cache dir (`-g1` bakes the source path into the object). Every failure mode — exception,
+  byte-identical artifact from a re-specialization of a witness row. The artifact check compares
+  every generated C++ source plus the host command, which on the pinned toolchain determine the
+  object bit for bit (measured on the real 6.3 MB sdxl TU: same source, same command, same build
+  path recompiles byte-identically; a different build path moves 156 bytes of 15 MB, all of it the
+  embedded path). Both arms stop BEFORE their 180 s `g++` and run concurrently in their own
+  interpreters, so the gate costs about one codegen rather than two full entry compiles — the
+  difference between a change whose sign is positive across the measured range and one whose sign
+  depended on an unmeasured quantity. Every failure mode — exception,
   missing artifact, empty digest set, unplaceable input — falls back to a full per-row export;
   absence of evidence is never a pass. The verdict is per `(target, adapter arm)` per MINT and is
   never memoised across families. Enable with `GEN_WORKER_AOT_EXPORT_REUSE=1`. No inductor config,

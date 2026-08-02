@@ -10,6 +10,8 @@ from an accidental re-export.
 from __future__ import annotations
 
 import copy
+import hashlib
+import subprocess
 
 import pytest
 import torch
@@ -137,27 +139,79 @@ def test_respecialize_declines_a_row_it_cannot_place():
 # --------------------------------------------------------------------------
 
 
+def test_source_and_command_determine_the_object(tmp_path):
+    """The premise the cheap gate rests on, re-checked on THIS toolchain.
+
+    Measured separately on the real 6.3 MB sdxl wrapper TU
+    (`scripts/pgw847/source_implies_so.py`): identical source + identical
+    command + the same build path => byte-identical object, and a different
+    build path moves 156 bytes of 15 MB. Pinned here on a small generated TU
+    so the claim cannot rot silently.
+
+    NOTE the trap this test exists to avoid: `-g1` embeds the OBJECT path as
+    well as the source path, so two compiles that differ in `-o` are not the
+    same command. A first pass read a false NEGATIVE off exactly that.
+    """
+    src = tmp_path / "u.cpp"
+    src.write_text(
+        "#include <vector>\n#include <string>\n"
+        "std::vector<std::string> f() { return {\"a\", \"b\"}; }\n")
+    obj = tmp_path / "u.o"
+    cmd = ["g++", "-O1", "-g1", "-fPIC", "-std=c++20", "-c", str(src),
+           "-o", str(obj)]
+    digests = []
+    for _ in range(2):
+        assert subprocess.run(cmd, capture_output=True).returncode == 0
+        digests.append(hashlib.sha256(obj.read_bytes()).hexdigest())
+        obj.unlink()
+    assert digests[0] == digests[1], "g++ is not deterministic here"
+
+
 def test_gate_admits_a_shape_stable_family_and_proves_it_on_the_artifact(
         tmp_path, _refuse_export):
     """The whole claim, end to end: same graph text AND byte-identical
-    emitted files, the linked `.so` included."""
+    generated C++ under a byte-identical host command, from two arms that
+    each stop before `g++` and run concurrently."""
     module = _Stack()
     base, _ = _export(module, 1, 32, 32)
     witness, example = _export(module, 1, 24, 40)
 
-    _refuse_export()          # the gate must not export anything itself
+    # The real computation REFUSES for the whole gate: `respecialize` runs in
+    # THIS process, so a secret re-export would raise here. (The two arms are
+    # subprocesses that only `torch.export.load` a `.pt2`; neither calls
+    # `export` at all, which is the point.)
+    _refuse_export()
     verdict = aot_export_reuse.prove(
         base, witness, example, {}, workdir=tmp_path, entry="probe")
 
     assert verdict.admitted, verdict.reason
     assert verdict.code_equal is True
     assert verdict.artifacts_equal is True
-    # every file, and the linked object among them
     assert verdict.own_digests == verdict.reuse_digests
-    assert any(k.endswith(".so") for k in verdict.own_digests), \
-        verdict.own_digests
+    # the host command is part of the evidence, not just the sources
+    assert "__cmd__" in verdict.own_digests, verdict.own_digests
     assert any(k.endswith(".cpp") for k in verdict.own_digests), \
         verdict.own_digests
+
+
+def test_the_gate_never_reaches_the_wrapper_host_compile(tmp_path, monkeypatch):
+    """The whole cost argument: the 180 s `g++` must not run in either arm."""
+    module = _Stack()
+    base, _ = _export(module, 1, 32, 32)
+    witness, example = _export(module, 1, 24, 40)
+
+    seen: list[str] = []
+    real = aot_export_reuse._capture_codegen
+
+    def watched(program, entry, cache_dir, configs):
+        out = real(program, entry, cache_dir, configs)
+        seen.extend(sorted(cache_dir.rglob("*.wrapper.o")) and ["WRAPPER.O"])
+        return out
+
+    monkeypatch.setattr(aot_export_reuse, "_capture_codegen", watched)
+    aot_export_reuse.prove(
+        base, witness, example, {}, workdir=tmp_path, entry="probe")
+    assert seen == [], "an arm compiled the wrapper TU"
 
 
 def test_gate_declines_a_family_whose_graph_moves_with_the_row(tmp_path):
@@ -176,6 +230,30 @@ def test_gate_declines_a_family_whose_graph_moves_with_the_row(tmp_path):
     assert verdict.artifacts_equal is None      # never got that far
 
 
+def test_gate_declines_a_WRONG_respecialization_on_real_codegen(
+        tmp_path, monkeypatch):
+    """The artifact check's RED arm, with no mocking of the thing under test.
+
+    `respecialize` is replaced by the NAIVE form this lane measured and
+    rejected — hand back the base program untouched, so the row's metadata
+    never moves. That is exactly the failure that compiles row 0's kernels
+    under row R's name, and the gate must catch it from the generated C++
+    alone."""
+    module = _Stack()
+    base, _ = _export(module, 1, 32, 32)
+    witness, example = _export(module, 1, 24, 40)
+
+    monkeypatch.setattr(
+        aot_export_reuse, "respecialize", lambda b, a, k: b)
+    verdict = aot_export_reuse.prove(
+        base, witness, example, {}, workdir=tmp_path, entry="probe")
+
+    assert not verdict.admitted, verdict.reason
+    assert verdict.code_equal is True          # the graph TEXT is identical
+    assert verdict.artifacts_equal is False    # the generated C++ is not
+    assert verdict.own_digests != verdict.reuse_digests
+
+
 def test_gate_declines_when_it_cannot_build_its_evidence(tmp_path, monkeypatch):
     """Absence of evidence is a FALLBACK, never a pass."""
     module = _Stack()
@@ -185,7 +263,7 @@ def test_gate_declines_when_it_cannot_build_its_evidence(tmp_path, monkeypatch):
     def boom(*_a, **_kw):
         raise RuntimeError("no compiler today")
 
-    monkeypatch.setattr(aot_export_reuse, "_compile_digests", boom)
+    monkeypatch.setattr(aot_export_reuse, "_run_arms", boom)
     verdict = aot_export_reuse.prove(
         base, witness, example, {}, workdir=tmp_path, entry="probe")
 
@@ -199,8 +277,9 @@ def test_gate_declines_when_an_arm_emits_nothing(tmp_path, monkeypatch):
     base, _ = _export(module, 1, 32, 32)
     witness, example = _export(module, 1, 24, 40)
 
-    monkeypatch.setattr(aot_export_reuse, "_compile_digests",
-                        lambda *a, **k: {})
+    monkeypatch.setattr(
+        aot_export_reuse, "_run_arms",
+        lambda *a, **k: {"gate-own": {}, "gate-reuse": {}})
     verdict = aot_export_reuse.prove(
         base, witness, example, {}, workdir=tmp_path, entry="probe")
 
@@ -213,19 +292,17 @@ def test_gate_declines_on_any_artifact_difference(tmp_path, monkeypatch):
     base, _ = _export(module, 1, 32, 32)
     witness, example = _export(module, 1, 24, 40)
 
-    calls = {"n": 0}
-
     def two_arms(*_a, **_kw):
-        calls["n"] += 1
-        return {".wrapper.cpp": "aaa", ".wrapper.so": f"so{calls['n']}"}
+        return {"gate-own": {"__cmd__": "c", ".wrapper.cpp": "aaa"},
+                "gate-reuse": {"__cmd__": "c", ".wrapper.cpp": "bbb"}}
 
-    monkeypatch.setattr(aot_export_reuse, "_compile_digests", two_arms)
+    monkeypatch.setattr(aot_export_reuse, "_run_arms", two_arms)
     verdict = aot_export_reuse.prove(
         base, witness, example, {}, workdir=tmp_path, entry="probe")
 
     assert not verdict.admitted
     assert verdict.artifacts_equal is False
-    assert ".wrapper.so" in verdict.reason
+    assert ".wrapper.cpp" in verdict.reason
 
 
 # --------------------------------------------------------------------------
