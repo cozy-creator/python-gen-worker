@@ -512,6 +512,34 @@ _IN_FLIGHT: Dict[str, Tuple[str, float]] = {}
 _PUBLISHED: Dict[str, str] = {}
 _REFUSED: Dict[str, str] = {}
 
+#: pgw#848 item 1 / th#1359: a monotonic counter of DURABLE publish progress.
+#: It advances when a NEW cell key begins uploading and when one lands — never
+#: on a retry, never on a failure, never on "a message arrived". That
+#: restriction is the whole design: the mint's activity stays RUNNING until the
+#: cell is durable, and a publish that fails and retries forever must therefore
+#: read as NOT PROGRESSING, or the fix is worse than the bug it closes (a
+#: never-reap loop on a paid card with no attendant, which is exactly why
+#: `self_mint_publish` was refused as a podguard progress KIND).
+_DURABLE_PROGRESS = 0
+_DURABLE_SEEN: set = set()
+
+
+def publish_durable_progress() -> int:
+    """Monotonic count of durable publish transitions in this process."""
+    with _IN_FLIGHT_LOCK:
+        return _DURABLE_PROGRESS
+
+
+def _note_durable(key: str, event: str) -> None:
+    """Advance the durable counter for a transition that is NOT a retry."""
+    global _DURABLE_PROGRESS
+    token = f"{key}|{event}"
+    with _IN_FLIGHT_LOCK:
+        if token in _DURABLE_SEEN:
+            return
+        _DURABLE_SEEN.add(token)
+        _DURABLE_PROGRESS += 1
+
 
 def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
     """``{cell_key: (family, started_monotonic)}`` for every publish whose
@@ -551,6 +579,9 @@ def _publish_async(
         size_mb = 0.0
     with _IN_FLIGHT_LOCK:
         _IN_FLIGHT[key] = (family, time.monotonic())
+    # A NEW key beginning its upload is durable new work; a retry of the same
+    # key is not, and `_note_durable` dedupes on (key, event) to enforce that.
+    _note_durable(key, "started")
     activity_mod.emit_event(
         "self_mint_publish",
         f"family={family} key={key}: uploading {size_mb:.1f} MB to the fleet "
@@ -587,6 +618,7 @@ def _publish_async(
         else:
             with _IN_FLIGHT_LOCK:
                 _PUBLISHED[key] = str(checkpoint_id or "")
+            _note_durable(key, "published")
             activity_mod.emit_event(
                 "self_mint_publish",
                 f"family={family} key={key} checkpoint={checkpoint_id}: "

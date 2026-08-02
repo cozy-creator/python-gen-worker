@@ -104,6 +104,11 @@ from .registry import EndpointSpec
 from .runtime_config import ConfigStore, extract_job_config
 from .stage_timing import stage_ms_for_metrics
 
+#: pgw#848 item 1: cadence for the publish-durability wait. A POLL interval,
+#: not a deadline — nothing here decides when a publish has taken too long;
+#: the activity's own staleness window does, and only durable movement feeds it.
+_PUBLISH_SETTLE_POLL_S = 2.0
+
 if typing.TYPE_CHECKING:
     from . import compile_cache
     from . import fleet_cells
@@ -9234,6 +9239,7 @@ class Executor:
         try:
             with activity_mod.watchdog(act):
                 await self._background_mint_run(rec, bg, act)
+                await self._await_publish_durable(act)
         except _MintDeclined as declined:
             # pgw#737: a declined mint is an OUTCOME, not a failure — the
             # activity terminates COMPLETED and the tier stays eager, so
@@ -9302,6 +9308,48 @@ class Executor:
             # `ensure_setup` — see `_mark_warm_complete`.
             self._mark_warm_complete(rec, bg.spec.name)
             self._on_state_change()
+
+    async def _await_publish_durable(self, act: Any) -> None:
+        """Keep the mint's activity RUNNING until its cell is DURABLE.
+
+        pgw#848 item 1. This method's docstring used to be a lie by omission:
+        the activity "stays RUNNING for the whole background build" and
+        terminates COMPLETED on ARM — but the publish is a background thread
+        that outlives the arm, so the window in which the cell EXISTS AND IS
+        NOT YET DURABLE had no running activity at all. For a pod nobody is
+        watching (every PRODUCTION forge pod, hub-launched from a publish or
+        demand event) that window is unprotected, and a mint reaped there has
+        paid its entire cost and produced nothing.
+
+        THE CONSTRAINT THAT SHAPES ALL OF THIS: the counter advances on
+        DURABLE STATE — a new key starting its upload, a key landing — and
+        NEVER on a retry attempt or a message. So a publish that fails and
+        retries forever goes stale here and IS condemned, which is the whole
+        point: a liveness signal a failing retry loop can satisfy is not a
+        liveness signal, and widening the window wrongly would be worse than
+        the bug it closes. Same reasoning that refused `self_mint_publish` as
+        a podguard progress kind.
+
+        Beats the activity ONLY when the durable counter moves, so the
+        activity's `UpdatedAt` remains "last PROGRESS", not "last poll".
+        """
+        try:
+            from . import fleet_cells as fc
+
+            last = fc.publish_durable_progress()
+            while fc.publishes_in_flight():
+                await asyncio.sleep(_PUBLISH_SETTLE_POLL_S)
+                current = fc.publish_durable_progress()
+                if current == last:
+                    continue  # no durable movement: let the window age
+                last = current
+                phase = getattr(act, "phase", None)
+                if callable(phase):
+                    phase("publishing")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — never fail a mint on its own telemetry
+            logger.debug("publish-durability wait failed", exc_info=True)
 
     async def _background_mint_run(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
