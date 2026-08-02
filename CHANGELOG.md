@@ -7,20 +7,24 @@
 PATCH, so it rides the existing `0.90` entry in `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS`
 (major.minor match): no gate widen, no hub bounce, no deploy operator.
 
-Range verified BY ANCESTRY, not from cut notes — `git merge-base --is-ancestor` against HEAD for
-every must-ride, and `git rev-list --count v0.90.5..HEAD` = **17**.
+Range verified BY ANCESTRY, not from cut notes — `git merge-base --is-ancestor` against the tag for
+every must-ride, and `git rev-list --count v0.90.5..<tag>` = **20** (counted, not estimated).
 
-**Cut on a FULL-SUITE green taken on a clean export of the release commit**, not on the shared
-worktree: two other lanes had unrelated work in flight there (`aot_resume.py`,
-`test_worker_outbox_pgw869.py`, and edits to `topology.py`/`aot_compile_pool.py`/`chunk_cas.py`),
-and a suite run in that tree would have been a green for code this release does not contain.
+**Cut from a RELEASE BRANCH, not from the chaos tip, and that is the interesting part.** Two lanes
+landed on chaos while this cut was in flight: `780b3d0` (pgw#869, the outbox's durable lane for
+FACTS) and `d6067d2` (pgw#868 A4, parallel export). `780b3d0` left `mypy` **RED** — six
+`bytes | None` errors in `transport.py`, because `_message_key` returns `None` for `job_result`
+by design (a result is not evidence) and the new call sites use its return as a `dict` key.
 
-**Three reds fixed rather than carried.** `e8b3109` renamed `Settings.worker_jwt` ->
-`Settings.bootstrap_worker_jwt` on purpose, so every stale reader becomes an `AttributeError` at the
-call site instead of a silently frozen token. Three `SimpleNamespace` fakes in
-`tests/test_executor_adopt.py` still built the old field and raised at `lifecycle.py:258`.
-`5bce263` had repaired the SECURITY suite's copy; these were the rest. A red gate is not a cut, and
-"known failures" is the folklore this program is eliminating.
+That red is **not this release's to fix**: guarding those call sites is a semantics decision owned
+by pgw#869, and editing another lane's in-flight file to unblock a tag is how a release acquires a
+bug it cannot explain. So `release/0.90.6` branches from `653c2ac` — which predates both — and
+carries only the export probe on top. **A red gate is not a cut, and neither is a cut that
+launders someone else's red.**
+
+Consequently `d6067d2` (parallel export) is **NOT in 0.90.6**; it ships off-by-default and rides
+0.90.7 once chaos is green. Nothing in 0.90.6 depends on it: the export probe below is what makes
+it decidable, and the probe is here.
 
 Highlights, by what they change rather than by issue number:
 
