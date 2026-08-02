@@ -472,100 +472,53 @@ def test_every_hub_dial_reads_ONE_refreshable_credential() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#848 CP12: the numerics gate does not exist — say so on EVERY arm
+# pgw#848 CP12 -> pgw#868: the honest ABSENCE has been replaced by the GATE
 # ---------------------------------------------------------------------------
 
 
-def test_the_missing_numerics_gate_is_announced_not_hidden() -> None:
-    """There is no compiled-vs-eager comparison ANYWHERE in this worker, so
-    there is no `Comparison` for `numerics_ladder.gate()` to consult.
+def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """CP12 shipped `cell_numerics phase=unchecked` — an arm that stated, on
+    the wire, that nobody had checked it. That was the right stopgap and the
+    wrong end state, and pgw#868 replaced it with the measurement.
 
-    Wiring the gate in would have been WORSE than this: it opens
-    `if comparison is None: return None`, so it would pass every cell always
-    while looking exactly like a working gate. This is the honest alternative
-    — every arm states, on the wire, that nobody checked.
+    Two things are pinned here so the stopgap cannot creep back:
+
+    * `_announce_unchecked_numerics` no longer exists. A cell that armed while
+      announcing it was unchecked is exactly what the gate refuses now.
+    * `arm_aot` FAILS CLOSED when there is nothing to measure. The old shape
+      of this test drove `arm_aot` with a stub `enable` and asserted True;
+      today that same call arms NOTHING (no marker, no runner, no eager
+      reference), so it must refuse — `phase=unmeasurable`, never `unchecked`.
+
+    The gate's own behaviour lives in `tests/test_numerics_gate_pgw868.py`,
+    which drives the real arm path against a real packed artifact.
     """
-    from gen_worker.models import provision
-
-    said: list[tuple[str, str, str]] = []
     import gen_worker.activity as activity_mod
-
-    real = activity_mod.emit_event
-    activity_mod.emit_event = (  # type: ignore[assignment]
-        lambda kind, detail, **kw: said.append(
-            (kind, detail, str(kw.get("phase", "")))))
-    try:
-        provision._announce_unchecked_numerics(
-            type("Cfg", (), {"family": "sdxl", "numerics_floor": 0.995,
-                             "numerics_warn": 0.999})())
-    finally:
-        activity_mod.emit_event = real  # type: ignore[assignment]
-
-    assert said, "an arm with no numerics check said nothing"
-    kind, detail, phase = said[0]
-    assert kind == activity_mod.KIND_CELL_NUMERICS
-    assert phase == "unchecked"
-    # The declared floor must be NAMED, so a reader sees what was not enforced.
-    assert "0.995" in detail and "0.999" in detail
-    assert "source=declared" in detail
-    # And it must be unmistakable — silence must not read as a pass.
-    assert "ARMED WITHOUT A NUMERICS CHECK" in detail
-    assert "not a pass" in detail
-
-
-def test_the_announcement_is_not_a_gate() -> None:
-    """It must never refuse, and it must never be able to fail an arm — an
-    absence that could break arming would get deleted, and the gap would go
-    quiet again."""
-    from gen_worker.models import provision
-
-    # No cfg attributes at all: still announces, using SDK defaults.
-    said: list[str] = []
-    import gen_worker.activity as activity_mod
-
-    real = activity_mod.emit_event
-    activity_mod.emit_event = (  # type: ignore[assignment]
-        lambda kind, detail, **kw: said.append(detail))
-    try:
-        assert provision._announce_unchecked_numerics(object()) is None
-        assert "source=sdk-default" in said[0]
-        # A raising sink must not propagate.
-        activity_mod.emit_event = (  # type: ignore[assignment]
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sink down")))
-        assert provision._announce_unchecked_numerics(object()) is None
-    finally:
-        activity_mod.emit_event = real  # type: ignore[assignment]
-
-
-def test_a_REAL_arm_emits_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The wiring, not the helper.
-
-    The two tests above pass with the CALL DELETED — they drive
-    `_announce_unchecked_numerics` directly, so they prove the function works
-    and nothing about whether an arm reaches it. That is the exact defect this
-    whole issue keeps finding, so it gets its own test: drive the real
-    `provision.arm_aot` to a successful arm and assert the event is on the
-    wire. RED when the call site is removed.
-    """
     from gen_worker import aot_serve
     from gen_worker.models import provision
-    import gen_worker.activity as activity_mod
+
+    assert not hasattr(provision, "_announce_unchecked_numerics")
 
     monkeypatch.setattr(aot_serve, "enable", lambda *a, **k: True)
-    monkeypatch.setattr(
-        provision, "_install_lifted_bindings", lambda *a, **k: (False, None),
-        raising=False)
-    said: list[tuple[str, str]] = []
+    said: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         activity_mod, "emit_event",
-        lambda kind, detail, **kw: said.append((kind, str(kw.get("phase")))))
+        lambda kind, detail, **kw: said.append(
+            (kind, detail, str(kw.get("phase", "")))))
 
     cfg = type("Cfg", (), {"family": "sdxl", "numerics_floor": 0.995,
                            "numerics_warn": 0.999, "lora_bucket": 0,
                            "targets": ()})()
-    assert provision.arm_aot(object(), cfg, None, Path("cell.pt2"), 0) is True
-    assert (activity_mod.KIND_CELL_NUMERICS, "unchecked") in said, (
-        f"a REAL arm did not announce the missing numerics check: {said}")
+    assert provision.arm_aot(object(), cfg, None, Path("cell.pt2"), 0) is False
+    rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_CELL_NUMERICS]
+    assert rows, "an arm that could not be measured said nothing"
+    detail, phase = rows[-1]
+    assert phase == "unmeasurable"
+    assert "unchecked" not in [p for _d, p in rows]
+    assert "not a pass" in detail
+
+
 
 
 def test_exactly_ONE_module_may_read_the_bootstrap_credential() -> None:

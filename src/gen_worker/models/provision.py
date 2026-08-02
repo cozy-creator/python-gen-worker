@@ -302,8 +302,30 @@ def arm_aot(
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
     if aot_serve.enable(pipe, cfg, cache_dir, artifact):
-        _announce_unchecked_numerics(cfg)
-        return True
+        if gate_cell_numerics(pipe, cfg):
+            return True
+        # A refused cell is UNARMED, not merely reported: the whole point is
+        # that it must not serve. Staying eager is the ordinary miss policy
+        # every other adopt gate uses, so the tenant keeps being served.
+        #
+        # And the ADOPT ledger has to agree with it. `enable` already emitted
+        # `aot_adopt phase=armed` before the gate ran, so a reader counting
+        # armed adoptions would over-count every numerics refusal. One closing
+        # row keeps that count honest — the numbers themselves ride the
+        # `cell_numerics` row.
+        meta = aot_serve.armed_metadata(pipe)
+        aot_serve.unwrap(pipe)
+        try:
+            from .. import activity as activity_mod
+
+            activity_mod.emit_event(
+                aot_serve.ADOPT_EVENT,
+                f"family={meta.get('family')} key={meta.get('cell_key')}: "
+                f"armed, then UNARMED by the numerics gate — this pod serves "
+                f"eager (pgw#868)",
+                phase="numerics_refused")
+        except Exception:  # noqa: BLE001 — the refusal already stands
+            logger.debug("could not close the adopt ledger", exc_info=True)
     if lifted_installed:
         from . import lora_lifted
 
@@ -311,50 +333,107 @@ def arm_aot(
     return False
 
 
-def _announce_unchecked_numerics(cfg: Any) -> None:
-    """Say out loud that this cell armed with NO numerics check (pgw#848).
+def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
+    """THE numerics gate (pgw#868): does this cell reproduce the eager forward
+    it is about to replace? Returns False when it must not serve.
 
-    This is NOT a gate and must never be mistaken for one. It exists because
-    the gate does not: `numerics_ladder` is imported by nothing in `src/`
-    except the pgw#800 ADAPTER gate, and `compare_outputs` / `Comparison` /
-    `flatten_outputs` have ZERO consumers anywhere. Nothing in the mint or
-    arm path ever computes a compiled-vs-eager comparison, so there is no
-    `Comparison` for a gate to consult.
+    Placed at ADOPT time because a hub-delivered cell never re-enters mint —
+    the arm is the only point every cell passes through, and it is the point
+    that decides whether the artifact serves. `numerics_probe.measure_axis`
+    takes callables rather than a pipeline precisely so the same measurement
+    can also run mint-side later as a cheaper early catch; what must not exist
+    is a mint-only gate, which cannot protect an adopting pod whose weights,
+    lane and card differ.
 
-    Wiring `numerics_ladder.gate()` in here would have been worse than this.
-    It opens `if comparison is None: return None` — so with nothing computing
-    a comparison it would pass EVERY cell, always, while looking in the diff
-    and in the call graph exactly like a working gate, and pgw#849's guard 2
-    would then mark the surface covered. An absent gate that is obvious beats
-    an absent gate that is invisible.
+    Three outcomes, all of them typed rows on the wire:
 
-    So: every arm says so, on the wire, naming the floor the family DECLARED
-    and nobody checked. A future reader must not be able to mistake silence
-    for a pass — the declaration (`Compile.numerics_floor`, sdxl 0.995/0.999),
-    the thresholds, this activity kind and the ladder are all present and all
-    correct; the thing that MEASURES is what is missing, and it needs a
-    device, real weights and a real forward, so it cannot be built off-pod.
-
-    Best-effort: telemetry never fails an arm.
+    * HEALTHY -> `cell_numerics phase=checked`, arms silently-but-recorded.
+      The pass is announced deliberately: an unannounced pass is
+      indistinguishable from a gate that never ran, which is this program's
+      signature failure.
+    * DEGRADED -> the ladder's `phase=degraded` row; the cell ARMS and
+      confesses.
+    * DESTROYED / unmeasurable -> refuse. `numerics_ladder.gate` raises the
+      typed refusal below the floor; a probe that could not be TAKEN is
+      refused on its own `phase=unmeasurable`, because "nobody could ask" is
+      not "it passed".
     """
-    try:
-        from .. import activity as activity_mod, numerics_ladder
+    from .. import activity as activity_mod, aot_serve, numerics_ladder
+    from .. import numerics_probe
 
-        thresholds = numerics_ladder.declared_thresholds(cfg)
-        declared = getattr(cfg, "numerics_floor", None)
+    family = str(getattr(cfg, "family", "") or "")
+    try:
+        report = numerics_probe.probe_cell(
+            pipe, cfg, aot_serve.armed_metadata(pipe))
+    except numerics_probe.ProbeUnavailable as exc:
+        return _refuse_unmeasurable(family, exc.reason, str(exc))
+    except Exception as exc:  # noqa: BLE001 — an unexplained probe is a refusal
+        # Deliberately NOT best-effort. The pgw#848 announcement could swallow
+        # anything because it refused nothing; a GATE that swallowed an error
+        # into an armed cell would be the exact hole this replaces.
+        return _refuse_unmeasurable(
+            family, "probe_error", f"{type(exc).__name__}: {exc}")
+    if not report.measured:
+        rows = "; ".join(
+            f"{v.axis.name}: {v.reason} ({v.detail})"
+            for v in report.unmeasured[:6])
+        return _refuse_unmeasurable(
+            family, (report.unmeasured[0].reason if report.unmeasured
+                     else "no_axis_measured"),
+            f"{report.context()} | unmeasured: {rows}")
+    comparison = report.comparison()
+    try:
+        numerics_ladder.gate(
+            comparison,
+            kind=activity_mod.KIND_CELL_NUMERICS,
+            refuse=lambda detail, worst: numerics_probe.CellNumericsRefused(
+                detail, worst),
+            context=report.context())
+        if comparison is not None and comparison.healthy:
+            activity_mod.emit_event(
+                activity_mod.KIND_CELL_NUMERICS,
+                f"CHECKED against eager on every packaged entry — "
+                f"{report.context()}",
+                phase="checked", duration_ms=report.elapsed_ms)
+    except numerics_probe.CellNumericsRefused as exc:
+        logger.error(
+            "aot arm: REFUSING to arm %s — the cell does not reproduce its "
+            "eager reference: %s", family or "cell", exc)
+        return False
+    except Exception as exc:  # noqa: BLE001 — a gate that errored is a refusal
+        # Includes a raising activity sink, and the announcement is INSIDE the
+        # try on purpose: an arm nobody could record is an arm we do not make.
+        # A telemetry failure cannot be told apart from a logic failure here,
+        # and the two costs are not symmetric — refusing costs an un-armed cell
+        # (the ordinary miss policy), passing costs a silently-wrong one.
+        return _refuse_unmeasurable(
+            family, "gate_error",
+            f"{type(exc).__name__}: {exc} | {report.context()}")
+    return True
+
+
+def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
+    """A cell that could not be measured does not arm — and says which half.
+
+    Fail-closed by construction: the only way to reach an armed cell is
+    through a comparison that exists. An exception swallowed into a `True`
+    here would rebuild the exact hole pgw#848 CP12 refused to ship.
+    """
+    from .. import activity as activity_mod
+
+    logger.error(
+        "aot arm: REFUSING to arm %s — the numerics gate could not be run "
+        "(%s): %s", family or "cell", reason, detail)
+    try:
         activity_mod.emit_event(
             activity_mod.KIND_CELL_NUMERICS,
-            f"family={getattr(cfg, 'family', '?')} ARMED WITHOUT A NUMERICS "
-            f"CHECK — no compiled-vs-eager comparison is computed anywhere in "
-            f"this worker, so the declared floor was NOT enforced "
-            f"(floor={thresholds.floor} warn={thresholds.warn} "
-            f"source={'declared' if declared is not None else 'sdk-default'}). "
-            f"This is an absence, not a pass: nothing verified this cell's "
-            f"numerics (pgw#848 CP12)",
-            phase="unchecked",
-        )
-    except Exception:  # noqa: BLE001 — telemetry never fails an arm
-        logger.debug("could not announce unchecked numerics", exc_info=True)
+            f"family={family} REFUSED TO ARM: the compiled-vs-eager "
+            f"comparison could not be taken ({reason}). This is not a pass — "
+            f"an unmeasurable cell stays eager (pgw#868). {detail}",
+            phase="unmeasurable")
+    except Exception:  # noqa: BLE001 — the refusal stands even if the wire is down
+        logger.debug("could not announce unmeasurable numerics", exc_info=True)
+    return False
 
 
 def enable_compiled(

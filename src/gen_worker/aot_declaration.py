@@ -36,8 +36,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from . import aot_mint
-from .aot_mint import DynamicDim, ExportSpec, MintRefused
+from .aot_contract import ADAPTER_FORK, DynamicDim, ExportSpec, MintRefused
 from .api.decorators import Compile
 from .api.export_contract import (
     DYNAMIC_COLLAPSE,
@@ -328,7 +327,7 @@ def select_plan(
     # goes through this function.
     want_fork = tuple(sorted(
         (str(k), v) for k, v in dict(fork).items()
-        if str(k) != aot_mint.ADAPTER_FORK))
+        if str(k) != ADAPTER_FORK))
     plans = [p for p in mint_plans(decl, target)
              if p.fork == want_fork]
     if not plans:

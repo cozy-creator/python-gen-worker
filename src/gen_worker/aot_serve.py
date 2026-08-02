@@ -2218,6 +2218,35 @@ def proven_since(pipeline: Any, before: int) -> bool:
     return execution_count(pipeline) > int(before) and is_armed(pipeline)
 
 
+def armed_targets(pipeline: Any) -> Dict[str, Dict[str, Any]]:
+    """Every wrapped target of an armed pipeline, keyed by target name.
+
+    Each row carries ``module``, ``attr`` and the wrap ``state`` — whose
+    ``original`` is the EAGER callable the cell replaced and whose ``runner``
+    is that target's :class:`EntryDispatch`. The pgw#868 numerics probe needs
+    exactly those two to run the cell and its own reference on one feed, and a
+    private marker read from another module would be a second interpretation
+    of this one's format. ``{}`` when nothing is armed.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    rows = marker.get("targets")
+    if not isinstance(rows, dict):
+        return {}
+    return {str(name): dict(row) for name, row in rows.items()}
+
+
+def armed_metadata(pipeline: Any) -> Dict[str, Any]:
+    """The metadata the ARM itself used, off the live marker.
+
+    The authority for anything asked about an armed cell: a caller that
+    re-unpacked the artifact could be reading a different file than the one
+    :func:`load_and_wrap` staged, verified and bound.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    meta = marker.get("meta")
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
 def is_armed(pipeline: Any) -> bool:
     """Whether the AOTI cell is currently serving this pipeline — EVERY
     wrapped target must still be live: one revoked target means the cell no
@@ -2290,6 +2319,8 @@ __all__ = [
     "PACKAGE_NAME",
     "SOURCE_LITERAL",
     "SOURCE_STATE_DICT",
+    "armed_metadata",
+    "armed_targets",
     "artifact_metadata",
     "assert_bindable",
     "assert_lifted_contract",

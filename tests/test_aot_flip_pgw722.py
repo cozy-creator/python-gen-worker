@@ -709,6 +709,11 @@ def test_f2_flag_on_installs_before_enable_in_proven_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _flag_on(monkeypatch)
+    # pgw#868: a successful arm now also has to pass the numerics gate, which
+    # this rig cannot feed (no declaration, no artifact, no forward). Stubbed
+    # so the subject stays the INSTALL ORDER; the gate itself is proven in
+    # tests/test_numerics_gate_pgw868.py.
+    monkeypatch.setattr(provision, "gate_cell_numerics", lambda *a, **k: True)
     pipe = _Pipe()
     observed = _arm_aot(monkeypatch, pipe, enable_result=True)
     # Installed BEFORE the arm (assert_lifted_contract sees a lifted module)
