@@ -64,6 +64,7 @@ from ..pb import worker_scheduler_pb2 as pb
 from ..transport import FatalTransportError, Transport
 from ..topology import ExecutionTopology
 from .. import postmortem
+from .. import worker_mode
 from .. import worker_fatal
 from . import (
     ENV_CHILD,
@@ -77,6 +78,7 @@ from . import (
     capability,
     frames,
     merge,
+    privdrop,
 )
 from .group import ChildGroup, GroupPlan
 from .seam import SeamAccountant
@@ -126,10 +128,18 @@ _EVIDENCE_EPS = 0.05
 # delta 1: pod-launch envs that must not survive into the compute child. Every
 # one of them is a platform credential or the platform's identity claim, and
 # the child imports tenant code — so `os.environ` in that process is a public
-# noticeboard. WORKER_JWT is the signing identity; HF_TOKEN is the endpoint
-# author's own credential and legitimately belongs to the code that pulls
-# weights, so it deliberately stays.
-_CHILD_FORBIDDEN_ENVS = ("WORKER_JWT",)
+# noticeboard. WORKER_JWT is the signing identity; RUNPOD_API_KEY is injected by
+# RunPod into every pod and th#1380 verified it is ACCOUNT-scoped in authority
+# (it enumerates our fleet, reads our balance, lists 90 registry credential
+# records) and cannot be suppressed at the create call; PUBLIC_KEY is our
+# operator SSH key. HF_TOKEN is the endpoint author's OWN credential and
+# legitimately belongs to the code that pulls weights, so it deliberately stays.
+#
+# This list only became load-bearing with pgw#858: until the child ran as its
+# own uid, deleting a name here was cosmetic — tenant code read the same value
+# out of `/proc/<ppid>/environ` (WORKER_JWT) or `/proc/1/environ` (the RunPod
+# key). Both, and the strip, are guarded by test_pod_privilege_isolation_pgw858.
+_CHILD_FORBIDDEN_ENVS = ("WORKER_JWT", "RUNPOD_API_KEY", "PUBLIC_KEY")
 # A mediated hub call must not hold the parent's control loop open forever.
 _ACTION_HARD_TIMEOUT_S = 120.0
 _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
@@ -151,6 +161,13 @@ _OBSERVATION_CAP = 512
 # pods for want of these bytes. Ring-buffered, bounded, reset per spawn.
 _STDERR_TAIL_CAP_BYTES = 32768
 _STDERR_TAIL_DIAL_CHARS = 3000
+# pgw#858: the compute uid's home — HF cache, ~/.triton, ~/.nv, TMPDIR and the
+# .pyc prefix all hang off it. On disk, not in the world-writable /tmp, and
+# owned by the compute uid rather than shared with the control parent.
+_COMPUTE_HOME = "/var/lib/gen-worker/compute"
+# models/cache_paths.py's default, duplicated rather than imported: importing
+# the models package pulls the model layer, and the parent never imports torch.
+_DEFAULT_TENSORHUB_CACHE_DIR = "/tmp/tensorhub-cache"
 
 
 def _tee_stderr_chunk(chunk: bytes) -> None:
@@ -213,28 +230,11 @@ def _http_call(
 
 
 # pgw#783: PR_SET_PDEATHSIG — make every compute child die with the parent.
-_PR_SET_PDEATHSIG = 1
-
-
-def _set_pdeathsig() -> None:
-    """preexec (post-fork, pre-exec) in the child: ask the kernel to SIGKILL
-    this process when its parent dies.
-
-    At G>1 a crashed or abruptly-killed control parent would otherwise leave G
-    orphaned compute children EACH holding tens of GB of VRAM — a real leak, and
-    exactly the kind of stranded-VRAM anomaly the quant lane is chasing. With
-    this, the parent's death reaps every child (and the child's death frees its
-    CUDA context and all its VRAM). Linux-only; a no-op elsewhere.
-    """
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
-    except Exception:
-        # Best-effort: a platform without prctl keeps the pre-pgw#783 behaviour
-        # (the container's own death took the child with it at G=1).
-        pass
+# pgw#858 moved the implementation into privdrop, which owns the whole
+# post-fork/pre-exec sequence: the parent-death signal must be re-established
+# AFTER the credential change, not before, so the two cannot be set in the
+# wrong order by accident. This name stays as the module's export of it.
+_set_pdeathsig = privdrop.set_pdeathsig
 
 
 class _ChildLink:
@@ -326,6 +326,12 @@ class _ChildSlot:
         self.server = await asyncio.start_unix_server(
             self._on_child_connect, path=self.socket_path
         )
+        # pgw#858: connecting to a unix socket needs WRITE on its inode, so a
+        # root-created socket under the default umask is unreachable by the
+        # compute child's uid. Handing it to that uid at 0600 is also strictly
+        # tighter than the 0755 the split shipped with.
+        if self.p._drop_plan is not None:
+            privdrop.grant_socket(self.p._drop_plan, self.socket_path)
 
     async def close_server(self) -> None:
         if self.server is None:
@@ -488,6 +494,11 @@ class _ChildSlot:
         # in WORKER_JWT, and `os.environ` is the first place tenant code looks.
         for name in _CHILD_FORBIDDEN_ENVS:
             env.pop(name, None)
+        # pgw#858: the uid the child is about to exec as has no account of its
+        # own to inherit these from, and `~`, getpass.getuser(), TMPDIR and the
+        # .pyc path all resolve through them.
+        if self.p._drop_plan is not None:
+            env.update(privdrop.child_env(self.p._drop_plan))
         # ...but the child still needs its IDENTITY, which is not a credential.
         worker_id, release_id = self.p._identity()
         if worker_id:
@@ -506,9 +517,11 @@ class _ChildSlot:
         read_fd, write_fd = os.pipe()
         env[ENV_LIVENESS_FD] = str(write_fd)
         self.spawn_count += 1
+        plan = self.p._drop_plan
         logger.info(
-            "spawning compute child %s #%d (devices=%s): %s",
+            "spawning compute child %s #%d (devices=%s, as=%s): %s",
             self.label, self.spawn_count, ",".join(str(d) for d in self.devices),
+            plan.describe() if plan is not None else f"uid {os.geteuid()} (no drop)",
             " ".join(self.p._child_cmd),
         )
         try:
@@ -519,9 +532,14 @@ class _ChildSlot:
                 # byte straight back to the parent's stderr, so the container
                 # log (and the pgw#639 SIGUSR2 stack dumps) are unchanged.
                 stderr=asyncio.subprocess.PIPE,
-                # pgw#783: die with the parent so a crashed group never strands
-                # its VRAM as an orphaned torch process.
-                preexec_fn=_set_pdeathsig if sys.platform == "linux" else None,
+                # pgw#858 + pgw#783, in that order and in ONE hook: drop to the
+                # unprivileged compute uid, prove the drop took, then re-arm
+                # PR_SET_PDEATHSIG so a crashed group never strands its VRAM as
+                # an orphaned torch process. Post-fork/pre-exec, so tenant code
+                # has never run in this process when the credential changes.
+                preexec_fn=(
+                    privdrop.preexec(plan) if sys.platform == "linux" else None
+                ),
             )
         finally:
             os.close(write_fd)   # the child owns it now
@@ -1102,6 +1120,11 @@ class ParentControl:
         # plan is one slot with an EMPTY env delta and the original socket path.
         self._topology = topology if topology is not None else ExecutionTopology.from_env()
         self._plan = GroupPlan.for_topology(self._topology, socket_path=self._socket_path)
+
+        # pgw#858: decide the compute uid and grant it what it needs BEFORE any
+        # slot exists, so no child is ever spawned into a half-prepared pod.
+        self._drop_plan = self._prepare_privilege_drop()
+
         self._slots: List[_ChildSlot] = [
             _ChildSlot(self, group) for group in self._plan.children
         ]
@@ -1184,6 +1207,58 @@ class ParentControl:
     @property
     def execution_groups(self) -> int:
         return len(self._slots)
+
+    # ---- pgw#858: the compute uid ----------------------------------------
+
+    def _prepare_privilege_drop(self) -> Optional[privdrop.DropPlan]:
+        """Decide the compute child's uid, then hand that uid everything it
+        needs — while this process is still root and can.
+
+        The list is deliberately explicit (``privdrop.writable_paths`` plus the
+        pod's cache roots): the answer to a permission error the child hits is
+        another entry here, never giving the child root back. Anything NOT in
+        it stays root-owned and read-only to tenant code, which is the point.
+        """
+        try:
+            plan = privdrop.plan_drop(_COMPUTE_HOME)
+        except Exception:
+            logger.error(
+                "refusing to spawn a compute child: the pgw#858 privilege drop "
+                "could not be planned", exc_info=True,
+            )
+            raise
+        if plan is None:
+            return None
+        extra = [
+            # weights/CAS: written by the child (it does the fetching), empty on
+            # a cold pod so the chown is free, metadata-only when warm. Read
+            # from env/Settings rather than models.cache_paths — importing that
+            # package pulls the model layer, and this process never imports torch.
+            self._settings.tensorhub_cache_dir
+            or os.environ.get("TENSORHUB_CACHE_DIR", "")
+            or _DEFAULT_TENSORHUB_CACHE_DIR,
+            self._settings.tensorhub_cas_dir,
+            # post-mortem markers: the CHILD writes inflight/fault-dump/streaks
+            # and this parent takes them, so the dir is genuinely shared.
+            str(postmortem.BOOT_RECORD_PATH.parent),
+        ]
+        granted = privdrop.grant_paths(plan, privdrop.writable_paths(plan, extra))
+        privdrop.grant_devices(plan)
+        # The datacenter-warm fill source is a mounted network volume we only
+        # ever READ. It is deliberately not in the granted set — say so rather
+        # than let a later reader assume it was missed.
+        fill = (self._settings.tensorhub_fill_source_dir
+                or os.environ.get("TENSORHUB_FILL_SOURCE_DIR", ""))
+        if fill and not os.access(fill, os.R_OK | os.X_OK):
+            logger.warning(
+                "fill source %s is not readable by the compute uid; warm fill "
+                "will fall back to R2", fill,
+            )
+        logger.info(
+            "compute child will run as %s; writable: %s",
+            plan.describe(), ", ".join(granted),
+        )
+        return plan
 
     # Single-slot conveniences: the per-child process/spawn state moved into
     # _ChildSlot (pgw#783), but at G==1 there is exactly one, and the G=1
@@ -1301,6 +1376,15 @@ class ParentControl:
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=str(m.get("gen_worker_version") or ""),
             image_digest=self._settings.worker_image_digest,
+            # pgw#846: this builder — not lifecycle's — is the one the hub
+            # actually receives, because the split is unconditional. th#1359
+            # Part 2 taught only `lifecycle._build_resources()` to declare the
+            # mode, so every forge pod ever bought echoed the protobuf default
+            # "" and was idle-reaped as `cold_idle_never_dispatched` (measured
+            # 2026-08-02, pods ld425b16fca080 / rd88n91cz0mxxl at 391s each,
+            # WORKER_MODE="forge" present in the container env throughout).
+            # RAW declared value, same contract as the other builder.
+            worker_mode=worker_mode.declared(),
             instance_id=self._settings.runpod_pod_id or "",
         )
 
@@ -1312,7 +1396,10 @@ class ParentControl:
             return self._identity_cache
         worker_id = (self._settings.worker_id or "").strip()
         release_id = ""
-        token = (self._settings.worker_jwt or "").strip()
+        # pgw#848: IDENTITY claims (sub / release_id), which rotation never
+        # changes — the bootstrap copy is correct here and is cached anyway.
+        # Anything AUTHENTICATING must read `worker_credential.current()`.
+        token = (self._settings.bootstrap_worker_jwt or "").strip()
         if token:
             try:
                 from ..request_context import _decode_unverified_jwt_claims
