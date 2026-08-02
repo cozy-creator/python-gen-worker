@@ -52,6 +52,7 @@ from gen_worker.topology import (
     PARALLEL_INTERNAL,
     PARALLEL_NONE,
     PARALLEL_SEQUENCE,
+    MAX_GPU_COUNT,
     ExecutionTopology,
     TopologyError,
 )
@@ -60,39 +61,24 @@ VECTORS = pathlib.Path(__file__).parent / "testdata" / "topology_wire_vectors.js
 
 _LEGAL_PARALLEL = (PARALLEL_NONE, PARALLEL_INTERNAL, PARALLEL_SEQUENCE, PARALLEL_CFG)
 
-# The divergences this decoder is KNOWN to have against the Go one today
-# (pgw#870). The fixture records both sides' answers; the driver script uses it
-# as a suppression list so its exit code means "no NEW disagreement".
-_KNOWN_UNTYPED = (OverflowError, ValueError)
-
-
 def _decode(raw: str) -> ExecutionTopology:
     """decode, asserting P1: nothing but TopologyError may escape.
 
-    pgw#870 is the live exception — ``json.loads`` accepts the non-standard
-    ``NaN``/``Infinity`` literals and ``int()`` of them raises untyped — so that
-    one shape is named rather than silently tolerated.
+    pgw#870 was the live exception — ``json.loads`` accepts the non-standard
+    ``NaN``/``Infinity`` literals and ``int()`` of them raised untyped. Fixed:
+    the decoder refuses a non-integer before anything can coerce it, so there is
+    no named exception here any more and ANY untyped escape fails.
     """
     try:
         return ExecutionTopology.decode(raw)
     except TopologyError:
         raise
-    except _KNOWN_UNTYPED as exc:  # pragma: no cover - exercised by the ledger test
-        if "float" in str(exc) and ("infinity" in str(exc) or "NaN" in str(exc)):
-            raise TopologyError("pgw870_untyped_nonfinite", str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - an untyped escape IS the defect
         raise AssertionError(
             f"decode({raw!r}) raised an UNTYPED {type(exc).__name__}: {exc} — every "
             "refusal must be a TopologyError, or callers that catch TopologyError "
             "crash instead of refusing"
         ) from exc
-
-
-#: Above this the decoder is in pgw#870 territory (it applies no upper bound at
-#: all, so `gpu_count = 10**30` is accepted and `all_groups()` becomes unbounded
-#: work). The invariant below enumerates every group, so it must not be asked to
-#: enumerate an absurd one — the SIZE is the defect, and it is recorded in the
-#: fixture ledger rather than asserted here.
-_PGW870_ENUMERATION_CAP = 1 << 16
 
 
 def _assert_partition(topo: ExecutionTopology, source: object) -> None:
@@ -113,8 +99,12 @@ def _assert_partition(topo: ExecutionTopology, source: object) -> None:
         assert topo.parallel == PARALLEL_NONE, (
             f"{source!r} accepted parallel={topo.parallel!r} at degree 1"
         )
-    if topo.gpu_count > _PGW870_ENUMERATION_CAP:
-        return  # known open (pgw#870): no upper bound on gpu_count.
+    # pgw#870: the decoder now has a CEILING as well as a floor
+    # (``MAX_GPU_COUNT``), so enumerating every group of an accepted topology is
+    # bounded work and this property no longer needs an escape hatch.
+    assert topo.gpu_count <= MAX_GPU_COUNT, (
+        f"{source!r} accepted gpu_count={topo.gpu_count} above the ceiling"
+    )
     # Every group's devices are disjoint, in range, and cover the pod exactly.
     seen: set[int] = set()
     for g in range(topo.execution_groups):
@@ -333,17 +323,18 @@ def test_group_ordinal_is_exact_for_rank0_devices(gpu_count: int, degree: int) -
         assert excinfo.value.code == "topology_dispatch_gpu_index_invalid"
 
 
-def test_nonfinite_numbers_escape_untyped_ledger_pgw870() -> None:
-    """LEDGER for pgw#870, the untyped-escape half.
+def test_nonfinite_numbers_are_typed_refusals_pgw870() -> None:
+    """pgw#870 FIXED, untyped-escape half — revert-turns-red guard.
 
     ``json.loads`` accepts the non-standard ``NaN``/``Infinity`` literals, and
     ``int()`` of either raises ``OverflowError``/``ValueError`` — neither is a
     ``TopologyError``, so a caller that catches ``TopologyError`` around
-    ``from_env`` crashes at boot instead of refusing. Recorded, not fixed here.
+    ``from_env`` crashed at boot instead of refusing. The decoder now refuses a
+    non-integer before anything coerces it, so both are ordinary typed
+    refusals.
     """
-    for raw, exc in (('{"gpu_count":1e400}', OverflowError), ('{"gpu_count":NaN}', ValueError)):
-        with pytest.raises(exc) as excinfo:
+    for raw in ('{"gpu_count":1e400}', '{"gpu_count":-1e400}', '{"gpu_count":NaN}',
+                '{"gpu_count":Infinity}'):
+        with pytest.raises(TopologyError) as excinfo:
             ExecutionTopology.decode(raw)
-        assert not isinstance(excinfo.value, TopologyError), (
-            f"pgw#870 appears fixed for {raw!r} — move it into the `agreed` vectors"
-        )
+        assert excinfo.value.code == "topology_decode_failed", raw

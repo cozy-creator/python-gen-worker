@@ -32,14 +32,17 @@ nobody chose. Keep it that way: derive, never store a fourth independent fact.
 **rank-0 device of the group** (0, D, 2D, ...), so at D == 1 it is byte-identical
 to what has always shipped.
 
-Absent is a legal state, never an error: every CPU pod and every pod created
-before the field existed has no topology and keeps the historical single slot.
-A value that is *present but not fully recognised* is a typed refusal — never a
-silent fallback — because it can only mean a producer that is not the hub. That
-covers unknown keys too (``topology_unknown_field``): the field set is CLOSED,
-so growing the contract is itself a two-release transition, exactly like the
-th#1375 rename below. The alternative — ignore what you do not understand — is
-how a hub that believes it bought degree 2 gets served degree 1 in silence.
+An absent ENV VAR is a legal state, never an error: every CPU pod and every pod
+created before the field existed has no topology and keeps the historical
+single slot. An absent FIELD inside a *present* object is the opposite — a
+typed refusal (th#1385), because both producers always write ``gpu_count`` and
+the degree, so an object missing one did not come from a producer this contract
+knows, and defaulting it reads as ONE SLOT. Everything *present but not fully
+recognised* is likewise a typed refusal — never a silent fallback. That covers
+unknown keys (``topology_unknown_field``): the field set is CLOSED, so growing
+the contract is itself a two-release transition, exactly like the th#1375
+rename below. The alternative — ignore what you do not understand — is how a
+hub that believes it bought degree 2 gets served degree 1 in silence.
 
 An "execution group" is NOT a PyTorch ``ProcessGroup``
 ---------------------------------------------------
@@ -217,6 +220,19 @@ _KNOWN_KEYS = frozenset({
     LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS,
 })
 
+# th#1385/pgw#870: a CEILING, not just a floor, and the same number on both
+# sides (tensorhub ``topology.MaxGPUCount``). Without one the decoder accepts
+# any wire integer and ``all_groups()`` / ``group()`` over it is unbounded work
+# on a number no producer could have meant. The largest pod the fleet rents is
+# 8 cards.
+MAX_GPU_COUNT = 1024
+
+# The wire integers are int64 on the hub side, so a value outside that range is
+# not a number this contract can carry — it is a typed decode refusal, matching
+# what `encoding/json` does with it.
+_INT64_MIN = -(2 ** 63)
+_INT64_MAX = 2 ** 63 - 1
+
 # ``parallel`` — who shards the work across a group's devices.
 PARALLEL_NONE = ""            # group is one device
 PARALLEL_INTERNAL = "internal"  # the MODEL spans the devices by its own arrangement
@@ -253,9 +269,20 @@ class ExecutionTopology:
             raise TopologyError(
                 "topology_gpu_count_invalid", f"gpu_count={self.gpu_count}"
             )
+        if self.gpu_count > MAX_GPU_COUNT:
+            raise TopologyError(
+                "topology_gpu_count_invalid",
+                f"gpu_count={self.gpu_count} exceeds the maximum {MAX_GPU_COUNT}",
+            )
         if self.gpus_per_execution_group < 1:
             raise TopologyError(
                 "topology_degree_invalid", f"gpus_per_execution_group={self.gpus_per_execution_group}"
+            )
+        if self.gpus_per_execution_group > self.gpu_count:
+            raise TopologyError(
+                "topology_degree_invalid",
+                f"gpus_per_execution_group={self.gpus_per_execution_group} exceeds "
+                f"gpu_count={self.gpu_count}",
             )
         if self.gpu_count % self.gpus_per_execution_group != 0:
             raise TopologyError(
@@ -433,20 +460,32 @@ class ExecutionTopology:
             )
 
         def _opt(key: str) -> Optional[int]:
+            """One optional wire integer. Absent and ``null`` are both "not
+            written"; anything that is not a JSON integer is a TYPED decode
+            refusal.
+
+            pgw#870: this used to accept any ``(int, float)`` and then compare
+            ``int(value) != value``, which let an integral float through
+            (``2.0`` -> 2, where the hub refuses) and let ``NaN``/``Infinity``
+            — which ``json.loads`` accepts as non-standard literals — reach
+            ``int()`` and escape as an UNTYPED ``ValueError``/``OverflowError``
+            past every caller that catches ``TopologyError``. A float is not an
+            integer; say so instead of coercing.
+            """
             if key not in obj or obj[key] is None:
                 return None
             value = obj[key]
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TopologyError(
-                    "topology_decode_failed", f"{key} is not a number: {value!r}"
-                )
-            if int(value) != value:
+            if isinstance(value, bool) or not isinstance(value, int):
                 raise TopologyError(
                     "topology_decode_failed", f"{key} is not an integer: {value!r}"
                 )
-            return int(value)
+            if not _INT64_MIN <= value <= _INT64_MAX:
+                raise TopologyError(
+                    "topology_decode_failed", f"{key} is not an integer in range: {value!r}"
+                )
+            return value
 
-        def _aliased(key: str, legacy_key: str, default: int) -> int:
+        def _aliased(key: str, legacy_key: str) -> Optional[int]:
             """One field under either spelling (th#1375/#1376).
 
             Both present must AGREE. During the transition every hub emits
@@ -457,7 +496,7 @@ class ExecutionTopology:
             new_value = _opt(key)
             legacy_value = _opt(legacy_key)
             if legacy_value is None:
-                return default if new_value is None else new_value
+                return new_value
             if new_value is not None and new_value != legacy_value:
                 raise TopologyError(
                     "topology_alias_disagree",
@@ -474,31 +513,51 @@ class ExecutionTopology:
                 return legacy_value
             return new_value
 
-        parallel = obj.get(KEY_PARALLEL) or ""
-        if not isinstance(parallel, str):
+        # pgw#870: TYPE-CHECK BEFORE DEFAULTING. This was
+        # ``obj.get(KEY_PARALLEL) or ""``, the `or 1` launder in a second
+        # field: every falsy non-string (``false``, ``0``, ``[]``, ``{}``)
+        # became PARALLEL_NONE before the isinstance guard could see it, so
+        # the guard was unreachable for exactly the values it was written for.
+        parallel_raw = obj.get(KEY_PARALLEL)
+        if parallel_raw is None:
+            parallel = ""
+        elif not isinstance(parallel_raw, str):
             raise TopologyError(
-                "topology_decode_failed", f"parallel is not a string: {parallel!r}"
+                "topology_decode_failed", f"parallel is not a string: {parallel_raw!r}"
             )
+        else:
+            parallel = parallel_raw
+        # th#1385: an ABSENT field is a refusal, not a default. The hub and
+        # this worker both always emit gpu_count and the degree (under one
+        # spelling or the other), so an object missing either did not come
+        # from a producer this contract knows — and a default reads it as
+        # ONE SLOT, which is the exact silence th#1375 exists to prevent.
+        # (An absent ENV VAR is still legal and still means one slot; that is
+        # `from_env`, not this.)
         gpu_count = _opt(KEY_GPU_COUNT)
+        if gpu_count is None:
+            raise TopologyError(
+                "topology_gpu_count_invalid",
+                f"{KEY_GPU_COUNT} is absent; a present topology must declare it",
+            )
+        degree = _aliased(KEY_GPUS_PER_GROUP, LEGACY_KEY_GPUS_PER_GROUP)
+        if degree is None:
+            raise TopologyError(
+                "topology_degree_invalid",
+                f"{KEY_GPUS_PER_GROUP} is absent under both spellings; a present "
+                "topology must declare it",
+            )
         topo = cls(
-            # NOT ``_opt(...) or 1`` — gpu_count=0 is a REFUSAL
-            # (``topology_gpu_count_invalid``), and ``or`` would launder it
-            # into the legal single-slot default.
-            gpu_count=1 if gpu_count is None else gpu_count,
-            gpus_per_execution_group=_aliased(
-                KEY_GPUS_PER_GROUP, LEGACY_KEY_GPUS_PER_GROUP, 1
-            ),
+            gpu_count=gpu_count,
+            gpus_per_execution_group=degree,
             parallel=parallel.strip(),
         )
         # ``execution_groups`` is derived and the producer always recomputes
         # it, so a disagreement means the value did not come from the hub.
         # Refuse it rather than pick a winner — a wrong slot count is a wrong
         # fleet capacity, and it is silent.
-        declared = _aliased(
-            KEY_EXECUTION_GROUPS, LEGACY_KEY_EXECUTION_GROUPS,
-            topo.execution_groups,
-        )
-        if declared != topo.execution_groups:
+        declared = _aliased(KEY_EXECUTION_GROUPS, LEGACY_KEY_EXECUTION_GROUPS)
+        if declared is not None and declared != topo.execution_groups:
             raise TopologyError(
                 "topology_execution_groups_disagree",
                 f"declared execution_groups={declared} but gpu_count/"

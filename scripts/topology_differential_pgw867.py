@@ -206,40 +206,23 @@ def generate(n: int, rng: random.Random) -> list[str]:
 
 
 
-# The recorded divergence CLASSES. Suppression is by class, not by exact string:
-# each class has thousands of concrete witnesses (any payload omitting a field
-# exhibits the defaults asymmetry), and the fixture's `divergent` block carries
-# one canonical witness of each with its tracker issue. A non-zero exit from
-# this driver therefore means "a disagreement outside every class anybody has
-# ruled on", which is the only signal worth acting on.
+# The recorded divergence CLASSES — EMPTY as of 2026-08-02.
 #
-#   th#1385  Go side: no defaults (an omitted field is the illegal zero) while
-#            Python defaults to 1; `reconcileAlias` reads an explicit 0 as
-#            "not written"; encoding/json matches keys case-INSENSITIVELY so the
-#            closed key set is not closed; `parallel` is lowercased on one side
-#            only; json.Decoder.Decode ignores trailing data.
-#   pgw#870  Python side: `or ""` launders a falsy non-string `parallel`;
-#            integral floats and unbounded ints are accepted; NaN/Infinity
-#            escape UNTYPED.
+# th#1385 and pgw#870 closed all nine: the Go decoder now checks its key set
+# case-SENSITIVELY on a raw key map, refuses trailing data, distinguishes an
+# absent field from an explicit zero, and no longer case-folds `parallel`; the
+# Python decoder type-checks `parallel` BEFORE defaulting, refuses non-integer
+# and out-of-int64 numbers (so NaN/Infinity are typed refusals rather than an
+# untyped escape), and both sides refuse an absent gpu_count/degree instead of
+# defaulting one side to a legal single slot. Every witness moved into the
+# fixture's `agreed` block.
+#
+# Suppression is by CLASS, not by exact string, because each class has thousands
+# of concrete witnesses. A non-zero exit from this driver means "a disagreement
+# nobody has ruled on" — with nothing suppressed, that is now simply "any
+# disagreement". Add a class here ONLY alongside a fixture `divergent` entry and
+# a tracker issue that owns the fix.
 def known_divergence_class(go: dict[str, Any], py: dict[str, Any]) -> str:
-    g_ok, p_ok = bool(go.get("accept")), bool(py.get("accept"))
-    g_code, p_code = str(go.get("code") or ""), str(py.get("code") or "")
-    if p_code.startswith("UNTYPED"):
-        return "pgw#870 untyped escape (NaN/Infinity)"
-    if not g_ok and p_ok:
-        if g_code in ("topology_gpu_count_invalid", "topology_degree_invalid"):
-            return "th#1385 defaults asymmetry (Go has none, Python defaults to 1)"
-        if g_code == "topology_decode_failed":
-            return "pgw#870 Python value laxity (integral float / bignum / falsy parallel)"
-    if g_ok and not p_ok:
-        if p_code == "topology_alias_disagree":
-            return "th#1385 explicit zero in a legacy alias read as 'not written'"
-        if p_code == "topology_unknown_field":
-            return "th#1385 case-insensitive key matching defeats the closed key set"
-        if p_code == "topology_parallel_unknown":
-            return "th#1385 `parallel` lowercased on the Go side only"
-        if p_code == "topology_decode_failed":
-            return "th#1385 json.Decoder.Decode ignores trailing data"
     return ""
 
 
