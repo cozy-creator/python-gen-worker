@@ -1547,7 +1547,14 @@ def mint_recipe(
     # down at boot. A refusal to MINT is not a refusal to IMPORT.
     try:
         decl = export_declaration(family)
-    except BaseException as exc:  # noqa: BLE001 — serving outranks compiling
+    except Exception as exc:  # noqa: BLE001 — serving outranks compiling
+        # Deliberately `Exception`, not `BaseException`: this runs INSIDE the
+        # serving process, where swallowing a KeyboardInterrupt/cancellation
+        # would be its own defect. Every refusal shape the declarations
+        # actually raise (MintRefused, DeclarationError, ImportError) is an
+        # Exception. The import boundary is the other way round — see
+        # `import_export_declaration`, which runs at BOOT and catches
+        # everything, because there nothing outranks the endpoint coming up.
         return _decline(
             "declaration_refused",
             f"family {family!r}'s export declaration refuses to mint "
