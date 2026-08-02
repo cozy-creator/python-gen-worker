@@ -56,7 +56,7 @@ def test_the_pod_reports_the_least_roomy_group_not_the_roomiest(
     # 4x1: group 0 carries the weights (10 GiB free), groups 1-3 are cold
     # (40 GiB free). MAX reported 40 GiB and invited the hub to admit four
     # 40 GiB jobs; only three of them fit anywhere and none fits on group 0.
-    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"group_degree":1}')
+    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"gpus_per_execution_group":1}')
     _fake_devices([10 * GiB, 40 * GiB, 40 * GiB, 40 * GiB], monkeypatch)
     assert lifecycle.free_vram_bytes() == 10 * GiB
 
@@ -69,7 +69,7 @@ def test_the_report_follows_the_DELIVERED_topology_not_the_env(
     # describe groups (0,1) and (2,3) — a packing nobody is serving.
     monkeypatch.setenv(
         ENV_VAR,
-        '{"gpu_count":4,"group_degree":2,"parallel":"sequence"}')
+        '{"gpu_count":4,"gpus_per_execution_group":2,"parallel":"sequence"}')
     _fake_devices([30 * GiB, 8 * GiB, 40 * GiB, 40 * GiB], monkeypatch)
 
     from gen_worker import host_canary
@@ -86,7 +86,7 @@ def test_the_report_follows_the_DELIVERED_topology_not_the_env(
     assert lifecycle._worst_group_free_vram_bytes() == 8 * GiB
     from gen_worker.topology import delivered_topology
 
-    assert delivered_topology(interconnect="pcie").group_degree == 1, (
+    assert delivered_topology(interconnect="pcie").gpus_per_execution_group == 1, (
         "the fabric gate must have demoted this pod")
 
 
@@ -95,7 +95,7 @@ def test_a_single_group_pod_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv(ENV_VAR, raising=False)
     _fake_devices([17 * GiB], monkeypatch)
     assert lifecycle.free_vram_bytes() == 17 * GiB
-    assert ExecutionTopology.single().groups == 1
+    assert ExecutionTopology.single().execution_groups == 1
 
 
 def test_a_multi_gpu_host_with_no_topology_names_the_invisible_cards(
@@ -134,7 +134,7 @@ def test_the_fit_ladder_gates_on_the_least_free_group(
     # allocator cache, so reading it planned rungs for groups 1-3 from a card
     # they never touch — and a genuinely-unfit card 0 refused functions the
     # other groups could serve.
-    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"group_degree":1}')
+    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"gpus_per_execution_group":1}')
     _fake_devices([9 * GiB, 40 * GiB, 40 * GiB, 40 * GiB], monkeypatch)
 
     import torch

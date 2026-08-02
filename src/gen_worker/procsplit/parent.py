@@ -359,7 +359,7 @@ class _ChildSlot:
         # to re-sync the whole worker via a fresh, re-aggregated Hello. The
         # hub's reconcile is idempotent, so the siblings are undisturbed. (At
         # G==1 the death path already cycled — never double-cycle here.)
-        if (self.p.groups > 1 and self.spawn_count > 1
+        if (self.p.execution_groups > 1 and self.spawn_count > 1
                 and not (self.p._draining or self.p._terminating
                          or self.p._stopping.is_set())):
             try:
@@ -905,7 +905,7 @@ class _ChildSlot:
         # would block on the down slot. So DON'T cycle on death; the re-sync
         # happens when THIS group's respawned child reconnects (_on_child_connect
         # triggers the cycle then, with every slot's link back up).
-        if p.groups == 1:
+        if p.execution_groups == 1:
             p.transport.cycle_connection()
         return cause
 
@@ -1182,7 +1182,7 @@ class ParentControl:
         self.seam = SeamAccountant()
 
     @property
-    def groups(self) -> int:
+    def execution_groups(self) -> int:
         return len(self._slots)
 
     # Single-slot conveniences: the per-child process/spawn state moved into
@@ -1217,7 +1217,7 @@ class ParentControl:
         """Which slot serves this dispatch. At G==1 always the one slot; at G>1
         route by the hub-picked rank-0 device, refusing a mis-dispatch (never
         flooring onto group 0 — pgw#779)."""
-        if self.groups == 1:
+        if self.execution_groups == 1:
             return self._slots[0]
         gpu_index = run.compute.gpu_index if run.HasField("compute") else None
         try:
@@ -1225,7 +1225,7 @@ class ParentControl:
         except (ValueError, Exception) as exc:  # noqa: BLE001 - typed refusal below
             logger.error("cannot route dispatch %s: %s", run.request_id, exc)
             return None
-        return self._slots[ordinal] if 0 <= ordinal < self.groups else None
+        return self._slots[ordinal] if 0 <= ordinal < self.execution_groups else None
 
     # ---- hardware + canary (parent-owned, PRE-IMPORT) ---------------------
 
@@ -1357,7 +1357,7 @@ class ParentControl:
         except asyncio.TimeoutError:
             pass
 
-        if self.groups == 1:
+        if self.execution_groups == 1:
             # BYTE-IDENTICAL to the single-child parent: request the one child's
             # Hello and apply the delta identity/resources overrides + in-flight
             # merge inline, exactly as before pgw#783.
@@ -1443,7 +1443,7 @@ class ParentControl:
         if which == "cancel_job":
             key = (msg.cancel_job.request_id, msg.cancel_job.attempt)
             slot = self._slot_for_request(key)
-            if self.groups == 1:
+            if self.execution_groups == 1:
                 slot = self._slots[0]  # identity: relay even if not yet tracked
             if slot is None or slot.link is None:
                 return
@@ -1504,7 +1504,7 @@ class ParentControl:
         # CUDA_VISIBLE_DEVICES, so rewrite the dispatched rank-0 device to the
         # child-local 0. At G==1 there is no rewrite (identity).
         relay = msg
-        if self.groups > 1 and run.HasField("compute"):
+        if self.execution_groups > 1 and run.HasField("compute"):
             relay = pb.SchedulerMessage()
             relay.CopyFrom(msg)
             relay.run_job.compute.gpu_index = self._plan.local_gpu_index(slot.ordinal)
@@ -1547,7 +1547,7 @@ class ParentControl:
         At G==1 it IS the child's message (byte-identical beat); at G>1 it is the
         merge of every group's latest."""
         self._last_state_delta_at = time.monotonic()
-        if self.groups == 1:
+        if self.execution_groups == 1:
             self._last_state_delta = self._slots[0].last_state_delta
             return
         deltas = [s.last_state_delta.state_delta for s in self._slots
@@ -1568,7 +1568,7 @@ class ParentControl:
         across groups here and per-request signals (job_result/progress/accepted,
         model_event) forward verbatim.
         """
-        if self.groups == 1:
+        if self.execution_groups == 1:
             return msg
         which = msg.WhichOneof("msg")
         if which == "state_delta":
@@ -1993,7 +1993,7 @@ class ParentControl:
                 f"phase=compute_parent_exit reason={reason} flushed={flushed} "
                 f"unretired_results={len(pending)} "
                 f"keys={sorted(f'{r}#{a}' for (r, a) in pending)[:16]} "
-                f"groups={self.groups}"
+                f"groups={self.execution_groups}"
             )
         self._stopping.set()
 
@@ -2153,7 +2153,7 @@ class ParentControl:
                         f"phase=compute_parent_exit reason=abrupt "
                         f"unretired_results={len(pending)} "
                         f"keys={sorted(f'{r}#{a}' for (r, a) in pending)[:16]} "
-                        f"groups={self.groups}"
+                        f"groups={self.execution_groups}"
                     )
             self._stopping.set()
             for slot in self._slots:

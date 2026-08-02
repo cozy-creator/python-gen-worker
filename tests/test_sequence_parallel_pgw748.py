@@ -458,7 +458,7 @@ def test_async_handlers_are_refused_on_a_multi_group_worker() -> None:
     assert ex._multi_group_handler_refusal(sync) == ""
     assert ex._multi_group_handler_refusal(asy) == ""   # one group: unchanged
 
-    ex.topology = ExecutionTopology(gpu_count=4, group_degree=1)
+    ex.topology = ExecutionTopology(gpu_count=4, gpus_per_execution_group=1)
     assert ex._multi_group_handler_refusal(sync) == ""
     refusal = ex._multi_group_handler_refusal(asy)
     assert "async handlers are not yet served" in refusal

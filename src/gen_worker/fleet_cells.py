@@ -1038,16 +1038,16 @@ def enable_compiled(
     # never per-group. Typed, and scoped by the miss policy like every other
     # decline here.
     topo = topology_mod.installed_topology()
-    if topo is not None and int(getattr(topo, "groups", 1) or 1) > 1:
+    if topo is not None and int(getattr(topo, "execution_groups", 1) or 1) > 1:
         logger.warning(
             "fleet-cells: in-process self-mint refused for %s key=%s — this "
             "worker runs %d execution groups in one process and the inductor "
-            "capture env is process-global (pgw#777)", family, key, topo.groups)
+            "capture env is process-global (pgw#777)", family, key, topo.execution_groups)
         if bucket:
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe,
-            f"in-process mint refused at groups={topo.groups}: the inductor "
+            f"in-process mint refused at groups={topo.execution_groups}: the inductor "
             "capture env is process-global (pgw#777/DPA-8)",
             selection_bug, phase="multi_group_in_process")
 

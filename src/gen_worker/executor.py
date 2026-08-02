@@ -1158,7 +1158,7 @@ class ModelStore:
         if topology is None:
             return
         with self._residency_lock:
-            for ordinal in range(int(topology.groups)):
+            for ordinal in range(int(topology.execution_groups)):
                 self._residency_groups[ordinal] = topology.group(ordinal)
             zero = self._residency_by_group.get(0)
             if zero is not None:
@@ -1171,13 +1171,13 @@ class ModelStore:
         # per-group cap only engages once it knows G, and nothing in src/ ever
         # told it. Without this a G=4 degraded pod lets group 0 claim the whole
         # pinned budget (§4.3 caveat 2).
-        staging_mod.pinned_pool().set_group_count(int(topology.groups))
+        staging_mod.pinned_pool().set_group_count(int(topology.execution_groups))
         # pgw#780 item 2: registries were created lazily on first dispatch, so
         # the boot disk re-track (which unions over all_residencies()) was a
         # no-op for groups 1..G-1 — their LRU/preserve/eviction views started
         # blind to the disk tier that was already there. Create every group's
         # registry NOW, before any boot walk unions over them.
-        for ordinal in range(int(topology.groups)):
+        for ordinal in range(int(topology.execution_groups)):
             self.residency_for(ordinal)
 
     def disk_ref_in_use(self, ref: str) -> bool:
@@ -3066,7 +3066,7 @@ class Executor:
         # identity because a record is the group's owner and dies with it.
         self._sequence_plans: Dict[int, Any] = {}
         self.store.bind_topology(self.topology)
-        self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.groups)
+        self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.execution_groups)
         # pgw#779: G INDEPENDENT permits, not a COUNT of G. A count admits G
         # concurrent jobs but binds none of them to a group, so four dispatches
         # naming the same card serialized on one `run_lock` while three cards
@@ -3075,10 +3075,10 @@ class Executor:
         # ``gpu_slots=`` (the `cli serve`/test override, never a production
         # knob) still means what it meant: its concurrency is divided among the
         # groups, so at G==1 group 0's permit IS today's whole pool.
-        per_group = max(1, self._gpu_slots // max(1, self.topology.groups))
+        per_group = max(1, self._gpu_slots // max(1, self.topology.execution_groups))
         self._gpu_permits: Tuple[asyncio.Semaphore, ...] = tuple(
             asyncio.Semaphore(per_group)
-            for _ in range(max(1, self.topology.groups))
+            for _ in range(max(1, self.topology.execution_groups))
         )
         self._gpu_permits_each = per_group
         # Group 0's permit. At G == 1 — every pod today — this IS the pool.
@@ -3663,7 +3663,7 @@ class Executor:
                     "withdrawing %r on this pod: %s", name, group_refusal)
                 self.unavailable[name] = (
                     "multi_group_async_handler", group_refusal,
-                    {"groups": str(self.topology.groups),
+                    {"execution_groups": str(self.topology.execution_groups),
                      "degree": str(self.topology.degree)})
                 self._gate_owned.add(name)
                 continue
@@ -4868,7 +4868,7 @@ class Executor:
         until ``ctx.device`` is explicit from the job's group. Single-group
         workers — every pod today — are untouched.
         """
-        if self.topology.groups <= 1 and self.topology.degree <= 1:
+        if self.topology.execution_groups <= 1 and self.topology.degree <= 1:
             return ""
         if not (spec.is_async or spec.is_async_gen):
             return ""
@@ -4921,7 +4921,7 @@ class Executor:
         and pre-topology hubs have no compute and there is only one group to
         mean.
         """
-        if self.topology.groups <= 1:
+        if self.topology.execution_groups <= 1:
             return 0
         if not run.HasField("compute"):
             raise DispatchGroupUnresolved(
@@ -11282,7 +11282,7 @@ class Executor:
             self.unavailable.setdefault(
                 spec.name,
                 ("multi_group_async_handler", refusal,
-                 {"groups": str(self.topology.groups),
+                 {"execution_groups": str(self.topology.execution_groups),
                   "degree": str(self.topology.degree)}))
             await self._finish(job, pb.JOB_STATUS_RETRYABLE, safe_message=refusal)
             return

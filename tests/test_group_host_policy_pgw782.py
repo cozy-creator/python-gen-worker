@@ -61,7 +61,7 @@ def _restore_process_state() -> Any:
     That is precisely why every one of them must be put back. This fixture
     restored `torch` thread count and the encode semaphore but **not the
     INSTALLED TOPOLOGY**, and the tests here boot four-group workers
-    (`{"gpu_count":4,"group_degree":1,"groups":4}`). `monkeypatch` puts the ENV
+    (`{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}`). `monkeypatch` puts the ENV
     VAR back; it cannot put back the module global that the boot path writes
     through `install_topology()`.
 
@@ -156,7 +156,7 @@ class _GroupHarness:
 
         store = ModelStore(_send, cache_dir=tmp_path / "cas")
         topo = ExecutionTopology.from_env(
-            {ENV_VAR: '{"gpu_count":4,"group_degree":1,"groups":4}'})
+            {ENV_VAR: '{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}'})
         self.ex = Executor(self.specs, _send, store=store, topology=topo)
 
     def _run(self, group: int) -> pb.RunJob:
@@ -290,7 +290,7 @@ def test_the_executor_imposes_the_budget_from_its_own_slot_count(
         return None
 
     topo = ExecutionTopology.from_env(
-        {ENV_VAR: '{"gpu_count":4,"group_degree":1,"groups":4}'})
+        {ENV_VAR: '{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}'})
     ex = Executor([], _send, store=ModelStore(_send, cache_dir=tmp_path / "cas"),
                   topology=topo)
     assert ex._gpu_slots == 4
@@ -311,12 +311,12 @@ def test_finalize_bound_is_two_per_group_and_single_group_is_unchanged(
     monkeypatch.delenv(ENV_VAR, raising=False)
     assert video_encode.finalize_concurrency() == 2
 
-    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"group_degree":1,"groups":4}')
+    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}')
     assert video_encode.finalize_concurrency() == 8
 
     # A degree-4 sequence-parallel pod is ONE group: one request owns the pod,
     # so the bound stays where it was.
-    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"group_degree":4,"groups":1}')
+    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"gpus_per_execution_group":4,"execution_groups":1}')
     assert video_encode.finalize_concurrency() == 2
 
     # An explicit operator budget still wins (gw#516 escape hatch).
@@ -328,7 +328,7 @@ def test_the_semaphore_actually_admits_two_per_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(video_encode.ENCODE_CONCURRENCY_ENV, raising=False)
-    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"group_degree":1,"groups":4}')
+    monkeypatch.setenv(ENV_VAR, '{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}')
     video_encode._finalize_sem = None
 
     held: List[int] = []

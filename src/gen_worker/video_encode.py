@@ -161,7 +161,7 @@ def finalize_concurrency() -> int:
     try:
         from .topology import delivered_topology
 
-        groups = max(1, int(delivered_topology().groups))
+        groups = max(1, int(delivered_topology().execution_groups))
     except Exception:  # noqa: BLE001
         groups = 1
     return DEFAULT_ENCODE_CONCURRENCY_PER_GROUP * groups

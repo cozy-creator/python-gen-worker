@@ -86,7 +86,7 @@ class G2Harness:
             child_env=child_env,
             socket_path=str(tmp / "ctl.sock"),
             # TWO execution groups, one device each — the 4.00x shape at width 2.
-            topology=ExecutionTopology(gpu_count=2, group_degree=1),
+            topology=ExecutionTopology(gpu_count=2, gpus_per_execution_group=1),
             respawn_backoff_base_s=0.1,
             respawn_backoff_cap_s=0.5,
             transport_backoff_base_s=0.05,
@@ -149,7 +149,7 @@ def test_two_children_boot_and_each_group_serves_its_own_dispatch(g2):
     conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
 
     # Two real children exist, one per group.
-    assert g2.pc.groups == 2
+    assert g2.pc.execution_groups == 2
     assert all(slot.proc is not None for slot in g2.pc._slots)
     assert g2.pc._slots[0].socket_path != g2.pc._slots[1].socket_path
 

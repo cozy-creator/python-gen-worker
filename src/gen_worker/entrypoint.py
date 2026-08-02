@@ -345,12 +345,12 @@ def _impose_group_host_policy() -> None:
     from .topology import ExecutionTopology
 
     try:
-        groups = ExecutionTopology.from_env().groups
+        execution_groups = ExecutionTopology.from_env().execution_groups
     except Exception:  # noqa: BLE001  (an illegal topology refuses later, typed)
         return
-    threads = cpu_budget.impose_intra_op_threads(groups)
+    threads = cpu_budget.impose_intra_op_threads(execution_groups)
     _log_startup_phase(
-        "group_host_policy", status="ok", groups=groups,
+        "group_host_policy", status="ok", execution_groups=execution_groups,
         intra_op_threads=threads.get("imposed"),
     )
 

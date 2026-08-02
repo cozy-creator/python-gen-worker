@@ -30,7 +30,7 @@ from gen_worker.topology import (
 
 
 def _env(gpu_count: int, degree: int, parallel: str = "sequence") -> dict:
-    body = {"gpu_count": gpu_count, "group_degree": degree}
+    body = {"gpu_count": gpu_count, "gpus_per_execution_group": degree}
     if parallel:
         body["parallel"] = parallel
     return {"WORKER_EXECUTION_TOPOLOGY": json.dumps(body)}
@@ -45,7 +45,7 @@ def _no_installed_topology():
 
 def test_two_pairs_map_every_rank_to_a_card_it_owns() -> None:
     topo = delivered_topology(_env(4, 2), interconnect="nvlink", peer_gbps=272.6)
-    assert (topo.groups, topo.degree) == (2, 2)
+    assert (topo.execution_groups, topo.degree) == (2, 2)
     install_topology(topo)
 
     # The whole defect in one assertion: group 1's rank-0 card is 2, not 1.
@@ -54,7 +54,7 @@ def test_two_pairs_map_every_rank_to_a_card_it_owns() -> None:
     assert (group_rank0_device(0), group_rank0_device(1)) == (0, 2)
 
     # No card is claimed by two groups, and every card is claimed once.
-    owned = [d for g in range(topo.groups) for d in group_devices(g)]
+    owned = [d for g in range(topo.execution_groups) for d in group_devices(g)]
     assert sorted(owned) == [0, 1, 2, 3]
 
     # The ambient group (the contextvar every job stamps) resolves the same way.
@@ -107,7 +107,7 @@ def test_multi_group_sequence_is_no_longer_refused() -> None:
     # The pgw#773 boot refusal is LIFTED for `sequence` at any shape.
     for gpus, degree in ((4, 2), (8, 2), (8, 4)):
         topo = delivered_topology(_env(gpus, degree), interconnect="nvlink", peer_gbps=272.6)
-        assert (topo.groups, topo.degree) == (gpus // degree, degree)
+        assert (topo.execution_groups, topo.degree) == (gpus // degree, degree)
     refuse_unless_groups_can_coexist(ExecutionTopology(4, 2, parallel="sequence"))
 
 
@@ -123,7 +123,7 @@ def test_a_degree_without_a_runtime_is_still_refused_by_name() -> None:
     # ...and a cfg pod on a fabric that cannot keep the promise demotes first,
     # to a shape that IS servable.
     demoted = delivered_topology(_env(4, 2, parallel="cfg"), interconnect="pcie")
-    assert (demoted.groups, demoted.degree) == (4, 1)
+    assert (demoted.execution_groups, demoted.degree) == (4, 1)
 
 
 def test_reading_the_real_environment_publishes_the_packing(monkeypatch) -> None:

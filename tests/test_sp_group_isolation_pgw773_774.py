@@ -5,7 +5,7 @@ Layers exercised, per test:
 
 - ``init_rank``/``RankGroup`` (the process-group construction itself): two
   degree-2 groups coexist in ONE parent process with independent worlds —
-  the exact shape (``gpu_count=4, group_degree=2``) the old code corrupted
+  the exact shape (``gpu_count=4, gpus_per_execution_group=2``) the old code corrupted
   by joining the default group. Collectives run CONCURRENTLY on both groups
   through the real diffusers CP hooks (split/gather over our mesh) and the
   values prove no cross-talk.
@@ -160,7 +160,7 @@ def _base_call(pipe: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def test_two_degree2_groups_coexist_with_no_cross_talk() -> None:
-    # gpu_count=4, group_degree=2: the shape DPA-1 corrupts. Both groups arm
+    # gpu_count=4, gpus_per_execution_group=2: the shape DPA-1 corrupts. Both groups arm
     # in ONE parent process and run their sharded forwards CONCURRENTLY;
     # each output must be its own group's input times 2, at full length
     # (the gather ran over the right world).

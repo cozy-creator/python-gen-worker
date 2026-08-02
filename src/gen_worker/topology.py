@@ -6,27 +6,74 @@ The worker never invents any of it. The whole contract is
 ``WORKER_EXECUTION_TOPOLOGY`` (th#1285, tensorhub ``internal/orchestrator/
 topology/topology.go``)::
 
-    WORKER_EXECUTION_TOPOLOGY={"gpu_count":4,"group_degree":2,"groups":2,
-                               "parallel":"sequence"}
+    WORKER_EXECUTION_TOPOLOGY={"gpu_count":4,"gpus_per_execution_group":2,
+                               "execution_groups":2,"parallel":"sequence"}
 
 ``WORKER_`` is a reserved endpoint-env prefix hub-side, so this is a trusted
 wire fact and NOT an operator knob: nothing in gen-worker may set it to change
 behaviour, and nothing may default it to anything but "one slot".
 
-Derivation, identical on both sides, from ``(gpu_count, group_degree)`` alone::
+Derivation, identical on both sides, from ``(gpu_count,
+gpus_per_execution_group)`` alone::
 
-    D = group_degree                    # devices per execution group
-    G = gpu_count / group_degree        # execution groups == serving slots
+    D = gpus_per_execution_group        # devices per execution group
+    G = gpu_count / D                   # execution groups == serving slots
     group g owns devices [g*D, (g+1)*D)
 
-``ResolvedCompute.gpu_index`` is unchanged on the job wire and now names the
+``gpu_count = execution_groups × gpus_per_execution_group`` is not bookkeeping;
+it **encodes a partition invariant**. An execution group exclusively owns its
+devices — no card is in two groups, and no card is idle. Should GPU sharing
+between groups ever be introduced, that arithmetic stops holding and every
+consumer that derives G from it refuses loudly (``topology_degree_not_divisor``,
+``topology_execution_groups_disagree``) instead of quietly serving a packing
+nobody chose. Keep it that way: derive, never store a fourth independent fact.
+
+``ResolvedCompute.gpu_index`` is unchanged on the job wire and names the
 **rank-0 device of the group** (0, D, 2D, ...), so at D == 1 it is byte-identical
 to what has always shipped.
 
 Absent is a legal state, never an error: every CPU pod and every pod created
 before the field existed has no topology and keeps the historical single slot.
-A value that is *present but malformed* is a typed refusal — never a silent
-fallback — because it can only mean a producer that is not the hub.
+A value that is *present but not fully recognised* is a typed refusal — never a
+silent fallback — because it can only mean a producer that is not the hub. That
+covers unknown keys too (``topology_unknown_field``): the field set is CLOSED,
+so growing the contract is itself a two-release transition, exactly like the
+th#1375 rename below. The alternative — ignore what you do not understand — is
+how a hub that believes it bought degree 2 gets served degree 1 in silence.
+
+An "execution group" is NOT a PyTorch ``ProcessGroup``
+---------------------------------------------------
+They sound identical and appear within a few lines of each other in the process
+-split code, and they are different things. An **execution group** is the
+*serving unit*: the set of cards that cooperate on one request, and the thing
+whose count is this worker's slot count. A ``torch.distributed.ProcessGroup``
+is the *communication handle* those ranks collect over. Each execution group
+owns one (non-default, over its own store), so the relationship is
+one-ProcessGroup-per-execution-group — not a synonym.
+
+Translating from another stack
+------------------------------
+The same two numbers exist everywhere; only the names differ. Ours are spelled
+out because a bare ``groups`` collides with process groups, parameter groups
+and co-location groups, all of which live in these files:
+
+===========================  ==================================================
+ours                         theirs
+===========================  ==================================================
+``gpus_per_execution_group``  ``tensor_parallel_size`` (vLLM, SGLang);
+                              ``context_parallel_size`` / ``cp_size``
+                              (Megatron); ``sequence_parallel_size``
+                              (DeepSpeed-Ulysses)
+``execution_groups``          ``data_parallel_size``; ``num_replicas``
+                              (Ray Serve); instance count (Triton)
+===========================  ==================================================
+
+Note what those names do that ours does not: each of them fuses the *width* of
+a group with the *technique* used to fill it, so a stack that wants Ulysses
+instead of tensor parallelism needs a different field. We keep ``parallel`` as
+a separate field precisely so the width is named independently of the mechanism
+— ``gpus_per_execution_group=2`` means two cards serve one request whether the
+sharding is ``sequence``, ``cfg``, or the model's own ``internal`` arrangement.
 """
 
 from __future__ import annotations
@@ -90,7 +137,7 @@ def group_devices(ordinal: Optional[int] = None) -> Tuple[int, ...]:
     """
     g = current_device_group() if ordinal is None else int(ordinal)
     topo = _installed
-    if topo is None or g < 0 or g >= topo.groups:
+    if topo is None or g < 0 or g >= topo.execution_groups:
         return (max(0, g),)
     return topo.group(g).devices
 
@@ -148,6 +195,28 @@ class device_group_scope:
 
 ENV_VAR = "WORKER_EXECUTION_TOPOLOGY"
 
+# The wire keys. The set is CLOSED — anything else is ``topology_unknown_field``
+# (see the module docstring), which is what makes "present but unrecognised" a
+# refusal instead of a silent fall back to one slot.
+KEY_GPU_COUNT = "gpu_count"
+KEY_GPUS_PER_GROUP = "gpus_per_execution_group"
+KEY_EXECUTION_GROUPS = "execution_groups"
+KEY_PARALLEL = "parallel"
+
+# th#1375's pre-rename spelling. Accepted here, and emitted alongside the new
+# spelling by ``as_dict``, for exactly one release: the hub and the workers
+# deploy independently and prod pins gen-worker 0.79.0, so no flip day exists on
+# which every reader speaks the new names. Carrying both makes deploy ORDER
+# irrelevant rather than merely survivable. th#1376 deletes them, after which
+# they fall through to ``topology_unknown_field`` by construction.
+LEGACY_KEY_GPUS_PER_GROUP = "group_degree"
+LEGACY_KEY_EXECUTION_GROUPS = "groups"
+
+_KNOWN_KEYS = frozenset({
+    KEY_GPU_COUNT, KEY_GPUS_PER_GROUP, KEY_EXECUTION_GROUPS, KEY_PARALLEL,
+    LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS,
+})
+
 # ``parallel`` — who shards the work across a group's devices.
 PARALLEL_NONE = ""            # group is one device
 PARALLEL_INTERNAL = "internal"  # the MODEL spans the devices by its own arrangement
@@ -176,7 +245,7 @@ class ExecutionTopology:
     """One pod's delivered packing. Immutable; derived, never negotiated."""
 
     gpu_count: int = 1
-    group_degree: int = 1
+    gpus_per_execution_group: int = 1
     parallel: str = PARALLEL_NONE
 
     def __post_init__(self) -> None:
@@ -184,45 +253,45 @@ class ExecutionTopology:
             raise TopologyError(
                 "topology_gpu_count_invalid", f"gpu_count={self.gpu_count}"
             )
-        if self.group_degree < 1:
+        if self.gpus_per_execution_group < 1:
             raise TopologyError(
-                "topology_degree_invalid", f"group_degree={self.group_degree}"
+                "topology_degree_invalid", f"gpus_per_execution_group={self.gpus_per_execution_group}"
             )
-        if self.gpu_count % self.group_degree != 0:
+        if self.gpu_count % self.gpus_per_execution_group != 0:
             raise TopologyError(
                 "topology_degree_not_divisor",
-                f"group_degree={self.group_degree} does not divide "
+                f"gpus_per_execution_group={self.gpus_per_execution_group} does not divide "
                 f"gpu_count={self.gpu_count}",
             )
         if self.parallel not in _PARALLEL_VALUES:
             raise TopologyError(
                 "topology_parallel_unknown", f"parallel={self.parallel!r}"
             )
-        if self.group_degree > 1 and self.parallel == PARALLEL_NONE:
+        if self.gpus_per_execution_group > 1 and self.parallel == PARALLEL_NONE:
             raise TopologyError(
                 "topology_parallel_required",
-                f"group_degree={self.group_degree} needs a parallel mechanism",
+                f"gpus_per_execution_group={self.gpus_per_execution_group} needs a parallel mechanism",
             )
-        if self.group_degree == 1 and self.parallel != PARALLEL_NONE:
+        if self.gpus_per_execution_group == 1 and self.parallel != PARALLEL_NONE:
             raise TopologyError(
                 "topology_parallel_without_degree",
-                f"parallel={self.parallel!r} at group_degree=1",
+                f"parallel={self.parallel!r} at gpus_per_execution_group=1",
             )
 
     # ---- derived facts -----------------------------------------------------
 
     @property
-    def groups(self) -> int:
+    def execution_groups(self) -> int:
         """G — execution groups, which IS the worker's slot count."""
-        return self.gpu_count // self.group_degree
+        return self.gpu_count // self.gpus_per_execution_group
 
     @property
     def slots(self) -> int:
-        return self.groups
+        return self.execution_groups
 
     @property
     def degree(self) -> int:
-        return self.group_degree
+        return self.gpus_per_execution_group
 
     @property
     def platform_parallel(self) -> bool:
@@ -240,17 +309,17 @@ class ExecutionTopology:
     def group_ordinal(self, gpu_index: int) -> int:
         """Which group a dispatched ``ResolvedCompute.gpu_index`` names."""
         idx = int(gpu_index)
-        if idx < 0 or idx >= self.gpu_count or idx % self.group_degree != 0:
+        if idx < 0 or idx >= self.gpu_count or idx % self.gpus_per_execution_group != 0:
             # The hub always dispatches a group's rank-0 device. Anything else
             # is a hub/worker disagreement about the packing; floor it to a
             # real group rather than index off the end, and say so.
-            ordinal = max(0, min(self.groups - 1, idx // self.group_degree))
+            ordinal = max(0, min(self.execution_groups - 1, idx // self.gpus_per_execution_group))
             logger.warning(
                 "topology: dispatched gpu_index=%d is not a rank-0 device of "
                 "%s; serving it as group %d", idx, self, ordinal,
             )
             return ordinal
-        return idx // self.group_degree
+        return idx // self.gpus_per_execution_group
 
     def group_ordinal_exact(self, gpu_index: int) -> int:
         """``group_ordinal`` without the floor: a typed refusal instead.
@@ -261,14 +330,14 @@ class ExecutionTopology:
         busiest.
         """
         idx = int(gpu_index)
-        if idx < 0 or idx >= self.gpu_count or idx % self.group_degree != 0:
+        if idx < 0 or idx >= self.gpu_count or idx % self.gpus_per_execution_group != 0:
             raise TopologyError(
                 "topology_dispatch_gpu_index_invalid",
                 f"gpu_index={idx} is not a rank-0 device of {self} "
                 f"(expected one of "
-                f"{[g * self.group_degree for g in range(self.groups)]})",
+                f"{[g * self.gpus_per_execution_group for g in range(self.execution_groups)]})",
             )
-        return idx // self.group_degree
+        return idx // self.gpus_per_execution_group
 
     def device_group(self, gpu_index: int) -> DeviceGroup:
         """The DeviceGroup a job dispatched to ``gpu_index`` executes on."""
@@ -276,19 +345,19 @@ class ExecutionTopology:
 
     def group(self, ordinal: int) -> DeviceGroup:
         g = int(ordinal)
-        if g < 0 or g >= self.groups:
+        if g < 0 or g >= self.execution_groups:
             raise TopologyError(
                 "topology_group_out_of_range",
-                f"group {g} of {self.groups} in {self}",
+                f"group {g} of {self.execution_groups} in {self}",
             )
-        base = g * self.group_degree
+        base = g * self.gpus_per_execution_group
         return DeviceGroup(
-            devices=tuple(range(base, base + self.group_degree)),
+            devices=tuple(range(base, base + self.gpus_per_execution_group)),
             placement_mode=self.placement_mode,
         )
 
     def all_groups(self) -> Tuple[DeviceGroup, ...]:
-        return tuple(self.group(g) for g in range(self.groups))
+        return tuple(self.group(g) for g in range(self.execution_groups))
 
     def demoted(self) -> "ExecutionTopology":
         """The hub's ``topology_demoted_fabric_not_nvlink`` re-pack, computed
@@ -301,21 +370,27 @@ class ExecutionTopology:
         one constant each side, same number); there is deliberately still no
         HelloAck demote field — two independent gates over one measurement is
         the design, and the constants must move together."""
-        return ExecutionTopology(gpu_count=self.gpu_count, group_degree=1)
+        return ExecutionTopology(gpu_count=self.gpu_count, gpus_per_execution_group=1)
 
     def as_dict(self) -> dict:
         d: dict[str, Any] = {
-            "gpu_count": self.gpu_count,
-            "group_degree": self.group_degree,
-            "groups": self.groups,
+            KEY_GPU_COUNT: self.gpu_count,
+            KEY_GPUS_PER_GROUP: self.gpus_per_execution_group,
+            KEY_EXECUTION_GROUPS: self.execution_groups,
+            # th#1376 removes these two. They are here so this worker's own
+            # produced topology (the parent stamps one per split child, and
+            # ``procsplit`` children may run a different build during a rolling
+            # image swap) is readable by a pre-th#1375 reader.
+            LEGACY_KEY_GPUS_PER_GROUP: self.gpus_per_execution_group,
+            LEGACY_KEY_EXECUTION_GROUPS: self.execution_groups,
         }
         if self.parallel:
-            d["parallel"] = self.parallel
+            d[KEY_PARALLEL] = self.parallel
         return d
 
     def __str__(self) -> str:  # pragma: no cover - logging sugar
         return (
-            f"{self.groups}x{self.group_degree}"
+            f"{self.execution_groups}x{self.gpus_per_execution_group}"
             f"{'/' + self.parallel if self.parallel else ''}"
         )
 
@@ -339,9 +414,27 @@ class ExecutionTopology:
                 "topology_decode_failed", f"expected an object, got {type(obj).__name__}"
             )
 
-        def _int(key: str, default: int) -> int:
+        # THE guard. A key this worker does not recognise means the value did
+        # not come from a hub this worker understands — most likely one half of
+        # a rename that only landed on one side. Ignoring it would read the
+        # field it names as ABSENT, and absent is legal and means one slot, so
+        # the pod would serve degree 1 while the hub billed the degree it
+        # bought. Refuse by name instead, listing what was and was not known,
+        # so the fault reads as a version skew rather than a config bug.
+        unknown = sorted(k for k in obj if k not in _KNOWN_KEYS)
+        if unknown:
+            raise TopologyError(
+                "topology_unknown_field",
+                f"unrecognised topology field(s) {unknown} in {raw!r}; this "
+                f"worker knows {sorted(_KNOWN_KEYS)}. Refusing rather than "
+                "reading the fields it names as absent — absent means ONE "
+                "slot, so ignoring them would silently serve less than the "
+                "hub bought",
+            )
+
+        def _opt(key: str) -> Optional[int]:
             if key not in obj or obj[key] is None:
-                return default
+                return None
             value = obj[key]
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TopologyError(
@@ -353,26 +446,63 @@ class ExecutionTopology:
                 )
             return int(value)
 
-        parallel = obj.get("parallel") or ""
+        def _aliased(key: str, legacy_key: str, default: int) -> int:
+            """One field under either spelling (th#1375/#1376).
+
+            Both present must AGREE. During the transition every hub emits
+            both, so a disagreement is not a stale producer to be tolerated —
+            it is a producer whose two spellings describe two different
+            packings, and picking either one is picking silently.
+            """
+            new_value = _opt(key)
+            legacy_value = _opt(legacy_key)
+            if legacy_value is None:
+                return default if new_value is None else new_value
+            if new_value is not None and new_value != legacy_value:
+                raise TopologyError(
+                    "topology_alias_disagree",
+                    f"{key}={new_value} but {legacy_key}={legacy_value} — one "
+                    "producer wrote both spellings of the same field with "
+                    "different values; refusing rather than choosing",
+                )
+            if new_value is None:
+                logger.warning(
+                    "topology: %r is the pre-th#1375 spelling of %r and is "
+                    "accepted for this release only (th#1376 removes it)",
+                    legacy_key, key,
+                )
+                return legacy_value
+            return new_value
+
+        parallel = obj.get(KEY_PARALLEL) or ""
         if not isinstance(parallel, str):
             raise TopologyError(
                 "topology_decode_failed", f"parallel is not a string: {parallel!r}"
             )
+        gpu_count = _opt(KEY_GPU_COUNT)
         topo = cls(
-            gpu_count=_int("gpu_count", 1),
-            group_degree=_int("group_degree", 1),
+            # NOT ``_opt(...) or 1`` — gpu_count=0 is a REFUSAL
+            # (``topology_gpu_count_invalid``), and ``or`` would launder it
+            # into the legal single-slot default.
+            gpu_count=1 if gpu_count is None else gpu_count,
+            gpus_per_execution_group=_aliased(
+                KEY_GPUS_PER_GROUP, LEGACY_KEY_GPUS_PER_GROUP, 1
+            ),
             parallel=parallel.strip(),
         )
-        # ``groups`` is derived and the producer always recomputes it, so a
-        # disagreement means the value did not come from the hub. Refuse it
-        # rather than pick a winner — a wrong slot count is a wrong fleet
-        # capacity, and it is silent.
-        declared_groups = _int("groups", topo.groups)
-        if declared_groups != topo.groups:
+        # ``execution_groups`` is derived and the producer always recomputes
+        # it, so a disagreement means the value did not come from the hub.
+        # Refuse it rather than pick a winner — a wrong slot count is a wrong
+        # fleet capacity, and it is silent.
+        declared = _aliased(
+            KEY_EXECUTION_GROUPS, LEGACY_KEY_EXECUTION_GROUPS,
+            topo.execution_groups,
+        )
+        if declared != topo.execution_groups:
             raise TopologyError(
-                "topology_groups_disagree",
-                f"declared groups={declared_groups} but "
-                f"gpu_count/group_degree={topo.groups}",
+                "topology_execution_groups_disagree",
+                f"declared execution_groups={declared} but gpu_count/"
+                f"gpus_per_execution_group={topo.execution_groups}",
             )
         return topo
 
@@ -387,8 +517,8 @@ class ExecutionTopology:
             return cls.single()
         topo = cls.decode(raw)
         logger.info(
-            "EXECUTION_TOPOLOGY gpu_count=%d group_degree=%d groups=%d parallel=%s",
-            topo.gpu_count, topo.group_degree, topo.groups, topo.parallel or "-",
+            "EXECUTION_TOPOLOGY gpu_count=%d gpus_per_execution_group=%d groups=%d parallel=%s",
+            topo.gpu_count, topo.gpus_per_execution_group, topo.execution_groups, topo.parallel or "-",
         )
         return topo
 
