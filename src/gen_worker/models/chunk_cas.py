@@ -126,18 +126,22 @@ class ChunkSpec:
 def parse_cas_ref(ref: str) -> tuple[str, str]:
     """Split ``"<algo>:<hex>"`` into its parts.
 
-    A BARE hex string is read as legacy blake3 — matching the hub's read-path
-    rule — because pre-migration manifests legitimately carry bare hex. New
-    code must always emit the tagged form; bare hex is refused at phase 4.
+    An UNTAGGED ref is REFUSED — the same rule as the hub's
+    ``storage.ParseCASRef`` (th#1357, which deleted the bare-hex default there).
+    A 64-character hex cannot distinguish blake3 from sha256, because both
+    digests are 32 bytes: the length check is not a discriminator, it only looks
+    like one. Inferring an algorithm addresses the WRONG namespace silently
+    (pgw#871).
     """
     s = (ref or "").strip().lower()
     if not s:
         raise ValueError("cas ref: empty")
-    if ":" in s:
-        algo, _, hexpart = s.partition(":")
-        algo, hexpart = algo.strip(), hexpart.strip()
-    else:
-        algo, hexpart = "blake3", s
+    if ":" not in s:
+        raise ValueError(
+            'cas ref: not algorithm-tagged (bare hex is refused; write "sha256:<hex>")'
+        )
+    algo, _, hexpart = s.partition(":")
+    algo, hexpart = algo.strip(), hexpart.strip()
     if algo not in ("sha256", "blake3"):
         raise ValueError(f"cas ref: unsupported algorithm {algo!r}")
     if len(hexpart) != 64 or any(c not in "0123456789abcdef" for c in hexpart):

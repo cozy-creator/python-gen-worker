@@ -141,8 +141,9 @@ def _blob_path(blobs_root: Path, ref: str) -> Path:
 
     The algorithm is a PATH SEGMENT, mirroring the hub's `blobs/<algo>/` layout,
     so a sha256 blob and a blake3 blob of different bytes can never collide on
-    one name and a legacy blake3 tree keeps its exact existing paths. A bare
-    hex ref reads as legacy blake3 (`parse_cas_ref`'s read-path rule).
+    one name and a legacy blake3 tree keeps its exact existing paths. An
+    untagged ref is REFUSED by `parse_cas_ref` (pgw#871/th#1357) — a bare hex
+    names no namespace, so there is no path to build.
     """
     algo, hexpart = parse_cas_ref(ref)
     return blobs_root / algo / hexpart[:2] / hexpart[2:4] / hexpart

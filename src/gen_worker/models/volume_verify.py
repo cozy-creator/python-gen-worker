@@ -63,8 +63,9 @@ def clear_memo() -> None:
 
 @dataclass(frozen=True)
 class VerifyTarget:
-    """One file to verify. ``ref`` is algorithm-tagged (or bare hex = legacy
-    sha256); ``size`` of 0 means the manifest declared none."""
+    """One file to verify. ``ref`` is ALGORITHM-TAGGED — an untagged ref is an
+    unreadable digest, i.e. CORRUPT, not "nothing to check" (pgw#871). ``size``
+    of 0 means the manifest declared none."""
 
     path: Path
     ref: str

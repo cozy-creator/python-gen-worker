@@ -199,30 +199,27 @@ def test_parse_cas_ref_acceptance_is_fully_determined(ref: str) -> None:
     assert (algo3, hex3) == (algo, hexpart), "case changes the identity of a ref"
 
 
-def test_bare_hex_still_infers_blake3_ledger_pgw871() -> None:
-    """LEDGER for pgw#871 — the th#1357 defect, still live on this side.
+def test_bare_hex_is_refused_pgw871() -> None:
+    """pgw#871 FIXED — the two CAS readers in this repo agree with each other
+    AND with the hub. Revert-turns-red guard.
 
     th#1357 DELETED the bare-hex read-path default from the hub:
-    ``storage.ParseCASRef`` now refuses an untagged ref outright ("bare hex is
-    refused; write \\"sha256:<hex>\\""). This function still infers ``blake3``,
-    and its docstring still claims it is "matching the hub's read-path rule" —
-    a claim that is no longer true.
-
-    That is the asymmetry the bug history warns about: a digest the hub refuses,
-    this side resolves — into the WRONG namespace, since a 64-char hex cannot
-    distinguish blake3 from sha256. Reachable from the snapshot download/verify
-    path (``models/cozy_snapshot.py``), which decodes hub-delivered manifest
-    entries. Filed, not fixed in passing.
+    ``storage.ParseCASRef`` refuses an untagged ref outright ("bare hex is
+    refused; write \"sha256:<hex>\""). ``parse_cas_ref`` used to infer
+    ``blake3`` from bare hex while its docstring claimed to match the hub — so
+    the same 64-character string the hub REFUSED, this side resolved, into the
+    WRONG namespace: a 64-char hex cannot distinguish blake3 from sha256,
+    because both digests are 32 bytes. The length check is not a discriminator,
+    it only looks like one.
     """
-    algo, hexpart = parse_cas_ref(HEX64)
-    if algo != "blake3":
-        pytest.fail(
-            f"pgw#871 appears fixed (bare hex now parses as {algo!r}) — delete this ledger"
-        )
-    assert hexpart == HEX64
-    # And the asymmetry itself: the same string is a REFUSAL on the hub side.
+    with pytest.raises(ValueError, match="algorithm-tagged"):
+        parse_cas_ref(HEX64)
+    # The other CAS-digest reader in this repo, which already refused it.
     with pytest.raises(ValueError):
         resolved_entry_digest({"digest": HEX64})
+    # Tagged refs are unaffected, both algorithms.
+    assert parse_cas_ref(f"sha256:{HEX64}") == ("sha256", HEX64)
+    assert parse_cas_ref(f"blake3:{HEX64}") == ("blake3", HEX64)
 
 
 # ---------------------------------------------------------------------------
