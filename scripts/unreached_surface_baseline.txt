@@ -1,0 +1,71 @@
+# pgw#849 guard 2 — the RATCHET.
+#
+# Every line is public surface in the aot/mint/serve packages that NOTHING on
+# the pod's production path calls, measured on chaos 9f582ba (2026-08-01).
+# `scripts/lint_unreached_surface.py` fails on any NEW line, and equally on a
+# line here that has since acquired a production caller — a baseline nobody has
+# to shrink is a baseline nobody reads.
+#
+# These are not equivalent. Roughly, by what the absence COSTS:
+#
+#   A gate that never runs
+#     numerics_ladder.gate / compare_outputs / declared_thresholds — pgw#817's
+#       ADOPTION numerics gate. `api/decorators.py` declares numerics_floor and
+#       numerics_warn per family, `activity.py` declares KIND_CELL_NUMERICS, and
+#       NOTHING IN src/ IMPORTS numerics_ladder AT ALL. A cell about to arm is
+#       supposed to be run against the eager forward it replaces and REFUSE
+#       below the floor. It never is.
+#     compile_cache.assert_closure_complete — the ck5 code-closure completeness
+#       gate ("a dynamic import is hiding trace-relevant code from the recipe
+#       key"). Its only caller is a test.
+#     aot_serve.is_aot_artifact — its own docstring says "kind sniff for the
+#       provision.enable_compiled dispatch". That dispatch does not call it.
+#     aot_declaration.named_dynamic_rows — bridges declaration rows that NAME a
+#       Dim into per-binding DynamicDim rows. Nothing runs it.
+#
+#   Measured and then dropped (the pgw#848 CP1 shape)
+#     boot_phases.servable_ms — "THE cold-boot number", computed, never read.
+#     aot_compile_spans.dark_fraction — unattributed compile time, never emitted.
+#     aot_serve.realigned_inputs / served_entry_calls / EntryDispatch.refusal_counts
+#       — the pgw#790/#791 adapter-fork and realignment tax, measured "rather
+#       than inferred from a stderr line nobody can read", and never reported.
+#     compile_cache.artifact_fx_lines / live_fx_lines — fx forensics that
+#       fx_key_forensics does not reach.
+#
+#   Dead or duplicated surface
+#     compile_cache.build / prepare (the JIT build path), aot_serve.flavor_label
+#     and find_artifact (compile_cache's same-named versions are the live ones),
+#     aot_mint.replace_spec, aot_package.package_entry_names,
+#     aot_compile_pool.free_disk_bytes, guard_closure.manifest_digest.
+#
+#   KNOWN FALSE POSITIVES (3 of 24 — the measured rate is 12.5%)
+#     aot_inputs.inputs_for / latent_dims — declaration-author surface; the
+#       callers are endpoint repos that vendor the wheel, like gen_worker.api.
+#     boot_phases.BootSpan.skipped — reached by an operator script only.
+#     They stay listed rather than exempted: an exemption rule broad enough to
+#     clear them would also clear real hits.
+#
+gen_worker.aot_compile_pool.free_disk_bytes()
+gen_worker.aot_compile_spans.dark_fraction()
+gen_worker.aot_declaration.named_dynamic_rows()
+gen_worker.aot_inputs.inputs_for()
+gen_worker.aot_inputs.latent_dims()
+gen_worker.aot_mint.replace_spec()
+gen_worker.aot_package.package_entry_names()
+gen_worker.aot_serve.EntryDispatch.refusal_counts()
+gen_worker.aot_serve.find_artifact()
+gen_worker.aot_serve.flavor_label()
+gen_worker.aot_serve.is_aot_artifact()
+gen_worker.aot_serve.realigned_inputs()
+gen_worker.aot_serve.served_entry_calls()
+gen_worker.boot_phases.BootSpan.skipped()
+gen_worker.boot_phases.servable_ms()
+gen_worker.compile_cache.artifact_fx_lines()
+gen_worker.compile_cache.assert_closure_complete()
+gen_worker.compile_cache.build()
+gen_worker.compile_cache.live_fx_lines()
+gen_worker.compile_cache.prepare()
+gen_worker.guard_closure.manifest_digest()
+gen_worker.numerics_ladder.compare_outputs()
+gen_worker.numerics_ladder.declared_thresholds()
+gen_worker.numerics_ladder.gate()
