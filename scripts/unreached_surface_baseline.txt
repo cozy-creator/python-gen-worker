@@ -9,12 +9,18 @@
 # These are not equivalent. Roughly, by what the absence COSTS:
 #
 #   A gate that never runs
-#     numerics_ladder.gate / compare_outputs / declared_thresholds — pgw#817's
-#       ADOPTION numerics gate. `api/decorators.py` declares numerics_floor and
-#       numerics_warn per family, `activity.py` declares KIND_CELL_NUMERICS, and
-#       NOTHING IN src/ IMPORTS numerics_ladder AT ALL. A cell about to arm is
-#       supposed to be run against the eager forward it replaces and REFUSE
-#       below the floor. It never is.
+#     numerics_ladder.gate / compare_outputs / declared_thresholds — ✅ DELISTED
+#       2026-08-02, the first entries this ratchet has ever removed. The original
+#       finding is kept verbatim because it is the clearest illustration of what
+#       delisting MEANS: "pgw#817's ADOPTION numerics gate. `api/decorators.py`
+#       declares numerics_floor and numerics_warn per family, `activity.py`
+#       declares KIND_CELL_NUMERICS, and NOTHING IN src/ IMPORTS numerics_ladder
+#       AT ALL. A cell about to arm is supposed to be run against the eager
+#       forward it replaces and REFUSE below the floor. It never is."
+#       That sentence is now FALSE, which is the whole point — pgw#848 CP12
+#       (`c47dc46`) gave all three their first production callers, the guard went
+#       red on STALE, and the lines came out. A symbol ceasing to be dead code is
+#       this guard's nicest failure mode, and the ratchet turned the right way.
 #     compile_cache.assert_closure_complete — the ck5 code-closure completeness
 #       gate ("a dynamic import is hiding trace-relevant code from the recipe
 #       key"). Its only caller is a test.
@@ -66,6 +72,20 @@ gen_worker.compile_cache.build()
 gen_worker.compile_cache.live_fx_lines()
 gen_worker.compile_cache.prepare()
 gen_worker.guard_closure.manifest_digest()
-gen_worker.numerics_ladder.compare_outputs()
-gen_worker.numerics_ladder.declared_thresholds()
-gen_worker.numerics_ladder.gate()
+
+# ---------------------------------------------------------------------------
+# IN FLIGHT — a seam that landed AHEAD of its caller. Not 2026-08-01 debt.
+#
+# Segregated deliberately. An exemption list that only ever gains entries is a
+# guard being retired in slow motion, so entries below carry an owning issue and
+# are expected to leave, not to accumulate. If one is still here when its issue
+# closes, the seam was never wired and the guard was right the first time.
+#
+#   pgw#868 A4 (`d6067d2`, landed 2026-08-02) — the parallel-export seam. Both
+#   symbols are the DECISION rules for out-of-process row export; the only other
+#   mention of `width_for` anywhere in src/ is a COMMENT in aot_mint.py:1719
+#   explaining why it exists. Caught by this ratchet within hours of landing,
+#   which is the first time it has flagged live work rather than history.
+# ---------------------------------------------------------------------------
+gen_worker.aot_export_parallel.groups()
+gen_worker.aot_export_parallel.width_for()
