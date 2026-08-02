@@ -250,10 +250,16 @@ class Lifecycle:
         # Identity: JWT claims are authoritative (sub = worker_id, release_id);
         # Hello echoes them for dev mode / cross-checking only.
         claims: Dict[str, Any] = {}
-        if (settings.worker_jwt or "").strip():
+        # pgw#848: the BOOTSTRAP token by intent, not by accident. This runs at
+        # construction, before any stream exists, and it reads IDENTITY claims
+        # (sub / release_id) which rotation never changes — so the frozen copy is
+        # the right and only available answer here. Anything reading a
+        # credential to AUTHENTICATE must use `worker_credential.current()`.
+        _boot_jwt = (settings.bootstrap_worker_jwt or "").strip()
+        if _boot_jwt:
             from .request_context import _decode_unverified_jwt_claims
 
-            claims = _decode_unverified_jwt_claims(settings.worker_jwt.strip())
+            claims = _decode_unverified_jwt_claims(_boot_jwt)
         self.worker_id = (
             settings.worker_id or str(claims.get("sub") or "").strip() or f"py-worker-{os.getpid()}"
         )

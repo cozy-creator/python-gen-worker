@@ -460,10 +460,13 @@ def test_every_hub_dial_reads_ONE_refreshable_credential() -> None:
         assert worker_credential.current() == "rotated-token"
 
         # The dialer must READ that source, not the frozen settings value.
+        # pgw#848 follow-up (Paul: "why would we have two credentials?"): the
+        # fallback is GONE, not merely deprioritised, and the settings field is
+        # renamed so a stale read is an AttributeError rather than a stale
+        # string. There is one source now.
         src = inspect.getsource(hardware_report)
-        assert "worker_credential.current()" in src
-        assert src.count("settings.worker_jwt or") == 2, (
-            "both attestation dials must prefer the rotated credential")
+        assert src.count("token = worker_credential.current()") == 2
+        assert "settings.worker_jwt" not in src
     finally:
         worker_credential.reset()
 
@@ -563,3 +566,58 @@ def test_a_REAL_arm_emits_it(monkeypatch: pytest.MonkeyPatch) -> None:
     assert provision.arm_aot(object(), cfg, None, Path("cell.pt2"), 0) is True
     assert (activity_mod.KIND_CELL_NUMERICS, "unchecked") in said, (
         f"a REAL arm did not announce the missing numerics check: {said}")
+
+
+def test_exactly_ONE_module_may_read_the_bootstrap_credential() -> None:
+    """pgw#848 / Paul: *"why would we have two credentials? that makes no
+    sense."* It was never two credentials — it was ONE with two storage
+    locations and no source of truth, and nothing ever superseded the boot copy
+    once rotation began.
+
+    The rename makes an accidental read an AttributeError rather than a stale
+    string, which is the "make it impossible, not detectable" half. This is the
+    other half: a reader-role check, because the rule is sharp — exactly one
+    module may read the field to AUTHENTICATE, and everything else is a bug.
+
+    pgw#849's unreached-surface guard is structurally blind to this class: the
+    field IS read, and by production code. Only a role check catches it.
+    """
+    root = Path(pool.PACKAGE_ROOT) / "gen_worker"
+    allowed = {
+        # the single source of truth
+        "worker_credential.py": "owns the field; every other reader goes through it",
+        # identity-only reads: `sub`/`release_id`, which rotation never changes,
+        # taken before any stream exists. Justified in-line at both sites.
+        "lifecycle.py": "boot identity claims",
+        "procsplit/parent.py": "boot identity claims",
+        # the loader maps the env name onto the field
+        "config/loader.py": "env->field mapping",
+        "config/settings.py": "the declaration itself",
+    }
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = str(path.relative_to(root))
+        if rel in allowed:
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "bootstrap_worker_jwt" in code:
+                offenders.append(f"{rel}:{n}: {line.strip()[:90]}")
+    assert not offenders, (
+        "these read the BOOTSTRAP credential directly — it is frozen at pod "
+        "create and updated by nothing, so a long-lived pod authenticates with "
+        "a dead token while other paths work fine (pgw#846 attempts 16/17). "
+        "Read `worker_credential.current()`:\n  " + "\n  ".join(offenders))
+
+
+def test_the_old_name_is_gone_so_a_stale_read_cannot_compile() -> None:
+    """The rename is the enforcement. If `Settings.worker_jwt` still existed,
+    every one of the readers fixed above would still be *valid Python* that
+    silently returns a frozen token — which is exactly how the attestation
+    carrier acquired it."""
+    from gen_worker.config.settings import Settings
+
+    assert not hasattr(Settings(), "worker_jwt"), (
+        "the old field name is back — a call site can read the frozen token "
+        "again and nothing will refuse it")
+    assert hasattr(Settings(), "bootstrap_worker_jwt")

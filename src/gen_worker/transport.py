@@ -562,7 +562,11 @@ class Transport:
     @property
     def current_worker_jwt(self) -> str:
         """Newest worker credential: hub-rotated token, else the boot token."""
-        return (self._worker_jwt or self._settings.worker_jwt or "").strip()
+        # pgw#848: ONE source. `_worker_jwt` is this stream's rotation cache;
+        # `worker_credential` is the process-wide truth every hub dial reads.
+        from . import worker_credential
+
+        return (self._worker_jwt or worker_credential.current() or "").strip()
 
     # ---- drain / shutdown --------------------------------------------------
 
@@ -611,7 +615,9 @@ class Transport:
         return grpc.aio.insecure_channel(target, options=self._channel_options())
 
     def _metadata(self) -> Optional[List[Tuple[str, str]]]:
-        token = (self._worker_jwt or self._settings.worker_jwt or "").strip()
+        from . import worker_credential
+
+        token = (self._worker_jwt or worker_credential.current() or "").strip()
         if not token:
             return None
         self._report_credential_age(token)

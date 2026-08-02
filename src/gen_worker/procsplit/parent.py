@@ -1234,13 +1234,22 @@ class ParentControl:
             # a cold pod so the chown is free, metadata-only when warm. Read
             # from env/Settings rather than models.cache_paths — importing that
             # package pulls the model layer, and this process never imports torch.
-            self._settings.tensorhub_cache_dir
+            self._child_env.get("TENSORHUB_CACHE_DIR", "")
+            or self._settings.tensorhub_cache_dir
             or os.environ.get("TENSORHUB_CACHE_DIR", "")
             or _DEFAULT_TENSORHUB_CACHE_DIR,
-            self._settings.tensorhub_cas_dir,
+            self._child_env.get("TENSORHUB_CAS_DIR", "")
+            or self._settings.tensorhub_cas_dir,
             # post-mortem markers: the CHILD writes inflight/fault-dump/streaks
-            # and this parent takes them, so the dir is genuinely shared.
+            # and this parent takes them, so the dir is genuinely shared. Both
+            # sides of it, because the pod points the child at a durable
+            # carrier (GEN_WORKER_BOOT_RECORD) while the parent's own default
+            # may still be the volatile one.
             str(postmortem.BOOT_RECORD_PATH.parent),
+            os.path.dirname(
+                self._child_env.get("GEN_WORKER_BOOT_RECORD", "")
+                or os.environ.get("GEN_WORKER_BOOT_RECORD", "")
+            ),
         ]
         granted = privdrop.grant_paths(plan, privdrop.writable_paths(plan, extra))
         privdrop.grant_devices(plan)

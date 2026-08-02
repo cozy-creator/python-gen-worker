@@ -5,7 +5,7 @@ credentials with different lifetimes:
 
 * ``transport._worker_jwt`` — rotated by the hub at ~80 % of TTL over the
   scheduler stream, and therefore current;
-* ``Settings.worker_jwt`` — the boot token, **frozen at pod create and never
+* ``Settings.bootstrap_worker_jwt`` — the boot token, **frozen at pod create and never
   updated by anything**, and reachable from a code path that runs forever.
 
 MEASURED (hub ``pod_events``, pgw#846 attempts 16 and 17). The scheduler stream
@@ -70,7 +70,9 @@ def current() -> str:
     try:
         from .config import get_settings
 
-        return str(getattr(get_settings(), "worker_jwt", "") or "").strip()
+        return str(
+            getattr(get_settings(), "bootstrap_worker_jwt", "") or ""
+        ).strip()
     except Exception:  # noqa: BLE001 — a credential read never raises
         return ""
 
