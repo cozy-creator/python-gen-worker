@@ -166,11 +166,12 @@ def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
 
 def build_request(
     task: MintTask, *, workdir: Path, cap_bytes: int,
-    entry_peak_rss_bytes: int = 0,
+    entry_peak_rss_bytes: int = 0, entry_device_peak_bytes: int = 0,
 ) -> MintRequest:
     pending = task.pending
     return MintRequest(
         entry_peak_rss_bytes=int(entry_peak_rss_bytes),
+        entry_device_peak_bytes=int(entry_device_peak_bytes),
         function=task.function,
         modules=tuple(task.modules),
         family=str(pending.family),
@@ -210,6 +211,22 @@ def build_request(
         # the permanent-miss loop this issue exists to close.
         recipe=str(getattr(pending, "recipe", "dynamo") or "dynamo"),
     )
+
+
+def _pool_stat(phases: Any, key: str) -> int:
+    """One measurement out of a mint's phase table `pool` block, or 0.
+
+    pgw#877: this was written out by hand three times over two banks, each
+    with its own try/except and its own idea of which exceptions to swallow.
+    The next reader added the fourth copy or, more likely, did not add it at
+    all — which is how `peak_child_device_bytes` came to be published and
+    never read.
+    """
+    try:
+        block = (phases or {}).get("pool")
+        return int((block or {}).get(key) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
 
 
 def _on_frame(act: Any) -> Any:
@@ -308,6 +325,10 @@ async def build_cell(
             # child to peak at. Read here rather than in the child because the
             # child is the thing that dies.
             entry_peak_rss_bytes=mint_budget.entry_peak_rss(
+                family, task.weight_lane),
+            # pgw#877: and the DEVICE measurement, which until now had no way
+            # to reach the process that sizes K.
+            entry_device_peak_bytes=mint_budget.entry_device_peak(
                 family, task.weight_lane))
         act.phase(activity_mod.PHASE_LOAD)
         outcome = await mint_process.run_mint(
@@ -333,23 +354,25 @@ async def build_cell(
             # outcome, not just a minted one: an aborted mint's entries still
             # peaked where they peaked, and the attempt that follows it is
             # exactly the one that needs the fact.
-            try:
-                pool_block = (outcome.report.mint_phases or {}).get("pool")
-                peak_rss = int(
-                    (pool_block or {}).get("peak_child_rss_bytes") or 0)
-            except (TypeError, ValueError, AttributeError):
-                peak_rss = 0
-            mint_budget.record_entry_peak_rss(
-                family, task.weight_lane, peak_rss)
-        # pgw#848: ...and from the SNAPSHOT when the child never wrote a
-        # report at all, which is every killed and every abandoned mint.
-        try:
-            snap_pool = (outcome.partial_phases or {}).get("pool")
             mint_budget.record_entry_peak_rss(
                 family, task.weight_lane,
-                int((snap_pool or {}).get("peak_child_rss_bytes") or 0))
-        except (TypeError, ValueError, AttributeError):
-            pass
+                _pool_stat(outcome.report.mint_phases,
+                           "peak_child_rss_bytes"))
+            # pgw#877 #1/#2: the DEVICE half of the same loop, banked on the
+            # same terms. pgw#868 A4 measured this and left it telemetry-only;
+            # this is the read that makes it a decision.
+            mint_budget.record_entry_device_peak(
+                family, task.weight_lane,
+                _pool_stat(outcome.report.mint_phases,
+                           "peak_child_device_bytes"))
+        # pgw#848: ...and from the SNAPSHOT when the child never wrote a
+        # report at all, which is every killed and every abandoned mint.
+        mint_budget.record_entry_peak_rss(
+            family, task.weight_lane,
+            _pool_stat(outcome.partial_phases, "peak_child_rss_bytes"))
+        mint_budget.record_entry_device_peak(
+            family, task.weight_lane,
+            _pool_stat(outcome.partial_phases, "peak_child_device_bytes"))
         if str(getattr(pending, "recipe", "")) == fleet_cells.RECIPE_AOT:
             _emit_aot_phases(outcome, family=family, lane=task.weight_lane)
         else:

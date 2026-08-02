@@ -201,6 +201,18 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: INSIDE the mint child, whose memory dies with it — the same reason
     #: ``vram_cap_bytes`` is computed parent-side and handed down.
     entry_peak_rss_bytes: int = 0
+    #: pgw#877: the DEVICE twin of the field above, and the fix for the defect
+    #: that made the per-entry device ask a permanent estimate. ONE ENTRY
+    #: child's measured device high-water, banked by the parent from a
+    #: previous mint of this (family, lane).
+    #:
+    #: It has to travel HERE for exactly the reason the RSS figure does, and
+    #: the asymmetry between the two was the proof: `mint_budget._CHILD_PEAKS`
+    #: is written only in the SERVING PARENT, while the width is computed
+    #: INSIDE the mint child, where that dict is empty by construction. A bank
+    #: read in a process that can never have written it is not a bank.
+    #: 0 = never measured here, and the ask falls back to the estimate.
+    entry_device_peak_bytes: int = 0
     #: The hub-resolved execution lane (``ctx.lane``) and the effective
     #: declared-parameter values per function (th#1087). Both STEER the warm
     #: forwards, so both must be the parent's values — a child warming at

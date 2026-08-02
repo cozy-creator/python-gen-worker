@@ -44,13 +44,40 @@
 #     aot_mint.replace_spec, aot_package.package_entry_names,
 #     guard_closure.manifest_digest.
 #       aot_compile_pool.free_disk_bytes — ✅ DELISTED 2026-08-02 (pgw#877) by
-#       DELETION, the other way a line leaves this file. Deleted alongside
-#       `available_memory_bytes` and `free_device_bytes`, which this guard
-#       never saw at all: both are zero-caller one-line wrappers, and the
-#       "one-line wrapper over X, which production already calls" exemption
-#       cleared them on the strength of the wrappee's callers. The exemption
-#       is kept — it is right far more often than not — but it is a known
-#       blind spot, not a proof of reach.
+#       DELETION, the other way a line leaves this file.
+#     aot_export_parallel.groups / width_for — ✅ DELISTED 2026-08-02 by
+#       WIRING (`5923622`, pgw#868 A4). The audit that filed them found the
+#       producer too: `aot_mint` had been recording `export_peak_device_bytes`
+#       since 0.90.6, which IS `width_for(per_export_device_bytes=)`. Both
+#       halves built, never joined — and `GEN_WORKER_AOT_EXPORT_PARALLEL` was
+#       therefore an inert flag, which is a shape this guard should be taught
+#       to see (a module with NO importer at all, as against a symbol with no
+#       caller).
+#
+#   ⚠️ KNOWN BLIND SPOT — the wrapper exemption clears the WRONG function
+#
+#     MECHANISM: a definition is exempted when its body is a one-line call
+#     into another symbol that production reaches. The reach test then runs
+#     against the WRAPPEE, never the wrapper — so a wrapper with zero callers
+#     of its own is cleared on the strength of the callers of the thing it
+#     calls. The rule can be satisfied by a function that is not the one under
+#     test, and the guard reports nothing.
+#
+#     MEASURED, 2026-08-02 (pgw#877): `aot_compile_pool.available_memory_bytes`
+#     and `.free_device_bytes` had zero references anywhere in src/, tests/ or
+#     scripts/ and were invisible to this guard for its entire life. Both are
+#     now deleted. `--explain` still shows the same clearance for
+#     `aot_export_parallel.enabled`, whose "wrappee production already calls"
+#     is `str.strip` / `dict.get` — stdlib methods, which every module reaches
+#     and which therefore clear ANY one-line wrapper over them.
+#
+#     KEPT, deliberately, and recorded rather than silently worked around: the
+#     exemption is right far more often than it is wrong, and a rule tight
+#     enough to catch these would re-list real delegating wrappers. What must
+#     not happen again is treating its silence as proof of reach. Two candidate
+#     tightenings, neither implemented: require the wrappee to be IN-PACKAGE
+#     (kills the `str.strip` class outright), and flag any guarded module with
+#     no importer in src/ regardless of per-symbol reach.
 #
 #   KNOWN FALSE POSITIVES (3 of 24 — the measured rate is 12.5%)
 #     aot_inputs.inputs_for / latent_dims — declaration-author surface; the
@@ -94,5 +121,3 @@ gen_worker.guard_closure.manifest_digest()
 #   explaining why it exists. Caught by this ratchet within hours of landing,
 #   which is the first time it has flagged live work rather than history.
 # ---------------------------------------------------------------------------
-gen_worker.aot_export_parallel.groups()
-gen_worker.aot_export_parallel.width_for()

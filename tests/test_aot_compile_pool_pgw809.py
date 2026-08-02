@@ -254,8 +254,20 @@ def test_a_malformed_job_is_a_wiring_defect_not_a_retry(tmp_path: Path) -> None:
 
 #: A pod fat enough that CPU, host RAM and VRAM are all out of the way,
 #: so a case can isolate the ONE bound it is about.
+# pgw#877: the per-entry DEVICE footprint is now STATED here, because every
+# production caller states it — `aot_mint._entry_device_bytes` always supplies
+# one on a probeable card. It used to be omitted, which silently exercised
+# `DEFAULT_ENTRY_DEVICE_BYTES = 8 GiB`, a constant no production path could
+# reach (pgw#877 #5) and which is now deleted. The `/8` arithmetic in the
+# cases below is unchanged and now true because the CALLER says 8 GiB.
+#
+# Worth stating plainly, because it is pgw#849's lesson running backwards:
+# the combination "readable card, no footprint" was unreachable in production
+# and reached by this table on every run. A unit test is not only the caller
+# production is not — it is sometimes the ONLY caller a dead branch has.
 _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3,
-              free_vram_bytes=640 * 1024**3, device_lock=True)
+              free_vram_bytes=640 * 1024**3, device_bytes=8 * 1024**3,
+              device_lock=True)
 
 
 @pytest.mark.parametrize(
@@ -283,6 +295,10 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3,
         ("3 entries", dict(entries=3), 3),
         # A single-entry cell never pays for a pool.
         ("1 entry", dict(entries=1), 1),
+        # pgw#877 #5: a card we CAN read but have no per-entry footprint for
+        # refuses to widen, instead of dividing by a guess. The failure mode
+        # of guessing here is an OOM on paid work.
+        ("readable card, no footprint", dict(device_bytes=0), 1),
     ],
 )
 def test_width_is_derived_from_the_pod_not_the_host(
@@ -301,8 +317,12 @@ def test_an_unreadable_host_does_not_license_a_wide_pool() -> None:
     OOM-kill the serving process it is supposed to be sharing with."""
     width = pool.entry_workers(
         18, vcpus=64, available_bytes=0, free_vram_bytes=640 * 1024**3,
-        device_lock=True)
+        device_bytes=8 * 1024**3, device_lock=True)
     assert width.workers == 1
+    # pgw#877: the footprint is supplied so this pins the MEMORY bound alone.
+    # Without it the width would be 1 for two reasons at once and the test
+    # would pass while proving neither.
+    assert width.binding == "host-memory", width.reason
 
 
 def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:

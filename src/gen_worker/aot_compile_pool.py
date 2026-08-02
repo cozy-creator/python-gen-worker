@@ -189,14 +189,16 @@ FORGE_RSS_RESERVE_BYTES = 1 * 1024**3
 #: figure, because "free right now" is measured between tenant forwards.
 DEVICE_RESERVE_BYTES = 2 * 1024**3
 
-#: Per-entry DEVICE footprint assumed before anything has been measured.
-#: An AOTI compile is not a pure host job: it benchmarks kernels on the card
-#: (and, when ``autotune_at_compile_time`` is explicitly False, runs the whole
-#: model on real inputs), so each concurrent entry child holds its own weight
-#: copy, an activation set and a CUDA context. This is the bound that actually
-#: binds on a 24 GB card, which is why pgw#809's headline K comes from VRAM
-#: and not from vCPUs.
-DEFAULT_ENTRY_DEVICE_BYTES = 8 * 1024**3
+#: pgw#877 #5: there is NO per-entry device default, deliberately.
+#: ``DEFAULT_ENTRY_DEVICE_BYTES = 8 GiB`` sat here and was UNREACHABLE:
+#: ``aot_mint._entry_device_bytes`` returns 0 only when ``co_residency`` is
+#: unprobed, and ``_probe_free_device_bytes`` returns 0 under exactly those
+#: conditions, so ``free_vram <= 0`` short-circuited before the fallback could
+#: be consulted. A constant nothing can reach still reads as a policy, and
+#: this one read as "8 GiB is a reasonable entry". Deleted; a readable card
+#: with no footprint now refuses to widen instead — the rule
+#: ``aot_export_parallel.width_for`` already states for the export footprint,
+#: because the failure mode of guessing here is an OOM on paid work.
 
 #: Programs staged AHEAD of the running set. The export loop hands the pool
 #: every entry at once; staging them all would put ~46 GB of exported programs
@@ -533,6 +535,7 @@ def entry_workers(
     vcpus: int = 0,
     available_bytes: int = -1,
     free_vram_bytes: int = -1,
+    device_basis: str = "",
     limit: int = 0,
     device_lock: Optional[bool] = None,
     forge: Optional[bool] = None,
@@ -590,13 +593,23 @@ def entry_workers(
     locked = aot_device_lock.supported() if device_lock is None \
         else bool(device_lock)
     if entries <= 1:
+        # pgw#877: the entry count alone decides this, so no bound is READ —
+        # and the row must not report unread bounds as zeros. It used to say
+        # `available_bytes=0, free_device_bytes=0`: a row whose entire job is
+        # to explain K=1, telling its reader the pod has no RAM and no card.
+        # `-1` is this module's existing "not read" (`cgroup_available_bytes`,
+        # `quota_cores`), and the bases say so in words.
         return PoolWidth(
             workers=1, entries=entries, vcpus=0, cpu_workers=1, mem_workers=1,
-            device_workers=1, available_bytes=0, free_device_bytes=0,
+            device_workers=1, available_bytes=-1, free_device_bytes=-1,
             per_entry_rss_bytes=0, per_entry_device_bytes=0,
+            per_entry_rss_basis="not-read", per_entry_device_basis="not-read",
             device_lock=locked, binding="entries", ceiling=1,
             forge=bool(forge or False),
-            reason=f"{entries} entr{'y' if entries == 1 else 'ies'}: serial")
+            reason=(
+                f"{entries} entr{'y' if entries == 1 else 'ies'}: serial "
+                f"(no cpu/memory/device bound was read — the entry count "
+                f"decides this width on its own)"))
 
     if vcpus > 0:
         cpu = CpuFacts(int(vcpus), "caller", int(vcpus), int(vcpus), -1.0)
@@ -629,8 +642,7 @@ def entry_workers(
     else:
         device = device_facts()
     free_vram = device.free_bytes
-    per_device = int(device_bytes) if device_bytes > 0 \
-        else DEFAULT_ENTRY_DEVICE_BYTES
+    per_device = max(0, int(device_bytes))
     if free_vram <= 0:
         # No card, or no reading: the device bound is DROPPED and K falls to
         # whichever of cpu/mem/ceiling binds. Right for a CPU-only cell, which
@@ -641,6 +653,13 @@ def entry_workers(
         # never happened is a property of `_probe_free_device_bytes` failing
         # only when there is no card, not of this branch.
         device_workers = MAX_ENTRY_WORKERS
+    elif per_device <= 0:
+        # pgw#877 #5: a card we CAN read but have no per-entry footprint for.
+        # Unreachable in production today (see the note where the deleted
+        # default used to live), and stated explicitly rather than left to a
+        # constant: an unmeasured footprint does not license concurrency on
+        # the card it cannot describe.
+        device_workers = 1
     else:
         device_workers = max(
             1, int(max(0, free_vram - device_reserve) // per_device))
@@ -652,7 +671,16 @@ def entry_workers(
     # pgw#877: ONE definition of each basis. It was written twice — once for
     # the row, once for the reason string — which is how the reason could
     # have drifted from the field it explains.
-    device_basis = "estimated" if device_bytes > 0 else "default"
+    # THREE values, because there are three provenances and collapsing them is
+    # the defect this issue is named for:
+    #   "measured"   — a real entry child was watched (pgw#877 #1/#2)
+    #   "estimated"  — `co_residency().need_bytes`, ~56 % never observed
+    #   "unmeasured" — a readable card and no footprint at all -> K=1
+    # The caller states which; a bare non-zero ask cannot tell them apart, and
+    # "the caller handed me a number" is precisely the overstatement that made
+    # `"measured"` meaningless in the first place.
+    device_basis = str(device_basis or "").strip() or (
+        "estimated" if device_bytes > 0 else "unmeasured")
     rss_basis = "measured" if peak_rss_bytes > 0 else "default"
 
     def _width(
@@ -1146,6 +1174,11 @@ class EntryCompilePool:
         self.seal_seed_s = 0.0
         self.python = python
         self.peak_rss_bytes = 0
+        #: pgw#877 #2: the widest DEVICE high-water any entry child reported.
+        #: pgw#868 A4 measured this and left it telemetry-only; nothing read
+        #: it, so the per-entry device ask stayed the mint child's whole
+        #: co-residency estimate. This is the number that ends that.
+        self.peak_device_bytes = 0
         self.peak_concurrency = 0
         # pgw#848: the kernel's OOM-kill counter as it stood before this pool
         # ran. A DELTA over the pool's own wall is evidence; the absolute
@@ -1510,6 +1543,20 @@ class EntryCompilePool:
                 return row
         return None
 
+    def observe_entry_device(self, report: EntryReport) -> None:
+        """Bank one entry child's DEVICE high-water (pgw#877 #2).
+
+        RESERVED in preference to allocated, on the child's own argument:
+        allocated is what the compile needed, reserved is what the caching
+        allocator HELD and therefore what a concurrent sibling actually cannot
+        have — and K is a question about siblings. A child too old to report
+        reserved still contributes its allocated figure rather than nothing.
+        """
+        peak = int(report.peak_device_reserved_bytes or 0) \
+            or int(report.peak_device_bytes or 0)
+        if peak > 0:
+            self.peak_device_bytes = max(self.peak_device_bytes, peak)
+
     def _collect(self, row: _Running) -> List[str]:
         elapsed = time.monotonic() - row.started
         reap_epoch = time.time()
@@ -1520,6 +1567,11 @@ class EntryCompilePool:
         # child exits; drop it before the next stage runs.
         with_suppress_unlink(row.program_path)
         if report is not None:
+            # pgw#877: banked BEFORE any gate can raise, and on the failure
+            # path too — pgw#848's rule for the host half applies unchanged
+            # here: the attempt that FAILED is exactly the attempt whose
+            # measurement the next one has to size against.
+            self.observe_entry_device(report)
             self._verify_child_code(row, report)
         if code == EXIT_COMPILED and report is not None and report.files:
             if report.peak_rss_bytes:
@@ -1750,7 +1802,6 @@ __all__ = [
     "arm_parent_death_signal",
     "EntryJob",
     "EntryReport",
-    "DEFAULT_ENTRY_DEVICE_BYTES",
     "DEVICE_RESERVE_BYTES",
     "MAX_ENTRY_WORKERS",
     "PACKAGE_ROOT",

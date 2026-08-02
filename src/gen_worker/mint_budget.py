@@ -67,6 +67,16 @@ _CHILD_PEAKS: Dict[Tuple[str, str], int] = {}
 #: compiler it runs), which is what bounds K.
 _ENTRY_RSS_PEAKS: Dict[Tuple[str, str], int] = {}
 
+#: pgw#877: and the DEVICE half of the entry loop, which is the one that was
+#: missing entirely. ``_CHILD_PEAKS`` above is the MINT CHILD's device peak —
+#: one process holding a whole pipeline. This is ONE ENTRY CHILD's, measured
+#: by ``aot_compile_child._peak_device`` and carried out on the pool's phase
+#: table. They are different processes with different footprints and must not
+#: share a figure: the entry ask used to be the mint child's whole
+#: co-residency estimate, which is how K stayed at 1-2 on a host that could
+#: run it 37-127 wide.
+_ENTRY_DEVICE_PEAKS: Dict[Tuple[str, str], int] = {}
+
 
 def _gib(value: int) -> str:
     return f"{value / _GIB:.2f}GiB"
@@ -84,6 +94,10 @@ class MintBudget:
     need_bytes: int = 0
     resident_bytes: int = 0
     activation_bytes: int = 0
+    #: pgw#877 #3: ``reserved - allocated``, the part of ``free_bytes`` that is
+    #: free to THIS process only. Reported so the cross-process over-count can
+    #: be measured on a real pod instead of reasoned about.
+    cache_slack_bytes: int = 0
     #: pgw#848: the CEILING the child is actually given, which is NOT
     #: ``need_bytes``. See :func:`co_residency` — the estimate answers "should
     #: this start", the ceiling answers "how far may it go", and using one
@@ -101,7 +115,8 @@ class MintBudget:
             f"resident={_gib(self.resident_bytes)} "
             f"activation={_gib(self.activation_bytes)}"
             f"({'measured' if self.measured else 'estimated'}) "
-            f"cap={_gib(self.cap_bytes)}"
+            f"cap={_gib(self.cap_bytes)} "
+            f"cache_slack={_gib(self.cache_slack_bytes)}"
         )
 
 
@@ -152,6 +167,16 @@ class _DeviceRead:
     allocated: int
     measured_activation: int
     activation: int
+    #: pgw#877 #3: THE OVER-COUNT, named and carried rather than argued about.
+    #: ``reserved - allocated`` — this process's cached-but-unallocated
+    #: allocator blocks, which `free_bytes` counts as headroom. Exact for
+    #: :func:`probe`; for :func:`co_residency` it is bytes a DIFFERENT process
+    #: cannot have, so it inflates both `fits` and `cap_bytes` by this much,
+    #: out of the tenant's reserve. Off-pod it cannot be measured (this box has
+    #: no usable CUDA), so the instrument ships and the next real mint reports
+    #: it: compare `cache_slack` in the decline line against `nvidia-smi`'s
+    #: free. Nothing branches on it — measure first, then decide.
+    cache_slack: int
 
 
 def _read_device(device: Optional[int]) -> Optional[_DeviceRead]:
@@ -172,6 +197,7 @@ def _read_device(device: Optional[int]) -> Optional[_DeviceRead]:
     return _DeviceRead(
         free_bytes=int(free) + max(0, reserved - allocated),
         allocated=allocated,
+        cache_slack=max(0, reserved - allocated),
         measured_activation=measured_activation,
         activation=max(
             measured_activation,
@@ -199,6 +225,7 @@ def probe(device: Optional[int] = None) -> MintBudget:
         need_bytes=need,
         resident_bytes=read.allocated,
         activation_bytes=read.activation,
+        cache_slack_bytes=read.cache_slack,
         cap_bytes=need,
     )
 
@@ -245,6 +272,51 @@ def record_entry_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> Non
 def entry_peak_rss(family: str, weight_lane: str) -> int:
     """0 = never measured on this pod; the width falls back to its constant."""
     return _ENTRY_RSS_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
+
+
+def record_entry_device_peak(
+    family: str, weight_lane: str, peak_bytes: int,
+) -> None:
+    """Bank ONE ENTRY child's measured DEVICE high-water (pgw#877 #1/#2).
+
+    The third bank, and the last one that was missing. pgw#868 A4 taught the
+    entry child to measure this (``EntryReport.peak_device_bytes`` /
+    ``..._reserved_bytes``) and deliberately left it telemetry-only; nothing
+    ever read it, so the per-entry device ask stayed
+    ``co_residency().need_bytes`` — the MINT CHILD's whole footprint, ~56 % of
+    which was never observed — reported as ``per_entry_device_basis:
+    'measured'``.
+
+    Written by the SERVING PARENT only, exactly like its two siblings, and
+    read back onto ``MintRequest.entry_device_peak_bytes``. That wire hop is
+    the fix for the defect this bank would otherwise reproduce: a
+    module-global read inside the mint child is a read of an empty dict.
+
+    Monotone, for the reason both siblings are: a mint that peaked higher once
+    can peak that high again.
+    """
+    if peak_bytes <= 0:
+        return
+    key = (str(family or ""), str(weight_lane or ""))
+    _ENTRY_DEVICE_PEAKS[key] = max(
+        _ENTRY_DEVICE_PEAKS.get(key, 0), int(peak_bytes))
+
+
+def entry_device_peak(family: str, weight_lane: str) -> int:
+    """0 = no entry child has ever been watched on this pod for this lane."""
+    return _ENTRY_DEVICE_PEAKS.get(
+        (str(family or ""), str(weight_lane or "")), 0)
+
+
+def entry_device_ask(peak_bytes: int) -> int:
+    """One entry child's device ask from ITS OWN measured peak (0 = none).
+
+    The peak is the caching allocator's high-water. A CUDA context, the
+    cuBLAS/cuDNN handles and the driver's own per-process overhead live
+    OUTSIDE the allocator and are invisible to it, so the context floor is
+    added rather than assumed to be inside the measurement.
+    """
+    return int(peak_bytes) + _CUDA_CONTEXT_FLOOR_BYTES if peak_bytes > 0 else 0
 
 
 def co_residency(
@@ -372,26 +444,31 @@ def co_residency(
         # completes must not inherit a tenant reserve computed off a model
         # that is on its way out.
         activation = 0
-    # pgw#877, two facts about this bank that its name does not carry:
+    # pgw#877 #4 — A MEASUREMENT REPLACES THE GUESSES IT MEASURED.
     #
-    #  * It is PROCESS-LOCAL and only the SERVING parent ever writes it
-    #    (`mint_delegate` is the sole `record_child_peak` caller). The other
-    #    reader of `co_residency` is `aot_mint._entry_device_bytes`, which runs
-    #    INSIDE the mint child, where `_CHILD_PEAKS` is empty by construction —
-    #    so the per-entry device ask is the estimate below, on every mint, on
-    #    every pod, forever. The host side of the same loop does NOT have this
-    #    hole: it travels to the child on `MintRequest.entry_peak_rss_bytes`.
-    #    Observable: `per_entry_device_bytes` in the pool width row is always
-    #    exactly `allocated * 1.25 + 5 GiB` (11.09 GiB on both sdxl pods).
-    #  * It only ever RAISES the ask. A child measured LOWER than the estimate
-    #    cannot narrow it, so the measurement can make admission stricter and
-    #    never wider.
+    # This was `max(banked + ctx, allocated + activation + workspace + ctx)`,
+    # so a child that really peaked BELOW the estimate re-asked for the
+    # estimate forever: an estimate acting as a floor a measurement isn't
+    # allowed to correct. That is this subsystem's whole disease in one line.
+    #
+    # The monotone ratchet belongs at the WRITE (`record_child_peak` keeps the
+    # high-water across attempts, so a lucky run cannot talk the ask down) and
+    # NOT at the read, where it can only ever pin the answer to the guess.
+    #
+    # The floor that makes narrowing safe is `allocated + ctx`, and it is
+    # chosen rather than assumed: `allocated` is a MEASUREMENT of the resident
+    # set the child provably re-holds, while `_UNMEASURED_ACTIVATION_FRACTION`
+    # and `_COMPILE_WORKSPACE_BYTES` are the two guesses. Only the guesses may
+    # be corrected away. It matters because `record_child_peak` banks on EVERY
+    # outcome including failures (pgw#848, deliberately) — a child that OOMed
+    # during `load` banks a tiny peak, and a narrowing that trusted it blindly
+    # would admit the next mint onto a card that cannot hold one weight copy.
     banked = child_peak(family, weight_lane)
-    need = max(
-        banked + _CUDA_CONTEXT_FLOOR_BYTES if banked else 0,
-        allocated + activation + _COMPILE_WORKSPACE_BYTES
-        + _CUDA_CONTEXT_FLOOR_BYTES,
-    )
+    if banked:
+        need = max(banked, allocated) + _CUDA_CONTEXT_FLOOR_BYTES
+    else:
+        need = (allocated + activation + _COMPILE_WORKSPACE_BYTES
+                + _CUDA_CONTEXT_FLOOR_BYTES)
     # pgw#848: the CEILING, which is a property of the CARD and not of the
     # estimate. Everything the tenant will need for its next forward is
     # `activation` — its weights are already allocated and therefore already
@@ -408,6 +485,7 @@ def co_residency(
         need_bytes=need,
         resident_bytes=allocated,
         activation_bytes=activation,
+        cache_slack_bytes=read.cache_slack,
         cap_bytes=cap,
     )
 
@@ -417,8 +495,11 @@ __all__ = [
     "child_peak",
     "co_residency",
     "device_of",
+    "entry_device_ask",
+    "entry_device_peak",
     "entry_peak_rss",
     "probe",
     "record_child_peak",
+    "record_entry_device_peak",
     "record_entry_peak_rss",
 ]

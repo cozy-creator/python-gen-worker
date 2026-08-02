@@ -1419,6 +1419,7 @@ def mint(
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
+    entry_device_peak_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
 ) -> MintResult:
@@ -1466,7 +1467,9 @@ def mint(
             allow_regressed_lanes=allow_regressed_lanes,
             inductor_configs=inductor_configs,
             entry_workers=entry_workers,
-            entry_peak_rss_bytes=entry_peak_rss_bytes, progress=progress)
+            entry_peak_rss_bytes=entry_peak_rss_bytes,
+            entry_device_peak_bytes=entry_device_peak_bytes,
+            progress=progress)
     except BaseException as exc:
         _attach_partial_phases(exc, progress)
         raise
@@ -1601,6 +1604,7 @@ def _mint_cell(
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
+    entry_device_peak_bytes: int = 0,
     progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
@@ -1672,9 +1676,15 @@ def _mint_cell(
     # constant. K=1 IS the pre-#809 serial in-process path, which is the
     # honest answer on a narrow pod.
     entry_count = len(rows)
+    # pgw#877: the DEVICE ask now has the same shape the HOST ask got in
+    # pgw#848 — a measurement made on this pod by a previous mint of this
+    # (family, lane), banked by the serving parent and handed down on the
+    # request. 0 keeps the estimate, and keeps saying so.
+    device_bytes, device_basis = _entry_device_bytes(
+        spec, int(entry_device_peak_bytes or 0))
     width = aot_compile_pool.entry_workers(
         entry_count, limit=int(entry_workers or 0),
-        device_bytes=_entry_device_bytes(spec),
+        device_bytes=device_bytes, device_basis=device_basis,
         # pgw#848: the HOST ask, measured on this pod by a previous mint of
         # this (family, lane) and banked by the serving parent. Until this
         # existed the argument was never passed at ALL, so `mem_workers`
@@ -1888,18 +1898,35 @@ def _mint_cell(
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
 
 
-def _entry_device_bytes(spec: ExportSpec) -> int:
-    """One entry child's DEVICE ask, from this process rather than a constant.
+def _entry_device_bytes(
+    spec: ExportSpec, banked_device_peak: int = 0,
+) -> Tuple[int, str]:
+    """One entry child's DEVICE ask, and the PROVENANCE of that number.
 
-    An AOTI compile benchmarks kernels on the card, so an entry child holds
-    its own weight copy, one activation set and a CUDA context — which is
-    exactly what ``mint_budget.co_residency`` already computes for the pgw#784
-    mint child, read off the pipeline THIS process has resident. Reused rather
-    than re-derived: the entry child loads the same weights at the same lane
-    and runs the same declared shapes, so the mint child's own footprint is a
-    proxy and not a guess. 0 means "unprobeable", and the width policy treats
-    that as "do not license concurrency on a card you cannot measure".
+    pgw#877 #1/#2. Two sources, ranked, because they are not the same kind of
+    thing:
+
+    * ``banked_device_peak`` — what an entry child on THIS pod, for this
+      (family, lane), was actually measured to peak at
+      (``EntryReport.peak_device_reserved_bytes``), banked by the serving
+      parent and handed down on ``MintRequest.entry_device_peak_bytes``. It
+      travels on the WIRE and not through ``mint_budget``'s module globals,
+      which is the entire fix: those globals are written in the serving parent
+      and this function runs in the MINT CHILD, where they are empty by
+      construction. Basis ``"measured"``.
+    * ``mint_budget.co_residency().need_bytes`` — the fallback, and an
+      ESTIMATE of a different process: the mint child's whole co-residency
+      footprint (a full pipeline), used as one entry child's (one exported
+      program plus inductor). ~56 % of it was never observed. Basis
+      ``"estimated"``, which is what it used to call ``"measured"``.
+
+    ``(0, "unmeasured")`` means unprobeable, and the width policy refuses to
+    license concurrency on a card it cannot size against.
     """
+    if banked_device_peak > 0:
+        from . import mint_budget
+
+        return mint_budget.entry_device_ask(int(banked_device_peak)), "measured"
     try:
         from . import mint_budget
 
@@ -1907,10 +1934,10 @@ def _entry_device_bytes(spec: ExportSpec) -> int:
             family=str(spec.family or ""),
             weight_lane=str(spec.lane_label() or ""))
     except Exception:  # noqa: BLE001
-        return 0
+        return 0, "unmeasured"
     if not budget.probed:
-        return 0
-    return int(budget.need_bytes)
+        return 0, "unmeasured"
+    return int(budget.need_bytes), "estimated"
 
 
 def _compile_entries_parallel(
@@ -2016,6 +2043,12 @@ def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
         # pool actually overlapped rather than looping K-wide on paper.
         "peak_concurrency": int(pool.peak_concurrency),
         "peak_child_rss_bytes": int(pool.peak_rss_bytes),
+        # pgw#877 #2: the entry children's own DEVICE high-water, which is what
+        # the NEXT mint's per-entry ask is sized from. It rides the phase table
+        # rather than a second event for the same reason the RSS figure does:
+        # the phase table is what survives the mint child, and the mint child
+        # is the process that dies.
+        "peak_child_device_bytes": int(pool.peak_device_bytes),
     }
     if pool.oom_entry:
         facts["oom_entry"] = pool.oom_entry

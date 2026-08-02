@@ -153,13 +153,25 @@ def cap_vram(device: int, cap_bytes: int) -> str:
 
         if not torch.cuda.is_available():
             return ""
-        # Always ordinal 0: `mint_process.child_env` sets CUDA_VISIBLE_DEVICES
-        # so this process sees exactly one card. It was written
-        # `0 if device < 0 else 0` — a ternary with one arm, which read like a
-        # decision and was not one. NOTE (pgw#877, unfixed): `child_env` sets
-        # the pin only when `request.device >= 0`, so a request carrying -1 on
-        # a multi-GPU pod caps ordinal 0 whichever card the pipeline is on.
-        dev = 0
+        # pgw#877 #6. `mint_process.child_env` pins CUDA_VISIBLE_DEVICES only
+        # when `request.device >= 0`, so "the pin already chose for us" is
+        # true for a named device and FALSE for -1 — and this used to cap
+        # ordinal 0 either way, written `0 if device < 0 else 0`: a ternary
+        # with one arm, which read like a decision and was not one.
+        #
+        # A cap applied to the wrong card is worse than no cap: it neither
+        # bounds the child nor protects the tenant, and it reports a note
+        # saying it did both. So an ambiguous request refuses to cap and SAYS
+        # so, rather than capping a card nobody named.
+        if device < 0 and torch.cuda.device_count() > 1:
+            note = (
+                f"vram cap NOT applied: the request named no device and "
+                f"{torch.cuda.device_count()} cards are visible, so there is "
+                f"no ordinal this process can honestly cap — capping cuda:0 "
+                f"would bound a card the pipeline may not be on")
+            logger.warning("mint-child: %s", note)
+            return note
+        dev = torch.cuda.current_device()
         torch.cuda.set_device(dev)
         _free, total = torch.cuda.mem_get_info(dev)
         if total <= 0:
@@ -411,6 +423,11 @@ def _mint_aot(
             # 0 on a pod that has never minted this (family, lane).
             entry_peak_rss_bytes=int(
                 getattr(request, "entry_peak_rss_bytes", 0) or 0),
+            # pgw#877: and the DEVICE half. Read off the request rather than a
+            # module global, because a module global here is always empty —
+            # the parent is the only process that banks.
+            entry_device_peak_bytes=int(
+                getattr(request, "entry_device_peak_bytes", 0) or 0),
             # pgw#848: rewritten on every beat, so a mint this process is
             # KILLED in still leaves its measurements on disk for the parent.
             phase_snapshot=(

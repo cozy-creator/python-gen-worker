@@ -208,10 +208,19 @@ def test_the_width_names_its_binding_constraint_and_its_readings() -> None:
                 "cgroup_reclaimable_bytes", "host_available_bytes",
                 "os_cpu_count", "affinity_cpus", "quota_cores"):
         assert key in facts, f"{key} missing from {sorted(facts)}"
-    # A default per-entry ask is a GUESS, and must not read like a measurement.
+    # pgw#877: THREE provenances, and none may read like another. A guess must
+    # not read like a measurement — and "the caller handed me a number", which
+    # is all `"measured"` ever meant on this axis, must not either.
+    common: Dict[str, Any] = dict(
+        entries=72, vcpus=21, available_bytes=60 * _GIB,
+        free_vram_bytes=20 * _GIB, device_lock=True)
     assert pool.entry_workers(
-        72, vcpus=21, available_bytes=60 * _GIB, free_vram_bytes=20 * _GIB,
-        device_lock=True).per_entry_device_basis == "default"
+        **common).per_entry_device_basis == "unmeasured"
+    assert pool.entry_workers(
+        device_bytes=6 * _GIB, **common).per_entry_device_basis == "estimated"
+    assert pool.entry_workers(
+        device_bytes=6 * _GIB, device_basis="measured",
+        **common).per_entry_device_basis == "measured"
 
 
 def test_the_advertised_cores_are_not_the_ones_the_pool_believes() -> None:

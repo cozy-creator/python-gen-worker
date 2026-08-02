@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **pgw#877 round 2 — the entry-child DEVICE measurement now reaches the decision it exists for,
+  and a measurement is allowed to NARROW.** Three findings landed as ONE change because separately
+  each looks optional and together they are one broken loop: a measurement that was taken, could
+  not travel, and would not have been allowed to act if it had arrived.
+  **(a)** `EntryCompilePool.observe_entry_device()` banks each entry child's device high-water —
+  RESERVED over allocated, on the child's own argument that reserved is what a concurrent sibling
+  cannot have — on every terminus, and publishes it as `peak_child_device_bytes` on the phase table
+  beside the RSS figure. `EntryReport.peak_device_bytes` had been measured since pgw#868 A4 and
+  read by nothing. **(b)** New `MintRequest.entry_device_peak_bytes`, the exact mirror of
+  `entry_peak_rss_bytes`: `mint_delegate` banks from the report AND the killed-mint snapshot and
+  reads back onto the request, so the mint child stops reading a module-global that only the
+  serving parent ever writes. That bank was empty **by construction** in the process that sizes K,
+  which is why `per_entry_device_bytes` printed exactly `allocated × 1.25 + 5 GiB` on a 4090 and an
+  L40S alike. **(c)** `co_residency` no longer maxes a banked measurement against the estimate —
+  *an estimate acting as a floor a measurement isn't allowed to correct.* The monotone ratchet
+  belongs at the write, where `record_child_peak` already keeps the high-water; at the read it
+  could only pin the answer to the guess. The narrowing is floored at `allocated + context`,
+  chosen because `allocated` is measured while the activation fraction and the compile workspace
+  are the guesses — and because pgw#848 banks on failures too, so a child that OOMed at `load`
+  must not talk the next mint onto a card that cannot hold a weight copy.
+  `per_entry_device_basis` is now three-valued (`measured` / `estimated` / `unmeasured`).
+  **`DEFAULT_ENTRY_DEVICE_BYTES` deleted** — unreachable in production, and a readable card with no
+  footprint now refuses to widen instead of dividing by a guess. **`cap_vram` stops capping ordinal
+  0 unconditionally**: `child_env` pins `CUDA_VISIBLE_DEVICES` only for a named device, so an
+  unnamed device on a multi-GPU pod now refuses and says so. The `entries <= 1` width row stopped
+  reporting unread bounds as `0` — a row whose job is to explain K=1, telling its reader the pod
+  has no RAM and no card.
+  **Not changed, deliberately:** `free_bytes` counts this process's cached allocator blocks as
+  headroom for a DIFFERENT process. `MintBudget.cache_slack_bytes` now carries `reserved -
+  allocated` and the decline line prints it, so the next real mint measures the over-count instead
+  of it being argued about. **The on-pod observable is not yet observed:**
+  `per_entry_device_bytes` must MOVE on a real mint's second attempt. If it prints 11.09 GiB again
+  this is a fourth mechanism producing the same number, and a failure rather than a partial win.
+
 - **pgw#877 — mint resource-sizing audit (pgw#876 §1). Deletions, one honest rename, one extraction;
   no decision changed.** `per_entry_device_basis: "measured"` now reads **`"estimated"`**: its only
   producer is `mint_budget.co_residency().need_bytes` (resident x 1.25 + 5 GiB, ~56 % never
