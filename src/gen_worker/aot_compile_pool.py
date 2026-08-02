@@ -179,6 +179,11 @@ ENTRY_RSS_RESERVE_BYTES = 4 * 1024**3
 #: ``mint_budget.record_child_peak`` banks the device peak.
 DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3
 
+#: Host RAM a FORGE pod leaves alone (th#1359). Not a tenant reserve — there
+#: is no tenant — but the OS, the page cache and the mint child's own
+#: supervisor are real on any pod. A quarter of the serving reserve.
+FORGE_RSS_RESERVE_BYTES = 1 * 1024**3
+
 #: VRAM the pool must leave to the tenant. The mint's whole premise is that
 #: the worker keeps serving (pgw#784), so the eager forward's weights AND its
 #: activation peak stay untouchable; this is the margin ON TOP of the free
@@ -311,6 +316,10 @@ class PoolWidth:
     #: chosen off a guess must not read like a K chosen off a measurement.
     per_entry_device_basis: str = "default"
     per_entry_rss_basis: str = "default"
+    #: th#1359: whether the tenant reserves were applied. A K of 1 on a
+    #: serving pod and a K of 1 on a forge pod are different defects, and the
+    #: row has to say which one it is.
+    forge: bool = False
 
     @property
     def underwidth(self) -> int:
@@ -336,6 +345,7 @@ class PoolWidth:
             "underwidth": int(self.underwidth),
             "per_entry_device_basis": self.per_entry_device_basis,
             "per_entry_rss_basis": self.per_entry_rss_basis,
+            "forge": bool(self.forge),
             "width_reason": self.reason,
         }
         for block in (self.cpu, self.memory, self.device):
@@ -525,6 +535,7 @@ def entry_workers(
     free_vram_bytes: int = -1,
     limit: int = 0,
     device_lock: Optional[bool] = None,
+    forge: Optional[bool] = None,
 ) -> PoolWidth:
     """How many entries this pod may compile at once.
 
@@ -557,6 +568,25 @@ def entry_workers(
     say why — so an unexplained K is a defect in itself.
     """
     entries = max(0, int(entries))
+    if forge is None:
+        from . import worker_mode
+
+        forge = worker_mode.is_forge()
+    # th#1359 / pgw#848: THREE of this policy's terms are tenant reserves, and
+    # on a forge pod there is no tenant. `SERVING_HEADROOM_CPUS` keeps cores
+    # for an eager forward and a heartbeat; `DEVICE_RESERVE_BYTES` keeps VRAM
+    # for the tenant's peak; `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a
+    # request arriving mid-mint does not meet the OOM killer. A mint-only pod
+    # receives no tenant dispatch, so all three protect nobody — and on
+    # pgw#846's attempts fourteen and fifteen the VRAM reserve alone held the
+    # pool at K=1 on a host that could have run it 127 CPU-side.
+    #
+    # A SMALL host-RAM reserve survives: the OS, the page cache and the mint
+    # child's own supervisor are real on a forge pod too. It is the TENANT's
+    # share that goes, not prudence.
+    cpu_headroom = 0 if forge else SERVING_HEADROOM_CPUS
+    device_reserve = 0 if forge else DEVICE_RESERVE_BYTES
+    rss_reserve = FORGE_RSS_RESERVE_BYTES if forge else ENTRY_RSS_RESERVE_BYTES
     locked = aot_device_lock.supported() if device_lock is None \
         else bool(device_lock)
     if entries <= 1:
@@ -565,6 +595,7 @@ def entry_workers(
             device_workers=1, available_bytes=0, free_device_bytes=0,
             per_entry_rss_bytes=0, per_entry_device_bytes=0,
             device_lock=locked, binding="entries", ceiling=1,
+            forge=bool(forge or False),
             reason=f"{entries} entr{'y' if entries == 1 else 'ies'}: serial")
 
     if vcpus > 0:
@@ -572,7 +603,7 @@ def entry_workers(
     else:
         cpu = cpu_facts()
     vcpus = cpu.vcpus
-    budget = vcpus - SERVING_HEADROOM_CPUS
+    budget = vcpus - cpu_headroom
     cpu_workers = max(1, budget // CPUS_PER_ENTRY_WORKER)
 
     if available_bytes >= 0:
@@ -588,7 +619,7 @@ def entry_workers(
         mem_workers = 1
     else:
         mem_workers = max(
-            1, int(max(0, avail - ENTRY_RSS_RESERVE_BYTES) // per_entry))
+            1, int(max(0, avail - rss_reserve) // per_entry))
 
     if free_vram_bytes >= 0:
         device = DeviceFacts(
@@ -606,7 +637,7 @@ def entry_workers(
         device_workers = MAX_ENTRY_WORKERS
     else:
         device_workers = max(
-            1, int(max(0, free_vram - DEVICE_RESERVE_BYTES) // per_device))
+            1, int(max(0, free_vram - device_reserve) // per_device))
 
     # A caller cap NARROWS. `limit` above MAX_ENTRY_WORKERS is a caller
     # asking for more than the ceiling allows, and the ceiling wins.
@@ -626,7 +657,8 @@ def entry_workers(
             per_entry_device_basis=(
                 "measured" if device_bytes > 0 else "default"),
             per_entry_rss_basis=(
-                "measured" if peak_rss_bytes > 0 else "default"))
+                "measured" if peak_rss_bytes > 0 else "default"),
+            forge=bool(forge))
 
     workers = max(
         1, min(cpu_workers, mem_workers, device_workers, ceiling, entries))
@@ -643,7 +675,8 @@ def entry_workers(
         (device_workers, "vram"), (ceiling, "ceiling"),
         (entries, "entries"))[1]
     reason = (
-        f"K={workers} ({binding}-bound): {vcpus} vCPU ({cpu.basis}) -> "
+        f"K={workers} ({binding}-bound{', forge' if forge else ''}): "
+        f"{vcpus} vCPU ({cpu.basis}) -> "
         f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) -> "
         f"{mem_workers}, {free_vram / 1024**3:.1f} GiB VRAM ({device.basis}) "
         f"/ {per_device / 1024**3:.1f} GiB per entry "
@@ -1558,6 +1591,7 @@ __all__ = [
     "ENTRY_CHILD_MODULE",
     "ENTRY_REPORT_NAME",
     "ENTRY_RSS_RESERVE_BYTES",
+    "FORGE_RSS_RESERVE_BYTES",
     "EXIT_BAD_JOB",
     "EXIT_COMPILED",
     "EXIT_REFUSED",

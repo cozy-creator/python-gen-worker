@@ -214,6 +214,7 @@ def co_residency(
     *,
     family: str = "",
     weight_lane: str = "",
+    forge: Optional[bool] = None,
 ) -> MintBudget:
     """pgw#784: can a MINT CHILD live on this card next to the eager server?
 
@@ -292,6 +293,10 @@ def co_residency(
     never the child, and the child's measured peak is banked
     (``record_child_peak``) so the second ask on a pod is a fact.
     """
+    if forge is None:
+        from . import worker_mode
+
+        forge = worker_mode.is_forge()
     try:
         import torch
 
@@ -310,6 +315,19 @@ def co_residency(
         measured_activation,
         int(allocated * _UNMEASURED_ACTIVATION_FRACTION),
     )
+    if forge:
+        # th#1359 / pgw#848: on a FORGE pod there is no tenant, so there is
+        # nothing to reserve for one. Every term in this module exists to
+        # protect a co-resident serving process; with none, the whole premise
+        # collapses and the mint gets the card.
+        #
+        # Explicit rather than emergent. Once the serving instance is released
+        # `allocated` tends to 0 and the arithmetic mostly falls out on its
+        # own — but "mostly" is how the 11.09 GiB ceiling survived fifteen
+        # attempts. A forge pod that probes a millisecond before the release
+        # completes must not inherit a tenant reserve computed off a model
+        # that is on its way out.
+        activation = 0
     banked = child_peak(family, weight_lane)
     need = max(
         banked + _CUDA_CONTEXT_FLOOR_BYTES if banked else 0,

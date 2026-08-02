@@ -163,3 +163,82 @@ def test_every_terminus_reports_the_device_peak() -> None:
     assert source.count("peak_vram_bytes=_peak_vram()") == 2, (
         "the refusal and crash reports must both carry the device peak")
     assert mint_process.MintReport(status="x").peak_vram_bytes == 0
+
+
+# ---------------------------------------------------------------------------
+# th#1359: on a FORGE pod every tenant reserve in this file protects nobody
+# ---------------------------------------------------------------------------
+
+
+def test_forge_mode_has_no_tenant_to_reserve_for() -> None:
+    """The premise of this whole module is a co-resident serving process.
+
+    A forge pod receives no tenant dispatch and holds no resident serving
+    model, so the reserve is not "small" — it is zero, and the mint gets the
+    card. Stated explicitly rather than left to emerge from `allocated -> 0`:
+    "mostly falls out on its own" is how the 11.09 GiB ceiling survived
+    fifteen attempts.
+    """
+    import inspect
+
+    source = inspect.getsource(mint_budget.co_residency)
+    assert "if forge:" in source and "activation = 0" in source
+    # The signature takes the mode, and defaults to reading it from the process.
+    assert "forge" in inspect.signature(mint_budget.co_residency).parameters
+
+
+def test_a_forge_pool_drops_all_three_tenant_reserves() -> None:
+    """CPU headroom, VRAM reserve and the host-RAM reserve are all tenant
+    reserves. On pgw#846's attempts 14/15 the VRAM one alone held the pool at
+    K=1 on a host that could have run it 127 CPU-side."""
+    from gen_worker import aot_compile_pool as pool
+
+    hw: Any = dict(
+        vcpus=127, available_bytes=116 * _GIB, device_bytes=int(11.09 * _GIB),
+        device_lock=True)
+    serving = pool.entry_workers(
+        36, free_vram_bytes=int(21.48 * _GIB), forge=False, **hw)
+    forge = pool.entry_workers(
+        36, free_vram_bytes=int(44.39 * _GIB), forge=True, **hw)
+
+    assert serving.workers == 1 and serving.binding == "vram", serving.reason
+    assert forge.workers > serving.workers, (
+        f"the forge pod must not inherit the serving pod's reserves: "
+        f"{serving.reason!r} vs {forge.reason!r}")
+    # Every reserve, individually, on identical hardware.
+    same = dict(hw, free_vram_bytes=int(44.39 * _GIB))
+    a = pool.entry_workers(36, forge=False, **same)
+    b = pool.entry_workers(36, forge=True, **same)
+    assert b.cpu_workers > a.cpu_workers, "CPU headroom not dropped"
+    assert b.mem_workers > a.mem_workers, "host-RAM reserve not dropped"
+    assert b.device_workers > a.device_workers, "VRAM reserve not dropped"
+
+
+def test_the_width_row_says_which_regime_it_was() -> None:
+    """A K of 1 on a serving pod and a K of 1 on a forge pod are different
+    defects. The row has to say which."""
+    from gen_worker import aot_compile_pool as pool
+
+    forge = pool.entry_workers(
+        36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+        device_lock=True, forge=True)
+    assert forge.facts()["forge"] is True
+    assert "forge" in forge.reason
+    serving = pool.entry_workers(
+        36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+        device_lock=True, forge=False)
+    assert serving.facts()["forge"] is False
+    assert "forge" not in serving.reason
+
+
+def test_serving_mode_is_completely_unchanged() -> None:
+    """The forge branch must be additive. A serving pod's width is a number
+    two lanes are currently measuring against; it must not move."""
+    from gen_worker import aot_compile_pool as pool
+
+    w = pool.entry_workers(
+        18, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+        device_lock=True, forge=False)
+    assert w.cpu_workers == (16 - pool.SERVING_HEADROOM_CPUS) // 2 == 7
+    assert w.mem_workers == (64 * _GIB - pool.ENTRY_RSS_RESERVE_BYTES) // (
+        pool.DEFAULT_ENTRY_PEAK_RSS_BYTES)
