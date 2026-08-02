@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -311,10 +310,21 @@ class PoolWidth:
     cpu: Optional[CpuFacts] = None
     memory: Optional[MemoryFacts] = None
     device: Optional[DeviceFacts] = None
-    #: "measured" when the caller handed a probed per-entry ask, "default"
-    #: when the width fell back to a constant. A default is a guess, and a K
-    #: chosen off a guess must not read like a K chosen off a measurement.
+    #: ``"estimated"`` when the caller handed a per-entry device ask,
+    #: ``"default"`` when the width fell back to a constant.
+    #:
+    #: It read ``"measured"`` until pgw#877, and that overstated it. The only
+    #: caller is ``aot_mint._entry_device_bytes``, which returns
+    #: ``mint_budget.co_residency().need_bytes`` — the MINT CHILD's resident
+    #: set times :data:`~gen_worker.mint_budget._UNMEASURED_ACTIVATION_FRACTION`
+    #: plus two flat constants, i.e. ~56 % of the number was never observed and
+    #: no entry child was ever watched. ``EntryReport.peak_device_bytes`` is
+    #: the observation, and nothing reads it yet; until something does, this
+    #: axis has no ``"measured"`` value to report and must not claim one.
     per_entry_device_basis: str = "default"
+    #: ``"measured"`` here is literal: the value is one entry child's VmHWM
+    #: summed over its real descendant tree (``_peak_rss_bytes``), banked by
+    #: the serving parent (``mint_budget.record_entry_peak_rss``).
     per_entry_rss_basis: str = "default"
     #: th#1359: whether the tenant reserves were applied. A K of 1 on a
     #: serving pod and a K of 1 on a forge pod are different defects, and the
@@ -448,11 +458,6 @@ def memory_facts(
     return MemoryFacts(0, "unreadable", 0, -1, 0)
 
 
-def available_memory_bytes() -> int:
-    """The single number :func:`memory_facts` bounds the pool with."""
-    return memory_facts().available_bytes
-
-
 def cpu_facts() -> CpuFacts:
     """The pod's honest core count, and which of the three readings it is."""
     os_count = os.cpu_count() or 1
@@ -518,11 +523,6 @@ def device_facts(
             # No card, or no reading — sampling an absence is not evidence.
             return DeviceFacts(0, "absent", tuple(taken))
     return DeviceFacts(max(taken), "sampled", tuple(taken))
-
-
-def free_device_bytes(device: int = -1) -> int:
-    """The single free-VRAM number :func:`device_facts` sizes the pool with."""
-    return device_facts(device).free_bytes
 
 
 def entry_workers(
@@ -632,8 +632,14 @@ def entry_workers(
     per_device = int(device_bytes) if device_bytes > 0 \
         else DEFAULT_ENTRY_DEVICE_BYTES
     if free_vram <= 0:
-        # No card, or no reading. A CPU-only cell is not device-bound; a card
-        # we cannot measure does not get to license concurrency on it.
+        # No card, or no reading: the device bound is DROPPED and K falls to
+        # whichever of cpu/mem/ceiling binds. Right for a CPU-only cell, which
+        # is not device-bound at all — and deliberately stated as "dropped"
+        # rather than the "does not get to license concurrency" this comment
+        # used to claim, which is the opposite of what the line does. A GPU pod
+        # whose card reads 0 therefore compiles device-UNBOUNDED; that it has
+        # never happened is a property of `_probe_free_device_bytes` failing
+        # only when there is no card, not of this branch.
         device_workers = MAX_ENTRY_WORKERS
     else:
         device_workers = max(
@@ -643,6 +649,12 @@ def entry_workers(
     # asking for more than the ceiling allows, and the ceiling wins.
     ceiling = min(MAX_ENTRY_WORKERS, int(limit)) if limit > 0 \
         else MAX_ENTRY_WORKERS
+    # pgw#877: ONE definition of each basis. It was written twice — once for
+    # the row, once for the reason string — which is how the reason could
+    # have drifted from the field it explains.
+    device_basis = "estimated" if device_bytes > 0 else "default"
+    rss_basis = "measured" if peak_rss_bytes > 0 else "default"
+
     def _width(
         workers: int, *, binding: str, reason: str, lock: bool,
     ) -> PoolWidth:
@@ -654,10 +666,8 @@ def entry_workers(
             per_entry_device_bytes=per_device, device_lock=lock,
             reason=reason, binding=binding, ceiling=ceiling, cpu=cpu,
             memory=memory, device=device,
-            per_entry_device_basis=(
-                "measured" if device_bytes > 0 else "default"),
-            per_entry_rss_basis=(
-                "measured" if peak_rss_bytes > 0 else "default"),
+            per_entry_device_basis=device_basis,
+            per_entry_rss_basis=rss_basis,
             forge=bool(forge))
 
     workers = max(
@@ -680,7 +690,7 @@ def entry_workers(
         f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) -> "
         f"{mem_workers}, {free_vram / 1024**3:.1f} GiB VRAM ({device.basis}) "
         f"/ {per_device / 1024**3:.1f} GiB per entry "
-        f"({'measured' if device_bytes > 0 else 'default'}) -> "
+        f"({device_basis}) -> "
         f"{device_workers}")
     return _width(workers, binding=binding, reason=reason, lock=locked)
 
@@ -753,7 +763,6 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
 
 COMPILED = "compiled"
 REFUSED = "refused"
-CRASHED = "crashed"
 
 EXIT_COMPILED = 0
 EXIT_REFUSED = 2
@@ -1724,19 +1733,10 @@ def _exit_note(code: Optional[int]) -> str:
     return "crashed"
 
 
-def free_disk_bytes(path: Path) -> int:
-    try:
-        usage = shutil.disk_usage(str(path))
-    except OSError:
-        return 0
-    return int(usage.free)
-
-
 __all__ = [
     "CODE_DIGEST",
     "COMPILED",
     "CPUS_PER_ENTRY_WORKER",
-    "CRASHED",
     "DEFAULT_ENTRY_PEAK_RSS_BYTES",
     "ENTRY_CHILD_MODULE",
     "ENTRY_REPORT_NAME",
@@ -1761,13 +1761,10 @@ __all__ = [
     "MemoryFacts",
     "PoolLedger",
     "PoolWidth",
-    "available_memory_bytes",
     "child_argv",
     "child_env",
     "cpu_facts",
     "device_facts",
     "entry_workers",
-    "free_device_bytes",
-    "free_disk_bytes",
     "memory_facts",
 ]

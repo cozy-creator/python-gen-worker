@@ -153,7 +153,13 @@ def cap_vram(device: int, cap_bytes: int) -> str:
 
         if not torch.cuda.is_available():
             return ""
-        dev = 0 if device < 0 else 0  # CUDA_VISIBLE_DEVICES already pinned us
+        # Always ordinal 0: `mint_process.child_env` sets CUDA_VISIBLE_DEVICES
+        # so this process sees exactly one card. It was written
+        # `0 if device < 0 else 0` — a ternary with one arm, which read like a
+        # decision and was not one. NOTE (pgw#877, unfixed): `child_env` sets
+        # the pin only when `request.device >= 0`, so a request carrying -1 on
+        # a multi-GPU pod caps ordinal 0 whichever card the pipeline is on.
+        dev = 0
         torch.cuda.set_device(dev)
         _free, total = torch.cuda.mem_get_info(dev)
         if total <= 0:
@@ -428,19 +434,6 @@ def _mint_aot(
     frame(phase="finalize", note=f"cell {result.cell_key}")
 
     peak = _peak_vram()
-    try:
-        import resource
-
-        # pgw#848: SELF + CHILDREN. Under the pgw#809 pool this process is a
-        # supervisor — the entry children hold the compile, and the cc1plus
-        # under each of them is the largest single allocation of the whole
-        # mint. RUSAGE_SELF alone reports the supervisor and calls it the mint.
-        rss = (
-            int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-            + int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
-        ) * 1024
-    except Exception:
-        rss = 0
     return MintReport(
         status="minted",
         artifact=str(target),
@@ -451,7 +444,6 @@ def _mint_aot(
             f"class(es) for family {cfg.family!r} as one aot-inductor cell"),
         phase="finalize",
         peak_vram_bytes=peak,
-        peak_rss_bytes=rss,
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
         mint_phases=dict(result.metadata.get("mint_phases") or {}),
@@ -559,19 +551,6 @@ def mint(request: MintRequest) -> MintReport:
     frame(phase="finalize", note=f"packed {target.name}")
 
     peak = _peak_vram()
-    try:
-        import resource
-
-        # pgw#848: SELF + CHILDREN. Under the pgw#809 pool this process is a
-        # supervisor — the entry children hold the compile, and the cc1plus
-        # under each of them is the largest single allocation of the whole
-        # mint. RUSAGE_SELF alone reports the supervisor and calls it the mint.
-        rss = (
-            int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-            + int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
-        ) * 1024
-    except Exception:
-        rss = 0
     from . import cell_key
 
     try:
@@ -587,7 +566,6 @@ def mint(request: MintRequest) -> MintReport:
         detail=f"packed {target.name} for family {cfg.family!r}",
         phase="finalize",
         peak_vram_bytes=peak,
-        peak_rss_bytes=rss,
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
     )

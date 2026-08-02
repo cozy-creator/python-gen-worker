@@ -112,9 +112,10 @@ def _peak_device() -> tuple:
     measurement at all: it is `resident_weights * 1.25 + 5 GiB`, i.e. sdxl's
     4.87 GiB of weights plus an activation term the module's own docstring
     calls "a fraction nobody measured" plus a flat context+workspace constant.
-    That estimate is what `per_entry_device_basis: 'measured'` reports as
-    "measured" — meaning "the caller handed a probed number", not "somebody
-    watched a compile child".
+    That estimate used to report as `per_entry_device_basis: 'measured'`,
+    which meant only "the caller handed a probed number" and never "somebody
+    watched a compile child"; pgw#877 renamed the value to `'estimated'`, and
+    the axis has no `'measured'` value until something reads THIS number.
 
     So this reports what the child ACTUALLY peaked at. Telemetry only: no
     decision reads it, and the width policy is deliberately NOT changed in the

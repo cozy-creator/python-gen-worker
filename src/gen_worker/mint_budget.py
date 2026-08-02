@@ -130,37 +130,75 @@ def device_of(pipeline: Any) -> Optional[int]:
     return None
 
 
-def probe(device: Optional[int] = None) -> MintBudget:
-    """Can a self-mint capture run here without taking the tenant down?"""
+@dataclass(frozen=True)
+class _DeviceRead:
+    """One CUDA reading, and the two derived quantities both budgets need.
+
+    pgw#877: :func:`probe` and :func:`co_residency` each carried their own
+    verbatim copy of this — same five ``torch.cuda`` calls, same ``free_bytes``
+    sum, same ``activation`` floor. Two copies of one definition is how the two
+    answers drift apart on a card neither of them can re-read.
+
+    ``free_bytes`` counts THIS process's cached-but-unallocated allocator
+    blocks as headroom. That is exact for :func:`probe`, whose capture runs in
+    this process and this allocator. It is NOT exact for
+    :func:`co_residency`, whose consumer is a different OS process: the
+    caching allocator does not hand cached blocks back to the driver without
+    ``empty_cache()``, so those bytes are free to nobody but us. See that
+    function's note.
+    """
+
+    free_bytes: int
+    allocated: int
+    measured_activation: int
+    activation: int
+
+
+def _read_device(device: Optional[int]) -> Optional[_DeviceRead]:
+    """The reading, or ``None`` when there is no CUDA to read."""
     try:
         import torch
 
         if not torch.cuda.is_available():
-            return _UNPROBEABLE
+            return None
         dev = torch.cuda.current_device() if device is None else int(device)
         free, _total = torch.cuda.mem_get_info(dev)
         allocated = int(torch.cuda.memory_allocated(dev))
         reserved = int(torch.cuda.memory_reserved(dev))
         peak = int(torch.cuda.max_memory_allocated(dev))
     except Exception:
-        return _UNPROBEABLE
-    # The allocator's cached-but-unallocated pool is reclaimable headroom
-    # (ie#468's planner reads free VRAM the same way).
-    free_bytes = int(free) + max(0, reserved - allocated)
+        return None
     measured_activation = max(0, peak - allocated)
-    activation = max(
-        measured_activation,
-        int(allocated * _UNMEASURED_ACTIVATION_FRACTION),
+    return _DeviceRead(
+        free_bytes=int(free) + max(0, reserved - allocated),
+        allocated=allocated,
+        measured_activation=measured_activation,
+        activation=max(
+            measured_activation,
+            int(allocated * _UNMEASURED_ACTIVATION_FRACTION),
+        ),
     )
-    need = 2 * activation + _COMPILE_WORKSPACE_BYTES
+
+
+def probe(device: Optional[int] = None) -> MintBudget:
+    """Can a self-mint capture run here without taking the tenant down?
+
+    The IN-PROCESS capture's gate (pgw#737), still reached whenever
+    delegation declines — ``executor._background_mint_run`` falls through to
+    it when no pending is delegated.
+    """
+    read = _read_device(device)
+    if read is None:
+        return _UNPROBEABLE
+    need = 2 * read.activation + _COMPILE_WORKSPACE_BYTES
     return MintBudget(
-        fits=free_bytes >= need,
+        fits=read.free_bytes >= need,
         probed=True,
-        measured=measured_activation > 0,
-        free_bytes=free_bytes,
+        measured=read.measured_activation > 0,
+        free_bytes=read.free_bytes,
         need_bytes=need,
-        resident_bytes=allocated,
-        activation_bytes=activation,
+        resident_bytes=read.allocated,
+        activation_bytes=read.activation,
         cap_bytes=need,
     )
 
@@ -286,6 +324,23 @@ def co_residency(
     OOM rather than the tenant's — which is the failure the wan-2.2 incident
     was. What changes is that a roomy card now licenses a roomy child.
 
+    KNOWN OVERSTATEMENT, unfixed (pgw#877)
+    --------------------------------------
+    ``free_bytes`` is ``mem_get_info().free + (reserved - allocated)`` — the
+    driver's free plus THIS process's cached-but-unallocated allocator blocks.
+    That sum is exact for :func:`probe`, whose capture runs in this allocator.
+    It is not exact here: the consumer is a different OS process, and PyTorch's
+    caching allocator does not return cached blocks to the driver without an
+    ``empty_cache()`` nobody calls on this path. So both ``fits`` and
+    ``cap_bytes`` are overstated by exactly ``reserved - allocated``, and the
+    overstatement comes out of the tenant's reserve. ``aot_compile_pool
+    ._probe_free_device_bytes`` reads the card the same way for the same
+    cross-process consumer, and its own docstring already says the quiet part
+    ("a cached block the tenant is not using is free to nobody but this
+    process"). Observable: log ``reserved - allocated`` beside ``free_bytes``
+    and diff ``free_bytes`` against ``nvidia-smi``'s free — the gap is the
+    over-count.
+
     On :data:`_UNMEASURED_ACTIVATION_FRACTION`: it is still a guess, and it is
     deliberately NOT replaced with a different off-pod constant — substituting
     one unmeasured number for another is a move this program has already paid
@@ -297,24 +352,13 @@ def co_residency(
         from . import worker_mode
 
         forge = worker_mode.is_forge()
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return _UNPROBEABLE
-        dev = torch.cuda.current_device() if device is None else int(device)
-        free, _total = torch.cuda.mem_get_info(dev)
-        allocated = int(torch.cuda.memory_allocated(dev))
-        reserved = int(torch.cuda.memory_reserved(dev))
-        peak = int(torch.cuda.max_memory_allocated(dev))
-    except Exception:
+    read = _read_device(device)
+    if read is None:
         return _UNPROBEABLE
-    free_bytes = int(free) + max(0, reserved - allocated)
-    measured_activation = max(0, peak - allocated)
-    activation = max(
-        measured_activation,
-        int(allocated * _UNMEASURED_ACTIVATION_FRACTION),
-    )
+    free_bytes = read.free_bytes
+    allocated = read.allocated
+    measured_activation = read.measured_activation
+    activation = read.activation
     if forge:
         # th#1359 / pgw#848: on a FORGE pod there is no tenant, so there is
         # nothing to reserve for one. Every term in this module exists to
@@ -328,6 +372,20 @@ def co_residency(
         # completes must not inherit a tenant reserve computed off a model
         # that is on its way out.
         activation = 0
+    # pgw#877, two facts about this bank that its name does not carry:
+    #
+    #  * It is PROCESS-LOCAL and only the SERVING parent ever writes it
+    #    (`mint_delegate` is the sole `record_child_peak` caller). The other
+    #    reader of `co_residency` is `aot_mint._entry_device_bytes`, which runs
+    #    INSIDE the mint child, where `_CHILD_PEAKS` is empty by construction —
+    #    so the per-entry device ask is the estimate below, on every mint, on
+    #    every pod, forever. The host side of the same loop does NOT have this
+    #    hole: it travels to the child on `MintRequest.entry_peak_rss_bytes`.
+    #    Observable: `per_entry_device_bytes` in the pool width row is always
+    #    exactly `allocated * 1.25 + 5 GiB` (11.09 GiB on both sdxl pods).
+    #  * It only ever RAISES the ask. A child measured LOWER than the estimate
+    #    cannot narrow it, so the measurement can make admission stricter and
+    #    never wider.
     banked = child_peak(family, weight_lane)
     need = max(
         banked + _CUDA_CONTEXT_FLOOR_BYTES if banked else 0,

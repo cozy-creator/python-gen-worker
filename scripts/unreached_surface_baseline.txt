@@ -42,7 +42,15 @@
 #     compile_cache.build / prepare (the JIT build path), aot_serve.flavor_label
 #     and find_artifact (compile_cache's same-named versions are the live ones),
 #     aot_mint.replace_spec, aot_package.package_entry_names,
-#     aot_compile_pool.free_disk_bytes, guard_closure.manifest_digest.
+#     guard_closure.manifest_digest.
+#       aot_compile_pool.free_disk_bytes — ✅ DELISTED 2026-08-02 (pgw#877) by
+#       DELETION, the other way a line leaves this file. Deleted alongside
+#       `available_memory_bytes` and `free_device_bytes`, which this guard
+#       never saw at all: both are zero-caller one-line wrappers, and the
+#       "one-line wrapper over X, which production already calls" exemption
+#       cleared them on the strength of the wrappee's callers. The exemption
+#       is kept — it is right far more often than not — but it is a known
+#       blind spot, not a proof of reach.
 #
 #   KNOWN FALSE POSITIVES (3 of 24 — the measured rate is 12.5%)
 #     aot_inputs.inputs_for / latent_dims — declaration-author surface; the
@@ -51,7 +59,6 @@
 #     They stay listed rather than exempted: an exemption rule broad enough to
 #     clear them would also clear real hits.
 #
-gen_worker.aot_compile_pool.free_disk_bytes()
 gen_worker.aot_compile_spans.dark_fraction()
 gen_worker.aot_declaration.named_dynamic_rows()
 gen_worker.aot_inputs.inputs_for()

@@ -237,9 +237,15 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     detail: str = ""
     phase: str = ""
     #: Measured, so the NEXT mint's co-residency ask is a fact rather than
-    #: an estimate (§1: no magic numbers).
+    #: an estimate (§1: no magic numbers). Read by
+    #: ``mint_delegate.record_child_peak``.
+    #:
+    #: pgw#877: there was a `peak_rss_bytes` beside it, written from
+    #: `getrusage(SELF)+getrusage(CHILDREN)` on both minted termini and read by
+    #: NOTHING — the parent banks the host high-water from
+    #: `mint_phases["pool"]["peak_child_rss_bytes"]`, which is a per-entry
+    #: VmHWM tree sum and the number `entry_workers` actually divides by.
     peak_vram_bytes: int = 0
-    peak_rss_bytes: int = 0
     elapsed_s: float = 0.0
     #: th#1322: per-phase seconds, measured by the CHILD (`load`,
     #: `warmup_forward`, `inductor_compile`, `seal_publish`, `finalize`). The

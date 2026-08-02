@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **pgw#877 — mint resource-sizing audit (pgw#876 §1). Deletions, one honest rename, one extraction;
+  no decision changed.** `per_entry_device_basis: "measured"` now reads **`"estimated"`**: its only
+  producer is `mint_budget.co_residency().need_bytes` (resident x 1.25 + 5 GiB, ~56 % never
+  observed), and "the caller handed a probed number" is not an observation. The axis has no
+  `"measured"` value until something reads `EntryReport.peak_device_bytes`. Deleted
+  `aot_compile_pool.free_disk_bytes` / `available_memory_bytes` / `free_device_bytes` / `CRASHED`
+  (zero references anywhere; the first was on the pgw#849 ratchet, **delisted by deletion**, and the
+  next two the ratchet never saw because its "one-line wrapper" exemption clears a wrapper on the
+  *wrappee's* callers — recorded in the baseline header as a known blind spot). Deleted
+  `MintReport.peak_rss_bytes` and the `getrusage` block that fed it, duplicated verbatim in both
+  mint termini and **read by nothing**. Extracted `mint_budget._read_device` — `probe()` and
+  `co_residency()` carried byte-identical copies of the same CUDA read. Six findings that DO change a
+  decision are proposed with evidence in pgw#877 and deliberately not landed; the largest is that
+  `_CHILD_PEAKS` is written only in the serving parent and read only in the mint child, so the
+  per-entry device ask has always been the estimate.
+
 ## 0.90.6 (2026-08-02) — **the release that makes "fast" claimable and the mint survivable**: the numerics gate lands at the adopt-time choke point (until now every arm merely announced its own absence), the pool row is emitted at CONSTRUCTION so a mint that dies still reports K and its binding, the entry child reports its real DEVICE high-water, export-once is recorded as a measured negative, and the compute child execs unprivileged
 
 PATCH, so it rides the existing `0.90` entry in `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS`
