@@ -55,6 +55,41 @@ T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
 
 KINDS = ("inference", "training", "dataset", "conversion", "eval")
+
+#: How BOUNDED is the set of model weights an endpoint can load? (Paul's
+#: ruling, 2026-08-02: *"a serving inference endpoint uses the same set of
+#: weights every time and can benefit from an NFS drive a lot; a conversion
+#: endpoint downloads different sets of weights per request, so an NFS drive
+#: provides no value."*)
+#:
+#: This is a statement about the endpoint's RELATIONSHIP TO ITS WEIGHTS, not a
+#: yes/no about one storage product — deliberately, because the same fact
+#: decides more than caching. A cached volume lives in EXACTLY ONE datacenter,
+#: so attaching one to an endpoint that cannot use it does not merely waste
+#: disk: it collapses that endpoint's placement to a single datacenter.
+#: Measured cost of getting this wrong: a wan conversion failed SIXTEEN times
+#: against one datacenter while three others had capacity.
+#:
+#: * ``bound``       — every weight this endpoint can load is named by its
+#:                     DEPLOY BINDINGS. Enumerable, small, reused across
+#:                     requests. A request may still choose among them
+#:                     (``Slot.selected_by="model"``) — choosing within a
+#:                     bound catalog is still bound.
+#: * ``per_request`` — the weights are named BY THE REQUEST, from outside the
+#:                     bindings (a HuggingFace repo id, a Civitai ref). The
+#:                     working set is the open world: a cache cannot hold it
+#:                     and pinning to one datacenter buys nothing.
+#: * ``none``        — loads no model weights at all (dataset builders,
+#:                     CPU-only utilities). Same placement consequence as
+#:                     ``per_request`` and a DIFFERENT fact — worth its own
+#:                     value so nobody "fixes" it by adding a binding.
+#:
+#: UNSET is not a fourth value: it means the author has not said, and a
+#: consumer must treat it as the conservative branch (no volume) WITHOUT
+#: recording it as a declared ``per_request``. Attaching a volume nobody can
+#: use costs capacity; withholding one costs cold-boot seconds. Those are not
+#: symmetric, which is what makes "no volume" the safe default.
+WEIGHT_SETS = ("bound", "per_request", "none")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
@@ -643,6 +678,31 @@ def _validate_config_decl(owner: str, config: Any) -> Tuple[ConfigParam, ...]:
     return tuple(out)
 
 
+def _validate_weight_set(owner: str, value: Optional[str]) -> Optional[str]:
+    """Validate ``weight_set=`` against :data:`WEIGHT_SETS`.
+
+    ``None`` stays ``None`` — undeclared is its own state, never silently the
+    conservative value, because a consumer must be able to tell "the author
+    said per_request" from "nobody said anything". The first is a fact; the
+    second is a gap, and a gap that reads as a fact is how a guard quietly
+    stops guarding.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text not in WEIGHT_SETS:
+        raise ValueError(
+            f"@endpoint {owner!r}: weight_set= must be one of "
+            f"{list(WEIGHT_SETS)!r}, got {value!r}. It declares how BOUNDED "
+            f"this endpoint's weight set is — 'bound' when every weight is "
+            f"named by its deploy bindings (choosing among them per request "
+            f"is still bound), 'per_request' when the REQUEST names weights "
+            f"from outside the bindings, 'none' when it loads no model "
+            f"weights at all. Omit it if you do not know; do not guess."
+        )
+    return text
+
+
 def _validate_env_decl(owner: str, env: Any) -> Tuple[str, ...]:
     """th#1087 D2: code declares the env names it reads; the hub validates
     config-layer env writes against this declaration (undeclared-write 422)."""
@@ -958,6 +1018,11 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # child calls (ctx.call_endpoint / ctx.workflow_checkpoint). The hub
     # mints the invoke_child credential ONLY for declaring functions.
     child_calls: bool = False
+    # Paul 2026-08-02: how bounded is this endpoint's weight set? One of
+    # WEIGHT_SETS, or None = the author has not said. See WEIGHT_SETS for why
+    # this is a KIND and not a `use_nfs: bool`, and why unset must not read as
+    # a declared value.
+    weight_set: Optional[str] = None
     # pgw#647 concurrency contract: handlers on ONE live instance run
     # SINGLE-FLIGHT by default (one binding set = one materialized graph
     # with mutable buffers — e.g. a resident LoRA branch; two concurrent
@@ -1409,6 +1474,7 @@ def _decorate_class(
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
+    weight_set: Optional[str] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -1435,6 +1501,7 @@ def _decorate_class(
         ),
         config=_validate_config_decl(cls.__name__, config),
         env=_validate_env_decl(cls.__name__, env),
+        weight_set=_validate_weight_set(cls.__name__, weight_set),
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -1465,6 +1532,7 @@ def _decorate_function(
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
+    weight_set: Optional[str] = None,
 ) -> Callable[..., Any]:
     if reentrant:
         raise ValueError(
@@ -1511,6 +1579,7 @@ def _decorate_function(
         runtime_formula={"": formulas["*"]} if "*" in formulas else {},
         config=_validate_config_decl(fn.__name__, config),
         env=_validate_env_decl(fn.__name__, env),
+        weight_set=_validate_weight_set(fn.__name__, weight_set),
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -1537,6 +1606,7 @@ def endpoint(
     handles: Optional[Any] = ...,
     config: Optional[Sequence[ConfigParam]] = ...,
     env: Optional[Sequence[str]] = ...,
+    weight_set: Optional[str] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -1557,6 +1627,7 @@ def endpoint(
     handles: Optional[Any] = None,
     config: Optional[Sequence[ConfigParam]] = None,
     env: Optional[Sequence[str]] = None,
+    weight_set: Optional[str] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -1622,6 +1693,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
+                weight_set=weight_set,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
@@ -1631,6 +1703,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
+                weight_set=weight_set,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"

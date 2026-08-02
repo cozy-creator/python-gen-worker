@@ -168,6 +168,12 @@ class EndpointSpec:
     # th#1257: this handler's declared serving tasks (@worker_function).
     # None = undeclared, which resolves NO quant approval hub-side.
     tasks: Optional[tuple] = None
+    # Paul 2026-08-02: how bounded is this endpoint's weight set — one of
+    # api.decorators.WEIGHT_SETS, or None when the author has not declared it.
+    # An ENDPOINT-level placement fact, deliberately not on `Compile`: it must
+    # never reach the cell contract, and keeping it off the AOT declaration
+    # makes that structural rather than a promise.
+    weight_set: Optional[str] = None
     distilled: Optional[bool] = None
     # pgw#654 gap #6: this handler's effective text pin
     # (@worker_function(text_len=) else the class Compile.text_len).
@@ -603,6 +609,7 @@ def _spec_for_handler(
         variant_kind=variant_kind,
         objectives=(tuple(wf.objectives) if wf is not None and wf.objectives is not None else None),
         tasks=(tuple(wf.tasks) if wf is not None and wf.tasks is not None else None),
+        weight_set=getattr(decl, "weight_set", None),
         distilled=(wf.distilled if wf is not None else None),
         text_len=(wf_text_len if wf_text_len is not None
                   else (decl.compile.text_len if decl.compile is not None else None)),
