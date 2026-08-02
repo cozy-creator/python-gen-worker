@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+## 0.90.6 (2026-08-02) — **the release that makes "fast" claimable and the mint survivable**: the numerics gate lands at the adopt-time choke point (until now every arm merely announced its own absence), the pool row is emitted at CONSTRUCTION so a mint that dies still reports K and its binding, the entry child reports its real DEVICE high-water, export-once is recorded as a measured negative, and the compute child execs unprivileged
+
+PATCH, so it rides the existing `0.90` entry in `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS`
+(major.minor match): no gate widen, no hub bounce, no deploy operator.
+
+Range verified BY ANCESTRY, not from cut notes — `git merge-base --is-ancestor` against HEAD for
+every must-ride, and `git rev-list --count v0.90.5..HEAD` = **17**.
+
+**Cut on a FULL-SUITE green taken on a clean export of the release commit**, not on the shared
+worktree: two other lanes had unrelated work in flight there (`aot_resume.py`,
+`test_worker_outbox_pgw869.py`, and edits to `topology.py`/`aot_compile_pool.py`/`chunk_cas.py`),
+and a suite run in that tree would have been a green for code this release does not contain.
+
+**Three reds fixed rather than carried.** `e8b3109` renamed `Settings.worker_jwt` ->
+`Settings.bootstrap_worker_jwt` on purpose, so every stale reader becomes an `AttributeError` at the
+call site instead of a silently frozen token. Three `SimpleNamespace` fakes in
+`tests/test_executor_adopt.py` still built the old field and raised at `lifecycle.py:258`.
+`5bce263` had repaired the SECURITY suite's copy; these were the rest. A red gate is not a cut, and
+"known failures" is the folklore this program is eliminating.
+
+Highlights, by what they change rather than by issue number:
+
+- **THE NUMERICS GATE (`8670f73`)** — a measurement, then the gate around it, at the `arm_aot`
+  choke point: `checked` / `degraded` / `refused` / `unmeasurable` / `gate_error`, where the last
+  two **refuse**, on the principle that *an arm nobody could record is an arm we do not make*.
+  Until this shipped, pgw#868 held that no run could be cited as evidence a gate works and every
+  arm merely announced `cell_numerics phase=unchecked`. **This is what makes A3's "fast" claim
+  admissible.** Cost is projected but **unmeasured** at ~7-14 s per arm on a 36-entry sdxl cell;
+  the `checked` row carries `duration_ms`, so the next real mint produces the first true number.
+  Note the trap it nearly shipped: wiring the probe dragged `aot_wrapper_split`/`aot_run_impl_split`
+  into `static_code_closure`, **which `cell_key.compute` keys every dynamo cell on** — the closure
+  walk follows function-level imports, so the declaration layer transitively depended on the mint
+  driver. Fixed with a leaf module plus re-exports (no import changed), but the hazard was latent
+  for **any serve-side consumer touching the declaration layer**, not a quirk of one lane.
+- **The pool row at CONSTRUCTION (`aa385ba`)** — K, its binding and the underwidth are decided
+  before the first entry compiles, and were previously reported only at a terminus three mints never
+  reached.
+- **The entry child's DEVICE high-water (`6607a4a`)** — `per_entry_device_bytes` = 11.07 GiB is
+  ~56 % arithmetic (`resident_weights * 1.25 + 5 GiB`) while reporting as `measured`. `EntryReport`
+  now carries the real `peak_device_bytes`/`peak_device_reserved_bytes`. Telemetry only: sizing
+  still uses the estimate, per pgw#830's instrument-first rule.
+- **Export-once is a measured NEGATIVE for sdxl (`6e1f307`)** — and every mint now reports
+  `export_reuse_eligible` for free, so the question is answered per family per mint at no cost.
+- **The compute child execs as an unprivileged uid (`f957ca8`)** — the delta-1 env strip stops being
+  polite and starts being enforced.
+- **One credential, not two (`e8b3109`)** — `Settings.worker_jwt` -> `bootstrap_worker_jwt`; the
+  fallbacks are gone rather than deprioritised.
+
 - **pgw#868 A4 — the entry child now reports its DEVICE high-water, because nothing ever measured
   it.** The compile pool is VRAM-bound at K=1-2 on both cards measured (L40S: 27.69 GiB free,
   K=2; 4090: 6.89 GiB free, K=1) while CPU would permit 63-127 — an order of magnitude, owned by one
