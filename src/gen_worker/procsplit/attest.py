@@ -33,8 +33,8 @@ divergence is visible instead of implicit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from dataclasses import dataclass
+from typing import Any, List
 
 # Slack on the wall-clock bound. The parent times the frame write and the frame
 # read, so its window already contains the child's; the margin only absorbs
@@ -49,8 +49,6 @@ class JobObservation:
     function: str = ""
     relayed_at: float = 0.0          # monotonic, when the RunJob frame was written
     concurrency_at_relay: int = 0    # jobs this parent already had open
-    accepted_at: Optional[float] = None
-    divergences: List[str] = field(default_factory=list)
 
 
 def attest(
@@ -130,7 +128,6 @@ def attest(
     # duration is meaningful (`per_output_second` — fail closed) or expected
     # (`per_output` on images). Re-adding a worker-side version of this check
     # needs a temporal-asset count on the wire, not a heuristic over `output_count`.
-    obs.divergences = found
     return found
 
 

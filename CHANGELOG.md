@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **pgw#876 §4 (where facts are built) — two dead fields on the billing-attestation observation.**
+  `JobObservation.accepted_at` had zero references anywhere in the repo, including tests.
+  `JobObservation.divergences` was write-only: `attest()` assigned it on the last line and nothing
+  ever read it — and the caller pops the observation out of `_observations` before calling, so the
+  write landed on an object already on its way to the garbage collector. `attest()` already
+  RETURNS the same list, which is what `_attest_result` uses. No wire change, no boot change.
+
 - **pgw#877 round 2 — the entry-child DEVICE measurement now reaches the decision it exists for,
   and a measurement is allowed to NARROW.** Three findings landed as ONE change because separately
   each looks optional and together they are one broken loop: a measurement that was taken, could
