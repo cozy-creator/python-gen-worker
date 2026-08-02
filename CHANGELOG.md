@@ -8,7 +8,7 @@ PATCH, so it rides the existing `0.90` entry in `TENSORHUB_SUPPORTED_GEN_WORKER_
 (major.minor match): no gate widen, no hub bounce, no deploy operator.
 
 Range verified BY ANCESTRY, not from cut notes — `git merge-base --is-ancestor` against HEAD for
-every must-ride, and `git rev-list --count v0.90.5..HEAD` = **17**.
+every must-ride, and `git rev-list --count v0.90.5..HEAD` = 17 at the time the bump was written; **22** as tagged.
 
 **Cut on a FULL-SUITE green taken on a clean export of the release commit**, not on the shared
 worktree: two other lanes had unrelated work in flight there (`aot_resume.py`,
@@ -22,7 +22,29 @@ call site instead of a silently frozen token. Three `SimpleNamespace` fakes in
 `5bce263` had repaired the SECURITY suite's copy; these were the rest. A red gate is not a cut, and
 "known failures" is the folklore this program is eliminating.
 
+Range grew after the version bump was written: two lanes landed on chaos while the cut was in
+flight (`780b3d0` outbox-for-FACTS, `d6067d2` parallel export), plus the export probe below, so
+0.90.6 is tagged at the CHANGELOG commit itself and `rev-list --count v0.90.5..<tag>` = **22**
+(verified, not asserted: the count was written as 20 from the pre-bump range and corrected).
+
 Highlights, by what they change rather than by issue number:
+
+- **The EXPORT phase's device high-water is measured for the first time (`f4f20d3`)** —
+  `aot_compile_child` resets and samples around the INDUCTOR compile, so `EntryReport.
+  peak_device_bytes` is the *compile's*; export runs serially in the PARENT and was never sampled.
+  `timings` gains `export_peak_device_bytes` / `export_peak_device_reserved_bytes`, taken before the
+  pool is built so no inductor allocation is attributed to export. **This is the number
+  `aot_export_parallel.width_for()` is gated on** — it returns 1 while it is unknown, deliberately
+  refusing to reuse the compile pool's `weights * 1.25 + 5 GiB` (inductor's activation and workspace
+  terms, ~56 % never observed) for a phase that traces with fake tensors and runs no kernel.
+- **Parallel export — the seam, the width rule, and an out-of-process byte-identity proof
+  (`d6067d2`)**, shipped **OFF** behind `GEN_WORKER_AOT_EXPORT_PARALLEL`. ~74 min -> ~20 min at
+  4-wide once the footprint above is known. The partition splits ONLY where the adapter arm changes
+  — that is exactly where the branch-disarm mutation fires — and an alternating declaration is never
+  merged (pinned by a test, because merging across the mutation is the one way this goes silently
+  wrong). Rows may reorder within a run, never across one; the caller reassembles by position, so
+  completion order is unobservable in the artifact. **Not yet wired into `aot_mint`**: a worker must
+  reconstruct the pipeline, which is family-specific and cannot be validated off-pod.
 
 - **THE NUMERICS GATE (`8670f73`)** — a measurement, then the gate around it, at the `arm_aot`
   choke point: `checked` / `degraded` / `refused` / `unmeasurable` / `gate_error`, where the last
