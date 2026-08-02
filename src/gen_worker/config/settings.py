@@ -84,6 +84,15 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # variant it selected for this pod.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
 
+    # th#1359 Part 2: what the hub bought this pod FOR. "serve" (default, every
+    # existing behaviour) or "forge" — mint-only: registers, receives no tenant
+    # dispatch, holds no resident serving model, mints, publishes, retires.
+    # See gen_worker.worker_mode. Deliberately NOT an env_seal knob (a sealed
+    # knob would re-digest the env_seal key axis and give a forge-minted cell a
+    # key no serving pod can compute — the exact property the forge exists to
+    # preserve). Unknown values read as "serve" and are echoed on Hello.
+    worker_mode: str = "serve"  # WORKER_MODE
+
     # tensorhub access for standalone clients (run/serve/prefetch). Production
     # workers get orchestrator-resolved manifests and never dial these.
     tensorhub_url: str = ""        # TENSORHUB_URL

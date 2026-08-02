@@ -16,6 +16,7 @@ from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import content_credentials
 from . import receipts
+from . import worker_mode
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
@@ -414,6 +415,12 @@ class Lifecycle:
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=gw_version,
             image_digest=self._settings.worker_image_digest,
+            # th#1359 Part 2: the RAW declared mode. The hub keys dispatch
+            # exclusion and drain immunity on it, so it ships as declared —
+            # `worker_mode.mode()` normalises an unknown value to "serve"
+            # locally, but the hub must be able to SEE that it sent something
+            # this image does not understand rather than infer a serving pod.
+            worker_mode=worker_mode.declared(),
             # git_commit intentionally unpopulated (pgw#514/P4): no launcher
             # ever set WORKER_GIT_COMMIT and Go never read WorkerResources
             # .git_commit — dead on both ends. Field stays on the wire
