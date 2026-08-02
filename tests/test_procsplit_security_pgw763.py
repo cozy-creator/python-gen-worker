@@ -105,9 +105,10 @@ def credentialed_split(tmp_path, captured_dials, monkeypatch, hub_http):
         extra_child_env={"PGW763_CHILD_MODULES": "harness.procsplit_endpoints"},
     )
     h.scheduler.file_base_url = f"http://127.0.0.1:{hub_http.server_address[1]}"
-    # The harness builds Settings with worker_jwt="" (its own default); give the
-    # parent the credential a real pod is launched with.
-    h.pc._settings = msgspec.structs.replace(h.pc._settings, worker_jwt=WORKER_JWT)
+    # The harness builds Settings with bootstrap_worker_jwt="" (its own default);
+    # give the parent the credential a real pod is launched with.
+    h.pc._settings = msgspec.structs.replace(
+        h.pc._settings, bootstrap_worker_jwt=WORKER_JWT)
     h.pc.transport._settings = h.pc._settings
     try:
         yield h
@@ -255,7 +256,8 @@ def forging_split(tmp_path, captured_dials, monkeypatch):
         extra_child_env={"PGW763_FAKE_MODE": "forge_hello"},
     )
     h.pc._settings = msgspec.structs.replace(
-        h.pc._settings, worker_jwt=WORKER_JWT, worker_image_digest="sha256:real")
+        h.pc._settings, bootstrap_worker_jwt=WORKER_JWT,
+        worker_image_digest="sha256:real")
     h.pc.transport._settings = h.pc._settings
     try:
         yield h
