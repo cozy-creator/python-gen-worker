@@ -113,14 +113,17 @@ def attest(
     # data plane through its own interpreter.
     #
     # It was not merely noisy. Each divergence dials the post-mortem carrier,
-    # which opens a SEPARATE Connect authenticated with `settings.worker_jwt` —
-    # the boot token, which rotation never updates — so past pod-create + TTL
-    # every dial is `worker_token_expired`, and three of them terminate the pod
+    # which opens a SEPARATE Connect; at the time this was found that carrier
+    # authenticated with `settings.worker_jwt` — the boot token, which rotation
+    # never updated — so past pod-create + TTL every dial was
+    # `worker_token_expired`, and three of them terminate the pod
     # (`worker_auth_wedge`). pgw#846 attempt sixteen died exactly there, 35
     # minutes into the longest AOT mint in the program's history. **A false
     # positive in a billing attestation became the proximate cause of a pod
-    # death.** The carrier's credential bug and the hub's strike counting are
-    # fixed separately (pgw#848 / th#1359); this removes the trigger.
+    # death.** The carrier now reads `worker_credential.current()` (pgw#848
+    # `7fa4eeb`) and a diagnostic dial can no longer condemn a pod (th#1359
+    # `705c316a`); this removes the false positive that fired it. Three
+    # independent layers — keep all three.
     #
     # th#1309 keeps the property, on the side that can actually hold it: the HUB
     # knows the endpoint's settlement model, so it alone can say whether a zero
