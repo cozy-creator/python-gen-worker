@@ -59,6 +59,17 @@ class _FakeHub(BaseHTTPRequestHandler):
             st["proxy_gets"] -= 1
             self._send_proxy_page(int(st.get("proxy_status", 503)))
             return
+        if self.path.split("?", 1)[0].endswith("/resolve"):
+            # th#1411 source-stamp reads: answer the pgw#654 resolve shape
+            # from state["resolve_body"], 404 when unset.
+            st.setdefault("resolve_gets", []).append(self.path)
+            body = st.get("resolve_body")
+            if body is None:
+                self._send(404, {"error": {"code": "not_found",
+                                           "message": "no such repo"}})
+                return
+            self._send(200, body)
+            return
         self._send(200, {"repo": {"path": self.path}})
 
     def do_POST(self) -> None:  # noqa: N802

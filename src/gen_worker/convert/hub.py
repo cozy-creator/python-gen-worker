@@ -471,7 +471,10 @@ class HubClient:
             "mode": mode,
             "files": [d.to_wire() for d in decls],
         }
-        if tags:
+        # th#1411: an EMPTY list is an explicit "move no tags" and must reach
+        # the wire (the classification gate refuses an OMITTED tags field on
+        # repos that carry tag rows); only None omits the field.
+        if tags is not None:
             df = _token(default_flavor)
             body["tags"] = [
                 {"tag": t, **({"default_flavor": df} if df else {})} for t in tags

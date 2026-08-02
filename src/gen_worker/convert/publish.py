@@ -73,6 +73,32 @@ def _flavor_files(flavor: ProducedFlavor) -> list[CommitFile]:
     return files
 
 
+def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None]:
+    """th#1411 restatement default: the pgw#654 stamps of the checkpoint being
+    converted, read from the hub's resolve of ``ctx.source``. Best-effort —
+    on any failure the publish proceeds unstamped and the hub's
+    classification gate stays the enforcement."""
+    info = getattr(ctx, "source", None) or {}
+    ref = str((info.get("ref") if isinstance(info, dict) else "") or "").strip()
+    if not ref:
+        return None, None
+    try:
+        from ..models.hub_client import resolve_repo
+        from ..models.refs import parse_model_ref
+
+        th = parse_model_ref(ref).tensorhub
+        if th is None:
+            return None, None
+        resolved = resolve_repo(th, base_url=client.base_url, token=client.token)
+        return resolved.objective, resolved.distilled
+    except Exception as exc:
+        log = getattr(ctx, "log", None)
+        if callable(log):
+            log(f"source-stamp read failed ({exc}); "
+                "publishing without restated classification")
+        return None, None
+
+
 def publish_flavors(
     ctx: Any,
     flavors: Iterable[ProducedFlavor],
@@ -81,6 +107,8 @@ def publish_flavors(
     tags: Iterable[str] | None = None,
     mode: str = "replace",
     metadata: Mapping[str, Any] | None = None,
+    objective: str | None = None,
+    distilled: bool | None = None,
 ) -> list[CommitResult]:
     """Publish each ProducedFlavor as one commit. ``destination_repo`` falls
     back to the reserved-name ``ctx.destination`` payload field.
@@ -98,6 +126,18 @@ def publish_flavors(
         raise ValueError("destination_repo is required (payload.destination.repo)")
 
     client = HubClient.from_ctx(ctx)
+    # th#1411: a v2 publish mints a new identity and inherits nothing, so a
+    # publish into a classified repo must restate objective/distilled. Default:
+    # restate the SOURCE checkpoint's hub stamps — this producer just derived
+    # the flavors from exactly that source, and quantize/fuse/cast preserve
+    # objective/distillation, so the restatement is a first-hand declaration,
+    # not the silent inheritance th#1400 forbids. Explicit caller values win.
+    if objective is None or distilled is None:
+        src_objective, src_distilled = _source_stamps(ctx, client)
+        if objective is None:
+            objective = src_objective
+        if distilled is None:
+            distilled = src_distilled
     results: list[CommitResult] = []
     for flavor in flavors:
         # th#1362 item 4: OUR producers never emit shards, and this is the
@@ -152,6 +192,8 @@ def publish_flavors(
             dtype=attrs.get("dtype", ""),
             file_layout=attrs.get("file_layout", ""),
             file_type=attrs.get("file_type", ""),
+            objective=str(objective or ""),
+            distilled=distilled,
             metadata=meta,
             provenance=provenance,
         ))
