@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.90.4 (2026-08-01) — **the release that stops us losing measurements**: an ABANDONED mint keeps its phase table (three mints have died and taken K, per-entry timings, `prop_probe_s` and the peak-VRAM matrix with them), the forge lands as a MODE, and the export-reuse gate becomes the cheap one
+
+- **pgw#848 `7322722` — an ABANDONED mint kept nothing.** `f9c1b2d` closed this for the ABORTED
+  exit; the abandoned exit emitted a bare `status=abandoned total_s=…` and discarded the pool
+  ledger, per-entry timings and every peak. **Measured cost: attempts sixteen and seventeen died
+  at 1,741 s and 2,121 s and produced ZERO usable rows between them**, with four lanes waiting on
+  numbers the child had already computed. The child now rewrites its phase table atomically on
+  every beat and ABANDONED is its own terminus.
+- **pgw#848 `dbaedc2` (+ `242c111`) — the pod-side reaper's progress signal had no producer.**
+  `/usr/local/bin/podguard-progress` had no writer anywhere in gen-worker; the mint now emits a
+  changing progress token on the same beat it writes the phase snapshot. `242c111` corrects
+  `dbaedc2`'s own claim: it did NOT prevent attempt sixteen and is inert on hub-created pods —
+  **that reap was renter-liveness only, and the fix for it was the podguard lease bug.**
+- **th#1359 Part 2 `630dc16` + `728a234` — the forge is a MODE, not a fork.** `WORKER_MODE`
+  (settings + Hello axis) and the forge driver: mint-only pods refuse tenant dispatch, join their
+  own mint, and retire on a TYPED terminal. Not proven on hardware — this cut is what the first
+  forge pod needs.
+- **pgw#848 x th#1359 `f833032` — on a forge pod every tenant reserve protects nobody.** Collapsed,
+  in the file that owns them: **K 1 → 4**.
+- **pgw#847 `1a0d084` — the CHEAP export-reuse gate.** 0.90.3 shipped `14021eb`'s expensive
+  (~780 s) gate latent behind a default-off flag; enabling it there would have measured the feature
+  as a loss the shipped-later version does not have. The gate is now cheap enough that the change's
+  SIGN cannot depend on `prop_s`.
+- **pgw#853 `564c850` — thunk equality must be SOURCE identity.** 0.90.3 carries a hole where a
+  non-idempotent re-registration propagates `DeclarationError` out of endpoint discovery and **a pod
+  fails to boot**; it was safe there only by coincidence of import path. Must-ride per the
+  pgw#852/#853 lane. `7449f3a` fixes the harness's own dead-code-after-raise shape.
+- **pgw#848 `9f582ba` + `3b4da5c`** — the conftest collection-order import fix (the `-n 4`
+  collection error observed while cutting 0.90.3), and a gate run invalidated by editing the tree
+  under it.
+
+
 ## 0.90.3 (2026-08-01) — **three families that could never be wired to the AOT lane now can** (pgw#853: a declaration that refuses to MINT was refusing to IMPORT), and `prop_s` is measured so the export-reuse change can be decided on its own sign (pgw#847)
 
 - **pgw#853 — a declaration that REFUSES must not be able to refuse the ENDPOINT.**
