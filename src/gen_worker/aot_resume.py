@@ -88,7 +88,101 @@ REFUSE_UNSTATED = "context_unstated"   # an axis this runtime cannot state
 REFUSE_FILE_MISSING = "file_missing"
 REFUSE_FILE_CONTENT = "file_content"   # size or sha256 moved under us
 
+#: Where banks live: a WORKER-LOCAL, persistent directory, deliberately NOT
+#: under the mint's own root. `fleet_cells.abandon_self_mint` rmtree's
+#: `mint_root`, and abandonment is exactly what a crashed mint ends in — a bank
+#: under that root would be deleted on its way out of the one case it exists
+#: for. Sited beside `local_cells`' own mint staging (`.mint`) because that is
+#: already the pod's compile-scratch neighbourhood, and NOT in the CAS
+#: (`cache_dir`), which `disk_gc` owns and sweeps by reference index.
+RESUME_DIRNAME = ".mint-resume"
+
+#: A capacity bound on the whole resume area, enforced oldest-first at open.
+#: A BYTE cap rather than a count: an entry's compiled files are code-only
+#: (pgw#704 B1) and small, but "small" is a property of the graph, so a count
+#: would bound the wrong thing. Whole key-scopes are dropped, never parts of
+#: one — half a bank is a bank whose remaining entries still admit, which is
+#: fine, but a partial drop wastes the copy for no recovery.
+ENV_MAX_BYTES = "GEN_WORKER_MINT_RESUME_MAX_BYTES"
+DEFAULT_MAX_BYTES = 4 * 1024**3
+
 _ROOT: Optional[str] = None
+
+
+def bank_root(scope: str) -> Path:
+    """The bank directory for one mint SCOPE, outside the mint's own root.
+
+    ``scope`` is the pending's ``cell_key``. For an AOT pending that is a
+    CAPTURE HANDLE, not the published cell's key (a real AOT key folds the
+    combined graph hash and is unknowable until the export finishes) — which is
+    exactly right here: this is a SCOPE, and identity is the per-entry check
+    that runs inside it. A colliding scope cannot admit anything wrong; it can
+    only produce a graph-hash refusal.
+    """
+    from . import local_cells
+
+    safe = "".join(
+        c if (c.isalnum() or c in "._-") else "_" for c in str(scope))[:48]
+    digest = hashlib.sha256(str(scope).encode()).hexdigest()[:12]
+    return local_cells.store_root() / RESUME_DIRNAME / f"{safe or 'scope'}-{digest}"
+
+
+def _dir_bytes(path: Path) -> int:
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def sweep(keep: Path, *, max_bytes: int = 0) -> int:
+    """Hold the resume area under its capacity bound, oldest scope first.
+
+    ``keep`` is never dropped. Everything else is ordered by mtime, newest
+    first, and whole scopes are removed from the tail until the total fits. An
+    actively-running mint's bank is the newest thing in the area (every banked
+    entry touches it), so the loser is an abandoned mint nobody came back for
+    — and the cost of getting that wrong is one recompile, never a wrong cell.
+    """
+    cap = int(max_bytes or os.environ.get(ENV_MAX_BYTES, "") or DEFAULT_MAX_BYTES)
+    area = keep.parent
+    scopes: List[Tuple[float, Path, int]] = []
+    try:
+        children = [p for p in area.iterdir() if p.is_dir()]
+    except OSError:
+        return 0
+    for path in children:
+        try:
+            scopes.append((path.stat().st_mtime, path, _dir_bytes(path)))
+        except OSError:
+            continue
+    total = sum(size for _, _, size in scopes)
+    dropped = 0
+    for _, path, size in sorted(scopes, reverse=True):
+        if total <= cap:
+            break
+        if path == keep:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        total -= size
+        dropped += 1
+        logger.info(
+            "aot-resume: swept the banked scope %s (%.1f MB) — the resume area "
+            "is capped at %.1f GB", path.name, size / 1e6, cap / 1024**3)
+    return dropped
+
+
+def discard(scope: str) -> None:
+    """Drop one scope's bank. Called when the cell it was recovering has been
+    ADOPTED — at that terminus the bank has no further job, and holding it is
+    the only way this area grows without bound on a healthy pod."""
+    try:
+        shutil.rmtree(bank_root(scope), ignore_errors=True)
+    except Exception:  # noqa: BLE001 — hygiene never fails a mint
+        logger.debug("aot-resume: discard failed", exc_info=True)
 
 
 def set_root(path: Any) -> None:
@@ -450,6 +544,7 @@ def open_bank(
     try:
         path = Path(where)
         (path / ENTRIES_DIR).mkdir(parents=True, exist_ok=True)
+        sweep(path)
         return EntryBank(
             root=path, context=context_facts(inductor_configs))
     except Exception as exc:  # noqa: BLE001 — never fail a mint for a cache
@@ -461,7 +556,10 @@ def open_bank(
 
 __all__ = [
     "BANK_V",
+    "DEFAULT_MAX_BYTES",
+    "ENV_MAX_BYTES",
     "ENV_RESUME_DIR",
+    "RESUME_DIRNAME",
     "MISS",
     "REFUSE_CONTEXT",
     "REFUSE_ENTRY",
@@ -470,10 +568,14 @@ __all__ = [
     "REFUSE_FORMAT",
     "REFUSE_GRAPH",
     "REFUSE_UNSTATED",
+    "UNSTATED",
     "Admission",
     "EntryBank",
+    "bank_root",
     "context_facts",
+    "discard",
     "open_bank",
     "root",
     "set_root",
+    "sweep",
 ]

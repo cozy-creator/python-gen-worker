@@ -445,6 +445,98 @@ def test_a_bank_torn_mid_write_is_a_cold_miss_not_a_short_entry(
     assert other.admit(entry, program).reason == aot_resume.REFUSE_FORMAT
 
 
+def test_the_bank_outlives_an_abandoned_mint(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """Abandonment is how a CRASHED mint ends, so the bank must not be under
+    the thing abandonment deletes.
+
+    ``fleet_cells.abandon_self_mint`` rmtree's ``mint_root``. A bank sited
+    there would be destroyed on its way out of the one case it exists for —
+    everything else here would recover ~5.2 h and the cleanup would delete it.
+    Driven through the REAL abandon path, not an assertion about a path string.
+    """
+    from types import SimpleNamespace
+
+    from gen_worker import fleet_cells, local_cells, mint_delegate
+
+    monkeypatch.setenv(local_cells.ENV_STORE_DIR, str(tmp_path / "store"))
+    mint_root = tmp_path / "selfmint-abc"
+    (mint_root / "capture").mkdir(parents=True)
+    key = "ck5:sdxl:deadbeef"
+
+    # 1. The request the parent actually builds points OUTSIDE the mint tree.
+    request = mint_delegate.build_request(
+        mint_delegate.MintTask(
+            pending=SimpleNamespace(
+                family="sdxl", cell_key=key, capture_dir=mint_root / "capture",
+                mint_root=mint_root, recipe="aot",
+                cfg=SimpleNamespace(shapes=(), targets=(), family="sdxl")),
+            pipe=None, function="generate", modules=("m",)),
+        workdir=mint_root / "child-1", cap_bytes=0)
+    assert request.resume == str(aot_resume.bank_root(key))
+    assert not Path(request.resume).is_relative_to(mint_root), (
+        "a bank under mint_root is deleted by the abandon path — which is the "
+        "path a crashed mint takes")
+
+    # 2. Bank something real-shaped there, then abandon for real.
+    bank = aot_resume.open_bank(request.resume, inductor_configs={})
+    assert bank is not None
+    loose = tmp_path / "wrapper.so"
+    loose.write_bytes(b"compiled bytes")
+    program = _program(0)
+    from gen_worker import graph_hash as graph_hash_mod
+
+    bank.put(_name(0), graph_hash_mod.graph_hash(program), [str(loose)])
+
+    pending = fleet_cells.PendingSelfMint(
+        family="sdxl", cell_key=key, ref=f"repo#{key}",
+        cfg=SimpleNamespace(family="sdxl"), target=mint_root / "cell.tar.gz",
+        capture_dir=mint_root / "capture", mint_root=mint_root,
+        publisher=None, delegated=True, recipe=fleet_cells.RECIPE_AOT)
+    fleet_cells.abandon_self_mint(pending)
+
+    assert not mint_root.exists(), (
+        "the abandon path must still clean the mint tree up — this test would "
+        "be vacuous if it did not")
+    after = aot_resume.open_bank(request.resume, inductor_configs={})
+    assert after is not None
+    admission = after.admit(_name(0), program)
+    assert admission.ok, (
+        f"the banked entry did not survive abandonment: {after.outcomes!r}")
+
+    # 3. ...and the ADOPTED terminus is the one that drops it.
+    aot_resume.discard(key)
+    assert not Path(request.resume).exists()
+
+
+def test_the_resume_area_is_capacity_bounded(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """A bank that survives every failure is a bank that grows without bound
+    on an unhealthy pod, so the area is capped and swept oldest scope first."""
+    monkeypatch.setenv(local_cells_env(), str(tmp_path / "store"))
+    monkeypatch.setenv(aot_resume.ENV_MAX_BYTES, "4096")
+    keep = aot_resume.bank_root("keep-me")
+    for scope, size in (("old", 4096), ("older", 4096)):
+        root = aot_resume.bank_root(scope)
+        (root / aot_resume.ENTRIES_DIR).mkdir(parents=True)
+        (root / "blob").write_bytes(b"x" * size)
+        os.utime(root, (1, 1))          # deliberately the oldest scopes
+    (keep / aot_resume.ENTRIES_DIR).mkdir(parents=True)
+    (keep / "blob").write_bytes(b"x" * 4096)
+
+    assert aot_resume.sweep(keep) == 2
+    assert keep.exists(), "the scope being opened is never the one swept"
+    assert not aot_resume.bank_root("old").exists()
+
+
+def local_cells_env() -> str:
+    from gen_worker import local_cells
+
+    return local_cells.ENV_STORE_DIR
+
+
 def test_no_resume_root_means_no_bank_and_no_behaviour_change() -> None:
     """The off path is the untouched path: no admission pass, no hashing, no
     copies, and the inductor cache stays where it was."""

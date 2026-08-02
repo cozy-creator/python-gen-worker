@@ -1505,7 +1505,16 @@ def abandon_self_mint(pending: "PendingSelfMint") -> None:
     genuinely unexercised with no proven sibling). Never packed, never
     published — only the temp capture dir is cleaned up. A no-op when a
     proven sibling already finalized the shared capture (the artifact and
-    its publish must survive)."""
+    its publish must survive).
+
+    pgw#848 item 5: this rmtree is why the crash-only resume bank is NOT sited
+    under ``mint_root``. Abandonment is how a crashed mint ends, so a bank here
+    would be destroyed on its way out of the one case it exists for. It lives
+    in the worker-local resume area instead (``aot_resume.bank_root``), keyed
+    by scope, and is dropped only when a cell actually ADOPTS. Keeping it past
+    an abandonment is safe by construction rather than by policy: nothing is
+    re-admitted without its identity being re-derived from a freshly exported
+    program."""
     if pending._state.get("minted") is not None:
         return
     mark_terminus(pending, TERMINUS_ABANDONED)

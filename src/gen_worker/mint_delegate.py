@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from . import activity as activity_mod
+from . import aot_resume
 from . import mint_budget
 from . import mint_process
 from . import progress as progress_mod
@@ -183,15 +184,16 @@ def build_request(
         # back what it measured.
         phases_snapshot=str(
             Path(workdir) / mint_process.PHASES_SNAPSHOT_NAME),
-        # pgw#848 item 5: a sibling of `workdir`, not a child of it. Every
-        # other path here is per-attempt by design; this one must outlive the
-        # attempt or the crash-only mint has nothing to resume FROM. It also
-        # outlives the mint CHILD, so a launch driver that restarts the child
-        # in place on the same pod gets the same recovery for free — the
-        # `mint_root` of an existing pending is reused verbatim
-        # (`fleet_cells.arm_self_mint`), which is what makes the two compose
-        # without either knowing about the other.
-        resume=str(Path(pending.mint_root) / "resume"),
+        # pgw#848 item 5: outside the mint's own tree entirely. Every other
+        # path here is per-attempt by design; this one must outlive not just
+        # the attempt but the PENDING — `abandon_self_mint` rmtree's
+        # `mint_root`, and abandonment is how a crashed mint ends, so a bank
+        # sited there would be deleted on its way out of the one case it
+        # exists for. Keyed by the pending's `cell_key` as a SCOPE (identity is
+        # the per-entry re-derivation inside it), so a mint child restarted in
+        # place on the same pod — or a whole new pending for the same cell on a
+        # later boot — finds the same bank.
+        resume=str(aot_resume.bank_root(pending.cell_key)),
         cfg=cfg_spec(pending.cfg),
         snapshots=dict(task.snapshots),
         component_paths={
@@ -365,6 +367,11 @@ async def build_cell(
             minted = fleet_cells.adopt_delegated_mint(
                 task.pipe, pending, outcome.artifact)
             if minted is not None:
+                # pgw#848 item 5: the ONE terminus where the bank's job is
+                # finished. It survives every failure (that is the point) and
+                # is dropped on success, which is what keeps a healthy pod's
+                # resume area from being the only thing that grows.
+                aot_resume.discard(str(pending.cell_key))
                 return DelegatedResult(
                     status=ADOPTED, minted=minted, attempts=attempts,
                     budget=budget)
