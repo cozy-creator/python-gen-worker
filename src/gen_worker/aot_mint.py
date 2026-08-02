@@ -1708,6 +1708,24 @@ def _mint_cell(
     reuse_state = aot_export_reuse.ReuseState(
         work, inductor_configs=inductor_configs)
     t_export = time.monotonic()
+    # pgw#868 A4: the EXPORT phase's own device high-water, which nothing has
+    # ever measured. `aot_compile_child` resets and samples around the INDUCTOR
+    # compile (`peak_device_bytes` in `EntryReport`), so that number is the
+    # compile's; export runs HERE, serially, in the parent, and was never
+    # sampled at all. The two are different questions and must not share a
+    # figure: export traces with FAKE tensors and executes no kernel, so the
+    # compile pool's `weights * 1.25 + 5 GiB` — whose activation and workspace
+    # terms are INDUCTOR'S, and ~56 % of which was never observed — does not
+    # describe it. That is exactly why `aot_export_parallel.width_for()`
+    # returns 1 while this is unknown rather than guessing and OOMing a
+    # 74-minute phase. A probe: it reads and clears a counter and decides
+    # nothing (pgw#830 — instrument first, optimise never in the same change).
+    try:
+        import torch as _t
+        if _t.cuda.is_available():
+            _t.cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        pass
     progress.beat(
         PHASE_TRACE_GRAPH, 0, len(rows),
         f"{len(rows)} declared class row(s)")
@@ -1767,6 +1785,19 @@ def _mint_cell(
 
     if parallel:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
+        # Sampled BEFORE the pool is built, so no inductor allocation can be
+        # attributed to export. Reported even when zero (no CUDA / probe
+        # failed), because a missing key and a measured zero are different
+        # facts and the width rule must be able to tell them apart.
+        try:
+            import torch as _t
+            if _t.cuda.is_available():
+                timings["export_peak_device_bytes"] = float(
+                    _t.cuda.max_memory_allocated())
+                timings["export_peak_device_reserved_bytes"] = float(
+                    _t.cuda.max_memory_reserved())
+        except Exception:  # noqa: BLE001 — a probe never changes an outcome
+            pass
         progress.beat(
             PHASE_INDUCTOR_COMPILE, 0, len(minted),
             f"{len(minted)} entries, {width.workers} wide")
