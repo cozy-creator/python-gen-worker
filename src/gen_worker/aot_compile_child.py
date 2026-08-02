@@ -103,6 +103,43 @@ def _device_lock_wait_s() -> float:
     return round(float(getattr(lock, "waited_s", 0.0) or 0.0), 3) if lock else 0.0
 
 
+def _peak_device() -> tuple:
+    """This entry child's DEVICE high-water — allocated and reserved.
+
+    pgw#868 A4. Nothing has ever measured this, and it is the number that
+    holds K to 1-2. The pool's per-entry device ask is
+    `mint_budget.co_residency().need_bytes`, which is NOT a compile-child
+    measurement at all: it is `resident_weights * 1.25 + 5 GiB`, i.e. sdxl's
+    4.87 GiB of weights plus an activation term the module's own docstring
+    calls "a fraction nobody measured" plus a flat context+workspace constant.
+    That estimate is what `per_entry_device_basis: 'measured'` reports as
+    "measured" — meaning "the caller handed a probed number", not "somebody
+    watched a compile child".
+
+    So this reports what the child ACTUALLY peaked at. Telemetry only: no
+    decision reads it, and the width policy is deliberately NOT changed in the
+    same breath (pgw#830's rule — instrument first, optimise never in the same
+    change). BOTH numbers, because they answer different questions: `allocated`
+    is what the compile needed, `reserved` is what the caching allocator held
+    and therefore what a concurrent sibling actually cannot have.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return (0, 0)
+        return (int(torch.cuda.max_memory_allocated()),
+                int(torch.cuda.max_memory_reserved()))
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        return (0, 0)
+
+
+def _device_fields() -> dict:
+    allocated, reserved = _peak_device()
+    return {"peak_device_bytes": allocated,
+            "peak_device_reserved_bytes": reserved}
+
+
 def run(job: EntryJob) -> int:
     from . import aot_device_lock, aot_mint, env_seal
 
@@ -158,11 +195,20 @@ def run(job: EntryJob) -> int:
                 f"{type(exc).__name__}: {exc}"),
             elapsed_s=round(time.monotonic() - started, 2),
             peak_rss_bytes=_peak_rss(),
+            **_device_fields(),
             **_span_fields(ledger, {}, {}, seal_detail)))
         return EXIT_REFUSED
 
     # pgw#757's phase split is read from dynamo's IN-PROCESS counters, so it
     # has to be measured here, in the process that does the compiling.
+    # pgw#868 A4: reset so the high-water below is this ENTRY'S COMPILE, not
+    # whatever `torch.export.load` or the seal's own torch import allocated
+    # first. A probe: it reads and clears a counter and decides nothing.
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        pass
     before = aot_compile_spans.phase_snapshot()
     try:
         with ledger.span("compile_wall_s"):
@@ -175,6 +221,7 @@ def run(job: EntryJob) -> int:
             entry=job.entry, status=REFUSED, detail=str(exc),
             elapsed_s=round(time.monotonic() - started, 2),
             peak_rss_bytes=_peak_rss(),
+            **_device_fields(),
             **_span_fields(ledger, partition, overlays, seal_detail)))
         return EXIT_REFUSED
 
@@ -186,6 +233,7 @@ def run(job: EntryJob) -> int:
         detail=f"{len(files)} loose file(s)",
         elapsed_s=round(time.monotonic() - started, 2),
         peak_rss_bytes=_peak_rss(),
+        **_device_fields(),
         metrics_raw={k: v for k, v in sorted(raw.items())},
         **_span_fields(ledger, partition, overlays, seal_detail)))
     return EXIT_COMPILED

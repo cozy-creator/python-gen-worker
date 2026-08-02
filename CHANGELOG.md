@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **pgw#868 A4 — the entry child now reports its DEVICE high-water, because nothing ever measured
+  it.** The compile pool is VRAM-bound at K=1-2 on both cards measured (L40S: 27.69 GiB free,
+  K=2; 4090: 6.89 GiB free, K=1) while CPU would permit 63-127 — an order of magnitude, owned by one
+  number: `per_entry_device_bytes` = 11.07 GiB. That number is **not a compile-child measurement**.
+  It is `mint_budget.co_residency().need_bytes` = `resident_weights * 1.25 + 5 GiB`, i.e. sdxl's
+  4.87 GiB of UNet plus an activation term `mint_budget`'s own docstring calls *"a fraction nobody
+  measured"* plus a flat context+workspace constant — **~56 % of the ask is arithmetic, not
+  observation** — and it reports as `per_entry_device_basis: 'measured'`, which only ever meant "the
+  caller handed a probed number". It is also the estimate that, used as a hard cap, killed two mints
+  with 21.48 GiB free (pgw#848). `EntryReport` now carries `peak_device_bytes` and
+  `peak_device_reserved_bytes` (allocated *and* reserved — allocated is what the compile needed,
+  reserved is what a concurrent sibling actually cannot have), reset immediately before the compile
+  so the peak is the compile's rather than `torch.export.load`'s, and reported on every exit path
+  including both refusals. Fields are defaulted, so an older child's report still decodes.
+  **Telemetry only: `entry_workers` still sizes off the estimate.** Replacing it with the
+  measurement is a separate change with its own evidence, per pgw#830's instrument-first rule — but
+  if the real footprint is materially below 11.07 GiB, K roughly doubles on an L40S and every other
+  compile-speed win in A4 multiplies by it.
+
 - **pgw#847/#868 A4 — export-once is a MEASURED NEGATIVE for sdxl, and every mint now says so for
   free.** The feature shipped in 0.90.3/0.90.5 behind an off-by-default flag on the strength of a
   byte-identity proof taken on a CONV probe. Re-asked of attention, and then of the real

@@ -708,6 +708,12 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     detail: str = ""
     elapsed_s: float = 0.0
     peak_rss_bytes: int = 0
+    #: pgw#868 A4: the child's DEVICE high-water, allocated and reserved.
+    #: Defaulted so an older child's report still decodes. Telemetry only —
+    #: `entry_workers` still sizes off `mint_budget.co_residency`, and
+    #: replacing an estimate with this measurement is a SEPARATE change.
+    peak_device_bytes: int = 0
+    peak_device_reserved_bytes: int = 0
     #: Inductor's own phase split (lowering / codegen / host C++ compile+link)
     #: MEASURED IN THE CHILD. pgw#757's instrument-first deliverable is read
     #: from dynamo's in-process counters, which do not move in the parent once
