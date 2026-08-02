@@ -55,7 +55,7 @@ def _lifecycle(tmp_path: Path) -> Lifecycle:
     store = ModelStore(_noop_send, cache_dir=tmp_path)
     ex = Executor([], _noop_send, store=store)
     lc = Lifecycle(
-        SimpleNamespace(worker_jwt="", worker_id="w-th1330",
+        SimpleNamespace(bootstrap_worker_jwt="", worker_id="w-th1330",
                         runpod_pod_id="", worker_image_digest=""),
         ex,
     )

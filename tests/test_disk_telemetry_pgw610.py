@@ -147,7 +147,7 @@ def test_hello_and_state_delta_carry_measured_disk(tmp_path: Path) -> None:
         await store.refresh_disk_usage_report()
         ex = Executor([], _noop_send, store=store)
         lc = Lifecycle(
-            SimpleNamespace(worker_jwt="", worker_id="w-test",
+            SimpleNamespace(bootstrap_worker_jwt="", worker_id="w-test",
                             runpod_pod_id="", worker_image_digest=""),
             ex,
         )
