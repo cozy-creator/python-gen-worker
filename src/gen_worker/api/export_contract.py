@@ -533,12 +533,35 @@ class _Thunk:
         self._built = decl
         return decl
 
+    def _identity(self) -> Tuple[Any, ...]:
+        """SOURCE identity, deliberately not object identity.
+
+        A ``Compile`` re-registered from a second execution of the same file
+        is VALUE-equal (msgspec Struct), so registration was idempotent. Two
+        thunks are two distinct function objects, so a naive ``==`` made it
+        NOT idempotent — and that regression was not academic: the endpoint
+        walker (``discovery/walk.py``) imports EVERY submodule of an endpoint
+        package, so a declaration module reachable under two module names
+        registered twice, the second raised ``DeclarationError``, and the
+        walk died with ``EndpointImportError``. I.e. the compile feature broke
+        serving again, through a different door. Measured on qwen-image.
+
+        Same function, same source file => same declaration, whatever module
+        name it was loaded under. A genuinely different declaration still
+        conflicts by name.
+        """
+        fn = self.factory
+        code = getattr(fn, "__code__", None)
+        if code is None:  # a callable object, not a function
+            return (self.family, id(fn))
+        return (self.family, getattr(fn, "__qualname__", ""),
+                getattr(code, "co_filename", ""))
+
     def __eq__(self, other: Any) -> bool:
-        return (isinstance(other, _Thunk) and other.family == self.family
-                and other.factory == self.factory)
+        return isinstance(other, _Thunk) and other._identity() == self._identity()
 
     def __hash__(self) -> int:
-        return hash((self.family, self.factory))
+        return hash(self._identity())
 
 
 def register_export_declaration(

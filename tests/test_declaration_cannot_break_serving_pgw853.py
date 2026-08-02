@@ -302,3 +302,122 @@ def test_the_pod_serves_eager_rather_than_failing_the_arm(
 
     assert outcome.armed is False
     assert outcome.self_mint is not None
+
+
+# ---------------------------------------------------------------------------
+# 4. THE REGRESSION THIS FIX ALMOST SHIPPED WITH — registering a thunk twice
+#    from the same source file must be IDEMPOTENT.
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_declaration_file_registered_twice_is_idempotent() -> None:
+    """Measured on qwen-image, and it is the same defect class this whole
+    file exists to kill, entering through a different door.
+
+    `discovery/walk.py` imports EVERY submodule of an endpoint package, so an
+    in-wheel declaration module is reachable under more than one module name.
+    A `Compile` re-registered from a second execution is VALUE-equal (msgspec
+    Struct) so it was always idempotent; two THUNKS are two distinct function
+    objects, so the naive `==` raised `DeclarationError` on the second
+    registration and the walk died with `EndpointImportError` — a pod that
+    does not boot, for a compile feature.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent / "harness" / "blocked_declaration_parts.py"
+
+    def _exec_under(name: str):
+        spec = importlib.util.spec_from_file_location(name, src)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    reset_export_declarations()
+    try:
+        first = _exec_under("parts_alias_one")
+        second = _exec_under("parts_alias_two")
+        assert first.build_declaration is not second.build_declaration, (
+            "the two module objects must really be distinct, or this test "
+            "proves nothing")
+
+        register_export_declaration(first.build_declaration, family=FAMILY)
+        # Must NOT raise: same function, same source file, same declaration.
+        register_export_declaration(second.build_declaration, family=FAMILY)
+
+        assert registered_export_families() == (FAMILY,)
+        assert export_declaration(FAMILY).family == FAMILY
+    finally:
+        reset_export_declarations()
+
+
+def test_a_genuinely_different_thunk_still_conflicts_by_name() -> None:
+    """Source identity must not be so loose that two real declarations for
+    one family register over each other silently."""
+    reset_export_declarations()
+    try:
+        register_export_declaration(_raising_thunk, family=FAMILY)
+        with pytest.raises(DeclarationError):
+            register_export_declaration(_other_thunk, family=FAMILY)
+        # ...and the owner can still say so explicitly.
+        register_export_declaration(_other_thunk, family=FAMILY, replace=True)
+    finally:
+        reset_export_declarations()
+
+
+def _other_thunk():
+    from harness.blocked_declaration_parts import build_declaration
+
+    return build_declaration()
+
+
+# ---------------------------------------------------------------------------
+# 5. THE WALKER DOOR — an in-wheel declaration is imported by DISCOVERY, not
+#    only by main.py, so `import_export_declaration` cannot be the only guard.
+# ---------------------------------------------------------------------------
+
+
+def test_a_package_whose_declaration_submodule_refuses_still_serves() -> None:
+    """The shape ltx-2.3 / qwen-image / z-image actually ship.
+
+    `discovery/walk.py` imports EVERY submodule of an endpoint package and
+    raises `EndpointImportError` on any failure. So for an in-wheel
+    declaration the walker imports it DIRECTLY — `main.py`'s guarded import is
+    not on that path at all, and the thunk is what actually makes these
+    families safe. Proven the only way that means anything: a real worker, a
+    real package, a real job over the wire.
+    """
+    with hub_double(modules=("harness.blocked_pkg",)) as (scheduler, _harness):
+        conn = scheduler.wait_connection(0)
+        conn.wait_for(is_ready)
+        conn.send(run_job=pb.RunJob(
+            request_id="r-pkg", attempt=1, function_name="pkg-echo",
+            input_payload=msgspec.msgpack.encode({"text": "marco"})))
+        res = conn.wait_for(is_result_for("r-pkg")).job_result
+
+    assert res.status == pb.JOB_STATUS_OK, res.safe_message
+    assert msgspec.msgpack.decode(res.inline)["response"] == "pkg-served:marco"
+
+
+def test_the_walker_registers_the_blocked_family_and_it_refuses_at_the_mint() -> None:
+    """Registered by the walk, and still refusing — both halves, one pass."""
+    from gen_worker.registry import collect_endpoints
+
+    # The module may already be in sys.modules from a sibling test, and a
+    # cached module does not re-run its registration. Re-assert it so this
+    # test states one thing (collection does not detonate the thunk) rather
+    # than accidentally testing import order.
+    mod = importlib.import_module("harness.blocked_pkg.aot_declaration")
+    reset_export_declarations()
+    register_export_declaration(mod._declaration, family=FAMILY)
+    try:
+        specs = collect_endpoints(["harness.blocked_pkg"])
+
+        assert specs, "the package collected no endpoint"
+        assert FAMILY in registered_export_families()
+        with pytest.raises(MintRefused) as excinfo:
+            export_declaration(FAMILY)
+        assert "B1-harness" in str(excinfo.value)
+    finally:
+        reset_export_declarations()
