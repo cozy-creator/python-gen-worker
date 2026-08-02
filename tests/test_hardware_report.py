@@ -49,7 +49,7 @@ def _settings(**overrides: object) -> Settings:
     base = dict(
         orchestrator_public_addr="127.0.0.1:1",
         worker_id="worker-1",
-        worker_jwt="",
+        bootstrap_worker_jwt="",
         worker_image_digest="sha256:deadbeef",
         runpod_pod_id="pod-1",
     )
@@ -93,7 +93,7 @@ def test_build_hardware_report_uses_nvidia_smi_when_torch_cuda_is_down(monkeypat
 
 def test_report_hardware_unsuitable_delivers_to_a_new_hub() -> None:
     with recording_hub() as (servicer, addr):
-        settings = _settings(orchestrator_public_addr=addr, worker_jwt="")
+        settings = _settings(orchestrator_public_addr=addr, bootstrap_worker_jwt="")
         probe = CudaProbeResult(ok=False, reason="torch.cuda.is_available() is False")
         delivered = hardware_report.report_hardware_unsuitable(settings, probe)
         assert delivered is True
@@ -111,22 +111,38 @@ def test_report_hardware_unsuitable_delivers_to_a_new_hub() -> None:
 
 def test_report_hardware_unsuitable_delivers_with_worker_jwt_identity() -> None:
     """worker_id/release_id fall back to the JWT claims when Settings.worker_id
-    is unset — exactly Lifecycle's own identity resolution (lifecycle.py)."""
+    is unset — exactly Lifecycle's own identity resolution (lifecycle.py).
+
+    pgw#848/`e8b3109`: the token comes from `worker_credential.current()` and
+    ONLY from there. That commit deleted the `or settings.worker_jwt` fallback
+    on purpose — *"the fallbacks are GONE, not deprioritised: hardware_report is
+    bare"* — so seeding this through `Settings` no longer reaches the code under
+    test, and the assertion below was passing for the wrong reason before and
+    failing for the right one after. The PROPERTY is unchanged; only the source
+    of the credential moved, so the test moves with it.
+    """
     import base64
     import json
+
+    from gen_worker import worker_credential
 
     payload = base64.urlsafe_b64encode(
         json.dumps({"sub": "jwt-worker", "release_id": "release-77"}).encode()
     ).rstrip(b"=")
     fake_jwt = b"header." + payload + b".sig"
 
-    with recording_hub() as (servicer, addr):
-        settings = _settings(orchestrator_public_addr=addr, worker_id="", worker_jwt=fake_jwt.decode())
-        probe = CudaProbeResult(ok=False, reason="")
-        assert hardware_report.report_hardware_unsuitable(settings, probe) is True
-        hw = servicer.wait_for_message(timeout=5.0).hardware_unsuitable
-        assert hw.worker_id == "jwt-worker"
-        assert hw.release_id == "release-77"
+    worker_credential.reset()
+    try:
+        worker_credential.install(fake_jwt.decode())
+        with recording_hub() as (servicer, addr):
+            settings = _settings(orchestrator_public_addr=addr, worker_id="")
+            probe = CudaProbeResult(ok=False, reason="")
+            assert hardware_report.report_hardware_unsuitable(settings, probe) is True
+            hw = servicer.wait_for_message(timeout=5.0).hardware_unsuitable
+            assert hw.worker_id == "jwt-worker"
+            assert hw.release_id == "release-77"
+    finally:
+        worker_credential.reset()
 
 
 def test_report_hardware_unsuitable_old_hub_rejects_gracefully() -> None:
