@@ -450,6 +450,55 @@ def export_program(
         ) from exc
 
 
+#: pgw#847: measured ONCE per mint process, and read by nobody.
+#:
+#: `torch.export.export` runs once per declared class row, SERIALLY, in this
+#: parent (`_export_entry`) — sdxl is 36 entries at a banked `export_s` of
+#: 37.8 s, so that loop is ~22 minutes of wall the pgw#809 pool never covered.
+#: An exported graph's `graph_module.code` is byte-identical across shape rows
+#: (the row lives in node metadata), and ONE export plus a per-row
+#: `FakeTensorProp` reproduces the compiled artifact byte for byte — wrapper,
+#: kernel and the linked `.so` — proven with `torch.export.export` monkeypatched
+#: to raise. The saving is therefore `export_s - prop_s`, and `prop_s` on a real
+#: family's graph has never been measured; off-pod probes bound it only to
+#: 0.25-0.97x. This is that one number, so the next real mint settles it.
+_PROP_PROBE_DONE = False
+
+
+def _probe_prop_s(program: Any) -> Optional[float]:
+    """Time `FakeTensorProp` over this program's own graph, once per process.
+
+    Probe only: it mutates a FRESH `program.module()` (never the program), no
+    decision reads it, and any failure records nothing rather than touching a
+    mint. `.module()` is excluded from the timing because the current path
+    pays it too (`compile_entry_files`), so the comparison stays like-for-like.
+    """
+    global _PROP_PROBE_DONE
+    if _PROP_PROBE_DONE:
+        return None
+    _PROP_PROBE_DONE = True
+    try:
+        import torch
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.passes.fake_tensor_prop import FakeTensorProp
+
+        args, _kwargs = program.example_inputs
+        gm = program.module(check_guards=False)
+        t0 = time.monotonic()
+        mode = FakeTensorMode(allow_non_fake_inputs=True)
+        with mode:
+            fake = tuple(
+                mode.from_tensor(a) if isinstance(a, torch.Tensor) else a
+                for a in args)
+            FakeTensorProp(gm, mode=mode).propagate(*fake)
+        return round(time.monotonic() - t0, 2)
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "aot-mint: pgw#847 prop probe skipped: %s: %s",
+            type(exc).__name__, exc)
+        return None
+
+
 def _placeholder_shapes(program: Any) -> Dict[str, Tuple[Any, ...]]:
     """``{user input name: shape tuple}`` from the exported placeholders."""
     signature = getattr(program, "graph_signature", None)
@@ -1111,6 +1160,11 @@ def _export_entry(
     except MintRefused as exc:
         raise MintRefused(f"entry {entry!r}: {exc}") from exc
     timings["export_s"] = round(time.monotonic() - t0, 2)
+    # pgw#847, telemetry only: the one number that sizes "export once,
+    # re-propagate per row". Once per process, so a 36-entry mint pays it once.
+    prop_probe = _probe_prop_s(program)
+    if prop_probe is not None:
+        timings["prop_probe_s"] = prop_probe
 
     gaps = declared_range_gaps(program, espec.dynamic)
     if gaps:
