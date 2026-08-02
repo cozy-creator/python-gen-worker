@@ -64,7 +64,7 @@ import os
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -84,6 +84,13 @@ FRAME_PREFIX = "MINT_FRAME "
 
 REQUEST_NAME = "request.json"
 REPORT_NAME = "report.json"
+#: pgw#848: the mint's phase table AS IT RUNS, rewritten atomically on every
+#: beat. `REPORT_NAME` is written once, at a terminus the child reaches under
+#: its own power — a child that is KILLED never writes one, and until this
+#: existed a 29-minute abandoned mint reported `total_s=1741.33 — no cell
+#: produced` with zero entry rows and no pool row. The measurements were all
+#: made; nothing carried them out of the process.
+PHASES_SNAPSHOT_NAME = "mint_phases.json"
 
 # Exit codes. The child's exit code is a CLASSIFICATION, not just a failure
 # bit: the retry policy below reads it, so a deterministic refusal is never
@@ -179,6 +186,9 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     component_paths: Dict[str, Dict[str, str]] = {}
     device: int = -1     # CUDA ordinal; -1 = leave the child's default
     vram_cap_bytes: int = 0   # 0 = uncapped (see mint_budget.co_residency)
+    #: pgw#848: where the child rewrites its live phase table, so a mint the
+    #: parent KILLS still leaves its measurements behind. Empty = no snapshot.
+    phases_snapshot: str = ""
     #: pgw#848: one ENTRY child's measured host high-water, banked by the
     #: parent from a previous mint on this pod (``mint_budget.entry_peak_rss``).
     #: 0 = never measured here, and the pool's width falls back to its
@@ -257,6 +267,12 @@ class MintOutcome:
     stderr_tail: str = ""
     last_phase: str = ""
     elapsed_s: float = 0.0
+    #: pgw#848: the child's live phase table, recovered from disk when the
+    #: child died without writing a report. Deliberately a SEPARATE field
+    #: rather than a synthesized ``report``: ``retryable`` branches on
+    #: ``report is None``, and inventing a report to carry telemetry would
+    #: silently change a retry decision.
+    partial_phases: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def minted(self) -> bool:
@@ -374,6 +390,21 @@ def _evidence(pid: int, capture: Path) -> float:
 
 def child_argv(request_path: Path, *, python: str = "") -> Sequence[str]:
     return [python or sys.executable, "-m", MINT_CHILD_MODULE, str(request_path)]
+
+
+def _read_phase_snapshot(path: str) -> Dict[str, Any]:
+    """The child's live phase table, or ``{}`` when there is none.
+
+    Never raises: a mint's outcome must not depend on whether its telemetry
+    file parsed.
+    """
+    if not path:
+        return {}
+    try:
+        table = msgspec.json.decode(Path(path).read_bytes())
+    except (OSError, msgspec.DecodeError, ValueError):
+        return {}
+    return dict(table) if isinstance(table, dict) else {}
 
 
 def write_request(workdir: Path, request: MintRequest) -> Path:
@@ -582,12 +613,17 @@ async def run_mint(
     report = _decode_report(report_path)
     stderr_tail = str(state.get("stderr") or "")[-_STDERR_TAIL_BYTES:]
     phase = str(state.get("phase") or (report.phase if report else ""))
+    # pgw#848: a child the parent KILLED wrote no report, and everything it
+    # measured is on disk in the snapshot. Read unconditionally — a report and
+    # a snapshot never disagree, and when both exist the report wins because
+    # the child reached its own terminus.
+    partial = _read_phase_snapshot(request.phases_snapshot)
 
     def _out(status: str, detail: str, artifact: Optional[Path] = None) -> MintOutcome:
         outcome = MintOutcome(
             status=status, detail=detail, artifact=artifact, report=report,
             exit_code=code, stderr_tail=stderr_tail, last_phase=phase,
-            elapsed_s=elapsed)
+            elapsed_s=elapsed, partial_phases=partial)
         logger.info("%s", outcome.line())
         return outcome
 
@@ -634,6 +670,7 @@ __all__ = [
     "EXIT_RESOURCE",
     "FRAME_PREFIX",
     "MAX_ATTEMPTS",
+    "PHASES_SNAPSHOT_NAME",
     "MINTED",
     "MINT_CHILD_MODULE",
     "MintFrame",

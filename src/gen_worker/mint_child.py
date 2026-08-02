@@ -395,7 +395,12 @@ def _mint_aot(
             # pgw#848: banked by the parent from a previous mint on this pod.
             # 0 on a pod that has never minted this (family, lane).
             entry_peak_rss_bytes=int(
-                getattr(request, "entry_peak_rss_bytes", 0) or 0))
+                getattr(request, "entry_peak_rss_bytes", 0) or 0),
+            # pgw#848: rewritten on every beat, so a mint this process is
+            # KILLED in still leaves its measurements on disk for the parent.
+            phase_snapshot=(
+                Path(request.phases_snapshot)
+                if request.phases_snapshot else None))
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod

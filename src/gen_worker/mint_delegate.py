@@ -177,6 +177,12 @@ def build_request(
         target=str(Path(workdir) / "cell.tar.gz"),
         capture=str(pending.capture_dir),
         report=str(Path(workdir) / mint_process.REPORT_NAME),
+        # pgw#848: where the child writes its LIVE table. `report` is written
+        # once, at a terminus the child reaches under its own power; this is
+        # written on every beat, so a mint the parent abandons still hands
+        # back what it measured.
+        phases_snapshot=str(
+            Path(workdir) / mint_process.PHASES_SNAPSHOT_NAME),
         cfg=cfg_spec(pending.cfg),
         snapshots=dict(task.snapshots),
         component_paths={
@@ -324,6 +330,15 @@ async def build_cell(
                 peak_rss = 0
             mint_budget.record_entry_peak_rss(
                 family, task.weight_lane, peak_rss)
+        # pgw#848: ...and from the SNAPSHOT when the child never wrote a
+        # report at all, which is every killed and every abandoned mint.
+        try:
+            snap_pool = (outcome.partial_phases or {}).get("pool")
+            mint_budget.record_entry_peak_rss(
+                family, task.weight_lane,
+                int((snap_pool or {}).get("peak_child_rss_bytes") or 0))
+        except (TypeError, ValueError, AttributeError):
+            pass
         if str(getattr(pending, "recipe", "")) == fleet_cells.RECIPE_AOT:
             _emit_aot_phases(outcome, family=family, lane=task.weight_lane)
         else:
@@ -386,6 +401,16 @@ def _emit_aot_phases(
     report = outcome.report
     table = dict(getattr(report, "mint_phases", None) or {}) \
         if report is not None else {}
+    if not table and outcome.partial_phases:
+        # pgw#848: the ABANDONED path. `f9c1b2d` gave the aborted path its
+        # measurements back; this is the same code with a different exit, and
+        # it never got them. Attempt sixteen compiled for 29 minutes and
+        # reported ONE row — `status=abandoned total_s=1741.33 — no cell
+        # produced`, zero `entry:` rows, no `pool` row — because the child was
+        # group-killed before it could write a report. The snapshot is what
+        # survives a signal.
+        table = dict(outcome.partial_phases)
+        table["recovered_from"] = "phase_snapshot"
     try:
         total_s = float(
             report.elapsed_s if report is not None and report.elapsed_s > 0
@@ -400,10 +425,17 @@ def _emit_aot_phases(
                 **dict(table.get("totals") or {}),
                 "child_elapsed_s": round(total_s, 2),
             }
+        # pgw#848: an ABANDONED mint is not an aborted one. Nothing about the
+        # mint failed — a co-tenancy decision (a drain of the endpoint
+        # instances) destroyed it while it was working, and a roll-up that
+        # calls that "aborted" hides the only actionable fact in the row.
+        terminus = ""
+        if not outcome.minted:
+            terminus = ABANDONED if outcome.status == ABANDONED else "aborted"
         if table:
+            table["terminus"] = terminus or table.get("terminus") or ""
             aot_mint.emit_phase_events(
-                family=family, lane=lane, table=table,
-                terminus="" if outcome.minted else "aborted")
+                family=family, lane=lane, table=table, terminus=terminus)
         if outcome.minted or table:
             return
         if total_s <= 0:

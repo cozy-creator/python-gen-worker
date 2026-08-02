@@ -75,6 +75,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -1511,6 +1512,7 @@ def mint(
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
+    phase_snapshot: Optional[Path] = None,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
 
@@ -1529,6 +1531,23 @@ def mint(
     """
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
+    if phase_snapshot is not None:
+        # pgw#848: every beat re-writes the on-disk table, so a mint that is
+        # KILLED still leaves 29 minutes of measurement behind it. Wrapped
+        # around the caller's sink rather than replacing it: both are
+        # best-effort and neither may cost a mint.
+        inner = progress.on_progress
+        snap = Path(phase_snapshot)
+
+        def _beat(phase: str, step: int, total: int, note: str) -> None:
+            try:
+                write_phase_snapshot(snap, progress)
+            except Exception:  # noqa: BLE001 — telemetry never fails a mint
+                logger.debug("aot-mint: phase snapshot failed", exc_info=True)
+            if inner is not None:
+                inner(phase, step, total, note)
+
+        progress.on_progress = _beat
     try:
         return _mint_cell(
             pipeline, spec, out_dir,
@@ -1541,6 +1560,63 @@ def mint(
         raise
 
 
+def partial_phase_table(
+    progress: MintProgress, *, terminus: str = "aborted",
+) -> Dict[str, Any]:
+    """Everything this mint has measured SO FAR, as a phase table.
+
+    Empty dict when there is nothing yet — "no measurement" and "zero" must
+    not read the same.
+    """
+    minted = list(progress.minted)
+    timings = dict(progress.timings)
+    started = progress.t_mint
+    where = dict(progress.at)
+    if not minted and not timings and not where:
+        return {}
+    if started is not None:
+        # The mint's OWN wall clock, so an aborted total is comparable
+        # with a completed one rather than being a sum of entry seconds.
+        timings["total_s"] = round(time.monotonic() - float(started), 2)
+    table = _mint_phase_table(
+        minted, timings, progress.inductor_configs, progress.width,
+        progress.pool_ledger)
+    table["terminus"] = terminus
+    if where:
+        # pgw#824 x pgw#825: the entries block names what FINISHED; this
+        # names what the mint was ON. Without it an 18-entry mint that
+        # dies in entry 12's export reports 11 rows and no twelfth, and
+        # the row that matters is the missing one.
+        table["at"] = where
+    return table
+
+
+def write_phase_snapshot(path: Path, progress: MintProgress) -> None:
+    """Put the partial table on DISK, atomically, as the mint runs.
+
+    pgw#848. Attaching the table to an exception (below) only reaches a mint
+    that gets to raise one. A mint that is KILLED — the parent abandons it,
+    the OOM killer takes it, the pod goes — raises nothing and writes no
+    report, and every measurement it made dies with the process.
+
+    That is not hypothetical: attempt sixteen compiled for **29 minutes** and
+    reported `status=abandoned total_s=1741.33 — no cell produced`. Zero
+    `entry:` rows. No `pool` row. K, its binding constraint, the per-entry
+    timings and the peaks were all measured and all discarded, and the
+    K-and-binding answer had to be re-bought with another pod.
+
+    A file the parent can read after a hard kill is the only shape that
+    survives a signal, which is the same reason the pgw#848 resume design
+    keys on content on disk rather than on the process staying alive.
+    """
+    table = partial_phase_table(progress, terminus="in_flight")
+    if not table:
+        return
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(table))
+    os.replace(tmp, path)   # atomic: a reader never sees a half-written table
+
+
 def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
     """Hang the partial phase table off a failed mint's exception.
 
@@ -1548,27 +1624,9 @@ def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
     refuses must refuse with ITS sentence, not with a reporting error.
     """
     try:
-        minted = list(progress.minted)
-        timings = dict(progress.timings)
-        started = progress.t_mint
-        where = dict(progress.at)
-        if not minted and not timings and not where:
-            return
-        if started is not None:
-            # The mint's OWN wall clock, so an aborted total is comparable
-            # with a completed one rather than being a sum of entry seconds.
-            timings["total_s"] = round(time.monotonic() - float(started), 2)
-        table = _mint_phase_table(
-            minted, timings, progress.inductor_configs, progress.width,
-            progress.pool_ledger)
-        table["terminus"] = "aborted"
-        if where:
-            # pgw#824 x pgw#825: the entries block names what FINISHED; this
-            # names what the mint was ON. Without it an 18-entry mint that
-            # dies in entry 12's export reports 11 rows and no twelfth, and
-            # the row that matters is the missing one.
-            table["at"] = where
-        setattr(exc, "mint_phases", table)
+        table = partial_phase_table(progress)
+        if table:
+            setattr(exc, "mint_phases", table)
     except Exception:  # pragma: no cover — telemetry never fails a mint
         logger.debug("aot-mint: partial phase table unavailable", exc_info=True)
 
@@ -1745,6 +1803,11 @@ def _mint_cell(
             progress=progress,
             on_entry=lambda name, done, total: progress.beat(
                 PHASE_INDUCTOR_COMPILE, done, total, name))
+        # NOTE: `_compile_entries_parallel` refreshes `progress.pool_ledger`
+        # on every completed entry (pgw#848), so the snapshot each beat writes
+        # already carries a LIVE ledger — K, its binding, efficiency, peaks —
+        # rather than only the width. An abandoned mint's row is the one that
+        # needs it most.
     timings["entry_workers"] = float(width.workers)
 
     t0 = time.monotonic()
@@ -1865,9 +1928,20 @@ def _compile_entries_parallel(
         work.parent / "entry-pool", width=width,
         inductor_configs=inductor_configs)
     t0 = time.monotonic()
+
+    def _tick(name: str, done: int, total: int) -> None:
+        # pgw#848: refresh the ledger BEFORE the beat, so the snapshot the
+        # beat writes carries this entry's numbers. A mint killed at entry 30
+        # of 36 then leaves 30 entries' worth of measurement on disk instead
+        # of one bare "no cell produced" row.
+        if progress is not None:
+            progress.pool_ledger = _pool_facts(pool)
+        if on_entry is not None:
+            on_entry(name, done, total)
+
     try:
         by_entry = pool.compile(
-            [(row.name, row.program) for row in minted], on_entry=on_entry)
+            [(row.name, row.program) for row in minted], on_entry=_tick)
     except aot_compile_pool.EntryCompileFailed as exc:
         # pgw#848: the pool's ledger and its MEASURED peak have to survive the
         # failure, because the aborted phase table is what the parent banks
@@ -2965,7 +3039,9 @@ __all__ = [
     "ExportSpec",
     "MintRefused",
     "MintResourceExhausted",
+    "partial_phase_table",
     "raise_if_device_oom",
+    "write_phase_snapshot",
     "MINT_COMPILE_THREADS",
     "MintResult",
     "PARITY_LANES",
