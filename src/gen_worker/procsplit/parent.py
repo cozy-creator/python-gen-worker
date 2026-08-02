@@ -165,9 +165,11 @@ _STDERR_TAIL_DIAL_CHARS = 3000
 # .pyc prefix all hang off it. On disk, not in the world-writable /tmp, and
 # owned by the compute uid rather than shared with the control parent.
 _COMPUTE_HOME = "/var/lib/gen-worker/compute"
-# models/cache_paths.py's default, duplicated rather than imported: importing
-# the models package pulls the model layer, and the parent never imports torch.
+# models/cache_paths.py's and runtime_config.py's defaults, duplicated rather
+# than imported: importing either package pulls the model layer, and the parent
+# never imports torch.
 _DEFAULT_TENSORHUB_CACHE_DIR = "/tmp/tensorhub-cache"
+_DEFAULT_CONFIG_SNAPSHOT_PATH = "/app/.tensorhub/runtime_config.msgpack"
 
 
 def _tee_stderr_chunk(chunk: bytes) -> None:
@@ -1249,6 +1251,17 @@ class ParentControl:
             os.path.dirname(
                 self._child_env.get("GEN_WORKER_BOOT_RECORD", "")
                 or os.environ.get("GEN_WORKER_BOOT_RECORD", "")
+            ),
+            # th#1087's mutable-config snapshot: the CHILD atomically rewrites
+            # it on every config-generation push (tmp file in the SAME dir plus
+            # os.replace, so the directory itself must be writable), and unlike
+            # the post-mortem markers that writer RAISES on failure. It lives
+            # in the image at /app/.tensorhub, which is root-owned.
+            os.path.dirname(
+                self._child_env.get("GEN_WORKER_CONFIG_SNAPSHOT_PATH", "")
+                or self._settings.config_snapshot_path
+                or os.environ.get("GEN_WORKER_CONFIG_SNAPSHOT_PATH", "")
+                or _DEFAULT_CONFIG_SNAPSHOT_PATH
             ),
         ]
         granted = privdrop.grant_paths(plan, privdrop.writable_paths(plan, extra))
