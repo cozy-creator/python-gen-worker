@@ -98,3 +98,69 @@ def test_parallel_without_headroom_refused() -> None:
 def test_ceiling_below_floor_refused() -> None:
     with pytest.raises(ValueError, match="below gpu_count"):
         Resources(gpu=True, gpu_count=4, max_gpu_count=2)
+
+
+# --- th#1426: the DEGREE axis, declared independently of the pod width ------
+#
+# `max_gpu_count` alone could not express a multi-group sharded pod: the hub
+# derived the group degree from the ceiling and then the width from the ceiling
+# over the degree, which forces width to 1 identically. The second declared
+# number is what makes 2x2 askable.
+
+
+@endpoint(resources=Resources(
+    gpu=True, vram_gb_hint=80.0, max_gpu_count=4,
+    max_gpus_per_execution_group=2, parallel=("sequence",)))
+class TwoByTwoEndpoint:
+    def generate(self, ctx: RequestContext[_Defaults], p: In) -> Out:
+        return Out()
+
+
+def test_group_width_reaches_manifest_under_the_builder_key() -> None:
+    res = _resources(TwoByTwoEndpoint)
+    # Both axes present and independent: 4 GPUs in the pod, 2 per request.
+    assert res["max_gpu_count"] == 4
+    assert res["max_gpus_per_execution_group"] == 2
+    assert msgspec.json.decode(
+        msgspec.json.encode(res))["max_gpus_per_execution_group"] == 2
+
+
+def test_undeclared_group_width_is_absent_not_defaulted() -> None:
+    # The whole existing fleet. Declaring the width axis must not start
+    # emitting the degree axis with a defaulted legal value.
+    assert "max_gpus_per_execution_group" not in _resources(SPEndpoint)
+    assert "max_gpus_per_execution_group" not in _resources(PlainEndpoint)
+
+
+def test_group_width_that_does_not_shard_is_refused() -> None:
+    # 1 is the value a "default to today's behaviour" implementation would
+    # have quietly accepted. It is outside the legal domain [2, ceiling], so
+    # absence can never be confused with a declaration.
+    with pytest.raises(ValueError, match="does not shard"):
+        Resources(gpu=True, max_gpu_count=4,
+                  max_gpus_per_execution_group=1, parallel=("sequence",))
+
+
+def test_group_width_above_the_pod_ceiling_is_refused() -> None:
+    with pytest.raises(ValueError, match="exceeds max_gpu_count"):
+        Resources(gpu=True, max_gpu_count=4,
+                  max_gpus_per_execution_group=8, parallel=("sequence",))
+    with pytest.raises(ValueError, match="exceeds max_gpu_count"):
+        Resources(gpu=True, max_gpus_per_execution_group=2,
+                  parallel=("sequence",))
+
+
+def test_group_width_without_a_mechanism_is_refused_as_inert() -> None:
+    with pytest.raises(ValueError, match="inert"):
+        Resources(gpu=True, max_gpu_count=4, max_gpus_per_execution_group=2)
+
+
+def test_group_width_positive_control() -> None:
+    # A validator that refused every group width would pass the table above
+    # trivially. The legal shapes must construct.
+    for width in (2, 3, 4):
+        r = Resources(gpu=True, max_gpu_count=4,
+                      max_gpus_per_execution_group=width,
+                      parallel=("sequence",))
+        assert r.max_gpus_per_execution_group == width
+        assert r.gpu is True

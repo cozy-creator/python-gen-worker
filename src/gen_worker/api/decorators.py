@@ -204,14 +204,28 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     ``DeviceRequest`` — pgw#648) declares how many devices one instance
     needs; endpoint code NEVER picks devices.
 
-    ``max_gpu_count`` + ``parallel`` (pgw#748/th#1285) are the author
-    ENVELOPE — the SDK half of the hub builder's ``extractStaffingEnvelope``
-    contract. ``gpu_count`` is the floor (devices ONE materialization
-    requires); ``max_gpu_count`` is the ceiling the hub MAY staff up to;
-    ``parallel`` names the platform mechanisms the function survives at
-    degree > 1 (``"sequence"`` is the only one with a worker runtime). The
-    author never writes a degree, a tier, a packing or a device id — those
-    are the hub's decisions. Both are elided from the manifest when they
+    ``max_gpu_count`` + ``max_gpus_per_execution_group`` + ``parallel``
+    (pgw#748/th#1285/th#1426) are the author ENVELOPE — the SDK half of the
+    hub builder's ``extractStaffingEnvelope`` contract. ``gpu_count`` is the
+    floor (devices ONE materialization requires); ``max_gpu_count`` is how
+    many GPUs the POD may hold; ``max_gpus_per_execution_group`` is how many
+    of them ONE REQUEST may be spread across; ``parallel`` names the platform
+    mechanisms the function survives at degree > 1 (``"sequence"`` is the
+    only one with a worker runtime). The author never writes a degree, a
+    tier, a packing or a device id — those are the hub's decisions.
+
+    The last two are INDEPENDENT axes, and both exist because the hub used to
+    derive each from the other and so could only ever express ONE execution
+    group (th#1426)::
+
+        max_gpu_count=4                                  -> 1x4: one request across 4 cards
+        max_gpu_count=4, max_gpus_per_execution_group=2  -> 2x2: two slots, each request across 2
+
+    Omitting ``max_gpus_per_execution_group`` means "no opinion on that axis"
+    and lets the hub use the whole ceiling as one group — what every release
+    written before this field already gets. It is NOT defaulted to a legal
+    value: the declared domain is 2 or more, and 0/1 are refused here and at
+    ingest, so "declared nothing" can never be confused with a declaration. Both are elided from the manifest when they
     carry nothing (``omit_defaults``), so every existing release's payload
     is byte-identical. Validation mirrors the builder's ingest refusals so a
     contradiction costs a declaration-time ValueError instead of a build.
@@ -226,6 +240,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     ram_gb_hint: float | None = None
     compute_capability: float | str | None = None
     max_gpu_count: int | None = None
+    max_gpus_per_execution_group: int | None = None
     parallel: tuple[str, ...] = ()
 
     def manifest_dict(self) -> dict:
@@ -296,6 +311,26 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
                     f"max_gpu_count {m} is below gpu_count {n_gpu}")
             force(self, "max_gpu_count", m)
             force(self, "gpu", True)
+        # th#1426 — the degree axis. Legal domain is [2, max_gpu_count];
+        # absence means "no opinion", never a defaulted legal value.
+        if self.max_gpus_per_execution_group is not None:
+            d = int(self.max_gpus_per_execution_group)
+            if d != self.max_gpus_per_execution_group:
+                raise ValueError(
+                    f"max_gpus_per_execution_group must be a whole number of "
+                    f"devices, got {self.max_gpus_per_execution_group}")
+            if d < 2:
+                raise ValueError(
+                    f"max_gpus_per_execution_group {d} declares a sharding "
+                    f"width that does not shard; omit the field to let the hub "
+                    f"use the whole max_gpu_count as one group")
+            if self.max_gpu_count is None or d > self.max_gpu_count:
+                raise ValueError(
+                    f"max_gpus_per_execution_group {d} exceeds max_gpu_count "
+                    f"{self.max_gpu_count} — one request cannot span more GPUs "
+                    f"than the pod may hold")
+            force(self, "max_gpus_per_execution_group", d)
+            force(self, "gpu", True)
         if self.parallel:
             mechanisms = tuple(
                 str(x).strip().lower() for x in self.parallel if str(x).strip()
@@ -314,6 +349,16 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
                     f"is only reachable with device headroom")
             force(self, "parallel", mechanisms)
             force(self, "gpu", True)
+        elif self.max_gpus_per_execution_group is not None:
+            # A group width only bounds a MECHANISM; with none declared the
+            # degree is always 1 and the field is inert. The hub's ingest
+            # refuses this too — mirror it here so it costs a ValueError at
+            # declaration rather than a build.
+            raise ValueError(
+                f"max_gpus_per_execution_group "
+                f"{self.max_gpus_per_execution_group} declared without a "
+                f"parallel mechanism — nothing shards a group, so the "
+                f"declaration is inert")
 
 
 class NoWarmup(msgspec.Struct, frozen=True):
