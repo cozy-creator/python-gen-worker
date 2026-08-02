@@ -1542,6 +1542,10 @@ def mint(
         def _beat(phase: str, step: int, total: int, note: str) -> None:
             try:
                 write_phase_snapshot(snap, progress)
+                # pgw#848: the SAME beat tells the pod-side reaper this mint
+                # is progressing. It has to be a CHANGING token, so it carries
+                # the position — which is the honest signal anyway.
+                _touch_pod_progress(f"aot_mint {phase} {step}/{total} {note}")
             except Exception:  # noqa: BLE001 — telemetry never fails a mint
                 logger.debug("aot-mint: phase snapshot failed", exc_info=True)
             if inner is not None:
@@ -1589,6 +1593,45 @@ def partial_phase_table(
         # the row that matters is the missing one.
         table["at"] = where
     return table
+
+
+#: pgw#848 long-fuse sweep: where the POD-SIDE reaper reads progress from.
+#: Set by `podguard.arm()` on every pod it rents; absent everywhere else, so
+#: this is inert off-pod and costs one `os.environ.get` per beat.
+PODGUARD_STATE_ENV = "PODGUARD_STATE"
+
+
+def _touch_pod_progress(note: str) -> None:
+    """Tell the pod-side reaper this mint is still doing work.
+
+    pgw#848. podguard's own docstring says both its layers "kill on liveness +
+    progress-staleness" — Paul's rule, implemented — and the pod-side layer
+    reads a token file that `podguard-progress` writes. **Nothing in the SDK
+    has ever written it.** Zero references to podguard anywhere in gen_worker,
+    so the pod-side progress path had no producer and the ONLY signal keeping
+    a minting pod alive was podguard's own renewal thread.
+
+    That thread was the thing that was never started (`attend()` returned an
+    unstarted Keeper), which turned a single missing producer into a 30-minute
+    fixed fuse — `lease_seconds` 900 x `REAP_LEASE_MULTIPLE` 2.0 — under a
+    29-minute mint. Two independent failures were required and only one was
+    visible; this closes the other, so the fuse can never again be the sole
+    thing between a working mint and a terminate.
+
+    Best-effort and unconditional-safe: a mint must not fail because a
+    telemetry file could not be written, and the whole call is inert when
+    `PODGUARD_STATE` is unset (every non-podguard pod, and this box).
+    """
+    state = os.environ.get(PODGUARD_STATE_ENV, "")
+    if not state:
+        return
+    try:
+        Path(state).mkdir(parents=True, exist_ok=True)
+        # CONTENT, not mtime: the watchdog compares the token, so a value that
+        # does not change reads as no progress even if the file is rewritten.
+        (Path(state) / "progress").write_text(note)
+    except OSError:
+        logger.debug("aot-mint: could not touch podguard progress", exc_info=True)
 
 
 def write_phase_snapshot(path: Path, progress: MintProgress) -> None:
@@ -3039,6 +3082,7 @@ __all__ = [
     "ExportSpec",
     "MintRefused",
     "MintResourceExhausted",
+    "PODGUARD_STATE_ENV",
     "partial_phase_table",
     "raise_if_device_oom",
     "write_phase_snapshot",

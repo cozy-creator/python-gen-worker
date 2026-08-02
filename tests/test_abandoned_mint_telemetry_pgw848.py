@@ -219,3 +219,62 @@ def test_the_pool_ledger_is_live_not_end_of_run() -> None:
     assert "on_entry=_tick" in source, (
         "the refresh must be on the per-entry callback, not after the pool "
         "returns — a mint killed at entry 30 of 36 never reaches after")
+
+
+# ---------------------------------------------------------------------------
+# pgw#848 long-fuse sweep: the pod-side reaper's progress signal had no producer
+# ---------------------------------------------------------------------------
+
+
+def test_the_mint_feeds_the_pod_side_reapers_progress_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """podguard's own docstring: both its layers "kill on liveness +
+    progress-staleness" — Paul's rule, implemented. The pod-side layer reads a
+    token file that `podguard-progress` writes, and **nothing in the SDK has
+    ever written it** (zero references to podguard in gen_worker).
+
+    So the pod-side progress path had no producer, and the only thing keeping
+    a minting pod alive was podguard's renewal thread — the thread that was
+    never started. Two independent failures were required to reap attempt
+    sixteen and only one was visible.
+    """
+    state = tmp_path / "podguard"
+    monkeypatch.setenv(aot_mint.PODGUARD_STATE_ENV, str(state))
+
+    aot_mint._touch_pod_progress("aot_mint inductor_compile 3/36 unet/x")
+    token_a = (state / "progress").read_text()
+    aot_mint._touch_pod_progress("aot_mint inductor_compile 4/36 unet/y")
+    token_b = (state / "progress").read_text()
+
+    assert "3/36" in token_a and "4/36" in token_b
+    assert token_a != token_b, (
+        "the watchdog compares the token's CONTENT, so a value that does not "
+        "change reads as NO progress however often the file is rewritten")
+
+
+def test_the_progress_signal_is_inert_off_pod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset everywhere but a podguard-rented pod, and a mint must never fail
+    because a telemetry file could not be written."""
+    monkeypatch.delenv(aot_mint.PODGUARD_STATE_ENV, raising=False)
+    aot_mint._touch_pod_progress("nothing should happen")
+    assert not list(tmp_path.iterdir())
+
+    # An unwritable state dir is survivable, not fatal.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("i am a file, not a directory")
+    monkeypatch.setenv(aot_mint.PODGUARD_STATE_ENV, str(blocked))
+    aot_mint._touch_pod_progress("still must not raise")
+
+
+def test_every_mint_beat_feeds_both_survivors(tmp_path: Path) -> None:
+    """The two things that must outlive a killed mint are fed by the SAME
+    beat: the phase snapshot (what it measured) and the pod-side progress
+    token (that it was working). Neither may depend on the other running."""
+    import inspect
+
+    source = inspect.getsource(aot_mint.mint)
+    assert "write_phase_snapshot(snap, progress)" in source
+    assert "_touch_pod_progress(" in source
