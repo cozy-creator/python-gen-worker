@@ -34,6 +34,12 @@ _AUTH_FAILURE_EXIT_THRESHOLD = 3
 # UNAUTHENTICATED can be transient hub-side (duplicate stream teardown, pg
 # blip): exit only when failures persist across a real time window.
 _AUTH_FAILURE_EXIT_WINDOW_S = 60.0
+
+#: pgw#848: how long before its own expiry a worker starts SAYING SO. Wider
+#: than the hub's ~80%-of-TTL rotation point (24 min of a 30 min TTL, i.e.
+#: 6 min of remaining life), so a missed rotation is visible while the stream
+#: is still usable rather than after it is not.
+_CREDENTIAL_WARN_S = 8 * 60.0
 _BACKOFF_RESET_AFTER_S = 60.0
 _HELLO_ACK_TIMEOUT_S = 30.0
 # FAILED_PRECONDITION details that can never heal by retrying: identity is
@@ -524,6 +530,9 @@ class Transport:
         self.reconnect_delays: List[float] = []  # observability + tests
         self._consecutive_auth_failures = 0
         self._first_auth_failure_at: Optional[float] = None
+        #: pgw#848: the last remaining-lifetime this worker reported, so a
+        #: reconnect storm does not emit one event per attempt.
+        self._last_credential_left: Optional[float] = None
         self._connected_at: Optional[float] = None  # set on each HelloAck
         # gw#640: (message kind, exception class) already dialed to the hub.
         self._reported_handler_failures: set = set()
@@ -605,7 +614,75 @@ class Transport:
         token = (self._worker_jwt or self._settings.worker_jwt or "").strip()
         if not token:
             return None
+        self._report_credential_age(token)
         return [("authorization", f"Bearer {token}")]
+
+    def _report_credential_age(self, token: str) -> None:
+        """Say something BEFORE the credential dies, not after the pod does.
+
+        pgw#848. The worker has never looked at its own token's ``exp``. It
+        learns of expiry only by being rejected — and by then it cannot
+        recover, because the refresh arrives ONLY as a ``token_refresh`` down
+        the stream (see the handler below) and the stream is the thing it can
+        no longer open. A credential deliverable solely over the connection it
+        authenticates cannot be delivered once that connection stops
+        authenticating.
+
+        MEASURED, hub `pod_events`, two consecutive whole-graph mints:
+
+            attempt 16  T+32.4 min  worker_token_expired
+                        T+42.9 min  "stream dropped involuntarily and never
+                                     reconnected (10m13s of silence) — silent
+                                     death mid-activity"
+            attempt 17  T+31.2 min  worker_token_expired -> auth wedge
+
+        ``DefaultWorkerJWTTTL`` is 30 minutes from POD CREATE, so this fires on
+        any pod that lives past half an hour — which, until the pgw#848 cap
+        fix, no mint ever did. Both runs destroyed a self-mint the hub's own
+        record describes as "reporting fresh progress".
+
+        DIAGNOSIS ONLY, deliberately: it changes no behaviour and refuses
+        nothing. An expired token is not always fatal — the hub has a
+        boot-grace admission for exactly that case — so shortcutting the
+        reconnect here would break a path that legitimately heals. What was
+        missing is not a decision, it is that ten minutes of silence carried
+        no name.
+        """
+        try:
+            from .request_context import _decode_unverified_jwt_claims
+
+            claims = _decode_unverified_jwt_claims(token) or {}
+            exp = float(claims.get("exp") or 0.0)
+        except Exception:  # noqa: BLE001 — a probe never breaks a connect
+            return
+        if exp <= 0:
+            return
+        left = exp - time.time()
+        if left > _CREDENTIAL_WARN_S or left == self._last_credential_left:
+            return
+        self._last_credential_left = left
+        if left > 0:
+            logger.warning(
+                "worker JWT expires in %.0fs and no rotation has arrived — the "
+                "hub pushes one at ~80%% of TTL over this stream, and if it is "
+                "missed there is NO other channel to receive one (pgw#848)",
+                left)
+            detail = f"worker_jwt_expiring in={left:.0f}s exp={int(exp)}"
+        else:
+            logger.error(
+                "worker JWT EXPIRED %.0fs ago and is being presented anyway — "
+                "if this connect is rejected this worker cannot recover: the "
+                "only refresh channel is the stream it cannot open (pgw#848)",
+                -left)
+            detail = f"worker_jwt_expired ago={-left:.0f}s exp={int(exp)}"
+        try:
+            from . import activity as activity_mod
+
+            activity_mod.emit_event(
+                "worker_credential", detail,
+                phase="expiring" if left > 0 else "expired")
+        except Exception:  # noqa: BLE001 — telemetry never breaks a connect
+            logger.debug("credential-age event failed", exc_info=True)
 
     def _report_handler_failure(self, err: HandlerError) -> None:
         """Log a handler failure as ITSELF and dial it to the hub (gw#640).

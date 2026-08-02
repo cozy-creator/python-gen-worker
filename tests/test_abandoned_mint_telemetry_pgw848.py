@@ -315,12 +315,116 @@ def test_the_progress_signal_is_inert_off_pod(
     aot_mint._touch_pod_progress("still must not raise")
 
 
-def test_every_mint_beat_feeds_both_survivors(tmp_path: Path) -> None:
+def test_every_mint_beat_feeds_both_survivors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The two things that must outlive a killed mint are fed by the SAME
     beat: the phase snapshot (what it measured) and the pod-side progress
-    token (that it was working). Neither may depend on the other running."""
-    import inspect
+    token (that it was working). Neither may depend on the other running.
 
-    source = inspect.getsource(aot_mint.mint)
-    assert "write_phase_snapshot(snap, progress)" in source
-    assert "_touch_pod_progress(" in source
+    Was `inspect.getsource(aot_mint.mint)`, and that failed TWICE in a
+    release gate — once because I edited the file mid-run, once because a
+    SIBLING LANE did. That is the finding, not the accident: on a shared
+    chaos worktree the source file is not a stable object, so a source-text
+    assertion tests the file rather than the behaviour and can go red without
+    the behaviour changing. Driven through the real `mint()` entrypoint
+    instead: `_mint_cell` is replaced with one that beats once and raises, so
+    the REAL beat wrapper `mint()` installs is what runs.
+    """
+    snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
+    state = tmp_path / "podguard"
+    monkeypatch.setenv(aot_mint.PODGUARD_STATE_ENV, str(state))
+
+    def _one_beat(pipeline, spec, out_dir, **kw):  # type: ignore[no-untyped-def]
+        progress = kw["progress"]
+        progress.width = pool.entry_workers(
+            2, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+            device_lock=True, limit=2)
+        progress.timings["export_all_s"] = 1.0
+        progress.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 1, 36, "unet/row=0")
+        raise aot_mint.MintRefused("stop here — the beat is what is under test")
+
+    monkeypatch.setattr(aot_mint, "_mint_cell", _one_beat)
+    with pytest.raises(aot_mint.MintRefused):
+        aot_mint.mint(None, None, tmp_path / "out", phase_snapshot=snapshot)
+
+    assert snapshot.exists(), (
+        "the beat did not write the phase snapshot — a killed mint keeps "
+        "nothing it measured")
+    assert (state / "progress").exists(), (
+        "the beat did not touch the pod-side progress token — the reaper is "
+        "told nothing about work that is happening")
+    assert "1/36" in (state / "progress").read_text()
+
+
+# ---------------------------------------------------------------------------
+# pgw#848 CP10: the worker never looked at its own credential's expiry
+# ---------------------------------------------------------------------------
+
+
+def _jwt(exp: float) -> str:
+    import base64
+    import json as _json
+
+    def seg(d: Any) -> str:
+        raw = _json.dumps(d).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{seg({'alg': 'none'})}.{seg({'exp': int(exp)})}.x"
+
+
+def _transport_probe(token: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Drive the REAL `_report_credential_age` and capture what it said."""
+
+    from gen_worker import transport as tp
+
+    said: list[tuple[str, str]] = []
+
+    class _Probe:
+        _last_credential_left = None
+        _report_credential_age = tp.Transport._report_credential_age
+
+    import gen_worker.activity as activity_mod
+
+    real = activity_mod.emit_event
+    activity_mod.emit_event = (  # type: ignore[assignment]
+        lambda kind, detail, **kw: said.append((kind, detail)))
+    logs: list[str] = []
+    try:
+        _Probe()._report_credential_age(token)  # type: ignore[arg-type]
+    finally:
+        activity_mod.emit_event = real  # type: ignore[assignment]
+    return logs, said
+
+
+def test_an_expiring_worker_jwt_is_announced_before_the_pod_dies() -> None:
+    """MEASURED (hub pod_events, attempts 16 and 17): the worker JWT expired
+    at T+32.4 and T+31.2 minutes and the worker said NOTHING. Ten minutes of
+    silence later the hub recorded "silent death mid-activity" and destroyed a
+    mint it described as reporting fresh progress.
+
+    The worker can always know this locally — it holds the token and the token
+    carries `exp`. It just never looked.
+    """
+    import time as _time
+
+    _, said = _transport_probe(_jwt(_time.time() + 120))
+    assert said, "an expiring credential produced no typed event"
+    kind, detail = said[0]
+    assert kind == "worker_credential"
+    assert "worker_jwt_expiring" in detail
+
+    _, said = _transport_probe(_jwt(_time.time() - 90))
+    assert "worker_jwt_expired" in said[0][1]
+
+
+def test_a_healthy_credential_is_silent() -> None:
+    """A warning every connect would be noise, and noise is how the real one
+    gets missed."""
+    import time as _time
+
+    _, said = _transport_probe(_jwt(_time.time() + 3600))
+    assert said == []
+    # An unreadable or exp-less token is not an event either.
+    _, said = _transport_probe("not-a-jwt")
+    assert said == []
