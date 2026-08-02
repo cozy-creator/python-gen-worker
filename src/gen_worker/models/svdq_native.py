@@ -347,10 +347,15 @@ def swap_svdq_linears(
     alignment fold to dense individually rather than refusing."""
     import torch
 
+    from .native_kernels import svdq_execution_lane
+    from .svdq_fused import build_svdq_fused_linear, fused_shape_supported
+
     compute = compute_dtype or torch.bfloat16
     if mode not in ("blockwise", "dense"):
         mode = "blockwise" if svdq_native_available() else "dense"
-    counts = {"blockwise": 0, "dense": 0, "prefixes": 0, "linears": 0}
+    lane = svdq_execution_lane() if mode == "blockwise" else "baseline"
+    counts = {"blockwise": 0, "dense": 0, "fused": 0, "prefixes": 0,
+              "linears": 0}
     for prefix in sorted(decoded):
         dec = decoded[prefix]
         targets = plan_targets(model, prefix)
@@ -369,7 +374,13 @@ def swap_svdq_linears(
             fp4_ok = (mode == "blockwise"
                       and part.in_features % _K_ALIGN == 0
                       and part.out_features % _N_ALIGN == 0)
-            if fp4_ok:
+            fused_ok = (fp4_ok and lane == "fused" and fused_shape_supported(
+                part.out_features, part.in_features, part.rank))
+            if fused_ok:
+                new = build_svdq_fused_linear(part, compute_dtype=compute,
+                                              device=device)
+                counts["fused"] += 1
+            elif fp4_ok:
                 new = build_svdq_linear(to_buffers(part),
                                         compute_dtype=compute, device=device)
                 counts["blockwise"] += 1
@@ -380,9 +391,9 @@ def swap_svdq_linears(
                 counts["dense"] += 1
             _set_module(model, path, new)
     logger.info(
-        "svdq native swap: %d prefixes -> %d linears (%d fp4, %d folded bf16)",
-        counts["prefixes"], counts["linears"], counts["blockwise"],
-        counts["dense"])
+        "svdq native swap: %d prefixes -> %d linears (%d fused, %d fp4, "
+        "%d folded bf16)", counts["prefixes"], counts["linears"],
+        counts["fused"], counts["blockwise"], counts["dense"])
     return counts
 
 
