@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "limits": {
+    "max_depth": 4,
+    "max_len": 64,
+    "max_nodes": 5,
+    "max_abs_result": 10,
+    "fail_closed": false
+  },
+  "vectors": [
+    {
+      "name": "ordinary evaluation",
+      "source": "a+b*x",
+      "term_keys": ["1", "x"],
+      "values": {"x": 3},
+      "term_values": {"1": 1, "x": 3}
+    },
+    {
+      "name": "range boundary is inclusive",
+      "source": "a+b*x",
+      "term_keys": ["1", "x"],
+      "values": {"x": 10},
+      "term_values": {"1": 1, "x": 10}
+    },
+    {
+      "name": "decimal canonicalization",
+      "source": "a+b*x/0.1",
+      "term_keys": ["1", "x/1.0000000000000001e-1"]
+    },
+    {
+      "name": "large integer canonicalization",
+      "source": "a+b*x/1000000000000000",
+      "term_keys": ["1", "x/1e15"]
+    },
+    {
+      "name": "small decimal canonicalization",
+      "source": "a+b*x/0.0000001",
+      "term_keys": ["1", "x/9.9999999999999995e-8"]
+    },
+    {
+      "name": "seventeen digit canonicalization",
+      "source": "a+b*x/1.2345678901234567",
+      "term_keys": ["1", "x/1.2345678901234567"]
+    },
+    {
+      "name": "depth boundary is inclusive",
+      "source": "a+b*((((x))))",
+      "term_keys": ["1", "x"]
+    },
+    {
+      "name": "depth over limit",
+      "source": "a+b*((((x))))",
+      "limits": {"max_depth": 3},
+      "parse_error": true
+    },
+    {
+      "name": "stack overflow payload is refused before parsing",
+      "repeat_parentheses": 100000,
+      "parse_error": true
+    },
+    {
+      "name": "length boundary is inclusive",
+      "source": "a+b*x",
+      "limits": {"max_len": 5},
+      "term_keys": ["1", "x"]
+    },
+    {
+      "name": "length over limit",
+      "source": "a+b*x",
+      "limits": {"max_len": 4},
+      "parse_error": true
+    },
+    {
+      "name": "node boundary is inclusive",
+      "source": "a+b*x+c*y",
+      "term_keys": ["1", "x", "y"]
+    },
+    {
+      "name": "node count over limit",
+      "source": "a+b*x+c*y+d*z",
+      "parse_error": true
+    },
+    {
+      "name": "non-finite literal is a parse error",
+      "source": "a+b*x/1e999",
+      "parse_error": true
+    },
+    {
+      "name": "range over limit stays fail soft for time",
+      "source": "a+b*x",
+      "values": {"x": 11},
+      "evaluation_error": true
+    },
+    {
+      "name": "range over limit refuses money",
+      "source": "a+b*x",
+      "limits": {"fail_closed": true},
+      "values": {"x": 11},
+      "evaluation_error": true,
+      "refusal": true
+    },
+    {
+      "name": "intercept obeys the range limit",
+      "source": "a",
+      "limits": {"max_abs_result": 0.5, "fail_closed": true},
+      "values": {},
+      "evaluation_error": true,
+      "refusal": true
+    },
+    {
+      "name": "missing value stays fail soft for time",
+      "source": "a+b*x",
+      "values": {},
+      "evaluation_error": true
+    },
+    {
+      "name": "missing value refuses money",
+      "source": "a+b*x",
+      "limits": {"fail_closed": true},
+      "values": {},
+      "evaluation_error": true,
+      "refusal": true
+    },
+    {
+      "name": "division by zero refuses money",
+      "source": "a+b*x/y",
+      "limits": {"fail_closed": true},
+      "values": {"x": 1, "y": 0},
+      "evaluation_error": true,
+      "refusal": true
+    },
+    {
+      "name": "finite negation",
+      "source": "a+b*(-x)",
+      "values": {"x": 3},
+      "term_values": {"1": 1, "-x": -3}
+    },
+    {
+      "name": "non-finite negation refuses money",
+      "source": "a+b*(-x)",
+      "limits": {"fail_closed": true},
+      "values": {"x": "inf"},
+      "evaluation_error": true,
+      "refusal": true,
+      "error_contains": "is not finite"
+    }
+  ]
+}
