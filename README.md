@@ -50,82 +50,8 @@ gen-worker run --payload '{"prompt": "hello"}'
 `cozyctl build` / `cozyctl deploy` take it from here — the full path to a
 deployed, billed endpoint is [tensorhub docs/writing-endpoints.md](https://github.com/cozy-creator/tensorhub/blob/master/docs/writing-endpoints.md).
 
-## Adding a model
-
-Hold state in a class: `setup()` runs once, every public method is one
-routable function. The worker downloads the binding, constructs the pipeline
-from the `setup()` annotation, and owns device placement + low-VRAM offload —
-endpoint code never touches `.to("cuda")` or offload config.
-
-```python
-from diffusers import StableDiffusionXLPipeline
-from gen_worker import HF, RequestContext, Resources, endpoint
-
-@endpoint(
-    model=HF("stabilityai/stable-diffusion-xl-base-1.0", dtype="bf16"),
-    resources=Resources(gpu=True),
-)
-class Generate:
-    def setup(self, pipeline: StableDiffusionXLPipeline) -> None:
-        self.pipeline = pipeline
-
-    def generate(self, ctx: RequestContext, payload: Input) -> Output:
-        view = ctx.for_request(self.pipeline, seed=42)
-        image = view(payload.prompt, generator=view.generator).images[0]
-        return Output(text=ctx.save_image(image).ref)
-```
-
-`Resources` declares only what the endpoint CANNOT run without (`gpu`,
-`gpu_count`, `libraries`, `strict_vram`, `vcpus`); VRAM requirements are
-MEASURED by the platform's profiling gate, not declared (`vram_gb_hint` is
-an optional first-build placement hint only). Handlers are exactly
-`(self, ctx, payload)`; per-request state (sampler, seed, scheduler) lives
-in a `ctx.for_request` view over shared weights — never assigned onto the
-instance.
-
-Bindings: `HF(id, revision=, dtype=, subfolder=, files=, storage_dtype=)`,
-`Hub(ref, tag=, flavor=, storage_dtype=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
-The slot name comes from the `models={}` key or the `setup()` parameter —
-never a constructor argument. `storage_dtype="fp8"` keeps denoiser weights in
-fp8-E4M3 storage with per-layer upcast to the compute `dtype` (half the VRAM
-on any card); fp8-stored `#fp8` flavors get the same treatment automatically.
-
-Curated checkpoint selection is a runtime payload argument: a handler declares
-`model: SomeModelChoice` (a `ModelChoice` enum of `Model` rows, each carrying a
-`ModelRef` binding + typed per-model defaults) and reads `payload.model.defaults`
-typed — one `generate(model=)` replaces N near-identical functions. `model:
-SomeModelChoice | ModelRef` opens BYOM. Streaming = an async-generator handler.
-Engine-hosted endpoints declare `runtime="vllm"` and get a booted,
-health-checked server subprocess injected into `setup()`.
-
-`Slot(pipeline_cls, selected_by=, default_checkpoint=)` is the hub-resolved
-alternative to `ModelChoice`: the model SET lives in platform config, not
-code, and the COMPONENT TREE (`pipeline.unet`, `pipeline.vae`, ...) is
-derived from the pipeline class and published to the hub — parts are never
-declared as sibling slots. The per-model config SCHEMA derives from the
-handler's context annotation (`ctx: RequestContext[SdxlDefaults]`, a
-`gen_worker.families.GenerationDefaults` vocabulary); the catalog owns the
-VALUES and `ctx.defaults` hands the resolved recipe to the handler typed.
-
-Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
-
-## Public surface
-
-- The decorator + bindings: `endpoint`, `Resources`, `Compile`, `HF`, `Hub`,
-  `Civitai`, `ModelScope`, `ModelRef`
-- Model selection: `Model`, `ModelChoice`, `ModelDefaults`, `Slot`,
-  `ResolvedSlot`, `gen_worker.families.GenerationDefaults`
-- Compile contract: `Compile`, `CompileAxis`, `AxisClass`, `DynamicDim`,
-  `pad_text_sequence`; per-request views: `ctx.for_request` / `gen_worker.view`
-- Contexts: `RequestContext` (≤15 members), `ConversionContext`,
-  `DatasetContext`, `TrainingContext`
-- Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`
-- Streaming: `BatchItemDelta`, `IncrementalTokenDelta`, `Done`, `Error`
-- Value types: `Asset`, `ImageAsset`, `AudioAsset`, `VideoAsset`
-- I/O codecs: `gen_worker.io`
-
-The conversion ETL (hub ingest, dtype cast / quant, clone, Tensorhub
-publish) is `gen_worker.convert` (see [docs/convert.md](docs/convert.md)).
+Full API reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
+The public surface is whatever `gen_worker/__init__.py` exports.
 
 ## Local development
 
@@ -160,8 +86,15 @@ hard-fails if `gen_worker` resolves outside `src/`).
 - [docs/local-dev.md](docs/local-dev.md) — the CLI: `run`/`serve`/`invoke`/
   `prefetch`, `field=value` grammar, `--offline`, exit codes.
 - [docs/dockerfile.md](docs/dockerfile.md) — bring-your-own-Dockerfile contract.
-- [docs/endpoint-envs.md](docs/endpoint-envs.md) — tenant envs/secrets.
+- [docs/host-integration.md](docs/host-integration.md) — the versioned contract
+  a host orchestrator (cozy-local) drives gen-worker over.
+- [docs/multi-gpu.md](docs/multi-gpu.md), [docs/compile-cache.md](docs/compile-cache.md),
+  [docs/convert.md](docs/convert.md) — measured results and the rulings from them.
+
+Tenant endpoint envs/secrets are tensorhub's contract:
+[docs/endpoint-envs-api.md](https://github.com/cozy-creator/tensorhub/blob/master/docs/endpoint-envs-api.md).
 
 ## Examples
 
-- `examples/marco-polo/` — minimal inference endpoint (sync, async, streaming)
+`examples/` — `marco-polo` (minimal CPU endpoint: sync, async, streaming),
+`sd15-image`, `sd15-hub-image`, `flux2-klein-image` (real GPU inference).

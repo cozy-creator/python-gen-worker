@@ -1,11 +1,4 @@
-# gen_worker.convert
-
-Cozy Creator's model ETL: hub ingest (HF + Civitai), dtype cast / quantization, repackage, and Tensorhub publish.
-
-- **Ingest**: HuggingFace (`HfApi.list_repo_files` + classifier + `snapshot_download(allow_patterns=…)`) and Civitai (bounded provider API).
-- **Convert**: streaming dtype cast + fp8-E4M3 storage cast (`#fp8` flavor), bitsandbytes nf4/fp4, GGUF (llama.cpp toolchain), singlefile↔diffusers repackage.
-- **Publish**: one commit call against Tensorhub's HF-shaped `/commits` write API (`mode: merge|replace`).
-- **Tenant SDK**: `Source`, `Component`, `Dataset`, `ProducedFlavor`, streaming cast/fp8 writers, calibration policy — for `@endpoint(kind="conversion")` endpoints.
+# Model conversion + transfer — measured floors and rulings
 
 ## Memory floors per operation (gw#395/#396)
 
@@ -23,8 +16,14 @@ Model size must never dictate converter hardware. What each operation actually n
 Casts and fp8 flavor production run on the standard 32 GB CPU class regardless of model size;
 only repackage/GGUF of huge models still needs RAM sized to the model.
 
-```python
-from gen_worker.convert import clone
+## Transfer rulings
 
-result = clone.from_huggingface(ctx, payload)   # download → convert → one commit per flavor
-```
+- **Model uploads are grant-only. There is no presigned-multipart fallback.**
+  A repo/model upload requires a Tensorhub-issued scoped `transfer_grant`
+  (short-lived S3 credentials scoped per object). Non-model platform uploads
+  (media, datasets) may still take presigned multipart URLs.
+- The transfer fanouts — **file fanout 4, part fanout 4, process-wide
+  presigned PUT budget 8** — are **implementation constants, not knobs**.
+  They are chosen from `scripts/benchmark_model_transfer.py`, scored
+  reliability first, then wall-clock, then RSS, then retries. Re-benchmark
+  before changing them; do not expose them as configuration.

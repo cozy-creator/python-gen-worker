@@ -1,32 +1,20 @@
 # torch.compile cache artifacts (#384)
 
-Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
-(model, shape) and needs a C toolchain prod worker images don't ship. The
-split:
+**The measured justification for the whole producer/consumer split:** compile
+wins **15-34 % warm latency** on flux-class models, but costs **20-46 s per
+(model, shape)** and needs a C toolchain prod worker images don't ship. That
+one sentence is the entire reason compilation happens in a separate
+first-party job and arrives at serving as an artifact.
 
-- **Producer** — the platform's first-party compile job (training-endpoints
-  `produce-inductor-cache`) runs on the target GPU SKU with a toolchain,
-  compiles the declared shape set, and publishes the captured
-  `TORCHINDUCTOR_CACHE_DIR` + `TRITON_CACHE_DIR` as ONE deterministic
-  `.tar.gz` flavor `#inductor-<sku>-torch<maj.min>` of the family system repo
-  `root/family-<family>`.
-- **Consumer** — an endpoint opts in with
-  `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024))))`.
-  At load the worker seeds a VERIFIED artifact (exact-match on family, SKU,
-  torch, triton, diffusers/transformers), then arms guarded `torch.compile`
-  (static by declaration: `dynamic=None` + `assume_static_by_default` + explicit marks, SDK v2) on `Compile.targets`. Plain optional lanes fall back to eager
-  on a miss or mismatch. W8A8 is mandatory compiled execution: a missing,
-  mismatched, or unproven cell fails retryably before GPU/handler work and
-  never dequantizes or runs eager. A plain compiled call that still needs a
-  fresh compile (undeclared shape, no toolchain) permanently unwraps to eager
-  — never a failed request.
+## The two execution rulings
 
-Serving artifacts are immutable per-(SKU, torch) snapshots attached by
-Tensorhub. They are verified against the exact live pipeline contract before
-the worker activates their cache files. Local tooling passes artifact paths
-explicitly or uses `gen_worker.local_cells`; the compile producer opts into
-cold compilation through an explicit library argument. There is no serving
-environment fallback that can bypass scheduler attachment or W8A8 fencing.
+- **W8A8 is MANDATORY compiled execution.** A missing, mismatched, or unproven
+  cell fails **retryably before any GPU/handler work**. It never dequantizes
+  and never runs eager — a silently-eager w8a8 path is a wrong-numerics
+  outcome, not a slow one.
+- **A plain compiled call is never a failed request.** If it still needs a
+  fresh compile (undeclared shape, no toolchain) it permanently unwraps to
+  eager. The two rules are deliberately opposite; do not unify them.
 
 Trust: compiled artifacts are CODE. Only platform jobs may publish to
 `root/*` (invoke-time destination-write preflight + cap-token repo+owner
@@ -41,8 +29,7 @@ never see the (cache-served) compile.
 
 ## Self-loading (str/Path-slot) endpoints — pgw#517
 
-The arming described above ("At load the worker seeds a VERIFIED artifact
-... then arms guarded `torch.compile`") only happens for a `setup()` slot
+Compile arming only happens for a `setup()` slot
 the worker loads itself — a slot annotated with the pipeline class (e.g.
 `pipeline: StableDiffusionXLPipeline`). A `str`/`Path`-annotated slot is
 **self-loading**: the endpoint constructs (and places) the pipeline inside

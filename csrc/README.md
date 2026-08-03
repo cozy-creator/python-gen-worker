@@ -1,21 +1,14 @@
 # csrc — the `_cozy_kernels` native extension (pgw#860)
 
-One torch C++/CUDA extension, `TORCH_LIBRARY`-registered under
-`torch.ops.cozy_kernels`. Compiled against the shared cuda base image's exact
-torch pin (2.13.0+cu130); fatbin targets exactly `sm_100a` + `sm_120a`.
+```bash
+scripts/native/build_native_kernels.sh [out_dir]
+```
 
-- Build: `scripts/native/build_native_kernels.sh [out_dir]` — compiles inside
-  the pinned devel toolchain image (no host toolkit, no GPU), verifies both
-  archs via `cuobjdump`, smokes op registration.
-- Ship: prebuilt `libcozy_kernels.so` baked into the shared cuda base image at
-  `/opt/cozy/native/` (pgw#859 G0 recommendation). Never a wheel extra —
-  that reintroduces nunchaku's version-matrix failure mode (gw#405/th#1211).
-- Runtime: `gen_worker.models.native_kernels` probes (load + op present +
-  numerics) and degrades to the triton/baseline lane on any gap.
-
-Currently the skeleton carries only the probe + build-info ops. Math kernels
-land per the pgw#862/#863 gates; the fused svdq lane (pgw#862 B0) is pure
-triton and does not need this extension.
+**Shipping decision:** the kernels ship as a **prebuilt
+`libcozy_kernels.so` baked into the shared cuda base image at
+`/opt/cozy/native/`** (pgw#859 G0). **Never a wheel extra** — a wheel extra
+reintroduces nunchaku's version-matrix failure mode (gw#405 / th#1211), where
+the extension and torch must be matched by the installer and silently is not.
 
 ## Attribution
 

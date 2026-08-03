@@ -1,65 +1,49 @@
 # Environment variables
 
-Orchestrator-injected pod config and anything an operator needs to override
-at deploy time flows through the typed `Settings` struct (`config/settings.py`),
-loaded by `config/loader.py` with precedence env → `./.env` → `/run/secrets`
-→ yaml → struct defaults. Call sites read `Settings` (the startup instance,
-or the cached `get_settings()`).
+Exactly one component reads the process environment: `config/loader.py`,
+which produces the typed `Settings` struct (`config/settings.py`) and passes
+it around. **`settings.py` carries the env name in a comment on every field**
+— that is the knob inventory; this page carries only what the code cannot
+tell you.
 
-A handful of modules that also work as standalone libraries/CLIs outside a
-full worker bring-up (`net.py`, `convert/ingest.py`, `convert/clone.py`,
-`cli/run.py`, `compile_cache.py`) read a few env vars directly instead —
-see "Internal plumbing" below. This doc is the source of truth for which
-knobs are which.
+## `TENSORHUB_FILL_SOURCE_DIR` (`tensorhub_fill_source_dir`)
 
-Tenant *endpoint* code reads its own envs freely (`docs/endpoint-envs.md`);
-this page covers the worker itself.
+th#850 managed-tier ruling: an endpoint-scoped datacenter-warm CAS mount
+(a RunPod volume), checked before R2 on a blob miss and write-through warmed
+from R2. **Never the CAS root** — that always stays `TENSORHUB_CACHE_DIR` /
+local. tensorhub sets this only when a volume is actually attached, and the
+worker **ismount-guards** it, so a plain directory can never be mistaken for
+the mount.
 
-## Secrets (Settings fields)
-
-| Env | Field | Why env |
-|---|---|---|
-| `HF_TOKEN` | `hf_token` | HF pulls of gated/private repos |
-| `WORKER_JWT` | `worker_jwt` | orchestrator-issued worker identity token |
-| `TENSORHUB_TOKEN` | `tensorhub_token` | standalone-CLI private tensorhub pulls |
-| `CIVITAI_API_KEY` (alias `CIVITAI_TOKEN`) | `civitai_api_key` | civitai provider downloads |
-
-## Orchestrator-injected deployment config (Settings fields)
-
-| Env | Field | Why env |
-|---|---|---|
-| `TENSORHUB_PUBLIC_URL` | `tensorhub_public_url` | injected per-cluster at pod launch |
-| `ORCHESTRATOR_PUBLIC_ADDR` | `orchestrator_public_addr` | router address, injected at pod launch |
-| `WORKER_ID` | `worker_id` | per-pod identity |
-| `ENDPOINT_LOCK_PATH` | `endpoint_lock_path` | discovery manifest path (baked default in images) |
-| `RUNPOD_POD_ID` | `runpod_pod_id` | set by the RunPod runtime |
-| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant |
-
-## Tuning knobs (Settings fields)
-
-| Env | Field | Why env |
-|---|---|---|
-| `HF_HOME` | `hf_home` | HF cache root (also read by huggingface_hub itself) |
-| `TENSORHUB_URL` | `tensorhub_url` | standalone-CLI resolve base URL |
-| `TENSORHUB_CACHE_DIR` / `TENSORHUB_CAS_DIR` | `tensorhub_cache_dir` / `tensorhub_cas_dir` | move cache/CAS off `/tmp` (cozy local persistence); `CAS_DIR` also isolates the `cli/run.py` standalone CLI in tests |
-| `TENSORHUB_FILL_SOURCE_DIR` | `tensorhub_fill_source_dir` | th#850 managed-tier ruling: an endpoint-scoped datacenter-warm CAS mount (RunPod volume), checked before R2 on a blob miss and write-through warmed from R2. Never the CAS root — that always stays `TENSORHUB_CACHE_DIR`/local. tensorhub sets this only when a volume is attached; ismount-guarded, so a plain directory never gets mistaken for it |
-
-## C2PA Content Credentials (Settings fields, th#714)
+## C2PA Content Credentials (th#714)
 
 Every generated media asset (png/jpeg/webp/gif, mp4/mov, wav/mp3/flac/m4a)
-gets a signed C2PA provenance manifest at `ctx.save_bytes`/`save_file` time --
+gets a signed C2PA provenance manifest at `ctx.save_bytes`/`save_file` time —
 the EU AI Act Art. 50 machine-readable AI-marking. ON iff the cert is
 configured; unconfigured logs a loud startup warning and no-ops;
 configured-but-broken refuses to start.
 
+**The worker holds a cert, never a key.** Signing itself is hub-side: the
+worker POSTs the claim to tensorhub's `/v1/worker/c2pa/sign` under its worker
+identity, and the private key never leaves the hub.
+
 | Env | Field | Notes |
 |---|---|---|
-| `GEN_WORKER_C2PA_CERT_PATH` | `c2pa_cert_path` | PEM signing-cert chain, leaf first (the ON switch) |
-| `GEN_WORKER_C2PA_KEY_PATH` | `c2pa_key_path` | PKCS#8 PEM private key for the leaf |
+| `GEN_WORKER_C2PA_CERT_PEM` | `c2pa_cert_pem` | inline PEM signing-cert chain, leaf first (the ON switch). **This is the mechanism actually used** — RunPod pods have no file mounts |
+| `GEN_WORKER_C2PA_CERT_PATH` | `c2pa_cert_path` | file-path variant for mounted deploys. `_CERT_PEM` takes precedence when both are set |
 | `GEN_WORKER_C2PA_ALG` | `c2pa_alg` | COSE alg matching the cert key (default `es256`) |
 | `GEN_WORKER_C2PA_TA_URL` | `c2pa_ta_url` | optional RFC3161 timestamp-authority URL |
 
-Needs the `signing` extra (`pip install gen-worker[signing]`, c2pa-python).
+**There is no key field, and setting one bricks the pod.**
+`GEN_WORKER_C2PA_KEY_PEM` and `GEN_WORKER_C2PA_KEY_PATH` are in
+`content_credentials._REFUSED_KEY_ENVS`: if either is present in the pod
+environment, `configure()` raises `C2paSigningError` at worker startup and
+the worker refuses to boot. A private key in a tenant pod is the thing this
+design exists to prevent, so it fails loudly rather than being ignored.
+
+`c2pa-python` is a **core dependency**, not the `[signing]` extra — the
+compliance default-ON posture must not depend on every endpoint image
+remembering to ask for an extra.
 
 ## Removed in the pgw#514 dead-config sweep
 
@@ -87,29 +71,3 @@ local-cell and producer tools use explicit library arguments. An inherited
 environment can therefore never bypass scheduler selection or mandatory W8A8
 compile evidence.
 
-## CI-lane opt-ins (raw env, tests/CI only)
-
-- `GEN_WORKER_GPU_SMOKE` — opts a GPU-only smoke test into a run (e.g. the
-  llama-server CUDA smoke in `tests/test_llama_runtime.py`); never read by
-  worker runtime code. Real-model GPU coverage now lives in the e2e repo's
-  nightly `TestJ6` cloud journey, not a gen-worker-repo GPU lane.
-
-## Internal plumbing (raw env)
-
-- `PYTORCH_CUDA_ALLOC_CONF` — `entrypoint.py` setdefault before torch import.
-- `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR` — WRITTEN by
-  `compile_cache.py` to latch inductor/triton onto verified seeded dirs
-  (children inherit).
-- `GEN_WORKER_LOCAL_OUTPUT_DIR`, `USER` — cozy-local app plumbing / login
-  fallback (`cli/local_context.py`).
-- `COZY_HTTP_CONNECT_TIMEOUT_S` / `COZY_HTTP_READ_TIMEOUT_S` — http timeout
-  floors, per-call by design so tests can tune them (`net.py`, gw#456).
-- `COZY_CIVITAI_DOWNLOAD_ATTEMPTS`, `COZY_CLONE_DOWNLOAD_ATTEMPTS` —
-  per-call test-tunable retry counts (`models/download.py`,
-  `convert/ingest.py`).
-- `COZY_CONVERT_WORKDIR` / `_SCRATCH_TTL_S` / `_RETAIN_WORKDIR` —
-  convert-job scratch knobs set by the invoking harness (`convert/clone.py`).
-  Clone disk admission itself is derived from the resolved source and output
-  operations and cannot be weakened by an environment override. The preflight
-  covers plan-known files; repackage tools fail normally if they later fetch
-  missing base components that exceed the remaining disk.

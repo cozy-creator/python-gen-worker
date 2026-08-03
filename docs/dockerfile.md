@@ -65,136 +65,27 @@ python = "3.12"
 
 ---
 
-## When to use `ARG BASE_IMAGE`
+## The base-image digest is duplicated across repos
 
-Use `ARG BASE_IMAGE` when your build profile uses **managed mode**
-(declares `python` / `torch` / `cuda`) or **explicit mode** (declares
-`base_image`). Tensorhub resolves or accepts the base image and passes it as
-a build arg.
+When your profile declares `python` / `torch` / `cuda` (managed mode) or
+`base_image` (explicit mode), tensorhub resolves the base image and passes it
+as the `BASE_IMAGE` build arg, plus matching `PYTHON_VERSION` /
+`TORCH_VERSION` / `CUDA_VERSION` args. Omit `ARG BASE_IMAGE` entirely for a
+**fully custom** profile — tensorhub injects nothing and your `FROM` is the
+only source of truth.
 
-```dockerfile
-ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime@sha256:db80a41f8428644cebcb3d75b0b62df334ab6c0e75785951eb25f48bfbd42407
-FROM ${BASE_IMAGE}
-WORKDIR /app
-COPY . /app
-RUN pip install -e .
-RUN mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
-```
+**The pinned digest is not single-sourced.** The authority is one map entry
+in tensorhub's `internal/builder/baseimage.go`; copies of the same
+`pytorch/pytorch:2.13.0-cuda13.0-...@sha256:db80a41f...` string were spread
+across four sites in two repos (that map, a builder test fixture, and two
+samples in this file — the two samples are now deleted). A torch bump has to
+chase every copy; if a local build and a tensorhub build disagree about the
+base, this is why.
 
-Use a common upstream default matching the profile so local builds behave like
-Tensorhub builds. In production, tensorhub overrides it with the resolved /
-explicit ref.
+## Cut from this document
 
-Omit `ARG BASE_IMAGE` entirely when your profile is **fully custom**
-(no `python` / `torch` / `cuda` / `base_image` declared). Tensorhub does not
-inject `BASE_IMAGE` in that mode — your `FROM` line is the only source of
-truth.
+The Docker tutorial that used to live here (`ARG BASE_IMAGE` walkthrough,
+version-pinning `RUN` steps, multi-profile branching, cache-bust nonces, the
+full uv example) was generic Docker knowledge with a Cozy label on it. Write
+whatever Dockerfile you want; satisfy the three contract points above.
 
----
-
-## Pinning library versions for `RUN` steps
-
-If your profile sets any of `python` / `torch` / `cuda`, tensorhub injects
-matching `PYTHON_VERSION` / `TORCH_VERSION` / `CUDA_VERSION` build args.
-Consume them when needed:
-
-```dockerfile
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-
-ARG CUDA_VERSION
-RUN pip install --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION//.} flash-attn
-```
-
-Most endpoints don't need this — the base image already ships the right
-version. Add an `ARG` only when a specific `RUN` step depends on it.
-
-If you're already in the image, you can read the version directly at build
-time without an `ARG`:
-
-```dockerfile
-RUN python -c "import torch; print(torch.version.cuda)"
-```
-
-One source of truth: the base image.
-
----
-
-## Multi-profile builds — one Dockerfile, different args per profile
-
-A single Dockerfile is reused across every build profile.
-Tensorhub passes the per-profile build args at build time; your Dockerfile
-branches as needed on the args it cares about.
-
-For most endpoints this is a no-op — the same Dockerfile works for every
-profile because each profile resolves to a fully-formed base image.
-
-For profiles that need different install steps (e.g. CUDA-specific wheels
-vs. CPU wheels), branch on a build arg you set yourself:
-
-```dockerfile
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-
-ARG ACCEL=cpu
-RUN if [ "$ACCEL" = "cuda" ]; then \
-        pip install -e .[torch]; \
-    else \
-        pip install -e .; \
-    fi
-```
-
-Add an extra build-profile field convention or use the `cuda` field's
-presence as your signal in the build script that drives `docker build`.
-
----
-
-## Caching: tenant-controlled
-
-`BUILD_NONCE`, `DEPS_NONCE`, endpoint-specific commit pins — these are your
-cache-bust knobs, unrelated to versioning. Tensorhub does not impose any
-caching strategy.
-
-```dockerfile
-ARG BUILD_NONCE=2026-04-23-default
-RUN echo "build-nonce=${BUILD_NONCE}" \
-    && mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-```
-
----
-
-## Full real-world example (managed mode + uv)
-
-```dockerfile
-ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime@sha256:db80a41f8428644cebcb3d75b0b62df334ab6c0e75785951eb25f48bfbd42407
-FROM ${BASE_IMAGE}
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-WORKDIR /app
-
-COPY pyproject.toml uv.lock /app/
-
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv export --cache-dir /var/cache/uv --link-mode copy \
-      --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
-      -o /tmp/requirements.txt \
-    && uv pip install --cache-dir /var/cache/uv --link-mode copy \
-      --system --break-system-packages --no-deps -r /tmp/requirements.txt
-
-COPY . /app
-
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --cache-dir /var/cache/uv --link-mode copy \
-      --system --break-system-packages --no-deps --no-sources /app \
-    && mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
-```
-
-Use this shape for GPU endpoints. For CPU-only endpoints, `python:3.12-slim`
-is still a good common default.

@@ -24,18 +24,18 @@ gen-worker run --payload '{"text": "marco"}'
 Everything else derives from the code:
 
 - Model bindings come from the `@endpoint(models=…)` decorator argument.
-- The payload's `_models` field can override any binding that declared
-  `.allow_override(...)`, exactly the way it does in production.
-- Model weights resolve from the local CAS first
-  (`$TENSORHUB_CAS_DIR`, default `/tmp/tensorhub-cache/cas`).
+- Model weights resolve from the local CAS first (see *Model fetch + the
+  local CAS* below).
 - On cache miss the CLI auto-fetches from the upstream registry
   (HuggingFace for `HF` bindings; cozy refs require an
   orchestrator-warmed cache today — see *Cozy ref cache miss* below).
 
-There is **no** `--models` flag and **no** stub mode. The code declares
-which model to load; the payload can override it. If you want to test
-pre/post-processing without loading a model, write a pytest against the
-helpers — that's what pytest is for.
+There is **no** `--models` flag and **no** stub mode. The code declares which
+model to load. A `Slot` with `selected_by=` is a hub-resolved choice, so
+hub-less `run` only ever loads the slot's `default_checkpoint`; naming a model
+in the payload is a typed usage error rather than a silent fallback. If you
+want to test pre/post-processing without loading a model, write a pytest
+against the helpers — that's what pytest is for.
 
 ## Output channels
 
@@ -85,30 +85,6 @@ Filtering with `--class` and/or `--method`:
 - More than one match → exit 2, "ambiguous; specify --class and/or
   --method".
 
-## Payload overrides via `_models`
-
-The reserved `_models` field on the payload lets you swap any binding
-that declared `.allow_override(...)` for an arbitrary ref. Same shape as
-production:
-
-```bash
-# String shorthand: owner/repo[:tag][#flavor]
-gen-worker run --payload '{
-  "prompt": "x",
-  "_models": {"pipe": "other/repo:canary#bf16"}
-}'
-
-# Structured form.
-gen-worker run --payload '{
-  "prompt": "x",
-  "_models": {"pipe": {"ref": "other/repo", "tag": "latest", "flavor": "bf16"}}
-}'
-```
-
-If the binding has no `.allow_override(...)`, the CLI rejects the
-override with exit 2 — matches production's `model_override_not_allowed`
-error.
-
 ## Model fetch + the local CAS
 
 The first invocation against a fresh checkout fetches model weights from
@@ -122,8 +98,21 @@ the upstream registry. You'll see a stderr line like:
 Subsequent invocations reuse the local cache. The cache locations:
 
 - `HF` bindings → `$HF_HOME` (default `~/.cache/huggingface`).
-- `Repo` (tensorhub) bindings → `$TENSORHUB_CAS_DIR` (default
-  `/tmp/tensorhub-cache/cas`).
+- `Hub` (tensorhub) bindings → `<$TENSORHUB_CACHE_DIR>/cas`, default
+  `/tmp/tensorhub-cache/cas`.
+
+**`TENSORHUB_CACHE_DIR` is the ONE knob for where the CAS lives**
+(`models/cache_paths.py`); `tensorhub_cas_dir()` is always
+`tensorhub_cache_dir()/cas`. Set it to somewhere durable or every run
+re-downloads — `/tmp` gets wiped.
+
+`TENSORHUB_CAS_DIR` is a **different, narrower** setting: it is read only by
+the standalone CLI resolver (`models/provision.py`), and the real worker path
+(`executor.py`) never looks at it. Setting `TENSORHUB_CAS_DIR` to stop
+re-downloading has no effect on a worker run.
+
+Bindings are `HF`, `Hub`, `Civitai`, `ModelScope`, `ModelRef` (`gen_worker`'s
+exports). There is no `Repo` class.
 
 ### `--offline`
 
@@ -140,7 +129,7 @@ gen-worker run --offline --payload '{"prompt":"x"}'
 ### Cozy ref cache miss
 
 Cozy / tensorhub refs (`Hub("owner/repo")` — no `hf:` / `civitai:`
-prefix) use the worker's CAS at `$TENSORHUB_CAS_DIR`. If the requested
+prefix) use the worker's CAS at `<$TENSORHUB_CACHE_DIR>/cas`. If the requested
 snapshot isn't there, the CLI exits 3 with a pointer to invoke the
 endpoint via the orchestrator once to populate the cache. This is the
 one production-equivalence gap: cozy refs require an orchestrator-
@@ -185,100 +174,14 @@ tensorhub).
 gen-worker run --payload '{"source":{"ref":"..."},"specs":[...]}' --allow-publish
 ```
 
-## Worked example — marco-polo
-
-```bash
-$ cd examples/marco-polo
-$ gen-worker run --payload '{"text":"marco"}'
-{"event":"result","value":{"response":"polo"}}
-
-$ gen-worker run --payload '{"text":"hello"}'
-# ValidationError: expected 'marco', got 'hello' — traceback on stderr, exit 1
-
-$ gen-worker run --payload '{"text":42}'
-gen-worker run: payload validation failed: Expected `str`, got `int` - at `$.text`
-# exit 2
-
-$ gen-worker run --payload '{"text":"marco"}' | jq -r .value.response
-polo
-```
-
-## Worked example — streaming generator
-
-```python
-def stream(self, ctx, data: Input) -> Iterator[Delta]:
-    for word in data.text.split():
-        yield Delta(chunk=word)
-```
-
-```bash
-$ gen-worker run --payload '{"text":"alpha beta gamma"}'
-{"event":"yield","value":{"chunk":"alpha"}}
-{"event":"yield","value":{"chunk":"beta"}}
-{"event":"yield","value":{"chunk":"gamma"}}
-{"event":"result","value":{"yielded":3}}
-```
-
-## Worked example — `--module` override
-
-If `[tool.gen_worker]` is missing or you want to invoke a sibling module:
-
-```bash
-gen-worker run --module my_pkg.alt_main --payload '{"prompt":"x"}'
-```
-
 ## Persistent dev server — `gen-worker serve` + `gen-worker invoke`
 
 `gen-worker run` reloads the model on **every** invocation — a fresh cold
-start per poke (minutes for a real model). For tight local iteration use
-`gen-worker serve`: it boots the endpoint **once** (imports `main`, runs
-`setup()` per class, holds the instances + loaded models VRAM-resident), then
-serves many requests warm. Ctrl-C tears down (`shutdown()` if present, socket
-removed, exit 0).
-
-One endpoint per `serve` process (matches prod: one worker = one release).
-`--config PATH` serves an endpoint outside the cwd; run several serves with
-distinct `--socket` paths to host multiple endpoints at once.
-
-Two transports, **one shared dispatch handler** (the same code path `run`
-uses):
-
-- **Unix domain socket (always on):** `serve` listens on `./.gen-worker.sock`
-  (override `--socket PATH`). Fire requests from another shell with
-  `gen-worker invoke`:
-
-  ```bash
-  # terminal 1
-  $ cd examples/marco-polo
-  $ gen-worker serve
-  gen-worker serve: listening on .../.gen-worker.sock (functions: marco_polo)
-  gen-worker serve: ready
-
-  # terminal 2 — address by FUNCTION NAME (no --class/--method)
-  $ gen-worker invoke marco_polo '{"text":"marco"}'
-  {"response":"polo"}
-  $ gen-worker invoke marco_polo @req.json          # curl-style @file
-  $ echo '{"text":"marco"}' | gen-worker invoke marco_polo -   # stdin
-  ```
-
-  If launching `serve` in the background, pass `--no-stdin` so it doesn't
-  consume the parent shell's stdin.
-
-- **stdin/stdout NDJSON (default, single process):** pipe a batch of
-  newline-delimited JSON requests in; get one NDJSON response line each. Logs
-  go to stderr. The process exits when stdin closes.
-
-  ```bash
-  $ printf '{"function":"marco_polo","payload":{"text":"marco"}}\n' \
-      | gen-worker serve
-  {"ok":true,"events":[{"event":"result","value":{"response":"polo"}}]}
-  ```
-
-**Wire format** (symmetric between the two transports):
-
-- request:  `{"function": "<fn_name>", "payload": <json>}`
-- response: `{"ok": true, "events": [{"event":"result","value":...}, ...]}`
-            or `{"ok": false, "error": {"kind":"...","message":"..."}}`
+start per poke (minutes for a real model). `gen-worker serve` boots the
+endpoint **once** and serves many requests warm; `gen-worker invoke <fn>`
+is the client. One endpoint per `serve` process (matches prod: one worker =
+one release). The wire protocol, sidecar, and transports are the versioned
+host contract — see [host-integration.md](host-integration.md).
 
 **Transport-fidelity caveat.** Production dispatch is gRPC-from-the-orchestrator.
 `serve` mirrors setup, context wiring, memory management, and GPU serialization
@@ -286,13 +189,6 @@ faithfully (shared code with `run`), but the **transport** differs (NDJSON over
 stdin/UDS locally vs gRPC in prod). That's the right trade for warm-model fast
 iteration; byte-for-byte prod fidelity would need the real gRPC Worker against a
 local stub-scheduler.
-
-## The two shapes
-
-| Shape | Process model | When to use |
-|---|---|---|
-| `gen-worker run` | One-shot: load → run → exit (one process). | Scripting, CI, one-off pokes, piping to `jq`. Cold-loads each time; pass `--attach` to dispatch through a warm `serve` socket instead. |
-| `gen-worker serve` + `gen-worker invoke` | Two processes / terminals: a warm worker + a thin client. | Tight iteration; this is the production/Docker topology (long-running worker, requests fired at it). |
 
 ## Ergonomic payload args (#350)
 
@@ -316,61 +212,6 @@ gen-worker invoke generate "a cat" seed=42
 
 `--payload '<json>'` still works as the escape hatch; ergonomic tokens **merge
 over** it.
-
-## Deployment shapes (Docker / k8s)
-
-> In real production the worker container's entrypoint is the **gRPC worker**
-> that dials the orchestrator. `serve` and `run` are the **local / self-hosted**
-> shapes — handy for one-off jobs and self-managed deployments.
-
-### `run` = one-off Job
-
-A single load-run-exit invocation. Mount the CAS volume so weights are reused,
-and the exit code propagates out of the container:
-
-```bash
-docker run --rm \
-  -v ~/.cache/cozy:/cache -e TENSORHUB_CAS_DIR=/cache \
-  <img> gen-worker run generate "a cat" seed=42
-```
-
-Maps cleanly to a Kubernetes **Job** / **CronJob** (exit 0 = success).
-
-### `serve` = long-running service
-
-A warm, always-on worker. Run detached, listen on TCP for cross-container
-access, and submit work either via `docker exec` or over a published port:
-
-```bash
-docker run -d -p 8731:8731 \
-  -v ~/.cache/cozy:/cache -e TENSORHUB_CAS_DIR=/cache \
-  <img> gen-worker serve --listen tcp://0.0.0.0:8731
-
-# submit via exec (shares the container's unix socket)…
-docker exec <ctr> gen-worker invoke generate "a cat" seed=42
-# …or over the published TCP port from the host:
-gen-worker invoke generate "a cat" --socket tcp://localhost:8731
-```
-
-Maps to a Kubernetes **Deployment** (one endpoint per Pod, mirroring prod's
-one-worker-per-release model).
-
-## Cancellation & signals (#352 / #353)
-
-Cancelling a request and stopping the worker both funnel through the same
-`ctx.cancel()` — so tenant code observes them identically, in prod and locally.
-
-- **`run` / `invoke` client, Ctrl-C:** cancels **that request** on the server;
-  the warm `serve` stays running. A **second** Ctrl-C within 2s detaches the
-  client (exit 130) — the request may still finish server-side.
-- **`serve` terminal, Ctrl-C / SIGTERM:** cancels **all** in-flight requests,
-  drains them cooperatively, then shuts down (runs `shutdown()`, removes the
-  socket). SIGTERM (k8s/orchestrator graceful stop) takes the identical path.
-  `SIGKILL` is uncatchable — it bypasses all cleanup.
-
-Tenant code observes cancellation by calling `ctx.raise_if_cancelled()`
-inside loops (or polling `ctx.cancelled`) — the **same idiom** production
-uses for an orchestrator interrupt.
 
 ## When `gen-worker run` is the wrong tool
 

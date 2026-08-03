@@ -94,13 +94,10 @@ wrong test to carry away.
 **Why it matters beyond tidiness.** A tensor outside `state_dict` is not a
 weight the CAS delivers and rebinds at load. `torch.export` lifts it as an
 anonymous `_tensor_constant{N}` **literal**, and a literal's bytes ship *inside*
-the compiled cell — so it becomes part of the artifact rather than part of the
-checkpoint. Two checkpoints of your family that differ only in the config that
-derives that table then need *different* cells. The cell key handles this
-correctly today (pgw#857 folds literal VALUES into the identity), so nothing
-breaks — but you have moved several MB out of the deduplicated weight store and
-into every compiled artifact, and you have coupled your cell identity to a
-number you probably meant to be a cache.
+the compiled cell. You have moved MBs out of the dedup'd weight store into
+every compiled artifact, and coupled cell identity to a number you probably
+meant to be a cache. Nothing breaks today (pgw#857 folds literal VALUES into
+the cell key), but it is pure cost.
 
 A registered buffer costs nothing and stays a weight.
 
@@ -138,6 +135,12 @@ ModelScope("owner/repo", revision=..., files=(...))
 ```
 
 `files` are `snapshot_download` allow-patterns for split-checkpoint repos.
+Measured worth checking for: FLUX.2-klein-4B's DiT is **~7.75 GB bf16**, and
+the source repo ships a redundant root-level single-file checkpoint alongside
+its real diffusers-layout weights (`transformer/`, `text_encoder/`, `vae/`).
+Narrowing with `files=` **roughly halves the download**. Vendor repos
+carrying both layouts are common — check before assuming the repo size is
+the model size.
 
 `components` (tensorhub/huggingface only) fetches only the named pipeline
 component subfolders instead of the whole repo — root config files
@@ -161,199 +164,43 @@ runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
 below platform standards) rather than falling straight to CPU offload.
 Fit ladder: bf16 → `#fp8` → `#nvfp4` (Blackwell) → emergency-nf4 → offload.
 
-## Model selection: `model=` is a payload argument (pgw#509)
+## Model selection — the design decisions
 
-Checkpoint selection is a runtime PAYLOAD FIELD, not a build-time fan-out. A
-handler whose payload declares a field typed with a `ModelChoice` subclass
-picks, per request, which curated checkpoint runs against the resident base.
-16 near-identical fine-tunes = ONE `generate(model=)`, not 16 functions.
+The API surface is `Slot`, `ModelChoice`, `Model`, `ModelDefaults` and
+`gen_worker.families` (read their signatures). What the code does not tell
+you is why they are shaped this way:
 
-Declare the curated set as DATA — one row per checkpoint carrying its
-`ModelRef` binding + typed per-model defaults:
-
-```python
-class SdxlDefaults(ModelDefaults, frozen=True):
-    scheduler: Literal["euler_a", "dpmpp_2m_karras"]
-    steps: int
-    guidance: float
-
-class SdxlModel(ModelChoice[SdxlDefaults], enum.Enum):
-    WAI  = Model("wai-illustrious",     Hub("tensorhub/wai-illustrious"), SdxlDefaults("euler_a", 28, 6.0), hot=True)
-    PONY = Model("cyberrealistic-pony", Hub("tensorhub/cyberrealistic-pony"), SdxlDefaults("dpmpp_2m_karras", 30, 5.0))
-
-class TextToImage(msgspec.Struct):
-    prompt: str
-    model: SdxlModel = SdxlModel.WAI          # curated-only
-
-@endpoint(models={"pipeline": Hub("tensorhub/wai-illustrious"), "vae": Hub("tensorhub/sdxl-vae")})
-class SDXLFamily:
-    def setup(self, pipeline, vae): ...
-    def generate(self, ctx, p: TextToImage) -> ImageOutput:
-        d = p.model.defaults                  # typed SdxlDefaults — no ctx.models sniffing
-        ...
-```
-
-On the wire a pick is its id string (`"wai-illustrious"`); the JSON schema is
-a closed `enum` (the curated allowlist). Defaults are manifest-exported so the
-catalog/UI can render `steps: 28` before submit. Discovery emits the whole set
-(each choice's binding + defaults + `hot`/`price` hints) for the scheduler to
-warm-pool per checkpoint.
-
-**BYOM is the field TYPE.** `model: SdxlModel` is curated-only; `model:
-SdxlModel | ModelRef` additionally accepts an arbitrary client-supplied
-`ModelRef` (bring-your-own-model). No `@byom` decorator, no `sources=` —
-architecture compatibility is derived from the pipeline the endpoint's
-`models=` loads. Per-method policy falls out of method=contract: a `generate`
-method can be BYOM-open while a `generate_turbo` method (fixed distillation
-LoRA) stays curated.
-
-Divergent WIRE contracts are separate METHODS, not `Optional` fields; only
-weight-sharing forces one class. A distilled turbo that shares the base is a
-`generate_turbo` method on the same class (shares the resident base); a
-standalone distilled checkpoint is a separate class/endpoint.
-
-## `Slot`: hub-resolved model slots (SDK v2, pgw#647)
-
-`ModelChoice` above bakes the curated set into the endpoint image — fine
-for a first-party endpoint that ships its own recipes, but the model SET is
-CATALOG, not code (th#767): adding a checkpoint shouldn't be a software
-release. `Slot(pipeline_cls, selected_by=, default_checkpoint=)` is the
-hub-resolved alternative, and under SDK v2 the declaration shrinks to the
-ROOT of the component tree:
-
-```python
-from gen_worker import HF, RequestContext, Slot, endpoint
-from gen_worker.families import SdxlDefaults
-
-@endpoint(models={
-    "pipeline": Slot(
-        StableDiffusionXLPipeline,
-        selected_by="model",                                              # payload field that branches this slot
-        default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"), # hub-less / seed-publish ref
-    ),
-})
-class Generate:
-    def setup(self, pipeline: StableDiffusionXLPipeline) -> None:
-        self.pipeline = pipeline
-
-    def generate(self, ctx: RequestContext[SdxlDefaults], p: TextToImage) -> ImageOutput:
-        d = ctx.defaults                     # typed SdxlDefaults — the catalog-resolved recipe
-        steps = p.steps if p.steps is not None else d.steps
-```
-
-- **The component tree is DERIVED from the pipeline class.**
-  `pipeline.unet` / `pipeline.vae` / `pipeline.text_encoder(_2)` /
-  `pipeline.scheduler` are addressable automatically (diffusers pipelines
-  self-describe), and the derived tree is published into the release
-  manifest for per-path catalog policy (`pipeline` open to a checkpoint
-  pick, `pipeline.vae` curated, `pipeline.unet` fixed) and
-  component-level routing. Declaring a part as a SIBLING slot
-  (`"vae": Slot(AutoencoderKL)`) or a `str` modifier slot next to a
-  pipeline slot (`turbo_lora: Slot(str)`) is a decoration-time error —
-  component overrides are CATALOG DATA (th#1116), adapters ride the model
-  binding. Explicit multi-slot declaration survives only for runtimes the
-  SDK cannot introspect (llama/gguf, custom engines).
-- **The config SCHEMA derives from the context annotation**
-  (`ctx: RequestContext[SdxlDefaults]`), never from a Slot kwarg
-  (`default_config=` is deleted). The catalog owns recipe VALUES: the hub
-  stamps one resolved recipe per slot and `ctx.defaults` hands it to the
-  handler typed. With no catalog metadata (hub-less `gen-worker run`,
-  tests), the neutral schema defaults (`SdxlDefaults()`) apply — identical
-  to the hub's neutral stamp.
-- `selected_by` names a payload field typed **plain `str`** (or
-  `str | ModelRef`, the wire's BYOM-open shape) — validated at
-  registration. The hub overlays the live allowed-value enum onto the
-  field; the SDK never bakes a curated list.
-- `default_checkpoint` seeds the hub mapping at first publish and is the
-  ONLY resolution source in hub-less mode; a live hub mapping always wins.
-- **Component sharing is AUTOMATIC by content address** — byte-identical
-  components (the qwen text encoder, a shared VAE) load once and are
-  refcounted across checkpoint picks; there is nothing to declare
-  (`share_components=` is deleted).
-
-**Per-family defaults vocabulary** (`gen_worker.families`): a typed,
-versioned, JSON-Schema-exportable struct per architecture — the shape
-tensorhub validates catalog recipe values against:
-
-```python
-from gen_worker.families import GenerationDefaults, family
-
-@family("sdxl")
-class SdxlDefaults(GenerationDefaults, frozen=True):
-    scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
-    steps: int = 28
-    guidance: float = 6.0
-    max_guidance: float | None = None   # a CLAMP constraint, never a wire reshape
-```
-
-`gen-worker families export-schemas <dir>` writes `<family>.schema.json`
-per registered family. Code owns this SCHEMA; the catalog owns the VALUES.
-
-**Per-request views**: `ctx.for_request(self.pipeline, sampler=, seed=)`
-returns a container copy sharing every module by reference (zero weight
-VRAM; the compiled graph stays bound to the module objects) with its OWN
-scheduler cloned from config — the SDK owns the sampler-name table
-(`gen_worker.view.SAMPLERS`; recipes select among its names, endpoints
-never define private sampler maps) and applies the resolved checkpoint's
-OBJECTIVE (pgw#654: `epsilon` / `v_prediction` — prediction_type plus
-zero-terminal-SNR for v-pred; `flow` — flow-match scheduler classes only)
-automatically. Never assign `self.pipeline.scheduler` per request:
-schedulers are stateful, shared, and part of the instance.
-
-Per-function contract facts live ON the function (pgw#654):
-
-```python
-@worker_function(objectives=("epsilon", "v_prediction"), distilled=False)
-def generate(self, ctx, payload: TextToImageInput) -> ImageOutput: ...
-```
-
-`objectives` = which checkpoint training objectives the handler's code
-path serves (omit = unrestricted); `distilled` = True (only distilled) /
-False (only non-distilled) / omit (either). The boot WARM PLAN is DERIVED
-— defaulted fields keep their schema defaults, `CompileAxis` fields
-cross-product their classes' `warm=` representatives, required fields
-synthesize neutral values — so there is no `warmup=` payload dict to
-write or to drift. Cheapen non-graph work on `ctx.boot_warmup`
-(`steps = 1 if ctx.boot_warmup else steps`). A per-function
-`@worker_function(warm={...}, warm_reason=...)` override exists only for
-a non-axis field that genuinely changes tracing. When the serve path
-modifies a requested value (clamps, substitutions), record it with
-`ctx.adjusted(field, requested, applied, reason)` / `ctx.clamp(...)` —
-the rows ride the result envelope to the caller.
-
-Imports live at module top by convention — no function-body imports
-unless breaking a genuine cycle or deferring an optional extra.
-
-**Testing:** `gen_worker.testing` builds a `RequestContext` with stubbed
-`ctx.slots` for handler unit tests, no hand-rolled fake context needed:
-
-```python
-from gen_worker.testing import fake_context
-from gen_worker import HF
-from gen_worker.families import SdxlDefaults
-
-ctx = fake_context(slots={
-    "pipeline": (HF("stabilityai/stable-diffusion-xl-base-1.0"), SdxlDefaults(steps=28)),
-})
-out = Generate().generate(ctx, TextToImage(prompt="a cat"))
-```
-
-## Lanes: multi-model classes with shared components (gw#479)
-
-A class binding 2+ pipeline slots whose snapshots share byte-identical
-components (content-keyed by the files' blake3 digests) loads the shared set
-ONCE; each slot's exclusive weights (its transformer) are an independent
-residency entry the worker LRU-swaps under VRAM pressure:
-
-```python
-@endpoint(models={"t2i": Hub("org/base"), "edit": Hub("org/edit")})
-class Generate:
-    def setup(self, t2i: QwenImagePipeline, edit: QwenImageEditPlusPipeline): ...
-    def generate(self, ctx, p: In) -> Out: ...  # picks self.t2i / self.edit
-```
-
-This COMPENSATES for split-vendor base+edit releases (Qwen, HiDream, Wan
-t2v/i2v); unified models (one transformer doing t2i + edit) bind one model.
+- **Checkpoint selection is a runtime PAYLOAD FIELD, not a build-time
+  fan-out** (pgw#509). 16 near-identical fine-tunes = ONE `generate(model=)`,
+  not 16 functions.
+- **BYOM is the field TYPE**, not a decorator. `model: SdxlModel` is
+  curated-only; `model: SdxlModel | ModelRef` is BYOM-open. There is no
+  `@byom` and no `sources=`; architecture compatibility derives from the
+  pipeline the endpoint loads. Per-method policy falls out of
+  method=contract.
+- **Divergent WIRE contracts are separate METHODS, not `Optional` fields.**
+  Only weight-sharing forces one class.
+- **The model SET is CATALOG, not code** (th#767) — adding a checkpoint must
+  not require a software release. That is what `Slot` is for; `ModelChoice`
+  bakes the set into the image and is the first-party-recipe case.
+- **The component tree is DERIVED from the pipeline class**, never declared.
+  Declaring a part as a sibling slot (`"vae": Slot(AutoencoderKL)`) or a
+  `str` modifier slot beside a pipeline slot is a **decoration-time error**:
+  component overrides are catalog data (th#1116) and adapters ride the model
+  binding. Explicit multi-slot declaration survives only for runtimes the SDK
+  cannot introspect (llama/gguf, custom engines).
+- **Code owns the config SCHEMA; the catalog owns the VALUES.** The schema
+  derives from the context annotation (`ctx: RequestContext[SdxlDefaults]`) —
+  `default_config=` was deleted rather than kept as a second answer.
+- **Component sharing is AUTOMATIC by content address**, refcounted across
+  picks — `share_components=` was deleted for the same reason.
+- **The boot warm plan is DERIVED, not written.** There is no `warmup=`
+  payload dict, precisely so it cannot drift from the schema.
+- **Per-request state lives in a VIEW** (`ctx.for_request`), never assigned
+  onto the instance: diffusers schedulers are stateful and shared, so
+  per-request instance mutation corrupts concurrent requests. The SDK owns
+  the sampler-name table (`gen_worker.view.SAMPLERS`) — endpoints never
+  define private sampler maps.
 
 ## Resources
 
@@ -521,12 +368,17 @@ watching the job should see.
 
 ## Project config
 
-`pyproject.toml` carries the one config value (there is no endpoint.toml):
+`pyproject.toml` carries the one config value gen-worker itself reads:
 
 ```toml
 [tool.gen_worker]
 main = "my_endpoint.main"
 ```
+
+gen-worker needs no `endpoint.toml`. **tensorhub's builder requires one** —
+a build tarball without it is rejected with `ErrNoEndpointToml`
+(`internal/builder/validation.go`). It carries build profiles and platform
+metadata, not SDK config.
 
 ## Errors
 

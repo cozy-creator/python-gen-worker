@@ -19,7 +19,8 @@ carries two version markers:
   host that wants to use an optional feature must check for its token here, not
   infer support from a version number or `--help` text.
 
-Current capabilities:
+Current capabilities (verified against `cli/protocol.py::CAPABILITIES` at
+gen-worker 0.91.0 — that list is the emitter and this table must track it):
 
 | Token | Meaning |
 |---|---|
@@ -52,7 +53,7 @@ Document shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.15.2",
+  "gen_worker_version": "<package version, e.g. 0.91.0>",
   "capabilities": ["describe", "list_functions", "prefetch", "cancel",
                    "streaming", "tcp_listen", "serve_sidecar",
                    "hub_resolve"],
@@ -111,8 +112,9 @@ One frame per line.
 ```
 
 - `function` (string, required) — the routable function name.
-- `payload` (object) — the decoded JSON payload; the reserved `_models` field
-  inside it overrides bindings exactly as in production.
+- `payload` (object) — the decoded JSON payload. There is **no** reserved
+  `_models` override field: th#767 deleted that channel on both sides. Model
+  choice is an ordinary payload field named by the slot's `selected_by`.
 - `request_id` (string) — required for cancellation to work; echoed back on
   responses.
 - `stream` (bool, optional) — request streamed frames (see below).
@@ -188,7 +190,7 @@ Shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.15.2",
+  "gen_worker_version": "<package version, e.g. 0.91.0>",
   "pid": 12345,
   "listen": "/abs/path/.gen-worker.sock",
   "ready_at": 1733356800.0,
@@ -268,6 +270,6 @@ a host can branch on it directly.
 
 ## See also
 
-- [local-dev.md](local-dev.md) — the CLI shapes (`run`, `serve` + `invoke`),
-  ergonomic payload args, and deployment topologies.
+- [local-dev.md](local-dev.md) — the CLI shapes (`run`, `serve` + `invoke`)
+  and ergonomic payload args.
 - [endpoint-authoring.md](endpoint-authoring.md) — decorator + binding reference.
