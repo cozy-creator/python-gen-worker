@@ -70,17 +70,6 @@ logger = logging.getLogger(__name__)
 #: rather than imported so the child never pulls the whole arming brain in).
 RECIPE_DYNAMO = "dynamo"
 RECIPE_AOT = "aot"
-#: pgw#817: the AOT mint whose entries are BLOCK classes. Same child, same
-#: `_mint_aot` call — the SHAPE is decided by the family's own export
-#: declaration (`Compile(regional=True)`), which the child reads from the
-#: endpoint it loads, so the recipe name is a label the parent and the hub
-#: group by rather than a second code path to keep in step.
-RECIPE_AOT_REGIONAL = "aot-regional"
-
-#: The recipes that export through AOTInductor. Named so a pre-flight guard can
-#: test membership without reading as the recipe DISPATCH below (pgw#817 pins
-#: that the dispatch follows the parent's composition; a refusal precedes it).
-_AOT_RECIPES = (RECIPE_AOT, RECIPE_AOT_REGIONAL)
 
 
 class MintChildRefused(RuntimeError):
@@ -164,7 +153,25 @@ def cap_vram(device: int, cap_bytes: int) -> str:
 
         if not torch.cuda.is_available():
             return ""
-        dev = 0 if device < 0 else 0  # CUDA_VISIBLE_DEVICES already pinned us
+        # pgw#877 #6. `mint_process.child_env` pins CUDA_VISIBLE_DEVICES only
+        # when `request.device >= 0`, so "the pin already chose for us" is
+        # true for a named device and FALSE for -1 — and this used to cap
+        # ordinal 0 either way, written `0 if device < 0 else 0`: a ternary
+        # with one arm, which read like a decision and was not one.
+        #
+        # A cap applied to the wrong card is worse than no cap: it neither
+        # bounds the child nor protects the tenant, and it reports a note
+        # saying it did both. So an ambiguous request refuses to cap and SAYS
+        # so, rather than capping a card nobody named.
+        if device < 0 and torch.cuda.device_count() > 1:
+            note = (
+                f"vram cap NOT applied: the request named no device and "
+                f"{torch.cuda.device_count()} cards are visible, so there is "
+                f"no ordinal this process can honestly cap — capping cuda:0 "
+                f"would bound a card the pipeline may not be on")
+            logger.warning("mint-child: %s", note)
+            return note
+        dev = torch.cuda.current_device()
         torch.cuda.set_device(dev)
         _free, total = torch.cuda.mem_get_info(dev)
         if total <= 0:
@@ -382,7 +389,16 @@ def _mint_aot(
     Runs against the pipeline the child ALREADY loaded through the endpoint's
     own ``setup()``, so the exported graphs are the serving graphs.
     """
-    from . import aot_mint, fleet_cells
+    from . import aot_mint, aot_resume, fleet_cells
+
+    # pgw#848 item 5: install the cross-attempt resume bank before anything is
+    # exported. Process-global rather than a parameter threaded through
+    # `aot_mint.mint` -> `_mint_cell` -> `_compile_entries_parallel`: the bank
+    # is opened by the entry pool, three call frames down, and the intervening
+    # signatures describe WHAT to compile rather than where a previous attempt
+    # left its work. Empty request field = no bank, and the mint runs exactly
+    # as it did before.
+    aot_resume.set_root(request.resume)
 
     frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
     spec = fleet_cells.aot_export_spec(pipe, cfg)
@@ -401,7 +417,22 @@ def _mint_aot(
         frame(phase=phase, step=step, total=total, note=note)
 
     try:
-        result = aot_mint.mint(pipe, spec, out_dir, on_progress=_progress)
+        result = aot_mint.mint(
+            pipe, spec, out_dir, on_progress=_progress,
+            # pgw#848: banked by the parent from a previous mint on this pod.
+            # 0 on a pod that has never minted this (family, lane).
+            entry_peak_rss_bytes=int(
+                getattr(request, "entry_peak_rss_bytes", 0) or 0),
+            # pgw#877: and the DEVICE half. Read off the request rather than a
+            # module global, because a module global here is always empty —
+            # the parent is the only process that banks.
+            entry_device_peak_bytes=int(
+                getattr(request, "entry_device_peak_bytes", 0) or 0),
+            # pgw#848: rewritten on every beat, so a mint this process is
+            # KILLED in still leaves its measurements on disk for the parent.
+            phase_snapshot=(
+                Path(request.phases_snapshot)
+                if request.phases_snapshot else None))
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod
@@ -419,20 +450,7 @@ def _mint_aot(
         os.replace(artifact, target)
     frame(phase="finalize", note=f"cell {result.cell_key}")
 
-    peak = 0
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            peak = int(torch.cuda.max_memory_allocated())
-    except Exception:
-        peak = 0
-    try:
-        import resource
-
-        rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
-    except Exception:
-        rss = 0
+    peak = _peak_vram()
     return MintReport(
         status="minted",
         artifact=str(target),
@@ -443,7 +461,6 @@ def _mint_aot(
             f"class(es) for family {cfg.family!r} as one aot-inductor cell"),
         phase="finalize",
         peak_vram_bytes=peak,
-        peak_rss_bytes=rss,
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
         mint_phases=dict(result.metadata.get("mint_phases") or {}),
@@ -482,7 +499,7 @@ def mint(request: MintRequest) -> MintReport:
     if not cc.toolchain_present():
         raise MintChildRefused(
             "no C toolchain (cc/gcc/clang) — inductor cannot link a kernel")
-    if request.recipe in _AOT_RECIPES and not cc.cxx_toolchain_present():
+    if request.recipe == RECIPE_AOT and not cc.cxx_toolchain_present():
         # pgw#823: the AOT recipe's stricter requirement, asserted BEFORE the
         # weights are read. The guard above passes on a C compiler; AOTI needs
         # a C++ one, and without this the miss surfaces 336 s later as an
@@ -511,7 +528,7 @@ def mint(request: MintRequest) -> MintReport:
     if cfg.lora_bucket:
         cc.apply_lora_lane(pipe, cfg.lora_bucket)
 
-    if request.recipe in (RECIPE_AOT, RECIPE_AOT_REGIONAL):
+    if request.recipe == RECIPE_AOT:
         # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
         # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
         # model ref for an operator's mint pod): the graphs this cell must
@@ -550,20 +567,7 @@ def mint(request: MintRequest) -> MintReport:
         expected_graphs=max(0, cc.cache_miss_count(pipe) - miss_before))
     frame(phase="finalize", note=f"packed {target.name}")
 
-    peak = 0
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            peak = int(torch.cuda.max_memory_allocated())
-    except Exception:
-        peak = 0
-    try:
-        import resource
-
-        rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
-    except Exception:
-        rss = 0
+    peak = _peak_vram()
     from . import cell_key
 
     try:
@@ -579,16 +583,43 @@ def mint(request: MintRequest) -> MintReport:
         detail=f"packed {target.name} for family {cfg.family!r}",
         phase="finalize",
         peak_vram_bytes=peak,
-        peak_rss_bytes=rss,
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
     )
+
+
+def _peak_vram() -> int:
+    """This process's device high-water.
+
+    pgw#848: read on EVERY terminus, not just the minted one. A mint that
+    died against its own cap is precisely the mint whose peak the next
+    attempt has to widen against, and until now the crash and refusal
+    reports carried no ``peak_vram_bytes`` at all — so the parent banked
+    nothing and re-asked identically, forever.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        return int(torch.cuda.max_memory_allocated())
+    except Exception:  # noqa: BLE001 — a probe never fails a report
+        return 0
 
 
 def _is_resource_error(exc: BaseException) -> bool:
     from .models.memory import is_cuda_oom
 
     if is_cuda_oom(exc):
+        return True
+    # pgw#848: a HOST memory shortfall, classified by whoever measured it.
+    # Duck-typed rather than imported: `aot_mint.MintResourceExhausted` sets
+    # `mint_resource_shortfall = True`, and this module deliberately pulls in
+    # as little of the arming brain as it can. Until this existed the AOT
+    # pool's only exit was `MintRefused` -> EXIT_REFUSED -> never retried, so
+    # an OOM-killed entry child was reported to the hub as a deterministic
+    # refusal and the mint never tried the narrower K that would fix it.
+    if getattr(exc, "mint_resource_shortfall", False) is True:
         return True
     return isinstance(exc, MemoryError)
 
@@ -620,7 +651,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write_report(report_path, MintReport(
             status="refused", detail=str(exc)[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0],
+            phase=_PHASE_OPEN[0], peak_vram_bytes=_peak_vram(),
             mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -630,7 +661,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             status="resource" if resource_shortfall else "failed",
             detail=f"{type(exc).__name__}: {exc}"[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0],
+            phase=_PHASE_OPEN[0], peak_vram_bytes=_peak_vram(),
             # pgw#825: a CRASH's paid compiles are measurable too — the mint
             # attaches its partial table to whatever it died with.
             mint_phases=dict(getattr(exc, "mint_phases", None) or {})))

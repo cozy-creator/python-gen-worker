@@ -68,14 +68,14 @@ _GPU = {"gpu_total_mem": 40 * 1024**3, "gpu_free_mem": 40 * 1024**3,
 
 
 def test_a_wide_pod_withdraws_the_async_function_instead_of_advertising_it() -> None:
-    ex = _executor(ExecutionTopology(gpu_count=4, group_degree=1))
-    assert ex.topology.groups == 4
+    ex = _executor(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
+    assert ex.topology.execution_groups == 4
     ex.gate_functions(_GPU)
 
     code, detail, axes = ex.unavailable["async_fn"]
     assert code == "multi_group_async_handler"
     assert "async handlers are not yet served" in detail
-    assert axes["groups"] == "4"
+    assert axes["execution_groups"] == "4"
     assert "async_fn" not in ex.available_functions(), (
         "the hub reads available_functions; advertising a function every "
         "dispatch refuses is the pgw#778 black hole")
@@ -87,8 +87,8 @@ def test_a_wide_pod_withdraws_the_async_function_instead_of_advertising_it() -> 
 
 def test_a_sequence_parallel_pod_withdraws_it_too() -> None:
     ex = _executor(ExecutionTopology(
-        gpu_count=2, group_degree=2, parallel="sequence"))
-    assert (ex.topology.groups, ex.topology.degree) == (1, 2)
+        gpu_count=2, gpus_per_execution_group=2, parallel="sequence"))
+    assert (ex.topology.execution_groups, ex.topology.degree) == (1, 2)
     ex.gate_functions(_GPU)
     assert ex.unavailable["async_fn"][0] == "multi_group_async_handler"
     assert "sync_fn" in ex.available_functions()
@@ -103,7 +103,7 @@ def test_a_single_group_pod_advertises_both() -> None:
 
 
 def test_the_gate_mark_is_gate_owned_and_re_derived() -> None:
-    ex = _executor(ExecutionTopology(gpu_count=4, group_degree=1))
+    ex = _executor(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     ex.gate_functions(_GPU)
     ex.gate_functions(_GPU)
     assert ex.unavailable["async_fn"][0] == "multi_group_async_handler"
@@ -114,7 +114,7 @@ def test_the_dispatch_refusal_is_retryable_not_invalid() -> None:
     # caller. RETRYABLE lets the hub replan it onto a pod that can serve it.
     import asyncio
 
-    ex = _executor(ExecutionTopology(gpu_count=4, group_degree=1))
+    ex = _executor(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     spec = ex.specs["async_fn"]
     finished: dict = {}
 
@@ -142,7 +142,7 @@ def test_serve_plans_are_not_polluted_for_a_withdrawn_function(
     # The withdrawal `continue`s before plan_serve, so a function the pod will
     # never run does not publish a fit plan the hub could act on.
     ex = _executor(ExecutionTopology(
-        gpu_count=groups * degree, group_degree=degree,
+        gpu_count=groups * degree, gpus_per_execution_group=degree,
         parallel="sequence" if degree > 1 else ""))
     ex.gate_functions(_GPU)
     assert "async_fn" not in ex.serve_plans

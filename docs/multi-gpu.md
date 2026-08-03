@@ -10,14 +10,40 @@ D.** DP and SP are two projections of one number pair, not two features.
 The whole contract is one env var (`WORKER_` is a hub-reserved prefix, so this
 is a trusted wire fact and not an operator knob):
 
-    WORKER_EXECUTION_TOPOLOGY={"gpu_count":4,"group_degree":2,"groups":2,"parallel":"sequence"}
+    WORKER_EXECUTION_TOPOLOGY={"gpu_count":4,"gpus_per_execution_group":2,"execution_groups":2,"parallel":"sequence"}
 
-Derivation is identical on both sides: `D = group_degree`, `G = gpu_count/D`,
+Derivation is identical on both sides: `D = gpus_per_execution_group`, `G = gpu_count/D`,
 group `g` owns devices `[g*D, (g+1)*D)`. `ResolvedCompute.gpu_index` on the job
 wire names the group's **rank-0 device** (`0, D, 2D, ...`), so at `D == 1`
 nothing about dispatch moves. Absent is legal and means one slot — every CPU
-pod and every pre-topology pod. Present but malformed is a typed refusal:
-the only producer is the hub.
+pod and every pre-topology pod. Present but not fully recognised is a typed
+refusal: the only producer is the hub.
+
+`gpu_count = execution_groups x gpus_per_execution_group` encodes a **partition
+invariant** — a group exclusively owns its devices — so introducing GPU sharing
+between groups breaks that arithmetic loudly instead of silently.
+
+The field set is **closed**: an unrecognised key is `topology_unknown_field`,
+never a field read as absent. Absent means one slot, so shrugging at an
+unknown key is how a hub that bought degree 2 gets served degree 1 in silence.
+Growing the contract is therefore its own two-release transition.
+
+**th#1375 rename, in transition.** `group_degree` -> `gpus_per_execution_group`
+and `groups` -> `execution_groups`. Prod pins gen-worker 0.79.0 and every
+released tag reads only the old spelling, so the hub emits BOTH and the worker
+accepts both (they must agree, else `topology_alias_disagree`). Deploy order is
+therefore irrelevant. th#1376 deletes the old spelling, after which it becomes
+an unknown key and is refused by the rule above.
+
+An **execution group** is the serving unit — the cards that cooperate on one
+request. It is *not* a PyTorch `ProcessGroup`, which is the communication
+handle those ranks collect over; each execution group owns one. Coming from
+another stack: `gpus_per_execution_group` is `tensor_parallel_size`
+(vLLM/SGLang), `context_parallel_size` (Megatron), `sequence_parallel_size`
+(DeepSpeed-Ulysses); `execution_groups` is `data_parallel_size`, `num_replicas`
+(Ray Serve), or instance count (Triton). Those names fuse the *width* of a
+group with the *technique* filling it; `parallel` is a separate field here so
+the width is named independently of the mechanism.
 
 `parallel` names WHO shards:
 

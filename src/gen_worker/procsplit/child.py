@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WATCHDOG_PING_S = 5.0
 _BOOT_FATAL_SEND_TIMEOUT_S = 5.0
+# pgw#833 (pgw#826 follow-on): how long the dying child waits for the parent
+# to CONFIRM it has recorded the verdict. Bounded — a wedged parent must not
+# hold a doomed child alive — and losing the ack only degrades to the old
+# fire-and-forget behaviour.
+_BOOT_FATAL_ACK_TIMEOUT_S = 10.0
 
 
 def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable") -> bool:
@@ -36,6 +41,13 @@ def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable"
     it opens its own short-lived socket. The parent propagates the report on
     its credential and exits 1 instead of respawning — a hardware verdict is
     not a transient fault.
+
+    pgw#833: after sending, WAIT (bounded) for the parent's T_BOOT_FATAL_ACK.
+    Without it, a child that exits immediately can be reaped before the parent
+    reads the frame off the socket buffer, downgrading the typed verdict to a
+    crash-to-retry (the race CI run 30692482234 caught). The ack is written
+    only after the parent has recorded the verdict, so surviving this call
+    means the respawn decision will see it.
     """
     path = os.environ.get(ENV_SOCKET, "").strip()
     if not path:
@@ -46,11 +58,46 @@ def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable"
             sock.settimeout(_BOOT_FATAL_SEND_TIMEOUT_S)
             sock.connect(path)
             sock.sendall(frames.frame_bytes(frames.T_BOOT_FATAL, payload))
+            sock.settimeout(_BOOT_FATAL_ACK_TIMEOUT_S)
+            try:
+                _wait_boot_fatal_ack(sock)
+            except (socket.timeout, OSError, ValueError):
+                logger.warning("no boot-fatal ack from the control parent "
+                               "within %.0fs; exiting anyway (the verdict may "
+                               "race the reap)", _BOOT_FATAL_ACK_TIMEOUT_S,
+                               exc_info=True)
     except OSError:
         logger.warning("could not hand the boot fatal to the control parent",
                        exc_info=True)
         return False
     return True
+
+
+def _wait_boot_fatal_ack(sock: socket.socket) -> None:
+    """Blocking read until T_BOOT_FATAL_ACK arrives.
+
+    The transient boot-fatal connection becomes the slot's link parent-side,
+    so unrelated parent->child frames (e.g. a T_HELLO_REQ from a concurrently
+    connecting hub stream) may precede the ack — skip them. Bounded by the
+    socket timeout the caller set.
+    """
+    while True:
+        header = _recv_exact(sock, 5)
+        ftype, length = header[0], int.from_bytes(header[1:5], "big")
+        if length:
+            _recv_exact(sock, length)
+        if ftype == frames.T_BOOT_FATAL_ACK:
+            return
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise OSError("socket closed before the boot-fatal ack arrived")
+        buf += chunk
+    return buf
 
 
 def _ping_interval() -> float:

@@ -116,7 +116,7 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
 
     siblings = host_siblings()
     effective = max(1, int(groups)) * siblings
-    facts: Dict[str, Any] = {"groups": int(groups), "host_siblings": siblings,
+    facts: Dict[str, Any] = {"execution_groups": int(groups), "host_siblings": siblings,
                              "concurrency": effective}
     try:
         import torch
@@ -148,7 +148,7 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
         "pgw#782 cpu budget: %d local group(s) x %d sibling child(ren) = %d "
         "sharing a %.2f-core allowance -> intra-op threads %d (torch default "
         "was %d)",
-        facts["groups"], siblings, effective, allowance, imposed, default)
+        facts["execution_groups"], siblings, effective, allowance, imposed, default)
     return facts
 
 

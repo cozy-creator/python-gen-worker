@@ -347,10 +347,15 @@ def swap_svdq_linears(
     alignment fold to dense individually rather than refusing."""
     import torch
 
+    from .native_kernels import svdq_execution_lane
+    from .svdq_fused import build_svdq_fused_linear, fused_shape_supported
+
     compute = compute_dtype or torch.bfloat16
     if mode not in ("blockwise", "dense"):
         mode = "blockwise" if svdq_native_available() else "dense"
-    counts = {"blockwise": 0, "dense": 0, "prefixes": 0, "linears": 0}
+    lane = svdq_execution_lane() if mode == "blockwise" else "baseline"
+    counts = {"blockwise": 0, "dense": 0, "fused": 0, "prefixes": 0,
+              "linears": 0}
     for prefix in sorted(decoded):
         dec = decoded[prefix]
         targets = plan_targets(model, prefix)
@@ -369,7 +374,13 @@ def swap_svdq_linears(
             fp4_ok = (mode == "blockwise"
                       and part.in_features % _K_ALIGN == 0
                       and part.out_features % _N_ALIGN == 0)
-            if fp4_ok:
+            fused_ok = (fp4_ok and lane == "fused" and fused_shape_supported(
+                part.out_features, part.in_features, part.rank))
+            if fused_ok:
+                new = build_svdq_fused_linear(part, compute_dtype=compute,
+                                              device=device)
+                counts["fused"] += 1
+            elif fp4_ok:
                 new = build_svdq_linear(to_buffers(part),
                                         compute_dtype=compute, device=device)
                 counts["blockwise"] += 1
@@ -380,9 +391,9 @@ def swap_svdq_linears(
                 counts["dense"] += 1
             _set_module(model, path, new)
     logger.info(
-        "svdq native swap: %d prefixes -> %d linears (%d fp4, %d folded bf16)",
-        counts["prefixes"], counts["linears"], counts["blockwise"],
-        counts["dense"])
+        "svdq native swap: %d prefixes -> %d linears (%d fused, %d fp4, "
+        "%d folded bf16)", counts["prefixes"], counts["linears"],
+        counts["fused"], counts["blockwise"], counts["dense"])
     return counts
 
 
@@ -439,12 +450,20 @@ def _group_by_prefix(names: Any) -> dict[str, list[str]]:
 
 
 def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
-                             mode: str = "") -> Any:
+                             mode: str = "", device: Any = None) -> Any:
     """Materialize a nunchaku-format svdq checkpoint as a STOCK diffusers
     denoiser: skeleton on meta, W4A4 linears swapped for :class:`SvdqLinear`
     (fused ``to_qkv`` split across the diffusers projections), AWQ modulation
-    layers decoded to bf16 Linears, everything else assigned verbatim."""
+    layers decoded to bf16 Linears, everything else assigned verbatim.
+
+    ``device`` is where the DECODE runs and where the result lives. Default:
+    the fragment unpack/repack chain runs on CUDA when the blockwise lane is
+    the target (te#150 — the same transforms measured 223s single-threaded on
+    CPU vs seconds as device-bandwidth permutes; nunchaku loads in ~8s only
+    because its kernels consume the on-disk layout verbatim). ``"cpu"``
+    reproduces the historical path byte-identically."""
     import json
+    import time
 
     import torch
     from accelerate import init_empty_weights
@@ -452,11 +471,23 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
 
     from .svdq import _read_safetensors_metadata
     from .svdq_awq import decode_awq_linear, is_awq_linear
-    from .svdq_layout import decode_linear
+    from .svdq_layout import (
+        LOWRANK_QUANT_KEY,
+        LOWRANK_QUANT_SCHEMES,
+        decode_linear,
+    )
 
     compute = compute_dtype or torch.bfloat16
     meta = _read_safetensors_metadata(art.file)
     model_class = str(meta.get("model_class") or "")
+    # te#148: the metadata flag declares the branch scheme; absent = bf16
+    # (the historical format). decode_linear enforces bytes == declaration.
+    lowrank_quant = str(meta.get(LOWRANK_QUANT_KEY) or "bf16")
+    if lowrank_quant not in ("bf16",) + LOWRANK_QUANT_SCHEMES:
+        raise SvdqNativeError(
+            f"svdq checkpoint {art.file.name} declares "
+            f"{LOWRANK_QUANT_KEY}={lowrank_quant!r} — not a known low-rank "
+            f"branch scheme (bf16, {', '.join(LOWRANK_QUANT_SCHEMES)})")
     cfg_raw = meta.get("config")
     try:
         cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else dict(cfg_raw or {})
@@ -475,10 +506,19 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
 
     if mode not in ("blockwise", "dense"):
         mode = "blockwise" if svdq_native_available() else "dense"
+    if device is None:
+        device = ("cuda" if mode == "blockwise" and torch.cuda.is_available()
+                  else "cpu")
+    dev = torch.device(device)
 
+    from .native_kernels import svdq_execution_lane
+    from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
+
+    lane = svdq_execution_lane() if mode == "blockwise" else "baseline"
+    t0 = time.perf_counter()
     plain: Dict[str, Any] = {}
-    swapped = awq = 0
-    with safe_open(str(art.file), framework="pt", device="cpu") as fh:
+    swapped = awq = awq_packed = 0
+    with safe_open(str(art.file), framework="pt", device=str(dev)) as fh:
         groups = _group_by_prefix(fh.keys())
         for prefix, leaves in sorted(groups.items()):
             tensors = {leaf: fh.get_tensor(f"{prefix}.{leaf}") for leaf in leaves}
@@ -489,19 +529,30 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                         f"AWQ layer {prefix!r} has no Linear in "
                         f"{type(model).__name__}")
                 splits = adanorm_splits_for(type(model).__name__, prefix)
-                _set_module(model, prefix, decode_awq_linear(
-                    tensors, int(target.out_features), int(target.in_features),
-                    adanorm_splits=splits, compute_dtype=compute))
-                awq += 1
+                out_f = int(target.out_features)
+                in_f = int(target.in_features)
+                # pgw#864: modulation stays packed-resident on the fused lane
+                # (the +6.8 GB delta was this dequant); degrade per-layer.
+                if lane == "fused" and awq_packed_supported(out_f, in_f):
+                    _set_module(model, prefix, build_awq_packed_linear(
+                        tensors, out_f, in_f, adanorm_splits=splits,
+                        compute_dtype=compute, device=dev))
+                    awq_packed += 1
+                else:
+                    _set_module(model, prefix, decode_awq_linear(
+                        tensors, out_f, in_f, adanorm_splits=splits,
+                        compute_dtype=compute, device=dev))
+                    awq += 1
                 continue
             if "qweight" in tensors and "wscales" in tensors:
                 targets = plan_targets(model, prefix)
                 out_f = sum(o for _, o in targets)
                 in_f = int(_module_at(model, targets[0][0]).in_features)
-                dec = decode_linear(tensors, out_f, in_f)
+                dec = decode_linear(tensors, out_f, in_f,
+                                    lowrank_quant=lowrank_quant)
                 swapped += swap_svdq_linears(
                     model, {prefix: dec}, compute_dtype=compute,
-                    mode=mode)["linears"]
+                    mode=mode, device=dev)["linears"]
                 continue
             for leaf, t in tensors.items():
                 key = f"{prefix}.{leaf}" if prefix else leaf
@@ -522,9 +573,11 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     model._cozy_svdq_engine = SVDQ_ENGINE_NATIVE
     model._cozy_svdq_mode = mode
     logger.info(
-        "svdq native loader: %s mode=%s — %d W4A4 linears, %d AWQ modulation "
-        "layers, %d plain tensors", type(model).__name__, mode, swapped, awq,
-        len(plain))
+        "svdq native loader: %s mode=%s lowrank=%s device=%s — %d W4A4 "
+        "linears, %d AWQ modulation layers (%d packed-resident), %d plain "
+        "tensors in %.1fs",
+        type(model).__name__, mode, lowrank_quant, dev, swapped,
+        awq + awq_packed, awq_packed, len(plain), time.perf_counter() - t0)
     return model
 
 

@@ -741,6 +741,13 @@ def test_provision_dispatches_aot_kind_and_reports_a_hit(tmp_path, monkeypatch, 
         raise AssertionError("compile_cache.enable must not be reached")
     monkeypatch.setattr(cc, "enable", _unexpected)
 
+    # pgw#868: the arm now GATES on numerics, and a torch-free rig has no
+    # tensors to compare — this file's whole premise ("no torch, no CUDA, no
+    # real artifact"). The gate is stubbed here because the subject is KIND
+    # DISPATCH; its own behaviour, and the fact that `arm_aot` reaches it at
+    # all, are proven in tests/test_numerics_gate_pgw868.py against a real
+    # packed artifact and real tensors.
+    monkeypatch.setattr(provision, "gate_cell_numerics", lambda *a, **k: True)
     module = FakeModule()
     pipeline = FakePipeline(module)
     assert provision.enable_compiled(

@@ -4,6 +4,33 @@ backoff, `not_leader` redirects. Liveness is HTTP/2 keepalive only.
 Send-queue policy (CONTRACT.md §1): JobResult is NEVER dropped — results
 persist across reconnects until written to a live stream. Under overflow the
 drop order is JobProgress (oldest first); everything else blocks the producer.
+
+pgw#869 — THE EVIDENCE LANE. Results had a durable lane; measurements did not.
+`reset_for_reconnect` cleared `_items` wholesale and restored only
+`_pending_results`, so every queued ActivityUpdate/BootPhase — every
+`self_mint_compile` phase, every `aot_mint phase=pool` ledger, every terminal —
+was destroyed on each disconnect, and any evidence already popped by the sender
+when the write failed had no durable copy at all. That is wall #7's mechanism:
+the pod stayed alive with its numbers, the route to them did not.
+
+Evidence now rides its own durable lane on the same principle as results:
+enqueue-and-return (never blocks a producer), survives reconnect in FIFO order,
+and retires only when a live stream has taken it. Coalescing is deliberately
+asymmetric — detail-free RUNNING beats (`Activity.heartbeat` /
+`progress_beat`) collapse to the latest per (kind, phase); anything carrying a
+`detail`, an `error`, or a non-RUNNING state is evidence and is never dropped.
+That split is not a guess: the hub's own upsert conflict key is
+`(worker_id, kind, phase, state, self_stalled, payload_digest)` with
+`payload_digest = sha256(error || 0x00 || detail)`
+(tensorhub `internal/db/gen/worker_activity_events.sql.go`,
+`repository/worker_activity_event_store.go`), so exactly what this coalesces is
+what the hub would itself have folded into one row via `occurrences + 1`, while
+everything it preserves is a distinct row hub-side.
+
+In-memory only, deliberately (pgw#869 §1): the worker process did not restart in
+the motivating incident, and a mint is a child of the worker, so a worker restart
+ends the mint anyway. Disk persistence is out of scope and must be argued on its
+own merits, not borrowed from this one.
 """
 
 from __future__ import annotations
@@ -28,12 +55,36 @@ logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = pb.PROTOCOL_VERSION_CURRENT
 
 _RESULT, _PROGRESS, _EVENT = "result", "progress", "event"
+#: pgw#869: a hub-bound FACT with no live-state replay behind it. Results have
+#: `_pending_results`; state has `LifecycleSnapshot`/`StateDelta`/the capacity
+#: lane. These two carry measurements and terminals and had neither.
+_EVIDENCE = "evidence"
+_EVIDENCE_MSGS = ("activity_update", "boot_phase")
 
 _MAX_REDIRECT_HOPS = 3
-_AUTH_FAILURE_EXIT_THRESHOLD = 3
 # UNAUTHENTICATED can be transient hub-side (duplicate stream teardown, pg
 # blip): exit only when failures persist across a real time window.
+#
+# pgw#869 — WHAT THIS LADDER MAY AND MAY NOT JUDGE. A rejected credential is a
+# verdict about US; an ABSENT hub is a verdict about nothing. Before this
+# change the ladder could not tell them apart, and the difference is the whole
+# outbox: a worker that outlives a hub outage ages past its 30 min JWT, redials,
+# is refused because its token expired, and DIES WITH A FULL QUEUE — every
+# property the outbox proves, right up to the moment it matters. See
+# `_auth_rejection_is_fatal`: an expired presented credential never reaches this
+# ladder.
+#
+# The 3/60 s pair is a magic number and is left ONLY because it now governs the
+# genuinely-about-us case that #372's tests pin. Replacing it with an
+# evidence-keyed rule is filed separately (pgw#873), not smuggled in here.
+_AUTH_FAILURE_EXIT_THRESHOLD = 3
 _AUTH_FAILURE_EXIT_WINDOW_S = 60.0
+
+#: pgw#848: how long before its own expiry a worker starts SAYING SO. Wider
+#: than the hub's ~80%-of-TTL rotation point (24 min of a 30 min TTL, i.e.
+#: 6 min of remaining life), so a missed rotation is visible while the stream
+#: is still usable rather than after it is not.
+_CREDENTIAL_WARN_S = 8 * 60.0
 _BACKOFF_RESET_AFTER_S = 60.0
 _HELLO_ACK_TIMEOUT_S = 30.0
 # FAILED_PRECONDITION details that can never heal by retrying: identity is
@@ -117,14 +168,84 @@ def _msg_kind(msg: pb.WorkerMessage) -> str:
         return _RESULT
     if which == "job_progress":
         return _PROGRESS
+    if which in _EVIDENCE_MSGS:
+        return _EVIDENCE
     return _EVENT
+
+
+#: How long the channel itself waits for a keepalive answer before calling the
+#: peer dead. Anything that needs "we tried, and the peer is not taking bytes"
+#: derives its bound from this rather than inventing one.
+KEEPALIVE_TIMEOUT_S = 10.0
+
+#: How long to wait for the peer to end a half-closed call before giving up on
+#: a graceful close. Unchanged value, named so both close paths share it.
+_PEER_CLOSE_WAIT_S = 5.0
+
+
+class SenderQuiesced(Exception):
+    """The send loop was asked to stop and the queue is empty (pgw#845).
+
+    Ending the sender BETWEEN writes is not cosmetic: in grpc.aio a cancelled
+    ``write()`` cancels the whole RPC (``_call._write`` calls ``self.cancel()``
+    on CancelledError), which RSTs the stream and discards every byte buffered
+    but not yet flushed — including a JobResult that ``mark_result_shipped``
+    has already retired from the durable queue.
+    """
+
+
+#: pgw#869 §5: how many undelivered evidence facts the outbox holds before it
+#: shortens itself. Sized against the motivating outage rather than guessed: a
+#: whole-graph sdxl mint emits O(10^2) phase/measurement facts per hour, so this
+#: is hours of a real mint's evidence. Growth is bounded by SHEDDING, and a shed
+#: is itself a reported fact — silence about a loss is the thing this issue
+#: exists to delete.
+EVIDENCE_MAX = 4096
+
+#: The shed report's own slot. Exempt from shedding: the one fact that must
+#: never be lost is the fact that facts were lost.
+_SHED_KEY = ("shed",)
+
+#: pgw#869: how many just-shipped facts are re-offered after a DIRTY reconnect.
+#:
+#: `stream.write()` returning means BUFFERED, not delivered — the codebase
+#: already knows this and says so in `_close_sender`: cancelling a write "RSTs
+#: the call and throws away everything buffered behind it". So retiring a fact
+#: the instant its write returns loses exactly the tail of facts produced in the
+#: moments around a stream death, which is the window this whole issue is about.
+#: MEASURED: the acceptance test below fails without this — three measurements
+#: emitted immediately after the hub died were written into a socket that was
+#: already gone, retired, and never replayed.
+#:
+#: A trailing ring makes that window recoverable at bounded cost. Re-offering is
+#: safe by construction: the hub folds an identical redelivery into
+#: `occurrences + 1` on one row (see the module docstring), so the choice is
+#: between a duplicate and a hole, and a hole is not a choice.
+RESHIP_WINDOW = 256
 
 
 class SendQueue:
     """Bounded outbound queue with results-never-dropped semantics."""
 
-    def __init__(self, maxsize: int = 1024) -> None:
+    def __init__(self, maxsize: int = 1024, evidence_max: int = EVIDENCE_MAX) -> None:
         self._maxsize = maxsize
+        # pgw#869: the durable evidence lane. Ordered (dict preserves insertion
+        # order), so replay is FIFO. A coalescible beat REPLACES its slot in
+        # place, which keeps a phase's beat where the phase began rather than
+        # letting liveness chatter reorder the record.
+        self._evidence_max = evidence_max
+        self._pending_evidence: dict[Any, pb.WorkerMessage] = {}
+        # serialized bytes -> evidence key, so retiring a shipped message is a
+        # dict pop rather than a scan, and a superseded copy cannot retire the
+        # newer one that replaced it.
+        self._evidence_key: dict[bytes, Any] = {}
+        self._evidence_ordinal = 0
+        self._shed_total = 0
+        # Facts whose write returned on the stream that has since died. See
+        # RESHIP_WINDOW: a returned write is a buffered write.
+        self._recent_shipped: collections.deque[Tuple[Any, pb.WorkerMessage]] = (
+            collections.deque(maxlen=RESHIP_WINDOW)
+        )
         self._items: collections.deque[Tuple[str, pb.WorkerMessage]] = collections.deque()
         # Reconnect evidence is inserted atomically ahead of preserved results.
         # It is a small state replay, not ordinary producer traffic, so it is
@@ -156,6 +277,9 @@ class SendQueue:
         # (request_id, attempt) -> JobResult WorkerMessage, until written to a
         # live stream. Survives reconnects; drives Hello.in_flight.
         self._pending_results: dict[Tuple[str, int], pb.WorkerMessage] = {}
+        # pgw#845: set when this stream's sender must end. It ends only once
+        # nothing is left to write, so quiescing never drops a queued message.
+        self._quiescing = False
 
     def __len__(self) -> int:
         return len(self._capacity) + len(self._reconnect) + len(self._items)
@@ -175,12 +299,159 @@ class SendQueue:
         # Durable JobResults are explicitly exempt from the queue bound. They
         # must not consume event/progress capacity merely because they share
         # the same deque (especially after reconnect requeues several results).
-        return sum(1 for kind, _msg in self._items if kind != _RESULT)
+        # pgw#869: evidence is exempt for the same reason and one stronger —
+        # it has its own bound (`_evidence_max`) with its own shed policy, and
+        # a producer that just MEASURED something must never block on a dead
+        # connection to report it.
+        return sum(
+            1 for kind, _msg in self._items if kind not in (_RESULT, _EVIDENCE)
+        )
+
+    # ---- pgw#869: the evidence lane ---------------------------------------
+
+    @staticmethod
+    def _is_coalescible_beat(msg: pb.WorkerMessage) -> bool:
+        """A pure liveness re-report: RUNNING, carrying no payload.
+
+        `Activity.heartbeat` and `Activity.progress_beat` re-state the current
+        phase with a fresh seq/counter and nothing else. Only the latest can
+        matter — and the hub agrees by construction: its conflict key covers
+        (kind, phase, state, payload_digest), and `seq`/`step`/`counter_*` are
+        taken from EXCLUDED on conflict, so N beats of one phase were always
+        going to become ONE row holding the last one's numbers.
+        """
+        if msg.WhichOneof("msg") != "activity_update":
+            return False
+        u = msg.activity_update
+        return (
+            u.state == pb.ActivityState.ACTIVITY_STATE_RUNNING
+            and not u.detail
+            and not u.error
+        )
+
+    def _evidence_slot(self, msg: pb.WorkerMessage) -> Any:
+        """The coalescing slot: shared for beats, unique for everything else."""
+        if self._is_coalescible_beat(msg):
+            u = msg.activity_update
+            return ("beat", u.kind, u.phase)
+        self._evidence_ordinal += 1
+        return ("fact", self._evidence_ordinal)
+
+    def _remove_item(self, msg: pb.WorkerMessage) -> None:
+        key = self._message_key(msg)
+        self._items = collections.deque(
+            (kind, queued)
+            for kind, queued in self._items
+            if self._message_key(queued) != key
+        )
+
+    def _put_evidence(self, msg: pb.WorkerMessage) -> None:
+        """Record a fact durably and queue it. NEVER blocks, never raises."""
+        slot = self._evidence_slot(msg)
+        prior = self._pending_evidence.get(slot)
+        if prior is not None:
+            # A superseded beat leaves no copy behind to be written after the
+            # newer one; its slot position is retained by the dict.
+            self._evidence_key.pop(self._evidence_bytes(prior), None)
+            self._remove_item(prior)
+        self._pending_evidence[slot] = msg
+        self._evidence_key[self._evidence_bytes(msg)] = slot
+        self._items.append((_EVIDENCE, msg))
+        self._shed_evidence()
+
+    def _shed_evidence(self) -> None:
+        """Bound the lane. Coalescible first, evidence last (pgw#869 §5)."""
+        if len(self._pending_evidence) <= self._evidence_max:
+            return
+        shed = 0
+        for pool in ("beat", "fact"):
+            for slot in list(self._pending_evidence):
+                if len(self._pending_evidence) <= self._evidence_max:
+                    break
+                if slot == _SHED_KEY or slot[0] != pool:
+                    continue
+                victim = self._pending_evidence.pop(slot)
+                self._evidence_key.pop(self._evidence_bytes(victim), None)
+                self._remove_item(victim)
+                shed += 1
+        if shed:
+            self._record_shed(shed)
+
+    def _record_shed(self, shed: int) -> None:
+        """Shedding evidence must itself emit a fact (pgw#869 §5).
+
+        Built here rather than through `activity.emit_event` so it cannot
+        recurse into the queue it is reporting on. It occupies the reserved
+        slot, so the count is always the running total and the hub's row is the
+        final one.
+        """
+        self._shed_total += shed
+        prior = self._pending_evidence.pop(_SHED_KEY, None)
+        if prior is not None:
+            self._evidence_key.pop(self._evidence_bytes(prior), None)
+            self._remove_item(prior)
+        msg = pb.WorkerMessage(activity_update=pb.ActivityUpdate(
+            kind="outbox_shed",
+            phase="overflow",
+            state=pb.ActivityState.ACTIVITY_STATE_RUNNING,
+            detail=(
+                f"outbox shed {self._shed_total} undelivered fact(s) at the "
+                f"{self._evidence_max}-entry bound — the hub was unreachable "
+                f"long enough that this worker could not keep every "
+                f"measurement it produced (pgw#869)"
+            ),
+            updated_at_unix_ms=int(time.time() * 1000),
+        ))
+        self._pending_evidence[_SHED_KEY] = msg
+        self._evidence_key[self._evidence_bytes(msg)] = _SHED_KEY
+        self._items.append((_EVIDENCE, msg))
+
+    @property
+    def pending_evidence_count(self) -> int:
+        return len(self._pending_evidence)
+
+    @property
+    def shed_total(self) -> int:
+        return self._shed_total
 
     @staticmethod
     def _message_key(msg: pb.WorkerMessage) -> Optional[bytes]:
+        """The wire identity of a message, or None for a JobResult.
+
+        **The None is load-bearing, not a gap.** A result is not a fact: it is
+        durable under `(request_id, attempt)` in `_pending_results`, it is
+        exempt from the queue bound, and it must never be folded with anything.
+        So it deliberately has no content key, and **every keyed structure here
+        is therefore a structure results do not belong in** — `_in_flight`, the
+        reconnect fences, and the pgw#869 evidence map all key on this and all
+        exclude results by construction. A consumer that treats this map as
+        covering every message has an unhandled case, not a typing nuisance.
+        """
         if msg.WhichOneof("msg") == "job_result":
             return None
+        return msg.SerializeToString(deterministic=True)
+
+    @staticmethod
+    def _evidence_bytes(msg: pb.WorkerMessage) -> bytes:
+        """`_message_key` for a message already classified as `_EVIDENCE`.
+
+        pgw#869 semantics, decided rather than defaulted. The two candidate
+        answers for "what does the evidence map do with a keyless message" are
+        both wrong, because **the question cannot arise**: `_msg_kind` admits
+        exactly `activity_update` and `boot_phase` to this lane, and the only
+        keyless message is `job_result`.
+
+        * *Skip it* would make the map silently lossy — in the one module whose
+          entire purpose is that facts are not silently lost.
+        * *Give results their own evidence key* would put them in two durable
+          lanes at once (`_pending_results` and `_pending_evidence`), which
+          double-ships a result on reconnect and coalesces something the queue
+          contract says is never coalesced.
+
+        So this is total by precondition, and it says so here — at the boundary
+        where the invariant could be violated — instead of narrowing an
+        Optional at five call sites and leaving the reason nowhere.
+        """
         return msg.SerializeToString(deterministic=True)
 
     @classmethod
@@ -276,6 +547,10 @@ class SendQueue:
                 self._items.append((kind, msg))       # results exempt from the bound
                 self._cond.notify_all()
                 return
+            if kind == _EVIDENCE:
+                self._put_evidence(msg)               # pgw#869: never blocks
+                self._cond.notify_all()
+                return
             if self._host_capacity_key(msg) is not None:
                 self._put_capacity(msg)
                 self._cond.notify_all()
@@ -354,9 +629,17 @@ class SendQueue:
                 self._reconnect.append((_msg_kind(msg), msg))
             self._cond.notify_all()
 
+    async def quiesce(self) -> None:
+        """Ask this stream's send loop to end at its next between-writes point."""
+        async with self._cond:
+            self._quiescing = True
+            self._cond.notify_all()
+
     async def get(self) -> Tuple[str, pb.WorkerMessage]:
         async with self._cond:
             while not self._capacity and not self._reconnect and not self._items:
+                if self._quiescing:
+                    raise SenderQuiesced
                 await self._cond.wait()
             if self._capacity:
                 # Dict insertion order is causal: the live executor outbox
@@ -403,6 +686,14 @@ class SendQueue:
             return
         async with self._cond:
             self._in_flight.discard(key)
+            # pgw#869: a fact retires from the durable lane only once a LIVE
+            # stream has taken it. `_evidence_key` holds only the currently
+            # stored copy, so a superseded beat can never retire the newer one.
+            slot = self._evidence_key.pop(key, None)
+            if slot is not None:
+                shipped = self._pending_evidence.pop(slot, None)
+                if shipped is not None:
+                    self._recent_shipped.append((slot, shipped))
             identity = self._reconnect_identity(msg)
             if identity is not None and identity[0] == "host_capacity":
                 generation = self._host_capacity_generation(msg)
@@ -419,8 +710,17 @@ class SendQueue:
             self._cond.notify_all()  # wake wait_empty (drain flush)
 
     async def reset_for_reconnect(self) -> None:
-        """Drop transient lanes; executor state replays capacity after HelloAck."""
+        """Drop transient lanes; executor state replays capacity after HelloAck.
+
+        pgw#869: DURABLE lanes are requeued, not dropped. Results were already;
+        evidence now is, in the order it was produced. Anything a live stream
+        took but never confirmed (`mark_event_shipped` did not run because the
+        write failed) is still in `_pending_evidence` and comes back with it —
+        which is the second of the two loss sites this closes, and the one no
+        amount of queueing would have covered on its own.
+        """
         async with self._cond:
+            self._quiescing = False   # the quiesce belonged to the dead stream
             self._reconnect.clear()
             self._reconnect_seen.clear()
             self._in_flight.clear()
@@ -430,6 +730,21 @@ class SendQueue:
             self._items.clear()
             for msg in self._pending_results.values():
                 self._items.append((_RESULT, msg))
+            # Re-offer the trailing window of facts whose write RETURNED on the
+            # stream that just died — buffered is not delivered (RESHIP_WINDOW).
+            # Oldest first, and never over a slot a newer fact has since taken.
+            reship = list(self._recent_shipped)
+            self._recent_shipped.clear()
+            revived: dict[Any, pb.WorkerMessage] = {}
+            for slot, msg in reship:
+                if slot in self._pending_evidence:
+                    continue          # superseded by a newer fact; that one wins
+                revived[slot] = msg
+            for slot, msg in revived.items():
+                self._evidence_key[self._evidence_bytes(msg)] = slot
+            self._pending_evidence = {**revived, **self._pending_evidence}
+            for msg in self._pending_evidence.values():
+                self._items.append((_EVIDENCE, msg))
             self._cond.notify_all()
 
     async def wait_empty(self, timeout: Optional[float] = None) -> bool:
@@ -442,6 +757,7 @@ class SendQueue:
                 or self._in_flight
                 or self._capacity_in_flight
                 or self._pending_results
+                or self._pending_evidence   # pgw#869: a drain flushes facts too
             ):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
@@ -491,6 +807,14 @@ class Transport:
         self.reconnect_delays: List[float] = []  # observability + tests
         self._consecutive_auth_failures = 0
         self._first_auth_failure_at: Optional[float] = None
+        #: pgw#869: the `jti` the streak above is about. A rotation makes the
+        #: accumulated evidence stale, so the streak restarts.
+        self._auth_credential_id = ""
+        #: Credentials whose expired-rejection has already been confessed.
+        self._expired_rejection_reported: set = set()
+        #: pgw#848: the last remaining-lifetime this worker reported, so a
+        #: reconnect storm does not emit one event per attempt.
+        self._last_credential_left: Optional[float] = None
         self._connected_at: Optional[float] = None  # set on each HelloAck
         # gw#640: (message kind, exception class) already dialed to the hub.
         self._reported_handler_failures: set = set()
@@ -520,7 +844,11 @@ class Transport:
     @property
     def current_worker_jwt(self) -> str:
         """Newest worker credential: hub-rotated token, else the boot token."""
-        return (self._worker_jwt or self._settings.worker_jwt or "").strip()
+        # pgw#848: ONE source. `_worker_jwt` is this stream's rotation cache;
+        # `worker_credential` is the process-wide truth every hub dial reads.
+        from . import worker_credential
+
+        return (self._worker_jwt or worker_credential.current() or "").strip()
 
     # ---- drain / shutdown --------------------------------------------------
 
@@ -550,7 +878,7 @@ class Transport:
     def _channel_options(self) -> List[Tuple[str, int]]:
         return [
             ("grpc.keepalive_time_ms", 20000),
-            ("grpc.keepalive_timeout_ms", 10000),
+            ("grpc.keepalive_timeout_ms", int(KEEPALIVE_TIMEOUT_S * 1000)),
             ("grpc.keepalive_permit_without_calls", 1),
             ("grpc.http2.max_pings_without_data", 0),
             ("grpc.max_send_message_length", 64 * 1024 * 1024),
@@ -569,10 +897,199 @@ class Transport:
         return grpc.aio.insecure_channel(target, options=self._channel_options())
 
     def _metadata(self) -> Optional[List[Tuple[str, str]]]:
-        token = (self._worker_jwt or self._settings.worker_jwt or "").strip()
+        from . import worker_credential
+
+        token = (self._worker_jwt or worker_credential.current() or "").strip()
         if not token:
             return None
+        self._report_credential_age(token)
         return [("authorization", f"Bearer {token}")]
+
+    # ---- pgw#869: which auth rejections are a verdict about US ------------
+
+    def _presented_credential(self) -> str:
+        from . import worker_credential
+
+        return (self._worker_jwt or worker_credential.current() or "").strip()
+
+    @staticmethod
+    def _credential_claims(token: str) -> dict:
+        try:
+            from .request_context import _decode_unverified_jwt_claims
+
+            return _decode_unverified_jwt_claims(token) or {}
+        except Exception:  # noqa: BLE001 — a probe never breaks a connect
+            return {}
+
+    @classmethod
+    def _credential_id(cls, token: str) -> str:
+        """`jti` — the same key the hub's admission and wedge streaks use."""
+        return str(cls._credential_claims(token).get("jti") or "").strip()
+
+    def _auth_rejection_is_fatal(self, details: str) -> bool:
+        """Whether THIS UNAUTHENTICATED is evidence against this worker.
+
+        **An expired presented credential is never such evidence**, and the hub
+        agrees — measured in tensorhub, not inferred:
+
+        * `AdmitExpiredBootToken` (`repository/expected_worker_store.go:311`)
+          admits an expired-but-valid token while
+          `now < ew.IssuedAtUnix + BootGraceWindow`, keyed on the `jti` the hub
+          itself last minted;
+        * `DefaultWorkerJWTTTL = 30 min` vs `DefaultWorkerJWTBootGrace = 4 h`
+          (`config/config.go:619,675`), and `RotateExpectedWorkerJTI` moves
+          `IssuedAtUnix` forward on every rotation — so a worker is admissible
+          for ~3.5 h PAST its expiry, counted from its last rotation;
+        * on admission the hub pushes a `TokenRefresh` immediately
+          (`connect_worker.go:392`, "credential rotated on connect"), which
+          fully heals the worker.
+
+        So retrying with an expired token is not a doomed loop — it is the
+        documented recovery path, and the ONLY thing that was preventing the
+        heal was this worker killing itself first. `_report_credential_age`
+        already said as much ("the hub has a boot-grace admission for exactly
+        that case — so shortcutting the reconnect here would break a path that
+        legitimately heals"); the ladder shortcut it anyway.
+
+        And the billing risk that motivated the ladder is owned by the party
+        that can actually see the pod: `grpc/worker_wedge.go` terminates a pod
+        after `wedgeAuthRejectThreshold` consecutive auth rejects through the
+        tracked provider path. A worker cannot reap itself when it cannot reach
+        the hub, and it does not have to.
+
+        A LIVE (or absent) credential refused by an answering hub IS about us —
+        revoked, superseded, misconfigured — and keeps the existing ladder. The
+        streak resets whenever the presented credential CHANGES, because a
+        rotation means the next attempt genuinely differs.
+        """
+        token = self._presented_credential()
+        exp = float(self._credential_claims(token).get("exp") or 0.0)
+        if exp > 0 and exp <= time.time():
+            self._consecutive_auth_failures = 0
+            self._first_auth_failure_at = None
+            self._report_expired_rejection(token, details, exp)
+            return False
+
+        cred = self._credential_id(token)
+        if cred != self._auth_credential_id:
+            # A different credential is a different attempt: the evidence the
+            # streak had accumulated was about the old one.
+            self._auth_credential_id = cred
+            self._consecutive_auth_failures = 0
+            self._first_auth_failure_at = None
+
+        now = time.monotonic()
+        if self._first_auth_failure_at is None:
+            self._first_auth_failure_at = now
+        self._consecutive_auth_failures += 1
+        logger.error(
+            "stream rejected UNAUTHENTICATED (%d consecutive over %.0fs) while "
+            "presenting a LIVE credential — this is a verdict about this "
+            "worker, not about the hub's availability: %s",
+            self._consecutive_auth_failures,
+            now - self._first_auth_failure_at, details,
+        )
+        return (
+            self._consecutive_auth_failures >= _AUTH_FAILURE_EXIT_THRESHOLD
+            and now - self._first_auth_failure_at >= _AUTH_FAILURE_EXIT_WINDOW_S
+        )
+
+    def _report_expired_rejection(
+        self, token: str, details: str, exp: float,
+    ) -> None:
+        """Patient is not the same as silent. Once per credential."""
+        cred = self._credential_id(token) or "<undecodable>"
+        if cred in self._expired_rejection_reported:
+            return
+        self._expired_rejection_reported.add(cred)
+        ago = time.time() - exp
+        logger.error(
+            "stream rejected UNAUTHENTICATED with an EXPIRED credential "
+            "(jti=%s, expired %.0fs ago): %s — NOT treating this as a verdict "
+            "against this worker. The hub admits an expired boot token inside "
+            "its grace window and rotates on admission, so this worker keeps "
+            "retrying rather than dying with its queue full (pgw#869).",
+            cred, ago, details,
+        )
+        try:
+            from . import activity as activity_mod
+
+            activity_mod.emit_event(
+                "worker_credential",
+                f"expired credential refused by the hub (jti={cred}, "
+                f"expired {ago:.0f}s ago): {details} — retrying patiently; "
+                f"the queued evidence is held, not dropped",
+                phase="expired_rejected_retrying",
+            )
+        except Exception:  # noqa: BLE001 — telemetry never breaks a connect
+            logger.debug("expired-rejection event failed", exc_info=True)
+
+    def _report_credential_age(self, token: str) -> None:
+        """Say something BEFORE the credential dies, not after the pod does.
+
+        pgw#848. The worker has never looked at its own token's ``exp``. It
+        learns of expiry only by being rejected — and by then it cannot
+        recover, because the refresh arrives ONLY as a ``token_refresh`` down
+        the stream (see the handler below) and the stream is the thing it can
+        no longer open. A credential deliverable solely over the connection it
+        authenticates cannot be delivered once that connection stops
+        authenticating.
+
+        MEASURED, hub `pod_events`, two consecutive whole-graph mints:
+
+            attempt 16  T+32.4 min  worker_token_expired
+                        T+42.9 min  "stream dropped involuntarily and never
+                                     reconnected (10m13s of silence) — silent
+                                     death mid-activity"
+            attempt 17  T+31.2 min  worker_token_expired -> auth wedge
+
+        ``DefaultWorkerJWTTTL`` is 30 minutes from POD CREATE, so this fires on
+        any pod that lives past half an hour — which, until the pgw#848 cap
+        fix, no mint ever did. Both runs destroyed a self-mint the hub's own
+        record describes as "reporting fresh progress".
+
+        DIAGNOSIS ONLY, deliberately: it changes no behaviour and refuses
+        nothing. An expired token is not always fatal — the hub has a
+        boot-grace admission for exactly that case — so shortcutting the
+        reconnect here would break a path that legitimately heals. What was
+        missing is not a decision, it is that ten minutes of silence carried
+        no name.
+        """
+        try:
+            from .request_context import _decode_unverified_jwt_claims
+
+            claims = _decode_unverified_jwt_claims(token) or {}
+            exp = float(claims.get("exp") or 0.0)
+        except Exception:  # noqa: BLE001 — a probe never breaks a connect
+            return
+        if exp <= 0:
+            return
+        left = exp - time.time()
+        if left > _CREDENTIAL_WARN_S or left == self._last_credential_left:
+            return
+        self._last_credential_left = left
+        if left > 0:
+            logger.warning(
+                "worker JWT expires in %.0fs and no rotation has arrived — the "
+                "hub pushes one at ~80%% of TTL over this stream, and if it is "
+                "missed there is NO other channel to receive one (pgw#848)",
+                left)
+            detail = f"worker_jwt_expiring in={left:.0f}s exp={int(exp)}"
+        else:
+            logger.error(
+                "worker JWT EXPIRED %.0fs ago and is being presented anyway — "
+                "if this connect is rejected this worker cannot recover: the "
+                "only refresh channel is the stream it cannot open (pgw#848)",
+                -left)
+            detail = f"worker_jwt_expired ago={-left:.0f}s exp={int(exp)}"
+        try:
+            from . import activity as activity_mod
+
+            activity_mod.emit_event(
+                "worker_credential", detail,
+                phase="expiring" if left > 0 else "expired")
+        except Exception:  # noqa: BLE001 — telemetry never breaks a connect
+            logger.debug("credential-age event failed", exc_info=True)
 
     def _report_handler_failure(self, err: HandlerError) -> None:
         """Log a handler failure as ITSELF and dial it to the hub (gw#640).
@@ -626,20 +1143,11 @@ class Transport:
             except grpc.aio.AioRpcError as e:
                 code, details = e.code(), str(e.details() or "")
                 if code == grpc.StatusCode.UNAUTHENTICATED:
-                    now = time.monotonic()
-                    if self._first_auth_failure_at is None:
-                        self._first_auth_failure_at = now
-                    self._consecutive_auth_failures += 1
-                    logger.error("stream rejected UNAUTHENTICATED (%d consecutive over %.0fs): %s",
-                                 self._consecutive_auth_failures,
-                                 now - self._first_auth_failure_at, details)
-                    if (
-                        self._consecutive_auth_failures >= _AUTH_FAILURE_EXIT_THRESHOLD
-                        and now - self._first_auth_failure_at >= _AUTH_FAILURE_EXIT_WINDOW_S
-                    ):
+                    if self._auth_rejection_is_fatal(details):
                         raise FatalTransportError(
                             f"authentication rejected {self._consecutive_auth_failures} times "
-                            f"over {now - self._first_auth_failure_at:.0f}s: {details}"
+                            f"over {time.monotonic() - (self._first_auth_failure_at or 0):.0f}s "
+                            f"while presenting a live credential: {details}"
                         ) from e
                 elif code == grpc.StatusCode.FAILED_PRECONDITION:
                     if details.startswith("not_leader:"):
@@ -746,6 +1254,8 @@ class Transport:
             self._connected_at = time.monotonic()
             self._consecutive_auth_failures = 0
             self._first_auth_failure_at = None
+            self._auth_credential_id = ""
+            self._expired_rejection_reported.clear()   # pgw#869: healed
             self._connected.set()
             logger.info("connected to %s (HelloAck ok)", target)
             await self._handlers.on_hello_ack(ack)
@@ -767,14 +1277,8 @@ class Transport:
                     # JobResult, which mark_result_shipped has already retired
                     # from the durable queue. Half-close and wait briefly for
                     # the peer to end the call, then reconnect.
-                    send_task.cancel()
-                    try:
-                        await stream.done_writing()
-                        await asyncio.wait_for(asyncio.shield(recv_task), 5.0)
-                    except (asyncio.TimeoutError, ConnectionError):
-                        pass
-                    except Exception:
-                        pass
+                    await self._close_sender(send_task)
+                    await self._await_peer_close(stream, recv_task)
                     raise ConnectionError(
                         "stream cycled by supervisor (compute process restart)"
                     )
@@ -783,20 +1287,28 @@ class Transport:
                     # peer to end the call. Closing the channel immediately
                     # after done_writing() RSTs the call and can discard the
                     # final buffered writes (e.g. the last JobResult).
-                    send_task.cancel()
-                    try:
-                        await stream.done_writing()
-                        await asyncio.wait_for(asyncio.shield(recv_task), 5.0)
-                    except (asyncio.TimeoutError, ConnectionError):
-                        pass
-                    except Exception:
-                        pass
+                    await self._close_sender(send_task)
+                    await self._await_peer_close(stream, recv_task)
                     return
                 for t in pending:
                     t.cancel()
                 for t in done:
                     if t is not stop_task:
-                        t.result()  # re-raise stream errors
+                        try:
+                            t.result()  # re-raise stream errors
+                        except asyncio.CancelledError:
+                            # NOT this worker being cancelled: grpc.aio raises
+                            # CancelledError out of read()/write() when the CALL
+                            # is locally cancelled (`_call._raise_for_status`).
+                            # Nothing here was cancelled by us — `pending` was,
+                            # and `pending` is not `done` — so this is a dead
+                            # stream, and it reconnects like any other. Left to
+                            # propagate it rode out of run() -> arun() ->
+                            # Worker.run() and killed the process with no exit
+                            # code (pgw#845).
+                            raise ConnectionError(
+                                "stream cancelled by the transport layer"
+                            ) from None
             finally:
                 for t in (send_task, recv_task, stop_task, cycle_task):
                     if not t.done():
@@ -808,9 +1320,57 @@ class Transport:
             self._connected.clear()
             await channel.close()
 
+    async def _close_sender(self, send_task: "asyncio.Task[None]") -> bool:
+        """End this stream's sender BETWEEN writes, never inside one (pgw#845).
+
+        Measured: `send_task.cancel()` here dropped a COMPLETED job's result
+        about one drain in six. The sender had already written that result
+        (so `mark_result_shipped` had retired the only durable copy) and was
+        inside `stream.write()` of the next event when the cancel landed —
+        and grpc.aio answers a cancelled write by cancelling the whole RPC,
+        which RSTs the call and throws away everything buffered behind it,
+        the result included. The half-close that follows then had nothing
+        left to flush, and `read()` raised CancelledError past every handler.
+
+        So: ask the queue to end the sender once it has nothing left to write,
+        and give it the peer-alive window to get there. Cancelling remains the
+        last resort, and it makes the close abrupt — which the hub reconciles
+        — rather than a clean close that silently lost bytes.
+        """
+        await self.queue.quiesce()
+        done, _pending = await asyncio.wait({send_task}, timeout=KEEPALIVE_TIMEOUT_S)
+        if send_task in done:
+            return True
+        logger.warning(
+            "send loop did not stop within %.0fs of the close; cancelling it "
+            "mid-write, which RSTs the stream — unretired results: %s",
+            KEEPALIVE_TIMEOUT_S, self.queue.pending_result_keys,
+        )
+        send_task.cancel()
+        self._clean_close = False
+        return False
+
+    async def _await_peer_close(self, stream: Any, recv_task: "asyncio.Task[None]") -> None:
+        """Half-close, then wait for the peer to end the call — the only
+        evidence that the writes we buffered actually landed.
+
+        `asyncio.wait` rather than `wait_for(shield(...))`: it neither cancels
+        the receiver nor re-raises what it ended with, so an RPC-level
+        cancellation cannot escape a graceful close (pgw#845). The `finally`
+        in `_connect_once` retrieves the outcome.
+        """
+        try:
+            await stream.done_writing()
+        except Exception:
+            return
+        await asyncio.wait({recv_task}, timeout=_PEER_CLOSE_WAIT_S)
+
     async def _send_loop(self, stream: Any) -> None:
         while True:
-            kind, msg = await self.queue.get()
+            try:
+                kind, msg = await self.queue.get()
+            except SenderQuiesced:
+                return
             if not await self.queue.should_ship_capacity(msg):
                 continue
             await stream.write(msg)
@@ -845,14 +1405,32 @@ class Transport:
                 token = (msg.token_refresh.token or "").strip()
                 if token:
                     self._worker_jwt = token
+                    # pgw#848: publish it where EVERY hub dial reads, not just
+                    # this stream. The attestation carrier opens its own
+                    # Connect and used to authenticate with the frozen boot
+                    # token — which is what wedged attempts 16 and 17.
+                    try:
+                        from . import worker_credential
+
+                        worker_credential.install(
+                            token, float(msg.token_refresh.expires_at_unix or 0))
+                    except Exception:  # noqa: BLE001 — never break a rotation
+                        logger.debug("credential publish failed", exc_info=True)
                     self._consecutive_auth_failures = 0
                     self._first_auth_failure_at = None
+                    self._auth_credential_id = ""
+                    self._expired_rejection_reported.clear()
                     logger.info(
                         "worker JWT rotated by hub (exp=%d)",
                         msg.token_refresh.expires_at_unix,
                     )
-                    # pgw#763: the split parent forwards rotations to the
-                    # compute child (capability renewal reads the fresh JWT).
+                    # pgw#763 delta 1: the rotation is OFFERED to the handler,
+                    # which is NOT the same as forwarded to the compute child
+                    # — `ParentControl.on_token_refresh` deliberately does
+                    # nothing with it, because the child holds no credential
+                    # and renews through `procsplit.broker` instead. The old
+                    # comment here said the parent "forwards rotations to the
+                    # compute child"; it never has (pgw#876 §2).
                     refreshed = getattr(self._handlers, "on_token_refresh", None)
                     if refreshed is not None:
                         try:

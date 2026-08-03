@@ -34,7 +34,8 @@ def sha(b: bytes) -> str:
 
 
 class _File:
-    """Duck-typed pb.SnapshotFile. A v2 entry has an EMPTY blake3 field."""
+    """Duck-typed pb.SnapshotFile. The legacy `blake3` field is still carried
+    on the wire (it dies at a proto rev), but nothing reads it any more."""
 
     def __init__(self, path, size_bytes, digest="", blake3=""):
         self.path = path
@@ -125,30 +126,28 @@ def test_a_corrupt_v2_file_is_caught_and_named_for_quarantine(tmp_path, counted)
     assert counted[-1].examined == 1
 
 
-def test_legacy_blake3_snapshots_still_verify(tmp_path, counted):
-    """Dual-read: the v1 path must keep working, with blake3, unchanged."""
-    from blake3 import blake3
+def test_an_entry_carrying_only_the_legacy_mirror_is_SKIPPED_not_passed(tmp_path, counted):
+    """th#1303 S1 replaces `test_legacy_blake3_snapshots_still_verify`.
+
+    The blake3 fallback is gone, so a mirror-only entry names no digest. It
+    must be reported as skipped and hash NOTHING — and the denominator is the
+    point: 1 expected, 0 hashed is a different verdict from 1 expected,
+    1 hashed, and only the denominator can tell them apart.
+    """
+    from gen_worker.models.volume_verify import snapshot_verify_targets
 
     data = b"legacy-bytes-" * 512
     root = _tree(tmp_path, "config.json", data)
-    b3 = blake3(data).hexdigest()
+    targets, skipped = snapshot_verify_targets(
+        [_File("config.json", len(data), blake3="b" * 64)], root)
+    assert targets == []
+    assert skipped == ["config.json"]
 
-    ok, bad = verify(root, [_File("config.json", len(data), blake3=b3)])
-    assert ok and bad == []
-    assert counted[-1].hashed == 1 and counted[-1].bytes_hashed == len(data)
-
-    # And a corrupted legacy file is still caught.
-    (root / "config.json").write_bytes(data[:-1] + b"X")
-    clear_memo()
-    ok, bad = verify(root, [_File("config.json", len(data), blake3=b3)])
-    assert not ok and bad == [b3]
 
 
 def test_a_mixed_tree_hashes_every_covered_file(tmp_path, counted):
-    """A v1 and a v2 entry in one snapshot: BOTH must be hashed. Any per-entry
+    """Two entries in one snapshot: BOTH must be hashed. Any per-entry
     algorithm assumption drops one of them silently."""
-    from blake3 import blake3
-
     a = b"sha-side" * 300
     b = b"blake-side" * 300
     root = tmp_path / "snap"
@@ -159,7 +158,7 @@ def test_a_mixed_tree_hashes_every_covered_file(tmp_path, counted):
 
     ok, bad = verify(root, [
         _File("a.safetensors", len(a), digest="sha256:" + sha(a)),
-        _File("sub/b.safetensors", len(b), blake3=blake3(b).hexdigest()),
+        _File("sub/b.safetensors", len(b), digest="sha256:" + sha(b)),
     ])
     assert ok and bad == []
     rep = counted[-1]

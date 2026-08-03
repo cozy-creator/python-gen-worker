@@ -6,7 +6,7 @@ slots, groups and devices from it and invents nothing. What is asserted here:
 A. The contract as SHIPPED (`EXECUTION-TOPOLOGY-DESIGN.md` §2a) — every legal
    shape decodes, every illegal one is a TYPED refusal naming the hub's own
    code, and absent stays legal (one slot).
-B. The slot math — `G = gpu_count/group_degree` IS the slot semaphore, and
+B. The slot math — `G = gpu_count/gpus_per_execution_group` IS the slot semaphore, and
    `gpu_index` names the group's rank-0 device so `DeviceGroup` falls straight
    out of it.
 C. The group is part of instance identity, and is ELIDED at 0 — every key a
@@ -51,46 +51,46 @@ def test_absent_topology_is_one_slot_and_never_an_error() -> None:
     # Every CPU pod and every pod created before this field existed.
     for env in ({}, {ENV_VAR: ""}, {ENV_VAR: "   "}):
         topo = ExecutionTopology.from_env(env)
-        assert (topo.gpu_count, topo.group_degree, topo.groups) == (1, 1, 1)
+        assert (topo.gpu_count, topo.gpus_per_execution_group, topo.execution_groups) == (1, 1, 1)
         assert topo.parallel == ""
 
 
 def test_the_shipped_shapes_decode() -> None:
     dp = ExecutionTopology.from_env(
-        _env('{"gpu_count":4,"group_degree":1,"groups":4}'))
-    assert (dp.groups, dp.degree, dp.parallel) == (4, 1, "")
+        _env('{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}'))
+    assert (dp.execution_groups, dp.degree, dp.parallel) == (4, 1, "")
 
     sp = ExecutionTopology.from_env(
-        _env('{"gpu_count":4,"group_degree":2,"groups":2,"parallel":"sequence"}'))
-    assert (sp.groups, sp.degree, sp.parallel) == (2, 2, "sequence")
+        _env('{"gpu_count":4,"gpus_per_execution_group":2,"execution_groups":2,"parallel":"sequence"}'))
+    assert (sp.execution_groups, sp.degree, sp.parallel) == (2, 2, "sequence")
 
     internal = ExecutionTopology.from_env(
-        _env('{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"internal"}'))
-    assert (internal.groups, internal.degree) == (1, 2)
+        _env('{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"internal"}'))
+    assert (internal.execution_groups, internal.degree) == (1, 2)
 
     cfg = ExecutionTopology.from_env(
-        _env('{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"cfg"}'))
+        _env('{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"cfg"}'))
     assert cfg.parallel == "cfg"
 
 
 @pytest.mark.parametrize(
     "raw,code",
     [
-        ('{"gpu_count":0,"group_degree":1,"groups":0}', "topology_gpu_count_invalid"),
-        ('{"gpu_count":4,"group_degree":0,"groups":0}', "topology_degree_invalid"),
-        ('{"gpu_count":3,"group_degree":2,"groups":1,"parallel":"sequence"}',
+        ('{"gpu_count":0,"gpus_per_execution_group":1,"execution_groups":0}', "topology_gpu_count_invalid"),
+        ('{"gpu_count":4,"gpus_per_execution_group":0,"execution_groups":0}', "topology_degree_invalid"),
+        ('{"gpu_count":3,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"sequence"}',
          "topology_degree_not_divisor"),
-        ('{"gpu_count":2,"group_degree":2,"groups":1}', "topology_parallel_required"),
-        ('{"gpu_count":2,"group_degree":1,"groups":2,"parallel":"sequence"}',
+        ('{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1}', "topology_parallel_required"),
+        ('{"gpu_count":2,"gpus_per_execution_group":1,"execution_groups":2,"parallel":"sequence"}',
          "topology_parallel_without_degree"),
-        ('{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"tensor"}',
+        ('{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"tensor"}',
          "topology_parallel_unknown"),
-        ('{"gpu_count":4,"group_degree":2,"groups":3,"parallel":"sequence"}',
-         "topology_groups_disagree"),
+        ('{"gpu_count":4,"gpus_per_execution_group":2,"execution_groups":3,"parallel":"sequence"}',
+         "topology_execution_groups_disagree"),
         ("not json at all", "topology_decode_failed"),
         ("[1,2,3]", "topology_decode_failed"),
-        ('{"gpu_count":"four","group_degree":1,"groups":4}', "topology_decode_failed"),
-        ('{"gpu_count":1.5,"group_degree":1,"groups":1}', "topology_decode_failed"),
+        ('{"gpu_count":"four","gpus_per_execution_group":1,"execution_groups":4}', "topology_decode_failed"),
+        ('{"gpu_count":1.5,"gpus_per_execution_group":1,"execution_groups":1}', "topology_decode_failed"),
     ],
 )
 def test_a_present_but_illegal_topology_is_a_typed_refusal(raw: str, code: str) -> None:
@@ -115,8 +115,8 @@ def test_a_present_but_illegal_topology_is_a_typed_refusal(raw: str, code: str) 
 def test_groups_is_gpu_count_over_degree(gpu_count: int, degree: int, groups: int) -> None:
     parallel = "sequence" if degree > 1 else ""
     topo = ExecutionTopology(
-        gpu_count=gpu_count, group_degree=degree, parallel=parallel)
-    assert topo.groups == groups
+        gpu_count=gpu_count, gpus_per_execution_group=degree, parallel=parallel)
+    assert topo.execution_groups == groups
     # G IS the slot count. Both sides compute it from the same two integers;
     # neither negotiates and the worker never advertises it back.
     assert topo.slots == groups
@@ -124,7 +124,7 @@ def test_groups_is_gpu_count_over_degree(gpu_count: int, degree: int, groups: in
 
 def test_gpu_index_names_the_groups_rank_zero_device() -> None:
     # §2a: gpu_index is UNCHANGED on the wire and is now 0, D, 2D, ...
-    topo = ExecutionTopology(gpu_count=4, group_degree=2, parallel="sequence")
+    topo = ExecutionTopology(gpu_count=4, gpus_per_execution_group=2, parallel="sequence")
     assert topo.group_ordinal(0) == 0
     assert topo.group_ordinal(2) == 1
     assert topo.device_group(0) == DeviceGroup(devices=(0, 1))
@@ -134,7 +134,7 @@ def test_gpu_index_names_the_groups_rank_zero_device() -> None:
 
 
 def test_degree_one_dispatch_is_byte_identical_to_today() -> None:
-    topo = ExecutionTopology(gpu_count=4, group_degree=1)
+    topo = ExecutionTopology(gpu_count=4, gpus_per_execution_group=1)
     for idx in range(4):
         assert topo.group_ordinal(idx) == idx
         assert topo.device_group(idx) == DeviceGroup(devices=(idx,))
@@ -145,21 +145,21 @@ def test_platform_parallel_is_what_may_be_fabric_gated() -> None:
     # platform mechanisms make a bandwidth promise, and demoting an `internal`
     # group would take a model's own cards away.
     assert ExecutionTopology(
-        gpu_count=2, group_degree=2, parallel="sequence").platform_parallel
+        gpu_count=2, gpus_per_execution_group=2, parallel="sequence").platform_parallel
     assert ExecutionTopology(
-        gpu_count=2, group_degree=2, parallel="cfg").platform_parallel
+        gpu_count=2, gpus_per_execution_group=2, parallel="cfg").platform_parallel
     assert not ExecutionTopology(
-        gpu_count=2, group_degree=2, parallel="internal").platform_parallel
-    assert not ExecutionTopology(gpu_count=2, group_degree=1).platform_parallel
+        gpu_count=2, gpus_per_execution_group=2, parallel="internal").platform_parallel
+    assert not ExecutionTopology(gpu_count=2, gpus_per_execution_group=1).platform_parallel
 
 
 def test_placement_mode_follows_who_shards() -> None:
     # Ulysses replicates weights and shards activations, so a degree-2 group's
     # weight fit is MIN over members. `internal` genuinely splits the weights.
     assert ExecutionTopology(
-        gpu_count=2, group_degree=2, parallel="sequence").group(0).placement_mode == "replicated"
+        gpu_count=2, gpus_per_execution_group=2, parallel="sequence").group(0).placement_mode == "replicated"
     assert ExecutionTopology(
-        gpu_count=2, group_degree=2, parallel="internal").group(0).placement_mode == "sharded"
+        gpu_count=2, gpus_per_execution_group=2, parallel="internal").group(0).placement_mode == "sharded"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ def test_one_registry_per_group_each_owning_its_own_devices() -> None:
     from gen_worker.executor import ModelStore
 
     store = ModelStore(emit=None)  # type: ignore[arg-type]
-    topo = ExecutionTopology(gpu_count=4, group_degree=2, parallel="sequence")
+    topo = ExecutionTopology(gpu_count=4, gpus_per_execution_group=2, parallel="sequence")
     store.bind_topology(topo)
 
     zero = store.residency_for(0)
@@ -235,7 +235,7 @@ def test_residency_property_follows_the_current_group() -> None:
     from gen_worker.executor import ModelStore
 
     store = ModelStore(emit=None)  # type: ignore[arg-type]
-    store.bind_topology(ExecutionTopology(gpu_count=2, group_degree=1))
+    store.bind_topology(ExecutionTopology(gpu_count=2, gpus_per_execution_group=1))
     assert current_device_group() == 0
     assert store.residency is store.residency_for(0)
     with device_group_scope(1):
@@ -250,7 +250,7 @@ def test_disk_facts_union_across_groups(tmp_path) -> None:
     from gen_worker.executor import ModelStore
 
     store = ModelStore(emit=None)  # type: ignore[arg-type]
-    store.bind_topology(ExecutionTopology(gpu_count=2, group_degree=1))
+    store.bind_topology(ExecutionTopology(gpu_count=2, gpus_per_execution_group=1))
     p0 = tmp_path / "a"
     p0.mkdir()
     p1 = tmp_path / "b"
@@ -269,29 +269,29 @@ def test_disk_facts_union_across_groups(tmp_path) -> None:
 
 
 def test_a_sharded_pod_without_nvlink_demotes_instead_of_serving_the_promise() -> None:
-    raw = '{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"sequence"}'
+    raw = '{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"sequence"}'
     # The pod the hub bought in good faith. pgw#818: class alone no longer
     # keeps the group — the measured bandwidth must clear the floor too.
     nvlink = delivered_topology(_env(raw), interconnect="nvlink", peer_gbps=272.6)
-    assert (nvlink.groups, nvlink.degree, nvlink.parallel) == (1, 2, "sequence")
+    assert (nvlink.execution_groups, nvlink.degree, nvlink.parallel) == (1, 2, "sequence")
 
     # H100-PCIe measured `SYS` at 14.5 GB/s -> 1.40x, sold as 1.89x.
     # 2xRTX-4090 measured 1.96 GB/s -> 0.51x, SLOWER than one GPU.
     for miss in ("host-staged", "pcie-p2p", ""):
         demoted = delivered_topology(_env(raw), interconnect=miss, peer_gbps=14.5)
-        assert (demoted.groups, demoted.degree, demoted.parallel) == (2, 1, "")
+        assert (demoted.execution_groups, demoted.degree, demoted.parallel) == (2, 1, "")
     # And the class-passes-floor-fails band (pgw#818's disagreement band).
     demoted = delivered_topology(_env(raw), interconnect="nvlink", peer_gbps=30.2)
-    assert (demoted.groups, demoted.degree, demoted.parallel) == (2, 1, "")
+    assert (demoted.execution_groups, demoted.degree, demoted.parallel) == (2, 1, "")
 
 
 def test_an_internal_group_is_never_demoted() -> None:
     # Demoting `internal` would take a multi-device model's own cards away and
     # break a release that has always worked.
-    raw = '{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"internal"}'
+    raw = '{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"internal"}'
     for link in ("nvlink", "host-staged", ""):
         topo = delivered_topology(_env(raw), interconnect=link, peer_gbps=14.5)
-        assert (topo.groups, topo.degree, topo.parallel) == (1, 2, "internal")
+        assert (topo.execution_groups, topo.degree, topo.parallel) == (1, 2, "internal")
 
 
 def test_free_vram_reports_the_tightest_group_never_the_pod_sum(
@@ -312,14 +312,14 @@ def test_free_vram_reports_the_tightest_group_never_the_pod_sum(
     monkeypatch.setattr(torch.cuda, "mem_get_info", fake.mem_get_info)
 
     monkeypatch.setenv(
-        ENV_VAR, '{"gpu_count":4,"group_degree":1,"groups":4}')
+        ENV_VAR, '{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}')
     # 4x1: four independent pools, and the hub may fill all four — so the
     # honest offer is the tightest one, not the roomiest (pgw#776).
     assert lifecycle.free_vram_bytes() == 10 * _GiB
 
     monkeypatch.setenv(
         ENV_VAR,
-        '{"gpu_count":4,"group_degree":2,"groups":2,"parallel":"sequence"}')
+        '{"gpu_count":4,"gpus_per_execution_group":2,"execution_groups":2,"parallel":"sequence"}')
     # 2x2 replicated: group 0 = min(10,10) = 10, group 1 = min(40,20) = 20;
     # the pod can only promise 10 to each of the two jobs it may be given.
     assert lifecycle.free_vram_bytes() == 10 * _GiB

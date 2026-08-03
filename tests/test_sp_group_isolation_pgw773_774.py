@@ -5,7 +5,7 @@ Layers exercised, per test:
 
 - ``init_rank``/``RankGroup`` (the process-group construction itself): two
   degree-2 groups coexist in ONE parent process with independent worlds —
-  the exact shape (``gpu_count=4, group_degree=2``) the old code corrupted
+  the exact shape (``gpu_count=4, gpus_per_execution_group=2``) the old code corrupted
   by joining the default group. Collectives run CONCURRENTLY on both groups
   through the real diffusers CP hooks (split/gather over our mesh) and the
   values prove no cross-talk.
@@ -160,7 +160,7 @@ def _base_call(pipe: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def test_two_degree2_groups_coexist_with_no_cross_talk() -> None:
-    # gpu_count=4, group_degree=2: the shape DPA-1 corrupts. Both groups arm
+    # gpu_count=4, gpus_per_execution_group=2: the shape DPA-1 corrupts. Both groups arm
     # in ONE parent process and run their sharded forwards CONCURRENTLY;
     # each output must be its own group's input times 2, at full length
     # (the gather ran over the right world).
@@ -253,13 +253,16 @@ def test_a_follower_that_skips_the_collective_times_out_typed() -> None:
     # timeout, so a hung follower parked rank 0 forever. The process group
     # now carries a real timeout and rank 0 fails typed, condemning the
     # group.
+    collective_timeout_s = 5.0
     rt, pipe = _armed_runtime((0, 1), entry=_rig_entry_skips_collectives,
-                              timeout_s=5.0)
+                              timeout_s=collective_timeout_s)
     try:
         start = time.monotonic()
         with pytest.raises(Exception):
             rt.call_with(_base_call, pipe, torch.ones(4, 2))
-        assert time.monotonic() - start < 60
+        # Bounded by the timeout the group was CONFIGURED with, not by a
+        # constant that says nothing about this rig (pgw#845).
+        assert time.monotonic() - start < collective_timeout_s * 4
         assert rt.broken
     finally:
         rt.close()
@@ -286,14 +289,15 @@ def test_an_unpicklable_argument_is_typed_and_does_not_condemn() -> None:
 
 def test_arming_a_group_whose_follower_never_readies_fails_bounded() -> None:
     pipe = _make_toy_pipe()
+    arm_timeout_s = 3.0
     rt = SequenceRuntime(
         (0, 1), entry=_rig_entry_never_ready, backend="gloo",
-        collective_timeout_s=30.0, arm_timeout_s=3.0,
+        collective_timeout_s=30.0, arm_timeout_s=arm_timeout_s,
     )
     start = time.monotonic()
     with pytest.raises(RankGroupError, match="not armed"):
         rt.arm(pipe, BootPlan(degree=2), GroupPlan(sp_degree=2))
-    assert time.monotonic() - start < 60
+    assert time.monotonic() - start < arm_timeout_s * 6
     rt.close()
 
 
@@ -301,10 +305,12 @@ def test_close_is_never_a_collective_and_completes_against_a_wedged_follower() -
     rt, pipe = _armed_runtime((0, 1), entry=_rig_entry_skips_collectives,
                               timeout_s=5.0)
     # A RUN the follower ignores: it is now parked in a 600s sleep.
+    parked_s = 600.0
     rt._group.send({"op": "run", "args": (), "kwargs": {}})
     start = time.monotonic()
     rt.close()   # must join/terminate, never broadcast
-    assert time.monotonic() - start < 30
+    # The property is that close() does NOT wait out the parked follower.
+    assert time.monotonic() - start < parked_s / 20.0
 
 
 def test_group_mesh_contract_matches_installed_diffusers() -> None:

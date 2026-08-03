@@ -694,6 +694,7 @@ def validate_at_decoration(cls: type, decl: EndpointDecl) -> None:
 
     if decl.kind != "inference" or not decl.resources.gpu:
         return
+    _refuse_compile_nowarmup(cls, decl)
     if callable(getattr(cls, "warmup", None)) or isinstance(decl.warmup, NoWarmup):
         return
     pairs: List[Tuple[str, type]] = []
@@ -719,6 +720,25 @@ def validate_at_decoration(cls: type, decl: EndpointDecl) -> None:
             warmable = True
     if pairs and not warmable:
         _raise_unwarmable(cls.__name__, skips)
+
+
+def _refuse_compile_nowarmup(cls: type, decl: EndpointDecl) -> None:
+    """th#959: ``compile=`` + ``NoWarmup`` is a contradiction — compile cells
+    are minted and proven by warmup execution, so a NoWarmup class can never
+    arm one. Live, the combination struck a release broken in 3 pods. A
+    custom ``warmup()`` method resolves it (proof runs through that)."""
+    if (
+        decl.compile is not None
+        and isinstance(decl.warmup, NoWarmup)
+        and not callable(getattr(cls, "warmup", None))
+    ):
+        raise TypeError(
+            f"@endpoint class {cls.__name__!r}: compile= with "
+            f"warmup=NoWarmup({decl.warmup.reason!r}) can never mint or "
+            "prove a compile cell (proof runs through warmup execution — "
+            "th#959). Drop compile=, define a custom warmup() method, or "
+            "make a handler warmable (warm= overrides, pgw#654)."
+        )
 
 
 def _raise_unwarmable(owner: str, skips: Sequence[Tuple[str, str]]) -> None:

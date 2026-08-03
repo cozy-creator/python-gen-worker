@@ -1,0 +1,123 @@
+# pgw#849 guard 2 — the RATCHET.
+#
+# Every line is public surface in the aot/mint/serve packages that NOTHING on
+# the pod's production path calls, measured on chaos 9f582ba (2026-08-01).
+# `scripts/lint_unreached_surface.py` fails on any NEW line, and equally on a
+# line here that has since acquired a production caller — a baseline nobody has
+# to shrink is a baseline nobody reads.
+#
+# These are not equivalent. Roughly, by what the absence COSTS:
+#
+#   A gate that never runs
+#     numerics_ladder.gate / compare_outputs / declared_thresholds — ✅ DELISTED
+#       2026-08-02, the first entries this ratchet has ever removed. The original
+#       finding is kept verbatim because it is the clearest illustration of what
+#       delisting MEANS: "pgw#817's ADOPTION numerics gate. `api/decorators.py`
+#       declares numerics_floor and numerics_warn per family, `activity.py`
+#       declares KIND_CELL_NUMERICS, and NOTHING IN src/ IMPORTS numerics_ladder
+#       AT ALL. A cell about to arm is supposed to be run against the eager
+#       forward it replaces and REFUSE below the floor. It never is."
+#       That sentence is now FALSE, which is the whole point — pgw#848 CP12
+#       (`c47dc46`) gave all three their first production callers, the guard went
+#       red on STALE, and the lines came out. A symbol ceasing to be dead code is
+#       this guard's nicest failure mode, and the ratchet turned the right way.
+#     compile_cache.assert_closure_complete — the ck5 code-closure completeness
+#       gate ("a dynamic import is hiding trace-relevant code from the recipe
+#       key"). Its only caller is a test.
+#     aot_serve.is_aot_artifact — its own docstring says "kind sniff for the
+#       provision.enable_compiled dispatch". That dispatch does not call it.
+#     aot_declaration.named_dynamic_rows — bridges declaration rows that NAME a
+#       Dim into per-binding DynamicDim rows. Nothing runs it.
+#
+#   Measured and then dropped (the pgw#848 CP1 shape)
+#     boot_phases.servable_ms — "THE cold-boot number", computed, never read.
+#     aot_compile_spans.dark_fraction — unattributed compile time, never emitted.
+#     aot_serve.realigned_inputs / served_entry_calls / EntryDispatch.refusal_counts
+#       — the pgw#790/#791 adapter-fork and realignment tax, measured "rather
+#       than inferred from a stderr line nobody can read", and never reported.
+#     compile_cache.artifact_fx_lines / live_fx_lines — fx forensics that
+#       fx_key_forensics does not reach.
+#
+#   Dead or duplicated surface
+#     compile_cache.build / prepare (the JIT build path), aot_serve.flavor_label
+#     and find_artifact (compile_cache's same-named versions are the live ones),
+#     aot_mint.replace_spec, aot_package.package_entry_names,
+#     guard_closure.manifest_digest.
+#       aot_compile_pool.free_disk_bytes — ✅ DELISTED 2026-08-02 (pgw#877) by
+#       DELETION, the other way a line leaves this file.
+#     aot_export_parallel.groups / width_for — ✅ DELISTED 2026-08-02 by
+#       WIRING (`5923622`, pgw#868 A4). The audit that filed them found the
+#       producer too: `aot_mint` had been recording `export_peak_device_bytes`
+#       since 0.90.6, which IS `width_for(per_export_device_bytes=)`. Both
+#       halves built, never joined — and `GEN_WORKER_AOT_EXPORT_PARALLEL` was
+#       therefore an inert flag, which is a shape this guard should be taught
+#       to see (a module with NO importer at all, as against a symbol with no
+#       caller).
+#
+#   ⚠️ KNOWN BLIND SPOT — the wrapper exemption clears the WRONG function
+#
+#     MECHANISM: a definition is exempted when its body is a one-line call
+#     into another symbol that production reaches. The reach test then runs
+#     against the WRAPPEE, never the wrapper — so a wrapper with zero callers
+#     of its own is cleared on the strength of the callers of the thing it
+#     calls. The rule can be satisfied by a function that is not the one under
+#     test, and the guard reports nothing.
+#
+#     MEASURED, 2026-08-02 (pgw#877): `aot_compile_pool.available_memory_bytes`
+#     and `.free_device_bytes` had zero references anywhere in src/, tests/ or
+#     scripts/ and were invisible to this guard for its entire life. Both are
+#     now deleted. `--explain` still shows the same clearance for
+#     `aot_export_parallel.enabled`, whose "wrappee production already calls"
+#     is `str.strip` / `dict.get` — stdlib methods, which every module reaches
+#     and which therefore clear ANY one-line wrapper over them.
+#
+#     KEPT, deliberately, and recorded rather than silently worked around: the
+#     exemption is right far more often than it is wrong, and a rule tight
+#     enough to catch these would re-list real delegating wrappers. What must
+#     not happen again is treating its silence as proof of reach. Two candidate
+#     tightenings, neither implemented: require the wrappee to be IN-PACKAGE
+#     (kills the `str.strip` class outright), and flag any guarded module with
+#     no importer in src/ regardless of per-symbol reach.
+#
+#   KNOWN FALSE POSITIVES (3 of 24 — the measured rate is 12.5%)
+#     aot_inputs.inputs_for / latent_dims — declaration-author surface; the
+#       callers are endpoint repos that vendor the wheel, like gen_worker.api.
+#     boot_phases.BootSpan.skipped — reached by an operator script only.
+#     They stay listed rather than exempted: an exemption rule broad enough to
+#     clear them would also clear real hits.
+#
+gen_worker.aot_compile_spans.dark_fraction()
+gen_worker.aot_declaration.named_dynamic_rows()
+gen_worker.aot_inputs.inputs_for()
+gen_worker.aot_inputs.latent_dims()
+gen_worker.aot_mint.replace_spec()
+gen_worker.aot_package.package_entry_names()
+gen_worker.aot_serve.EntryDispatch.refusal_counts()
+gen_worker.aot_serve.find_artifact()
+gen_worker.aot_serve.flavor_label()
+gen_worker.aot_serve.is_aot_artifact()
+gen_worker.aot_serve.realigned_inputs()
+gen_worker.aot_serve.served_entry_calls()
+gen_worker.boot_phases.BootSpan.skipped()
+gen_worker.boot_phases.servable_ms()
+gen_worker.compile_cache.artifact_fx_lines()
+gen_worker.compile_cache.assert_closure_complete()
+gen_worker.compile_cache.build()
+gen_worker.compile_cache.live_fx_lines()
+gen_worker.compile_cache.prepare()
+gen_worker.guard_closure.manifest_digest()
+
+# ---------------------------------------------------------------------------
+# IN FLIGHT — a seam that landed AHEAD of its caller. Not 2026-08-01 debt.
+#
+# Segregated deliberately. An exemption list that only ever gains entries is a
+# guard being retired in slow motion, so entries below carry an owning issue and
+# are expected to leave, not to accumulate. If one is still here when its issue
+# closes, the seam was never wired and the guard was right the first time.
+#
+#   pgw#868 A4 (`d6067d2`, landed 2026-08-02) — the parallel-export seam. Both
+#   symbols are the DECISION rules for out-of-process row export; the only other
+#   mention of `width_for` anywhere in src/ is a COMMENT in aot_mint.py:1719
+#   explaining why it exists. Caught by this ratchet within hours of landing,
+#   which is the first time it has flagged live work rather than history.
+# ---------------------------------------------------------------------------

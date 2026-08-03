@@ -1,6 +1,6 @@
 """P2 (th#960/pgw#609 design table): HelloAck full-replace DesiredResidency
 -> download -> verify -> ModelEvent chain, over a real hub-double + real
-blake3 blob host. Events are fenced by snapshot digest + generation (a late
+sha256 blob host. Events are fenced by snapshot digest + generation (a late
 event after a tag-move never misattributes to the new identity); a mutable
 tag can move to new bytes under the SAME wire ref.
 
@@ -199,7 +199,7 @@ def test_mutable_tag_move_fences_events_by_digest_and_generation(tmp_path) -> No
 
 
 def test_corrupt_blob_is_never_trusted_silently(tmp_path) -> None:
-    """A blob that fails its blake3 verify on download must not be served —
+    """A blob that fails its digest verify on download must not be served —
     the model either quarantines/retries or the function stays unavailable;
     it never silently loads mismatched bytes. Real corruption via a real
     HTTP server serving wrong bytes for the declared digest (no mocking of
@@ -434,7 +434,7 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
     import json
     import struct
 
-    from blake3 import blake3
+    import hashlib
 
     import gen_worker.models.cozy_snapshot as snap_mod
     from gen_worker.api.binding import Hub as HubRef
@@ -448,14 +448,14 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
         return struct.pack("<Q", len(hb)) + hb + tag
 
     content = _tiny_safetensors()
-    digest = blake3(content).hexdigest()
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
     snap = pb.Snapshot(digest="corrupt-quarantine", files=[pb.SnapshotFile(
-        path="model.safetensors", size_bytes=len(content), blake3=digest,
+        path="model.safetensors", size_bytes=len(content), digest=digest,
         url="http://example.invalid/blob",
     )])
     calls = {"n": 0}
 
-    async def _fake_dl(url, dst, expected_size, expected_blake3, on_bytes=None):
+    async def _fake_dl(url, dst, expected_size, expected_digest, on_bytes=None):
         calls["n"] += 1
         dst.write_bytes(content)
 

@@ -84,12 +84,6 @@ logger = logging.getLogger(__name__)
 #: serving pod has ever produced because nothing on this path called it.
 RECIPE_DYNAMO = "dynamo"
 RECIPE_AOT = "aot"
-#: pgw#817: the AOT mint, one block class deep. Same exporter, same gates,
-#: same packaging; the entries are block classes of each target instead of
-#: shape coordinates of its whole forward. Named separately because a reader
-#: grouping `self_mint_started` by phase must be able to tell a 6-minute mint
-#: from a 2-hour one without reading the artifact.
-RECIPE_AOT_REGIONAL = "aot-regional"
 
 
 @dataclass(frozen=True)
@@ -510,12 +504,60 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
 _IN_FLIGHT_LOCK = threading.Lock()
 _IN_FLIGHT: Dict[str, Tuple[str, float]] = {}
 
+#: th#1359: the SETTLED half of the same ledger — ``{cell_key: checkpoint_id}``
+#: for publishes the hub acknowledged, and ``{cell_key: phase}`` for the ones
+#: it refused. In-flight alone answers "is an upload running"; a forge pod also
+#: has to answer "did this pod produce a cell for the fleet, or not", and that
+#: fact otherwise exists only as a wire event this process cannot read back.
+_PUBLISHED: Dict[str, str] = {}
+_REFUSED: Dict[str, str] = {}
+
+#: pgw#848 item 1 / th#1359: a monotonic counter of DURABLE publish progress.
+#: It advances when a NEW cell key begins uploading and when one lands — never
+#: on a retry, never on a failure, never on "a message arrived". That
+#: restriction is the whole design: the mint's activity stays RUNNING until the
+#: cell is durable, and a publish that fails and retries forever must therefore
+#: read as NOT PROGRESSING, or the fix is worse than the bug it closes (a
+#: never-reap loop on a paid card with no attendant, which is exactly why
+#: `self_mint_publish` was refused as a podguard progress KIND).
+_DURABLE_PROGRESS = 0
+_DURABLE_SEEN: set = set()
+
+
+def publish_durable_progress() -> int:
+    """Monotonic count of durable publish transitions in this process."""
+    with _IN_FLIGHT_LOCK:
+        return _DURABLE_PROGRESS
+
+
+def _note_durable(key: str, event: str) -> None:
+    """Advance the durable counter for a transition that is NOT a retry."""
+    global _DURABLE_PROGRESS
+    token = f"{key}|{event}"
+    with _IN_FLIGHT_LOCK:
+        if token in _DURABLE_SEEN:
+            return
+        _DURABLE_SEEN.add(token)
+        _DURABLE_PROGRESS += 1
+
 
 def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
     """``{cell_key: (family, started_monotonic)}`` for every publish whose
     thread has neither succeeded nor failed yet (pgw#815)."""
     with _IN_FLIGHT_LOCK:
         return dict(_IN_FLIGHT)
+
+
+def published_cells() -> Dict[str, str]:
+    """``{cell_key: checkpoint_id}`` the hub accepted from this process."""
+    with _IN_FLIGHT_LOCK:
+        return dict(_PUBLISHED)
+
+
+def refused_publishes() -> Dict[str, str]:
+    """``{cell_key: failure phase}`` for publishes this process could not land."""
+    with _IN_FLIGHT_LOCK:
+        return dict(_REFUSED)
 
 
 def _publish_async(
@@ -537,6 +579,9 @@ def _publish_async(
         size_mb = 0.0
     with _IN_FLIGHT_LOCK:
         _IN_FLIGHT[key] = (family, time.monotonic())
+    # A NEW key beginning its upload is durable new work; a retry of the same
+    # key is not, and `_note_durable` dedupes on (key, event) to enforce that.
+    _note_durable(key, "started")
     activity_mod.emit_event(
         "self_mint_publish",
         f"family={family} key={key}: uploading {size_mb:.1f} MB to the fleet "
@@ -551,6 +596,8 @@ def _publish_async(
                 family, artifact, meta, mint_duration_ms)
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
+            with _IN_FLIGHT_LOCK:
+                _REFUSED[key] = "refused"
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
@@ -558,6 +605,8 @@ def _publish_async(
             )
         except Exception as exc:  # noqa: BLE001 — reported, never fatal
             logger.warning("fleet-cells: publish failed; the next worker on this key re-mints", exc_info=True)
+            with _IN_FLIGHT_LOCK:
+                _REFUSED[key] = _publish_failure_phase(exc)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
@@ -567,6 +616,9 @@ def _publish_async(
                 phase=_publish_failure_phase(exc),
             )
         else:
+            with _IN_FLIGHT_LOCK:
+                _PUBLISHED[key] = str(checkpoint_id or "")
+            _note_durable(key, "published")
             activity_mod.emit_event(
                 "self_mint_publish",
                 f"family={family} key={key} checkpoint={checkpoint_id}: "
@@ -608,15 +660,11 @@ def delegation_refusal(pipe: Any, cfg: Any) -> str:
     loudly rather than raise). ``compile_cache.eager_tier_available`` is the
     honest predicate and this is now its only caller-side use.
 
-    pgw#817 CORRECTION. Regional targets used to keep a blanket refusal here
-    ("the family's mint is per-block and the adopt/serve half is still gated
-    behind pgw#812/#814"). That hold is discharged: the per-block mint, the
-    bind-by-reference arm and the assembled-vs-eager adoption gate all exist
-    now, and a regional mint is exactly the one that MOST wants delegating —
-    it is the shape that finishes in single-digit minutes. The refusal
-    survives only where it is still true: a family that declares regional but
-    registered no EXPORT declaration cannot mint an aot-inductor cell at all,
-    and ``mint_recipe`` declines that by its own name.
+    `Compile.regional` (the dynamo/JIT per-block knob, ie#381) is NOT a
+    refusal here: since pgw#846 the AOT mint is always whole-graph and
+    ignores it. A family with no registered EXPORT declaration cannot mint an
+    aot-inductor cell at all, and ``mint_recipe`` declines that by its own
+    name.
     """
     try:
         if not cc.eager_tier_available(pipe):
@@ -990,16 +1038,16 @@ def enable_compiled(
     # never per-group. Typed, and scoped by the miss policy like every other
     # decline here.
     topo = topology_mod.installed_topology()
-    if topo is not None and int(getattr(topo, "groups", 1) or 1) > 1:
+    if topo is not None and int(getattr(topo, "execution_groups", 1) or 1) > 1:
         logger.warning(
             "fleet-cells: in-process self-mint refused for %s key=%s — this "
             "worker runs %d execution groups in one process and the inductor "
-            "capture env is process-global (pgw#777)", family, key, topo.groups)
+            "capture env is process-global (pgw#777)", family, key, topo.execution_groups)
         if bucket:
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe,
-            f"in-process mint refused at groups={topo.groups}: the inductor "
+            f"in-process mint refused at groups={topo.execution_groups}: the inductor "
             "capture env is process-global (pgw#777/DPA-8)",
             selection_bug, phase="multi_group_in_process")
 
@@ -1193,7 +1241,7 @@ def adopt_delegated_mint(
         except OSError:
             shutil.copy2(artifact, pending.target)
     try:
-        if pending.recipe in (RECIPE_AOT, RECIPE_AOT_REGIONAL):
+        if pending.recipe == RECIPE_AOT:
             # pgw#805: an exported cell arms through the AOT gates
             # (lifted-binding install -> aot_serve.enable -> rollback), not
             # the inductor seed path. Same gates a hub-delivered `.pt2`
@@ -1457,7 +1505,16 @@ def abandon_self_mint(pending: "PendingSelfMint") -> None:
     genuinely unexercised with no proven sibling). Never packed, never
     published — only the temp capture dir is cleaned up. A no-op when a
     proven sibling already finalized the shared capture (the artifact and
-    its publish must survive)."""
+    its publish must survive).
+
+    pgw#848 item 5: this rmtree is why the crash-only resume bank is NOT sited
+    under ``mint_root``. Abandonment is how a crashed mint ends, so a bank here
+    would be destroyed on its way out of the one case it exists for. It lives
+    in the worker-local resume area instead (``aot_resume.bank_root``), keyed
+    by scope, and is dropped only when a cell actually ADOPTS. Keeping it past
+    an abandonment is safe by construction rather than by policy: nothing is
+    re-admitted without its identity being re-derived from a freshly exported
+    program."""
     if pending._state.get("minted") is not None:
         return
     mark_terminus(pending, TERMINUS_ABANDONED)
@@ -1515,8 +1572,6 @@ def mint_recipe(
     class this issue exists to kill: five real L4 pods produced no mint and no
     refusal, which is indistinguishable from a crash.
     """
-    from . import aot_regional
-
     if not aot_cells.prefer_aot():
         return RECIPE_DYNAMO
     family = str(getattr(cfg, "family", "") or "")
@@ -1552,7 +1607,27 @@ def mint_recipe(
 
     from .api.export_contract import export_declaration
 
-    if export_declaration(family) is None:
+    # pgw#853: THIS is where a declaration is allowed to refuse. A family with
+    # open mint blockers (ltx/qwen/z-image) registers a THUNK, so its refusal
+    # arrives here — as a typed `self_mint_skipped` carrying every word of the
+    # blocker text — instead of as an ImportError that takes the endpoint
+    # down at boot. A refusal to MINT is not a refusal to IMPORT.
+    try:
+        decl = export_declaration(family)
+    except Exception as exc:  # noqa: BLE001 — serving outranks compiling
+        # Deliberately `Exception`, not `BaseException`: this runs INSIDE the
+        # serving process, where swallowing a KeyboardInterrupt/cancellation
+        # would be its own defect. Every refusal shape the declarations
+        # actually raise (MintRefused, DeclarationError, ImportError) is an
+        # Exception. The import boundary is the other way round — see
+        # `import_export_declaration`, which runs at BOOT and catches
+        # everything, because there nothing outranks the endpoint coming up.
+        return _decline(
+            "declaration_refused",
+            f"family {family!r}'s export declaration refuses to mint "
+            f"({type(exc).__name__}): {exc}")
+
+    if decl is None:
         return _decline(
             "no_export_declaration",
             f"family {family!r} registered no export declaration (a "
@@ -1595,35 +1670,16 @@ def mint_recipe(
     # child, no pod and no compile can resolve it, so spending one to
     # rediscover the sentence is pure waste. Declines only the mint; the
     # pipeline serves eager exactly as it did.
-    decl_gaps = aot_mint.declaration_module_gaps(
-        pipe, spec, export_declaration(family))
+    decl_gaps = aot_mint.declaration_module_gaps(pipe, spec, decl)
     if decl_gaps:
         return _decline(
             "declaration_module_mismatch",
             f"family {family!r}'s export declaration does not fit the "
             f"composed pipeline: " + "; ".join(decl_gaps))
 
-    # pgw#817: the declaration decides the mint SHAPE. `regional=True` on the
-    # EXPORT declaration is a per-family opt-in, not a fleet default — pgw#812
-    # ranked it that way deliberately: on a small-table DiT regional is a 2x
-    # that costs a serve-path change, while pgw#811 buys a comparable win with
-    # no serve-path change at all. Where the constant table IS large it is
-    # 14.2x, which is the whole reason this lane exists.
-    if bool(getattr(export_declaration(family), "regional", False)):
-        # pgw#827: the LAST question, and the cheapest — does this runtime
-        # own an arm that can adopt the kind of cell this recipe produces?
-        # Attempt nine answered it after 354 s of L4 and a complete 72-entry
-        # artifact, at the mint's own self-adopt verification. It is
-        # answerable here, from the arm's own dispatch table, for free.
-        if provision.arm_route(aot_regional.MODE_REGIONAL) is None:
-            return _decline(
-                "regional_arm_unwired",
-                f"family {family!r} declares regional=True but this runtime "
-                f"has no arm for mode={aot_regional.MODE_REGIONAL!r} — a cell "
-                f"this worker could not adopt must not be minted, because the "
-                f"mint's own self-adopt verification would refuse it after "
-                f"the whole compile is paid for")
-        return RECIPE_AOT_REGIONAL
+    # pgw#846: the AOT mint is always WHOLE-GRAPH. `Compile.regional` keeps
+    # its dynamo/JIT meaning (ie#381) and is ignored here — regional export
+    # is retired for production.
     return RECIPE_AOT
 
 

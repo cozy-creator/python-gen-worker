@@ -383,6 +383,92 @@ def program_constant_fqns(program: Any) -> Tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def program_literal_fqns(program: Any) -> Tuple[str, ...]:
+    """The FQNs an ``ExportedProgram`` will declare ``source=literal``.
+
+    The complement of :func:`program_state_dict_fqns`: everything the export
+    lifted that has NO state_dict counterpart. Those bytes ship INSIDE the
+    artifact (``aot_serve.LITERALS_NAME``) and are never rebound at load —
+    *"nothing outside the artifact knows its value"*.
+    """
+    signature = getattr(program, "graph_signature", None)
+    state_dict = set(program_state_dict_fqns(program))
+    names = {
+        str(n) for n in getattr(signature, "lifted_tensor_constants", ()) or ()
+    }
+    names.update(
+        str(k) for k in (getattr(program, "constants", {}) or {})
+        if str(k) not in state_dict
+    )
+    return tuple(sorted(names - state_dict))
+
+
+def literal_values_digest(program: Any) -> str:
+    """Digest of the VALUES of every ``source=literal`` constant — ``""`` when
+    there are none (pgw#857).
+
+    **Why values, and only for literals.** A cell's identity folds constant
+    NAMES but deliberately not their bytes, because a weight is rebound from
+    the resident ``state_dict`` at load — so two fine-tunes of one family
+    SHOULD share a cell, and keying weight values would break exactly that.
+    A LITERAL is different in kind: it ships inside the artifact and is never
+    rebound, so **for a literal the value IS the artifact**. Two checkpoints
+    that need different literals must not share a key, and before this they
+    did.
+
+    Measured instances, both rope frequency tables and both pure functions of
+    config: z-image's ``RopeEmbedder.freqs_cis`` (~393 KB) and qwen-image's
+    ``QwenEmbedRope.pos_freqs``/``neg_freqs`` (4.19 MB). **The discriminator
+    is ASSIGNMENT STYLE, not class ancestry** — ``QwenEmbedRope`` IS an
+    ``nn.Module`` and its ``state_dict()`` is still empty, because the tables
+    are plain attributes rather than ``register_buffer``.
+
+    Returns ``""`` when the program lifts no literals, so the caller OMITS the
+    field and every family without literals (sdxl: measured zero across five
+    real mints) keys byte-identically to before.
+
+    Fails CLOSED: a literal whose bytes cannot be read raises rather than
+    being skipped, because a silently-skipped constant is the hole this
+    function exists to close.
+    """
+    import hashlib
+
+    names = program_literal_fqns(program)
+    if not names:
+        return ""
+    constants = getattr(program, "constants", {}) or {}
+    digest = hashlib.sha256()
+    for name in names:                      # already sorted
+        value = constants.get(name)
+        if value is None:
+            raise ValueError(
+                f"literal constant {name!r} is declared by the exported "
+                f"program but carries no value — its bytes ship inside the "
+                f"cell, so an unreadable one cannot be keyed and must not be "
+                f"published (pgw#857)")
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(str(getattr(value, "dtype", "")).encode("utf-8"))
+            digest.update(str(tuple(getattr(value, "shape", ()))).encode("utf-8"))
+            buf = value.detach().cpu().contiguous().reshape(-1)
+            digest.update(buf.view(_BYTE_VIEW_DTYPE()).numpy().tobytes())
+        except Exception as exc:  # noqa: BLE001 — fail closed, never skip
+            raise ValueError(
+                f"literal constant {name!r} could not be digested "
+                f"({type(exc).__name__}: {exc}); its value is part of the "
+                f"artifact and must be keyed (pgw#857)") from exc
+    return digest.hexdigest()[:32]
+
+
+def _BYTE_VIEW_DTYPE() -> Any:
+    """``torch.uint8`` — a raw byte view works for every dtype including
+    complex, where ``.numpy()`` would need a copy and a dtype special case."""
+    import torch
+
+    return torch.uint8
+
+
 def program_state_dict_fqns(program: Any) -> Tuple[str, ...]:
     """The FQNs an ``ExportedProgram`` will declare ``source=state_dict``.
 
@@ -657,5 +743,7 @@ __all__ = [
     "program_package_drift",
     "strict_mode_drift",
     "packaged_so",
+    "literal_values_digest",
+    "program_literal_fqns",
     "unbindable_constants",
 ]

@@ -40,7 +40,7 @@ def test_multi_group_worker_refuses_the_in_process_capture(monkeypatch, tmp_path
     monkeypatch.setattr(
         fc.cc, "begin_fleet_mint",
         lambda *a, **k: captured.append(a))
-    topology_mod.install_topology(ExecutionTopology(gpu_count=4, group_degree=1))
+    topology_mod.install_topology(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
 
     outcome = fc.enable_compiled(
         _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
@@ -58,7 +58,7 @@ def test_single_group_worker_still_opens_the_capture(monkeypatch, tmp_path):
     """The refusal is scoped: G == 1 (every pod today) keeps the exact
     in-process capture path pgw#784's `delegatable` falls back to."""
     _mintable(monkeypatch)
-    topology_mod.install_topology(ExecutionTopology(gpu_count=1, group_degree=1))
+    topology_mod.install_topology(ExecutionTopology(gpu_count=1, gpus_per_execution_group=1))
 
     outcome = fc.enable_compiled(
         _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))

@@ -37,6 +37,17 @@ _TENSORHUB_FLAVOR_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # from code that genuinely means the ``latest`` publish tag.
 DEFAULT_REF_TAG = "prod"
 
+# pgw#872 / th#1388: a LENGTH-PRESERVING case fold. An index computed on
+# ``s.lower()`` is not a valid index into ``s`` — the map is 1:1 here, so it is.
+# Only ASCII case matters: every marker this module searches for is ASCII.
+_ASCII_LOWER = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+)
+
+
+def _ascii_lower(s: str) -> str:
+    return s.translate(_ASCII_LOWER)
+
 # A ref string in NORMAL FORM (minted by this module). Annotate wire/residency
 # key surfaces with WireRef so mixing raw and normalized strings fails mypy.
 WireRef = NewType("WireRef", str)
@@ -222,7 +233,13 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
                 )
             flavor = flavor_part
 
-        low = s.lower()
+        # pgw#872: the index MUST come from the same string it slices.
+        # ``str.lower()`` is not length-preserving (``len("İ") == 1`` but
+        # ``len("İ".lower()) == 2``), so an index taken on a lowercased copy
+        # splits the original in the wrong place and silently truncates the
+        # digest. ``_ascii_lower`` is a 1:1 character map, so it cannot move
+        # an index.
+        low = _ascii_lower(s)
         if "@sha256:" in low:
             idx = low.index("@sha256:")
             repo_id = s[:idx].strip()
@@ -231,7 +248,6 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
                 raise ValueError("tensorhub ref sha256 digest is empty")
             digest = f"sha256:{dig}"
             s = repo_id
-            low = s.lower()
         elif "@blake3:" in low:
             idx = low.index("@blake3:")
             repo_id = s[:idx].strip()
@@ -240,7 +256,6 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
                 raise ValueError("tensorhub ref blake3 digest is empty")
             digest = f"blake3:{dig}"
             s = repo_id
-            low = s.lower()
         elif "@" in s:
             raise ValueError("tensorhub ref digest must use @sha256:<hex> or @blake3:<hex>")
         if ":" in s:

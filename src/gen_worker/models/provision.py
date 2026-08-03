@@ -222,12 +222,14 @@ def arm_route(mode: str) -> Optional[str]:
     adopt the kind of cell I am about to mint?" is answerable at
     ``self_mint_started``, and it is answerable HERE, from the same table
     the arm dispatches on.
-    """
-    from .. import aot_regional
 
+    pgw#846: regional cells are RETIRED, so the whole-graph arm is the only
+    row. A cell whose metadata still says ``mode='regional'`` is declined BY
+    NAME (``arm_aot`` stays eager and says why) — never handed to the
+    whole-graph arm, whose denoiser-scope bind table it cannot use (pgw#827).
+    """
     return {
         "": "aot_serve.enable",
-        aot_regional.MODE_REGIONAL: "aot_regional.enable",
     }.get(str(mode or ""))
 
 
@@ -255,7 +257,7 @@ def arm_aot(
     proven order). Rolled back on a failed arm so a dynamo fallthrough never
     traces a lifted forward it did not ask for.
     """
-    from .. import aot_regional, aot_serve, trt_engine
+    from .. import aot_serve, trt_engine
 
     if meta is None:
         try:
@@ -264,25 +266,19 @@ def arm_aot(
             meta = None
     lifted_target: Any = None
     lifted_installed = False
-    # pgw#825: a REGIONAL cell must not be armed on a lifted denoiser. Its
-    # block entries bind the branch pair as by-reference constants of each
-    # instance, and the lifted forward REASSIGNS every leaf's `lora_a`/`lora_b`
-    # to views of the flat pair on each call — the artifact would keep reading
-    # the buffers it bound at arm time and every attach would silently serve
-    # the base model. The install is skipped by name rather than left to the
-    # (currently unwired) regional arm to trip over.
     mode = str((meta or {}).get("mode") or "")
-    regional = mode == aot_regional.MODE_REGIONAL
     if arm_route(mode) is None:
         # A cell whose mode this runtime has no arm for must decline BY NAME
         # rather than be handed to whichever arm happens to be the default —
         # pgw#827 was exactly that: a regional cell routed into the
         # whole-graph arm, which built ONE bind table at denoiser scope.
+        # Since pgw#846 retired regional, `mode='regional'` cells land here
+        # and stay eager, which is the correct retirement semantics.
         logger.warning(
             "aot arm: artifact declares mode=%r, which this runtime has no "
             "arm for; staying eager", mode)
         return False
-    if bucket and not regional and get_settings().compile_prefer_aot:
+    if bucket and get_settings().compile_prefer_aot:
         from . import lora_lifted
 
         # The target module comes from the ARTIFACT's own recorded facts
@@ -305,19 +301,138 @@ def arm_aot(
                     "aot arm: lifted-binding install failed on %r (%s); a "
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
-    # pgw#827: the regional cell goes to the regional arm — the per-INSTANCE
-    # bind table — and the whole-graph cell to the whole-graph arm. Both the
-    # serve path and the delegated mint's self-adopt verification reach this
-    # one dispatch (`fleet_cells.adopt_delegated_mint`), which is why an
-    # unwired regional arm did not merely mean regional cells could not
-    # serve: it meant they could not be PUBLISHED.
-    arm = aot_regional.enable if regional else aot_serve.enable
-    if arm(pipe, cfg, cache_dir, artifact):
-        return True
+    if aot_serve.enable(pipe, cfg, cache_dir, artifact):
+        if gate_cell_numerics(pipe, cfg):
+            return True
+        # A refused cell is UNARMED, not merely reported: the whole point is
+        # that it must not serve. Staying eager is the ordinary miss policy
+        # every other adopt gate uses, so the tenant keeps being served.
+        #
+        # And the ADOPT ledger has to agree with it. `enable` already emitted
+        # `aot_adopt phase=armed` before the gate ran, so a reader counting
+        # armed adoptions would over-count every numerics refusal. One closing
+        # row keeps that count honest — the numbers themselves ride the
+        # `cell_numerics` row.
+        meta = aot_serve.armed_metadata(pipe)
+        aot_serve.unwrap(pipe)
+        try:
+            from .. import activity as activity_mod
+
+            activity_mod.emit_event(
+                aot_serve.ADOPT_EVENT,
+                f"family={meta.get('family')} key={meta.get('cell_key')}: "
+                f"armed, then UNARMED by the numerics gate — this pod serves "
+                f"eager (pgw#868)",
+                phase="numerics_refused")
+        except Exception:  # noqa: BLE001 — the refusal already stands
+            logger.debug("could not close the adopt ledger", exc_info=True)
     if lifted_installed:
         from . import lora_lifted
 
         lora_lifted.remove_lifted_lora_forward(lifted_target)
+    return False
+
+
+def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
+    """THE numerics gate (pgw#868): does this cell reproduce the eager forward
+    it is about to replace? Returns False when it must not serve.
+
+    Placed at ADOPT time because a hub-delivered cell never re-enters mint —
+    the arm is the only point every cell passes through, and it is the point
+    that decides whether the artifact serves. `numerics_probe.measure_axis`
+    takes callables rather than a pipeline precisely so the same measurement
+    can also run mint-side later as a cheaper early catch; what must not exist
+    is a mint-only gate, which cannot protect an adopting pod whose weights,
+    lane and card differ.
+
+    Three outcomes, all of them typed rows on the wire:
+
+    * HEALTHY -> `cell_numerics phase=checked`, arms silently-but-recorded.
+      The pass is announced deliberately: an unannounced pass is
+      indistinguishable from a gate that never ran, which is this program's
+      signature failure.
+    * DEGRADED -> the ladder's `phase=degraded` row; the cell ARMS and
+      confesses.
+    * DESTROYED / unmeasurable -> refuse. `numerics_ladder.gate` raises the
+      typed refusal below the floor; a probe that could not be TAKEN is
+      refused on its own `phase=unmeasurable`, because "nobody could ask" is
+      not "it passed".
+    """
+    from .. import activity as activity_mod, aot_serve, numerics_ladder
+    from .. import numerics_probe
+
+    family = str(getattr(cfg, "family", "") or "")
+    try:
+        report = numerics_probe.probe_cell(
+            pipe, cfg, aot_serve.armed_metadata(pipe))
+    except numerics_probe.ProbeUnavailable as exc:
+        return _refuse_unmeasurable(family, exc.reason, str(exc))
+    except Exception as exc:  # noqa: BLE001 — an unexplained probe is a refusal
+        # Deliberately NOT best-effort. The pgw#848 announcement could swallow
+        # anything because it refused nothing; a GATE that swallowed an error
+        # into an armed cell would be the exact hole this replaces.
+        return _refuse_unmeasurable(
+            family, "probe_error", f"{type(exc).__name__}: {exc}")
+    if not report.measured:
+        rows = "; ".join(
+            f"{v.axis.name}: {v.reason} ({v.detail})"
+            for v in report.unmeasured[:6])
+        return _refuse_unmeasurable(
+            family, (report.unmeasured[0].reason if report.unmeasured
+                     else "no_axis_measured"),
+            f"{report.context()} | unmeasured: {rows}")
+    comparison = report.comparison()
+    try:
+        numerics_ladder.gate(
+            comparison,
+            kind=activity_mod.KIND_CELL_NUMERICS,
+            refuse=lambda detail, worst: numerics_probe.CellNumericsRefused(
+                detail, worst),
+            context=report.context())
+        if comparison is not None and comparison.healthy:
+            activity_mod.emit_event(
+                activity_mod.KIND_CELL_NUMERICS,
+                f"CHECKED against eager on every packaged entry — "
+                f"{report.context()}",
+                phase="checked", duration_ms=report.elapsed_ms)
+    except numerics_probe.CellNumericsRefused as exc:
+        logger.error(
+            "aot arm: REFUSING to arm %s — the cell does not reproduce its "
+            "eager reference: %s", family or "cell", exc)
+        return False
+    except Exception as exc:  # noqa: BLE001 — a gate that errored is a refusal
+        # Includes a raising activity sink, and the announcement is INSIDE the
+        # try on purpose: an arm nobody could record is an arm we do not make.
+        # A telemetry failure cannot be told apart from a logic failure here,
+        # and the two costs are not symmetric — refusing costs an un-armed cell
+        # (the ordinary miss policy), passing costs a silently-wrong one.
+        return _refuse_unmeasurable(
+            family, "gate_error",
+            f"{type(exc).__name__}: {exc} | {report.context()}")
+    return True
+
+
+def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
+    """A cell that could not be measured does not arm — and says which half.
+
+    Fail-closed by construction: the only way to reach an armed cell is
+    through a comparison that exists. An exception swallowed into a `True`
+    here would rebuild the exact hole pgw#848 CP12 refused to ship.
+    """
+    from .. import activity as activity_mod
+
+    logger.error(
+        "aot arm: REFUSING to arm %s — the numerics gate could not be run "
+        "(%s): %s", family or "cell", reason, detail)
+    try:
+        activity_mod.emit_event(
+            activity_mod.KIND_CELL_NUMERICS,
+            f"family={family} REFUSED TO ARM: the compiled-vs-eager "
+            f"comparison could not be taken ({reason}). This is not a pass — "
+            f"an unmeasurable cell stays eager (pgw#868). {detail}",
+            phase="unmeasurable")
+    except Exception:  # noqa: BLE001 — the refusal stands even if the wire is down
+        logger.debug("could not announce unmeasurable numerics", exc_info=True)
     return False
 
 

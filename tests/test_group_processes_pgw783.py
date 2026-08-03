@@ -48,7 +48,7 @@ SOCK = "/tmp/gen-worker-compute-1234.sock"
 
 def plan(gpu_count: int, degree: int = 1, parallel: str = "") -> GroupPlan:
     topo = ExecutionTopology(
-        gpu_count=gpu_count, group_degree=degree, parallel=parallel
+        gpu_count=gpu_count, gpus_per_execution_group=degree, parallel=parallel
     )
     return GroupPlan.for_topology(topo, socket_path=SOCK)
 
@@ -67,7 +67,7 @@ def test_g1_child_env_delta_is_empty():
     stopped being the path pgw#763 measured on real silicon.
     """
     p = plan(1)
-    assert p.groups == 1
+    assert p.execution_groups == 1
     assert dict(p.child(0).env) == {}
     assert p.child(0).devices == (0,)
 
@@ -108,7 +108,7 @@ def test_g1_absent_topology_is_still_one_child():
     """Every CPU pod and every pod created before th#1285 has no topology at
     all. That is a legal state and must stay a one-child worker."""
     p = GroupPlan.for_topology(ExecutionTopology.single(), socket_path=SOCK)
-    assert p.groups == 1
+    assert p.execution_groups == 1
     assert dict(p.child(0).env) == {}
 
 
@@ -119,7 +119,7 @@ def test_g1_absent_topology_is_still_one_child():
 
 def test_children_own_disjoint_physical_devices():
     p = plan(4)
-    assert p.groups == 4
+    assert p.execution_groups == 4
     assert [c.devices for c in p.children] == [(0,), (1,), (2,), (3,)]
     seen = set()
     for c in p.children:
@@ -132,7 +132,7 @@ def test_a_degree_2_group_is_one_child_with_two_cards():
     a platform collective — so it stays ONE process. 4 GPUs at D=2 is TWO
     children, not four."""
     p = plan(4, degree=2, parallel="sequence")
-    assert p.groups == 2
+    assert p.execution_groups == 2
     assert [c.devices for c in p.children] == [(0, 1), (2, 3)]
     assert [c.degree for c in p.children] == [2, 2]
 
@@ -145,7 +145,7 @@ def test_each_child_is_a_single_group_worker_over_its_own_cards():
     env = dict(p.child(2).env)
     assert env["CUDA_VISIBLE_DEVICES"] == "2"
     local = ExecutionTopology.decode(env[ENV_TOPOLOGY])
-    assert local.groups == 1
+    assert local.execution_groups == 1
     assert local.gpu_count == 1
     assert env[ENV_GROUP_ORDINAL] == "2"
     assert env[ENV_HOST_SIBLINGS] == "4"
@@ -156,7 +156,7 @@ def test_a_degree_2_childs_local_topology_keeps_its_parallel_mechanism():
     env = dict(p.child(1).env)
     assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
     local = ExecutionTopology.decode(env[ENV_TOPOLOGY])
-    assert (local.groups, local.gpu_count, local.group_degree) == (1, 2, 2)
+    assert (local.execution_groups, local.gpu_count, local.gpus_per_execution_group) == (1, 2, 2)
     assert local.parallel == "sequence"
 
 
@@ -207,10 +207,10 @@ def test_routing_agrees_with_the_executors_own_dispatch_derivation(
     card the hub did not pick. Only rank-0 devices are dispatched by the hub;
     the executor now typed-refuses anything else, and so does route()."""
     topo = ExecutionTopology(
-        gpu_count=gpu_count, group_degree=degree, parallel=parallel
+        gpu_count=gpu_count, gpus_per_execution_group=degree, parallel=parallel
     )
     p = GroupPlan.for_topology(topo, socket_path=SOCK)
-    rank0_indices = [g * degree for g in range(topo.groups)]
+    rank0_indices = [g * degree for g in range(topo.execution_groups)]
     for gpu_index in rank0_indices:
         run = pb.RunJob(request_id="r", compute=pb.ResolvedCompute(gpu_index=gpu_index))
         expected = Executor._dispatch_group(
@@ -245,7 +245,7 @@ def test_the_child_always_sees_local_gpu_index_zero():
     """Under CUDA_VISIBLE_DEVICES the child's world starts at 0, so the parent
     rewrites the one field as it routes. At G == 1 that rewrite is 0 -> 0."""
     p = plan(4, degree=2, parallel="cfg")
-    for ordinal in range(p.groups):
+    for ordinal in range(p.execution_groups):
         assert p.local_gpu_index(ordinal) == 0
 
 
@@ -691,20 +691,20 @@ def _parent(gpu_count=1, degree=1, parallel=""):
     settings = load_settings(
         orchestrator_public_addr="127.0.0.1:1", worker_id="w-test", worker_jwt="",
     )
-    topo = ExecutionTopology(gpu_count=gpu_count, group_degree=degree, parallel=parallel)
+    topo = ExecutionTopology(gpu_count=gpu_count, gpus_per_execution_group=degree, parallel=parallel)
     return ParentControl(settings, socket_path=SOCK, topology=topo)
 
 
 def test_parent_builds_one_slot_per_execution_group():
     p1 = _parent(1)
-    assert p1.groups == 1
+    assert p1.execution_groups == 1
     assert [s.ordinal for s in p1._slots] == [0]
     # G==1: the ONE slot has an empty env delta and stage-1's socket path.
     assert dict(p1._slots[0].group_env) == {}
     assert p1._slots[0].socket_path == SOCK
 
     p4 = _parent(4)
-    assert p4.groups == 4
+    assert p4.execution_groups == 4
     assert [s.devices for s in p4._slots] == [(0,), (1,), (2,), (3,)]
     assert len({s.socket_path for s in p4._slots}) == 4
     assert dict(p4._slots[2].group_env)["CUDA_VISIBLE_DEVICES"] == "2"
@@ -716,7 +716,7 @@ def test_absent_topology_is_a_single_slot_worker():
         orchestrator_public_addr="127.0.0.1:1", worker_id="w", worker_jwt="",
     )
     p = ParentControl(settings, socket_path=SOCK, topology=ExecutionTopology.single())
-    assert p.groups == 1
+    assert p.execution_groups == 1
     assert dict(p._slots[0].group_env) == {}
 
 
@@ -824,7 +824,7 @@ def test_parent_stays_torch_free_after_construction():
         "from gen_worker.topology import ExecutionTopology\n"
         "settings = load_settings(orchestrator_public_addr='127.0.0.1:1',"
         " worker_id='w-test', worker_jwt='')\n"
-        "topo = ExecutionTopology(gpu_count=4, group_degree=1, parallel='')\n"
+        "topo = ExecutionTopology(gpu_count=4, gpus_per_execution_group=1, parallel='')\n"
         f"ParentControl(settings, socket_path={SOCK!r}, topology=topo)\n"
         "assert 'torch' not in sys.modules, 'ParentControl imported torch'\n"
         "print('TORCH_FREE_OK')\n"

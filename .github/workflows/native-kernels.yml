@@ -1,0 +1,45 @@
+name: native-kernels compile
+
+# pgw#860: box-side-equivalent compile lane — proves both fatbin archs + op
+# registration on the pinned devel toolchain, no GPU. Scoped to the extension
+# dir only (slim-CI rule); drafts run nothing.
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [master]
+    paths:
+      - "csrc/**"
+      - "scripts/native/**"
+      - ".github/workflows/native-kernels.yml"
+
+concurrency:
+  group: native-kernels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      # The devel toolchain image is ~12 GB unpacked; reclaim the runner's
+      # preinstalled toolchains first.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet \
+            /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - name: Compile + arch census + registration smoke
+        run: scripts/native/build_native_kernels.sh "${{ runner.temp }}/dist-native"
+
+      - name: Upload .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcozy_kernels
+          path: ${{ runner.temp }}/dist-native/libcozy_kernels.so
+          retention-days: 14

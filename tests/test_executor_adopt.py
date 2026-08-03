@@ -741,7 +741,7 @@ def test_compile_target_state_delta_is_exact_and_ready_only(tmp_path):
     assert target.active_compile_snapshot_digest == ""
 
     lifecycle = Lifecycle(
-        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+        SimpleNamespace(bootstrap_worker_jwt="", worker_id="worker"), ex)
     delta = lifecycle._state_delta()
     assert delta.compile_targets == ex.compile_targets()
 
@@ -1924,7 +1924,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert failed[0].operation_id == OP_A
 
     lifecycle = Lifecycle(
-        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+        SimpleNamespace(bootstrap_worker_jwt="", worker_id="worker"), ex)
     failed_delta = lifecycle._state_delta()
     assert "edit" in failed_delta.available_functions
     assert "generate" in failed_delta.available_functions
@@ -3410,7 +3410,7 @@ def test_multifunction_adoption_keeps_target_identity_through_guard_failure(
     assert adopted[0].target_incarnation_id == before.incarnation_id
 
     lifecycle = Lifecycle(
-        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+        SimpleNamespace(bootstrap_worker_jwt="", worker_id="worker"), ex)
     (after_adopt,) = lifecycle._state_delta().compile_targets
     assert after_adopt.incarnation_id == before.incarnation_id
     assert list(after_adopt.function_names) == list(before.function_names)

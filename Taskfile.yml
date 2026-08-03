@@ -37,6 +37,11 @@ tasks:
         ignore_error: true
       # Hard gate (matches CI): gw#467 HTTP timeout guard.
       - cmd: uv run python scripts/lint_http_timeouts.py
+      # Hard gate (matches CI): pgw#849 guard 2 — public surface in the
+      # aot/mint/serve packages with no caller on the pod's production path.
+      # Ratcheted against scripts/unreached_surface_baseline.txt: new entries
+      # fail, and so does a baseline line that is now wired up.
+      - cmd: uv run python scripts/lint_unreached_surface.py
 
   test:
     desc: Run tests (both suites, as CI does)

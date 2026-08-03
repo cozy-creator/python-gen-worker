@@ -6,6 +6,10 @@ hardcoded ``blobs/blake3/…``, ``chunk_cas`` was not imported by the fill path
 at all, and a v2 entry died at ``missing blake3 for <path>``. So a v2 publish
 was unconsumable — which makes "publish v2" untestable as an outcome.
 
+th#1303 S1 deleted the v1 arm these also used to pin (the two
+``test_v1_*`` cases): after the repoint nothing resolves to a blake3
+manifest, so a v1 entry is a stale pointer and is REFUSED, not filled.
+
 These drive the REAL ``ensure_snapshot_async`` over a real localhost HTTP
 server: sockets, threads, files, the actual reassembly. The assertions are
 about BYTES and about HOW MANY BYTES WERE HASHED, never about "ok" — a
@@ -24,7 +28,6 @@ import threading
 from pathlib import Path
 
 import pytest
-from blake3 import blake3
 
 import gen_worker.models.cozy_snapshot as snap_mod
 from gen_worker.models.chunk_cas import DigestMismatch
@@ -118,7 +121,6 @@ def chunked_entry(store, path: str, data: bytes, chunk_size: int = CS):
     return WorkerResolvedRepoFile(
         path=path,
         size_bytes=len(data),
-        blake3="",  # v2 leaves the legacy mirror EMPTY — that is the trap
         url=None,  # and a chunked file has NO whole-file URL
         digest="sha256:" + sha(data),
         chunks=tuple(chunks),
@@ -130,7 +132,6 @@ def whole_entry(store, path: str, data: bytes):
     return WorkerResolvedRepoFile(
         path=path,
         size_bytes=len(data),
-        blake3="",
         url=put(store, data),
         digest="sha256:" + sha(data),
     )
@@ -180,46 +181,8 @@ def test_chunks_land_under_the_sha256_root_not_the_blake3_one(tmp_path, store):
     assert (blobs / "sha256" / d[:2] / d[2:4] / d).read_bytes() == data
 
 
-def test_v1_blake3_snapshot_still_fills_unchanged(tmp_path, store):
-    """DUAL READ. Every pre-migration checkpoint must keep resolving, and its
-    on-disk layout must not move (a moved layout is a cold re-download of the
-    entire corpus on every pod)."""
-    data = body(900, seed=5)
-    b3 = blake3(data).hexdigest()
-    with store.lock:
-        store.blobs[b3] = data
-    entry = WorkerResolvedRepoFile(
-        path="model.safetensors",
-        size_bytes=len(data),
-        blake3=b3,  # legacy: bare hex, no tag, no digest field
-        url=f"{store.base}/{b3}",
-    )
-    snap = fill(tmp_path, [entry], sub="v1")
-    assert (snap / "model.safetensors").read_bytes() == data
-    blobs = tmp_path / "v1" / "blobs"
-    assert (blobs / "blake3" / b3[:2] / b3[2:4] / b3).read_bytes() == data
-    assert not (blobs / "sha256").exists()
 
 
-def test_v1_and_v2_entries_in_one_snapshot(tmp_path, store):
-    """The migration window: a repo mid-repoint carries both spellings."""
-    v2 = body(CS * 2 + 5)
-    v1 = body(300, seed=9)
-    b3 = blake3(v1).hexdigest()
-    with store.lock:
-        store.blobs[b3] = v1
-    snap = fill(
-        tmp_path,
-        [
-            chunked_entry(store, "new.safetensors", v2),
-            WorkerResolvedRepoFile(
-                path="old.safetensors", size_bytes=len(v1), blake3=b3,
-                url=f"{store.base}/{b3}",
-            ),
-        ],
-    )
-    assert (snap / "new.safetensors").read_bytes() == v2
-    assert (snap / "old.safetensors").read_bytes() == v1
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +197,7 @@ def test_lying_whole_file_digest_on_a_chunked_file_refuses_to_install(tmp_path, 
     data = body(CS * 2 + 3)
     entry = chunked_entry(store, "w.safetensors", data)
     lying = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=entry.size_bytes, blake3="", url=None,
+        path=entry.path, size_bytes=entry.size_bytes, url=None,
         digest="sha256:" + sha(b"something else entirely"),
         chunks=entry.chunks, chunk_size_bytes=CS,
     )
@@ -246,14 +209,15 @@ def test_lying_whole_file_digest_on_a_chunked_file_refuses_to_install(tmp_path, 
 
 
 def test_wrong_whole_file_digest_on_a_SMALL_v2_file_refuses(tmp_path, store):
-    """The ≤64 MiB path has no chunk enforcement at all — it is served by the
-    legacy transports, which only know blake3. Before this change a sha256
-    whole file went through them with an EMPTY blake3 expectation and was
-    accepted unverified."""
+    """The ≤64 MiB path has no chunk enforcement at all. Before pgw#781 the
+    whole-file transports only knew blake3, so a sha256 file went through them
+    with an EMPTY expectation and was accepted unverified; th#1303 S1 removed
+    the algorithm choice from the call site entirely, so there is no expectation
+    a transport can be handed that it will not check."""
     data = body(500, seed=3)
     url = put(store, data)
     lying = WorkerResolvedRepoFile(
-        path="config.json", size_bytes=len(data), blake3="", url=url,
+        path="config.json", size_bytes=len(data), url=url,
         digest="sha256:" + sha(b"not these bytes"),
     )
     with pytest.raises(DigestMismatch):
@@ -268,7 +232,7 @@ def test_a_permuted_chunk_list_is_caught(tmp_path, store):
     entry = chunked_entry(store, "w.safetensors", data)
     swapped = (entry.chunks[1], entry.chunks[0]) + tuple(entry.chunks[2:])
     permuted = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=entry.size_bytes, blake3="", url=None,
+        path=entry.path, size_bytes=entry.size_bytes, url=None,
         digest=entry.digest, chunks=swapped, chunk_size_bytes=CS,
     )
     with pytest.raises(DigestMismatch):
@@ -318,7 +282,7 @@ def test_an_entry_with_no_readable_digest_is_refused(tmp_path, store):
     unverified download — that is how "no digest" becomes "no check"."""
     data = body(100)
     entry = WorkerResolvedRepoFile(
-        path="x.json", size_bytes=len(data), blake3="", url=put(store, data),
+        path="x.json", size_bytes=len(data), url=put(store, data),
     )
     with pytest.raises(ValueError, match="no digest"):
         fill(tmp_path, [entry])
@@ -329,7 +293,7 @@ def test_untagged_v2_digest_is_a_hard_error(tmp_path, store):
     a sha256 gets hashed with blake3."""
     data = body(100, seed=4)
     entry = WorkerResolvedRepoFile(
-        path="x.json", size_bytes=len(data), blake3="", url=put(store, data),
+        path="x.json", size_bytes=len(data), url=put(store, data),
         digest=sha(data),  # untagged
     )
     with pytest.raises(ValueError, match="untagged"):
@@ -341,7 +305,7 @@ def test_chunk_lengths_must_sum_to_the_declared_size(tmp_path, store):
     data = body(CS * 2)
     entry = chunked_entry(store, "w.safetensors", data)
     lying = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=len(data) + 1000, blake3="", url=None,
+        path=entry.path, size_bytes=len(data) + 1000, url=None,
         digest=entry.digest, chunks=entry.chunks, chunk_size_bytes=CS,
     )
     with pytest.raises(ValueError, match="chunk lengths sum"):
@@ -478,3 +442,87 @@ def test_the_grpc_conversion_carries_chunks_through():
     assert [c.length for c in got.chunks] == [64, 64, 2]
     assert [c.url for c in got.chunks] == [f"https://r2.invalid/{i}" for i in range(3)]
     assert got.chunk_size_bytes == 64
+
+
+# ---------------------------------------------------------------------------
+# th#1303 S1 — the blake3 ARM is gone, and its absence must REFUSE
+#
+# These are the revert-turns-red guards for S1's deletions. Each one passes
+# today because the v1 arm raises; each one goes RED the moment somebody
+# restores a `blake3` fallback, because the fallback makes the refusal
+# disappear and the fill succeed.
+# ---------------------------------------------------------------------------
+
+
+def test_a_v1_blake3_entry_is_now_REFUSED_not_filled(tmp_path, store):
+    """The corpus is repointed: a blake3 ref can only be a stale pointer.
+
+    WHICH ARM THIS PINS, stated because a guard whose claim is untested is this
+    program's own defect one level up. It pins `cozy_cas`'s ALGORITHM PRE-CHECK
+    (`hash_algo != "sha256"`, before the retry loop) and NOT `hash_file`'s
+    deleted arm — verified by execution: restoring `hash_file`'s arm alone
+    leaves this GREEN, because the pre-check refuses first. `hash_file` has its
+    own guard (`test_hash_file_refuses_blake3_instead_of_hashing_it`). Two
+    independent arms refuse a v1 entry and each is pinned separately; this
+    replaces the deleted `test_v1_blake3_snapshot_still_fills_unchanged`.
+    """
+    data = body(900, seed=5)
+    entry = WorkerResolvedRepoFile(
+        path="model.safetensors",
+        size_bytes=len(data),
+        url=put(store, data),
+        digest="blake3:" + "b" * 64,
+    )
+    with pytest.raises(ValueError, match="no longer\n?\\s*verifiable|blake3"):
+        fill(tmp_path, [entry], sub="v1")
+    # The path may be staged, but no BYTES were published under a name this
+    # worker cannot verify.
+    root = tmp_path / "v1" / "blobs" / "blake3"
+    assert [q for q in root.rglob("*") if q.is_file()] == []
+
+
+def test_an_entry_carrying_ONLY_the_legacy_mirror_is_refused(tmp_path, store):
+    """The empty-guard shape, driven end to end.
+
+    ``resolved_entry_digest`` used to fall back to ``ent["blake3"]``. With the
+    fallback gone, a raw manifest entry that names only the legacy mirror
+    carries NO digest — and "no digest" must be a refusal, never a skip.
+    """
+    from gen_worker.models.hub_client import resolved_entry_digest
+
+    with pytest.raises(ValueError, match="carries no digest"):
+        resolved_entry_digest({"blake3": "c" * 64, "size_bytes": 10})
+
+
+def test_hash_file_refuses_blake3_instead_of_hashing_it(tmp_path):
+    """`chunk_cas.hash_file` is the single dispatcher. Its blake3 arm is the
+    one S1 deleted; nothing else may quietly grow one."""
+    from gen_worker.models.chunk_cas import hash_file, verify_file_digest
+
+    f = tmp_path / "b.bin"
+    f.write_bytes(b"abc")
+    with pytest.raises(ValueError, match="unsupported hash algorithm"):
+        hash_file(f, "blake3")
+    # And through the dispatcher a v1 ref is a refusal, never a silent pass.
+    with pytest.raises(ValueError, match="unsupported hash algorithm"):
+        verify_file_digest(f, "blake3:" + "a" * 64)
+
+
+def test_the_downloader_refuses_an_ABSENT_digest_before_fetching(tmp_path, store):
+    """The vacuous guard, pinned at the transport itself.
+
+    `_download_one_file` used to take `expected_blake3: str = ""` and compare
+    only `if expected_blake3:` — so an entry naming no digest was downloaded
+    and published with no check at all. The precondition is now mandatory and
+    fires BEFORE a byte moves. Deleting it turns this red.
+    """
+    import asyncio
+
+    from gen_worker.models.cozy_cas import _download_one_file
+
+    data = body(64)
+    url = put(store, data)
+    dst = tmp_path / "x.bin"
+    with pytest.raises(ValueError, match="no expected digest"):
+        asyncio.run(_download_one_file(url, dst, len(data), "", None))
+    assert not dst.exists(), "nothing may be published under no digest at all"

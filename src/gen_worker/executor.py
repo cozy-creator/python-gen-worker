@@ -38,6 +38,8 @@ from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
 from . import warmup
+from . import worker_credential
+from . import worker_mode
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -102,6 +104,11 @@ from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 from .runtime_config import ConfigStore, extract_job_config
 from .stage_timing import stage_ms_for_metrics
+
+#: pgw#848 item 1: cadence for the publish-durability wait. A POLL interval,
+#: not a deadline — nothing here decides when a publish has taken too long;
+#: the activity's own staleness window does, and only durable movement feeds it.
+_PUBLISH_SETTLE_POLL_S = 2.0
 
 if typing.TYPE_CHECKING:
     from . import compile_cache
@@ -533,7 +540,6 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
             WorkerResolvedRepoFile(
                 path=f.path,
                 size_bytes=int(f.size_bytes),
-                blake3=f.blake3,
                 url=f.url or None,
                 # th#1303 manifest v2: the algorithm-tagged digest and the
                 # ordered chunk list. Dropping these here is what would make
@@ -1153,7 +1159,7 @@ class ModelStore:
         if topology is None:
             return
         with self._residency_lock:
-            for ordinal in range(int(topology.groups)):
+            for ordinal in range(int(topology.execution_groups)):
                 self._residency_groups[ordinal] = topology.group(ordinal)
             zero = self._residency_by_group.get(0)
             if zero is not None:
@@ -1166,13 +1172,13 @@ class ModelStore:
         # per-group cap only engages once it knows G, and nothing in src/ ever
         # told it. Without this a G=4 degraded pod lets group 0 claim the whole
         # pinned budget (§4.3 caveat 2).
-        staging_mod.pinned_pool().set_group_count(int(topology.groups))
+        staging_mod.pinned_pool().set_group_count(int(topology.execution_groups))
         # pgw#780 item 2: registries were created lazily on first dispatch, so
         # the boot disk re-track (which unions over all_residencies()) was a
         # no-op for groups 1..G-1 — their LRU/preserve/eviction views started
         # blind to the disk tier that was already there. Create every group's
         # registry NOW, before any boot walk unions over them.
-        for ordinal in range(int(topology.groups)):
+        for ordinal in range(int(topology.execution_groups)):
             self.residency_for(ordinal)
 
     def disk_ref_in_use(self, ref: str) -> bool:
@@ -1268,8 +1274,11 @@ class ModelStore:
             return {}
         sizes: Dict[str, int] = {}
         for f in snap.files:
-            digest = (str(getattr(f, "digest", "") or "").strip()
-                      or str(getattr(f, "blake3", "") or "").strip())
+            # th#1303 S1: the tagged digest and nothing else. The legacy
+            # `blake3` fallback was empty on every v2 entry, so this used to
+            # bail to {} — sizes unknown — on exactly the manifests it was
+            # written for. Zero entries is a REFUSAL ({}), never a silent 0.
+            digest = str(getattr(f, "digest", "") or "").strip()
             if not digest:
                 return {}
             sizes[digest.lower()] = int(f.size_bytes)
@@ -1577,8 +1586,7 @@ class ModelStore:
     def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
         ``{top_level_subfolder: content_set_digest}``. Weight/data files use
-        the wire snapshot's per-file digest (v2 tagged ``digest``, v1 legacy
-        ``blake3`` mirror); small JSON sidecars use
+        the wire snapshot's per-file tagged digest; small JSON sidecars use
         CANONICAL digests read from ``local_path`` (save-era serialization —
         provenance stamps, explicit defaults, torch_dtype/dtype vocabulary —
         must not break sharing of byte-identical weights; see
@@ -1594,14 +1602,13 @@ class ModelStore:
         groups: Dict[str, Dict[str, str]] = {}
         for f in snap.files:
             rel = str(f.path).strip().lstrip("/")
-            # th#1303 empty-guard class: this read `f.blake3`, which is EMPTY
-            # on every v2 entry, so every file of a v2 snapshot was skipped
-            # and component sharing was silently OFF fleet-wide — the
-            # fail-CLOSED half of the class (the fail-open half is
-            # `if want and got != want`). Read the tagged digest first; the
-            # legacy mirror read dies with S1.
-            digest = (str(getattr(f, "digest", "") or "").strip()
-                      or str(getattr(f, "blake3", "") or "").strip())
+            # th#1303: this read `f.blake3`, which is EMPTY on every v2
+            # entry, so every file of a v2 snapshot was skipped and component
+            # sharing was silently OFF fleet-wide — the fail-CLOSED half of
+            # the empty-guard class (the fail-open half is
+            # `if want and got != want`). pgw#821 made it a dual-read; S1
+            # retires the legacy mirror arm, leaving the tagged digest alone.
+            digest = str(getattr(f, "digest", "") or "").strip()
             if not rel or not digest:
                 continue
             comp, _, rest = rel.partition("/")
@@ -2356,9 +2363,9 @@ class ModelStore:
         if files and p.is_dir():
             # pgw#769/#781 (th#1303): the hash algorithm comes from the DIGEST,
             # never from this call site. This used to read `f.blake3` and hash
-            # with blake3 -- but under manifest v2 that field is EMPTY and the
-            # digest lives in `f.digest` as "sha256:<hex>", so `digest` was ""
-            # and BOTH the size check and the hash check were skipped. The tree
+            # with blake3 -- but under manifest v2 that field is EMPTY, so
+            # `digest` was "" and BOTH the size and hash checks were skipped
+            # (the legacy fallback is gone at S1). The tree
             # was then reported CLEAN WITHOUT BEING HASHED. On a volume shared
             # across releases and pods that is a security hole, not a cosmetic
             # gap, and it is the same false-clean shape as reading
@@ -2458,7 +2465,7 @@ class ModelStore:
         text = str(exc).lower()
         if "expired" in text or "403" in text:
             return "url_expired"
-        if "digest" in text or "blake3" in text or "hash" in text:
+        if "digest" in text or "hash" in text:
             return "digest_mismatch"
         if "no space" in text or "disk" in text:
             return "insufficient_disk"
@@ -2498,7 +2505,7 @@ class _CompileTargetRecord:
     active_compile_ref: str = ""
     active_compile_snapshot_digest: str = ""
     # gw#604: True when the active artifact is this worker's OWN mint (the
-    # advertised digest is then the self-attested tar blake3, not the store's
+    # advertised digest is then the self-attested tar digest, not the store's
     # snapshot manifest digest — same bytes, different transport form).
     active_self_mint: bool = False
     function_names: Tuple[str, ...] = ()
@@ -2593,6 +2600,12 @@ class _WarmupEvidence:
 
     count: int = 0
     functions_by_object: Dict[int, set[str]] = dc_field(default_factory=dict)
+    #: pgw#844: per object, the aliases that proved SOME but not all of their
+    #: declared graph classes on the EXPORTED lane -> the classes that stayed
+    #: eager. Non-empty means "compiled for these shapes, eager for those",
+    #: which is a serving posture, not a boot failure.
+    partial_by_object: Dict[int, Dict[str, Tuple[str, ...]]] = dc_field(
+        default_factory=dict)
     #: pgw#677 reopen: non-empty when the warm plan was CUT SHORT (OOM
     #: backoff) — names the truncation. A truncated plan must never publish
     #: its partial capture as the family cell.
@@ -3054,7 +3067,7 @@ class Executor:
         # identity because a record is the group's owner and dies with it.
         self._sequence_plans: Dict[int, Any] = {}
         self.store.bind_topology(self.topology)
-        self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.groups)
+        self._gpu_slots = max(1, int(gpu_slots) if gpu_slots else self.topology.execution_groups)
         # pgw#779: G INDEPENDENT permits, not a COUNT of G. A count admits G
         # concurrent jobs but binds none of them to a group, so four dispatches
         # naming the same card serialized on one `run_lock` while three cards
@@ -3063,10 +3076,10 @@ class Executor:
         # ``gpu_slots=`` (the `cli serve`/test override, never a production
         # knob) still means what it meant: its concurrency is divided among the
         # groups, so at G==1 group 0's permit IS today's whole pool.
-        per_group = max(1, self._gpu_slots // max(1, self.topology.groups))
+        per_group = max(1, self._gpu_slots // max(1, self.topology.execution_groups))
         self._gpu_permits: Tuple[asyncio.Semaphore, ...] = tuple(
             asyncio.Semaphore(per_group)
-            for _ in range(max(1, self.topology.groups))
+            for _ in range(max(1, self.topology.execution_groups))
         )
         self._gpu_permits_each = per_group
         # Group 0's permit. At G == 1 — every pod today — this IS the pool.
@@ -3133,9 +3146,13 @@ class Executor:
         # settings-pathed store; the default keeps embedded/CLI runs working.
         self.runtime_config = ConfigStore()
         # Current worker JWT for hub HTTP calls (capability renewal). Worker
-        # wiring points this at the transport's rotated credential.
+        # wiring points this at the transport's rotated credential; until then
+        # the process-wide credential source answers (pgw#848). It read
+        # `getattr(settings, "worker_jwt", "")` until pgw#876 §2 — a field
+        # pgw#848 RENAMED, so the getattr default swallowed the AttributeError
+        # the rename exists to raise and this provider silently returned "".
         self.worker_jwt_provider: Callable[[], str] = (
-            lambda: str(getattr(settings, "worker_jwt", "") or "").strip()
+            lambda: worker_credential.current()
         )
         self.draining = False
         self.jobs: Dict[Tuple[str, int], _Job] = {}
@@ -3651,7 +3668,7 @@ class Executor:
                     "withdrawing %r on this pod: %s", name, group_refusal)
                 self.unavailable[name] = (
                     "multi_group_async_handler", group_refusal,
-                    {"groups": str(self.topology.groups),
+                    {"execution_groups": str(self.topology.execution_groups),
                      "degree": str(self.topology.degree)})
                 self._gate_owned.add(name)
                 continue
@@ -4058,7 +4075,7 @@ class Executor:
         self, rec: _ClassRecord, target: _CompileTargetRecord,
     ) -> bool:
         """Bind one live wrapper's first failure to exact target revocation."""
-        from . import compile_cache, trt_engine
+        from . import aot_serve, compile_cache, trt_engine
 
         # pgw#677: every shape-warm/heal compile for this pipeline must run
         # inside a background GPU turn (yield to tenant demand; mutual
@@ -4069,6 +4086,22 @@ class Executor:
             self._compile_guard_failed(rec, target, detail)
 
         if trt_engine.set_guard_failure_callback(target.pipeline, callback):
+            return True
+        # pgw#844: the EXPORTED lane owns its own revocation signal and this
+        # was never asked for it — `enable_compiled` returns as soon as
+        # `arm_aot` succeeds, so an AOT-armed pipeline never gets the dynamo
+        # `failure_signal` marker `compile_cache.set_guard_failure_callback`
+        # reads. Every aot arm therefore answered "no runtime guard
+        # revocation signal", had its `active_compile_ref` cleared, and
+        # advertised eager — a compiled AOT serve was structurally
+        # unreachable on the boot path regardless of dispatch. Ask the lane
+        # that is actually armed.
+        if aot_serve.set_guard_failure_callback(target.pipeline, callback):
+            def refusal_callback(reason: str, detail: str) -> None:
+                self._compile_ingress_refused(target, reason, detail)
+
+            aot_serve.set_ingress_refusal_callback(
+                target.pipeline, refusal_callback)
             return True
         if not compile_cache.set_guard_failure_callback(
             target.pipeline, callback,
@@ -4133,6 +4166,35 @@ class Executor:
                 serving_mode_mod.FALLBACK_VOLATILE) else
              serving_mode_mod.FALLBACK_GUARD_MISS),
         )
+
+    def _compile_ingress_refused(
+        self, target: _CompileTargetRecord, reason: str, detail: str,
+    ) -> None:
+        """pgw#844: one tenant request was refused at the artifact's ingress
+        and served eager by an ARMED compiled lane.
+
+        The typed `aot_ingress_refused` event already counts the refusal per
+        (release, SKU, reason). This charges the same fact to THIS request's
+        JobMetrics, which is the different question: an eager latency sample
+        tagged `serving_mode=aot_cell` argues against the optimization that is
+        working for every other shape. It matters now precisely because a
+        partially dispatchable cell stays armed instead of costing the pod its
+        whole compiled lane — the eager shapes must be subtractable from the
+        compiled measurement, by name.
+
+        Observability only: the artifact stays armed and the target keeps its
+        active identity, exactly as the per-call refusal contract says.
+        """
+        from . import postmortem
+
+        request_id = postmortem.current_inflight_request()
+        if not request_id:
+            return
+        logger.debug(
+            "aot ingress refusal charged to request %s (%s): %s",
+            request_id, reason, detail[:200])
+        self._mark_request_eager_fallback(
+            request_id, serving_mode_mod.FALLBACK_INGRESS_REFUSED)
 
     def _mark_request_eager_fallback(self, request_id: str, reason: str) -> None:
         """Record that ``request_id`` was served eager by a compiled lane.
@@ -4811,7 +4873,7 @@ class Executor:
         until ``ctx.device`` is explicit from the job's group. Single-group
         workers — every pod today — are untouched.
         """
-        if self.topology.groups <= 1 and self.topology.degree <= 1:
+        if self.topology.execution_groups <= 1 and self.topology.degree <= 1:
             return ""
         if not (spec.is_async or spec.is_async_gen):
             return ""
@@ -4864,7 +4926,7 @@ class Executor:
         and pre-topology hubs have no compute and there is only one group to
         mean.
         """
-        if self.topology.groups <= 1:
+        if self.topology.execution_groups <= 1:
             return 0
         if not run.HasField("compute"):
             raise DispatchGroupUnresolved(
@@ -5566,7 +5628,7 @@ class Executor:
                         # it — the desired cell is the SAME cell this live
                         # object already proved, published, and serves; the
                         # digests differ only in transport FORM
-                        # (self-attested tar blake3 vs the store's snapshot
+                        # (self-attested tar digest vs the store's snapshot
                         # manifest digest, th#910 ruling). A passed proof on
                         # a live object stays valid for that object's
                         # lifetime; a warm-process re-proof cannot produce
@@ -5772,6 +5834,17 @@ class Executor:
             outcome=(boot_mod.OUTCOME_OK if armed else boot_mod.OUTCOME_REFUSED),
             reason="" if armed else "serving_eager",
         )
+        # th#1359: reaching here means this boot's mint disposition is FINAL
+        # on every path (inline setup, adopted cell, eager-without-mint, and
+        # the background mint's own `finally`). A forge pod waits on exactly
+        # that fact rather than inventing a second notion of "boot is over"
+        # that could disagree with the one boot telemetry publishes.
+        try:
+            from . import forge as forge_mod
+
+            forge_mod.note_disposition_final()
+        except Exception:  # pragma: no cover - a latch never breaks a boot
+            logger.debug("forge disposition latch failed", exc_info=True)
         if armed or rec.background_mint is not None:
             return
         # pgw#805: a boot that DECLARED a compile target and ends with no
@@ -6006,6 +6079,13 @@ class Executor:
         # pgw#654 coverage attribution: runs prove GRAPH CLASSES; an alias
         # is proven on an object once ALL of its graph classes proved there.
         proven_keys: Dict[int, set] = {}
+        # pgw#844: which objects proved through the EXPORTED lane. An exported
+        # artifact refuses an out-of-contract shape BY NAME and serves that one
+        # call eager while staying armed, so a graph class it did not serve is
+        # a per-shape posture, not a silent recompile — which is what lets the
+        # attribution below be per-class for this lane and stay all-or-nothing
+        # for dynamo, where an unproven class means an unannounced recompile.
+        exported_proof_ids: set = set()
 
         async def _one(wj: Any, build: Any, mode: str, *, variant: bool) -> bool:
             """One warmup forward; False = OOM, stop warming."""
@@ -6116,6 +6196,8 @@ class Executor:
                 # and by still being armed, so a call that ended in a revoked
                 # (failed) artifact cannot count as proof.
                 aot_proven = aot_serve.proven_since(obj, aot_before)
+                if aot_proven:
+                    exported_proof_ids.add(id(obj))
                 if inductor_proven or trt_proven or aot_proven:
                     proven_keys.setdefault(id(obj), set()).add(wj.graph_key)
             logger.info(
@@ -6198,8 +6280,54 @@ class Executor:
                 name for name, keys in keys_by_name.items()
                 if keys and keys <= proven
             }
+            # pgw#844: …and on the EXPORTED lane an alias that proved SOME of
+            # its graph classes is attributed too, with the rest named.
+            #
+            # The measured shape (attempt twelve, pod o0legpgj5olhic): a
+            # regional sdxl cell armed all 72 entries, dispatched 1024x1024
+            # correctly, and refused the other eight aspect buckets
+            # `entry_ambiguous` because a transformer block sees H_lat*W_lat
+            # and the entries are keyed on H and W separately. Those eight
+            # classes went unproven, the all-or-nothing rule above attributed
+            # NO alias, the target was omitted as `target_applicability_
+            # incomplete`, and the boot ended `boot_ended_uncompiled` — so the
+            # ONE bucket that was armed, correct and unambiguous served eager
+            # too. One undispatchable shape cost the pod every shape.
+            #
+            # `boot_ended_uncompiled` must mean "nothing is dispatchable", not
+            # "something wasn't". An exported artifact refuses a shape it
+            # cannot serve BY NAME, counts it, emits `aot_ingress_refused`,
+            # charges the request `fallback_reason=ingress_refused`, and stays
+            # armed — so the degradation is per shape and fully visible, which
+            # is exactly the fail-soft posture the compiled lane is built on.
+            # Dynamo keeps the strict rule: there an unproven class means an
+            # unannounced recompile at serve time, which is silent.
+            partial: Dict[str, Tuple[str, ...]] = {}
+            if obj_id in exported_proof_ids:
+                for name, keys in keys_by_name.items():
+                    if not keys or name in names or not (keys & proven):
+                        continue
+                    names.add(name)
+                    partial[name] = tuple(sorted(
+                        str(key) for key in (keys - proven)))
             if names:
                 evidence.functions_by_object[obj_id] = names
+            if partial:
+                evidence.partial_by_object[obj_id] = partial
+                for name, missing in sorted(partial.items()):
+                    total = len(keys_by_name[name])
+                    activity_mod.emit_event(
+                        "compiled_shape_coverage",
+                        f"fn={name}: {total - len(missing)}/{total} declared "
+                        f"graph classes served COMPILED at boot; the compiled "
+                        f"lane stays armed and these {len(missing)} class(es) "
+                        f"serve EAGER per request (each one named at ingress, "
+                        f"and every such request reports "
+                        f"fallback_reason="
+                        f"{serving_mode_mod.FALLBACK_INGRESS_REFUSED}): "
+                        f"{list(missing[:8])!r}",
+                        phase="partial_shape_coverage",
+                    )
         return evidence
 
     async def _invoke_warmup(
@@ -9116,6 +9244,7 @@ class Executor:
         try:
             with activity_mod.watchdog(act):
                 await self._background_mint_run(rec, bg, act)
+                await self._await_publish_durable(act)
         except _MintDeclined as declined:
             # pgw#737: a declined mint is an OUTCOME, not a failure — the
             # activity terminates COMPLETED and the tier stays eager, so
@@ -9184,6 +9313,48 @@ class Executor:
             # `ensure_setup` — see `_mark_warm_complete`.
             self._mark_warm_complete(rec, bg.spec.name)
             self._on_state_change()
+
+    async def _await_publish_durable(self, act: Any) -> None:
+        """Keep the mint's activity RUNNING until its cell is DURABLE.
+
+        pgw#848 item 1. This method's docstring used to be a lie by omission:
+        the activity "stays RUNNING for the whole background build" and
+        terminates COMPLETED on ARM — but the publish is a background thread
+        that outlives the arm, so the window in which the cell EXISTS AND IS
+        NOT YET DURABLE had no running activity at all. For a pod nobody is
+        watching (every PRODUCTION forge pod, hub-launched from a publish or
+        demand event) that window is unprotected, and a mint reaped there has
+        paid its entire cost and produced nothing.
+
+        THE CONSTRAINT THAT SHAPES ALL OF THIS: the counter advances on
+        DURABLE STATE — a new key starting its upload, a key landing — and
+        NEVER on a retry attempt or a message. So a publish that fails and
+        retries forever goes stale here and IS condemned, which is the whole
+        point: a liveness signal a failing retry loop can satisfy is not a
+        liveness signal, and widening the window wrongly would be worse than
+        the bug it closes. Same reasoning that refused `self_mint_publish` as
+        a podguard progress kind.
+
+        Beats the activity ONLY when the durable counter moves, so the
+        activity's `UpdatedAt` remains "last PROGRESS", not "last poll".
+        """
+        try:
+            from . import fleet_cells as fc
+
+            last = fc.publish_durable_progress()
+            while fc.publishes_in_flight():
+                await asyncio.sleep(_PUBLISH_SETTLE_POLL_S)
+                current = fc.publish_durable_progress()
+                if current == last:
+                    continue  # no durable movement: let the window age
+                last = current
+                phase = getattr(act, "phase", None)
+                if callable(phase):
+                    phase("publishing")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — never fail a mint on its own telemetry
+            logger.debug("publish-durability wait failed", exc_info=True)
 
     async def _background_mint_run(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
@@ -9759,6 +9930,34 @@ class Executor:
             except Exception:
                 return 0
         return 0
+
+    def background_mint_tasks(self) -> List["asyncio.Task"]:
+        """th#1359: every still-running background mint on this worker.
+
+        A forge pod joins these before it calls itself done — a release may
+        declare more than one compile family, and retiring on the first one to
+        finish would abandon the rest, which is the exact failure (pgw#846
+        attempt sixteen: `self_mint_abort/abandoned_shutdown`) this mode
+        exists to make impossible.
+        """
+        tasks: List["asyncio.Task"] = []
+        for rec in self._classes.values():
+            bg = rec.background_mint
+            task = getattr(bg, "task", None) if bg is not None else None
+            if task is not None and not task.done():
+                tasks.append(task)
+        return tasks
+
+    def declares_compile(self) -> bool:
+        """Whether ANY discovered spec declares a compile family.
+
+        A forge pod for a release that declares none has nothing to mint, and
+        must say `nothing_owed` and retire rather than sit on a paid card.
+        """
+        return any(
+            s.compile is not None and getattr(s.compile, "family", "")
+            for s in self.specs.values()
+        )
 
     async def shutdown_instances(self) -> None:
         for rec in self._classes.values():
@@ -10586,6 +10785,32 @@ class Executor:
                 self._arm_cancel_unwind_watch(job)
 
         intent_id = self._job_intent(run)
+        if worker_mode.is_forge():
+            # th#1359: a forge pod is not in the serving rotation. The hub
+            # excludes it at placement; this is the WORKER-side half of the
+            # same promise, and it is the one that actually holds — a pod that
+            # accepted a tenant job would put a tenant's latency behind a
+            # multi-hour compile and give the drain path a reason to exist
+            # here. RETRYABLE, not INVALID: the request is perfectly valid and
+            # belongs on a serving worker.
+            self._intent_transition(
+                intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_FAILED,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+                detail="forge mode: mint-only worker, no tenant dispatch",
+            )
+            activity_mod.emit_event(
+                "forge_dispatch_refused",
+                f"request {run.request_id} attempt {run.attempt} for "
+                f"{run.function_name!r} reached a MINT-ONLY worker — the hub "
+                f"placed tenant work on a forge pod (th#1359)",
+                phase="forge_mode",
+            )
+            await self._send_result(
+                run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE,
+                safe_message="worker is in mint-only (forge) mode",
+            )
+            return
         if self.draining:
             self._intent_transition(
                 intent_id,
@@ -11062,7 +11287,7 @@ class Executor:
             self.unavailable.setdefault(
                 spec.name,
                 ("multi_group_async_handler", refusal,
-                 {"groups": str(self.topology.groups),
+                 {"execution_groups": str(self.topology.execution_groups),
                   "degree": str(self.topology.degree)}))
             await self._finish(job, pb.JOB_STATUS_RETRYABLE, safe_message=refusal)
             return
@@ -11751,7 +11976,7 @@ class Executor:
                 ensure_ms = int((time.monotonic() - t0) * 1000)
                 snap = snapshots.get(ref)
                 # gw#491: normalize to the bare-hex spelling — snap.digest may
-                # carry an algo prefix ("blake3:<hex>") while path.name is the
+                # carry an algo prefix ("sha256:<hex>") while path.name is the
                 # bare hex; one adapter must never mint two cache identities.
                 digest = (snap.digest if snap is not None else "") or path.name
                 digest = digest.split(":", 1)[-1].strip().lower()

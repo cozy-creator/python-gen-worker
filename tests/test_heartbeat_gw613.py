@@ -45,7 +45,7 @@ def _lifecycle(tmp_path: Path) -> tuple[Lifecycle, _FakeTransport]:
     store = ModelStore(_noop_send, cache_dir=tmp_path)
     ex = Executor([], _noop_send, store=store)
     lc = Lifecycle(
-        SimpleNamespace(worker_jwt="", worker_id="w-beat",
+        SimpleNamespace(bootstrap_worker_jwt="", worker_id="w-beat",
                         runpod_pod_id="", worker_image_digest=""),
         ex,
     )

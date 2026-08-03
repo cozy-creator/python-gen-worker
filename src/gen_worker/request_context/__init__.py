@@ -524,7 +524,8 @@ class RequestContext(Generic[D]):
         if not self._file_api_base_url:
             raise RuntimeError(
                 "file API base URL is not configured for this request — "
-                "Worker did not propagate Settings.tensorhub_public_url"
+                "no HelloAck has carried `file_base_url` yet "
+                "(executor.file_base_url is empty)"
             )
         return self._file_api_base_url.rstrip("/")
 

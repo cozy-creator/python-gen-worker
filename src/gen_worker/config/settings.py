@@ -51,7 +51,21 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Path to the discovery manifest (endpoint.lock). Default is the baked
     # container location; non-container runs (e2e, bare-metal dev) override it.
     endpoint_lock_path: str = "/app/.tensorhub/endpoint.lock"
-    worker_jwt: str = ""
+    # pgw#848 / Paul: NOT "the worker's JWT". It is the BOOTSTRAP copy — the
+    # value the hub injected at pod create, frozen there forever and updated by
+    # nothing. The live credential is rotated over the scheduler stream at ~80 %
+    # of TTL, and `gen_worker.worker_credential` is the ONLY source of truth for
+    # it. Renamed from `worker_jwt` deliberately: it read exactly like "the
+    # worker's JWT" to anyone who did not already know the live value lived in
+    # another module's private state, and the attestation carrier read it for
+    # precisely that reason — every dial past T+30 min then presented an expired
+    # token, three of which wedge the pod (pgw#846 attempts 16 and 17).
+    #
+    # The rename is the fix rather than a comment because it makes the mistake
+    # IMPOSSIBLE instead of detectable: any surviving `settings.worker_jwt`
+    # reader is now an AttributeError at the call site, not a stale string. Read
+    # this field from `worker_credential` and nowhere else.
+    bootstrap_worker_jwt: str = ""
     # pgw#763 delta 1: the worker's release identity, delivered SEPARATELY from
     # the JWT. Under the process split the compute child holds no JWT (the
     # parent strips it), so it cannot read `release_id` out of the claims — but
@@ -83,6 +97,15 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Immutable image provenance stamped by Tensorhub from the release image
     # variant it selected for this pod.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
+
+    # th#1359 Part 2: what the hub bought this pod FOR. "serve" (default, every
+    # existing behaviour) or "forge" — mint-only: registers, receives no tenant
+    # dispatch, holds no resident serving model, mints, publishes, retires.
+    # See gen_worker.worker_mode. Deliberately NOT an env_seal knob (a sealed
+    # knob would re-digest the env_seal key axis and give a forge-minted cell a
+    # key no serving pod can compute — the exact property the forge exists to
+    # preserve). Unknown values read as "serve" and are echoed on Hello.
+    worker_mode: str = "serve"  # WORKER_MODE
 
     # tensorhub access for standalone clients (run/serve/prefetch). Production
     # workers get orchestrator-resolved manifests and never dial these.

@@ -253,7 +253,8 @@ def _fake_resolve(monkeypatch: pytest.MonkeyPatch, body: dict) -> "object":
         def json(self) -> dict:
             return {
                 "snapshot_digest": "abc123",
-                "files": [{"path": "model.safetensors", "blake3": "b3",
+                "files": [{"path": "model.safetensors",
+                           "digest": "sha256:" + "b" * 64,
                            "url": "http://x/f", "size_bytes": 10}],
                 **body,
             }

@@ -1,5 +1,933 @@
 # Changelog
 
+## 0.91.0 (2026-08-02) — **the native kernel lane lands dormant** (pgw#862/pgw#864: env-gated opt-in, OFF by default — no serving path changes until the gate is set), the envelope gains the DEGREE axis (th#1426), an unprovable cell can no longer be declared (th#959), and v2 publish restates classification (th#1411)
+
+MINOR, not patch: `Resources` gains a field (`max_gpus_per_execution_group`), `@endpoint`
+gains `weight_set=`, and th#959 turns a previously-declarable combination into a decoration-time
+refusal. The hub gate matches on major.minor, so **adoption requires `0.91` in
+`TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS`** — additive beside the current floor first, hardcut
+after the fleet moves (the fleet089 pattern).
+
+Range verified BY ANCESTRY: `git merge-base --is-ancestor` against the cut head for every
+must-ride, and `git rev-list --count v0.90.6..<cut>` counted at tag time (v0.90.6 was cut from
+`release/0.90.6`, which branched below chaos, so the range also re-lands that branch's three
+test repairs — cherry-picked back rather than re-derived).
+
+Highlights beyond the entries below:
+
+- **The native kernel lane (pgw#862 B0 + pgw#864), shipped DORMANT.** Hybrid serving path
+  settled on the 5090: fused smooth+quant kernel (blocked-scale store, bit-identical), proven
+  cuBLAS block-scaled GEMM, fused lora_up+scale+bias epilogue; AWQ W4A16 modulation served
+  packed-resident on the fused lane — in-kernel group-64 dequant GEMM at ~28% of the bf16
+  bytes, adanorm undo as an exact row permutation at load. Env-gated opt-in; the decode path
+  is unchanged and remains the degrade. `dot_scaled` GEMM stays registered as the measured
+  alternative and the sm_100 seed.
+- **th#959: `compile=` + `NoWarmup` is refused at decoration.** An unprovable cell must not be
+  declarable; the contradiction is named at import, not discovered on a pod.
+- **th#1411/pgw#654: `publish_flavors` restates the source checkpoint's classification**, so a
+  v2 re-publish can no longer strip the rows the hub's typed-400 gate (hub th#1411) now demands.
+- **th#1426: `Resources(max_gpus_per_execution_group=)` — the degree axis**, mirroring the hub's
+  envelope split of "how many GPUs" from "how they are grouped"; absent means "no opinion",
+  which resolves to the pod ceiling exactly as every deployed release already behaves.
+- **`@endpoint(weight_set=...)`: declare how BOUNDED an endpoint's weight set is** (Paul,
+  2026-08-02).
+- **th#1400: `HubClient.publish_v2` defaults to replace**, following the hub — a checkpoint is
+  complete in itself.
+- **pgw#882: a dataset shard is never accepted on size alone** — the hasher is chosen by the
+  checksum's TAG, and an untagged checksum is refused.
+- **pgw#848 item 5: crash-only mint.** A finished entry survives the attempt and is re-admitted
+  only when its identity RE-DERIVES; the bank now also outlives ABANDONMENT, which is how a
+  crashed mint ends and was deleting the recovery on its way out.
+- **pgw#868 A4: the export-parallel seam is WIRED** — producer and consumer were both built in
+  0.90.6 and never joined; still OFF behind `GEN_WORKER_AOT_EXPORT_PARALLEL`.
+- **pgw#869: an absent hub is a verdict about nothing** — the auth ladder no longer kills a
+  worker that outlived its token, and the outbox gains a durable lane for FACTS beside RESULTS.
+- **pgw#870/pgw#871: config numbers are type-checked, bounded, and non-integers refused; the
+  repo's two CAS readers now agree with each other AND with the hub.**
+- **pgw#858: credential floor in both `.dockerignore` files** — the build context can no longer
+  carry a secret into an image layer.
+- **te#152: three `writer.py` names promoted out of the private namespace.**
+- **docs: `docs/releasing.md`** — batch cuts (cut when a POD RUN needs one), endpoints pin
+  RANGES bounded at the hub-admitted major.minor, conversion tracks newest (Paul, 2026-08-02).
+
+- **pgw#876 §4 — the `worker_mode=""` fingerprint is now a red test instead of a paid pod.**
+  `tests/test_wire_facts_pgw876.py` pins the two-builder hazard from both sides. **(a)** Feed
+  `ParentControl._parent_resources()` — the builder the hub actually receives, because the process
+  split is unconditional and the parent overwrites the child's copy wholesale — an all-distinct
+  measurement, and assert no `WorkerResources` field comes back at its protobuf default (except
+  `git_commit`, dead on both ends since pgw#514/P4). A default value there is not a choice the hub
+  can read; it is the signature of a field that was never assigned, which is exactly what th#1359
+  Part 2 left on two forge pods. Red-verified: stub `worker_mode.declared()` to `""` and the guard
+  names `worker_mode` and nothing else. **(b)** Source-scan both builders' `pb.WorkerResources(...)`
+  keyword sets and require them equal, so teaching one and not the other goes red here rather than
+  as a `cold_idle_never_dispatched` reap.
+
+- **pgw#876 §4 (where facts are built) — two dead fields on the billing-attestation observation.**
+  `JobObservation.accepted_at` had zero references anywhere in the repo, including tests.
+  `JobObservation.divergences` was write-only: `attest()` assigned it on the last line and nothing
+  ever read it — and the caller pops the observation out of `_observations` before calling, so the
+  write landed on an object already on its way to the garbage collector. `attest()` already
+  RETURNS the same list, which is what `_attest_result` uses. No wire change, no boot change.
+
+- **pgw#877 round 2 — the entry-child DEVICE measurement now reaches the decision it exists for,
+  and a measurement is allowed to NARROW.** Three findings landed as ONE change because separately
+  each looks optional and together they are one broken loop: a measurement that was taken, could
+  not travel, and would not have been allowed to act if it had arrived.
+  **(a)** `EntryCompilePool.observe_entry_device()` banks each entry child's device high-water —
+  RESERVED over allocated, on the child's own argument that reserved is what a concurrent sibling
+  cannot have — on every terminus, and publishes it as `peak_child_device_bytes` on the phase table
+  beside the RSS figure. `EntryReport.peak_device_bytes` had been measured since pgw#868 A4 and
+  read by nothing. **(b)** New `MintRequest.entry_device_peak_bytes`, the exact mirror of
+  `entry_peak_rss_bytes`: `mint_delegate` banks from the report AND the killed-mint snapshot and
+  reads back onto the request, so the mint child stops reading a module-global that only the
+  serving parent ever writes. That bank was empty **by construction** in the process that sizes K,
+  which is why `per_entry_device_bytes` printed exactly `allocated × 1.25 + 5 GiB` on a 4090 and an
+  L40S alike. **(c)** `co_residency` no longer maxes a banked measurement against the estimate —
+  *an estimate acting as a floor a measurement isn't allowed to correct.* The monotone ratchet
+  belongs at the write, where `record_child_peak` already keeps the high-water; at the read it
+  could only pin the answer to the guess. The narrowing is floored at `allocated + context`,
+  chosen because `allocated` is measured while the activation fraction and the compile workspace
+  are the guesses — and because pgw#848 banks on failures too, so a child that OOMed at `load`
+  must not talk the next mint onto a card that cannot hold a weight copy.
+  `per_entry_device_basis` is now three-valued (`measured` / `estimated` / `unmeasured`).
+  **`DEFAULT_ENTRY_DEVICE_BYTES` deleted** — unreachable in production, and a readable card with no
+  footprint now refuses to widen instead of dividing by a guess. **`cap_vram` stops capping ordinal
+  0 unconditionally**: `child_env` pins `CUDA_VISIBLE_DEVICES` only for a named device, so an
+  unnamed device on a multi-GPU pod now refuses and says so. The `entries <= 1` width row stopped
+  reporting unread bounds as `0` — a row whose job is to explain K=1, telling its reader the pod
+  has no RAM and no card.
+  **Not changed, deliberately:** `free_bytes` counts this process's cached allocator blocks as
+  headroom for a DIFFERENT process. `MintBudget.cache_slack_bytes` now carries `reserved -
+  allocated` and the decline line prints it, so the next real mint measures the over-count instead
+  of it being argued about. **The on-pod observable is not yet observed:**
+  `per_entry_device_bytes` must MOVE on a real mint's second attempt. If it prints 11.09 GiB again
+  this is a fourth mechanism producing the same number, and a failure rather than a partial win.
+
+- **pgw#877 — mint resource-sizing audit (pgw#876 §1). Deletions, one honest rename, one extraction;
+  no decision changed.** `per_entry_device_basis: "measured"` now reads **`"estimated"`**: its only
+  producer is `mint_budget.co_residency().need_bytes` (resident x 1.25 + 5 GiB, ~56 % never
+  observed), and "the caller handed a probed number" is not an observation. The axis has no
+  `"measured"` value until something reads `EntryReport.peak_device_bytes`. Deleted
+  `aot_compile_pool.free_disk_bytes` / `available_memory_bytes` / `free_device_bytes` / `CRASHED`
+  (zero references anywhere; the first was on the pgw#849 ratchet, **delisted by deletion**, and the
+  next two the ratchet never saw because its "one-line wrapper" exemption clears a wrapper on the
+  *wrappee's* callers — recorded in the baseline header as a known blind spot). Deleted
+  `MintReport.peak_rss_bytes` and the `getrusage` block that fed it, duplicated verbatim in both
+  mint termini and **read by nothing**. Extracted `mint_budget._read_device` — `probe()` and
+  `co_residency()` carried byte-identical copies of the same CUDA read. Six findings that DO change a
+  decision are proposed with evidence in pgw#877 and deliberately not landed; the largest is that
+  `_CHILD_PEAKS` is written only in the serving parent and read only in the mint child, so the
+  per-entry device ask has always been the estimate.
+
+## 0.90.6 (2026-08-02) — **the release that makes "fast" claimable and the mint survivable**: the numerics gate lands at the adopt-time choke point (until now every arm merely announced its own absence), the pool row is emitted at CONSTRUCTION so a mint that dies still reports K and its binding, the entry child reports its real DEVICE high-water, export-once is recorded as a measured negative, and the compute child execs unprivileged
+
+PATCH, so it rides the existing `0.90` entry in `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS`
+(major.minor match): no gate widen, no hub bounce, no deploy operator.
+
+Range verified BY ANCESTRY, not from cut notes — `git merge-base --is-ancestor` against HEAD for
+every must-ride, and `git rev-list --count v0.90.5..HEAD` = 17 at the time the bump was written; **22** as tagged.
+
+**Cut on a FULL-SUITE green taken on a clean export of the release commit**, not on the shared
+worktree: two other lanes had unrelated work in flight there (`aot_resume.py`,
+`test_worker_outbox_pgw869.py`, and edits to `topology.py`/`aot_compile_pool.py`/`chunk_cas.py`),
+and a suite run in that tree would have been a green for code this release does not contain.
+
+**Three reds fixed rather than carried.** `e8b3109` renamed `Settings.worker_jwt` ->
+`Settings.bootstrap_worker_jwt` on purpose, so every stale reader becomes an `AttributeError` at the
+call site instead of a silently frozen token. Three `SimpleNamespace` fakes in
+`tests/test_executor_adopt.py` still built the old field and raised at `lifecycle.py:258`.
+`5bce263` had repaired the SECURITY suite's copy; these were the rest. A red gate is not a cut, and
+"known failures" is the folklore this program is eliminating.
+
+Range grew after the version bump was written: two lanes landed on chaos while the cut was in
+flight (`780b3d0` outbox-for-FACTS, `d6067d2` parallel export), plus the export probe below, so
+0.90.6 is tagged at the CHANGELOG commit itself and `rev-list --count v0.90.5..<tag>` = **22**
+(verified, not asserted: the count was written as 20 from the pre-bump range and corrected).
+
+Highlights, by what they change rather than by issue number:
+
+- **The EXPORT phase's device high-water is measured for the first time (`f4f20d3`)** —
+  `aot_compile_child` resets and samples around the INDUCTOR compile, so `EntryReport.
+  peak_device_bytes` is the *compile's*; export runs serially in the PARENT and was never sampled.
+  `timings` gains `export_peak_device_bytes` / `export_peak_device_reserved_bytes`, taken before the
+  pool is built so no inductor allocation is attributed to export. **This is the number
+  `aot_export_parallel.width_for()` is gated on** — it returns 1 while it is unknown, deliberately
+  refusing to reuse the compile pool's `weights * 1.25 + 5 GiB` (inductor's activation and workspace
+  terms, ~56 % never observed) for a phase that traces with fake tensors and runs no kernel.
+- **Parallel export — the seam, the width rule, and an out-of-process byte-identity proof
+  (`d6067d2`)**, shipped **OFF** behind `GEN_WORKER_AOT_EXPORT_PARALLEL`. ~74 min -> ~20 min at
+  4-wide once the footprint above is known. The partition splits ONLY where the adapter arm changes
+  — that is exactly where the branch-disarm mutation fires — and an alternating declaration is never
+  merged (pinned by a test, because merging across the mutation is the one way this goes silently
+  wrong). Rows may reorder within a run, never across one; the caller reassembles by position, so
+  completion order is unobservable in the artifact. **Not yet wired into `aot_mint`**: a worker must
+  reconstruct the pipeline, which is family-specific and cannot be validated off-pod.
+
+- **THE NUMERICS GATE (`8670f73`)** — a measurement, then the gate around it, at the `arm_aot`
+  choke point: `checked` / `degraded` / `refused` / `unmeasurable` / `gate_error`, where the last
+  two **refuse**, on the principle that *an arm nobody could record is an arm we do not make*.
+  Until this shipped, pgw#868 held that no run could be cited as evidence a gate works and every
+  arm merely announced `cell_numerics phase=unchecked`. **This is what makes A3's "fast" claim
+  admissible.** Cost is projected but **unmeasured** at ~7-14 s per arm on a 36-entry sdxl cell;
+  the `checked` row carries `duration_ms`, so the next real mint produces the first true number.
+  Note the trap it nearly shipped: wiring the probe dragged `aot_wrapper_split`/`aot_run_impl_split`
+  into `static_code_closure`, **which `cell_key.compute` keys every dynamo cell on** — the closure
+  walk follows function-level imports, so the declaration layer transitively depended on the mint
+  driver. Fixed with a leaf module plus re-exports (no import changed), but the hazard was latent
+  for **any serve-side consumer touching the declaration layer**, not a quirk of one lane.
+- **The pool row at CONSTRUCTION (`aa385ba`)** — K, its binding and the underwidth are decided
+  before the first entry compiles, and were previously reported only at a terminus three mints never
+  reached.
+- **The entry child's DEVICE high-water (`6607a4a`)** — `per_entry_device_bytes` = 11.07 GiB is
+  ~56 % arithmetic (`resident_weights * 1.25 + 5 GiB`) while reporting as `measured`. `EntryReport`
+  now carries the real `peak_device_bytes`/`peak_device_reserved_bytes`. Telemetry only: sizing
+  still uses the estimate, per pgw#830's instrument-first rule.
+- **Export-once is a measured NEGATIVE for sdxl (`6e1f307`)** — and every mint now reports
+  `export_reuse_eligible` for free, so the question is answered per family per mint at no cost.
+- **The compute child execs as an unprivileged uid (`f957ca8`)** — the delta-1 env strip stops being
+  polite and starts being enforced.
+- **One credential, not two (`e8b3109`)** — `Settings.worker_jwt` -> `bootstrap_worker_jwt`; the
+  fallbacks are gone rather than deprioritised.
+
+- **pgw#868 A4 — the entry child now reports its DEVICE high-water, because nothing ever measured
+  it.** The compile pool is VRAM-bound at K=1-2 on both cards measured (L40S: 27.69 GiB free,
+  K=2; 4090: 6.89 GiB free, K=1) while CPU would permit 63-127 — an order of magnitude, owned by one
+  number: `per_entry_device_bytes` = 11.07 GiB. That number is **not a compile-child measurement**.
+  It is `mint_budget.co_residency().need_bytes` = `resident_weights * 1.25 + 5 GiB`, i.e. sdxl's
+  4.87 GiB of UNet plus an activation term `mint_budget`'s own docstring calls *"a fraction nobody
+  measured"* plus a flat context+workspace constant — **~56 % of the ask is arithmetic, not
+  observation** — and it reports as `per_entry_device_basis: 'measured'`, which only ever meant "the
+  caller handed a probed number". It is also the estimate that, used as a hard cap, killed two mints
+  with 21.48 GiB free (pgw#848). `EntryReport` now carries `peak_device_bytes` and
+  `peak_device_reserved_bytes` (allocated *and* reserved — allocated is what the compile needed,
+  reserved is what a concurrent sibling actually cannot have), reset immediately before the compile
+  so the peak is the compile's rather than `torch.export.load`'s, and reported on every exit path
+  including both refusals. Fields are defaulted, so an older child's report still decodes.
+  **Telemetry only: `entry_workers` still sizes off the estimate.** Replacing it with the
+  measurement is a separate change with its own evidence, per pgw#830's instrument-first rule — but
+  if the real footprint is materially below 11.07 GiB, K roughly doubles on an L40S and every other
+  compile-speed win in A4 multiplies by it.
+
+- **pgw#847/#868 A4 — export-once is a MEASURED NEGATIVE for sdxl, and every mint now says so for
+  free.** The feature shipped in 0.90.3/0.90.5 behind an off-by-default flag on the strength of a
+  byte-identity proof taken on a CONV probe. Re-asked of attention, and then of the real
+  `diffusers.Transformer2DModel` — sdxl's own block container — the answer inverts: the exported
+  graph keeps the same 86 nodes but its TEXT moves with the row, because the token<->spatial
+  conversion bakes the sequence length and the spatial extents into `reshape` ARGUMENTS
+  (`reshape(permute, [1, 64, 32])` vs `[1, 60, 32]`; `reshape(add_2, [1, 8, 8, 32])` vs
+  `[1, 6, 10, 32]`), on the aspect axis AND the batch axis. Node arguments are not metadata:
+  `FakeTensorProp` re-derives none of them, and rewriting them would be altering the traced graph,
+  which pgw#846 forbids. **So the gate declines sdxl for free at check 1 and the saving for that
+  family is ZERO — the "11-21 min/cell" figure never applied to it.** Attention itself is
+  row-invariant when the head reshape uses `-1` (which is how diffusers writes it) and is pinned
+  admitted; it is the spatial round trip that disqualifies. Both facts are now tests, so the
+  negative cannot rot into an assumption in either direction.
+  **New, always on and free:** `timings["export_reuse_eligible"]` (1.0 / 0.0 / -1.0) — the mint
+  already exports every row, so comparing two rows' graph text costs one string compare and no
+  compiles. Every mint anyone runs, on any family, now reports whether export-once could ever fire
+  there, without enabling anything. The flag stays OFF and no lane should spend a pod validating it
+  on sdxl.
+
+## 0.90.5 (2026-08-02) — **the credential and the durability release**: the two long fuses that killed attempts sixteen and seventeen are cut, the mint stops reading as finished before its cell is durable, and every arm confesses the missing numerics gate
+
+Cut for the first forge pod. **PATCH, so it rides the existing `0.90` entry in
+`TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` (major.minor match) — no gate widen, no hub bounce, no
+deploy operator.**
+
+**Range verified by ancestry, not by cut notes** — `git merge-base --is-ancestor` run for every
+commit against both `HEAD` and `v0.90.4`, plus `git rev-list --count v0.90.4..HEAD` = **10** (the
+nine inherited, plus this lane's own test fix `9fafbd3`). The range differed from its brief three
+times before this cut (7 → 8 → 9); **a cut documents its RANGE, not its intent.**
+
+- **pgw#848 `dc7bf6b` — the worker never read its own credential's expiry.** It holds a JWT
+  carrying `exp` and learned of expiry only by being REJECTED, at which point it cannot recover:
+  the refresh arrives only as a `token_refresh` down the stream it can no longer open. **Measured
+  in hub `pod_events`: attempts 16 and 17 expired at T+32.4 / T+31.2 min and said nothing**, and
+  ten minutes of silence later the hub recorded a silent death. `transport._report_credential_age`
+  now reports it.
+- **pgw#848 `7fa4eeb` — the credential SPLIT was the defect, and it corrects CP10.** The scheduler
+  stream never dropped; there is no reconnect storm. What burned the auth strikes was the
+  DIAGNOSTIC telemetry: `hardware_report` opens a brand-new gRPC Connect per report and
+  authenticated it with `settings.worker_jwt`, the BOOT token. **One refreshable source for every
+  hub dial.** This is the fix for attempt seventeen's `worker_auth_wedge`.
+- **th#1364 `bf204b4` (ROOT) + `674243d` — an image job is not a billing divergence.** The check
+  fired on most of the fleet's work and **each false positive dialled the pod-killing carrier**.
+  `674243d` keeps the carrier-credential comment true after `7fa4eeb` moved it.
+- **pgw#849 `e833f62` — the two mechanical guards against "correct code that nothing calls."**
+  Twelve instances, all green on their own unit tests, none ever executed on the production path;
+  **a unit test is structurally blind to wiring because the unit test IS the caller the production
+  path is not.** Guard 1 (`tests/entrypoint_ladder.py`) records per rung whether PRODUCTION or the
+  TEST was the caller, riding a ContextVar so it survives `create_task` and `to_thread`. Guard 2
+  lints unreached surface. Test-side and lint-side only — neither is in the wheel's runtime path.
+- **pgw#849 `cc79db9` — the tally is ELEVEN, not twelve.** `warm_changes_key` was relayed as a
+  twelfth instance and written into a check's header as its motivating example; the filing lane
+  withdrew it the same day (the pre-warm HAS been performed since pgw#758). **The withdrawal is
+  propagated as far as the claim went** — a retraction that does not travel as far as the claim is
+  not a retraction.
+- **pgw#853 `749a588` — the #739 vocabulary learns containers and row-derived structures.** Three
+  of eight declaring families' blockers reduced to ONE missing capability: an argument that is not
+  a single tensor (z-image B1 `list[Tensor]`, qwen-image B1 `img_shapes`, qwen B2). This is what
+  lets ltx/qwen/z-image ADOPT declarations they have recorded as "pending B1" for a week.
+  Fingerprint-proven inert: flux2 4b/9b, wan x3 and sdxl BYTE-IDENTICAL before/after, and
+  `declared_contract_facts` digests no input/arg rows, so it cannot re-key a cell.
+- **pgw#848 `c47dc46` — every arm now CONFESSES the missing numerics gate.** There is no
+  compiled-vs-eager comparison anywhere in this worker: `numerics_ladder` is imported by nothing in
+  `src/` except the pgw#800 adapter gate, and `compare_outputs` / `Comparison` / `flatten_outputs`
+  have ZERO consumers. **Wiring `gate()` in would have been WORSE** — it opens
+  `if comparison is None: return None`, so with nothing computing a comparison it would pass EVERY
+  cell, always, while looking in the diff and in the call graph exactly like a working gate.
+  Instead every arm emits `cell_numerics phase=unchecked` naming the floor the family DECLARED and
+  nobody checked (sdxl 0.995/0.999). **An absence that is obvious beats one that is invisible.**
+  The gate itself needs a device, real weights and a real forward, so it cannot be built off-pod.
+- **pgw#848 `e559098` — the mint's activity stays RUNNING until the cell is DURABLE**, and a
+  failing publish retry loop provably does NOT read as progress. Closes the tail gap where a mint
+  read as finished while its cell was not yet safe.
+
+**Not in this cut:** th#1359's pool-row early emission, banked at
+`cozy-creator-tracker/scripts/held-patches/th1359-pool-row-early-emit.patch`. It was out of the
+working tree when the freeze was asserted and **rides the next cut**; the forge run reads K, its
+binding and the underwidth LIVE from `fleet-status` at the first phase transition instead.
+- **pgw#846 `9fafbd3` — the two failures the first held gate found, both test-side.** A false
+  positive in `test_magic_timeouts_gw666` (a JWT `exp` claim is not a deadline on an awaited event)
+  and a leaked process-global 4-group topology in `test_group_host_policy_pgw782` that made
+  `test_guard_miss_pgw680`'s end-to-end test fail seven files later. **No `src/` change: the
+  wheel's contents are identical to what the nine commits produced.**
+
+**Gate:** `frozen_gate` PASSED on a tree PROVEN unchanged for 1,664 s — **2,683 passed, 18 skipped,
+1 xfailed, 0 failed** at `9fafbd3`, `moved: []`. **This is the first FULL-SUITE green recorded in
+this arc**; `v0.90.4` was validated on "93 passed SERIALLY" (release scope), which is why both
+failures above had gone unseen rather than being regressions.
+
+
+## 0.90.4 (2026-08-01) — **the release that stops us losing measurements**: an ABANDONED mint keeps its phase table (three mints have died and taken K, per-entry timings, `prop_probe_s` and the peak-VRAM matrix with them), the forge lands as a MODE, and the export-reuse gate becomes the cheap one
+
+- **pgw#848 `7322722` — an ABANDONED mint kept nothing.** `f9c1b2d` closed this for the ABORTED
+  exit; the abandoned exit emitted a bare `status=abandoned total_s=…` and discarded the pool
+  ledger, per-entry timings and every peak. **Measured cost: attempts sixteen and seventeen died
+  at 1,741 s and 2,121 s and produced ZERO usable rows between them**, with four lanes waiting on
+  numbers the child had already computed. The child now rewrites its phase table atomically on
+  every beat and ABANDONED is its own terminus.
+- **pgw#848 `dbaedc2` (+ `242c111`) — the pod-side reaper's progress signal had no producer.**
+  `/usr/local/bin/podguard-progress` had no writer anywhere in gen-worker; the mint now emits a
+  changing progress token on the same beat it writes the phase snapshot. `242c111` corrects
+  `dbaedc2`'s own claim: it did NOT prevent attempt sixteen and is inert on hub-created pods —
+  **that reap was renter-liveness only, and the fix for it was the podguard lease bug.**
+- **th#1359 Part 2 `630dc16` + `728a234` — the forge is a MODE, not a fork.** `WORKER_MODE`
+  (settings + Hello axis) and the forge driver: mint-only pods refuse tenant dispatch, join their
+  own mint, and retire on a TYPED terminal. Not proven on hardware — this cut is what the first
+  forge pod needs.
+- **pgw#848 x th#1359 `f833032` — on a forge pod every tenant reserve protects nobody.** Collapsed,
+  in the file that owns them: **K 1 → 4**.
+- **pgw#847 `1a0d084` — the CHEAP export-reuse gate.** 0.90.3 shipped `14021eb`'s expensive
+  (~780 s) gate latent behind a default-off flag; enabling it there would have measured the feature
+  as a loss the shipped-later version does not have. The gate is now cheap enough that the change's
+  SIGN cannot depend on `prop_s`.
+- **pgw#853 `564c850` — thunk equality must be SOURCE identity.** 0.90.3 carries a hole where a
+  non-idempotent re-registration propagates `DeclarationError` out of endpoint discovery and **a pod
+  fails to boot**; it was safe there only by coincidence of import path. Must-ride per the
+  pgw#852/#853 lane. `7449f3a` fixes the harness's own dead-code-after-raise shape.
+- **pgw#848 `9f582ba` + `3b4da5c`** — the conftest collection-order import fix (the `-n 4`
+  collection error observed while cutting 0.90.3), and a gate run invalidated by editing the tree
+  under it.
+
+
+## 0.90.3 (2026-08-01) — **three families that could never be wired to the AOT lane now can** (pgw#853: a declaration that refuses to MINT was refusing to IMPORT), and `prop_s` is measured so the export-reuse change can be decided on its own sign (pgw#847)
+
+- **pgw#853 — a declaration that REFUSES must not be able to refuse the ENDPOINT.**
+  ltx-2.3, qwen-image and z-image express their mint blockers by raising
+  `MintRefused` at MODULE SCOPE — and module-scope import is the only mechanism
+  the platform has for registering a declaration. **So the three families most
+  in need of the AOT lane were exactly the three that could not be wired to it:
+  doing so would have taken the endpoint DOWN AT BOOT.** A refusal to MINT was
+  being expressed as a refusal to IMPORT.
+  `register_export_declaration()` now accepts a zero-arg **callable** with an
+  explicit `family=`, and `export_declaration()` evaluates it so the refusal
+  surfaces where the mint is asking. `has_export_declaration()` /
+  `registered_entry()` read the registry WITHOUT evaluating (a blocked family
+  is declared; it just refuses to mint), and `register_declared_exports` uses
+  the non-evaluating accessor — reading it back through the evaluating one
+  would have detonated a thunk inside endpoint COLLECTION, the exact blast
+  radius this removes. `fleet_cells.mint_recipe` turns the refusal into a typed
+  `self_mint_skipped` under a new `declaration_refused` phase **with the
+  blocker text intact** (the evidence is the point; a try/except that swallowed
+  it would be a different defect). The mint gate's catch is `Exception`, not
+  `BaseException` — swallowing a `KeyboardInterrupt` or a cancellation inside
+  the SERVING process would be its own defect; the import boundary keeps
+  `BaseException` deliberately, because it runs at BOOT where nothing outranks
+  the endpoint coming up.
+
+- **pgw#847 — `prop_s` is measured, once per mint.** `torch.export.export` runs
+  once per declared class row, serially, in the parent: sdxl is **36 entries**
+  at a banked `export_s` of 37.8 s, so that loop is **~22 min of wall the
+  pgw#809 pool never covered**. An exported graph's `graph_module.code` is
+  byte-identical across shape rows, and one export plus a per-row
+  `FakeTensorProp` reproduces `wrapper.cpp`, `kernel.cpp` and the linked `.so`
+  byte for byte (proven with `torch.export.export` monkeypatched to **raise**,
+  so the reuse path cannot have silently fallen back). The saving is
+  `export_s - prop_s`, and `prop_s` had never been measured on a real family —
+  off-pod probes bound it only to 0.25-0.97x, which is not enough to know the
+  change's SIGN. Now recorded as `timings['prop_probe_s']` ONCE per mint
+  process, on a FRESH `program.module()` so the program is untouched, and
+  recorded not at all on any failure. **Telemetry only — no decision reads it.**
+
+- **pgw#847 — export ONCE per module, re-specialize per shape row** — the change
+  `prop_probe_s` exists to size. **Behind a fail-closed gate and OFF by
+  default**; it does not affect any mint in this release unless explicitly
+  enabled.
+
+- **pgw#847 — one export can serve every shape row, behind a gate that must PROVE it (OFF by
+  default).** A cell's N entries are one module traced at N shape rows, and an `ExportedProgram`'s
+  `graph_module.code` is byte-identical across them — the row lives entirely in node metadata. So
+  `gen_worker.aot_export_reuse` re-specializes one exported graph per row (deep copy +
+  `FakeTensorProp` + torch's own `_update`) instead of re-running `torch.export.export`, which
+  `aot_mint` does once per declared class row, **serially, in the parent** — ~22 minutes of an sdxl
+  mint that pgw#809's K-wide pool divides by one. Measured byte-identical on every emitted file
+  including the **linked `.so`**, with `torch.export.export` monkeypatched to raise for the whole
+  reuse arm. Worth **11-21 minutes of serial mint wall per 36-entry sdxl cell**; the range is that
+  wide only because `prop_s` on a real family has never been measured, and the new
+  `timings["prop_probe_s"]` (one pass per mint, read by nobody) is there to close it.
+  **Gated, because the invariant is a property of the module and not a law:** a family branching on
+  a size traces a different graph per row, so the gate requires graph-text equality AND a
+  byte-identical artifact from a re-specialization of a witness row. The artifact check compares
+  every generated C++ source plus the host command, which on the pinned toolchain determine the
+  object bit for bit (measured on the real 6.3 MB sdxl TU: same source, same command, same build
+  path recompiles byte-identically; a different build path moves 156 bytes of 15 MB, all of it the
+  embedded path). Both arms stop BEFORE their 180 s `g++` and run concurrently in their own
+  interpreters, so the gate costs about one codegen rather than two full entry compiles — the
+  difference between a change whose sign is positive across the measured range and one whose sign
+  depended on an unmeasured quantity. Every failure mode — exception,
+  missing artifact, empty digest set, unplaceable input — falls back to a full per-row export;
+  absence of evidence is never a pass. The verdict is per `(target, adapter arm)` per MINT and is
+  never memoised across families. Enable with `GEN_WORKER_AOT_EXPORT_REUSE=1`. No inductor config,
+  compiler, flag or library changes, and neither module is in the code closure, so **no cell
+  re-keys**.
+
+## 0.90.2 (2026-08-01) — **the mint's VRAM ceiling was its own estimate, not the card**: a whole-graph AOT mint died for 30 MiB with 21.48 GiB free (pgw#848), an OOM-killed entry child is no longer laundered into a never-retried refusal, the pool's host-RAM bound finally sees the compiler, and AOT-regional is deleted (pgw#846)
+
+- **pgw#848 (CRITICAL PATH) — the mint's VRAM cap was the ESTIMATE, not the card.**
+  Measured on two pods, two card sizes, one number:
+
+        pod   card total   free at OOM   cap imposed   entries exported
+        4090   23.52 GiB      660 MiB     11.09 GiB     1 of 36
+        L40S   44.39 GiB    21.48 GiB     11.08 GiB     5 of 36
+
+  The cap moved with neither a 2x card change nor `vram_gb` 12 -> 20, because it
+  was a property of neither: `mint_budget.co_residency().need_bytes` was handed
+  to the child as a hard `set_per_process_memory_fraction`, and for sdxl that is
+  `4.87 x 1.25 + 4 + 1 = 11.09 GiB` — exactly what both pods printed, derived
+  from `_UNMEASURED_ACTIVATION_FRACTION`, which nobody ever measured. The mint
+  was never out of GPU; it was enforcing a self-imposed ceiling and then
+  reporting the result as a deterministic refusal.
+  **`need_bytes` now answers only "should this start"; a new `cap_bytes` answers
+  "how far may it go"** and is `free - activation` — what the card has, less what
+  the tenant needs for its NEXT forward (its weights are already allocated, so
+  already outside `free`). On the L40S: **11.08 -> 20.26 GiB**. pgw#784 is not
+  weakened: the tenant's next peak is still reserved by construction on every
+  card, and a tight card still falls back to the estimate.
+  `_UNMEASURED_ACTIVATION_FRACTION` is deliberately **not** replaced with a
+  different off-pod constant — substituting one unmeasured number for another is
+  a move this program has already paid for; it now bounds only the admission
+  estimate and the tenant reserve, never the child. Widen-on-OOM now exists on
+  the device half too, so a child that dies inside `torch.export` no longer
+  banks nothing and leaves attempt N+1 to re-ask identically.
+
+- **pgw#848 item 4 — an OOM-killed entry child was reported as a DETERMINISTIC
+  REFUSAL,** so the one failure a narrower K would fix could never try one.
+  Every entry-pool failure converged on `EntryCompileFailed -> MintRefused ->
+  EXIT_REFUSED`, which `mint_process` documents as terminal and never retries —
+  while the pool's own `_exit_note` has said since pgw#809 that a SIGKILL there
+  "is the OOM killer far more often than a compiler bug". `EntryCompileFailed`
+  now carries `resource`, `basis` and the dead entry's measured
+  `peak_rss_bytes` (a child the OOM killer takes writes no report, so the
+  parent's live per-row sample is the only measurement that will ever exist).
+  `cgroup_oom_kills()` reads the kernel's counter, with `cgroup` (the counter
+  moved — a fact) and `sigkill` (an inference, worth one retry) kept distinct
+  and unreadable reported as -1, never a silent 0. New
+  `aot_mint.MintResourceExhausted` is deliberately NOT a `MintRefused` subclass.
+  Reproduced against a REAL kernel OOM kill of a real entry child under a
+  cgroup v2 cap, with `memory.events` `oom_kill` asserted to have moved.
+
+- **pgw#848 — the pool's memory bound had never seen the memory.**
+  `aot_compile_child._peak_rss` read `RUSAGE_SELF` (blind to the compiler) and
+  `aot_compile_pool._peak_rss_bytes` walked ONE level of `/proc` children — but
+  on a real `aoti_compile_and_package` the entry child's direct children are
+  `g++` (a driver that allocates nothing) and inductor's async_compile workers;
+  **`cc1plus` is at DEPTH 2 and `ld` at depth 3**. Measured off-pod on the real
+  sdxl AOTI wrapper TU (6,324,290 bytes, production flags, g++ 13.3): ground
+  truth **2.052 GiB**, of which one `cc1plus` is 2.049 — against 0.012 GiB from
+  instrument 1 (**171x low**) and 0.015 GiB from instrument 2 (**133x low**).
+  Nothing banked the pool's own `peak_child_rss_bytes`, and `aot_mint` never
+  passed `peak_rss_bytes` to `entry_workers()` at all, so `mem_workers` divided
+  available RAM by a 3 GiB constant on every mint the fleet has ever run and
+  `per_entry_rss_basis` read `"default"` permanently.
+
+- **pgw#846 (P0, Paul's ruling) — AOT-regional is DELETED** (full entry under
+  Unreleased history below; the exported cell is always WHOLE-GRAPH again and
+  whole-graph cell identity does not move).
+
+- **te#148 — svdq low-rank branch can arrive QUANTIZED (int8 | fp8_e4m3).**
+  `decode_linear`/`load_svdq_native_denoiser` accept a branch pair stored
+  int8 or fp8_e4m3 with fp32 per-block-32 scales along each factor's
+  contraction dim (LoRaQ, arXiv 2604.18117), declared by the new
+  `__metadata__` key `lowrank_quant` (absent = bf16, historical format —
+  byte-identical behavior). Declaration and bytes must agree; either mismatch
+  refuses. v1 dequantizes on load (bf16 downstream — SvdqLinear /
+  fold_to_dense / split_decoded untouched); `quantize_lowrank` /
+  `dequantize_lowrank` are the format's encode/decode pair for the te#148
+  producer half. Quantized branch tensors are plain row-major (the 16x16
+  lowrank fragment pack is a 16-bit-operand convention; nunchaku cannot read
+  a quantized-branch file regardless).
+
+- **pgw#846 (P0, Paul's ruling) — AOT-regional is DELETED.** Regional
+  (block-class) export/mint/arm is removed end to end: `aot_regional.py`, the
+  regional export fork and shell-digest machinery in `aot_mint`, the
+  `regional=`/`regional_shape_strategy` declaration plumbing
+  (`aot_declaration`, `Compile`, `export_contract`), the `aot-regional` mint
+  recipe, and the pgw#829 regional entry-collapse. The exported cell is
+  always WHOLE-GRAPH again; contract-facts stay v3 with `shell_digest`/`mode`
+  pinned `""`, so whole-graph cell identity does not move. What survives:
+  `Compile.regional` and all of `compile_cache`'s use of it (the ltx-video
+  dynamo/JIT per-block OOM workaround, ie#381/gw#472 — a different feature);
+  the numerics calibration (`NUMERICS_FLOOR`/`NUMERICS_WARN`/
+  `declared_thresholds`), moved to `numerics_ladder` — family-general, the
+  gate that should have caught the regional serve regression; pgw#844's
+  dispatch-admission gate, re-keyed on `(target, adapter arm)` and proven to
+  ADMIT the 36-entry whole-graph sdxl shape; and `provision.arm_route`'s
+  decline-by-name — a `mode='regional'` cell now declines by name and stays
+  eager (the retirement semantics), with a pinned test.
+
+## 0.90.1 (2026-08-01) — the release that actually CONTAINS the drain fix: a drain no longer drops a COMPLETED job's result (pgw#845 P1), superseding a 0.90.0 published from a pre-fix head
+
+- **Supersedes 0.90.0 — never pin 0.90.0.** The v0.90.0 tag was cut at `9332c0e`,
+  BEFORE the pgw#845 P1 drain fix (`09133ca`) landed, so the published 0.90.0
+  wheel still drops the result of a job that already completed when the pod
+  drains (scale-down window). 0.90.0's section below describes the intended
+  release; the drain bullet in it is only TRUE of 0.90.1. Lesson, recorded in
+  the tracker: a green CI run proves the tree it ran on, not that the tag
+  points at the tree you meant to ship — verify tag contents BY CONTENT.
+- **pgw#845 (P1) — a cancelled write cancels the whole gRPC call.** The drain's
+  "clean close" cancelled the sender task; grpc.aio answered by cancelling the
+  RPC, the RST discarded a `job_result` already retired from the durable
+  pending set, and the same cancellation escaped `run()` with no exit code.
+  Fixed via `SendQueue.quiesce` / `SenderQuiesced`: the sender is quiesced,
+  never cancelled mid-write. Red 12/12 before; green 56/56 after (24
+  sequential + 24 across four concurrent lanes on two pinned cores + 8
+  top-up). The same defect sat on the pgw#763 supervisor stream cycle, where
+  it would have discarded the typed death JobResult. Residual (filed, not
+  fixed): on an ABRUPT close a written-but-unflushed result is in neither the
+  wire nor the queue; closing that needs a hub-side result ack (proto change)
+  — today the hub reconciles it (a gap in the guarantee, not a silent drop).
+- **pgw#845 — `test_entry_collapse_pgw829` NameError repaired** (a helper
+  rename verified as a single-node run instead of the file: a file-wide change
+  verified as a local one), and the sibling stopwatch assertion de-clocked.
+
+## 0.90.0 (2026-08-01) — **an AOT cell can advertise `compiled` for the first time** (pgw#844 P0: the exported lane was never asked for its guard-revocation signal, and a partially dispatchable cell claimed nothing); the bake gate refuses a wheel that omits an endpoint module (pgw#833: the sp086 pod-death P0), the child's stderr rides the post-mortem, the T_BOOT_FATAL ack closes the verdict race, and sdxl's regional mint can derive 8 entries from 72 (pgw#829, per-family opt-in); the gw#640 SIGTERM drain hang is a FIXED lost wakeup (pgw#833 follow-on), a drain no longer drops the result of a job that already succeeded (pgw#845 P1: a cancelled write cancels the whole gRPC call), four runner-flake classes die and the wall-clock guard can finally fail (pgw#845), the seal split rides the phase table (pgw#842), and re-sharding is retired (th#1362)
+
+- **pgw#844 (P0) — an AOT cell could never advertise compiled, and one
+  undispatchable aspect bucket cost the pod every other shape.** Attempt
+  twelve (L4 `o0legpgj5olhic`) adopted the first cross-pod cell in platform
+  history — 72 entries armed, 58 s — and then served 100 % eager, including
+  1024x1024, whose entry was armed, correct and unambiguous. Two independent
+  defects, both fixed, both red-first on the real boot path:
+  - **the exported lane was never asked for its revocation signal.**
+    `_bind_compile_guard` probed TRT and dynamo only, and
+    `provision.enable_compiled` returns as soon as `arm_aot` succeeds — so an
+    AOT-armed pipeline carries no `compile_cache` `failure_signal` marker at
+    all, answered *"no runtime guard revocation signal"*, and had its
+    `active_compile_ref` cleared on every boot. `aot_serve` has owned
+    `set_guard_failure_callback` since pgw#721 and nothing called it. This is
+    why no `serving_mode=compiled` row exists anywhere on the release: a
+    compiled AOT serve was structurally unreachable regardless of dispatch.
+  - **the boot's coverage claim was all-or-nothing.** A transformer block sees
+    `(B, H_lat*W_lat, C)` — the token PRODUCT — while entries are keyed on the
+    latent H and W separately, so sdxl's 9 aspect buckets collapse to 4 token
+    counts and 8 of 9 are `entry_ambiguous`. An alias attributed to an object
+    only when EVERY declared graph class proved there, so a partially
+    dispatchable cell claimed nothing (hot adopt: `function_alias_unproven` ->
+    rollback). On the EXPORTED lane an alias that proves SOME of its classes
+    is now attributed, and the classes that stayed eager are NAMED on one
+    `compiled_shape_coverage / partial_shape_coverage` event. Dynamo keeps the
+    strict rule — there an unproven class is an unannounced recompile, which
+    is silent, while an exported refusal is typed, counted and armed-through.
+  `boot_ended_uncompiled` now means *nothing is dispatchable*, never
+  *something wasn't*.
+- **pgw#844 — a refused shape no longer contaminates the compiled
+  measurement.** An `aot_serve` / regional-block ingress refusal reports
+  through a new `set_ingress_refusal_callback` seam and charges THIS request
+  `fallback_reason=ingress_refused` on its own `JobMetrics`, so an eager
+  sample from an armed lane stops being counted as `serving_mode=aot_cell`
+  with no reason. Only reachable now that a partially dispatchable cell stays
+  armed, which is why it lands with the fix rather than before it.
+- **pgw#844 part B — the mint's dispatch-ambiguity gate asks about ADMISSION,
+  not equality.** pgw#829's gate compared a digest of each entry's placeholder
+  shapes, which catches identical contracts (sdxl's 9 static rows) but not the
+  case its own remedy introduces: a static row and a collapsed row over the
+  same token hull have different digests and both admit the same call. Every
+  entry's declared call now runs against every sibling's contract through
+  `aot_serve.assert_ingress` itself — the same function `EntryDispatch.select`
+  runs on a pod — grouped by (target, block class, adapter arm) exactly as
+  dispatch groups. Still pre-compile: seconds to refuse, not a full compile
+  bill.
+- **pgw#845 (P1) — a drain dropped the result of a job that had already
+  SUCCEEDED.** Roughly one drain in six, measured: `job finished r-last
+  status=1` -> `drain complete` -> stream closed, and the tenant's completed
+  request returned nothing. Every scale-down could swallow a request that
+  finished in the drain window; the GPU time was spent and billed either way.
+  The cycle, in one line: the clean close did `send_task.cancel()`, and if the
+  sender happened to be inside `stream.write()` of the next post-flush event,
+  **grpc.aio answers a cancelled write by cancelling the whole RPC**
+  (`_call._write` calls `self.cancel()` on CancelledError) — the RST discarded
+  the `job_result` that was buffered one message earlier and that
+  `mark_result_shipped` had already retired from the durable queue, so the
+  half-close had nothing left to flush; `read()` then raised the same
+  cancellation (`_raise_for_status`), which escaped
+  `except (TimeoutError, ConnectionError) / except Exception`, skipped the
+  wait for the peer to end the call, and rode out of `run()` -> `arun()` ->
+  `Worker.run()`, killing the process with no exit code at all. Note what
+  `wait_empty` proves and what it does not: it proved the result was WRITTEN,
+  and the write was then thrown away underneath it.
+  The sender now ends BETWEEN writes — `SendQueue.quiesce()` ends the loop
+  once nothing is left to write (never with a message queued), bounded by the
+  keepalive window; cancelling is the last resort and marks the close abrupt
+  (`_clean_close = False`) instead of pretending it was clean. The peer-close
+  wait is `asyncio.wait`, which neither cancels the receiver nor re-raises
+  what it ended with, so an RPC-level cancellation can no longer escape a
+  graceful close; and a cancelled call reaching the generic path is re-raised
+  as the `ConnectionError` it actually is, which reconnects instead of ending
+  the process. Both close paths — hub drain and the pgw#763 supervisor stream
+  cycle, whose comment already named the supervisor's typed death JobResult as
+  the thing at stake — share the two helpers. Guard: the pre-existing
+  `test_drain_finishes_in_flight_then_closes_and_rejects_new_work`, left red
+  on purpose by the previous commit, plus a new assertion that the drained
+  worker exits 0. Red 12/12 on the parent commit (5 lost the result outright,
+  7 shipped it and died by exception); green 48/48 after — 24 sequential and
+  24 across four concurrent lanes, all on a two-core pin.
+- **pgw#845 — the wall-clock source guard could not fail, and two more
+  "flakes" were the test.** `_LITERAL_DEADLINE` required a DIGIT after
+  `time.monotonic() +`, so `deadline = time.monotonic() + _TIMEOUT` was
+  invisible and six `tests/harness/` files hid deadlines that way — the harness
+  guard was asserting an empty set. Widened to see a name bound to a literal
+  duration, the clock call itself, latency/rtt, and BOTH directions (a lower
+  bound fails on a FAST runner). Five test files and two harness fixtures were
+  exposed and each dispositioned rather than allowlisted. Separately,
+  `test_procsplit_pgw763.py::test_signal_death_consumes_the_inflight_marker_*`
+  asserted the parent's post-mortem at the instant it observed the durable
+  job_result — `_handle_child_death` does attribution first and forensics
+  second, so under two-core contention 3 of 5 runs had no dial yet; it now
+  waits on the forensics via `await_progress`, giving up only when the parent
+  process is gone. And the bounded-shutdown tests now assert the escalation's
+  PRODUCT — the post-mortem naming `worker_process_exit` / `SIGKILL` — with the
+  wall bounded by the grace the test itself CONFIGURED instead of a literal 45,
+  so the gw#640 entry leaves the burndown rather than living there. Tests only;
+  no product change.
+
+- **pgw#833 follow-on — forwarding a signal is not draining a pod.** The
+  gw#640 SIGTERM test hung CI three runs running. It was not the stderr tee
+  (`844f9f6` was CI-3's parent and the hang survived it) and not a blocked
+  signal mask: all three live specimens off the failing runs had `SigBlk` and
+  `ShdPnd` **zero**, and an instrumented repro caught the child's SIGTERM
+  handler firing 1 ms after the parent forwarded it. The deadlock is a lost
+  wakeup: the child installed a handler, announced `READY`, then entered
+  `signal.pause()` — and on a contended box the forwarded SIGTERM lands in the
+  gap, is consumed by the handler, and `pause()` then waits forever for a
+  signal that already came, while the parent waits forever in `waitpid`. The
+  stand-in now blocks SIGTERM and `sigwait`s it, which has no gap.
+  Underneath the flake sat the real P0: `supervise()` forwarded a terminating
+  signal and then waited **unboundedly**. Any child that cannot answer — deaf,
+  wedged below Python in a CUDA call, or blocked writing into a stderr pipe
+  nobody drains — pins PID 1 alive, and a rented GPU keeps billing. Three
+  fixes in `supervisor.py`:
+  - **TimeoutStopSec for the outer layer.** The first terminating signal arms
+    `setitimer(ITIMER_REAL, 180s)`; when it expires the worker is SIGKILLed and
+    the post-mortem names the SIGKILL, so shutdown always completes and never
+    silently. 180s deliberately outlives the procsplit parent's own 120s
+    `_DEFAULT_STOP_TIMEOUT_S` so the inner escalation and its death dial run
+    first. Repeated SIGTERMs cannot push the deadline out.
+  - **The fork window is closed.** Between `fork()` and the parent installing
+    handlers, SIGTERM was still `SIG_DFL` — landing there killed the reporter
+    and stranded the worker as an orphan (a shape observed live on the box).
+    The contract signals are now blocked across the fork and unblocked only
+    *after* the handlers exist; the reverse order delivers a pending signal
+    straight into `SIG_DFL`.
+  - **The mask is taken back on every path**, including the un-supervised one:
+    it survives fork AND exec, so a launcher that blocks SIGTERM otherwise
+    decides that the drain is undeliverable. (Mechanism found by the 0.90.0
+    cut lane.)
+  Guards executed red first: a wedged child (`deaf`, and the exact
+  stalled-stderr-consumer hazard) hangs to the timeout without the escalation,
+  and the blocked-mask launcher hangs without the unblock — 3 red / 3 green,
+  11 passed in 14.6 s where the pre-fix tree burned 211 s in hangs, 6/6 under
+  2-core pinning. The shutdown tests also reap their own pair now, so a red run
+  stops stranding supervisor orphans on the host.
+  Separately, CI's `RuntimeError: Event loop is closed` pair is **not** this
+  hang: they are `PytestUnraisableExceptionWarning`s in the warnings summary,
+  attributed to two *passing* tests, from `BaseSubprocessTransport.__del__`
+  running after its loop closed — newly reachable because pgw#833 gave the
+  child a stderr PIPE for `__del__` to tear down. The parent now closes a
+  reaped child's transport deterministically, after `_settle_link` has drained
+  stderr to EOF.
+
+- **th#1362 — retire safetensors sharding: read-tolerant, write-invariant.**
+  Sharding exists upstream to solve resumable transfer, parallel download,
+  object-size caps and partial-failure re-upload. Chunked CAS solves all four
+  BELOW the file, and uniformly — including for files that were never sharded —
+  so the shard planner was a second, coarser answer to solved problems, plus an
+  index that can disagree with the bytes it describes (the klein-4b unloadable
+  publish). Four changes, split by WHO OWNS THE BYTES:
+  - `models/chunk_cas.py` materialises POSITIONALLY: each worker `pwrite`s its
+    chunk into its own byte range as blocks arrive, and the whole-file hash runs
+    on its own thread over the contiguous VERIFIED prefix. RAM per worker drops
+    from a 64 MiB chunk to one read block, so the default window goes 6 -> 16:
+    measured 188.0 -> 274.3 MB/s at 3.6x LESS peak RSS. Resume is now per chunk,
+    out of order, via a sidecar journal that is re-verified off disk — which
+    also makes resume WORK for the first time (the part file used to carry a
+    fresh uuid per call). Disk is proven up front with `posix_fallocate`.
+  - Mirror ingest DE-shards (`deshard_mirror_tree`,
+    `merge_safetensors_by_offset`) instead of re-sharding, including pure
+    pass-through mirrors, so the corpus we own has one shape. The merge verifies
+    its result against the index it consumed. `_reshard_indexed_safetensors` and
+    `_stage_oversize_safetensors` are gone.
+  - The planner is DELETED: `MAX_SAFETENSORS_SHARD_BYTES`, `ShardPlan`,
+    `plan_shards`, `build_index`, `shard_safetensors_by_offset`, and
+    `shard_threshold` from eight signatures. `shard_prefix` is `output_stem`;
+    `ConversionResult.index_path` is gone.
+  - `assert_one_file_per_component` fails closed at every producer output check
+    and at `publish_flavors`, and those `save_pretrained` calls pass
+    `NEVER_SHARD_MAX_SIZE` — save_pretrained shards on its own, which is why
+    this is checked rather than assumed.
+  READING a sharded artifact stays supported PERMANENTLY, and a user's own
+  sharded upload is never refused or rewritten — it does not pass through
+  `publish_flavors` at all.
+  BREAKING for endpoint repos importing the deleted names (training-endpoints
+  `conversion/fuse.py` is updated on its chaos branch and needs the pin bump).
+
+- **pgw#842 — the entry pool's width is now explainable, and monotone in the
+  box.** Two real L4 mints of the SAME 72-entry sdxl regional cell, back to
+  back: attempt ten (0.86.0, 16 vcpu / 62 GB) `entry_workers=5`, `compile_s`
+  1314.94, wall **347.94 s**; attempt eleven (0.89.0, 21 vcpu / 83 GB)
+  `entry_workers=3`, `compile_s` 1327.23 (+0.9 % — identical work), wall
+  **554.78 s (+59 %)**. Pool efficiency was ~97 % in both: the entire
+  regression is K, on a bigger host.
+  Why nobody could say which bound bound: `_mint_phase_table` has always built
+  a `pool` block holding every input (`cpu_workers`/`mem_workers`/
+  `device_workers`, the free-VRAM and available-RAM readings, the per-entry
+  asks) and `emit_phase_events` **never emitted it** — only the scalar
+  `entry_workers` reached a hub row, folded into `totals`. And pgw#830's pool
+  ledger IS emitted, from the mint CHILD, which holds no orchestrator session
+  (`mint_delegate._emit_aot_phases` exists because of exactly that) — so it
+  died in a pod log. Verified against the chaos hub: **zero `phase='pool'`
+  rows for either release**, on a stack where both mints are otherwise fully
+  recorded. The two pods are gone, so their binding constraint is
+  unrecoverable — that is the defect, not a footnote to it.
+  Fixed on both halves. (1) The pool's decision is a typed hub event:
+  `kind=aot_mint_phases phase=pool`, `duration_ms` = the pool's wall clock,
+  detail leading with `entry_workers=`, `binding=` and `underwidth=` (workers
+  the pod could have run but didn't, named with the constraint that held
+  them), then every reading and the pgw#830 ledger — relayed parent-side like
+  the rest of the table, and emitted for aborted mints too. `PoolWidth` now
+  carries `CpuFacts`/`MemoryFacts`/`DeviceFacts`: which of quota / affinity /
+  host cores the vCPU number came from (RunPod advertises `host_vcpus`; the
+  kernel enforces a quota, and they are routinely different), which of
+  meminfo / cgroup bounded RAM, every free-VRAM sample, and whether the
+  per-entry asks were `measured` or a `default` constant. A narrow pool also
+  logs WARNING with its inputs.
+  (2) Two readings that were not monotone in the box are corrected. The cgroup
+  RAM headroom counted PAGE CACHE against the pool (`memory.max -
+  memory.current`), so the bound shrank in proportion to how much I/O the pod
+  had already done — a mint reads GBs (weights, the toolchain the seal hashes,
+  every staged program). It now subtracts reclaimable file pages, i.e. sizes
+  on the working set, as every container runtime does: on a 62 GB pod with
+  50 GiB charged and 40 GiB of it cache, 12 GiB -> 52 GiB, K=2 -> K=8. And
+  free VRAM was a SINGLE `mem_get_info` taken on a card the pool shares with a
+  live tenant by construction (pgw#784): a sample landing inside a tenant
+  forward reads that forward's activation set as gone, while
+  `DEVICE_RESERVE_BYTES` reserves the tenant's peak anyway — the same bytes
+  charged twice, and worth exactly the observed 5-vs-3 (21 GiB steady vs
+  13 GiB dipped, at 3 GiB/entry: K=6 vs K=3). `device_facts` now takes the max
+  over three samples 50 ms apart and records all of them.
+  Red/green on the real path: 11 new tests, all 11 red on the unfixed tip;
+  the hub-visibility one drives a REAL 2-entry pool, its real ledger and real
+  width through the real parent-side relay into a bound activity sink.
+  Projected at a corrected K=5, attempt eleven's own numbers give ~374 s
+  against the measured 554.78 s.
+- **pgw#842 (second item) — pgw#832's headline was the HASH, not the seal:
+  2.76 s/entry on a pod, not "0.10 s".** 0.87.0 recorded "9.8 s -> 0.10 s per
+  entry, MEASURED"; that 0.10 s is `seal_libhash_s` alone, measured off-pod.
+  Attempt eleven measured the span the pod actually pays, `child_seal_s`, at
+  **199.085 s / 72 = 2.76 s/entry** — a ~3x cut against 8.14 s, not ~98x, and
+  still 15 % of `compile_s`. The gap is measured, not guessed: with a warm
+  memo on this box a child's seal splits into `seal_config_s` 3.62-4.70 s and
+  `seal_libhash_s` **0.056-0.080 s** (bare `import torch`: 1.895 s). The memo
+  did everything claimed OF THE HASH (~8 s -> ~0.07 s); what remains in
+  `child_seal_s` is the child's own `import torch`, which `establish_config`
+  owns by design — untouched by pgw#832, and now the largest per-entry fixed
+  cost in the pool (~199 s of a 72-entry mint).
+  So the overlays travel with the phase table too: per entry under
+  `timings.overlays` and summed into the roll-up as `overlays=` beside
+  `phases=` (never inside it — that was pgw#830's second attribution bug). A
+  reader who sees `child_seal_s` alone re-opens a question the split answers.
+
+- **pgw#840 — the entry-compile child must BE the parent's own gen_worker.**
+  pgw#830's attribution invariant went red on a tree nobody had changed: one
+  entry's table had no child spans at all, so its entire 19.5 s compile fell
+  into `reap_lag_s` and the partition stopped closing. The compile had
+  SUCCEEDED and returned files that exist — only the report was from other
+  code. Root cause: the pool spawned `sys.executable -m
+  gen_worker.aot_compile_child` with the parent's env verbatim and let the
+  CHILD's import system pick a `gen_worker` — the cwd first, then any inherited
+  `PYTHONPATH`, then site-packages. On a box with more than one checkout that
+  is a coin flip, and the child that wins compiles the loose files the cell
+  publishes while every gate runs in the parent against the parent's program.
+  MEASURED on the box that filed it: of 236 preserved entry reports, **150 were
+  written by a child predating pgw#830's span table**, several under a parent
+  that had pgw#832 (their pool workdirs hold the `seal-lib-memo.json` only such
+  a parent writes) — same venv, same interpreter. Attribution was the symptom;
+  the defect was an unpinned compiler.
+  `child_env` now prepends the parent's own package root to `PYTHONPATH` and
+  sets `PYTHONSAFEPATH=1` (the cwd would otherwise still outrank it), and the
+  child stamps every report — success and both refusals — with the digest of
+  the parent/child contract source it computed at ITS import, plus where it
+  imported from. `_collect` REFUSES the entry by name on any mismatch,
+  including the empty digest an old child leaves: an artifact compiled by code
+  the parent never ran must not be packed into a cell whose identity claims the
+  parent's. Identity-inert: `PYTHONPATH`/`PYTHONSAFEPATH` are in no scrub
+  namespace and in nothing `env_seal` reads back, and the pool's own
+  cell-identity tests are unchanged and green.
+  Deliberately NOT extended to pgw#784's mint child: that child DOES load the
+  endpoint, and `PYTHONSAFEPATH` would remove the cwd its module may resolve
+  through — the same hole, needing its own evidence, filed rather than guessed.
+  Red/green on the real path: on the unfixed tip a child that is not this
+  gen_worker is ACCEPTED and reproduces the filed table verbatim
+  (`compile_s == reap_lag_s`, no `child_wall_s`, the same violation string);
+  with the fix it is refused by name. Post-fix ledger, 4 real entries: **zero
+  violations, dark residual 4.9-8.1 %, `child_other_s` <= 0.002 s**, and
+  pgw#832's `seal_libhash_s` still 0.06-0.17 s.
+
+
+- **pgw#833 follow-on — the child-stderr tee writes OFF the event loop.** The
+  pump teed each chunk to the parent's stderr with a blocking `flush()` on the
+  loop thread; when the parent's own stderr is a pipe with a stalled consumer
+  (pytest capture, a throttled log collector), the flush froze the loop —
+  signal handling and the shutdown path included (measured:
+  `test_sigterm_is_forwarded_to_the_worker` 60 s timeout, CI 2/2 and a 2-core
+  local repro). The tee now runs per-chunk in `asyncio.to_thread`; ordering
+  within the single pump task is unchanged.
+- **th#1303 S1 (worker half) — the v1 (blake3) verify-on-fetch arms die.**
+  Every fetch-side check is unconditional v2 (chunked sha256); the test
+  harness speaks v2, v1-pinning cases are retired, and each deleted arm's
+  guard was EXECUTED red before deletion (two were wrong and are fixed).
+
+- **pgw#829 — a conv-free block class collapses its whole SHAPE axis onto ONE
+  entry: sdxl's regional mint goes 72 entries -> 8.** pgw#830 measured that
+  attempt nine's 72 entries were not a scheduling problem (the pool was already
+  >= 95.5 % efficient) but a per-ENTRY fixed cost — interpreter boot, the env
+  seal, the torch import, the staged-program load, the reap lag — multiplied 72
+  times. pgw#812 measured the lever: dynamic inner dims are **0.0 %** at serve
+  on a conv-FREE region, because `decide_layout_opt` bails only on conv + free
+  symbol, and #730's static-rows verdict (+7.2 %) was always a statement about
+  CONVS — which regional leaves in the eager shell.
+  `Compile.regional_shape_strategy` declares the BLOCK population's strategy
+  separately from `shape_strategy` (which keeps governing the conv-bearing
+  whole-graph route), and under `dynamic-collapse` a plan's whole class-row set
+  becomes one entry whose block dims are DERIVED: the shell is run eagerly once
+  per declared row, the block's own input shapes are recorded, and axes that
+  move become `torch.export` dims over their observed hull. That derivation is
+  the point — the declaration binds `H_lat`/`W_lat` to `sample`, and the block
+  is handed a flat `(B, H*W/f**2, C)` hidden state carrying neither name, so
+  the varying axis is only observable. Sweeping the rows costs no extra eager
+  forwards (one per plan-row either way) and retains no activations: only the
+  seed row's tensors survive the probe.
+  Guarded, not assumed: the collapse is decided PER BLOCK CLASS off the live
+  module (`aot_regional.block_has_conv`) — a conv-bearing block class keeps one
+  static entry per class row; an axis whose hull reaches 1 is REFUSED (torch's
+  0/1 specialization is not overridable, ie#543) rather than silently
+  specialized; slots that move in lockstep across the rows share one symbol
+  (pgw#812 D1, one level down); a rank change across rows is a fork, refused by
+  name. `_regional_entry_count` derives the pool's width the same way, so
+  pgw#812 S7's re-price does not go stale. Dispatch needed no change: a
+  collapsed entry is discriminated by its recorded range, and the structural
+  adapter/CFG forks stay separate entries. `regional_shape_strategy` without
+  `regional=True` is a declaration nothing reads, and is refused.
+  Proven off-pod on real `torch.export` + real AOTInductor: 8 per-shape entries
+  become 2, every declared coordinate dispatches onto a collapsed entry, and
+  every block INSTANCE at every SHAPE agrees with the per-shape cell and with
+  eager to 1e-6 while being no FURTHER from eager than the 8-entry cell it
+  replaces — stated as no-degradation rather than as bit-equality on purpose,
+  since a dynamic kernel is different compiled code from a static one and
+  demanding identical bytes would over-specify. Priced on a real pool ledger
+  at the A/B's own entry counts: the 6 entries that stopped existing took 6
+  whole copies of pgw#830's per-entry constant with them. pgw#831's
+  folded-constant refusal still fires under a dynamic dim — asserted, so it
+  cannot silently become unreachable for collapsed entries.
+
+- **pgw#829 (found by its own A/B) — a REGIONAL entry traced from a
+  NON-CONTIGUOUS captured block feed computes a 16 % WRONG answer, silently.**
+  A block's example inputs are CAPTURED from a live forward (pgw#812 S5), never
+  constructed, so whatever memory layout the shell happens to hand the block is
+  what gets traced — and AOTInductor generates against that layout. Measured
+  off-pod, $0, CPU, on a 3-block toy whose shell does diffusers' own
+  `permute(0, 2, 3, 1).reshape(b, h*w, c)` (a non-contiguous view):
+
+  | arm | max abs delta vs eager |
+  |---|---|
+  | traced non-contiguous, served with the pgw#791 realign | 0.1645 |
+  | traced non-contiguous, realign DISABLED | 0.1690 |
+  | traced CONTIGUOUS, served with the realign | 1.5e-08 |
+
+  So it is not the realign — it is the artifact, and no serve-side layout can
+  satisfy it. Nothing refused it either: the ingress contract records shapes and
+  dtypes, never strides, so the call is admitted and the answer is quietly off.
+  The mint now traces every regional entry from a contiguous feed, which makes
+  it agree with `aligned_feeds` (already staging out-of-contract inputs into an
+  owned contiguous buffer) by construction. A no-op for a feed that already
+  arrives contiguous — diffusers passes sdxl's blocks through `proj_in`, a
+  Linear, so the real family is in that case — and eager is untouched.
+
+- **pgw#829 (found by its own A/B) — a cell whose entries cannot be told apart
+  at dispatch is REFUSED at mint instead of serving eager forever.**
+  `EntryDispatch.select` calls two entries admitting one call
+  `entry_ambiguous`, which is a per-REQUEST refusal: the cell arms, reports
+  armed, and serves those coordinates 100 % eager while looking healthy. A
+  regional entry is exported one block deep — the shell has already flattened
+  the latent extents into a token count — so two class rows that are different
+  coordinates upstream can hand the block the IDENTICAL shape. What collides
+  is the token PRODUCT, of which a transposed aspect pair is only the obvious
+  case: sdxl's NINE aspect rows carry just FOUR distinct token counts (15360 =
+  1536x640 / 640x1536; 15808 = 1216x832 / 832x1216; 16128 = 1344x768 /
+  1152x896 / 896x1152 / 768x1344, a quadruple whose members are not each
+  other's transpose since 96*168 == 112*144; and 16384 = 1024x1024, the only
+  unique row). So attempt nine's 72-entry cell could have served exactly ONE
+  of its nine aspect ratios compiled — the other eight were `entry_ambiguous`
+  -> eager, per (CFG arm x adapter arm x block class). The new gate groups
+  entries exactly as the serve path does (target x block class x adapter arm)
+  and compares the EXPORTED placeholder signature — the thing the packed
+  contract is derived from, so it is an exact discriminator that is already
+  available before a single kernel is built. It refuses by name and names the
+  remedy: the collapse, under which one entry over the hull is unique by
+  construction.
+
+- **pgw#833 — the "split cannot boot a hub pod" P0 root-caused: a wheel-omitted
+  endpoint module, and the two gates that let it reach a paid pod.** The first
+  hub-launched 0.88.0 pod crash-looped its compute child untyped (`exit:1`
+  pre-Hello, ×3, `compute_boot_crash_loop`) — reproduced OFF-POD in the real
+  wan-2.2 image: `wan_2_2/finish.py` imports package-root `cozy_finish`, which
+  the wheel's hatch `only-include` never shipped, so `collect_endpoints` dies
+  with `ModuleNotFoundError` at boot. The split executes fine (G=1 and G=2
+  boots proven; with the module present the same image boots past the death
+  point). Three gen-worker fixes: (1) **bake gate parity** —
+  `discover_functions` refuses a walk that imported source-tree-only modules
+  when the project is installed (`SourceOnlyModuleError`; the bake previously
+  passed because it injects `root`/`root/src` into `sys.path`, a weaker
+  predicate than the runtime walker); (2) **child stderr in the post-mortem**
+  — the control parent captures each compute child's stderr (teed byte-for-byte
+  back to the container log), and a child death dial now carries
+  `child_stderr_tail` (and the `compute_boot_crash_loop` give-up names the last
+  lines) — a pre-Hello death is diagnosable from `pod_events` alone, no
+  container-logs API needed; (3) **T_BOOT_FATAL ack** (the pgw#826 follow-on
+  race) — the parent acks after RECORDING a terminal boot verdict and the
+  dying child waits (bounded) for it, so the typed verdict can no longer lose
+  to the reap on a slow host.
+
 ## 0.89.0 (2026-08-01) — the cell self-mint publisher speaks chunked sha256: the v1 (blake3) client is deleted, and the procsplit allowlist stops refusing the publisher's own payload
 - **pgw#807 item 3 — the cell self-mint publisher ships over CHUNKED SHA-256,
   and the seam it rides stops refusing its own payloads.** The first AOT mint
@@ -107,7 +1035,13 @@
 
 ## 0.87.0 (2026-08-01) — the process split is the ONLY execution model (the flag is gone), the control parent keeps the SIGUSR2 forensic contract, and the entry compile's dark time is named and stops being re-paid
 - **pgw#832 — pooled entry children stop re-paying the toolchain hash: 9.8 s ->
-  0.10 s per entry, MEASURED.** `env_seal`'s identity manifest SHA-256s every
+  0.10 s per entry, MEASURED.**
+  *(Corrected by pgw#842: those figures are `seal_libhash_s` — the hash pass
+  alone, off-pod. The span a pod pays, `child_seal_s`, went 8.14 -> **2.76
+  s/entry** (attempt eleven, 199.085 s / 72): a ~3x cut, not ~98x. The
+  remainder is the child's `import torch`, which `establish_config` owns.
+  Quote 2.76 s/entry.)*
+  `env_seal`'s identity manifest SHA-256s every
   toolchain `.so` the image ships (36 files, 3.96 GB); its memo was per
   PROCESS, and the pgw#809 pool's worker is a process that compiles one entry
   and exits — so a 72-entry mint re-paid the pass 72 times, K-wide (~28 % of

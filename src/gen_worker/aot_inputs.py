@@ -38,7 +38,7 @@ from .models.loading import load_from_pretrained
 from .models.memory import place_pipeline
 
 if TYPE_CHECKING:  # pragma: no cover — typing only, no runtime import cycle
-    from .aot_mint import DynamicDim, ExportSpec
+    from .aot_contract import DynamicDim, ExportSpec
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +174,7 @@ def latent_dims(
     Families with a class declaration never call this — their bounds derive
     from the class rows (``aot_declaration.derived_dynamic``).
     """
-    from .aot_mint import DynamicDim
+    from .aot_contract import DynamicDim
 
     if not spec.shapes:
         raise InputContractError(

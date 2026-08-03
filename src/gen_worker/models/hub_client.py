@@ -34,30 +34,24 @@ class WorkerResolvedChunk:
 class WorkerResolvedRepoFile:
     path: str
     size_bytes: int
-    #: LEGACY MIRROR (manifest v1): bare blake3 hex. EMPTY on every v2 entry.
-    #: Never read this to decide integrity — read ``cas_ref()``, which carries
-    #: the algorithm. Guarding on this field's truthiness is exactly how a v2
-    #: snapshot passes a check that never ran (th#1303).
-    blake3: str
     url: Optional[str]
     transfer_grant: Optional[dict[str, Any]] = None
-    #: Algorithm-tagged whole-file digest ("sha256:<hex>"). v2 populates this;
-    #: v1 leaves it empty and the blake3 mirror carries the ref.
+    #: Algorithm-tagged whole-file digest ("sha256:<hex>"). Every resolved
+    #: entry carries one; an entry that does not is refused, not skipped.
     digest: str = ""
     #: Present only when the file is stored as chunks (size > chunk_size).
     chunks: tuple["WorkerResolvedChunk", ...] = ()
     chunk_size_bytes: int = 0
 
     def cas_ref(self) -> str:
-        """The algorithm-tagged digest, whichever manifest version produced it.
+        """The algorithm-tagged digest of this entry.
 
-        THE one place the v1/v2 dual-read is expressed for a resolved entry.
         Raises rather than returning a bare or empty string, because every
         caller of this is an integrity check and an unreadable digest must
         fail closed, never degrade into "no check".
         """
         return resolved_entry_digest(
-            {"digest": self.digest, "blake3": self.blake3},
+            {"digest": self.digest},
             what=f"resolved file {self.path!r}",
         )
 
@@ -65,26 +59,28 @@ class WorkerResolvedRepoFile:
 def resolved_entry_digest(
     ent: Mapping[str, Any], *, what: str = "manifest entry"
 ) -> str:
-    """The v1/v2 dual-read for one RAW resolve-manifest entry.
+    """The algorithm-tagged digest of one RAW resolve-manifest entry.
 
     Callers that never build a ``WorkerResolvedRepoFile`` — anything reading
     ``/resolve`` JSON directly, e.g. AOT cell discovery — must go through here
-    rather than reaching for ``ent["blake3"]``, which is absent on every v2
-    entry. Raises on an absent or untagged digest: an integrity check with no
-    digest is a REFUSAL, never a skip (th#1303).
+    rather than reaching for a field name. Raises on an absent or untagged
+    digest: an integrity check with no digest is a REFUSAL, never a skip.
+
+    th#1303 S1: the legacy ``blake3`` mirror is no longer read. Before the
+    repoint an entry could carry bare blake3 hex and nothing else; after it,
+    an entry with no ``digest`` is a stale pointer, and the only safe answer
+    is to refuse it. Reinstating the mirror arm here re-opens the vacuous
+    guard this whole program exists to close.
     """
     d = str(ent.get("digest") or "").strip().lower()
-    if d:
-        if ":" not in d:
-            raise ValueError(
-                f"{what}: digest {d[:16]}… is untagged; "
-                "v2 entries must carry an algorithm prefix"
-            )
-        return d
-    b3 = str(ent.get("blake3") or "").strip().lower()
-    if b3:
-        return b3 if ":" in b3 else f"blake3:{b3}"
-    raise ValueError(f"{what} carries no digest")
+    if not d:
+        raise ValueError(f"{what} carries no digest")
+    if ":" not in d:
+        raise ValueError(
+            f"{what}: digest {d[:16]}… is untagged; "
+            "every entry must carry an algorithm prefix"
+        )
+    return d
 
 
 @dataclass(frozen=True)
@@ -263,16 +259,11 @@ def resolve_repo(
         raise HubResolveError(f"tensorhub resolve returned invalid JSON: {e}") from e
 
     digest = str(body.get("snapshot_digest") or "").strip()
-    if digest.lower().startswith("blake3:"):
-        digest = digest[7:]
     files: List[WorkerResolvedRepoFile] = []
     for ent in body.get("files") or []:
         if not isinstance(ent, dict):
             continue
         path = str(ent.get("path") or "").strip()
-        b3 = str(ent.get("blake3") or "").strip().lower()
-        if b3.startswith("blake3:"):
-            b3 = b3[7:]
         tagged = str(ent.get("digest") or "").strip().lower()
         u = str(ent.get("url") or "").strip() or None
         chunks = parse_chunk_list(
@@ -281,13 +272,13 @@ def resolve_repo(
         # A chunked entry has NO whole-file url — its bytes only exist as
         # chunks. Requiring `url` here is what would classify every v2
         # snapshot as unresolvable.
-        if not path or (not tagged and not b3) or (not u and not chunks):
+        if not path or not tagged or (not u and not chunks):
             raise HubResolveError(
                 f"tensorhub resolve for {ref.canonical()}: manifest entry "
                 f"missing path/digest/url ({ent.get('path')!r})"
             )
         files.append(WorkerResolvedRepoFile(
-            path=path, size_bytes=int(ent.get("size_bytes") or 0), blake3=b3, url=u,
+            path=path, size_bytes=int(ent.get("size_bytes") or 0), url=u,
             digest=tagged, chunks=chunks,
             chunk_size_bytes=int(ent.get("chunk_size_bytes") or 0),
         ))

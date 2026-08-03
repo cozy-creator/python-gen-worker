@@ -1,6 +1,6 @@
-"""Real blake3-addressed HTTP blob host — stands in for tensorhub's presigned
+"""Real sha256-addressed HTTP blob host — stands in for tensorhub's presigned
 GET URLs on ``pb.SnapshotFile.url``. No mocking of the download path itself:
-the worker does a real HTTP GET and a real blake3 verify against this server.
+the worker does a real HTTP GET and a real digest verify against this server.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any, List, Optional
 
-from blake3 import blake3
+import hashlib
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
@@ -51,7 +51,7 @@ class BlobHost:
         url = self.put(name, payload)
         return pb.SnapshotFile(
             path=path_in_snapshot, size_bytes=len(payload),
-            blake3=blake3(payload).hexdigest(), url=url,
+            digest="sha256:" + hashlib.sha256(payload).hexdigest(), url=url,
         )
 
     def snapshot(self, digest: str, files: List[pb.SnapshotFile]) -> pb.Snapshot:

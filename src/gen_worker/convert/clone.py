@@ -38,11 +38,10 @@ from .ingest import (
 from .writer import (
     CAST_NORMALIZE_DTYPES as _CAST_NORMALIZE_DTYPES,
     fp8_default_components,
-    MAX_SAFETENSORS_SHARD_BYTES,
     apply_objective_scheduler_config,
     copy_non_weight_files,
+    merge_safetensors_by_offset,
     normalize_variant_filenames as _normalize_variant_filenames,
-    shard_safetensors_by_offset,
     snapshot_weight_groups,
 )
 from .convert import run_inline_conversion
@@ -54,6 +53,9 @@ from gen_worker.models.refs import flavor_token
 logger = logging.getLogger(__name__)
 
 _PUBLIC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
+# An HF shard member; `group` is dir + prefix, i.e. the set it belongs to.
+_SHARD_MEMBER_RE = re.compile(
+    r"^(?P<group>.*?[^/]+)-\d{5}-of-\d{5}\.safetensors$")
 _PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 
 _KNOWN_DTYPES = {
@@ -185,110 +187,83 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffu
 # Flavor tree construction
 # ---------------------------------------------------------------------------
 
-def _reshard_indexed_safetensors(index_path: Path, max_shard_bytes: int) -> None:
-    """Reshard one existing HF shard group without invalidating its index."""
+def _deshard_indexed_safetensors(index_path: Path) -> Path:
+    """Collapse ONE HF shard set into a single ``<prefix>.safetensors``.
+
+    th#1362: repos WE pull are normalised to one file per component on the way
+    in, including pure pass-through mirrors, so the corpus we own has one shape.
+    Chunked CAS already gives resumable, parallel, partial-failure-tolerant
+    transfer BELOW the file, so the shard set buys nothing and costs an index
+    that can disagree with the bytes it names — the bug that made klein-4b
+    publish an unloadable text_encoder.
+
+    Provenance is unaffected: upstream per-file digests are recorded by the
+    provenance layer regardless of the layout we store.
+    """
     payload = json.loads(index_path.read_text(encoding="utf-8"))
     weight_map = payload.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError(f"invalid safetensors index: {index_path}")
-    member_names = sorted({str(name) for name in weight_map.values()})
-    if any(Path(name).name != name for name in member_names):
-        raise ValueError(f"safetensors index member must be a basename: {index_path}")
+    member_names: list[str] = []
+    for name in weight_map.values():
+        name = str(name)
+        if Path(name).name != name:
+            raise ValueError(
+                f"safetensors index member must be a basename: {index_path}")
+        if name not in member_names:
+            member_names.append(name)
     members = [index_path.parent / name for name in member_names]
-    if not all(member.is_file() for member in members):
+    missing = [m for m in members if not m.is_file()]
+    if missing:
         raise ValueError(f"safetensors index references a missing shard: {index_path}")
-    if not any(member.stat().st_size > max_shard_bytes for member in members):
-        return
 
     prefix = index_path.name.removesuffix(".safetensors.index.json")
-    stage = index_path.parent / f".__reshard__{prefix}"
-    shutil.rmtree(stage, ignore_errors=True)
-    stage.mkdir()
-    pieces: list[tuple[Path, set[str]]] = []
-    try:
-        for member_number, (member_name, member) in enumerate(
-            zip(member_names, members), start=1,
-        ):
-            expected = {str(tensor) for tensor, shard in weight_map.items()
-                        if str(shard) == member_name}
-            if member.stat().st_size <= max_shard_bytes:
-                linked = stage / f"part-{member_number:05d}.safetensors"
-                os.link(member, linked)
-                pieces.append((linked, expected))
-                continue
+    merged = index_path.parent / f"{prefix}.safetensors"
+    if merged.exists() and merged not in members:
+        raise ValueError(f"deshard destination already exists: {merged}")
+    merge_safetensors_by_offset(members, merged)
 
-            shard_paths, nested_index, _ = shard_safetensors_by_offset(
-                member,
-                stage / f"part-{member_number:05d}",
-                max_shard_bytes=max_shard_bytes,
-                shard_prefix=f"part-{member_number:05d}",
-            )
-            nested_map = json.loads(nested_index.read_text(encoding="utf-8")).get(
-                "weight_map")
-            if not isinstance(nested_map, dict) or set(map(str, nested_map)) != expected:
-                raise ValueError(f"reshard tensor map disagrees with {index_path}")
-            for shard_path in shard_paths:
-                tensors = {str(tensor) for tensor, shard in nested_map.items()
-                           if str(shard) == shard_path.name}
-                pieces.append((shard_path, tensors))
+    # The merged header must name exactly the tensors the index claimed — the
+    # index-vs-bytes disagreement this whole change exists to kill is caught
+    # here, at ingest, instead of at load time on a GPU pod.
+    with open(merged, "rb") as f:
+        header_len = int.from_bytes(f.read(8), "little")
+        header = json.loads(f.read(header_len).decode("utf-8"))
+    got = {k for k in header if k != "__metadata__"}
+    want = {str(k) for k in weight_map}
+    if got != want:
+        merged.unlink(missing_ok=True)
+        raise ValueError(
+            f"deshard of {index_path} produced {len(got)} tensors, index names "
+            f"{len(want)} (missing={sorted(want - got)[:5]}, "
+            f"extra={sorted(got - want)[:5]})")
 
-        new_weight_map: dict[str, str] = {}
-        final_pieces: list[tuple[Path, str]] = []
-        total = len(pieces)
-        for number, (piece, tensors) in enumerate(pieces, start=1):
-            name = f"{prefix}-{number:05d}-of-{total:05d}.safetensors"
-            destination = index_path.parent / name
-            if destination.exists() and destination not in members:
-                raise ValueError(f"reshard destination already exists: {destination}")
-            staged = stage / name
-            piece.rename(staged)
-            final_pieces.append((staged, name))
-            for tensor in tensors:
-                new_weight_map[tensor] = name
-        if set(new_weight_map) != set(map(str, weight_map)):
-            raise ValueError(f"reshard lost tensors from {index_path}")
-
-        new_payload = dict(payload)
-        new_payload["weight_map"] = new_weight_map
-        staged_index = stage / index_path.name
-        staged_index.write_text(
-            json.dumps(new_payload, separators=(",", ":"), sort_keys=True),
-            encoding="utf-8",
-        )
-        for member in members:
+    for member in members:
+        if member != merged:
             member.unlink()
-        for staged, name in final_pieces:
-            staged.replace(index_path.parent / name)
-        staged_index.replace(index_path)
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
+    index_path.unlink()
+    logger.info("deshard_mirror index=%s shards=%d -> %s",
+                index_path.name, len(members), merged.name)
+    return merged
 
 
-def _stage_oversize_safetensors(
-    tree: Path, *, max_shard_bytes: int = MAX_SAFETENSORS_SHARD_BYTES,
-) -> None:
-    """Reshard oversized safetensors by logical HF weight group."""
-    indexed_members: set[Path] = set()
-    for index_path in sorted(tree.rglob("*.safetensors.index.json")):
-        _reshard_indexed_safetensors(index_path, max_shard_bytes)
-        payload = json.loads(index_path.read_text(encoding="utf-8"))
-        weight_map = payload.get("weight_map")
-        if isinstance(weight_map, dict):
-            indexed_members.update(
-                index_path.parent / str(name) for name in weight_map.values())
-    for f in sorted(tree.rglob("*.safetensors")):
-        if f in indexed_members or not f.is_file() or f.stat().st_size <= max_shard_bytes:
-            continue
-        stem = f.stem
-        stage = f.parent / f".__shard__{stem}"
-        shard_paths, index_path, _ = shard_safetensors_by_offset(
-            f, stage, max_shard_bytes=max_shard_bytes, shard_prefix=stem)
-        if len(shard_paths) > 1:
-            f.unlink()
-            for sp in shard_paths:
-                sp.rename(f.parent / sp.name)
-            index_path.rename(f.parent / index_path.name)
-        shutil.rmtree(stage, ignore_errors=True)
+def tree_has_sharded_safetensors(tree: Path) -> bool:
+    """Does this tree carry an HF shard set that mirror ingest must collapse?"""
+    return any(Path(tree).rglob("*.safetensors.index.json"))
+
+
+def deshard_mirror_tree(tree: Path) -> int:
+    """De-shard every HF shard set in an ingested mirror tree, in place.
+
+    One component at a time, unlinking each set's members as soon as its merged
+    file is verified, so the peak extra disk is the LARGEST component and not
+    the whole tree.
+    """
+    n = 0
+    for index_path in sorted(Path(tree).rglob("*.safetensors.index.json")):
+        _deshard_indexed_safetensors(index_path)
+        n += 1
+    return n
 
 
 def build_flavor_tree(
@@ -339,7 +314,7 @@ def build_flavor_tree(
                 'dtype="source" needs a detectable on-disk dtype; request an explicit dtype')
         attrs["dtype"] = source_dtype
         copy_non_weight_files(source_dir, out_dir, skip_components=set())
-        _stage_oversize_safetensors(out_dir)
+        deshard_mirror_tree(out_dir)
         if source_dtype in _CAST_NORMALIZE_DTYPES:
             _normalize_variant_filenames(out_dir)
         apply_objective_scheduler_config(out_dir, objective, distilled)
@@ -396,7 +371,7 @@ def build_flavor_tree(
     needs_dtype_pass = spec.dtype != source_dtype or work_root is not source_dir
     if spec.dtype == source_dtype and work_root is source_dir:
         copy_non_weight_files(source_dir, out_dir, skip_components=set())
-        _stage_oversize_safetensors(out_dir)
+        deshard_mirror_tree(out_dir)
         if spec.dtype in _CAST_NORMALIZE_DTYPES:
             _normalize_variant_filenames(out_dir)
         apply_objective_scheduler_config(out_dir, objective, distilled)
@@ -443,7 +418,7 @@ def build_flavor_tree(
                 break
         result = run_inline_conversion(
             source_path=entry, out_dir=dest, target_dtype=spec.dtype,
-            target_file_type="safetensors", shard_prefix=stem or "model",
+            target_file_type="safetensors", output_stem=stem or "model",
             source_repo_dir=comp_dir, fp8_block_scope=fp8_block_scope,
         )
         attrs.update({k: v for k, v in result.attributes.items() if k not in attrs})
@@ -452,7 +427,7 @@ def build_flavor_tree(
         raise ValueError("no safetensors weights found to convert")
 
     copy_non_weight_files(work_root, out_dir, skip_components=converted)
-    _stage_oversize_safetensors(out_dir)
+    deshard_mirror_tree(out_dir)
     if spec.dtype in _CAST_NORMALIZE_DTYPES:
         _normalize_variant_filenames(out_dir)
     apply_objective_scheduler_config(out_dir, objective, distilled)
@@ -585,11 +560,15 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             and (spec.dtype == "source" or (source_dtype and spec.dtype == source_dtype))
         ]
         materialized = [spec for spec in specs if spec not in passthrough]
-        resharded_bytes = len(passthrough) * sum(
-            size for path, size in files
-            if path.lower().endswith(".safetensors")
-            and size > MAX_SAFETENSORS_SHARD_BYTES
-        )
+        # th#1362: mirror ingest de-shards, so the transient cost is the
+        # merged copy of the LARGEST shard set — its members are unlinked as
+        # soon as it verifies, one component at a time.
+        shard_groups: dict[str, int] = {}
+        for path, size in files:
+            m = _SHARD_MEMBER_RE.match(path)
+            if m:
+                shard_groups[m.group("group")] = shard_groups.get(m.group("group"), 0) + size
+        deshard_bytes = len(passthrough) * max(shard_groups.values(), default=0)
         # Untagged safetensors may still be a packed 4-bit tree. Mirrors do
         # not use this estimate; explicit widening conversions do.
         source_bits = _DTYPE_STORAGE_BITS.get(source_dtype, 4)
@@ -619,15 +598,15 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
         )
         required = (
             source_bytes + sum(output_sizes) + gguf_intermediate
-            + resharded_bytes + repack + _DISK_MARGIN_BYTES
+            + deshard_bytes + repack + _DISK_MARGIN_BYTES
         )
         parts = []
         if passthrough:
             parts.append("hardlink passthrough")
         if materialized:
             parts.append(f"{len(materialized)} materialized output tree(s)")
-        if resharded_bytes:
-            parts.append("oversize-safetensors reshard output")
+        if deshard_bytes:
+            parts.append("one merged de-shard output")
         if gguf_intermediate:
             parts.append("one intermediate F16 GGUF tree")
         if repack:
@@ -885,30 +864,30 @@ def run_clone(
                         tree = source.dir
                         attrs = dict(source.attrs)
                         flavor_label = source_dtype or spec.dtype
-                        # gw#593 companion: this passthrough bypasses
-                        # build_flavor_tree entirely (every one of ITS
-                        # branches ends in _stage_oversize_safetensors), so a
-                        # source shipping one oversized MONOLITHIC
-                        # safetensors file with no HF-convention shards (no
-                        # sharding at all to reshard around — e.g. LTX-2.3's
-                        # 46GB ltx-2.3-22b-dev.safetensors) was published raw
-                        # and tensorhub's commit API rejected it
-                        # (request_too_large: file exceeds
-                        # max_bytes_per_file). Found live: e2e#185
-                        # ltx-firstlight run 8. Hardlink into a scratch tree
-                        # and reshard only when something is actually
-                        # oversize — the common case (already-sharded
-                        # sources) stays the zero-cost passthrough.
-                        if spec.file_type == "safetensors" and any(
-                            f.is_file() and f.stat().st_size > MAX_SAFETENSORS_SHARD_BYTES
-                            for f in Path(tree).rglob("*.safetensors")
-                        ):
-                            reshard_dir = workdir / f"flavor-{spec.label}.__reshard__"
-                            shutil.rmtree(reshard_dir, ignore_errors=True)
-                            reshard_dir.mkdir(parents=True, exist_ok=True)
-                            copy_non_weight_files(Path(tree), reshard_dir, skip_components=set())
-                            _stage_oversize_safetensors(reshard_dir)
-                            tree = reshard_dir
+                        # th#1362: this passthrough bypasses build_flavor_tree
+                        # entirely (every one of ITS branches de-shards), so
+                        # de-shard it here too — the ruling is EXPLICIT that
+                        # pure pass-through mirrors are normalised as well, so
+                        # that the corpus we own has ONE shape. Hardlink into a
+                        # scratch tree first; only the sharded components are
+                        # actually rewritten, everything else stays a link.
+                        #
+                        # An oversized MONOLITHIC file needs no handling at all
+                        # any more: the old code resharded it because
+                        # tensorhub's commit API rejected it
+                        # (request_too_large, e2e#185 ltx-firstlight run 8 with
+                        # LTX-2.3's 46 GB single file). The checkpoint grant is
+                        # now sized for exactly this — 64 GiB per file, "single
+                        # files up to full unsharded checkpoints" — and chunked
+                        # CAS carries the transfer.
+                        if spec.file_type == "safetensors" \
+                                and tree_has_sharded_safetensors(Path(tree)):
+                            deshard_dir = workdir / f"flavor-{spec.label}.__deshard__"
+                            shutil.rmtree(deshard_dir, ignore_errors=True)
+                            deshard_dir.mkdir(parents=True, exist_ok=True)
+                            copy_non_weight_files(Path(tree), deshard_dir, skip_components=set())
+                            deshard_mirror_tree(deshard_dir)
+                            tree = deshard_dir
                     elif i == 0 and spec.file_type == "safetensors" \
                             and (strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
                                  or no_repackager):

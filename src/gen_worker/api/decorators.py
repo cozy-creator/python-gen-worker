@@ -55,6 +55,41 @@ T = TypeVar("T")
 SlotLike = Union[Binding, Slot]
 
 KINDS = ("inference", "training", "dataset", "conversion", "eval")
+
+#: How BOUNDED is the set of model weights an endpoint can load? (Paul's
+#: ruling, 2026-08-02: *"a serving inference endpoint uses the same set of
+#: weights every time and can benefit from an NFS drive a lot; a conversion
+#: endpoint downloads different sets of weights per request, so an NFS drive
+#: provides no value."*)
+#:
+#: This is a statement about the endpoint's RELATIONSHIP TO ITS WEIGHTS, not a
+#: yes/no about one storage product — deliberately, because the same fact
+#: decides more than caching. A cached volume lives in EXACTLY ONE datacenter,
+#: so attaching one to an endpoint that cannot use it does not merely waste
+#: disk: it collapses that endpoint's placement to a single datacenter.
+#: Measured cost of getting this wrong: a wan conversion failed SIXTEEN times
+#: against one datacenter while three others had capacity.
+#:
+#: * ``bound``       — every weight this endpoint can load is named by its
+#:                     DEPLOY BINDINGS. Enumerable, small, reused across
+#:                     requests. A request may still choose among them
+#:                     (``Slot.selected_by="model"``) — choosing within a
+#:                     bound catalog is still bound.
+#: * ``per_request`` — the weights are named BY THE REQUEST, from outside the
+#:                     bindings (a HuggingFace repo id, a Civitai ref). The
+#:                     working set is the open world: a cache cannot hold it
+#:                     and pinning to one datacenter buys nothing.
+#: * ``none``        — loads no model weights at all (dataset builders,
+#:                     CPU-only utilities). Same placement consequence as
+#:                     ``per_request`` and a DIFFERENT fact — worth its own
+#:                     value so nobody "fixes" it by adding a binding.
+#:
+#: UNSET is not a fourth value: it means the author has not said, and a
+#: consumer must treat it as the conservative branch (no volume) WITHOUT
+#: recording it as a declared ``per_request``. Attaching a volume nobody can
+#: use costs capacity; withholding one costs cold-boot seconds. Those are not
+#: symmetric, which is what makes "no volume" the safe default.
+WEIGHT_SETS = ("bound", "per_request", "none")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
@@ -169,14 +204,28 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     ``DeviceRequest`` — pgw#648) declares how many devices one instance
     needs; endpoint code NEVER picks devices.
 
-    ``max_gpu_count`` + ``parallel`` (pgw#748/th#1285) are the author
-    ENVELOPE — the SDK half of the hub builder's ``extractStaffingEnvelope``
-    contract. ``gpu_count`` is the floor (devices ONE materialization
-    requires); ``max_gpu_count`` is the ceiling the hub MAY staff up to;
-    ``parallel`` names the platform mechanisms the function survives at
-    degree > 1 (``"sequence"`` is the only one with a worker runtime). The
-    author never writes a degree, a tier, a packing or a device id — those
-    are the hub's decisions. Both are elided from the manifest when they
+    ``max_gpu_count`` + ``max_gpus_per_execution_group`` + ``parallel``
+    (pgw#748/th#1285/th#1426) are the author ENVELOPE — the SDK half of the
+    hub builder's ``extractStaffingEnvelope`` contract. ``gpu_count`` is the
+    floor (devices ONE materialization requires); ``max_gpu_count`` is how
+    many GPUs the POD may hold; ``max_gpus_per_execution_group`` is how many
+    of them ONE REQUEST may be spread across; ``parallel`` names the platform
+    mechanisms the function survives at degree > 1 (``"sequence"`` is the
+    only one with a worker runtime). The author never writes a degree, a
+    tier, a packing or a device id — those are the hub's decisions.
+
+    The last two are INDEPENDENT axes, and both exist because the hub used to
+    derive each from the other and so could only ever express ONE execution
+    group (th#1426)::
+
+        max_gpu_count=4                                  -> 1x4: one request across 4 cards
+        max_gpu_count=4, max_gpus_per_execution_group=2  -> 2x2: two slots, each request across 2
+
+    Omitting ``max_gpus_per_execution_group`` means "no opinion on that axis"
+    and lets the hub use the whole ceiling as one group — what every release
+    written before this field already gets. It is NOT defaulted to a legal
+    value: the declared domain is 2 or more, and 0/1 are refused here and at
+    ingest, so "declared nothing" can never be confused with a declaration. Both are elided from the manifest when they
     carry nothing (``omit_defaults``), so every existing release's payload
     is byte-identical. Validation mirrors the builder's ingest refusals so a
     contradiction costs a declaration-time ValueError instead of a build.
@@ -191,6 +240,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     ram_gb_hint: float | None = None
     compute_capability: float | str | None = None
     max_gpu_count: int | None = None
+    max_gpus_per_execution_group: int | None = None
     parallel: tuple[str, ...] = ()
 
     def manifest_dict(self) -> dict:
@@ -261,6 +311,26 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
                     f"max_gpu_count {m} is below gpu_count {n_gpu}")
             force(self, "max_gpu_count", m)
             force(self, "gpu", True)
+        # th#1426 — the degree axis. Legal domain is [2, max_gpu_count];
+        # absence means "no opinion", never a defaulted legal value.
+        if self.max_gpus_per_execution_group is not None:
+            d = int(self.max_gpus_per_execution_group)
+            if d != self.max_gpus_per_execution_group:
+                raise ValueError(
+                    f"max_gpus_per_execution_group must be a whole number of "
+                    f"devices, got {self.max_gpus_per_execution_group}")
+            if d < 2:
+                raise ValueError(
+                    f"max_gpus_per_execution_group {d} declares a sharding "
+                    f"width that does not shard; omit the field to let the hub "
+                    f"use the whole max_gpu_count as one group")
+            if self.max_gpu_count is None or d > self.max_gpu_count:
+                raise ValueError(
+                    f"max_gpus_per_execution_group {d} exceeds max_gpu_count "
+                    f"{self.max_gpu_count} — one request cannot span more GPUs "
+                    f"than the pod may hold")
+            force(self, "max_gpus_per_execution_group", d)
+            force(self, "gpu", True)
         if self.parallel:
             mechanisms = tuple(
                 str(x).strip().lower() for x in self.parallel if str(x).strip()
@@ -279,6 +349,16 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
                     f"is only reachable with device headroom")
             force(self, "parallel", mechanisms)
             force(self, "gpu", True)
+        elif self.max_gpus_per_execution_group is not None:
+            # A group width only bounds a MECHANISM; with none declared the
+            # degree is always 1 and the field is inert. The hub's ingest
+            # refuses this too — mirror it here so it costs a ValueError at
+            # declaration rather than a build.
+            raise ValueError(
+                f"max_gpus_per_execution_group "
+                f"{self.max_gpus_per_execution_group} declared without a "
+                f"parallel mechanism — nothing shards a group, so the "
+                f"declaration is inert")
 
 
 class NoWarmup(msgspec.Struct, frozen=True):
@@ -643,6 +723,31 @@ def _validate_config_decl(owner: str, config: Any) -> Tuple[ConfigParam, ...]:
     return tuple(out)
 
 
+def _validate_weight_set(owner: str, value: Optional[str]) -> Optional[str]:
+    """Validate ``weight_set=`` against :data:`WEIGHT_SETS`.
+
+    ``None`` stays ``None`` — undeclared is its own state, never silently the
+    conservative value, because a consumer must be able to tell "the author
+    said per_request" from "nobody said anything". The first is a fact; the
+    second is a gap, and a gap that reads as a fact is how a guard quietly
+    stops guarding.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text not in WEIGHT_SETS:
+        raise ValueError(
+            f"@endpoint {owner!r}: weight_set= must be one of "
+            f"{list(WEIGHT_SETS)!r}, got {value!r}. It declares how BOUNDED "
+            f"this endpoint's weight set is — 'bound' when every weight is "
+            f"named by its deploy bindings (choosing among them per request "
+            f"is still bound), 'per_request' when the REQUEST names weights "
+            f"from outside the bindings, 'none' when it loads no model "
+            f"weights at all. Omit it if you do not know; do not guess."
+        )
+    return text
+
+
 def _validate_env_decl(owner: str, env: Any) -> Tuple[str, ...]:
     """th#1087 D2: code declares the env names it reads; the hub validates
     config-layer env writes against this declaration (undeclared-write 422)."""
@@ -813,7 +918,7 @@ class Compile(msgspec.Struct, frozen=True):
     # about to arm is run against the eager forward it replaces and judged on
     # the shared verdict ladder; below `numerics_floor` it REFUSES to arm.
     # None = the SDK default (0.98 / 0.999), whose derivation is pgw#814's
-    # measured band — see `aot_regional.NUMERICS_FLOOR`. Declared per family
+    # measured band — see `numerics_ladder.NUMERICS_FLOOR`. Declared per family
     # because bf16 attention reassociation makes exact equality the wrong bar
     # and the right bar is not the same for a 25-block fp8 DiT and a
     # conv-bearing UNet.
@@ -853,27 +958,13 @@ class Compile(msgspec.Struct, frozen=True):
         if len({d.dim for d in dyn}) != len(dyn):
             raise ValueError("Compile.dynamic repeats a dim")
         force(self, "dynamic", dyn)
-        # pgw#817/D4: `regional=True` + `dynamic=(...)` is ADMITTED.
-        #
-        # It used to be refused here, on the reading that "regional is a
-        # dynamo partitioning strategy that never applies the declared marks,
-        # so the declaration would be inert while the contract digest claimed
-        # the dynamism" — and that regional was retiring in favour of
-        # whole-graph export (LTX-AOT-DESIGN §3.2).
-        #
-        # pgw#812 measured both halves of that away. Regional has an EXPORT
-        # counterpart: a block is exported with `dynamic_shapes` exactly like
-        # a whole graph, and the symbolic inner axis was measured FREE on a
-        # conv-free region (+0.2% bf16 / 0.0% w8a8, against pgw#730's +7.2%
-        # for the same axis on sdxl's conv lane). And regional is not
-        # retiring: it is 14.2x the whole-graph mint on the real sdxl w8a8
-        # cell with serve parity at +0.24%.
-        #
-        # The old refusal's CONTENT survives as a lane-side decline: the
-        # DYNAMO regional branch still calls `compile_repeated_blocks(
-        # dynamic=None)` and still cannot honour the marks, so it declines by
-        # name (`compile_cache._regional_dynamic_decline`) instead of arming
-        # a graph that does not implement the contract its key asserts. The
+        # `regional=True` + `dynamic=(...)` is ADMITTED at declaration.
+        # `regional` is the dynamo/JIT per-block knob (ie#381) — the AOT
+        # export lane ignores it entirely since pgw#846 retired regional
+        # cells. The dynamo regional branch calls `compile_repeated_blocks(
+        # dynamic=None)` and cannot honour the marks, so it declines by name
+        # (`compile_cache._regional_dynamic_decline`) instead of arming a
+        # graph that does not implement the contract its key asserts. The
         # declaration is legal; the lane that cannot serve it says so.
         for name, typ in (("dims", Dim), ("forks", Fork),
                           ("classes", GraphClass), ("inputs", Input),
@@ -972,6 +1063,11 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # child calls (ctx.call_endpoint / ctx.workflow_checkpoint). The hub
     # mints the invoke_child credential ONLY for declaring functions.
     child_calls: bool = False
+    # Paul 2026-08-02: how bounded is this endpoint's weight set? One of
+    # WEIGHT_SETS, or None = the author has not said. See WEIGHT_SETS for why
+    # this is a KIND and not a `use_nfs: bool`, and why unset must not read as
+    # a declared value.
+    weight_set: Optional[str] = None
     # pgw#647 concurrency contract: handlers on ONE live instance run
     # SINGLE-FLIGHT by default (one binding set = one materialized graph
     # with mutable buffers — e.g. a resident LoRA branch; two concurrent
@@ -1423,6 +1519,7 @@ def _decorate_class(
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
+    weight_set: Optional[str] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -1449,6 +1546,7 @@ def _decorate_class(
         ),
         config=_validate_config_decl(cls.__name__, config),
         env=_validate_env_decl(cls.__name__, env),
+        weight_set=_validate_weight_set(cls.__name__, weight_set),
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -1479,6 +1577,7 @@ def _decorate_function(
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
+    weight_set: Optional[str] = None,
 ) -> Callable[..., Any]:
     if reentrant:
         raise ValueError(
@@ -1525,6 +1624,7 @@ def _decorate_function(
         runtime_formula={"": formulas["*"]} if "*" in formulas else {},
         config=_validate_config_decl(fn.__name__, config),
         env=_validate_env_decl(fn.__name__, env),
+        weight_set=_validate_weight_set(fn.__name__, weight_set),
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -1551,6 +1651,7 @@ def endpoint(
     handles: Optional[Any] = ...,
     config: Optional[Sequence[ConfigParam]] = ...,
     env: Optional[Sequence[str]] = ...,
+    weight_set: Optional[str] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -1571,6 +1672,7 @@ def endpoint(
     handles: Optional[Any] = None,
     config: Optional[Sequence[ConfigParam]] = None,
     env: Optional[Sequence[str]] = None,
+    weight_set: Optional[str] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -1636,6 +1738,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
+                weight_set=weight_set,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
@@ -1645,6 +1748,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
+                weight_set=weight_set,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"

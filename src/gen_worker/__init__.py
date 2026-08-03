@@ -32,6 +32,7 @@ from .api.export_contract import (
     Fork,
     GraphClass,
     Input,
+    import_export_declaration,
     register_export_declaration,
 )
 from .api.formula import RuntimeFormula
@@ -100,6 +101,7 @@ __all__ = [
     "Input",
     "Arg",
     "register_export_declaration",
+    "import_export_declaration",
     "ConfigParam",
     "NoWarmup",
     "arm_compile",

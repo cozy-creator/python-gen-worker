@@ -36,6 +36,11 @@ T_DISCONNECTED = 6   # empty
 T_FLUSH_ACK = 8      # msgpack {"flushed": bool}
 T_ACTION_RESP = 9    # msgpack {"id": int, "ok": bool, "status": int,
                      #          "body": str, "error": str}
+# pgw#833 (pgw#826 follow-on): written by the parent as soon as it has
+# RECORDED a T_BOOT_FATAL verdict. The dying child waits (bounded) for this
+# before exiting, so the parent's respawn decision can never race the frame
+# still sitting in the socket buffer.
+T_BOOT_FATAL_ACK = 10  # msgpack {}
 
 # child -> parent
 T_HELLO = 20         # pb.Hello bytes

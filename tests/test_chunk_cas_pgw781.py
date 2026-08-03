@@ -167,10 +167,11 @@ def test_chunk_arithmetic_matches_the_hub():
 def test_parse_cas_ref_is_prefix_dispatched_and_strict():
     assert parse_cas_ref("sha256:" + "a" * 64) == ("sha256", "a" * 64)
     assert parse_cas_ref("blake3:" + "b" * 64) == ("blake3", "b" * 64)
-    # Bare hex is LEGACY blake3, matching the hub's read-path rule.
-    assert parse_cas_ref("c" * 64) == ("blake3", "c" * 64)
-    for bad in ["", "sha256:" + "a" * 32, "md5:" + "a" * 64, "blake3:sha256:" + "a" * 64,
-                "sha256:" + "z" * 64]:
+    # pgw#871: an UNTAGGED ref is REFUSED, matching the hub's read-path rule
+    # (th#1357). A 64-char hex cannot tell blake3 from sha256 — both digests are
+    # 32 bytes — so inferring one addresses the wrong namespace silently.
+    for bad in ["", "c" * 64, "sha256:" + "a" * 32, "md5:" + "a" * 64,
+                "blake3:sha256:" + "a" * 64, "sha256:" + "z" * 64]:
         with pytest.raises(ValueError):
             parse_cas_ref(bad)
 
@@ -408,19 +409,16 @@ def test_shape_lies_are_refused_before_any_byte_moves(tmp_path):
 def test_volume_check_is_prefix_dispatched_and_never_silently_skips(tmp_path):
     """The regression this exists for: reading `blake3` FIRST yields nothing on
     a v2 entry, and the old call site read that as 'nothing to check' — a clean
-    verdict over an unhashed tree."""
+    verdict over an unhashed tree. The DENOMINATOR is the assertion: a verifier
+    that examines nothing looks exactly like one that passes."""
     a = tmp_path / "a.safetensors"
     b = tmp_path / "b.safetensors"
     a.write_bytes(make_file(5000, seed=1))
     b.write_bytes(make_file(3000, seed=2))
 
-    import blake3 as _b3mod
-
-    b3 = _b3mod.blake3(b.read_bytes()).hexdigest()
-
     rep = verify_files([
         VerifyTarget(path=a, ref="sha256:" + sha(a.read_bytes()), size=5000),
-        VerifyTarget(path=b, ref="blake3:" + b3, size=3000),
+        VerifyTarget(path=b, ref="sha256:" + sha(b.read_bytes()), size=3000),
     ], blobs_root=str(tmp_path))
     assert rep.ok, rep.findings
     # DENOMINATOR: two files expected, two examined, two hashed.
@@ -479,10 +477,15 @@ def test_verify_file_digest_uses_the_declared_algorithm(tmp_path):
     data = make_file(1024, seed=53)
     f.write_bytes(data)
     verify_file_digest(f, "sha256:" + sha(data))
-    # The same bytes under the WRONG algorithm must not pass — this is the bug
-    # that hardcoding the algorithm per call site produces.
-    with pytest.raises(DigestMismatch):
+    # th#1303 S1: the same hex LABELLED blake3 must not pass either. Before S1
+    # this was a DigestMismatch (hashed with the wrong algorithm); now the
+    # algorithm itself is refused. Both are failures; what must never happen
+    # is a pass, and reinstating hash_file's blake3 arm turns the first
+    # assertion below red.
+    with pytest.raises(ValueError, match="unsupported hash algorithm"):
         verify_file_digest(f, "blake3:" + sha(data))
+    with pytest.raises(DigestMismatch):
+        verify_file_digest(f, "sha256:" + "0" * 64)
 
 
 class _FakePBFile:
@@ -496,33 +499,27 @@ class _FakePBFile:
         self.blake3 = blake3
 
 
-def test_snapshot_targets_read_the_digest_field_before_the_legacy_blake3(tmp_path):
-    """THE regression guard for the executor's silent-skip: reading `blake3`
-    first yields "" on a v2 entry, which the old call site treated as "nothing
-    to verify" and then reported the tree CLEAN. Every covered file must produce
-    a target, whichever algorithm it names."""
+def test_snapshot_targets_read_the_tagged_digest_and_account_for_every_input(tmp_path):
+    """th#1303 S1: `snapshot_verify_targets` reads `digest` and NOTHING else.
+
+    The legacy `blake3` fallback is gone, so an entry that carries only the
+    mirror produces NO target — and it must land in `skipped`, never vanish.
+    Restoring the fallback turns the `config.json` assertions below red.
+    """
     from gen_worker.models.volume_verify import snapshot_verify_targets
 
     v2 = _FakePBFile("transformer/model.safetensors", 10, digest="sha256:" + "a" * 64)
-    v1 = _FakePBFile("config.json", 20, blake3="b" * 64)
-    # A v1 entry that also mirrors its digest: the tagged field must win, and it
-    # must NOT be double-prefixed.
-    both = _FakePBFile("t.json", 30, digest="blake3:" + "c" * 64, blake3="c" * 64)
+    mirror_only = _FakePBFile("config.json", 20, blake3="b" * 64)
     nodigest = _FakePBFile("README.md", 40)
 
-    targets, skipped = snapshot_verify_targets([v2, v1, both, nodigest], tmp_path)
+    targets, skipped = snapshot_verify_targets([v2, mirror_only, nodigest], tmp_path)
 
     refs = {t.path.name: t.ref for t in targets}
-    assert refs == {
-        "model.safetensors": "sha256:" + "a" * 64,
-        "config.json": "b" * 64,
-        "t.json": "blake3:" + "c" * 64,
-    }, refs
-    # DENOMINATOR: nothing silently vanishes. Three covered + one accounted-for
-    # skip == four inputs.
-    assert len(targets) + len(skipped) == 4
-    assert skipped == ["README.md"]
-    # And every ref the targets carry is readable by the prefix dispatcher.
+    assert refs == {"model.safetensors": "sha256:" + "a" * 64}, refs
+    # DENOMINATOR: nothing silently vanishes. One covered + two accounted-for
+    # skips == three inputs.
+    assert len(targets) + len(skipped) == 3
+    assert sorted(skipped) == ["README.md", "config.json"]
     for t in targets:
         parse_cas_ref(t.ref)
 

@@ -267,7 +267,8 @@ def test_swap_splits_a_fused_qkv_into_three_dense_linears() -> None:
 
     counts = native.swap_svdq_linears(
         model, {"attn.to_qkv": dec}, compute_dtype=torch.float32, mode="dense")
-    assert counts == {"blockwise": 0, "dense": 3, "prefixes": 1, "linears": 3}
+    assert counts == {"blockwise": 0, "dense": 3, "fused": 0, "prefixes": 1,
+                      "linears": 3}
 
     torch.manual_seed(8)
     x = torch.randn(2, dim)

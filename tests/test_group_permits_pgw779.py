@@ -68,7 +68,7 @@ def _executor(topology: ExecutionTopology, gpu_slots: Any = None) -> Executor:
 
 
 def test_a_wide_pod_has_one_permit_per_group_not_a_count() -> None:
-    ex = _executor(ExecutionTopology(gpu_count=4, group_degree=1))
+    ex = _executor(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     assert len(ex._gpu_permits) == 4
     assert ex._gpu_permits_each == 1
     # Four distinct objects: taking group 0's permit cannot admit a job to
@@ -117,7 +117,7 @@ def test_an_explicit_gpu_slots_override_keeps_its_concurrency() -> None:
 
 
 def test_a_records_permit_is_its_own_groups() -> None:
-    ex = _executor(ExecutionTopology(gpu_count=4, group_degree=1))
+    ex = _executor(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     spec = ex.specs["gen"]
     for g in range(4):
         rec = _ClassRecord(cls=_Fake)
@@ -140,7 +140,7 @@ def _run(gpu_index: Any = None) -> pb.RunJob:
 
 
 def test_a_missing_compute_is_refused_on_a_wide_pod() -> None:
-    ex = _executor(ExecutionTopology(gpu_count=4, group_degree=1))
+    ex = _executor(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     with pytest.raises(DispatchGroupUnresolved, match="no resolved compute"):
         ex._dispatch_group(_run())
 
@@ -149,8 +149,8 @@ def test_an_off_by_degree_index_is_refused_not_floored() -> None:
     # 4 cards packed 2x2: the legal rank-0 devices are 0 and 2. gpu_index=1 is
     # a hub/worker disagreement about D — it used to be floored to group 0
     # with a warning, silently packing two jobs onto one group.
-    topo = ExecutionTopology(gpu_count=4, group_degree=2, parallel="sequence")
-    assert topo.groups == 2
+    topo = ExecutionTopology(gpu_count=4, gpus_per_execution_group=2, parallel="sequence")
+    assert topo.execution_groups == 2
     ex = _executor(topo)
     with pytest.raises(DispatchGroupUnresolved, match="not a rank-0 device"):
         ex._dispatch_group(_run(1))
@@ -162,7 +162,7 @@ def test_an_off_by_degree_index_is_refused_not_floored() -> None:
 
 
 def test_group_ordinal_exact_refuses_where_group_ordinal_floors() -> None:
-    topo = ExecutionTopology(gpu_count=4, group_degree=2, parallel="sequence")
+    topo = ExecutionTopology(gpu_count=4, gpus_per_execution_group=2, parallel="sequence")
     assert topo.group_ordinal(1) == 0          # the historical floor
     with pytest.raises(TopologyError, match="not a rank-0 device"):
         topo.group_ordinal_exact(1)
@@ -178,7 +178,7 @@ def test_a_single_group_pod_still_serves_a_computeless_dispatch() -> None:
 
 
 def test_the_refusal_ends_the_job_terminally() -> None:
-    ex = _executor(ExecutionTopology(gpu_count=4, group_degree=1))
+    ex = _executor(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     finished: dict = {}
 
     async def _fake_finish(job: Any, status: Any, **kw: Any) -> None:

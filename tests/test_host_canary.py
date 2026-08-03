@@ -96,7 +96,7 @@ def _fake_cuda(monkeypatch: pytest.MonkeyPatch):
 def _hello_canary(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(hc, "_cached", None)
     lc = Lifecycle(
-        SimpleNamespace(worker_jwt="", worker_id="w-748",
+        SimpleNamespace(bootstrap_worker_jwt="", worker_id="w-748",
                         runpod_pod_id="", worker_image_digest=""),
         Executor([], lambda *a, **k: None),
     )
