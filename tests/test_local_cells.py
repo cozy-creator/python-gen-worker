@@ -500,4 +500,17 @@ def test_local_cli_is_the_only_mint_caller():
                 callers.add(p)
             elif isinstance(node, ast.Attribute) and "local_cells" in node.attr:
                 callers.add(p)
-    assert {p.relative_to(root).as_posix() for p in callers} == {"cli/run.py"}
+    # aot_resume (pgw#848 item 5) sites its bank beside local_cells' own mint
+    # staging and touches exactly ONE name: store_root(). That is a path
+    # accessor, not the mint — pin it to that single attribute so the mint
+    # entry stays CLI-only.
+    assert {p.relative_to(root).as_posix() for p in callers} == {
+        "cli/run.py", "aot_resume.py"}
+    resume_tree = ast.parse((root / "aot_resume.py").read_text())
+    touched = {
+        n.attr for n in ast.walk(resume_tree)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name) and n.value.id == "local_cells"
+    }
+    assert touched == {"store_root"}, (
+        f"aot_resume.py may only read local_cells.store_root(); saw {touched}")

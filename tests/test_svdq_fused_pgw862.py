@@ -73,11 +73,17 @@ def _get_jit_fns() -> dict:
     assert svdq_fused.fused_ops() is not None
     out = {}
     for obj in gc.get_objects():
-        fn = obj.fn if isinstance(obj, Autotuner) else (
-            obj if isinstance(obj, JITFunction) else None)
-        if fn is not None and getattr(fn, "__name__", "") in (
-                "_quant_smooth_kernel", "_gemm_lora_kernel"):
-            out[fn.__name__] = fn
+        try:
+            # gc.get_objects() can hand back weakproxies whose referent died
+            # (anything the suite ran earlier in this process); touching them
+            # raises ReferenceError. They can't be our kernels — skip.
+            fn = obj.fn if isinstance(obj, Autotuner) else (
+                obj if isinstance(obj, JITFunction) else None)
+            if fn is not None and getattr(fn, "__name__", "") in (
+                    "_quant_smooth_kernel", "_gemm_lora_kernel"):
+                out[fn.__name__] = fn
+        except ReferenceError:
+            continue
     return out
 
 
