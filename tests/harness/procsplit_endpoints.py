@@ -55,9 +55,9 @@ class SplitProbe:
         if str(os.environ.get("WORKER_JWT", "") or "").strip():
             found.append("env:WORKER_JWT")
         try:
-            from gen_worker.config import get_settings
+            from gen_worker import config as gw_config
 
-            if str(getattr(get_settings(), "worker_jwt", "") or "").strip():
+            if str(getattr(gw_config.current(), "worker_jwt", "") or "").strip():
                 found.append("settings.worker_jwt")
         except Exception:
             pass
@@ -141,6 +141,30 @@ class SplitProbe:
 
         ctypes.string_at(0)
         return ProbeOut(response="unreachable")
+
+    async def activity_die(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """pgw#937: open a worker ACTIVITY, publish it RUNNING, then SIGKILL
+        this process while it is still open.
+
+        The shape the fan-in gets wrong: the group's last frame says RUNNING
+        forever, so nothing the parent later merges can retire it. The parent
+        must emit the terminal on the group's behalf when it reaps the child.
+        """
+        act = activity.begin(str(data.text or "g_hold"), phase="holding")
+        act.heartbeat()
+        await asyncio.sleep(0.2)
+        os.kill(os.getpid(), signal.SIGKILL)
+        return ProbeOut(response="unreachable")
+
+    async def activity_hold(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """Open the same activity kind and keep it open, beating, until
+        cancelled — the LIVE group whose fact must survive a sibling's death."""
+        act = activity.begin(str(data.text or "g_hold"), phase="holding")
+        for _ in range(600):
+            ctx.raise_if_cancelled()
+            act.heartbeat()
+            await asyncio.sleep(0.1)
+        return ProbeOut(response="held")
 
     def sleepy(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         """Long cancellable job: measures cancel latency across the seam."""

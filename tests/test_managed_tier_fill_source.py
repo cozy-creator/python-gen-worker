@@ -20,6 +20,7 @@ from pathlib import Path
 import hashlib
 
 import gen_worker.executor as executor_mod
+from gen_worker import config as gw_config
 import gen_worker.models.cozy_snapshot as snap_mod
 from gen_worker.executor import ModelStore
 from gen_worker.models.cache_paths import tensorhub_fill_source_dir
@@ -155,11 +156,19 @@ def test_corrupt_volume_blob_falls_through_to_r2(tmp_path: Path, monkeypatch) ->
 
 
 # ---------------------------------------------------------------------------
-# tensorhub_fill_source_dir(): ismount-guarded, env-driven
+# tensorhub_fill_source_dir(): ismount-guarded, Settings-driven
+#
+# pgw#931: "env-driven" was the old description and it is no longer accurate.
+# The value reaches this helper through the `Settings` the process entry
+# published, so a test that changes the environment must RELOAD — the same step
+# a real deployment performs exactly once, at boot. Under the deleted
+# `get_settings()` these tests passed without it, because a cleared cache would
+# lazily re-read env from whatever depth first asked.
 # ---------------------------------------------------------------------------
 
 def test_fill_source_dir_unset_is_none(monkeypatch) -> None:
     monkeypatch.delenv("TENSORHUB_FILL_SOURCE_DIR", raising=False)
+    gw_config.reload_for_test()
     assert tensorhub_fill_source_dir() is None
 
 
@@ -169,6 +178,7 @@ def test_fill_source_dir_requires_a_real_mount(tmp_path: Path, monkeypatch) -> N
     plain_dir = tmp_path / "not-a-mount"
     plain_dir.mkdir()
     monkeypatch.setenv("TENSORHUB_FILL_SOURCE_DIR", str(plain_dir))
+    gw_config.reload_for_test()
     assert tensorhub_fill_source_dir() is None  # ismount() is False -> rejected
 
     monkeypatch.setattr(os.path, "ismount", lambda p: str(p) == str(plain_dir))
@@ -403,7 +413,6 @@ def test_datacenter_pod_without_fill_source_logs(tmp_path: Path, monkeypatch, ca
 
 
 def test_datacenter_pod_with_unmounted_fill_source_logs(tmp_path: Path, monkeypatch, caplog) -> None:
-    from gen_worker.config.loader import get_settings
 
     async def _emit(msg: pb.WorkerMessage) -> None:
         del msg
@@ -413,12 +422,12 @@ def test_datacenter_pod_with_unmounted_fill_source_logs(tmp_path: Path, monkeypa
     monkeypatch.setenv("RUNPOD_POD_ID", "pod-guard-test")
     monkeypatch.delenv("RUNPOD_PROVIDER", raising=False)
     monkeypatch.setenv("TENSORHUB_FILL_SOURCE_DIR", str(plain_dir))
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
     try:
         with caplog.at_level("WARNING", logger="gen_worker.executor"):
             ModelStore(_emit, cache_dir=tmp_path / "local")
     finally:
-        get_settings.cache_clear()
+        gw_config.reload_for_test()
     assert any("fill_source_disabled reason=not_a_mount" in r.message for r in caplog.records)
 
 

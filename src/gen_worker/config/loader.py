@@ -14,7 +14,6 @@ env name and one .env / yaml / secret key — see the table below.
 """
 from __future__ import annotations
 
-import functools
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable
@@ -44,6 +43,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "GEN_WORKER_CONFIG_SNAPSHOT_PATH": "config_snapshot_path",
     "WORKER_CONFIG_GENERATION": "boot_config_generation",
     "WORKER_IMAGE_DIGEST": "worker_image_digest",
+    "GEN_WORKER_BOOT_RECORD": "boot_record_path",
     "TENSORHUB_URL": "tensorhub_url",
     "TENSORHUB_TOKEN": "tensorhub_token",
     "TENSORHUB_CACHE_DIR": "tensorhub_cache_dir",
@@ -86,18 +86,110 @@ _SECRETS_DIR = "/run/secrets"
 _DOTENV_PATH = "./.env"
 
 
-def _normalize_key(raw: str) -> str | None:
+#: Namespaces this program OWNS. A key inside one of them is addressed to us,
+#: so an unrecognised spelling is a misconfiguration and not somebody else's
+#: variable — see :func:`_normalize_key`.
+_OWNED_PREFIXES = ("GEN_WORKER_", "TENSORHUB_", "WORKER_", "COZY_")
+
+#: Owned-namespace names that are deliberately NOT Settings fields. Each one
+#: is read by a named mechanism other than this loader, and listing it here is
+#: what keeps :func:`_normalize_key`'s refusal from firing on a legitimate
+#: value. Anything not here and not in `_ENV_TO_FIELD` is a typo.
+_OWNED_NON_SETTINGS: frozenset[str] = frozenset({
+    # th#1307: refused at boot by content_credentials.configure(); deliberately
+    # never bound to a field, because a private key must not be readable by
+    # tenant code in this process.
+    "GEN_WORKER_C2PA_KEY_PEM",
+    "GEN_WORKER_C2PA_KEY_PATH",
+    # pgw#929 CHILD IPC HANDOFF: parent-minted, per-child, no config origin.
+    "GEN_WORKER_COMPUTE_CHILD",
+    "GEN_WORKER_COMPUTE_UID",
+    "GEN_WORKER_CHILD_SOCKET",
+    "GEN_WORKER_CHILD_CMD",
+    "GEN_WORKER_CHILD_LIVENESS_FD",
+    "GEN_WORKER_CHILD_WATCHDOG_PING_S",
+    "GEN_WORKER_GROUP_ORDINAL",
+    "GEN_WORKER_HOST_SIBLINGS",
+    "GEN_WORKER_SESSION_ID",
+    "GEN_WORKER_MINT_CHILD",
+    "GEN_WORKER_AOT_ENTRY_CHILD",
+    "GEN_WORKER_SEAL_LIB_MEMO",
+    "GEN_WORKER_SUPERVISED",
+    "WORKER_EXECUTION_TOPOLOGY",
+    # pgw#929 library/standalone-tool knobs; see scripts/config_reads_allowlist.txt.
+    "GEN_WORKER_LOG_LEVEL",
+    "GEN_WORKER_LOCAL_CELLS_DIR",
+    "GEN_WORKER_LOCAL_OUTPUT_DIR",
+    "GEN_WORKER_MINT_RESUME_DIR",
+    "GEN_WORKER_MINT_RESUME_MAX_BYTES",
+    "GEN_WORKER_AOT_HOST_COMPILE_JOBS",
+    "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF",
+    "GEN_WORKER_NATIVE_KERNELS",
+    "GEN_WORKER_NATIVE_KERNELS_LIB",
+    "GEN_WORKER_SVDQ_ENGINE",
+    "GEN_WORKER_VIDEO_ENCODER",
+    "GEN_WORKER_VIDEO_ENCODE_CONCURRENCY",
+    "GEN_WORKER_URL_FETCH_ALLOWED_HOSTS",
+    "GEN_WORKER_INTERNAL_OBJECT_HOSTS",
+    "GEN_WORKER_AOT_EXPORT_PARALLEL",
+    "GEN_WORKER_AOT_EXPORT_REUSE",
+    "GEN_WORKER_AOT_WRAPPER_SPLIT_OFF",
+    "GEN_WORKER_BG_YIELD",
+    "GEN_WORKER_EAGER_FIRST_BOOT",
+    "GEN_WORKER_MINT_IN_PROCESS",
+    "GEN_WORKER_HOST_MOVE_GUARD",
+    "GEN_WORKER_FORBID_CPU_OFFLOAD",
+    "GEN_WORKER_SUPERVISOR",
+    "GEN_WORKER_POSTMORTEM_FILE",
+    "COZY_HTTP_CONNECT_TIMEOUT_S",
+    "COZY_HTTP_READ_TIMEOUT_S",
+    "COZY_HTTP_WRITE_TIMEOUT_S",
+    "COZY_HTTP_POOL_TIMEOUT_S",
+    "COZY_HTTP_TOTAL_TIMEOUT_S",
+    "COZY_CONVERT_WORKDIR",
+    "COZY_CONVERT_SCRATCH_TTL_S",
+    "COZY_CLONE_DOWNLOAD_ATTEMPTS",
+    "COZY_CIVITAI_DOWNLOAD_ATTEMPTS",
+    "COZY_CELL_EPOCH",
+})
+
+
+class UnknownSettingError(ValueError):
+    """A key inside an owned namespace matches no Settings field.
+
+    pgw#931 deliverable 8. `_normalize_key` used to return None for anything
+    unrecognised and every source layer then silently skipped it, so a typo'd
+    ``TENSORHUB_CHACE_DIR`` in `.env` or `/run/secrets` was accepted and inert
+    — the operator's intent evaporated with no diagnostic anywhere. Same hole
+    the hub side closed at `config/config.go:1281` (th#1500 deliverable 4).
+
+    Deliberately scoped to `_OWNED_PREFIXES`: the process environment legitimately
+    carries hundreds of variables belonging to CUDA, Python, the OS and the pod
+    runtime, and refusing those would make the worker unbootable. A key in a
+    namespace we own is addressed to us, so we owe it an answer.
+    """
+
+
+def _normalize_key(raw: str, *, strict: bool = False) -> str | None:
     """Map a raw source key (env name OR field name) to a Settings field name.
 
-    Returns None when the key doesn't correspond to any known field — sources
-    can contain arbitrary keys (think a system .env with hundreds of entries);
-    we silently skip the ones that don't match a Settings field.
+    Returns None for a key that is not ours. When `strict`, an unrecognised key
+    inside an owned namespace raises `UnknownSettingError` instead of being
+    silently dropped.
     """
     key = raw.strip()
     if key in _ENV_TO_FIELD:
         return _ENV_TO_FIELD[key]
     if key in _FIELD_NAMES:
         return key
+    if strict and key.upper() in _OWNED_NON_SETTINGS:
+        return None
+    if strict and any(key.upper().startswith(p) for p in _OWNED_PREFIXES):
+        raise UnknownSettingError(
+            f"{key!r} is in a gen-worker-owned namespace but matches no "
+            f"Settings field. Fix the spelling or add the field; a config key "
+            f"we own must never be accepted and ignored."
+        )
     return None
 
 
@@ -115,6 +207,30 @@ def _load_env() -> Dict[str, str]:
         if val is not None:
             out[field] = val
     return out
+
+
+def unrecognised_owned_env() -> list[str]:
+    """Owned-namespace process-env names this build knows nothing about.
+
+    REPORTED, never refused — and the asymmetry with the file sources is the
+    whole point. `.env` / yaml / `/run/secrets` are hand-authored by an
+    operator addressing this program, so an unrecognised key there is a typo
+    and `load_settings` raises. The process environment is assembled by
+    another program: measured 2026-08-03, Tensorhub injects owned-namespace
+    names this worker has no reader for (`GEN_WORKER_OOM_PROBE`,
+    `GEN_WORKER_PROCESS_SPLIT`), so refusing here would turn a hub-side
+    addition into a fleet of dead pods.
+
+    The residue still matters — a misspelled `GEN_WORKER_PREFR_AOT` in a
+    release declaration is silently inert today — so it is named at boot
+    instead of vanishing.
+    """
+    known = set(_ENV_TO_FIELD) | set(_ENV_ALIASES) | set(_OWNED_NON_SETTINGS)
+    return sorted(
+        name for name in os.environ
+        if name not in known
+        and any(name.startswith(p) for p in _OWNED_PREFIXES)
+    )
 
 
 def _load_dotenv(path: str | None = None) -> Dict[str, str]:
@@ -136,7 +252,7 @@ def _load_dotenv(path: str | None = None) -> Dict[str, str]:
             if "=" not in line:
                 continue
             raw_key, _, raw_val = line.partition("=")
-            field = _normalize_key(raw_key)
+            field = _normalize_key(raw_key, strict=True)
             if field is None:
                 continue
             val = raw_val.strip()
@@ -161,15 +277,20 @@ def _load_secrets_dir(path: str | None = None) -> Dict[str, str]:
     if not p.is_dir():
         return {}
     out: Dict[str, str] = {}
-    for env_name, field in _ENV_TO_FIELD.items():
-        f = p / env_name
-        if not f.is_file():
+    try:
+        present = sorted(f.name for f in p.iterdir() if f.is_file())
+    except OSError:
+        return {}
+    for name in present:
+        # Raises UnknownSettingError on an owned-namespace filename we do not
+        # bind: a mounted secret nobody reads is a secret that did not arrive.
+        field = _normalize_key(name, strict=True)
+        if field is None:
             continue
         try:
-            val = f.read_text(encoding="utf-8").rstrip("\n")
+            out[field] = (p / name).read_text(encoding="utf-8").rstrip("\n")
         except OSError:
             continue
-        out[field] = val
     return out
 
 
@@ -189,7 +310,7 @@ def _load_yaml(paths: Iterable[str] | None = None) -> Dict[str, str]:
             return {}
         out: Dict[str, str] = {}
         for raw_key, raw_val in data.items():
-            field = _normalize_key(str(raw_key))
+            field = _normalize_key(str(raw_key), strict=True)
             if field is None:
                 continue
             if raw_val is None:
@@ -237,12 +358,3 @@ def load_settings(**init_kwargs: Any) -> Settings:
     merged.update(_load_env())
     merged.update(_normalize_init_kwargs(init_kwargs))
     return msgspec.convert(_normalize_values(merged), Settings, strict=False)
-
-
-@functools.lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    """Process-wide cached `Settings` for call sites that aren't handed the
-    startup instance (standalone CLI paths, module-level constants). Same
-    sources, loaded lazily on first use. Tests clear via the autouse
-    `_fresh_settings_cache` fixture (`get_settings.cache_clear()`)."""
-    return load_settings()

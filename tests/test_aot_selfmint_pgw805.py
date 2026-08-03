@@ -41,7 +41,8 @@ from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     export_declaration, register_export_declaration, reset_export_declarations,
 )
-from gen_worker.config import get_settings
+from gen_worker import config as gw_config
+from gen_worker.cell_adopt import AdoptOutcome
 
 FAMILY = "sdxl"
 
@@ -118,11 +119,11 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     resolvable compile target, CUDA and a toolchain — and no cell.
     """
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: False)
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
@@ -143,7 +144,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     yield
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
 def _arm(**kw: Any) -> Any:
@@ -468,7 +469,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     calls: List[str] = []
     monkeypatch.setattr(
         fleet_cells.provision, "arm_aot",
-        lambda *a, **k: (calls.append("aot"), True)[1])
+        lambda *a, **k: (calls.append("aot"), AdoptOutcome.hit())[1])
     monkeypatch.setattr(
         fleet_cells.cc, "enable",
         lambda *a, **k: (calls.append("dynamo"), True)[1])

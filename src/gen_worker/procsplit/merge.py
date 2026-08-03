@@ -75,7 +75,13 @@ def merge_phase(phases: Sequence["pb.WorkerPhase"]) -> "pb.WorkerPhase":
 
 
 def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
-    """One worker-level StateDelta from G per-group ones."""
+    """One worker-level StateDelta from G per-group ones.
+
+    ``deltas`` carries only LIVE groups (pgw#937). A down group contributes no
+    function to the union, no free VRAM to the sum, and no vote to the phase
+    min — otherwise the worker keeps advertising a dead group's functions and
+    every dispatch onto it is answered "compute process restarting".
+    """
     if not deltas:
         return pb.StateDelta()
     if len(deltas) == 1:
@@ -213,7 +219,11 @@ def reconcile_activity_kind(
     mint would look like the whole worker's).
 
     ``per_group`` is the latest update of this kind, keyed by group ordinal, for
-    every group that currently has it open. The worker's activity of this kind:
+    every LIVE group that currently has it open. A group whose child is down is
+    not a member — see "down-group semantics" in ``parent.py``: its last frame
+    is a dead process's fact, and leaving it in would pin the kind RUNNING for
+    good and let it outvote every live group's ``self_stalled`` confession
+    below. The worker's activity of this kind:
 
     * is RUNNING while ANY group runs it (the worker IS minting if any group
       is); it is terminal only when EVERY group's latest is terminal, and FAILED
@@ -280,6 +290,15 @@ def worker_fn_unavailable(
     do NOT retire it worker-wide. Only when every group reports it unavailable
     does the worker report unavailable, carrying one representative reason (the
     admin availability view is per-worker, not per-group).
+
+    **THE CONTRACT THE CALLER MUST NOT GET BACKWARDS (pgw#937): a value of
+    ``None`` means "this group SERVES it", so a group whose child is DOWN is
+    EXCLUDED from the mapping — never entered as ``None``.** Popping a dead
+    group's entry without also dropping the group would make the dead group read
+    as serving every function there is, which is strictly worse than the stale
+    entry it replaced. Absence-of-a-value is the live-group default; absence of
+    the *group* is "unknown, because there is nobody there". See "down-group
+    semantics" in ``parent.py``.
     """
     if not per_group:
         return None
@@ -305,7 +324,10 @@ def worker_fn_degraded(
     FnDegraded is placement guidance — "this release runs degraded on this card,
     it wants a bigger one". Under ruling 1 the worker routes a dispatch to a
     group that can serve, so if ANY group serves the function NATIVE the worker
-    is not degraded: report nothing. The worker is degraded only when it serves
+    is not degraded: report nothing. ``served_native_somewhere`` and
+    ``per_group`` are both computed over LIVE groups only (pgw#937): absence
+    means "serves it native" here too, so a down group left in the scan would
+    veto a live group's degradation report. The worker is degraded only when it serves
     the function AND the best any group can do is degraded — then report the
     LEAST degraded of the group reports (the worker's true best), so the hub's
     placement hint reflects the best card the worker actually has for it.

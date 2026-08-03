@@ -58,6 +58,14 @@ KIND_GUARD_MISS = "guard_miss"
 # ride the cell's guard manifest. Countable so a real leak class surfaces as
 # a trend hub-side instead of as a fleet-wide mint refusal (pgw#691/#733).
 KIND_GUARD_LEAK = "guard_leak"
+# pgw#916: the AOT arm's counterpart of `guard_miss` — one tenant request
+# arrived at a graph class the armed cell does not cover, was NAMED at ingress
+# and served eager. `guard_miss` is a dynamo concept (a torch guard fired), so
+# an AOT-armed pod produced no shape-gap fact at all and the hub could not
+# count AOT coverage holes the way it counts dynamo ones. `phase` carries the
+# ingress reason token (`no_entry_admits` / `entry_ambiguous`), `detail` names
+# the family, the target, the missing DECLARED CLASS and the cell.
+KIND_SHAPE_GAP = "shape_gap"
 # pgw#760 (error-visibility doctrine): a fail-soft outcome that changes what
 # or how this worker SERVES — or that a hub decision depends on — must ride
 # a typed event, never only a log line (hub-spawned workers expose no
@@ -66,7 +74,6 @@ KIND_GUARD_LEAK = "guard_leak"
 # ``detail`` naming the identifiers (ref/function/label/request) + the
 # exception. Fail-soft BEHAVIOR is unchanged — these are confessions.
 KIND_SERVE_DEGRADE = "serve_degrade"
-KIND_TRT_ADOPT = "trt_adopt"
 KIND_LORA_HYGIENE = "lora_hygiene"
 # pgw#794: the serve-side adapter-fidelity gate. `phase=refused` is a
 # fail-CLOSED decision (the request also gets a typed error); `phase=degraded`

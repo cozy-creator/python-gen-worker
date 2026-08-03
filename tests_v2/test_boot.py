@@ -363,7 +363,7 @@ def test_seal_refusal_exits_typed_with_settings_loaded(monkeypatch) -> None:
     fatal: list = []
     settings = SimpleNamespace(endpoint_lock_path="")
     monkeypatch.setattr(entrypoint, "_install_stack_dump_handler", lambda: None)
-    monkeypatch.setattr(entrypoint, "get_settings", lambda: settings)
+    monkeypatch.setattr(entrypoint, "_bootstrap_configuration", lambda: settings)
 
     def _refuse() -> dict:
         raise env_seal.EnvSealError("config freeze failed: HOSTILE_FACT")
@@ -389,7 +389,7 @@ def test_seal_order_is_settings_then_seal_then_probe(monkeypatch) -> None:
     order: list = []
     monkeypatch.setattr(entrypoint, "_install_stack_dump_handler", lambda: None)
     monkeypatch.setattr(
-        entrypoint, "get_settings",
+        entrypoint, "_bootstrap_configuration",
         lambda: order.append("settings") or SimpleNamespace(endpoint_lock_path=""))
     monkeypatch.setattr(
         entrypoint, "_establish_env_seal", lambda: order.append("seal") or {})

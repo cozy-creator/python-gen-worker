@@ -1161,6 +1161,45 @@ def place_pipeline(
             effective = nxt
 
 
+class CpuOffloadForbidden(RuntimeError):
+    """A CPU-offloading placement was attempted on a host that forbids it."""
+
+
+_FORBID_CPU_OFFLOAD_ENV = "GEN_WORKER_FORBID_CPU_OFFLOAD"
+
+
+def cpu_offload_forbidden() -> bool:
+    """Whether this host refuses every CPU-touching placement.
+
+    pgw#929 AMBIGUOUS #1 — this makes a DOCUMENTED CONTRACT TRUE rather than
+    adding a knob. The workspace `CLAUDE.md` told operators and agents that
+    ``GEN_WORKER_FORBID_CPU_OFFLOAD`` *"makes gen-worker raise on any
+    CPU-touching placement"*, and the box exports it for that reason. Measured
+    2026-08-03: it had exactly ONE reader in the tree,
+    ``benchmarks/swap_latency.py``, where it refused the swap-latency benchmark
+    and nothing else. The real CPU-offload ladder below never consulted it, so
+    the guard operators believed they had did not exist — stale prose reaching
+    people as fact (C3).
+
+    It is a TRIPWIRE, not configuration: it carries no behaviour of its own and
+    exists only to fire on a host that must never touch weights. Same shape as
+    the C2PA key-material refusal, and it is read here rather than through
+    `Settings` for the same reason a tripwire is not a setting — a control-plane
+    box exports it box-wide with no worker config in sight. Recorded, with that
+    argument, in `scripts/config_reads_allowlist.txt`.
+    """
+    return os.environ.get(_FORBID_CPU_OFFLOAD_ENV, "").strip() not in ("", "0", "false", "no")
+
+
+def _refuse_cpu_offload(what: str) -> None:
+    if cpu_offload_forbidden():
+        raise CpuOffloadForbidden(
+            f"refusing {what}: {_FORBID_CPU_OFFLOAD_ENV} is set on this host. "
+            f"CPU-offloading placements move weights through host RAM, which "
+            f"this machine forbids (weights-locality rule). Run it on a GPU pod."
+        )
+
+
 def apply_low_vram_config(
     pipeline: Any,
     *,
@@ -1247,6 +1286,7 @@ def apply_low_vram_config(
             )
 
     if effective_mode == "model_offload":
+        _refuse_cpu_offload("enable_model_cpu_offload")
         _pin_fragile_vae(pipeline, applied, log)
         ok = _call_if_present(pipeline, "enable_model_cpu_offload")
         if not ok:
@@ -1267,6 +1307,7 @@ def apply_low_vram_config(
             effective_mode = "sequential"
 
     if effective_mode == "sequential":
+        _refuse_cpu_offload("enable_sequential_cpu_offload")
         _pin_fragile_vae(pipeline, applied, log)
         _move_pipeline_to_cpu(pipeline)
         flush_memory()

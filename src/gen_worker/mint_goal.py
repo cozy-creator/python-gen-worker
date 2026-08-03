@@ -1,10 +1,16 @@
-"""th#1359 Part 2: the forge pod's whole life.
+"""The driver for a SCHEDULED MINT GOAL (th#1359 Part 2, recut by pgw#930).
 
-A forge worker boots the SAME release image as a serving pod, with
-``WORKER_MODE=forge``. It registers, receives no tenant dispatch, mints what it
-was scheduled for, publishes, and retires. This module is the driver for the
-last three: it waits for the boot's mint disposition to become final, waits out
-any publish, states a TYPED TERMINAL, and drains itself.
+Renamed from ``forge.py``. A pod that holds a mint goal boots the SAME release
+image as any other; it mints what it was scheduled for, publishes, states a
+TYPED TERMINAL, and — **only if it holds no serve goal** — retires.
+
+That last conditional is the §1.17 change. This module used to be "the forge
+pod's whole life", and it called ``start_drain`` unconditionally because a forge
+pod had nothing else to do. Under composable goals a pod may hold a mint goal
+AND a serve goal at once (Paul: *"you can spawn a GPU and tell it to mint some
+AOT-cells, while also using it to serve jobs"*), and draining that pod when its
+mint finishes would tear down a live serving instance. The terminal is still
+stated either way — what it MEANS for the pod is what the goal set decides.
 
 Why a driver at all — the two measured blockers (pgw#846)
 ---------------------------------------------------------
@@ -50,16 +56,20 @@ from typing import TYPE_CHECKING, Optional
 
 from . import activity as activity_mod
 from . import fleet_cells
-from . import worker_mode
+from . import worker_goals
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .lifecycle import Lifecycle
 
 logger = logging.getLogger(__name__)
 
-#: The wire kind every forge terminal rides. One kind, four phases, so the
-#: hub's view of "how did forge pods end" is a `GROUP BY phase`.
-KIND_FORGE = "forge_terminal"
+#: The wire kind every mint-goal terminal rides. One kind, four phases, so the
+#: hub's view of "how did mint goals end" is a `GROUP BY phase`.
+#:
+#: The STRING is deliberately unchanged across the pgw#930 rename: it is an
+#: emitted activity kind the hub already groups on, and renaming it would
+#: silently orphan every historical row. The Python name says what it is now.
+KIND_MINT_GOAL = "forge_terminal"
 
 #: A cell was minted AND published. The only outcome that discharges what the
 #: pod was bought for.
@@ -80,12 +90,14 @@ TERMINAL_REFUSED = "publish_refused"
 #: this terminal says the pod is finished asking.
 TERMINAL_FAILED = "no_cell"
 
-#: Drain deadline the forge gives itself. A forge pod holds no tenant work by
-#: construction, so this bounds only the flush of its own already-produced
-#: results — never a wait for work to finish.
-FORGE_DRAIN_DEADLINE_MS = 30_000
+#: Drain deadline a retiring mint-only pod gives itself. Such a pod holds no
+#: tenant work by construction, so this bounds only the flush of its own
+#: already-produced results — never a wait for work to finish. It is not
+#: consulted at all when a serve goal is also held, because that pod does not
+#: retire here.
+MINT_GOAL_DRAIN_DEADLINE_MS = 30_000
 
-#: How often the forge re-checks that its publish threads have finished. The
+#: How often the driver re-checks that its publish threads have finished. The
 #: publish registry (`fleet_cells.publishes_in_flight`) is the fact; this is
 #: only the polling cadence for a thread-to-loop handoff, not a deadline.
 _PUBLISH_POLL_S = 2.0
@@ -141,31 +153,51 @@ def _classify() -> tuple[str, str]:
 
 
 async def run(lifecycle: "Lifecycle") -> None:
-    """Drive a forge pod from "boot finished" to "drained".
+    """Drive a scheduled mint goal from "boot finished" to its terminal.
 
-    Never raises: a forge driver that dies leaves a pod that mints nothing and
-    never retires, which is strictly worse than any outcome it could report.
+    Never raises: a driver that dies leaves a pod that mints nothing and never
+    reports, which is strictly worse than any outcome it could state.
     """
-    if not worker_mode.is_forge():
+    if not worker_goals.current().drives_mint():
         return
     try:
         await _run(lifecycle)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.exception("forge driver failed")
+        logger.exception("mint-goal driver failed")
         activity_mod.emit_event(
-            KIND_FORGE,
-            f"forge driver failed: {type(exc).__name__}: {exc}",
+            KIND_MINT_GOAL,
+            f"mint-goal driver failed: {type(exc).__name__}: {exc}",
             phase=TERMINAL_FAILED,
         )
-        lifecycle.start_drain(FORGE_DRAIN_DEADLINE_MS)
+        _retire_if_owed(lifecycle)
+
+
+def _retire_if_owed(lifecycle: "Lifecycle") -> None:
+    """Drain the pod iff the mint goal was the only thing asked of it.
+
+    pgw#930: the single line that makes ``serve=True, mint=True`` safe. A pod
+    that also holds a serve goal has more to do than this mint, so its mint
+    terminal is a report, not an ending.
+    """
+    goals = worker_goals.current()
+    if goals.retires_when_mint_completes():
+        lifecycle.start_drain(MINT_GOAL_DRAIN_DEADLINE_MS)
+        return
+    logger.info(
+        "mint goal complete; NOT retiring — this pod also holds a serve goal "
+        "(pgw#930). Retiring here would drain a live serving instance.")
 
 
 async def _run(lifecycle: "Lifecycle") -> None:
+    goals = worker_goals.current()
     logger.info(
-        "forge mode: this pod serves no tenant traffic; it mints, publishes, "
-        "and retires (th#1359)")
+        "mint goal driver: goals serve=%s mint=%s; this pod mints, publishes "
+        "and reports a typed terminal%s",
+        goals.serve, goals.mint,
+        "; it retires when done" if goals.retires_when_mint_completes()
+        else "; it keeps serving when done")
     await disposition_event().wait()
 
     # A release may declare several compile families; `_mark_warm_complete`
@@ -191,8 +223,8 @@ async def _run(lifecycle: "Lifecycle") -> None:
     phase, detail = _classify()
     if phase == TERMINAL_FAILED and not lifecycle.executor.declares_compile():
         phase, detail = TERMINAL_NOTHING_OWED, (
-            "this release declares no compile family — a forge pod for it has "
-            "nothing to mint")
-    activity_mod.emit_event(KIND_FORGE, detail, phase=phase)
-    logger.info("forge terminal: %s — %s; retiring", phase, detail)
-    lifecycle.start_drain(FORGE_DRAIN_DEADLINE_MS)
+            "this release declares no compile family — a mint goal against "
+            "it has nothing to mint")
+    activity_mod.emit_event(KIND_MINT_GOAL, detail, phase=phase)
+    logger.info("mint-goal terminal: %s — %s", phase, detail)
+    _retire_if_owed(lifecycle)

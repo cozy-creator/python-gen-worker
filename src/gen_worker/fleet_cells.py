@@ -61,14 +61,16 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 from . import activity as activity_mod
 from . import aot_cells, cell_key
+from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from . import guard_closure
 from . import topology as topology_mod
+from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
 from .models.chunk_cas import sha256_file
 from .procsplit import broker
 # module import (not `from .loading import pipeline_weight_lane`): tests
@@ -184,7 +186,8 @@ class ArmOutcome:
     retrying the identical unusable cell on every subsequent request.
 
     ``eager_reason`` (pgw#824) is the CLASSIFIED token for why this pipeline is
-    not serving from a cell — the same token the decline's
+    not serving from a cell — a :class:`~.cell_adopt.EagerPhase` member, which
+    is where that vocabulary is spelled ONCE — the same token the decline's
     ``self_mint_skipped``/``self_mint_started`` event carries in ``phase``, so a
     request row's ``fallback_reason`` and the worker's activity events join on
     one string. "" only when ``armed`` is true. Without it every eager request
@@ -197,6 +200,11 @@ class ArmOutcome:
     self_mint: Optional[Any] = None
     selection_bug: Optional["cc.CellSelectionBugError"] = None
     eager_reason: str = ""
+    #: pgw#923: every ADOPTION attempt this policy made, in order, measured.
+    #: A self-mint is not an adoption and never appears here. The caller turns
+    #: these into the `ModelEvent{ADOPTED}` / `{FAILED}` the hub already stores
+    #: as `kind=compile_cache_adopt` — the one place the wire is owned.
+    adoptions: Tuple[CellAdoption, ...] = ()
 
     def __bool__(self) -> bool:
         return self.armed
@@ -679,6 +687,66 @@ def delegatable(pipe: Any, cfg: Any) -> bool:
     return not delegation_refusal(pipe, cfg)
 
 
+def _arm_candidate(
+    pipe: Any,
+    cfg: Any,
+    cache_dir: Optional[Path],
+    artifact: Optional[Path],
+    *,
+    ref: str,
+    snapshot_digest: str,
+    artifact_kind: str,
+) -> Tuple[AdoptOutcome, CellAdoption]:
+    """Arm ONE candidate cell, measured, and record the boot phase for it.
+
+    pgw#923/#924. The `cell_arm` boot span and the adoption's `duration_ms`
+    bracket the same interval, taken in the one place that does the arming, so
+    the boot ladder and the hub's adoption measurement cannot disagree about
+    what an arm cost. `cell_arm` was a DECLARED boot phase with no producer at
+    all until this call site existed.
+    """
+    # A CANDIDATE must exist for this to be a cell arm. `provision.
+    # enable_compiled` with no artifact also covers the seeded and ALLOW_COLD
+    # inductor lanes, and bracketing those would put a near-zero `cell_arm` row
+    # on every compile-declaring boot — the same "a default that reads as a
+    # fact" defect pgw#924 is closing for `warmup`.
+    span = (
+        boot_mod.open_span(
+            boot_mod.PHASE_CELL_ARM,
+            ref=ref,
+            artifact_kind=artifact_kind,
+            artifact_key=snapshot_digest,
+        )
+        if artifact is not None and boot_mod.in_boot()
+        else None
+    )
+    started = time.monotonic()
+    try:
+        outcome = provision.enable_compiled(pipe, cfg, cache_dir, artifact)
+    except BaseException as exc:
+        if span is not None:
+            span.close(exc)
+        raise
+    arm_ms = int(round(max(0.0, time.monotonic() - started) * 1000.0))
+    if span is not None:
+        if outcome.armed:
+            if outcome.identity:
+                span.note(outcome.identity)
+        else:
+            span.refused(outcome.reason or "no_cell", outcome.detail)
+        span.close()
+    return outcome, CellAdoption(
+        ref=ref,
+        snapshot_digest=snapshot_digest,
+        artifact_kind=artifact_kind,
+        arm_ms=arm_ms,
+        armed=outcome.armed,
+        reason=outcome.reason,
+        detail=outcome.detail or outcome.identity,
+        pipeline_id=id(pipe),
+    )
+
+
 def enable_compiled(
     pipe: Any,
     cfg: Any,
@@ -686,8 +754,49 @@ def enable_compiled(
     artifact: Optional[Path] = None,
     publisher: Optional[CellPublisher] = None,
     delegate: Optional[bool] = None,
+    delivered_ref: str = "",
+    delivered_digest: str = "",
+) -> ArmOutcome:
+    """Fleet arming policy, plus the adoption ledger every exit shares.
+
+    pgw#923: the policy has a dozen exits and an adoption attempt can precede
+    any of them, so the measured attempts are collected in ONE place rather
+    than threaded through each ``return``. That is the shape that lets a
+    refusal be reported: the old code could only announce an adoption from the
+    frame that made it, which is why the successful ones were narrated and the
+    measured ones never sent.
+    """
+    adoptions: List[CellAdoption] = []
+    outcome = _arming_policy(
+        pipe, cfg, cache_dir, artifact,
+        publisher=publisher, delegate=delegate,
+        delivered_ref=delivered_ref, delivered_digest=delivered_digest,
+        adoptions=adoptions,
+    )
+    if not adoptions:
+        return outcome
+    return dataclasses.replace(outcome, adoptions=tuple(adoptions))
+
+
+def _arming_policy(
+    pipe: Any,
+    cfg: Any,
+    cache_dir: Optional[Path],
+    artifact: Optional[Path],
+    *,
+    publisher: Optional[CellPublisher],
+    delegate: Optional[bool],
+    delivered_ref: str,
+    delivered_digest: str,
+    adoptions: List[CellAdoption],
 ) -> ArmOutcome:
     """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
+
+    ``delivered_ref``/``delivered_digest`` name the HUB-attached candidate.
+    They are the identity the hub fences an adoption on, they are known only to
+    the caller that resolved the delivery, and without them a boot-attached
+    adoption has nothing to report itself as (pgw#923). Every arm attempt is
+    appended to ``adoptions``, measured.
 
     Replaces the executor's bare ``provision.enable_compiled`` call. HIT
     keeps today's semantics for a genuine match. A ``CellSelectionBugError``
@@ -747,61 +856,72 @@ def enable_compiled(
         if adopted is not None:
             from . import aot_serve
 
-            aot_armed = False
-            lane_refused = False
             try:
-                aot_armed = provision.enable_compiled(
-                    pipe, cfg, cache_dir, adopted.artifact)
+                aot_out, aot_row = _arm_candidate(
+                    pipe, cfg, cache_dir, adopted.artifact,
+                    ref=adopted.ref,
+                    snapshot_digest=adopted.snapshot_digest,
+                    artifact_kind=aot_serve.ARTIFACT_KIND,
+                )
             except cc.CompiledLaneUnavailableError:
                 # The AOT arm refused and the mandatory-lane no-artifact
                 # fallthrough raised — the ordinary policy below (with the
                 # delivered artifact) is still to run, so this is not
                 # terminal here.
-                lane_refused = True
                 logger.warning(
                     "fleet-cells: discovered AOT cell %s did not arm; "
                     "falling through to the ordinary arming policy",
                     adopted.ref)
-                activity_mod.emit_event(
-                    aot_serve.ADOPT_EVENT,
-                    f"family={family} key={adopted.cell_key} "
-                    f"ref={adopted.ref}: arm refused and the mandatory-lane "
-                    "fallthrough raised; ordinary policy resumes with the "
-                    "delivered artifact",
-                    phase="lane_unavailable",
-                )
-            if aot_armed and aot_serve.is_armed(pipe):
-                logger.info(
-                    "fleet-cells: armed discovered AOT cell %s (pgw#722)",
-                    adopted.ref)
-                return ArmOutcome(armed=True, self_mint=adopted)
-            if aot_armed:
-                # Armed, but not through the exported artifact (e.g. a
-                # seeded dynamo cell picked up on the fallthrough): honest
-                # plain HIT — never advertise the AOT identity for bytes
-                # this pipe does not serve.
-                activity_mod.emit_event(
-                    aot_serve.ADOPT_EVENT,
-                    f"family={family} key={adopted.cell_key} "
-                    f"ref={adopted.ref}: armed via the fallthrough, NOT the "
-                    "discovered artifact; AOT identity not advertised",
-                    phase="armed_other_path",
-                )
-                return ArmOutcome(armed=True)
-            if not lane_refused:
-                # The classified inner refusal already rode its own
-                # ADOPT_EVENT (aot_serve.enable / cell_receipt_refused);
-                # this row binds it to the DISCOVERED candidate's identity.
-                activity_mod.emit_event(
-                    aot_serve.ADOPT_EVENT,
-                    f"family={family} key={adopted.cell_key} "
-                    f"ref={adopted.ref}: discovered cell did not arm; "
-                    "falling through to the ordinary arming policy",
-                    phase="did_not_arm",
-                )
+                adoptions.append(CellAdoption(
+                    ref=adopted.ref,
+                    snapshot_digest=adopted.snapshot_digest,
+                    artifact_kind=aot_serve.ARTIFACT_KIND,
+                    arm_ms=0,
+                    armed=False,
+                    reason="lane_unavailable",
+                    detail=(
+                        f"family={family} key={adopted.cell_key}: arm refused "
+                        "and the mandatory-lane fallthrough raised; ordinary "
+                        "policy resumes with the delivered artifact"),
+                    pipeline_id=id(pipe),
+                ))
+            else:
+                if aot_out.armed and not aot_serve.is_armed(pipe):
+                    # Armed, but not through the exported artifact (e.g. a
+                    # seeded dynamo cell picked up on the fallthrough): honest
+                    # plain HIT — never advertise the AOT identity for bytes
+                    # this pipe does not serve, so the DISCOVERED cell's own
+                    # adoption is a miss with its own token.
+                    aot_row = dataclasses.replace(
+                        aot_row, armed=False, reason="armed_other_path",
+                        detail=(
+                            f"family={family} key={adopted.cell_key}: armed "
+                            "via the fallthrough, NOT the discovered "
+                            "artifact; AOT identity not advertised"))
+                    adoptions.append(aot_row)
+                    return ArmOutcome(armed=True)
+                adoptions.append(aot_row)
+                if aot_out.armed:
+                    logger.info(
+                        "fleet-cells: armed discovered AOT cell %s (pgw#722)",
+                        adopted.ref)
+                    return ArmOutcome(armed=True, self_mint=adopted)
 
     try:
-        if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
+        delivered_out, delivered_row = _arm_candidate(
+            pipe, cfg, cache_dir, artifact,
+            ref=delivered_ref,
+            snapshot_digest=delivered_digest,
+            artifact_kind="",
+        )
+        if artifact is not None:
+            # ONE rule, the same one `_arm_candidate` opens its boot span on: a
+            # call with no delivered artifact is not an adoption ATTEMPT —
+            # `compile_cache.enable` also covers the seeded and ALLOW_COLD
+            # lanes — so it must not manufacture a row for a cell that was
+            # never offered, in either direction.
+            adoptions.append(delivered_row)
+        if delivered_out.armed:
             return ArmOutcome(armed=True)
         # Plain-lane miss: no cell delivered / artifact unusable. Fall
         # through to the self-mint instead of the pre-gw#587 silent eager.
@@ -822,14 +942,14 @@ def enable_compiled(
     if not family:
         return _fail_closed(
             pipe, "Compile decl has no family", selection_bug,
-            phase="no_family")
+            phase=EagerPhase.NO_FAMILY)
     if not _cuda_ready():
         return _fail_closed(
-            pipe, "CUDA unavailable", selection_bug, phase="no_cuda")
+            pipe, "CUDA unavailable", selection_bug, phase=EagerPhase.NO_CUDA)
     if not cc.toolchain_present():
         return _fail_closed(
             pipe, "no C compiler for the self-mint", selection_bug,
-            phase="no_toolchain")
+            phase=EagerPhase.NO_TOOLCHAIN)
     # gw#608 ROOT CAUSE gates (order matters — BEFORE any process-global
     # cache-dir mutation):
     # (a) a slot object with no resolvable compile target (the LTX upsampler
@@ -843,7 +963,7 @@ def enable_compiled(
     if not cc.has_compile_target(pipe, cfg):
         return _fail_closed(
             pipe, "no compile target resolves on this pipeline", selection_bug,
-            phase="no_compile_target")
+            phase=EagerPhase.NO_COMPILE_TARGET)
     if cc.delivered_cell_seeded() and not delegate:
         # pgw#784: this gate exists ONLY because an in-process capture moves
         # the process-global inductor cache dir. A DELEGATED mint's capture
@@ -855,7 +975,7 @@ def enable_compiled(
             "a delivered cell is seeded in this process; a self-mint "
             "capture would re-point the process-global inductor cache dir "
             "away from it (gw#608)", selection_bug,
-            phase="delivered_cell_seeded")
+            phase=EagerPhase.DELIVERED_CELL_SEEDED)
 
     # gw#561: the eager-miss rollback in provision.enable_compiled dropped
     # the branch lane; the mint must key + trace the DECLARED graph family.
@@ -881,7 +1001,7 @@ def enable_compiled(
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe, f"self-mint key computation failed: {exc}", selection_bug,
-            phase="key_computation_failed")
+            phase=EagerPhase.KEY_COMPUTATION_FAILED)
 
     # pgw#672: consult the process ledgers BEFORE opening a capture.
     key_ref = f"{cc.system_repo(family)}#{key}"
@@ -907,11 +1027,11 @@ def enable_compiled(
             f"was quarantined by a failed serve/finalize proof earlier in this "
             f"process; re-minting it is the churn loop, so this worker serves "
             f"eager for the rest of its life and publishes nothing",
-            phase="cell_quarantined",
+            phase=EagerPhase.CELL_QUARANTINED,
         )
         return ArmOutcome(
             armed=False, selection_bug=selection_bug,
-            eager_reason="cell_quarantined")
+            eager_reason=EagerPhase.CELL_QUARANTINED)
     finalized_prior = finalized_in_process(key)
     if finalized_prior is not None:
         # This process already minted, proved, and FOLDED this exact cell
@@ -963,7 +1083,7 @@ def enable_compiled(
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe, f"another self-mint capture is pending (key {conflict})",
-            selection_bug, phase="capture_conflict")
+            selection_bug, phase=EagerPhase.CAPTURE_CONFLICT)
 
     if existing is not None:
         mint_root, capture_dir = existing.mint_root, existing.capture_dir
@@ -1025,7 +1145,7 @@ def enable_compiled(
             # `mint_in_progress` is a fleet that is warming up; one carrying
             # `no_toolchain` is a fleet that never will. Reading them as the
             # same "" was the whole gap.
-            eager_reason="mint_in_progress")
+            eager_reason=EagerPhase.MINT_IN_PROGRESS)
 
     # pgw#777 / DPA-8: the IN-PROCESS capture moves the process-global
     # TORCHINDUCTOR_CACHE_DIR and clears inductor's latch for the whole
@@ -1049,7 +1169,7 @@ def enable_compiled(
             pipe,
             f"in-process mint refused at groups={topo.execution_groups}: the inductor "
             "capture env is process-global (pgw#777/DPA-8)",
-            selection_bug, phase="multi_group_in_process")
+            selection_bug, phase=EagerPhase.MULTI_GROUP_IN_PROCESS)
 
     try:
         cc.begin_fleet_mint(pipe, cfg, capture_dir)
@@ -1061,7 +1181,7 @@ def enable_compiled(
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe, f"self-mint arm failed: {exc}", selection_bug,
-            phase="capture_arm_failed")
+            phase=EagerPhase.CAPTURE_ARM_FAILED)
 
     if existing is not None:
         logger.info(
@@ -1248,12 +1368,12 @@ def adopt_delegated_mint(
             # passes; `provision.enable_compiled` itself is not reusable here
             # because its pgw#709 receipts gate would drop a cell this pod
             # minted seconds ago and the hub has not countersigned yet.
-            armed = provision.arm_aot(
+            armed = bool(provision.arm_aot(
                 pipe, pending.cfg, pending.cache_dir, pending.target,
-                int(getattr(pending.cfg, "lora_bucket", 0) or 0))
+                int(getattr(pending.cfg, "lora_bucket", 0) or 0)))
         else:
-            armed = cc.enable(pipe, pending.cfg, pending.cache_dir,
-                              artifact=pending.target)
+            armed = bool(cc.enable(pipe, pending.cfg, pending.cache_dir,
+                                   artifact=pending.target))
     except cc.CellSelectionBugError as exc:
         # th#883, delegated edition: the child's own cell, whose axes describe
         # exactly this runtime, refused to arm. Loud — it is a bug in the one
@@ -1721,7 +1841,7 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
 def _fail_closed(
     pipe: Any, reason: str,
     selection_bug: Optional["cc.CellSelectionBugError"] = None,
-    *, phase: str = "mint_unavailable",
+    *, phase: EagerPhase = EagerPhase.MINT_UNAVAILABLE,
 ) -> ArmOutcome:
     """The quantized-lane policy at every exit that cannot produce a cell:
     plain lanes serve eager (never-raise miss policy), w8a8/w4a4 keep the

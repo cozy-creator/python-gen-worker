@@ -18,11 +18,14 @@ premise of the audit.
 
 from __future__ import annotations
 
+import inspect
+import re
 from typing import Any, Dict, List, Tuple
 
 import pytest
 
 from gen_worker import activity, fleet_cells, serving_mode
+from gen_worker.cell_adopt import EagerPhase
 
 
 @pytest.fixture()
@@ -110,42 +113,102 @@ def test_fail_closed_names_the_cause_instead_of_one_shared_constant(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "")
 
     outcome = fleet_cells._fail_closed(
-        _Pipe(), "no C compiler for the self-mint", phase="no_toolchain")
+        _Pipe(), "no C compiler for the self-mint",
+        phase=EagerPhase.NO_TOOLCHAIN)
 
     assert outcome.armed is False
-    # the token rides the WIRE ...
+    # the token rides the WIRE, as the VALUE — a reader groups on the string,
+    # never on the member's repr.
     assert ("no_toolchain", ) == tuple(
         phase for phase, _ in _rows(events, "self_mint_skipped"))
     # ... and rides OUT of the decision, for the request path to report.
     assert outcome.eager_reason == "no_toolchain"
 
 
+#: The eager exits pgw#824 gave a classified cause, named as MEMBERS.
+#:
+#: This list is the audit's own specification of which causes must exist, and
+#: it stays here rather than being read back out of ``EagerPhase``: an audit
+#: that enumerates the enum agrees with the code by construction, which is the
+#: failure mode it exists to prevent. Deleting an exit must fail a test, not
+#: shrink a set on both sides at once.
+#:
+#: What is NOT re-typed here is the spelling. pgw#923 moved every one of these
+#: exits from ``enable_compiled`` into ``_arming_policy`` — no exit removed, no
+#: token changed — and this audit, which read only ``enable_compiled``'s source
+#: for nine string literals, reported all nine as lost. Two literal lists is a
+#: drift channel; naming members closes it while keeping the specification.
+_DECLINE_PHASES = (
+    EagerPhase.NO_FAMILY,
+    EagerPhase.NO_CUDA,
+    EagerPhase.NO_TOOLCHAIN,
+    EagerPhase.NO_COMPILE_TARGET,
+    EagerPhase.DELIVERED_CELL_SEEDED,
+    EagerPhase.KEY_COMPUTATION_FAILED,
+    EagerPhase.CAPTURE_CONFLICT,
+    EagerPhase.MULTI_GROUP_IN_PROCESS,
+    EagerPhase.CAPTURE_ARM_FAILED,
+)
+
+
+def _phase_uses(member: EagerPhase) -> int:
+    """How many exits in the arming module pass ``member`` as their phase.
+
+    Scans the whole ``fleet_cells`` module, not one function: WHICH function
+    holds the policy is an implementation detail that has already changed once,
+    and an audit that fails when a helper is extracted is an audit that gets
+    re-pointed rather than read.
+    """
+    src = inspect.getsource(fleet_cells)
+    return len(re.findall(rf"phase=EagerPhase\.{member.name}\b", src))
+
+
 def test_every_fail_closed_exit_carries_a_distinct_token() -> None:
     """The nine exits must not collapse back onto one token by accident: a
     reader groups on this string, so a duplicate silently merges two causes."""
-    import inspect
-
-    src = inspect.getsource(fleet_cells.enable_compiled)
-    tokens = {
-        "no_family", "no_cuda", "no_toolchain", "no_compile_target",
-        "delivered_cell_seeded", "key_computation_failed", "capture_conflict",
-        "multi_group_in_process", "capture_arm_failed",
-    }
-    missing = {t for t in tokens if f'phase="{t}"' not in src}
+    uses = {member: _phase_uses(member) for member in _DECLINE_PHASES}
+    missing = sorted(m.name for m, n in uses.items() if n == 0)
     assert not missing, f"these _fail_closed exits lost their token: {missing}"
+    shared = sorted(m.name for m, n in uses.items() if n > 1)
+    assert not shared, f"these tokens now cover more than one exit: {shared}"
+    # ... and none of them fell back onto the shared constant they replaced.
+    assert _phase_uses(EagerPhase.MINT_UNAVAILABLE) == 0
 
 
-def test_a_quarantined_cell_is_a_typed_event_not_a_log_line(
-    events: List[Any], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RED before pgw#824. This was the ONE eager exit in `enable_compiled`
+def test_the_eager_phase_values_are_a_wire_contract() -> None:
+    """The hub stores these as ``worker_activity_events.phase`` and joins them
+    to a request row's ``fallback_reason``. Renaming one does not break a
+    build — it orphans every row already grouped under the old spelling — so
+    the mapping is pinned here, in the one place a rename must be argued.
+    """
+    assert {m.name: m.value for m in EagerPhase} == {
+        "NO_FAMILY": "no_family",
+        "NO_CUDA": "no_cuda",
+        "NO_TOOLCHAIN": "no_toolchain",
+        "NO_COMPILE_TARGET": "no_compile_target",
+        "DELIVERED_CELL_SEEDED": "delivered_cell_seeded",
+        "KEY_COMPUTATION_FAILED": "key_computation_failed",
+        "CAPTURE_CONFLICT": "capture_conflict",
+        "MULTI_GROUP_IN_PROCESS": "multi_group_in_process",
+        "CAPTURE_ARM_FAILED": "capture_arm_failed",
+        "CELL_QUARANTINED": "cell_quarantined",
+        "MINT_IN_PROGRESS": "mint_in_progress",
+        "MINT_UNAVAILABLE": "mint_unavailable",
+    }
+    # The join the ArmOutcome docstring claims: a delegated mint's decline and
+    # the serving posture that describes it are ONE token, not two that happen
+    # to be spelled alike today.
+    assert EagerPhase.MINT_IN_PROGRESS == serving_mode.POSTURE_MINT_IN_PROGRESS
+
+
+def test_a_quarantined_cell_is_a_typed_event_not_a_log_line() -> None:
+    """RED before pgw#824. This was the ONE eager exit in the arming policy
     that returned before `_fail_closed` and only `logger.error`'d. A pod that
     quarantines its own cell serves eager for the rest of its life — the state
     the hub most needs named, and the one it could not see.
     """
-    src_ok = 'phase="cell_quarantined"' in __import__(
-        "inspect").getsource(fleet_cells.enable_compiled)
-    assert src_ok, "the quarantine exit must emit a typed event"
+    assert _phase_uses(EagerPhase.CELL_QUARANTINED) == 1, (
+        "the quarantine exit must emit a typed event")
 
 
 # ---------------------------------------------------------------------------

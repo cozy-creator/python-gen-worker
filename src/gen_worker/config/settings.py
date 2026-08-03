@@ -1,17 +1,26 @@
 """Worker `Settings` struct — the canonical typed config for the worker process.
 
-Loaded exactly once at `entrypoint._run_main()` via `load_settings()`, then
-passed by reference to every consumer. Orchestrator-injected pod config and
-anything an operator needs to override at deploy time belongs here.
+Ruling §1.18 (Paul, 2026-08-02): *"we should NEVER be loading random envs in
+the middle of code; we should only load it from our config pipeline and then
+pass it around."* Exactly one component in this process reads the process
+environment — `gen_worker.config` — and it produces exactly one typed struct,
+which is **passed by parameter**.
 
-NOT everything reads through Settings: a handful of modules that also work
-as standalone libraries/CLIs outside a full worker bring-up (`net.py`,
-`convert/ingest.py`, `convert/clone.py`, `cli/run.py`, `compile_cache.py`)
-read a few env vars directly with their own defaults — those are
-self-contained and tested independently of the Settings loader (e.g.
-`COZY_HTTP_*_TIMEOUT_S`, `COZY_CONVERT_*`, `GEN_WORKER_COMPILE_*`). New
-pod-launch config should still go on Settings;
-a raw read is the exception for library-standalone knobs, not the norm.
+Each process entry performs one bootstrap-owned `load_settings()`:
+`entrypoint._run_main()` for the worker, `procsplit.parent.main()` for the
+control parent, and the `cli/` command group for the standalone CLI. Nothing
+else loads; nothing else reads env. There is deliberately **no** cached
+process-global accessor — `get_settings()` was deleted in pgw#931 because a
+`lru_cache`d singleton is the same defect as a raw env read wearing better
+clothes: unreachable by a caller that wants to pass a different value,
+invisible to a test that does not clear the cache, and latched by whichever
+module happened to import first.
+
+The list of sanctioned raw-read sites is not prose here — prose drifted from
+5 files to 41 before pgw#931 measured it. It is
+`scripts/config_reads_allowlist.txt`, every line classified, enforced by
+`scripts/lint_config_reads.py` in CI. A new `os.environ` read outside this
+package fails the build.
 
 Built on msgspec.Struct (already a worker dep) instead of pydantic-settings to
 avoid pulling in pydantic. The source-loader layering (env → .env → secrets dir
@@ -98,13 +107,29 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # variant it selected for this pod.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
 
-    # th#1359 Part 2: what the hub bought this pod FOR. "serve" (default, every
-    # existing behaviour) or "forge" — mint-only: registers, receives no tenant
-    # dispatch, holds no resident serving model, mints, publishes, retires.
-    # See gen_worker.worker_mode. Deliberately NOT an env_seal knob (a sealed
-    # knob would re-digest the env_seal key axis and give a forge-minted cell a
-    # key no serving pod can compute — the exact property the forge exists to
-    # preserve). Unknown values read as "serve" and are echoed on Hello.
+    # pgw#931 VIOLATION-A #14/#15: where the post-mortem boot record is written.
+    # It had NO field at all and was read raw in three places, which is why the
+    # parent and the child could disagree about the carrier. Empty = let
+    # `postmortem` pick a DURABLE default (the model-cache volume when it is not
+    # itself volatile; /tmp only as a last resort, and loudly).
+    boot_record_path: str = ""  # GEN_WORKER_BOOT_RECORD
+
+    # The hub's pod-launch GOAL DECLARATION — a bootstrap SEED, not a mode.
+    #
+    # pgw#930 (§1.17) deleted `gen_worker.worker_mode`. Paul: *"you can spawn a
+    # GPU and tell it to mint some AOT-cells, while also using it to serve jobs
+    # (inference) as needed"*, so the posture is a composable goal set
+    # (`gen_worker.worker_goals.WorkerGoals`), not an exclusive enum. This field
+    # is the only thing that still spells it "serve"/"forge", and
+    # `worker_goals.from_settings` is the ONLY interpreter of that spelling —
+    # one site to delete when th#1488's Directive delivers `repeated Goal
+    # goals` on the control channel and this field goes with it.
+    #
+    # Deliberately NOT an env_seal knob (a sealed knob would re-digest the
+    # env_seal key axis and give a mint-only pod's cell a key no serving pod can
+    # compute — the exact property that makes a minted cell reusable). Unknown
+    # values seed serve-only and are echoed raw on Hello, so the hub sees the
+    # disagreement rather than inferring a serving pod.
     worker_mode: str = "serve"  # WORKER_MODE
 
     # tensorhub access for standalone clients (run/serve/prefetch). Production

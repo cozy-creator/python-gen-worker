@@ -125,6 +125,30 @@ for any OTHER reason (missing non-heavy dep, SyntaxError): a broken
 submodule fails the build with the real traceback instead of silently
 dropping its functions from the manifest.
 
+### Type-check against the INSTALLED SDK (pgw#942)
+
+A mypy run with `gen_worker` not installed is **not supported**, and the SDK
+cannot make it work: with the package absent, `--ignore-missing-imports`
+resolves every SDK name to `Any`, and mypy then types the members of
+`class AspectRatio(StringEnum)` as bare `str` — so every `AspectRatio`-keyed
+table lights up with false `dict-item` errors. A `.pyi` inside the wheel
+cannot fix that, because the wheel is exactly what is missing.
+
+So: install `gen-worker` in the environment your type-check runs in, and add
+`--follow-imports=silent` so the SDK's own diagnostics are not attributed to
+your package. Do NOT reshape production imports to satisfy a bare checker —
+a `if TYPE_CHECKING: from enum import StrEnum as StringEnum / else: from
+gen_worker import StringEnum` shim is a report script editing your source.
+Import the name once, normally:
+
+```python
+from gen_worker import StringEnum
+```
+
+(`StringEnum` is a direct alias for `enum.StrEnum`, not a subclass — an
+empty enum base makes a tenant's members resolve as `str`. It exists as the
+named, documented vocabulary for endpoint payload enums.)
+
 ## Bindings
 
 The slot name is the `models={}` key (or, with the single-binding `model=`
@@ -312,6 +336,49 @@ ctx = fake_context(slots={
 })
 out = Generate().generate(ctx, TextToImage(prompt="a cat"))
 ```
+
+Add a `Recorder` to assert what the handler SAVED and LOGGED (pgw#942).
+Outputs run the SDK's real encode / C2PA stamp / size-limit path and are
+written into the recorder's own directory instead of uploaded, so there is
+no hub and no network — and, unlike a `save_image` override, the encode
+under test is the one production runs:
+
+```python
+from gen_worker.testing import Recorder, fake_context
+
+rec = Recorder()
+ctx = fake_context(slots={...}, recorder=rec)
+Generate().generate(ctx, TextToImage(prompt="a cat"))
+
+assert rec.refs == ["outputs/test-request/image.webp"]
+assert rec.images[0].call["quality"] == 95        # what the handler asked for
+assert rec.images[0].read_bytes()[:4] == b"RIFF"  # what it actually produced
+assert rec.messages == ["scheduler: dpmpp_2m_karras"]   # ctx.log
+assert rec.progress[-1].payload["step"] == 28           # ctx.progress
+```
+
+`rec.saved` holds every `save_*` in order (`images` / `audio` / `videos` /
+`files` filter it); each entry carries the typed asset the handler received,
+with its real `sha256` and `size_bytes`. `ctx.log` and `ctx.progress` are
+captured at the emitter seam, so neither needs an override either.
+
+**Do not assert the SDK's own shape.** A field the SDK deleted is the SDK's
+fact: it is listed once in `gen_worker.api.shape_contract.DELETED_FIELDS`
+and asserted by the SDK's suite. An endpoint asserts what IT declares, and
+gets the deleted-field walk for free:
+
+```python
+from gen_worker.testing import assert_declaration_shape
+
+decl = Generate.__gen_worker_endpoint__
+assert_declaration_shape(decl)          # decl + resources + compile + slots
+assert decl.resources.gpu is True       # your declaration — keep asserting this
+```
+
+A hand-written `assert not hasattr(decl.resources, "vram_gb")` is a copy of
+that list which no SDK change can update: `compute_capability` was deleted
+at 0.60 and RESTORED at 0.75 (pgw#660), and every stale copy of the list
+had to be found by hand.
 
 ## Lanes: multi-model classes with shared components (gw#479)
 

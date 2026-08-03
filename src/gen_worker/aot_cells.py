@@ -54,7 +54,8 @@ from . import aot_serve, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .procsplit import broker
-from .config import get_settings
+from . import config
+from .config import Settings
 from .models.chunk_cas import sha256_file
 from .models.chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
@@ -80,9 +81,13 @@ EVENT = "aot_cell_discovery"
 _NOT_AUTHORIZED = (401, 403)
 
 
-def prefer_aot() -> bool:
-    """The pilot flip switch (typed pod-launch knob, default OFF)."""
-    return bool(get_settings().compile_prefer_aot)
+def prefer_aot(settings: Optional[Settings] = None) -> bool:
+    """The pilot flip switch (typed pod-launch knob, default OFF).
+
+    Takes the `Settings` when the caller has them; otherwise reads the ones the
+    process entry installed (§1.18 — never the environment).
+    """
+    return bool((settings or config.current()).compile_prefer_aot)
 
 
 @dataclass(frozen=True)

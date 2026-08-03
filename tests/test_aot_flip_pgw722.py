@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 import pytest
 
 from gen_worker import aot_cells, aot_serve, cell_key, fleet_cells
-from gen_worker.config import get_settings
+from gen_worker import config as gw_config
 from gen_worker.models.chunk_cas import sha256_file
 
 FAMILY = "sdxl"
@@ -83,7 +83,7 @@ def _pilot_meta(key: str, *, lane: str = "w8a8", bucket: int = 64,
 
 def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +92,13 @@ def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_flag_defaults_off() -> None:
-    assert get_settings().compile_prefer_aot is False
+    assert gw_config.current().compile_prefer_aot is False
     assert aot_cells.prefer_aot() is False
 
 
 def test_flag_rides_typed_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     _flag_on(monkeypatch)
-    assert get_settings().compile_prefer_aot is True
+    assert gw_config.current().compile_prefer_aot is True
     assert aot_cells.prefer_aot() is True
 
 
@@ -553,7 +553,7 @@ def test_flag_off_never_discovers(
     monkeypatch.setattr(aot_cells, "discover", _forbidden)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: True)
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.hit())
     outcome = fleet_cells.enable_compiled(
         _FakePipe(), _Cfg(), publisher=_StubPublisher())  # type: ignore[arg-type]
     assert outcome.armed and outcome.self_mint is None
@@ -573,11 +573,11 @@ def test_flag_on_arms_discovered_cell_and_advertises_it(
         aot_cells, "discover", lambda *a, **k: adopted)
     armed_with: List[Optional[Path]] = []
 
-    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> bool:
+    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
         armed_with.append(artifact)
         # The real path wraps the module; is_armed then reads the marker.
         pipe._cozy_aot = {"state": {"failed": False}}
-        return True
+        return AdoptOutcome.hit()
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)
     outcome = fleet_cells.enable_compiled(
@@ -604,9 +604,10 @@ def test_flag_on_failed_aot_arm_falls_through(
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: adopted)
     calls: List[Optional[Path]] = []
 
-    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> bool:
+    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
         calls.append(artifact)
-        return artifact == delivered
+        return (AdoptOutcome.hit() if artifact == delivered
+                else AdoptOutcome.miss("key_mismatch"))
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)
     outcome = fleet_cells.enable_compiled(
@@ -627,7 +628,7 @@ def test_flag_on_without_publisher_skips_discovery(
     monkeypatch.setattr(aot_cells, "discover", _forbidden)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: True)
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.hit())
     outcome = fleet_cells.enable_compiled(_FakePipe(), _Cfg(), publisher=None)
     assert outcome.armed and outcome.self_mint is None
 
@@ -683,10 +684,12 @@ def _arm_aot(
         lambda p: {"kind": aot_serve.ARTIFACT_KIND, "module": "unet"})
     observed: List[bool] = []
 
-    def _enable(p: Any, c: Any, cache_dir: Any, artifact: Any) -> bool:
+    def _enable(p: Any, c: Any, cache_dir: Any, artifact: Any) -> Any:
         observed.append(
             lora_lifted.lifted_binding(p.unet) is not None)
-        return enable_result
+        # pgw#923: the arm returns a typed outcome, not a bool.
+        return (AdoptOutcome.hit() if enable_result
+                else AdoptOutcome.miss("artifact_invalid"))
 
     monkeypatch.setattr(aot_serve, "enable", _enable)
     provision.enable_compiled(
@@ -740,6 +743,7 @@ def test_f2_failed_arm_rolls_the_install_back(
 # ---------------------------------------------------------------------------
 
 from gen_worker.utils.lora import AdapterResidency, PreparedAdapter  # noqa: E402
+from gen_worker.cell_adopt import AdoptOutcome
 
 
 def _adapter(model: nn.Module, seed: int) -> Dict[str, Any]:

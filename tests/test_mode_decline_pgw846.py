@@ -35,7 +35,9 @@ def test_a_cell_whose_mode_has_no_arm_is_declined_by_name_and_stays_eager(
     class _Pipe:
         pass
 
-    armed = provision.arm_aot(
+    outcome = provision.arm_aot(
         _Pipe(), object(), None, Path("/nonexistent/cell.tar.gz"),
         0, {"mode": mode})
-    assert armed is False
+    assert outcome.armed is False
+    # The decline is BY NAME (pgw#827/pgw#923), not a bare False.
+    assert outcome.reason == "no_arm_for_mode"

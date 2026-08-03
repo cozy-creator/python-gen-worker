@@ -1,10 +1,313 @@
 # Changelog
 
-## Unreleased
+## 0.91.3 (2026-08-03) — **SECURITY: the th#1307 private-key refusal is reachable again**, and the NVLS override stays deleted
+
+PATCH: no wire-contract, `@endpoint` or `Resources` change. Both items are promotion blockers
+found on `release/20260803-night-pgw3`; both trace to the pgw#929/#931 env work.
+
+- **SECURITY — `content_credentials`: a C2PA private key delivered to a pod stopped being
+  refused unless something called `configure()`.** 0.91.x rewrote `_active_config` to stop
+  resolving lazily from the cached `Settings` loader. That part is right and stays — a signing
+  module must not go and find its own config in the environment — but the th#1307 ratchet
+  (`GEN_WORKER_C2PA_KEY_PEM` / `_KEY_PATH` present ⇒ raise) was riding *inside* the
+  `configure()` call the lazy path made, so deleting the path deleted the refusal with it.
+  `configure()` still refused; nothing else did. Any process that does not run the worker
+  bring-up — a library embed, a compute child, an endpoint importing the module directly —
+  got a quiet `enabled() == False` and shipped media **unsigned, beside a platform-wide
+  signing key sitting in `os.environ`**: both failure directions of th#1307 at once.
+  `_refuse_pod_private_key_material()` is now hoisted out of `configure()` and evaluated at
+  the top of `_active_config()`, *before* the `_configured` memo — so it fires for `enabled()`,
+  `sign_media_bytes()` and `sign_media_file()`, whether or not this process configured signing
+  and whether or not the key arrived after a clean configure. The refusal is a property of the
+  pod's environment; no entry point owns it.
+
+- **`NCCL_NVLS_ENABLE`: the unconditional write STANDS — the stale pgw#773 test did not.**
+  `tests/test_nccl_nvls_pgw773.py` still asserted that a pre-set `=1` survives. Checked against
+  pgw#773 before overriding it: pgw#773 never argued for the override — it was a live CUDA-401
+  bug hunt, and respect-if-set was the incidental shape of the one-line fix. pgw#929 §1.17
+  re-adjudicated the same variable as a library-adapter handoff, because the failure it guards
+  is TOTAL (every all-to-all of every arm dies) rather than gradual, so an env inherited from a
+  base image can silently take sequence parallelism to zero. The test encoded an assumption, not
+  a contract, and now encodes the ruling. The removed escape hatch is still covered: the
+  override is never silently discarded — the warning names the variable, the dropped value, the
+  measured reason, and the route forward (a measured capability and a new issue, never this
+  env), and that warning is now part of the pinned contract.
+
+## 0.91.2 (2026-08-03) — **a produced flavor's passthrough components are one file too**: th#1362's producer invariant stops refusing the married trees it was meant to protect (the te#137 svdq publish blocker)
+
+PATCH: nothing here touches the worker<->hub wire contract, `@endpoint` or `Resources`, so no
+`TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` move is needed. Three de-shard helpers become
+public and move module (`clone` -> `writer`); the behaviour change is confined to how a
+producer materializes the half of its output tree it did not compute.
+
+- **th#1362 / te#137: a produced flavor's PASSTHROUGH components are one file too.**
+  `copy_non_weight_files` — the one door untouched weights enter a tree we produce — now
+  COLLAPSES an HF shard set it copies through. Item 4's producer invariant was right and
+  stays; what was missing is that item 2 wired de-shard into `clone.py`'s mirror arms only,
+  so the married-tree producers (`build_svdq_flavor_tree`, te's fuse) hardlinked a
+  legacy-sharded base component straight into their output and `publish_flavors` refused it
+  (`sharded_producer_output: ... text_encoder/model-00001-of-00009.safetensors`, found live
+  blocking every te#137 svdq flavor publish off `tensorhub/qwen-image`). `deshard_mirror_tree`
+  / `deshard_indexed_safetensors` / `tree_has_sharded_safetensors` moved from `clone.py` to
+  `writer.py` next to the `merge_safetensors_by_offset` primitive they drive, and are public.
+  The source snapshot is untouched (only this tree's hardlinks are unlinked), an unsharded
+  component is still passed through by inode, and a `-NNNNN-of-MMMMM` set with no index is
+  still REFUSED rather than published.
+
+- **pgw#923 + pgw#924: two telemetry lanes that reported zeros.** A lane that reports zeros is
+  worse than an absent one — it looks like a measurement.
+  - **The adoption fact had three spellings and the measured one was empty.** th#1329/th#1352's
+    `compile_cache_adopt` — durable, two partial indexes, a p50/p95/max admin surface — held
+    **0 rows on both live stacks**, while every real adoption rode free-text `aot_adopt` at
+    `duration_ms=0` (5 rows chaos, 27 master) and `trt_adopt` held 0. Z-gated, not unused: the
+    only sender of the measured `ModelEvent{ADOPTED}` was the hub-commanded
+    `ADOPT_COMPILE_CACHE` handler, which no stack has ever dispatched. Real adoptions are boot
+    attaches through `fleet_cells`, and that path sent no `ModelEvent` at all. The mechanism was
+    a return type: `aot_serve.enable` / `provision.arm_aot` / `provision.enable_compiled` /
+    `trt_engine.enable` narrated the outcome into an event and returned a bool, so the frame
+    that knew the outcome was not the frame that owns the wire. **They now return a typed
+    `AdoptOutcome`** (`gen_worker.cell_adopt`; still truthy/falsy, so every
+    `if enable_compiled(...)` reads unchanged), `fleet_cells.enable_compiled` measures each arm
+    onto `ArmOutcome.adoptions`, and `Executor._report_adoptions` sends one `ModelEvent` per
+    attempt after the boot warmup so `duration_ms` (arm) and `warmup_s` (what the armed cell
+    still costs) are both real. `operation_id` stays empty — already the wire contract's own
+    name for a boot-attached cell, so no proto or hub change is needed. `aot_adopt` and
+    `trt_adopt` are DELETED; their tokens survive as `adopt_failed:<reason>`, the grammar the
+    commanded path already uses, so one `kind=compile_cache_adopt` query returns the whole
+    outcome distribution. The STORE_SERVED_BOOT_COMPILED alarm stops hijacking
+    `ModelEvent{ADOPTED}` with `duration_ms` redefined as inductor compile wall — a second
+    meaning for the one field that lane percentiles over — and gets its own typed event.
+  - **The boot ladder declared 17 phases and had 8 producers.** `process_start`, `env_seal`,
+    `manifest_load`, `cache_preflight`, `cuda_probe`, `cell_load` and `first_request` had no
+    producer anywhere in `src/` — only unit tests constructed them — and are deleted.
+    `cell_arm` was in the same state but is RETAINED and its producer BUILT: it brackets the
+    real arm in `fleet_cells`, over the same interval the adoption reports, so the ladder and
+    the hub's measurement cannot disagree about what an arm cost. `warm_complete` is deleted
+    for a stronger reason — live rows reach **4,863,664 ms**, eighty minutes past the boot it
+    claimed to be a phase of (the deferred background mint) — while the mint-goal latch and the
+    pgw#805 eager-forever backstop it also performed are kept. `warmup` is the §4.22 defect:
+    the bracket opened unconditionally around a plan that is empty on most setup slots, so
+    240/240 boot rows and 336/336 activity events read `duration_ms=0`. It is now recorded only
+    when a forward actually ran, with the count in `detail` — "nobody warmed" and "warming was
+    free" stop being the same row. `warmup_iteration` is deleted on the vocabulary ruling, not
+    on absence: it is NOT unwired, the pgw#797 real-boot harness fires it, and its zero on both
+    stacks is traffic. `graph_class` (0/517 live) is no longer produced; the proto field is a
+    vendored artifact under a digest gate, so its removal is tensorhub's.
+
+- **pgw#942: three SDK holes the 28 endpoints were each paying for, closed once.**
+  The framing, and the reason a P2 was worth doing: *if 28 endpoints all write the same
+  fifteen lines to do something ordinary, that is an SDK gap.* Measured across the
+  endpoint tree at 56,750 Python lines.
+  - **`gen_worker.testing` gains the `save_*` half — a `Recorder`.** `fake_context`
+    shipped for exactly this and reached 4/27 adoption; the other 23 hand-roll 26
+    `class _Ctx(RequestContext)` subclasses (473 lines) whose only real content is a
+    CAPTURING `save_image`/`save_audio` and a `log` override. Passing
+    `fake_context(recorder=Recorder())` records every save — kind, ref, the typed asset
+    with its real `sha256`/`size_bytes`, and the keyword arguments the handler passed —
+    **after** the production `save_*` ran, with outputs written to the recorder's own
+    directory instead of uploaded. `ctx.log`/`ctx.progress` are captured at the emitter
+    seam, so they need no override either. This closes a real hole rather than a
+    cosmetic one: **23 suites are green over an encode path they never call**, which is
+    the reason hidream's own test comment gives for migrating.
+  - **The SDK asserts its own deleted-field set, once** —
+    `gen_worker.api.shape_contract.DELETED_FIELDS`, with `assert_sdk_shape()` (the SDK's
+    self-check) and `assert_declaration_shape(decl)` (walks one endpoint's decl,
+    resources, compile and slots). 25 of 28 packages carried 91 `assert not hasattr(...)`
+    lines plus 46 `for deleted in (...)` loops asserting fields the pinned SDK *cannot*
+    ship, which is the mechanism by which one field rename breaks 25 downstream suites at
+    once. The table is the only place that can be right: `compute_capability` was deleted
+    at 0.60 and RESTORED at 0.75 (pgw#660), and every fleet-side copy of the list had to
+    be corrected by hand.
+  - **The bare-mypy `StringEnum` question is answered: a mypy run without the SDK
+    installed is UNSUPPORTED, and the SDK cannot fix it.** With the package absent,
+    `--ignore-missing-imports` types every SDK name `Any`, and mypy then resolves the
+    members of `class AspectRatio(StringEnum)` as bare `str` — false `dict-item` errors
+    on every ratio-keyed table (reproduced: 11 errors on sdxl). A `.pyi` inside the wheel
+    cannot help, because the wheel is what is missing. Endpoints type-check against the
+    installed SDK with `--follow-imports=silent` (measured: 0-1 error delta per package)
+    and delete the 20 `if TYPE_CHECKING: from enum import StrEnum as StringEnum` shims in
+    15 packages — production import blocks were being shaped by a report script.
+
+  **Endpoint-side ordering (ie#594):** the fleet pins `gen-worker==0.89.0`, so the
+  `Recorder` and `assert_declaration_shape` migrations cannot land until this ships and
+  a fleet repin train moves the 28 endpoints onto it. The `StringEnum` half depends on
+  no new SDK and can land immediately.
+
+- **pgw#930 (§1.17): `WORKER_MODE` is deleted; serve and mint are COMPOSABLE goals.**
+  Paul: *"you can spawn a GPU and tell it to mint some AOT-cells, while also using it to
+  serve jobs (inference) as needed."* `worker_mode.py` was a closed two-tuple
+  `(serve, forge)` with one predicate, `is_forge()`, so "serve" was defined everywhere as
+  *not forge* and "both" could not be spelled at all. It is replaced by
+  `worker_goals.WorkerGoals` — independent `serve` and `mint` goals — and all five
+  production consumers now ask a better question:
+  - `executor` admits dispatch on `serve_admitted()`, not on a mode. (Kept rather than
+    deleted: reading the hub's declared goal set is not a second copy of the hub's
+    placement decision, and the failure it prevents — a tenant's latency behind a
+    multi-hour compile — is measured.)
+  - `mint_budget` and `aot_compile_pool` derive the three tenant reserves from
+    `tenant_reserve_applies()` (i.e. the serve goal) instead of `0 if forge else X`. A pod
+    serving one small model while minting now keeps a REAL reserve.
+  - `forge.py` → `mint_goal.py`. It states the same typed terminal, but retires the pod
+    only when no serve goal is held — the one line that makes the dual-goal case safe.
+    Previously `start_drain` was unconditional and would have torn down a live serving
+    instance.
+  - `PoolWidth.forge: bool` → `serve_goal` / `mint_goal`, reported independently.
+  The wire field `WorkerResources.worker_mode` is unchanged (the proto is a vendored
+  artifact of Tensorhub's canonical copy, pgw#944) and is now PROJECTED from the goal set,
+  carrying the raw declaration so an unrecognised spelling stays visible at the hub.
+
+  The two EMITTED ACTIVITY KINDS were decided separately, on row counts read from the
+  standing hub rather than on symmetry: `forge_terminal` keeps its string (1 historical row —
+  renaming it would silently orphan that row; only the Python name changed, to
+  `KIND_MINT_GOAL`), while `forge_dispatch_refused` became
+  `serve_goal_absent_dispatch_refused` (0 rows, nothing to orphan, and the old name asserted
+  a mode that no longer exists). Also confirmed there: **zero `worker_mode`/`forge` columns
+  across all 120 `tensorhub` tables**, so the hub never persisted the mode at all — exactly
+  what pgw#930 predicted.
+
+- **pgw#931 (§1.18): `get_settings()` is deleted; the config struct is passed.**
+  The `functools.lru_cache(maxsize=1)` accessor let any module at any depth materialise
+  configuration out of the environment, so content depended on which module imported first
+  and nothing could tell whether config had been loaded at all. Now: each process entry
+  performs one bootstrap-owned `load_settings()` and PUBLISHES it
+  (`entrypoint._bootstrap_configuration`, `procsplit.parent.main`); `config.current()`
+  raises `SettingsNotInstalled` rather than reading env behind the pipeline. Six raw config
+  reads deleted outright, five of them `or os.environ.get(...)` clauses sitting in the same
+  expression as the `Settings` field for the SAME fact. `worker_credential` and
+  `content_credentials` are handed their config instead of fetching it, restoring the
+  pgw#848 rename's teeth (the C8 `getattr(..., default)` inside `except Exception` is gone).
+  New `Settings.boot_record_path` (`GEN_WORKER_BOOT_RECORD`), which previously had no field
+  and was read raw in three places.
+
+  **Behaviour note:** C2PA signing on the STANDALONE CLI is now explicitly off rather than
+  lazily configured from env at first `save_bytes`. Unchanged on real pods —
+  `entrypoint._run_main` calls `content_credentials.configure(settings)` with the entry's
+  `Settings`, and th#1307's key-material boot refusal still fires there. The CLI lost nothing
+  it had: th#1307 moved the private key hub-side, so signing arms at HelloAck and a CLI run has
+  no HelloAck.
+
+- **pgw#931: the loader no longer accepts and ignores a key it owns.**
+  `_normalize_key` returned `None` for anything unrecognised and every source layer then
+  silently skipped it, so a typo'd `TENSORHUB_CHACE_DIR` in `.env` or `/run/secrets` was
+  accepted and inert. Owned-namespace keys (`GEN_WORKER_`, `TENSORHUB_`, `WORKER_`,
+  `COZY_`) from the file sources now raise `UnknownSettingError`. The PROCESS environment
+  is reported, not refused — Tensorhub injects owned-namespace names this worker has no
+  reader for, so refusing there would be a fleet of dead pods.
+
+- **pgw#931: `scripts/lint_config_reads.py` + a classified allowlist, gating in CI.**
+  Every `os.environ` access outside `gen_worker/config` needs a line naming its §1.18
+  classification. The gate also proves the loader's unknown-key exemption set still covers
+  the tree, so the refusal above cannot rot. Replaces the prose exception list in
+  `config/settings.py`, which named 5 files while the reads lived in 41.
+
+- **pgw#929 (§1.17): env census — deletions and corrections.**
+  - `COZY_CONVERT_RETAIN_WORKDIR` **deleted**. Retaining a failed job's scratch is a
+    debugging action against one run, not a deployment mode.
+  - `GEN_WORKER_AOT_ENTRY_WORKERS` **deleted** from the test that set it: nothing in
+    `src/` has ever read that name, so the assertion held for the one reason that proves
+    nothing.
+  - `NCCL_NVLS_ENABLE` is now overwritten to `0` **unconditionally** immediately before
+    communicator creation. It previously wrote only when unset, so an image or operator
+    could turn NVLS back on and take every Ulysses arm down with CUDA 401.
+  - `GEN_WORKER_FORBID_CPU_OFFLOAD` now **refuses at the real placement boundary**
+    (`models/memory.py`, both `enable_*_cpu_offload` calls). It had exactly one reader —
+    the swap-latency benchmark — while the workspace `CLAUDE.md` told operators it raised
+    on any CPU-touching placement. The documented contract is now true.
+  - `PODGUARD_STATE` **retained** as an external watchdog adapter (its producer runs before
+    this process exists, so it can be neither argv nor a `Settings` field) and now reports
+    `armed` / `not_present` / `invalid` — a set-but-unusable path was previously the same
+    silent no-op as a hub-created pod that legitimately has none.
+  - `aot_resume.resume_enabled()` states the decision that was hidden inside an empty
+    string.
+  - `docs/environment.md` corrected: it documented a `WORKER_JWT → worker_jwt` field that
+    pgw#848 renamed, and its raw-read list was best-effort prose. The allowlist is now the
+    census.
 
 - **pgw#938:** isolate transient post-mortem evidence per compute group and make
   concurrent grant downloads finalize through writer-unique temporary files.
+- **pgw#937: a dead execution group's last frame no longer outvotes the live ones.** The
+  parent's per-group fan-in state (`_group_activities`, `_group_fn_unavail`,
+  `_group_fn_degraded`, `slot.last_state_delta`) is now GENERATION-SCOPED and gated on a
+  liveness predicate. The ruling, written where `parent.py` already claimed it in prose: **a
+  group without a live child is not a participant, and its facts are UNKNOWN — neither "still
+  true" nor the live-group default — so its identity element is EXCLUSION from every merge.**
+  A bare `.pop()` would have been worse than the leak, because absence-of-a-value already means
+  "this group serves it". Fixes: an activity pinned RUNNING forever, a dead group vetoing a live
+  group's `self_stalled` confession, a natively-served function retired worker-wide, a down
+  group's functions and free VRAM still advertised, and the parent's dispatch-time observations
+  orphaned by the death path (which silently stopped billing attestation on a crash-looping
+  pod). The death path now EMITS the consequences — a terminal for every activity kind the dead
+  generation held open, plus the recomputed worker StateDelta — so the hub learns the capacity
+  dropped instead of inferring it from an update that stopped arriving. G == 1 is untouched by
+  construction.
 
+## 0.91.1 (2026-08-03) — **the AOT serving path stops lying about its coverage**: a declaration whose rows collapse to one ingress contract is MERGED instead of published undispatchable (pgw#917), the base-weight-lane vocabulary becomes one checked list (pgw#918), and the AOT arm finally has a shape-gap fact the hub can count (pgw#916)
+
+PATCH, deliberately: nothing here touches the worker<->hub wire contract, `@endpoint`, or
+`Resources`, so no `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` move is needed. The surface that
+does change is internal mint vocabulary — `aot_mint.PARITY_LANES` loses a member,
+`aot_mint.REGRESSED_LANES` is deleted (both named lanes nothing can stamp), and
+`aot_mint._gate_dispatch_ambiguity` is replaced by `aot_mint.canonicalize_dispatch_classes`.
+One additive activity kind (`shape_gap`); the hub logs unknown kinds verbatim.
+
+### pgw#917 (P1) — a regional multi-entry AOT cell was undispatchable BY CONSTRUCTION
+
+Measured, read-only, on the standing stack: `worker_activity_events` holds **24
+`aot_ingress_refused` rows, every one `phase='entry_ambiguous'`** — zero of any other phase —
+summing to **4,200 refused calls** across gen-worker 0.89.0 and 0.90.0, against a cell that
+adopted and armed (`family=sdxl mode=regional entries=72 precision=w8a8-lora64`). The cell
+armed, advertised, and served nothing.
+
+The mechanism is arithmetic: 112x144 = 144x112 = 168x96 = 96x168 = 16,128, and a
+`BasicTransformerBlock` never sees `H_lat`/`W_lat` — only the flattened sequence
+`(B, H_lat*W_lat, C)`. The declaration keys entries on the pair; the ingress contract can only
+observe the product. Ambiguity is guaranteed for every area-preserving aspect family at a fixed
+bucket, which is how the fleet's shape rows are generated.
+
+`_gate_dispatch_ambiguity` (pgw#844) already refused such a cell. Refusal is the wrong verdict
+for the common half: rows that produce one ingress contract over one target with byte-identical
+code ARE one dispatchable class. `canonicalize_dispatch_classes` now merges them to one entry
+and keeps the declared names as `entries[*].aliases` (not a `class_hash` fact — an alias declares
+no traffic the survivor already declares, so an otherwise identical cell does not re-key), and
+refuses only a collision whose members differ, **naming the pair and the differing axis**
+(`graph`, `ingress`, `specialization`, ...). Runs post-export/pre-compile, so the 36 of 72
+compiles that bought nothing are never paid — the direct pgw#847 shape-invariant win.
+
+### pgw#918 (P1) — `_SPECULATIVE_CELL_BASE_LANES` violated the invariant its own comment states
+
+The constant's comment describes ie#546 (9 workers re-minted a cell published on a lane no lookup
+speculated) and the constant was missing `w4a4` and `svdq-native` — the same defect, unrepaired,
+for two more lanes. `loading.STAMPABLE_BASE_LANES` is now the single source, the executor
+speculates exactly it, and a test PARSES every `_cozy_weight_lane` assignment site under
+`gen_worker/models` so a new lane cannot be stamped without appearing there.
+
+Second half: `PARITY_LANES` held `"w8a8-rowwise"`, a token `lane_admitted` can never be handed
+(no loader stamps it, `lane_token`/`lane_bucket` never synthesize it) — deleted, with a test that
+every member names something a loader can stamp. `REGRESSED_LANES` went with it: no reader in
+`src/`, and it too named an unstampable lane (`"fp8-storage"`).
+
+### pgw#916 (P1) — the AOT arm had NO shape-growth path
+
+`hot_swap.enable` returns False without a **dynamo** router, and an AOT-armed pipeline never has
+one (`provision.enable_compiled` returns as soon as `arm_aot` succeeds, so `compile_cache.enable`
+is never reached). Every one of the executor's three growth call sites was a silent no-op on an
+AOT arm; the measured cost is one live `compiled_shape_coverage` row reporting **2 of 18 declared
+graph classes served compiled**, with nothing able to heal the other 16 — on any pod, ever.
+
+New `gen_worker/shape_growth.py` is the one arm-agnostic module: the `ShapeGap` vocabulary keyed
+on a NAMED declared class (not a dynamo signature), a deduplicating ledger, the countable
+`shape_gap` activity kind (the AOT counterpart of pgw#680's dynamo-only `guard_miss`), the lifted
+turn-gate/`Debounce` primitives (`hot_swap` imports them — one implementation), and the per-arm
+backend seam. `aot_serve` now names the missing declared class at ingress
+(`aot_serve.ingress_class_name`) and reports+submits it; `hot_swap` books its permanent holes in
+the same ledger; and an armed target with no growth path emits `shape_gap phase=no_growth_path`
+instead of the success log line that simply never printed.
+
+**Not closed:** the AOT growth BACKEND (compile the named class and republish the grown cell)
+is unregistered, so `submit` refuses loudly by name. Building it here would mean building the
+second task/device scheduler this issue's own acceptance forbids; it belongs to pgw#910
+Reconciler + pgw#911 DeviceExecutor under pgw#888 CompileRuntime. A dependency test holds that
+line.
 ## 0.91.0 (2026-08-02) — **the native kernel lane lands dormant** (pgw#862/pgw#864: env-gated opt-in, OFF by default — no serving path changes until the gate is set), the envelope gains the DEGREE axis (th#1426), an unprovable cell can no longer be declared (th#959), and v2 publish restates classification (th#1411)
 
 MINOR, not patch: `Resources` gains a field (`max_gpus_per_execution_group`), `@endpoint`

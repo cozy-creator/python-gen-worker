@@ -158,10 +158,17 @@ def _emit(detail: str, *, dial: bool = True) -> None:
     if not dial:
         return
     try:
-        from .config import get_settings
+        from . import config
         from .worker_fatal import report_worker_detail
 
-        delivered = report_worker_detail(get_settings(), detail)
+        # The supervisor is a PRE-FORK process entry: it loads its own
+        # Settings once (§1.18 acceptance is one bootstrap-owned load per
+        # process entry, not one across the tree) and hands them down. It does
+        # not consult a cache that may or may not have been filled.
+        delivered = report_worker_detail(
+            config.current() if config.installed() else config.load_settings(),
+            detail,
+        )
         logger.info("worker.postmortem wire report delivered=%s", delivered)
     except Exception:
         logger.warning("post-mortem wire report failed", exc_info=True)

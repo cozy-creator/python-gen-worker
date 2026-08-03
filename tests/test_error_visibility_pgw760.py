@@ -48,37 +48,43 @@ class _Cfg:
     family = "sdxl"
 
 
-def test_trt_enable_refusal_rides_typed_event(
+def test_trt_enable_refusal_names_the_classified_reason(
     events: List[Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    """pgw#923: the reason is RETURNED, not narrated.
+
+    It used to ride a free-text `trt_adopt` event — a third spelling of "a cell
+    adopted and what it cost", next to `aot_adopt` and the measured
+    `compile_cache_adopt`. `trt_adopt` is deleted; the classified reason now
+    reaches the hub as this adoption's own `adopt_failed:<reason>`, which is
+    countable in the same query as every other adoption outcome.
+    """
     def refuse(*a: Any, **k: Any) -> Dict[str, Any]:
         raise AdoptError("no_target", "pipeline has no module 'unet'")
 
     monkeypatch.setattr(trt_engine, "load_and_wrap", refuse)
     artifact = tmp_path / "engine.tar"
     artifact.write_bytes(b"not-a-real-artifact")
-    assert trt_engine.enable(object(), _Cfg(), artifact=artifact) is False
+    out = trt_engine.enable(object(), _Cfg(), artifact=artifact)
+    assert out.armed is False
+    assert out.reason == "no_target"  # the CLASSIFIED reason, not a kind
+    assert "engine.tar" in out.detail
+    assert "no module 'unet'" in out.detail
+    # And no second vocabulary was written on the way past.
+    assert not [e for e in events if e.kind == "trt_adopt"]
 
-    got = _by_kind(events, activity.KIND_TRT_ADOPT)
-    assert len(got) == 1
-    assert got[0].phase == "no_target"  # the CLASSIFIED reason, not a kind
-    assert "engine.tar" in got[0].detail
-    assert "no module 'unet'" in got[0].detail
 
-
-def test_trt_enable_success_rides_typed_event(
+def test_trt_enable_success_names_the_engine(
     events: List[Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     meta = {"module": "unet", "sku": "l4", "trt": "10.8", "precision": "fp8"}
     monkeypatch.setattr(trt_engine, "load_and_wrap", lambda *a, **k: meta)
     artifact = tmp_path / "engine.tar"
     artifact.write_bytes(b"x")
-    assert trt_engine.enable(object(), _Cfg(), artifact=artifact) is True
-
-    got = _by_kind(events, activity.KIND_TRT_ADOPT)
-    assert len(got) == 1
-    assert got[0].phase == "armed"
-    assert "module=unet" in got[0].detail
+    out = trt_engine.enable(object(), _Cfg(), artifact=artifact)
+    assert out.armed is True
+    assert "module=unet" in out.identity
+    assert not [e for e in events if e.kind == "trt_adopt"]
 
 
 # ---------------------------------------------------------------------------

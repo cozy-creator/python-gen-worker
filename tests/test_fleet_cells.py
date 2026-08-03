@@ -24,6 +24,7 @@ from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure
 from gen_worker.models import provision
+from gen_worker.cell_adopt import AdoptOutcome
 
 
 class _Cfg:
@@ -65,7 +66,9 @@ def _clear_pending():
 
 def _mintable(monkeypatch, *, key=FAKE_KEY):
     """Route a MISS into the cold-capture arm with no CUDA/toolchain."""
-    monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: False)
+    monkeypatch.setattr(
+        provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     # pgw#681 gate at its torch boundary, simmed: these rigs never compile
@@ -127,7 +130,8 @@ def _in_process_mint_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
     calls: list = []
-    monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: True)
+    monkeypatch.setattr(
+        provision, "enable_compiled", lambda *a, **k: AdoptOutcome.hit())
     monkeypatch.setattr(
         cc, "begin_fleet_mint",
         lambda *a, **k: pytest.fail("HIT must never open a mint capture"))
@@ -357,7 +361,9 @@ def test_withheld_publish_never_ships_and_is_final(monkeypatch, tmp_path):
 def test_mint_impossible_keeps_quantized_typed_refusal(monkeypatch, tmp_path):
     """No CUDA => plain lanes serve eager (False), quantized lanes keep the
     typed fail-closed refusal — never a silent slow eager serve."""
-    monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: False)
+    monkeypatch.setattr(
+        provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fc, "_cuda_ready", lambda: False)
 
     plain = _Pipe()

@@ -26,9 +26,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
+from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
-from ..config import get_settings
+from ..config import Settings, current_or
+
+_STANDALONE = Settings()
 from .cache_paths import tensorhub_cas_dir
 from .errors import UrlExpiredError
 from .ladder import maybe_rebind_family_fp8
@@ -236,7 +239,7 @@ def arm_route(mode: str) -> Optional[str]:
 def arm_aot(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], artifact: Path,
     bucket: int, meta: Optional[Dict[str, Any]] = None,
-) -> bool:
+) -> AdoptOutcome:
     """Arm ONE exported ``.pt2`` cell on ``pipe``. The whole AOT arm, in one
     place, for every source of such an artifact.
 
@@ -277,8 +280,10 @@ def arm_aot(
         logger.warning(
             "aot arm: artifact declares mode=%r, which this runtime has no "
             "arm for; staying eager", mode)
-        return False
-    if bucket and get_settings().compile_prefer_aot:
+        return AdoptOutcome.miss(
+            "no_arm_for_mode",
+            f"artifact declares mode={mode!r}, which this runtime has no arm for")
+    if bucket and current_or(_STANDALONE).compile_prefer_aot:
         from . import lora_lifted
 
         # The target module comes from the ARTIFACT's own recorded facts
@@ -301,36 +306,33 @@ def arm_aot(
                     "aot arm: lifted-binding install failed on %r (%s); a "
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
-    if aot_serve.enable(pipe, cfg, cache_dir, artifact):
+    outcome = aot_serve.enable(pipe, cfg, cache_dir, artifact)
+    if outcome.armed:
         if gate_cell_numerics(pipe, cfg):
-            return True
+            return outcome
         # A refused cell is UNARMED, not merely reported: the whole point is
         # that it must not serve. Staying eager is the ordinary miss policy
         # every other adopt gate uses, so the tenant keeps being served.
         #
-        # And the ADOPT ledger has to agree with it. `enable` already emitted
-        # `aot_adopt phase=armed` before the gate ran, so a reader counting
-        # armed adoptions would over-count every numerics refusal. One closing
-        # row keeps that count honest — the numbers themselves ride the
-        # `cell_numerics` row.
+        # pgw#923: and the ADOPT ledger agrees with it by CONSTRUCTION now.
+        # `enable` used to announce `aot_adopt phase=armed` before the gate
+        # ran, so a reader counting armed adoptions over-counted every numerics
+        # refusal and a second closing row existed only to correct the first.
+        # Nothing is announced until the arm is final, so the refusal is simply
+        # what this function returns; the numbers still ride `cell_numerics`.
         meta = aot_serve.armed_metadata(pipe)
         aot_serve.unwrap(pipe)
-        try:
-            from .. import activity as activity_mod
-
-            activity_mod.emit_event(
-                aot_serve.ADOPT_EVENT,
-                f"family={meta.get('family')} key={meta.get('cell_key')}: "
-                f"armed, then UNARMED by the numerics gate — this pod serves "
-                f"eager (pgw#868)",
-                phase="numerics_refused")
-        except Exception:  # noqa: BLE001 — the refusal already stands
-            logger.debug("could not close the adopt ledger", exc_info=True)
+        outcome = AdoptOutcome.miss(
+            "numerics_refused",
+            f"family={meta.get('family')} key={meta.get('cell_key')}: armed, "
+            f"then UNARMED by the numerics gate — this pod serves eager "
+            f"(pgw#868)",
+            outcome.identity)
     if lifted_installed:
         from . import lora_lifted
 
         lora_lifted.remove_lifted_lora_forward(lifted_target)
-    return False
+    return outcome
 
 
 def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
@@ -439,7 +441,7 @@ def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
 def enable_compiled(
     pipe: Any, cfg: Any, cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
-) -> bool:
+) -> AdoptOutcome:
     """Arm the best available compiled path for a freshly loaded pipeline:
     a TRT engine artifact swaps the module (fail-soft), anything else goes
     through the torch.compile cache policy (which also covers the no-
@@ -463,6 +465,7 @@ def enable_compiled(
     ):
         artifact = None
 
+    refused: Optional[AdoptOutcome] = None
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket and not compile_cache.has_compile_target(pipe, cfg):
         # gw#627 live find: this arming runs for EVERY worker-loaded setup
@@ -483,14 +486,18 @@ def enable_compiled(
             meta = None
         kind = str((meta or {}).get("kind") or "")
         if kind == aot_serve.ARTIFACT_KIND:
-            if arm_aot(pipe, cfg, cache_dir, Path(artifact), bucket, meta):
-                return True
+            aot = arm_aot(pipe, cfg, cache_dir, Path(artifact), bucket, meta)
+            if aot.armed:
+                return aot
+            refused = aot
             artifact = None  # unusable artifact: fall through to eager policy
         elif kind == "trt-engine" and not bucket:
             # TRT engines expose only their plain contract — a lora_bucket
             # declaration always rides the inductor lane.
-            if trt_engine.enable(pipe, cfg, cache_dir, artifact):
-                return True
+            trt = trt_engine.enable(pipe, cfg, cache_dir, artifact)
+            if trt.armed:
+                return trt
+            refused = trt
             artifact = None  # unusable engine: fall through to eager policy
     try:
         armed = compile_cache.enable(pipe, cfg, cache_dir, artifact)
@@ -502,7 +509,12 @@ def enable_compiled(
         raise
     if bucket and not armed:
         compile_cache.drop_lora_lane(pipe)
-    return armed
+    if armed:
+        return AdoptOutcome.hit()
+    # The inductor lane declines without a classified token of its own — "no
+    # delivered cell for this identity" is the whole answer. A prior typed
+    # refusal from the exported/TRT arm is the more specific one and survives.
+    return refused if refused is not None else AdoptOutcome.miss("no_cell")
 
 
 # ---------------------------------------------------------------------------
@@ -873,8 +885,8 @@ def resolve_local_path(
     ``download.select_component_paths`` / ``cozy_snapshot.snapshot_dir_key``.
     """
 
-    env_cas = get_settings().tensorhub_cas_dir.strip()
-    cache_dir = Path(env_cas) if env_cas else Path(tensorhub_cas_dir())
+    configured_cas = current_or(_STANDALONE).tensorhub_cas_dir.strip()
+    cache_dir = Path(configured_cas) if configured_cas else Path(tensorhub_cas_dir())
 
     # Decode the bare ref into typed parts using the explicit provider.
     # No string-prefix sniffing — provider is the source of truth.
@@ -906,8 +918,8 @@ def resolve_local_path(
                     repo_id=parsed.hf.repo_id,
                     revision=parsed.hf.revision,
                     local_files_only=True,
-                    cache_dir=get_settings().hf_home or None,
-                    token=get_settings().hf_token or None,
+                    cache_dir=current_or(_STANDALONE).hf_home or None,
+                    token=current_or(_STANDALONE).hf_token or None,
                     allow_patterns=patterns or None,
                 )
                 return str(p)
@@ -924,8 +936,8 @@ def resolve_local_path(
 
             local_dir = download_hf(
                 parsed.hf,
-                hf_home=get_settings().hf_home or None,
-                hf_token=get_settings().hf_token or None,
+                hf_home=current_or(_STANDALONE).hf_home or None,
+                hf_token=current_or(_STANDALONE).hf_token or None,
                 allow_patterns=tuple(allow_patterns),
                 components=components,
             )
@@ -1021,7 +1033,7 @@ def resolve_local_path(
             fetch_civitai_model,
             parse_civitai_version_id,
         )
-        api_key = get_settings().civitai_api_key
+        api_key = current_or(_STANDALONE).civitai_api_key
 
         if civitai_version_id:
             # Explicit version pin via Civitai(version="<id>"). The pinned id

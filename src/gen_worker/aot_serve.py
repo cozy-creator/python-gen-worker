@@ -85,6 +85,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from . import activity as activity_mod
 from . import host_isa
+from .cell_adopt import AdoptOutcome
+from . import shape_growth
 from .compile_cache import (
     AdoptError,
     CompiledLaneUnavailableError,
@@ -100,12 +102,6 @@ METADATA_NAME = "metadata.json"
 PACKAGE_NAME = "model.pt2"
 LITERALS_NAME = "constants.safetensors"
 ARTIFACT_KIND = "aot-inductor"
-#: pgw#733 (arm half): every adopt/arm outcome of an AOT artifact — success
-#: AND every classified refusal — rides this ONE typed wire event. ``phase``
-#: carries the outcome class (``armed`` / the AdoptError reason), countable
-#: hub-side; ``detail`` names the candidate cell. Hub-spawned workers expose
-#: no stdout, so a reason that only reaches the logger does not exist.
-ADOPT_EVENT = "aot_adopt"
 #: pgw#791: an input the artifact was compiled for as 16-byte aligned arrived
 #: unaligned (or non-contiguous) and this ingress realigned it. Typed and
 #: hub-visible because the ALTERNATIVE is what shipped: AOTInductor's own
@@ -1675,6 +1671,45 @@ class EntryDispatch:
 # ---------------------------------------------------------------------------
 
 
+def ingress_class_name(
+    target: str, args: Sequence[Any], kwargs: Mapping[str, Any],
+) -> str:
+    """The DECLARED CLASS one refused call names (pgw#916).
+
+    A shape alone is not a growable unit of work — a mint is asked for a
+    class, and a class is the whole ingress coordinate of one target: every
+    declared input, in position order, with its dtype and extents.  Rendering
+    it here (rather than logging "a shape was refused") is what lets the
+    growth path submit the exact thing that is missing, and what lets two
+    pods agree they are missing the SAME thing.
+
+    Deliberately independent of any artifact: the whole point is that the
+    call arrived at a class no packaged entry declares, so there is no entry
+    block to read it off.
+    """
+    parts: List[str] = []
+
+    def render(name: str, value: Any) -> None:
+        shape = getattr(value, "shape", None)
+        dtype = getattr(value, "dtype", None)
+        if shape is None:
+            parts.append(f"{name}={value!r}"[:64])
+            return
+        extents = ",".join(str(int(d)) for d in tuple(shape))
+        token = str(dtype or "").replace("torch.", "")
+        parts.append(f"{name}={token}[{extents}]")
+
+    for index, value in enumerate(args):
+        render(f"#{index}", value)
+    for name in sorted(kwargs):
+        value = kwargs[name]
+        if value is None or isinstance(value, (bool, int, float, str)):
+            parts.append(f"{name}={value!r}")
+            continue
+        render(name, value)
+    return f"{target}/{','.join(parts)}"
+
+
 def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
     """The lifted-adapter call kwargs for one denoiser, or ``{}`` (pgw#725).
 
@@ -1855,6 +1890,21 @@ def wrap_module(
                 phase=exc.reason,
             )
             report_ingress_refusal(state, exc.reason, str(exc))
+            # pgw#916: the refusal is also a SHAPE GAP — the armed cell does
+            # not cover this declared class, and on the AOT arm nothing was
+            # ever going to grow it (hot_swap.enable returns False without a
+            # dynamo router, so the executor's three growth call sites are
+            # no-ops on every AOT arm). Named, counted, and submitted through
+            # the one arm-agnostic growth module.
+            shape_growth.report_and_submit(shape_growth.ShapeGap(
+                arm=shape_growth.ARM_AOT,
+                family=str(meta.get("family") or ""),
+                target=label,
+                declared_class=ingress_class_name(label, args, kwargs),
+                reason=exc.reason,
+                detail=str(exc)[:400],
+                cell_key=str(meta.get("cell_key") or ""),
+            ))
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
             # Reaching here means the arm order was violated. The gate did
@@ -2098,44 +2148,42 @@ def enable(
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
-) -> bool:
+) -> AdoptOutcome:
     """Consumer entry point: verify + load + bind + swap an AOTI artifact.
 
-    Returns False (staying eager) on ANY miss — the caller's ordinary miss
-    policy (fleet self-mint / eager / typed refusal) takes over, exactly as
-    for a TRT engine. Returning True IS the HIT: ``fleet_cells`` treats it
-    as a genuine match and skips the self-mint.
+    Falsy (staying eager) on ANY miss — the caller's ordinary miss policy
+    (fleet self-mint / eager / typed refusal) takes over, exactly as for a TRT
+    engine. Truthy IS the HIT: ``fleet_cells`` treats it as a genuine match and
+    skips the self-mint.
+
+    pgw#923: the outcome is RETURNED rather than narrated. The classified
+    refusal reason used to leave this function only as the ``phase`` of a
+    free-text ``aot_adopt`` event, which is why the adoption that actually
+    happens on every boot had no measured row anywhere — the caller could not
+    see what it had just been told.
     """
     if artifact is None:
-        return False
+        return AdoptOutcome.miss("no_artifact")
     try:
         meta = load_and_wrap(pipeline, cfg, Path(artifact), cache_dir=cache_dir)
     except Exception as exc:
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
+        identity = _adopt_identity(Path(artifact))
         logger.warning(
             "aot-serve: artifact unusable (%s: %s); staying eager",
             reason, exc)
-        activity_mod.emit_event(
-            ADOPT_EVENT,
-            f"{_adopt_identity(Path(artifact))}: "
-            f"{type(exc).__name__}: {exc}",
-            phase=reason,
-        )
-        return False
+        return AdoptOutcome.miss(
+            reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
     logger.info(
         "aot-serve: armed %s [%d entr%s] (sku=%s torch=%s precision=%s, "
         "constants bound from resident weights)",
         meta.get("family"), len(meta.get("entries") or {}),
         "y" if len(meta.get("entries") or {}) == 1 else "ies",
         meta.get("sku"), meta.get("torch"), meta.get("precision"))
-    activity_mod.emit_event(
-        ADOPT_EVENT,
+    return AdoptOutcome.hit(
         f"family={meta.get('family')} key={meta.get('cell_key')} "
         f"entries={len(meta.get('entries') or {})} sku={meta.get('sku')} "
-        f"torch={meta.get('torch')} precision={meta.get('precision')}",
-        phase="armed",
-    )
-    return True
+        f"torch={meta.get('torch')} precision={meta.get('precision')}")
 
 
 def _marker_states(pipeline: Any) -> List[Dict[str, Any]]:
@@ -2302,7 +2350,7 @@ def unwrap(pipeline: Any) -> bool:
 
 
 __all__ = [
-    "ADOPT_EVENT",
+    "AdoptOutcome",
     "ARTIFACT_FORMAT",
     "ARTIFACT_KIND",
     "ArtifactContract",
@@ -2337,6 +2385,7 @@ __all__ = [
     "find_artifact",
     "flavor_label",
     "host_isa_reason",
+    "ingress_class_name",
     "ingress_refusals",
     "is_aot_artifact",
     "is_aot_ref",

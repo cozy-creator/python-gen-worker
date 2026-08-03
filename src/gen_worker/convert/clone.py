@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import json
 import logging
 import os
 import re
@@ -40,7 +39,8 @@ from .writer import (
     fp8_default_components,
     apply_objective_scheduler_config,
     copy_non_weight_files,
-    merge_safetensors_by_offset,
+    deshard_mirror_tree,
+    tree_has_sharded_safetensors,
     normalize_variant_filenames as _normalize_variant_filenames,
     snapshot_weight_groups,
 )
@@ -186,85 +186,6 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffu
 # ---------------------------------------------------------------------------
 # Flavor tree construction
 # ---------------------------------------------------------------------------
-
-def _deshard_indexed_safetensors(index_path: Path) -> Path:
-    """Collapse ONE HF shard set into a single ``<prefix>.safetensors``.
-
-    th#1362: repos WE pull are normalised to one file per component on the way
-    in, including pure pass-through mirrors, so the corpus we own has one shape.
-    Chunked CAS already gives resumable, parallel, partial-failure-tolerant
-    transfer BELOW the file, so the shard set buys nothing and costs an index
-    that can disagree with the bytes it names — the bug that made klein-4b
-    publish an unloadable text_encoder.
-
-    Provenance is unaffected: upstream per-file digests are recorded by the
-    provenance layer regardless of the layout we store.
-    """
-    payload = json.loads(index_path.read_text(encoding="utf-8"))
-    weight_map = payload.get("weight_map")
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise ValueError(f"invalid safetensors index: {index_path}")
-    member_names: list[str] = []
-    for name in weight_map.values():
-        name = str(name)
-        if Path(name).name != name:
-            raise ValueError(
-                f"safetensors index member must be a basename: {index_path}")
-        if name not in member_names:
-            member_names.append(name)
-    members = [index_path.parent / name for name in member_names]
-    missing = [m for m in members if not m.is_file()]
-    if missing:
-        raise ValueError(f"safetensors index references a missing shard: {index_path}")
-
-    prefix = index_path.name.removesuffix(".safetensors.index.json")
-    merged = index_path.parent / f"{prefix}.safetensors"
-    if merged.exists() and merged not in members:
-        raise ValueError(f"deshard destination already exists: {merged}")
-    merge_safetensors_by_offset(members, merged)
-
-    # The merged header must name exactly the tensors the index claimed — the
-    # index-vs-bytes disagreement this whole change exists to kill is caught
-    # here, at ingest, instead of at load time on a GPU pod.
-    with open(merged, "rb") as f:
-        header_len = int.from_bytes(f.read(8), "little")
-        header = json.loads(f.read(header_len).decode("utf-8"))
-    got = {k for k in header if k != "__metadata__"}
-    want = {str(k) for k in weight_map}
-    if got != want:
-        merged.unlink(missing_ok=True)
-        raise ValueError(
-            f"deshard of {index_path} produced {len(got)} tensors, index names "
-            f"{len(want)} (missing={sorted(want - got)[:5]}, "
-            f"extra={sorted(got - want)[:5]})")
-
-    for member in members:
-        if member != merged:
-            member.unlink()
-    index_path.unlink()
-    logger.info("deshard_mirror index=%s shards=%d -> %s",
-                index_path.name, len(members), merged.name)
-    return merged
-
-
-def tree_has_sharded_safetensors(tree: Path) -> bool:
-    """Does this tree carry an HF shard set that mirror ingest must collapse?"""
-    return any(Path(tree).rglob("*.safetensors.index.json"))
-
-
-def deshard_mirror_tree(tree: Path) -> int:
-    """De-shard every HF shard set in an ingested mirror tree, in place.
-
-    One component at a time, unlinking each set's members as soon as its merged
-    file is verified, so the peak extra disk is the LARGEST component and not
-    the whole tree.
-    """
-    n = 0
-    for index_path in sorted(Path(tree).rglob("*.safetensors.index.json")):
-        _deshard_indexed_safetensors(index_path)
-        n += 1
-    return n
-
 
 def build_flavor_tree(
     source: IngestedSource,
@@ -660,8 +581,7 @@ def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
 def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
     """Workdir keyed by (provider, source, destination) so concurrent
     duplicates of the same clone serialize on one flock. Removed after every
-    job — success or failure (COZY_CONVERT_RETAIN_WORKDIR=1 keeps a failed
-    job's scratch for debugging). Base dir: ``$COZY_CONVERT_WORKDIR`` or
+    job — success or failure. Base dir: ``$COZY_CONVERT_WORKDIR`` or
     ``<tmp>/gen-worker-convert``."""
     base = Path(os.environ.get("COZY_CONVERT_WORKDIR", "").strip()
                 or Path(tempfile.gettempdir()) / "gen-worker-convert")
@@ -1078,15 +998,14 @@ def run_clone(
         # gw#462: a long-running worker must not leak scratch — the workdir
         # goes after EVERY job. Cross-run resume lives in the publish bank
         # (th#592) + CAS dedup, not in retained local bytes.
-        retain = os.environ.get("COZY_CONVERT_RETAIN_WORKDIR", "").strip() == "1"
-        if succeeded or not retain:
-            shutil.rmtree(workdir, ignore_errors=True)
-            if not succeeded:
-                logger.warning(
-                    "clone failed; workdir %s removed "
-                    "(COZY_CONVERT_RETAIN_WORKDIR=1 keeps it for debugging)", workdir)
-        else:
-            logger.warning("clone failed; workdir retained: %s", workdir)
+        # pgw#929: COZY_CONVERT_RETAIN_WORKDIR deleted. Retaining a failed
+        # job's scratch is a DEBUGGING ACTION taken against one run, not a
+        # deployment mode a pod is booted in — and as an env it could only ever
+        # be set fleet-wide and forgotten, which is how a long-running worker
+        # leaks scratch (the gw#462 defect this cleanup exists for).
+        shutil.rmtree(workdir, ignore_errors=True)
+        if not succeeded:
+            logger.warning("clone failed; workdir %s removed", workdir)
         os.close(lock_fd)  # releases the flock
 
 

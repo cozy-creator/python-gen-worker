@@ -48,7 +48,8 @@ from gen_worker.api.export_contract import (
     register_export_declaration,
     reset_export_declarations,
 )
-from gen_worker.config import get_settings
+from gen_worker import config as gw_config
+from gen_worker.cell_adopt import AdoptOutcome
 
 FAMILY = "sdxl"
 
@@ -154,11 +155,11 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
     monkeypatch.delenv("GEN_WORKER_MINT_IN_PROCESS", raising=False)
     monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: False)
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
@@ -184,7 +185,7 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda spec: "")
     yield
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
 def _arm(**kw: Any) -> Any:

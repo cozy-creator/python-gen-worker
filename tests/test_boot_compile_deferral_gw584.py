@@ -55,6 +55,7 @@ from gen_worker.lifecycle import Lifecycle
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
+from gen_worker.cell_adopt import AdoptOutcome
 
 
 @family("gw584-testfam")
@@ -209,7 +210,7 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
             "originals": [],
             "regional_mods": [],
         })
-        return True
+        return AdoptOutcome.hit()
 
     monkeypatch.setattr(provision, "enable_compiled", _fake_enable)
     return ex, sent, enables

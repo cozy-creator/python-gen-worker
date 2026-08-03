@@ -76,16 +76,32 @@ if _REPO_SRC not in _LOCATION.parents:
 
 import pytest  # noqa: E402
 
-from gen_worker.config.loader import get_settings  # noqa: E402
+from gen_worker import config as gw_config  # noqa: E402
+from gen_worker import worker_goals as gw_worker_goals  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _fresh_settings_cache():
-    """`get_settings()` caches process-wide; tests monkeypatch env vars, so
-    every test starts (and ends) with a cleared cache."""
-    get_settings.cache_clear()
+def _fresh_process_settings():
+    """pgw#931: `get_settings()` is gone, and so is the cache this fixture used
+    to clear. `Settings` are now PUBLISHED by a process entry
+    (`config.install`), so a test starts from "nothing installed" and installs
+    what it needs — the same shape production uses, instead of poking a cache.
+
+    A test that reaches `config.current()` without installing gets a loud
+    `SettingsNotInstalled` rather than a silent fresh read of the environment,
+    which is the whole point of the change.
+
+    The default install mirrors a bare pod: `load_settings()` over whatever env
+    the test has monkeypatched, so tests that tune env still work.
+    """
+    gw_config.reset_for_test()
+    gw_worker_goals.reset_for_test()
+    gw_config.install(gw_config.load_settings())
+    gw_worker_goals.install(
+        gw_worker_goals.from_settings(gw_config.current()))
     yield
-    get_settings.cache_clear()
+    gw_config.reset_for_test()
+    gw_worker_goals.reset_for_test()
 
 
 @pytest.fixture(autouse=True)

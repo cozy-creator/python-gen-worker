@@ -27,27 +27,23 @@ import queue
 import threading
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Iterator, Optional, Tuple
 from . import activity as activity_mod
 from . import compile_cache
+from . import shape_growth
+from .shape_growth import Debounce, TurnGateBusy, TurnGateClosed
 
 logger = logging.getLogger(__name__)
 
 EAGER = "eager"
 COMPILED = "compiled"
 
-
-class TurnGateClosed(Exception):
-    """The executor's background-turn gate is gone (shutdown/drain); the
-    warm job is dropped, its signature stays eager (pgw#677)."""
-
-
-class TurnGateBusy(Exception):
-    """No background turn within the bounded admission window (live tenant
-    demand). The warm job re-queues instead of blocking the ONE shape-warm
-    thread — a blocked compile for one instance must never head-of-line
-    delay every other router's jobs (pgw#677)."""
+# pgw#916: the GPU-turn admission types and the debounced republish are
+# arm-agnostic and now live in `shape_growth`, which BOTH arms reach. They are
+# re-exported here (same names, same objects) so the dynamo arm's call sites
+# and its `except TurnGateBusy` handlers are untouched — one implementation,
+# no second copy to drift.
 
 
 # pgw#677: the background mint's seed forwards run inside this window. A
@@ -706,6 +702,18 @@ def _run_warm_compile(job: _WarmJob) -> None:
             f"{type(exc).__name__}: {exc}",
             phase="warm_compile_failed",
         )
+        # pgw#916: and it is a permanent COVERAGE hole, which is the
+        # arm-agnostic fact — the dynamo arm books it in the same ledger the
+        # AOT arm books an uncovered declared class in, so the hub counts one
+        # population instead of two half-populations.
+        shape_growth.report(shape_growth.ShapeGap(
+            arm=shape_growth.ARM_DYNAMO,
+            family="",
+            target=job.label,
+            declared_class=f"sig:{repr(job.sig)[:200]}",
+            reason=shape_growth.REASON_UNCOVERED,
+            detail=f"background warm failed: {type(exc).__name__}: {exc}",
+        ))
         return
     router.mark_warm(job.sig)
     with router.lock:
@@ -755,46 +763,6 @@ def enable(
     if router is None:
         return False
     return router.enable(on_warmed)
-
-
-@dataclass
-class Debounce:
-    """Coalesce ``on_warmed`` bursts into serialized runs of ``fn`` on a
-    background thread: at most one in flight, one queued."""
-
-    fn: Callable[[], None]
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-    _running: bool = False
-    _dirty: bool = False
-
-    def __call__(self) -> None:
-        with self._lock:
-            if self._running:
-                self._dirty = True
-                return
-            self._running = True
-        threading.Thread(
-            target=self._run, name="cell-republish", daemon=True).start()
-
-    def _run(self) -> None:
-        while True:
-            try:
-                self.fn()
-            except Exception as exc:
-                logger.warning("hot-swap: debounced callback failed", exc_info=True)
-                # pgw#760: the debounced fn is the cell republish path —
-                # same fleet-level consequence as a failed on_warmed.
-                activity_mod.emit_event(
-                    activity_mod.KIND_SERVE_DEGRADE,
-                    f"debounced cell-republish callback failed: "
-                    f"{type(exc).__name__}: {exc}",
-                    phase="republish_failed",
-                )
-            with self._lock:
-                if not self._dirty:
-                    self._running = False
-                    return
-                self._dirty = False
 
 
 __all__ = [

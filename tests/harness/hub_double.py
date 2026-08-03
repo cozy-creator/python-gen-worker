@@ -21,7 +21,8 @@ from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
 
 import grpc
 
-from gen_worker.config import get_settings, load_settings
+from gen_worker import config as gw_config
+from gen_worker.config import load_settings
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
 from gen_worker.worker import Worker
@@ -395,7 +396,7 @@ def hub_double(
 
     ``TENSORHUB_CACHE_DIR`` is the ONLY thing that actually steers the CAS
     root (``gen_worker.models.cache_paths.tensorhub_cache_dir`` reads the
-    process-wide cached ``get_settings()``, not the per-worker ``Settings``
+    process-wide cached ``gw_config.current()``, not the per-worker ``Settings``
     instance) — passing ``tensorhub_cache_dir=`` to ``load_settings()``
     alone does NOT redirect it. Found the hard way authoring P3's
     boot-precedence test: without this, every hub-double test on a dev box
@@ -411,7 +412,7 @@ def hub_double(
     with tempfile.TemporaryDirectory(prefix="pgw-hub-double-cache-") as tmp:
         resolved_cache_dir = cache_dir or Path(tmp)
         os.environ["TENSORHUB_CACHE_DIR"] = str(resolved_cache_dir)
-        get_settings.cache_clear()
+        gw_config.reload_for_test()
         harness = WorkerHarness(
             scheduler, port, cache_dir=resolved_cache_dir,
             modules=modules, worker_id=worker_id, gpu_slots=gpu_slots,
@@ -428,7 +429,7 @@ def hub_double(
                 os.environ.pop("TENSORHUB_CACHE_DIR", None)
             else:
                 os.environ["TENSORHUB_CACHE_DIR"] = prior_env
-            get_settings.cache_clear()
+            gw_config.reload_for_test()
 
 
 @contextmanager
@@ -456,7 +457,7 @@ def custom_scheduler_server(
     server.start()
     with tempfile.TemporaryDirectory(prefix="pgw-hub-double-cache-") as tmp:
         os.environ["TENSORHUB_CACHE_DIR"] = tmp
-        get_settings.cache_clear()
+        gw_config.reload_for_test()
         harness = WorkerHarness(
             servicer, bound_port, cache_dir=Path(tmp), modules=modules, worker_id=worker_id,
             backoff_base_s=backoff_base_s, backoff_cap_s=backoff_cap_s,
@@ -471,7 +472,7 @@ def custom_scheduler_server(
                 os.environ.pop("TENSORHUB_CACHE_DIR", None)
             else:
                 os.environ["TENSORHUB_CACHE_DIR"] = prior_env
-            get_settings.cache_clear()
+            gw_config.reload_for_test()
 
 
 # ---------------------------------------------------------------------------

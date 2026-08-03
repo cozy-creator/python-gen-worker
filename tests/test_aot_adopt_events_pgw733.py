@@ -1,22 +1,27 @@
-"""pgw#733 (arm half): every AOT adopt/arm outcome is a TYPED wire event.
+"""pgw#733 (arm half) + pgw#923: every AOT adopt/arm outcome is TYPED and MEASURED.
 
-The verdict lane's blocker (tracker CP5, 2026-07-29): a cross-pod adopt
-fails inside stage/bind/arm with a classified ``AdoptError`` reason, and
-v0.76.5 reduces ALL of them to ``logger.warning`` — hub-spawned workers
-expose no stdout, so the reason is structurally invisible. These tests are
-the red half: each classified refusal must ride ``aot_serve.ADOPT_EVENT``
-(one event class, ``phase`` = the reason), a successful arm must too, and
-the fleet-level F1 consumer must bind the outcome to the DISCOVERED
-candidate's identity (key + ref) on the same event class.
+The verdict lane's blocker (tracker CP5, 2026-07-29): a cross-pod adopt fails
+inside stage/bind/arm with a classified ``AdoptError`` reason, and v0.76.5
+reduced ALL of them to ``logger.warning`` — hub-spawned workers expose no
+stdout, so the reason was structurally invisible. pgw#733 fixed that with a
+free-text ``aot_adopt`` activity event.
 
-The wire transport itself (ActivityUpdate -> hub row, th#1250) is captured
-at ``activity._emit`` — the exact envelope the stream sink sends — so the
-assertion covers kind/phase/detail truncation as wired, not a test double
-of the event API.
+pgw#923 replaced that spelling. The event carried a reason and no numbers,
+while the MEASURED lane it duplicated (``compile_cache_adopt``, fed by
+``ModelEvent{ADOPTED}``) had zero rows on both live stacks because its only
+sender was a hub operation nothing dispatches. So the arm now RETURNS its
+outcome, the arming policy MEASURES it, and one ledger — ``ArmOutcome.
+adoptions`` — carries every attempt with its identity, its classified reason
+and its wall time to the executor, which puts it on the wire the hub already
+stores.
+
+The acceptance is unchanged and strictly stronger: every classified refusal is
+still named, and now it is also timed and bound to the candidate's ref+digest.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,7 +29,14 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from gen_worker import activity, aot_cells, aot_serve, fleet_cells
-from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.cell_adopt import AdoptOutcome
+
+#: The arm is INDUCED to take this long, and the floor asserted against it is a
+#: share of that induced quantity rather than a bare constant (pgw#795). This is
+#: a LOWER bound on work the test itself produced: a slow runner only raises the
+#: measured value, so nothing here can fail because the machine was busy.
+_INDUCED_ARM_S = 0.02
+_MEASURED_ARM_FLOOR_MS = int(_INDUCED_ARM_S * 1000 * 0.75)
 
 FAMILY = "sdxl"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
@@ -144,8 +156,9 @@ def stub_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
 
 
-def _adopt_rows(events: List[Any]) -> List[Any]:
-    return [e for e in events if e.kind == aot_serve.ADOPT_EVENT]
+def _reasons(outcome: Any) -> List[str]:
+    """The classified reason of every adoption ATTEMPT, in order."""
+    return [row.reason for row in outcome.adoptions]
 
 
 # ---------------------------------------------------------------------------
@@ -153,17 +166,14 @@ def _adopt_rows(events: List[Any]) -> List[Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_successful_arm_emits_armed(
-    tmp_path: Path, events: List[Any], stub_runtime: None,
-    monkeypatch: pytest.MonkeyPatch,
+def test_successful_arm_returns_an_armed_outcome_naming_the_cell(
+    tmp_path: Path, stub_runtime: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         aot_serve, "_load_package", lambda path, entry: FakePackage())
-    assert aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
-    rows = _adopt_rows(events)
-    assert [e.phase for e in rows] == ["armed"]
-    assert KEY in rows[0].detail and FAMILY in rows[0].detail
-    assert rows[0].state == pb.ActivityState.ACTIVITY_STATE_COMPLETED
+    out = aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
+    assert out.armed and out.reason == ""
+    assert KEY in out.identity and FAMILY in out.identity
 
 
 def test_key_mismatch_named_on_the_wire(
@@ -172,18 +182,17 @@ def test_key_mismatch_named_on_the_wire(
     # pgw#765: an sm mismatch is the key mismatch; a SKU difference alone is
     # adopted (same-sm cross-SKU cells are the point of the pgw#691 collapse).
     art = _tar(tmp_path, _meta(sm="sm_80"))
-    assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
-    rows = _adopt_rows(events)
-    assert [e.phase for e in rows] == ["key_mismatch"]
-    assert KEY in rows[0].detail  # the refusal names the candidate cell
+    out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
+    assert not out.armed and out.reason == "key_mismatch"
+    assert KEY in out.detail  # the refusal names the candidate cell
 
 
 def test_host_isa_unsupported_named_on_the_wire(
     tmp_path: Path, events: List[Any], stub_runtime: None,
 ) -> None:
     art = _tar(tmp_path, _meta(host_isa={"machine": "sparc64", "level": ""}))
-    assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
-    assert [e.phase for e in _adopt_rows(events)] == ["host_isa_unsupported"]
+    out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
+    assert not out.armed and out.reason == "host_isa_unsupported"
 
 
 def test_artifact_invalid_named_on_the_wire(
@@ -191,19 +200,16 @@ def test_artifact_invalid_named_on_the_wire(
 ) -> None:
     art = tmp_path / "corrupt.tar.gz"
     art.write_bytes(b"\x00definitely not a tarball")
-    assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
-    rows = _adopt_rows(events)
-    assert [e.phase for e in rows] == ["artifact_invalid"]
+    out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
+    assert not out.armed and out.reason == "artifact_invalid"
     # Identity is best-effort: an unreadable artifact still names its file.
-    assert "corrupt.tar.gz" in rows[0].detail
+    assert "corrupt.tar.gz" in out.detail
 
     # Malformed entries classify the same, with the reason in the detail.
-    events.clear()
     malformed = _tar(tmp_path, _meta(entries={ENTRY: {"target": "unet"}}))
-    assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=malformed)
-    rows = _adopt_rows(events)
-    assert [e.phase for e in rows] == ["artifact_invalid"]
-    assert "declares no inputs" in rows[0].detail
+    out = aot_serve.enable(FakePipeline(), Cfg(), artifact=malformed)
+    assert not out.armed and out.reason == "artifact_invalid"
+    assert "declares no inputs" in out.detail
 
 
 def test_constants_refusal_named_on_the_wire(
@@ -214,10 +220,9 @@ def test_constants_refusal_named_on_the_wire(
         aot_serve, "_load_package",
         lambda path, entry: FakePackage(fqns=("conv_in.weight",
                                               "not.in.state_dict")))
-    assert not aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
-    rows = _adopt_rows(events)
-    assert len(rows) == 1
-    assert rows[0].phase.startswith("constants_")
+    out = aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
+    assert not out.armed
+    assert out.reason.startswith("constants_")
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +281,10 @@ class _FleetPipe:
 def _f1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """Flag on + a discovered candidate; provision seam is per-test."""
     from gen_worker import compile_cache as cc
-    from gen_worker.config import get_settings
+    from gen_worker import config as gw_config
 
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
     monkeypatch.setattr(cc, "has_compile_target", lambda pipe, cfg: True)
     art = tmp_path / "cell.tar.gz"
     art.write_bytes(b"artifact")
@@ -288,60 +293,75 @@ def _f1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
         snapshot_digest="blake3:" + "5" * 64, artifact=art)
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: adopted)
     yield adopted
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
-def test_fleet_success_is_one_armed_row(
-    monkeypatch: pytest.MonkeyPatch, events: List[Any], _f1: Any,
+def test_fleet_success_is_one_measured_adoption_bound_to_the_candidate(
+    monkeypatch: pytest.MonkeyPatch, _f1: Any,
 ) -> None:
-    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> bool:
+    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
         pipe._cozy_aot = {"state": {"failed": False}}
-        activity.emit_event(aot_serve.ADOPT_EVENT, "k", phase="armed")
-        return True
+        time.sleep(_INDUCED_ARM_S)  # a real arm costs time; a measured one records it
+        return AdoptOutcome.hit(f"family={FAMILY} key={KEY}")
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)
     outcome = fleet_cells.enable_compiled(
         _FleetPipe(), _FleetCfg(), publisher=_StubPublisher())  # type: ignore[arg-type]
     assert outcome.armed and outcome.self_mint is _f1
-    # exactly the inner "armed" row — the fleet layer adds no duplicate
-    assert [e.phase for e in _adopt_rows(events)] == ["armed"]
+    assert len(outcome.adoptions) == 1
+    row = outcome.adoptions[0]
+    assert row.armed and row.reason == ""
+    # The identity the hub fences an adoption on, and the number the whole
+    # measurement lane exists for. `arm_ms == 0` is what shipped for a year.
+    assert row.ref == _f1.ref and row.snapshot_digest == _f1.snapshot_digest
+    assert row.artifact_kind == aot_serve.ARTIFACT_KIND
+    assert row.arm_ms >= _MEASURED_ARM_FLOOR_MS, (
+        "the adoption recorded no time at all")
 
 
-def test_fleet_did_not_arm_row_names_the_candidate(
-    monkeypatch: pytest.MonkeyPatch, events: List[Any], _f1: Any,
-    tmp_path: Path,
+def test_fleet_did_not_arm_is_a_measured_refusal_naming_the_candidate(
+    monkeypatch: pytest.MonkeyPatch, _f1: Any, tmp_path: Path,
 ) -> None:
     delivered = tmp_path / "delivered.tar.gz"
     delivered.write_bytes(b"dynamo")
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: artifact == delivered)
+        lambda pipe, cfg, cache_dir, artifact: (
+            AdoptOutcome.hit() if artifact == delivered
+            else AdoptOutcome.miss("key_mismatch", f"key={KEY}")))
     outcome = fleet_cells.enable_compiled(
         _FleetPipe(), _FleetCfg(), artifact=delivered,
-        publisher=_StubPublisher())  # type: ignore[arg-type]
+        publisher=_StubPublisher(),  # type: ignore[arg-type]
+        delivered_ref="root/family-sdxl#ck5-delivered",
+        delivered_digest="blake3:" + "7" * 64)
     assert outcome.armed and outcome.self_mint is None
-    rows = _adopt_rows(events)
-    assert [e.phase for e in rows] == ["did_not_arm"]
-    assert KEY in rows[0].detail and _f1.ref in rows[0].detail
+    # BOTH attempts are on the ledger, in order: the discovered cell that
+    # refused, then the delivered cell that armed. The old vocabulary recorded
+    # the refusal and nothing at all for the adoption that actually happened.
+    assert _reasons(outcome) == ["key_mismatch", ""]
+    assert outcome.adoptions[0].ref == _f1.ref
+    assert not outcome.adoptions[0].armed
+    assert outcome.adoptions[1].armed
+    assert outcome.adoptions[1].ref == "root/family-sdxl#ck5-delivered"
 
 
 def test_fleet_armed_other_path_never_advertises_aot(
-    monkeypatch: pytest.MonkeyPatch, events: List[Any], _f1: Any,
+    monkeypatch: pytest.MonkeyPatch, _f1: Any,
 ) -> None:
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: True)  # armed, marker absent
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.hit())  # marker absent
     outcome = fleet_cells.enable_compiled(
         _FleetPipe(), _FleetCfg(), publisher=_StubPublisher())  # type: ignore[arg-type]
     assert outcome.armed and outcome.self_mint is None
-    rows = _adopt_rows(events)
-    assert [e.phase for e in rows] == ["armed_other_path"]
-    assert KEY in rows[0].detail
+    assert _reasons(outcome) == ["armed_other_path"]
+    row = outcome.adoptions[0]
+    assert not row.armed, "the DISCOVERED cell is not what armed this pipe"
+    assert row.ref == _f1.ref and KEY in row.detail
 
 
-def test_fleet_lane_unavailable_row_names_the_candidate(
-    monkeypatch: pytest.MonkeyPatch, events: List[Any], _f1: Any,
-    tmp_path: Path,
+def test_fleet_lane_unavailable_is_recorded_against_the_candidate(
+    monkeypatch: pytest.MonkeyPatch, _f1: Any, tmp_path: Path,
 ) -> None:
     from gen_worker import compile_cache as cc
 
@@ -349,20 +369,20 @@ def test_fleet_lane_unavailable_row_names_the_candidate(
     delivered.write_bytes(b"dynamo")
     calls: List[Any] = []
 
-    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> bool:
+    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
         calls.append(artifact)
         if len(calls) == 1:
             raise cc.CompiledLaneUnavailableError("no cell for w8a8")
-        return True
+        return AdoptOutcome.hit()
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)
     outcome = fleet_cells.enable_compiled(
         _FleetPipe(), _FleetCfg(), artifact=delivered,
         publisher=_StubPublisher())  # type: ignore[arg-type]
     assert outcome.armed
-    rows = _adopt_rows(events)
-    assert [e.phase for e in rows] == ["lane_unavailable"]
-    assert KEY in rows[0].detail
+    assert _reasons(outcome) == ["lane_unavailable", ""]
+    assert outcome.adoptions[0].ref == _f1.ref
+    assert KEY in outcome.adoptions[0].detail
 
 
 # ---------------------------------------------------------------------------
