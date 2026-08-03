@@ -65,7 +65,7 @@ from ..pb import worker_scheduler_pb2 as pb
 from ..transport import FatalTransportError, Transport
 from ..topology import ExecutionTopology
 from .. import postmortem
-from .. import worker_goals
+from .. import config, worker_credential, worker_goals
 from .. import worker_fatal
 from . import (
     ENV_CHILD,
@@ -2348,8 +2348,6 @@ def run_parent() -> int:
     report_previous_container_death()
     postmortem.clear_all_inflight()
     postmortem.write_boot_record()
-    from .. import config, worker_credential
-
     # §1.18: the bootstrap-owned load for the CONTROL-PARENT process entry.
     settings = config.install(config.load_settings())
     worker_goals.install(worker_goals.from_settings(settings))
