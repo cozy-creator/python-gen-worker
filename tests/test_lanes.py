@@ -12,9 +12,7 @@ from gen_worker.models import lanes
 def test_known_lanes_stable() -> None:
     assert lanes.known_lanes() == [
         "fp8-w8a8-dynamic+compiled",
-        "fp8-w8a8-dynamic+eager",
         "nvfp4-w4a4-static+compiled",
-        "nvfp4-w4a4-static+eager",
         "svdq-fp4-w4a4+eager",
         "svdq-int4-w4a4+eager",
         "bf16-w16a16+compiled",
@@ -25,16 +23,19 @@ def test_known_lanes_stable() -> None:
 
 
 def test_parse_lane_round_trip() -> None:
-    for lane_id in lanes.known_lanes():
-        assert lanes.lane_id(lanes.parse_lane(lane_id)) == lane_id
+    parsed = [lanes.parse_lane(lane_id) for lane_id in lanes.known_lanes()]
+    assert [lanes.lane_id(lane) for lane in parsed] == lanes.known_lanes()
+    assert {lanes.lane_body_id(lane) for lane in parsed} == set(lanes.known_lane_bodies())
 
 
 @pytest.mark.parametrize("bad", [
     "", "bf16", "fp8", "4bit",
     "fp8-w8a8-dynamic",
+    "fp8-w8a8-dynamic+eager",
     "fp8-w8a8+turbo",
     "fp8-w4a4-dynamic+compiled",
     "svdq-fp4-w4a4+compiled",
+    "nvfp4-w4a4-static+eager",
     "int8-w8a8+eager",
 ])
 def test_parse_lane_rejects(bad: str) -> None:
@@ -62,10 +63,29 @@ def test_parse_lane_spec_dual_form() -> None:
     ("", "fp8", False, "fp8-w8a16+eager"),
     ("fp8", "", True, "fp8-w8a16+compiled"),
     ("fp8-w8a8", "", True, "fp8-w8a8-dynamic+compiled"),
-    ("fp8-w8a8-cal1", "", False, "fp8-w8a8-dynamic+eager"),
+    ("fp8-w8a8-cal1", "", False, "fp8-w8a8-dynamic+compiled"),
     ("svdq-fp4-r128", "", True, "svdq-fp4-w4a4+eager"),
     ("svdq-int4-r128", "", False, "svdq-int4-w4a4+eager"),
     ("nvfp4-w4a4", "", True, "nvfp4-w4a4-static+compiled"),
+    ("nvfp4-w4a4", "", False, "nvfp4-w4a4-static+compiled"),
 ])
 def test_lane_of_binding(flavor: str, storage: str, compiled: bool, want: str) -> None:
     assert lanes.lane_id(lanes.lane_of_binding(flavor, storage, compiled)) == want
+
+
+def test_lane_of_binding_covers_every_body_with_valid_execution() -> None:
+    inputs = [
+        ("", ""),
+        ("", "fp8"),
+        ("fp8-w8a8", ""),
+        ("svdq-fp4-r128", ""),
+        ("svdq-int4-r128", ""),
+        ("nvfp4-w4a4", ""),
+    ]
+    bodies = set()
+    for flavor, storage in inputs:
+        for compiled in (False, True):
+            lane = lanes.lane_of_binding(flavor, storage, compiled)
+            assert lanes.valid_lane(lane)
+            bodies.add(lanes.lane_body_id(lane))
+    assert bodies == set(lanes.known_lane_bodies())

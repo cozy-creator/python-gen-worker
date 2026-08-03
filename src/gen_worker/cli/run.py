@@ -120,7 +120,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         "--lane", dest="lane", default="",
         help=(
             "Execution lane (th#913 dual-form): a family 'bf16'|'fp8', or a "
-            "full descriptor like 'fp8-w8a8-dynamic+eager'. Default: auto "
+            "full descriptor like 'fp8-w8a8-dynamic+compiled'. Default: auto "
             "(the binding as declared). 'fp8' maps to the local cast lane; "
             "'fp8-w8a8*' folds the #fp8-w8a8 flavor (must be published); "
             "4bit lanes need an explicit ref#flavor instead."
