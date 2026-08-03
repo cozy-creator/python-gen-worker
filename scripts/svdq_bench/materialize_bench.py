@@ -60,22 +60,32 @@ def refs_from_r2() -> None:
     print(f"[mat] R2 total {total/1e9:.2f} GB", flush=True)
 
 
-def refs_from_hf(with_transformer: bool) -> None:
-    """The chaos-R2 qwen-image blobs were GC'd 2026-08-01; our mirror IS
-    Qwen/Qwen-Image HEAD 75e0b4be (eval_sets.py, verified 2026-07-26), so the
-    public tree at that pinned revision is byte-identical for every component
-    we load (VAE/TEs/tokenizer/scheduler/model_index; transformer is injected)."""
+# family -> (HF repo, pinned revision). Our published bf16 flavor is the
+# mirror of these pins, so the public tree is byte-identical for every
+# component we load (VAE/TEs/tokenizer/processor/scheduler/model_index; the
+# transformer is injected by the arm).
+FAMILY_REFS = {
+    "t2i": ("Qwen/Qwen-Image",
+            "75e0b4be04f60ec59a75f475837eced720f823b6"),
+    "edit": ("Qwen/Qwen-Image-Edit-2511",
+             "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9"),
+}
+
+
+def refs_from_hf(with_transformer: bool, family: str = "t2i") -> None:
+    """The chaos-R2 qwen blobs were GC'd 2026-08-01, so the pinned public
+    tree is the reference source."""
     import os as _os
     from huggingface_hub import snapshot_download
+    repo_id, revision = FAMILY_REFS[family]
     ignore = ["*.png", "*.md"]
     if not with_transformer:
         ignore.append("transformer/*.safetensors")
     p = snapshot_download(
-        repo_id="Qwen/Qwen-Image",
-        revision="75e0b4be04f60ec59a75f475837eced720f823b6",
+        repo_id=repo_id, revision=revision,
         local_dir=str(REFS), ignore_patterns=ignore,
         token=_os.environ.get("HF_TOKEN") or None)
-    print(f"[mat] HF refs tree -> {p}", flush=True)
+    print(f"[mat] HF refs tree {repo_id}@{revision[:8]} -> {p}", flush=True)
 
 
 def fp8_from_manifest(manifest: Path) -> None:
@@ -146,21 +156,28 @@ def fp8_from_manifest(manifest: Path) -> None:
 def main() -> int:
     # chaos-R2 qwen refs blobs GC'd 2026-08-01 -> HF mirror is primary now.
     # --bf16 also pulls the transformer shards: the same-card bf16 arm.
-    refs_from_hf("--bf16" in sys.argv)
+    family = "edit" if "--edit" in sys.argv else "t2i"
+    refs_from_hf("--bf16" in sys.argv, family)
     # Markers as soon as each artifact is real: the reference tree and the
     # svdq checkpoint are what every arm needs, and an optional extra
     # artifact must never be able to invalidate them.
     print("REFS_TREE=" + str(REFS), flush=True)
 
-    NUN.mkdir(parents=True, exist_ok=True)
-    from huggingface_hub import hf_hub_download
-    fn = hf_hub_download(
-        repo_id="nunchaku-ai/nunchaku-qwen-image",
-        filename="svdq-fp4_r128-qwen-image.safetensors",
-        revision="4d9f4f667ea571ab172e0ee29ac2c27b82a41a6b",
-        local_dir=str(NUN), token=os.environ.get("HF_TOKEN") or None)
-    print(f"[mat] nunchaku -> {fn} {Path(fn).stat().st_size/1e9:.2f} GB", flush=True)
-    print("NUN_FILE=" + str(fn), flush=True)
+    if family == "t2i":
+        NUN.mkdir(parents=True, exist_ok=True)
+        from huggingface_hub import hf_hub_download
+        fn = hf_hub_download(
+            repo_id="nunchaku-ai/nunchaku-qwen-image",
+            filename="svdq-fp4_r128-qwen-image.safetensors",
+            revision="4d9f4f667ea571ab172e0ee29ac2c27b82a41a6b",
+            local_dir=str(NUN), token=os.environ.get("HF_TOKEN") or None)
+        print(f"[mat] nunchaku -> {fn} "
+              f"{Path(fn).stat().st_size / 1e9:.2f} GB", flush=True)
+        print("NUN_FILE=" + str(fn), flush=True)
+    else:
+        # No 4-bit qwen-image-edit artifact exists (te#137's edit produce is
+        # planned, not run). Absence is recorded, never fabricated.
+        print("NUN_FILE=none", flush=True)
 
     man = Path("/root/fp8_manifest.json")
     if "--fp8" in sys.argv and man.exists():

@@ -62,7 +62,8 @@ def main() -> int:
         man, arms = load(run)
         gpu = man.get("gpu", "?")
         env = " ".join(man.get("env_line") or [])
-        print(f"\n## {run.name} — {gpu} ({env})")
+        print(f"\n## {run.name} — {gpu} · "
+              f"{man.get('family', 't2i')} ({env})")
         print(f"pod {man.get('pod')} rate ${man.get('rate_per_hr')}/hr "
               f"elapsed {man.get('elapsed_min', 0):.0f} min "
               f"est ${man.get('est_cost_usd', 0):.2f} "
