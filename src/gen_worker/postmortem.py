@@ -426,7 +426,9 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
     # pgw#676: the previous process's in-flight marker + fault dump are the
     # death's attribution; consuming them here also feeds the crash registry
     # so this boot's gate can refuse a crash-streak function.
-    extra.update(attribute_signal_death(signal_name="container_death"))
+    extra.update(attribute_all_signal_deaths(
+        signal_name="container_death", marker_dir=path.parent,
+    ))
     return format_detail(
         phase="previous_container_death",
         verdict={"exit_code": None, "signaled": None},
@@ -471,9 +473,43 @@ def _sibling(name: str) -> Path:
     return BOOT_RECORD_PATH.parent / name
 
 
-INFLIGHT_PATH = _sibling(_INFLIGHT_NAME)
+# pgw#938: a compute group is a separate OS process.  Its transient markers
+# therefore need one writer just as its inductor cache does; otherwise one
+# child replaces or truncates a sibling's evidence.  The crash registry stays
+# pod-wide on purpose: it is the worker-level refusal fact consumed by every
+# group on its next boot.
+def _group_marker_path(
+    name: str, ordinal: int, marker_dir: Optional[Path] = None,
+) -> Path:
+    root = marker_dir or BOOT_RECORD_PATH.parent
+    return root / f"g{max(0, int(ordinal))}" / name
+
+
+def group_inflight_path(
+    ordinal: int, marker_dir: Optional[Path] = None,
+) -> Path:
+    return _group_marker_path(_INFLIGHT_NAME, ordinal, marker_dir)
+
+
+def group_fault_dump_path(
+    ordinal: int, marker_dir: Optional[Path] = None,
+) -> Path:
+    return _group_marker_path(_FAULT_DUMP_NAME, ordinal, marker_dir)
+
+
+def _local_marker_path(name: str) -> Path:
+    # Importing procsplit's tiny environment helpers here keeps the reserved
+    # names canonical without pulling in the parent or any compute dependency.
+    from .procsplit import group_ordinal, host_siblings
+
+    if host_siblings() > 1:
+        return _group_marker_path(name, group_ordinal())
+    return _sibling(name)
+
+
+INFLIGHT_PATH = _local_marker_path(_INFLIGHT_NAME)
 CRASH_REGISTRY_PATH = _sibling(_CRASH_REGISTRY_NAME)
-FAULT_DUMP_PATH = _sibling(_FAULT_DUMP_NAME)
+FAULT_DUMP_PATH = _local_marker_path(_FAULT_DUMP_NAME)
 
 _fault_dump_file: Optional[Any] = None
 
@@ -748,6 +784,98 @@ def attribute_signal_death(
     return extra
 
 
+def _group_marker_dirs(marker_dir: Optional[Path] = None) -> list[Path]:
+    """Existing ``gN`` marker dirs, sorted by ordinal.
+
+    The whole-worker supervisor and next-container reporter do not own the
+    delivered topology, so the durable filesystem is their census.  Only the
+    exact directory form this module creates is admitted.
+    """
+    marker_dir = marker_dir or BOOT_RECORD_PATH.parent
+    try:
+        dirs = [
+            p for p in marker_dir.iterdir()
+            if p.is_dir() and p.name.startswith("g") and p.name[1:].isdigit()
+        ]
+    except OSError:
+        return []
+    return sorted(dirs, key=lambda p: int(p.name[1:]))
+
+
+def clear_all_inflight(marker_dir: Optional[Path] = None) -> None:
+    """Remove transient markers for the whole worker, including every group."""
+    paths = {
+        marker_dir / _INFLIGHT_NAME if marker_dir is not None else INFLIGHT_PATH
+    }
+    paths.update(p / _INFLIGHT_NAME for p in _group_marker_dirs(marker_dir))
+    for path in paths:
+        clear_inflight(path=path)
+
+
+def clear_all_fault_dumps(marker_dir: Optional[Path] = None) -> None:
+    """Remove fault dumps for the whole worker, including every group."""
+    paths = {
+        marker_dir / _FAULT_DUMP_NAME if marker_dir is not None else FAULT_DUMP_PATH
+    }
+    paths.update(p / _FAULT_DUMP_NAME for p in _group_marker_dirs(marker_dir))
+    for path in paths:
+        clear_fault_dump(path=path)
+
+
+def attribute_all_signal_deaths(
+    *, signal_name: str, marker_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Consume signal evidence after the whole control process/container dies.
+
+    A per-slot death calls :func:`attribute_signal_death` with its ordinal.
+    The outer supervisor and next boot instead lost the owner of every slot,
+    so they aggregate all one-writer group files without letting one group's
+    record overwrite another's.
+    """
+    pairs = [(
+        "worker",
+        marker_dir / _INFLIGHT_NAME if marker_dir is not None else INFLIGHT_PATH,
+        marker_dir / _FAULT_DUMP_NAME if marker_dir is not None else FAULT_DUMP_PATH,
+    )]
+    pairs.extend(
+        (p.name, p / _INFLIGHT_NAME, p / _FAULT_DUMP_NAME)
+        for p in _group_marker_dirs(marker_dir)
+    )
+    seen: set[tuple[Path, Path]] = set()
+    inflight: list[Dict[str, Any]] = []
+    streaks: Dict[str, int] = {}
+    tails: list[str] = []
+    for label, inflight_path, dump_path in pairs:
+        key = (inflight_path, dump_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not inflight_path.exists() and not dump_path.exists():
+            continue
+        detail = attribute_signal_death(
+            signal_name=signal_name,
+            inflight_path=inflight_path,
+            dump_path=dump_path,
+        )
+        rows = detail.get("inflight")
+        if isinstance(rows, list):
+            inflight.extend(r for r in rows if isinstance(r, dict))
+        counts = detail.get("native_crash_streaks")
+        if isinstance(counts, dict):
+            streaks.update({str(k): int(v) for k, v in counts.items()})
+        tail = str(detail.get("fault_dump_tail") or "")
+        if tail:
+            tails.append(f"[{label}]\n{tail}")
+    extra: Dict[str, Any] = {}
+    if inflight:
+        extra["inflight"] = inflight
+    if streaks:
+        extra["native_crash_streaks"] = streaks
+    if tails:
+        extra["fault_dump_tail"] = "\n\n".join(tails)[-_FAULT_DUMP_TAIL_BYTES:]
+    return extra
+
+
 __all__ = [
     "BOOT_RECORD_PATH",
     "CRASH_REGISTRY_PATH",
@@ -755,11 +883,14 @@ __all__ = [
     "INFLIGHT_PATH",
     "COMPILE_KIND",
     "NATIVE_CRASH_REFUSE_STREAK",
+    "attribute_all_signal_deaths",
     "attribute_signal_death",
     "compile_crash_rows",
     "compile_marker",
     "boot_record_is_volatile",
     "clear_boot_record",
+    "clear_all_fault_dumps",
+    "clear_all_inflight",
     "clear_fault_dump",
     "clear_inflight",
     "container_limits",
@@ -770,6 +901,8 @@ __all__ = [
     "enable_fault_dump",
     "fault_dump_tail",
     "format_detail",
+    "group_fault_dump_path",
+    "group_inflight_path",
     "native_crash_streaks",
     "note_inflight",
     "oom_kill_count",
