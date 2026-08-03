@@ -25,8 +25,59 @@ spelling, and the spelling that carries numbers.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
-__all__ = ["AdoptOutcome", "CellAdoption"]
+__all__ = ["AdoptOutcome", "CellAdoption", "EagerPhase"]
+
+
+class EagerPhase(StrEnum):
+    """Why a compile-declaring pipeline is serving EAGER — one token, shared.
+
+    pgw#824 gave the arming policy's declines a classified token instead of the
+    single ``mint_unavailable`` constant they used to share; the token rides
+    ``self_mint_skipped``/``self_mint_started`` as ``phase`` and rides out of
+    the decision as ``ArmOutcome.eager_reason``, so the hub's activity rows and
+    the request row's ``fallback_reason`` join on one string.
+
+    The tokens lived as bare literals at each ``return``, and the pgw#824 audit
+    re-spelled the same nine strings in a second list to check they were all
+    still there. Two lists of literals is a drift channel, and it drifted:
+    pgw#923 moved every exit out of ``enable_compiled`` into ``_arming_policy``
+    and the audit — which read only ``enable_compiled``'s source — reported all
+    nine as lost when not one had changed. Naming the members here makes the
+    audit reference the vocabulary instead of re-typing it.
+
+    **The values are a wire contract.** The hub groups
+    ``worker_activity_events`` on them and joins them to request rows; renaming
+    one orphans that history, so ``test_silent_failure_audit_pgw824`` pins the
+    member-to-value mapping rather than reading it back out of this file.
+    """
+
+    #: The nine mint-impossibility exits, each a distinct `_fail_closed` cause.
+    NO_FAMILY = "no_family"
+    NO_CUDA = "no_cuda"
+    NO_TOOLCHAIN = "no_toolchain"
+    NO_COMPILE_TARGET = "no_compile_target"
+    DELIVERED_CELL_SEEDED = "delivered_cell_seeded"
+    KEY_COMPUTATION_FAILED = "key_computation_failed"
+    CAPTURE_CONFLICT = "capture_conflict"
+    MULTI_GROUP_IN_PROCESS = "multi_group_in_process"
+    CAPTURE_ARM_FAILED = "capture_arm_failed"
+
+    #: The tenth eager exit: it declines BEFORE `_fail_closed` (a quarantined
+    #: identity must not be re-minted) and was the one that only logged.
+    CELL_QUARANTINED = "cell_quarantined"
+
+    #: Eager with an END — a delegated mint child is building the cell. Equal
+    #: to ``serving_mode.POSTURE_MINT_IN_PROGRESS`` by contract; the audit
+    #: asserts the two, because a fleet that is warming up must never read as
+    #: a fleet that never will.
+    MINT_IN_PROGRESS = "mint_in_progress"
+
+    #: `_fail_closed`'s default, for a caller that has not classified its exit.
+    #: A new decline landing here rather than on its own member is the
+    #: regression pgw#824 exists to catch.
+    MINT_UNAVAILABLE = "mint_unavailable"
 
 
 @dataclass(frozen=True)
