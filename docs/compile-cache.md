@@ -69,7 +69,9 @@ Fix one of:
 
    `arm_compile` reads the endpoint's own `Compile` spec, cache dir, and any
    hub-attached artifact from a scope the executor holds open for the
-   duration of `setup()` — no `ctx` parameter needed, and it raises if
-   called anywhere else (compile is a setup-time-only concern). An endpoint
+   duration of `setup()` — no `ctx` parameter needed. With no active scope
+   (an eager release that declared no `compile=`) it logs once at info and
+   returns `False`; it never raises, so a self-loading `setup()` may call it
+   unconditionally (ie#522). An endpoint
    with several self-loaded pipelines sharing weights (e.g. one class
    assembling `self.t2i`/`self.i2v`/`self.v2v`) calls it once per object.
