@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - 'v*'  # Triggers on v0.2.0, v1.0.0, etc.
+  # MANUAL RECOVERY PATH. The tag push above was this workflow's ONLY trigger,
+  # so when GitHub stops delivering tag push events the release lane has no
+  # way forward at all — observed 2026-08-03, when v0.91.3 was pushed (and
+  # re-pushed, and recreated through the refs API) without a single run being
+  # created, while `workflow_dispatch` on ci.yml kept working normally.
+  #
+  # This is NOT a way around the provenance gate below: a dispatched run
+  # asserts the SAME "some green CI run carries this exact tree" property, and
+  # refuses identically when it does not. It only restores a way to ASK.
+  workflow_dispatch: {}
 
 jobs:
   publish:
