@@ -372,9 +372,121 @@ def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
         time.sleep(poll_s)
 
 
+def _release() -> None:
+    """Reclaim a probe pipeline's device memory. The caller has already
+    dropped its references; this collects the cycles and returns the cached
+    blocks so the next candidate loads onto an empty card."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 — best effort
+        logger.debug("mint-child: empty_cache failed", exc_info=True)
+
+
+def _measure_lane(lane: str, load: Any) -> Any:
+    """Load, build and time ONE candidate lane.
+
+    Its own frame on purpose: the probe pipeline and its compiled step must
+    be unreachable the moment this returns, or the next candidate loads onto
+    a card the previous one is still resident on.
+    """
+    from . import aot_mint, kernel_lane
+
+    kernel_lane.pin(lane, "mint-time A/B probe (pgw#947)")
+    try:
+        pipe, spec = load(lane)
+        return kernel_lane.measure(lane, aot_mint.bench_step(pipe, spec))
+    except Exception as exc:  # noqa: BLE001 — a candidate that cannot be
+        # built or measured drops out of the ranking; it never fails the
+        # mint, and the reason is recorded with the verdict.
+        logger.warning("mint-child: kernel-lane %s not buildable — %s",
+                       lane, exc)
+        return kernel_lane.Measurement(
+            lane=lane, unavailable=f"build: {type(exc).__name__}: {exc}")
+
+
+def lane_verdict_for(load: Any) -> Tuple[Any, Any, Any]:
+    """MEASURE which serving-kernel lane wins on THIS card (pgw#947).
+
+    Returns ``(verdict, pipeline, spec)`` — the winning lane's loaded
+    pipeline and its export spec, ready to mint, so the artifact and the
+    verdict inside it can never describe different code.
+
+    A "lane" is the pgw#863 COMBINATION of both axes (``fused+packed``,
+    ``baseline+packed``, ...), so the ranking prices the modulation lane's
+    residency win and the linear lane's throughput win against each other
+    under one rule instead of a hand tuple per axis.
+
+    The A/B has to happen HERE and not inside ``aot_mint``: the lane is
+    chosen when the checkpoint's linears are swapped, which is model LOAD, so
+    comparing lanes means loading once per candidate. ``load(lane)`` does one
+    full endpoint load with that lane pinned and hands back
+    ``(pipeline, export_spec)``.
+
+    Replaces the hand-maintained SM tuples this used to be. Whether each
+    kernel EXISTS on a card is still a capability question
+    (``kernel_lane.candidate_axes``), and an axis with one buildable value
+    contributes no candidates — a non-Blackwell card therefore has ONE
+    combination and pays no benchmark at all. Whether an armed value is
+    FASTER on a qualifying card is now measured there instead of edited into
+    a tuple after a $12 campaign.
+
+    Never fails a mint: any gap leaves the default lane pinned, records no
+    verdict, and says why — a cell with no verdict is the documented
+    conservative-default case on the serving side.
+    """
+    from . import kernel_lane
+
+    candidates = kernel_lane.candidates_here()
+    if len(candidates) < 2:
+        _axes, gaps = kernel_lane.candidate_axes()
+        detail = "; ".join(
+            f"{axis}: {gap}" for axis, gap in sorted(gaps.items()))
+        verdict = kernel_lane.sole(
+            candidates[0] if candidates else kernel_lane.DEFAULT_LANE,
+            f"only one lane combination is buildable on this card — "
+            f"{detail or 'no rival'}")
+        kernel_lane.pin(verdict.winner, f"sole candidate: {verdict.detail}")
+        frame(phase="load", note=f"kernel lane {verdict.winner} (sole)")
+        pipe, spec = load(verdict.winner)
+        return verdict, pipe, spec
+
+    measurements = []
+    for index, lane in enumerate(candidates, start=1):
+        frame(phase="load", step=index, total=len(candidates),
+              note=f"kernel-lane probe: {lane}")
+        measurements.append(_measure_lane(lane, load))
+        # Each candidate is loaded onto an EMPTY card and torn down before the
+        # next one: two resident pipelines would make the probe itself the
+        # thing that OOMs a mint pod sized for one, and the peak this measures
+        # has to be one lane's peak, not two lanes' sum. The probe pipeline
+        # dies with `_measure_lane`'s frame; this reclaims it.
+        _release()
+
+    total, name, sm = kernel_lane.device_facts()
+    verdict = kernel_lane.select(
+        measurements, device_total_bytes=total, device_name=name, sm=sm)
+    frame(phase="load",
+          note=f"kernel lane {verdict.winner} ({verdict.binding})")
+    kernel_lane.pin(verdict.winner, f"mint verdict: {verdict.detail}")
+    # The winner is loaded FRESH rather than kept from its probe pass: the
+    # probe ran `torch.compile` over the denoiser, and the graph that gets
+    # exported must come from a pipeline nothing has warmed or specialized.
+    pipe, spec = load(verdict.winner)
+    return verdict, pipe, spec
+
+
 def _mint_aot(
     request: MintRequest, pipe: Any, cfg: Any, target: Path, *,
     started: float, sha256_file: Any,
+    lane_verdict: Any = None,
+    spec: Any = None,
 ) -> MintReport:
     """pgw#805: the AOT recipe — torch.export + AOTInductor over the family's
     whole declared graph-class set, packed as ONE multi-graph cell (pgw#758).
@@ -401,7 +513,8 @@ def _mint_aot(
     aot_resume.set_root(request.resume)
 
     frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
-    spec = fleet_cells.aot_export_spec(pipe, cfg)
+    if spec is None:
+        spec = fleet_cells.aot_export_spec(pipe, cfg)
     out_dir = target.parent / "aot"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,7 +545,11 @@ def _mint_aot(
             # KILLED in still leaves its measurements on disk for the parent.
             phase_snapshot=(
                 Path(request.phases_snapshot)
-                if request.phases_snapshot else None))
+                if request.phases_snapshot else None),
+            # pgw#947: the MEASURED serving-kernel lane for this card. The
+            # discrete verdict lands in the packed envelope (serving reads it
+            # instead of an SM tuple); the numbers ride the result metadata.
+            lane_verdict=lane_verdict)
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod
@@ -518,6 +635,38 @@ def mint(request: MintRequest) -> MintReport:
         f"setup {spec.cls.__name__}"
         + (f" (+{sum(len(c) for c in overrides.values())} component "
            f"override(s))" if overrides else "")))
+
+    def _load(_lane: str) -> Tuple[Any, Any]:
+        """One full endpoint load on the currently pinned kernel lane, plus
+        the export spec of the pipeline it produced."""
+        from . import fleet_cells
+
+        obj = spec.cls()
+        got = run_setup(
+            obj, dict(request.snapshots), arm_compile=False,
+            return_loaded=True, component_paths=overrides) or {}
+        _slot, loaded_pipe = _pick_compile_target(got, cfg)
+        frame(phase="load", note=f"compile target on slot {_slot!r}")
+        if cfg.lora_bucket:
+            cc.apply_lora_lane(loaded_pipe, cfg.lora_bucket)
+        return loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
+
+    if request.recipe == RECIPE_AOT:
+        # pgw#947: MEASURE the serving-kernel lane on this card before the
+        # cell is exported, so the cell can carry the verdict instead of the
+        # fleet re-deriving it from a hand-maintained SM tuple. The probe
+        # loads once per candidate; the winner's pipeline is what gets minted.
+        verdict, pipe, aot_spec = lane_verdict_for(_load)
+        # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
+        # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
+        # model ref for an operator's mint pod): the graphs this cell must
+        # serve are the graphs the ENDPOINT's own composed pipeline runs, and
+        # composing a second time is how a mint exports something the serving
+        # pod cannot adopt.
+        return _mint_aot(
+            request, pipe, cfg, target, started=started,
+            sha256_file=sha256_file, lane_verdict=verdict, spec=aot_spec)
+
     instance = spec.cls()
     loaded = run_setup(
         instance, dict(request.snapshots), arm_compile=False,
@@ -527,17 +676,6 @@ def mint(request: MintRequest) -> MintReport:
 
     if cfg.lora_bucket:
         cc.apply_lora_lane(pipe, cfg.lora_bucket)
-
-    if request.recipe == RECIPE_AOT:
-        # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
-        # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
-        # model ref for an operator's mint pod): the graphs this cell must
-        # serve are the graphs the ENDPOINT's own composed pipeline runs, and
-        # composing a second time is how a mint exports something the serving
-        # pod cannot adopt.
-        return _mint_aot(
-            request, pipe, cfg, target, started=started,
-            sha256_file=sha256_file)
 
     jobs = _warm_jobs(siblings)
     # Arm COLD, pointed at our own capture dir: the warm forwards below are

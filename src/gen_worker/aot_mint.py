@@ -100,7 +100,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import activity as activity_mod
 from . import (
     aot_compile_pool, aot_export_parallel, aot_export_reuse, aot_package,
-    aot_serve, aot_wrapper_split, cell_key, graph_hash)
+    aot_serve, aot_wrapper_split, cell_key, graph_hash, kernel_lane)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
     DynamicDim,
@@ -1143,6 +1143,59 @@ def _export_entry(
         timings=timings)
 
 
+def bench_step(pipeline: Any, spec: ExportSpec) -> Callable[[], Any]:
+    """A zero-argument callable running ONE forward of this family's DOMINANT
+    declared graph class, in the PRODUCTION (compiled) posture (pgw#947).
+
+    The dominant class is the declaration's FIRST target — the denoiser,
+    which runs once per step while the VAE runs once per image — so "ms/step"
+    means what the pgw#862/#863 benchmark tables mean by it. A cell-level spec
+    that names a target (the operator CLI path) overrides that. Its inputs are
+    the family's OWN declared example feed (``aot_inputs.builder_for``), i.e.
+    the same representative shape the mint is about to export against, not a
+    shape invented here.
+
+    COMPILED, deliberately: pgw#863's whole finding is that the eager ranking
+    and the compiled ranking disagree — inductor fuses the baseline lane's
+    open elementwise chain and cannot fuse across our custom ops — and the
+    compiled posture is the only one production serves from.
+    """
+    import torch
+
+    from . import aot_declaration as _decl
+    from . import aot_inputs
+    from .api.export_contract import export_declaration
+
+    decl = export_declaration(spec.family)
+    if decl is None:
+        raise MintRefused(
+            f"family {spec.family!r} has no export declaration — nothing to "
+            f"benchmark a kernel lane against")
+    plans = list(_decl.cell_plans(decl))
+    if not plans:
+        raise MintRefused(f"family {spec.family!r} declares no graph classes")
+    want = str(spec.target or "") or str(decl.targets[0])
+    dominant = next(
+        (p for p in plans if str(p.target) == want), plans[0])
+    espec = _entry_spec(spec, dominant, decl)
+    resolved = _resolve_target(pipeline, espec.target)
+    if resolved is None:
+        raise MintRefused(
+            f"pipeline {type(pipeline).__name__} has no compile target "
+            f"{espec.target!r} to benchmark")
+    owner, attr, _fn = resolved
+    module = owner if attr == "forward" else _CallableTarget(owner, attr)
+    builder = aot_inputs.builder_for(espec.family, espec.target)
+    args, kwargs = builder(owner, espec)
+    compiled = torch.compile(module)
+
+    def step() -> Any:
+        with torch.no_grad():
+            return compiled(*args, **kwargs)
+
+    return step
+
+
 def replace_spec(spec: ExportSpec, **changes: Any) -> ExportSpec:
     """``dataclasses.replace`` on an :class:`ExportSpec`, named so the
     deferred-import dance does not have to repeat at every call site."""
@@ -1412,6 +1465,7 @@ def mint(
     entry_device_peak_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
+    lane_verdict: Optional[kernel_lane.Verdict] = None,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
 
@@ -1465,6 +1519,7 @@ def mint(
             entry_workers=entry_workers,
             entry_peak_rss_bytes=entry_peak_rss_bytes,
             entry_device_peak_bytes=entry_device_peak_bytes,
+            lane_verdict=lane_verdict,
             progress=progress)
     except BaseException as exc:
         _attach_partial_phases(exc, progress)
@@ -1652,10 +1707,18 @@ def _mint_cell(
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
     entry_device_peak_bytes: int = 0,
+    lane_verdict: Optional[kernel_lane.Verdict] = None,
     progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
     multi-graph cell (pgw#758).
+
+    ``lane_verdict`` (pgw#947) is the MEASURED serving-kernel lane for this
+    card, produced by the mint driver before the pipeline was loaded — only
+    the loader can swap the linears, so the A/B happens one level up
+    (``mint_child.lane_verdict_for``). The discrete verdict is packed into
+    the envelope so serving reads it instead of an SM tuple; the numbers ride
+    the result metadata beside ``mint_phases``, never the artifact.
 
     ``entry_workers`` CAPS pgw#809's compile pool; it never widens it. The
     width is derived from the pod (see :func:`aot_compile_pool.entry_workers`),
@@ -1932,6 +1995,12 @@ def _mint_cell(
         raise MintRefused(
             f"envelope refused the declared contract: {exc}") from exc
     meta.update(shared_identity_blocks(spec))
+    if lane_verdict is not None:
+        # pgw#947: the DISCRETE verdict only. Milliseconds in metadata.json
+        # would break the #699 double-mint byte-compare — the artifact
+        # deliberately carries no wall clocks — and the margin threshold is
+        # what makes the discrete answer reproducible across two mints.
+        meta[kernel_lane.META_KEY] = kernel_lane.envelope_block(lane_verdict)
     mode_drift = aot_package.strict_mode_drift(meta, spec.strict)
     if mode_drift:
         raise MintRefused("trace-mode drift: " + "; ".join(mode_drift))
@@ -1951,6 +2020,13 @@ def _mint_cell(
     # metadata.json would break the #699 double-mint byte-compare — the
     # artifact deliberately carries no timestamps and no wall clocks.
     meta["mint_phases"] = phase_table
+    if lane_verdict is not None:
+        # The EVIDENCE: both lanes' ms/step and peak bytes, the margin, the
+        # headroom terms, and the device it was all measured on. Same channel
+        # as the phase table (published checkpoint metadata + the typed
+        # event), so a verdict is auditable long after the pod is gone.
+        meta[kernel_lane.EVIDENCE_KEY] = kernel_lane.evidence_block(
+            lane_verdict)
 
     logger.info(
         "aot-mint: %s lane=%s -> %s (%d entr%s across %d target(s), %.1f MB "
@@ -3287,6 +3363,7 @@ __all__ = [
     "MINT_COMPILE_THREADS",
     "MintResult",
     "autotune_posture",
+    "bench_step",
     "cell_identity",
     "compile_entry_files",
     "compose_for_mint",
