@@ -800,14 +800,6 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
-        # Paul 2026-08-02: the WEIGHT-SET declaration the placement side reads
-        # to decide whether a cached volume can help this endpoint. OMITTED
-        # when undeclared — the consumer must be able to tell "the author said
-        # per_request" from "nobody said", because a cached volume lives in
-        # exactly ONE datacenter and attaching one that cannot be used
-        # collapses placement rather than merely wasting disk.
-        if es.weight_set is not None:
-            fn["weight_set"] = es.weight_set
         # th#1087: declared config parameters + env names — the hub persists
         # these as the release's declared surface and 422s config writes
         # outside it.
