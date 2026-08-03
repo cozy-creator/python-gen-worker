@@ -69,7 +69,7 @@ def test_run_main_seals_after_settings_and_before_cuda_probe(
     order: list = []
     monkeypatch.setattr(entrypoint, "_install_stack_dump_handler", lambda: None)
     monkeypatch.setattr(
-        entrypoint, "get_settings",
+        entrypoint, "_bootstrap_configuration",
         lambda: order.append("settings") or SimpleNamespace(
             endpoint_lock_path=""))
     monkeypatch.setattr(
@@ -95,7 +95,7 @@ def test_seal_refusal_dials_the_hub_typed_with_settings(
     fatal: list = []
     settings = SimpleNamespace(endpoint_lock_path="")
     monkeypatch.setattr(entrypoint, "_install_stack_dump_handler", lambda: None)
-    monkeypatch.setattr(entrypoint, "get_settings", lambda: settings)
+    monkeypatch.setattr(entrypoint, "_bootstrap_configuration", lambda: settings)
 
     def _refuse() -> dict:
         raise RuntimeError("unsealable: HOSTILE_VAR")

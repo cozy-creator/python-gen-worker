@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 import pytest
 
 from gen_worker import aot_cells, aot_serve, cell_key, fleet_cells
-from gen_worker.config import get_settings
+from gen_worker import config as gw_config
 from gen_worker.models.chunk_cas import sha256_file
 
 FAMILY = "sdxl"
@@ -83,7 +83,7 @@ def _pilot_meta(key: str, *, lane: str = "w8a8", bucket: int = 64,
 
 def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +92,13 @@ def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_flag_defaults_off() -> None:
-    assert get_settings().compile_prefer_aot is False
+    assert gw_config.current().compile_prefer_aot is False
     assert aot_cells.prefer_aot() is False
 
 
 def test_flag_rides_typed_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     _flag_on(monkeypatch)
-    assert get_settings().compile_prefer_aot is True
+    assert gw_config.current().compile_prefer_aot is True
     assert aot_cells.prefer_aot() is True
 
 

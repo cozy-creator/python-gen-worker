@@ -41,9 +41,9 @@ def _transport(handlers, settings) -> Transport:
 
 
 def _settings():
-    from gen_worker.config import get_settings
+    from gen_worker import config as gw_config
 
-    return get_settings()
+    return gw_config.current()
 
 
 def test_handler_exception_is_its_own_class_not_a_transport_error():

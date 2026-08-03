@@ -33,12 +33,17 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .config import Settings
 
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
 _TOKEN: str = ""
 _EXPIRES_AT: float = 0.0
+_BOOTSTRAP: str = ""
 
 
 def install(token: str, expires_at_unix: float = 0.0) -> None:
@@ -56,25 +61,36 @@ def install(token: str, expires_at_unix: float = 0.0) -> None:
         _EXPIRES_AT = float(expires_at_unix or 0.0)
 
 
+def install_bootstrap(settings: "Settings") -> None:
+    """Hand this module the boot token, from the process entry's `Settings`.
+
+    pgw#931 (§1.18): `current()` used to reach for `get_settings()` itself,
+    inside `getattr(..., "bootstrap_worker_jwt", "")` inside a bare
+    `except Exception: return ""`. That is the DEFECT-TAXONOMY C8 shape on the
+    field pgw#848 renamed precisely so a stale reader would raise: a getattr
+    default plus a swallowed exception restores the silence the rename existed
+    to break. Direct attribute access here means a rename fails loudly at the
+    one site that feeds it.
+    """
+    global _BOOTSTRAP
+    with _LOCK:
+        _BOOTSTRAP = str(settings.bootstrap_worker_jwt or "").strip()
+
+
 def current() -> str:
     """The credential every hub dial must present.
 
     Falls back to the boot token when no rotation has arrived yet, which is
     the correct answer for the first ~24 minutes of a pod's life and the only
-    answer available before the stream is up. Read lazily rather than captured
-    at import, so a settings reload cannot pin a stale value.
+    answer available before the stream is up. The boot token is HANDED to this
+    module by the process entry (`install_bootstrap`), never fetched by it: a
+    module that can go and find its own credential is a module that can find a
+    different one than the rest of the process is using.
     """
     with _LOCK:
         if _TOKEN:
             return _TOKEN
-    try:
-        from .config import get_settings
-
-        return str(
-            getattr(get_settings(), "bootstrap_worker_jwt", "") or ""
-        ).strip()
-    except Exception:  # noqa: BLE001 — a credential read never raises
-        return ""
+        return _BOOTSTRAP
 
 
 def expires_at() -> float:

@@ -35,7 +35,9 @@ import textwrap
 import pytest
 
 from gen_worker import lifecycle as lifecycle_mod
-from gen_worker.config import get_settings, load_settings
+from gen_worker import config as gw_config
+from gen_worker import worker_goals
+from gen_worker.config import load_settings
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.procsplit.parent import ParentControl
 from gen_worker.topology import ExecutionTopology
@@ -108,7 +110,11 @@ def test_the_parent_builder_assigns_every_wire_field(monkeypatch: pytest.MonkeyP
     forge pods.
     """
     monkeypatch.setenv("WORKER_MODE", "forge")
-    get_settings.cache_clear()
+    # pgw#930: the wire value is projected from the PUBLISHED goal set, not
+    # re-derived from env at the builder. Seeding the declaration therefore
+    # means installing the goals it seeds — which is what a process entry does.
+    settings = gw_config.reload_for_test()
+    worker_goals.install(worker_goals.from_settings(settings))
     pc = _parent_control(
         worker_mode="forge",
         worker_image_digest="sha256:deadbeef",

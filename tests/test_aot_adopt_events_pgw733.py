@@ -276,10 +276,10 @@ class _FleetPipe:
 def _f1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """Flag on + a discovered candidate; provision seam is per-test."""
     from gen_worker import compile_cache as cc
-    from gen_worker.config import get_settings
+    from gen_worker import config as gw_config
 
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
     monkeypatch.setattr(cc, "has_compile_target", lambda pipe, cfg: True)
     art = tmp_path / "cell.tar.gz"
     art.write_bytes(b"artifact")
@@ -288,7 +288,7 @@ def _f1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
         snapshot_digest="blake3:" + "5" * 64, artifact=art)
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: adopted)
     yield adopted
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
 def test_fleet_success_is_one_armed_row(

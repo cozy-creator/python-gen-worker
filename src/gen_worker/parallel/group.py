@@ -159,18 +159,28 @@ def _refuse_nvls_multicast() -> None:
 
     Switching it off costs nothing measurable HERE: Ulysses is all-to-all, and
     NVLS accelerates switch-side reductions (all-reduce/reduce-scatter), not
-    all-to-all. CODE decides it, which is pgw#718's rule — an explicit value in
-    the image is left alone, so a platform that CAN bind multicast keeps it.
-    """
-    import os
+    all-to-all.
 
-    if os.environ.get(_NVLS_ENV) is None:
-        os.environ[_NVLS_ENV] = "0"
-        logger.info(
-            "%s=0 for this rank group: NVLS multicast cannot be bound in our "
-            "containers (measured: ncclUnhandledCudaError / CUDA 401 on the "
-            "first all-to-all of every group) and Ulysses does not use it",
-            _NVLS_ENV,
+    pgw#929 (§1.17), AMBIGUOUS #3: this used to write ``0`` only when the
+    variable was UNSET, so an image or an operator could turn NVLS back on and
+    take every Ulysses arm down with CUDA 401 — a logic gate carried by an env,
+    on a failure that is total rather than gradual. The write is now
+    UNCONDITIONAL and immediately precedes communicator creation. The env
+    survives only as NCCL's own handoff mechanism (it reads env at init and
+    offers no other API); it is no longer anybody's choice.
+
+    A future collective that can benefit from NVLS needs a measured capability
+    and its own issue. It may not revive this as a gate.
+    """
+    previous = os.environ.get(_NVLS_ENV)
+    os.environ[_NVLS_ENV] = "0"
+    if previous not in (None, "0"):
+        logger.warning(
+            "%s was %r; overwritten to 0. NVLS multicast cannot be bound in "
+            "our containers (measured: ncclUnhandledCudaError / CUDA 401 on "
+            "the first all-to-all of every group) and Ulysses does not use it "
+            "— this is not an operator choice (pgw#929)",
+            _NVLS_ENV, previous,
         )
 
 

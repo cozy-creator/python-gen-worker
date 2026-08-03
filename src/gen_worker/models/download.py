@@ -29,7 +29,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequen
 from urllib.parse import parse_qs, urlparse
 
 from ..api.errors import ValidationError
-from ..config import get_settings
+from ..config import Settings, current_or
+
+_STANDALONE = Settings()
 from ..stall import ProgressFloor, SilenceWindow
 from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
@@ -282,7 +284,7 @@ async def ensure_local(
             download_civitai,
             version_id,
             base / "civitai" / str(version_id),
-            api_key=civitai_api_key or get_settings().civitai_api_key,
+            api_key=civitai_api_key or current_or(_STANDALONE).civitai_api_key,
             progress=progress,
         )
 

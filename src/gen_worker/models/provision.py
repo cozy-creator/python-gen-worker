@@ -28,7 +28,9 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
-from ..config import get_settings
+from ..config import Settings, current_or
+
+_STANDALONE = Settings()
 from .cache_paths import tensorhub_cas_dir
 from .errors import UrlExpiredError
 from .ladder import maybe_rebind_family_fp8
@@ -278,7 +280,7 @@ def arm_aot(
             "aot arm: artifact declares mode=%r, which this runtime has no "
             "arm for; staying eager", mode)
         return False
-    if bucket and get_settings().compile_prefer_aot:
+    if bucket and current_or(_STANDALONE).compile_prefer_aot:
         from . import lora_lifted
 
         # The target module comes from the ARTIFACT's own recorded facts
@@ -873,8 +875,8 @@ def resolve_local_path(
     ``download.select_component_paths`` / ``cozy_snapshot.snapshot_dir_key``.
     """
 
-    env_cas = get_settings().tensorhub_cas_dir.strip()
-    cache_dir = Path(env_cas) if env_cas else Path(tensorhub_cas_dir())
+    configured_cas = current_or(_STANDALONE).tensorhub_cas_dir.strip()
+    cache_dir = Path(configured_cas) if configured_cas else Path(tensorhub_cas_dir())
 
     # Decode the bare ref into typed parts using the explicit provider.
     # No string-prefix sniffing — provider is the source of truth.
@@ -906,8 +908,8 @@ def resolve_local_path(
                     repo_id=parsed.hf.repo_id,
                     revision=parsed.hf.revision,
                     local_files_only=True,
-                    cache_dir=get_settings().hf_home or None,
-                    token=get_settings().hf_token or None,
+                    cache_dir=current_or(_STANDALONE).hf_home or None,
+                    token=current_or(_STANDALONE).hf_token or None,
                     allow_patterns=patterns or None,
                 )
                 return str(p)
@@ -924,8 +926,8 @@ def resolve_local_path(
 
             local_dir = download_hf(
                 parsed.hf,
-                hf_home=get_settings().hf_home or None,
-                hf_token=get_settings().hf_token or None,
+                hf_home=current_or(_STANDALONE).hf_home or None,
+                hf_token=current_or(_STANDALONE).hf_token or None,
                 allow_patterns=tuple(allow_patterns),
                 components=components,
             )
@@ -1021,7 +1023,7 @@ def resolve_local_path(
             fetch_civitai_model,
             parse_civitai_version_id,
         )
-        api_key = get_settings().civitai_api_key
+        api_key = current_or(_STANDALONE).civitai_api_key
 
         if civitai_version_id:
             # Explicit version pin via Civitai(version="<id>"). The pinned id

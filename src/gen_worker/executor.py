@@ -39,7 +39,7 @@ from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
 from . import warmup
 from . import worker_credential
-from . import worker_mode
+from . import worker_goals
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
@@ -5825,15 +5825,15 @@ class Executor:
         )
         # th#1359: reaching here means this boot's mint disposition is FINAL
         # on every path (inline setup, adopted cell, eager-without-mint, and
-        # the background mint's own `finally`). A forge pod waits on exactly
-        # that fact rather than inventing a second notion of "boot is over"
-        # that could disagree with the one boot telemetry publishes.
+        # the background mint's own `finally`). The mint-goal driver waits on
+        # exactly that fact rather than inventing a second notion of "boot is
+        # over" that could disagree with the one boot telemetry publishes.
         try:
-            from . import forge as forge_mod
+            from . import mint_goal as mint_goal_mod
 
-            forge_mod.note_disposition_final()
+            mint_goal_mod.note_disposition_final()
         except Exception:  # pragma: no cover - a latch never breaks a boot
-            logger.debug("forge disposition latch failed", exc_info=True)
+            logger.debug("mint-goal disposition latch failed", exc_info=True)
         if armed or rec.background_mint is not None:
             return
         # pgw#805: a boot that DECLARED a compile target and ends with no
@@ -10774,30 +10774,37 @@ class Executor:
                 self._arm_cancel_unwind_watch(job)
 
         intent_id = self._job_intent(run)
-        if worker_mode.is_forge():
-            # th#1359: a forge pod is not in the serving rotation. The hub
-            # excludes it at placement; this is the WORKER-side half of the
-            # same promise, and it is the one that actually holds — a pod that
-            # accepted a tenant job would put a tenant's latency behind a
-            # multi-hour compile and give the drain path a reason to exist
-            # here. RETRYABLE, not INVALID: the request is perfectly valid and
-            # belongs on a serving worker.
+        if not worker_goals.current().serve_admitted():
+            # pgw#930 (§1.17): this pod holds no SERVE goal. It is not a mode
+            # check — a pod holding BOTH a serve and a mint goal passes here,
+            # which is the whole point of the ruling; only the absence of the
+            # serve goal refuses.
+            #
+            # Kept rather than deleted (pgw#930 proposed deleting it outright
+            # as a second copy of the hub's placement decision). It is not a
+            # second copy once it reads the goal set: the hub DECLARES the
+            # goals and this honours them, so there is one carrier. And the
+            # measured failure it prevents is real — a pod that accepted a
+            # tenant job would put that tenant's latency behind a multi-hour
+            # compile. RETRYABLE, not INVALID: the request is perfectly valid
+            # and belongs on a worker holding a serve goal.
             self._intent_transition(
                 intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_FAILED,
                 pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-                detail="forge mode: mint-only worker, no tenant dispatch",
+                detail="no serve goal: this worker was not asked to serve",
             )
             activity_mod.emit_event(
-                "forge_dispatch_refused",
+                "serve_goal_absent_dispatch_refused",
                 f"request {run.request_id} attempt {run.attempt} for "
-                f"{run.function_name!r} reached a MINT-ONLY worker — the hub "
-                f"placed tenant work on a forge pod (th#1359)",
-                phase="forge_mode",
+                f"{run.function_name!r} reached a worker holding no serve "
+                f"goal — the hub placed tenant work on a mint-only pod "
+                f"(pgw#930)",
+                phase="goal_admission",
             )
             await self._send_result(
                 run.request_id, run.attempt, pb.JOB_STATUS_RETRYABLE,
-                safe_message="worker is in mint-only (forge) mode",
+                safe_message="worker holds no serve goal",
             )
             return
         if self.draining:

@@ -41,7 +41,7 @@ from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     export_declaration, register_export_declaration, reset_export_declarations,
 )
-from gen_worker.config import get_settings
+from gen_worker import config as gw_config
 
 FAMILY = "sdxl"
 
@@ -118,7 +118,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     resolvable compile target, CUDA and a toolchain — and no cell.
     """
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
@@ -143,7 +143,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     yield
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
 def _arm(**kw: Any) -> Any:
