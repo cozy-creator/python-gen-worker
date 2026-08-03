@@ -1168,6 +1168,19 @@ class ParentControl:
         transport_backoff_cap_s: float = 30.0,
     ) -> None:
         self._settings = settings
+        # pgw#931 follow-up: the CONTROL PARENT is the process that holds the
+        # worker credential — the compute child is deliberately stripped of it
+        # (`_CHILD_FORBIDDEN_ENVS`) and signs through this process. So the boot
+        # token is installed HERE, where the parent's `Settings` arrive, not
+        # only in `run_parent`.
+        #
+        # It was in `run_parent` alone, and that was wrong: every other way of
+        # building a control parent — the split harness, the group-process
+        # tests, any embedder — got a parent with no credential, and the
+        # mediated C2PA sign refused with "this pod holds no worker JWT".
+        # Deriving a fact at ONE of several entry points is the §4.22 defect:
+        # the fact and its carrier have to be established together.
+        worker_credential.install_bootstrap(settings)
         env_cmd = os.environ.get(ENV_CHILD_CMD, "").strip()
         self._child_cmd = list(
             child_cmd
@@ -2552,7 +2565,8 @@ def run_parent() -> int:
     # §1.18: the bootstrap-owned load for the CONTROL-PARENT process entry.
     settings = config.install(config.load_settings())
     worker_goals.install(worker_goals.from_settings(settings))
-    worker_credential.install_bootstrap(settings)
+    # The boot credential is installed by ParentControl.__init__, which is the
+    # seam every parent goes through — not just this entry point.
     code = ParentControl(settings).run()
     if code == 0:
         postmortem.clear_boot_record()

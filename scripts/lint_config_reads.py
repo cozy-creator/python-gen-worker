@@ -63,6 +63,10 @@ CLASSIFICATIONS = {
 #: Namespaces this program owns; see config/loader.py `_OWNED_PREFIXES`.
 OWNED_PREFIXES = ("GEN_WORKER_", "TENSORHUB_", "WORKER_", "COZY_")
 
+#: Key for a site whose variable this walk cannot name statically — a bare
+#: `os.environ` binding (`dict(os.environ)`) or a computed key.
+UNRESOLVED = "<unresolved>"
+
 
 class EnvVisitor(ast.NodeVisitor):
     """Every `os.environ` / `os.getenv` access, with the name when it is static."""
@@ -70,6 +74,12 @@ class EnvVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.hits: List[Tuple[int, str]] = []
         self.consts: Dict[str, str] = {}
+        #: `os.environ` attribute nodes already accounted for as the base of a
+        #: `.get(...)` / `[...]`. Without this, `os.environ.get("X")` records
+        #: BOTH ("X", from the call) and an unnamed bare binding (from the
+        #: attribute), which double-counts the census and invents
+        #: `<unresolved>` entries for sites whose variable is right there.
+        self._consumed: Set[int] = set()
 
     def load_consts(self, tree: ast.AST) -> None:
         for node in ast.walk(tree):
@@ -86,9 +96,13 @@ class EnvVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
         if isinstance(node, ast.Name):
-            return self.consts.get(node.id, "")
+            # A module constant imported from a sibling (`ENV_SOCKET`) cannot be
+            # resolved by a single-file walk, but the IDENTIFIER is itself a
+            # stable, specific key — and unlike a line number, nobody else's
+            # edit moves it.
+            return self.consts.get(node.id) or f"${node.id}"
         if isinstance(node, ast.Attribute):
-            return self.consts.get(node.attr, "")
+            return self.consts.get(node.attr) or f"${node.attr}"
         return ""
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -100,6 +114,7 @@ class EnvVisitor(ast.NodeVisitor):
             is_getenv = (isinstance(base, ast.Name) and base.id == "os"
                          and func.attr == "getenv")
             if is_environ or is_bare_environ or is_getenv:
+                self._consumed.add(id(base))
                 self.hits.append(
                     (node.lineno, self._name(node.args[0] if node.args else None)))
         self.generic_visit(node)
@@ -107,6 +122,7 @@ class EnvVisitor(ast.NodeVisitor):
     def visit_Subscript(self, node: ast.Subscript) -> None:
         value = node.value
         if isinstance(value, ast.Attribute) and value.attr == "environ":
+            self._consumed.add(id(value))
             self.hits.append((node.lineno, self._name(node.slice)))
         elif isinstance(value, ast.Name) and value.id == "environ":
             self.hits.append((node.lineno, self._name(node.slice)))
@@ -123,15 +139,32 @@ class EnvVisitor(ast.NodeVisitor):
         nobody thought to name. Same shape th#1502 records at `registry.go`.
         Hits dedupe by line, so an `os.environ.get(...)` is not double-counted.
         """
-        if isinstance(node.value, ast.Name) and node.value.id == "os" \
-                and node.attr == "environ":
+        if (isinstance(node.value, ast.Name) and node.value.id == "os"
+                and node.attr == "environ" and id(node) not in self._consumed):
             self.hits.append((node.lineno, ""))
         self.generic_visit(node)
 
 
-def scan() -> Tuple[Dict[str, Set[int]], Set[str]]:
-    """Returns {relative path: {line, ...}} outside config/, and every static name."""
-    sites: Dict[str, Set[int]] = {}
+def scan() -> Tuple[Dict[Tuple[str, str], int], Set[str]]:
+    """Every env access outside `config/`, keyed by (path, ENV NAME).
+
+    NOT by line number, and that is the whole point. pgw#931 shipped this gate
+    keyed on `path:line` and it went red on `dev` within the hour: two sibling
+    PRs (#432, #434) merged alongside it and shifted lines in four files nobody
+    in this change had touched. A line number is a fact OTHER PEOPLE change
+    independently, so pinning an allowlist to one makes the allowlist a second
+    carrier that goes stale silently — §4.22, and precisely the defect class
+    this gate exists to police. The gate committed the sin it polices.
+
+    (path, name) is stable under unrelated edits, and it is the meaningful unit
+    anyway: the classification belongs to "this file reading this variable",
+    not to a cursor position. Two sites in one file reading the same name share
+    one classification, which is correct — they are one decision.
+
+    The value per key is a representative line number, for DIAGNOSTICS only.
+    Never for matching.
+    """
+    sites: Dict[Tuple[str, str], int] = {}
     names: Set[str] = set()
     for path in sorted(SRC_ROOT.rglob("*.py")):
         if CONFIG_PKG in path.parents or path == CONFIG_PKG:
@@ -144,19 +177,17 @@ def scan() -> Tuple[Dict[str, Set[int]], Set[str]]:
         visitor = EnvVisitor()
         visitor.load_consts(tree)
         visitor.visit(tree)
-        if not visitor.hits:
-            continue
         rel = str(path.relative_to(REPO))
         for lineno, name in visitor.hits:
-            sites.setdefault(rel, set()).add(lineno)
+            sites.setdefault((rel, name or UNRESOLVED), lineno)
             if name:
                 names.add(name)
     return sites, names
 
 
-def load_allowlist() -> Tuple[Dict[str, Set[int]], List[str]]:
-    """Parse `path:line CLASSIFICATION reason` lines. Returns sites and errors."""
-    allowed: Dict[str, Set[int]] = {}
+def load_allowlist() -> Tuple[Dict[Tuple[str, str], str], List[str]]:
+    """Parse `path::ENV_NAME CLASSIFICATION reason` lines."""
+    allowed: Dict[Tuple[str, str], str] = {}
     errors: List[str] = []
     if not ALLOWLIST.is_file():
         return allowed, [f"{ALLOWLIST} is missing"]
@@ -168,7 +199,7 @@ def load_allowlist() -> Tuple[Dict[str, Set[int]], List[str]]:
         if len(parts) < 3:
             errors.append(
                 f"{ALLOWLIST.name}:{num}: expected "
-                f"'<path>:<line> <CLASSIFICATION> <reason>', got {raw!r}")
+                f"'<path>::<ENV_NAME> <CLASSIFICATION> <reason>', got {raw!r}")
             continue
         site, classification, reason = parts
         if classification not in CLASSIFICATIONS:
@@ -179,11 +210,14 @@ def load_allowlist() -> Tuple[Dict[str, Set[int]], List[str]]:
         if not reason.strip():
             errors.append(f"{ALLOWLIST.name}:{num}: a classification needs a reason")
             continue
-        path, _, lineno = site.rpartition(":")
-        if not path or not lineno.isdigit():
-            errors.append(f"{ALLOWLIST.name}:{num}: bad site {site!r}")
+        path, sep, name = site.partition("::")
+        if not path or not sep or not name:
+            errors.append(
+                f"{ALLOWLIST.name}:{num}: bad site {site!r} — expected "
+                f"'<path>::<ENV_NAME>' (use ::{UNRESOLVED} for a bare "
+                f"`os.environ` binding or a name this walk cannot resolve)")
             continue
-        allowed.setdefault(path, set()).add(int(lineno))
+        allowed[(path, name)] = classification
     return allowed, errors
 
 
@@ -213,22 +247,21 @@ def main() -> int:
     sites, names = scan()
     allowed, errors = load_allowlist()
 
-    for path in sorted(sites):
-        for lineno in sorted(sites[path] - allowed.get(path, set())):
-            errors.append(
-                f"{path}:{lineno}: reads the process environment outside "
-                f"gen_worker/config. Ruling §1.18: config is loaded once by the "
-                f"pipeline and PASSED. If this site is genuinely legitimate, add "
-                f"'{path}:{lineno} <CLASSIFICATION> <reason>' to "
-                f"{ALLOWLIST.name} — and say which classification it is.")
+    for key in sorted(set(sites) - set(allowed)):
+        path, name = key
+        errors.append(
+            f"{path}:{sites[key]} reads {name} from the process environment "
+            f"outside gen_worker/config. Ruling §1.18: config is loaded once by "
+            f"the pipeline and PASSED. If this site is genuinely legitimate, add "
+            f"'{path}::{name} <CLASSIFICATION> <reason>' to {ALLOWLIST.name} — "
+            f"and say which classification it is.")
 
-    for path in sorted(allowed):
-        stale = sorted(allowed[path] - sites.get(path, set()))
-        for lineno in stale:
-            errors.append(
-                f"{ALLOWLIST.name}: {path}:{lineno} is allowlisted but reads no "
-                f"environment any more. Delete the line — a stale allowlist is "
-                f"how an exception list stops describing the tree.")
+    for key in sorted(set(allowed) - set(sites)):
+        path, name = key
+        errors.append(
+            f"{ALLOWLIST.name}: {path}::{name} is allowlisted but no longer "
+            f"reads the environment. Delete the line — a stale allowlist is how "
+            f"an exception list stops describing the tree.")
 
     errors.extend(check_owned_names_known(names))
 
@@ -241,8 +274,8 @@ def main() -> int:
             file=sys.stderr)
         return 1
 
-    total = sum(len(v) for v in sites.values())
-    print(f"config-read guard: OK — {total} accepted site(s), all classified.")
+    print(f"config-read guard: OK — {len(sites)} accepted (file, variable) "
+          f"pair(s), all classified.")
     return 0
 
 
