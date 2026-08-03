@@ -371,12 +371,19 @@ def main() -> int:
             spec = json.loads((HERE / fam["prompts"]).read_text())
             befores = [str(Path(fam["before_dir"]) / r["before"])
                        for r in spec["edit"]]
-            ssh(ip, port, "mkdir -p /root/before", 60)
-            rc, out = sh(["scp", *SSH_OPTS, "-P", str(port), *befores,
-                          f"root@{ip}:/root/before/"], 300)
-            print(f"[scp before] rc={rc} n={len(befores)}", flush=True)
-            if rc != 0:
-                print(out[-1500:], flush=True)
+            # A freshly booted sshd drops connections for a while; one broken
+            # pipe here must not cost a rented pod.
+            for attempt in range(5):
+                ssh(ip, port, "mkdir -p /root/before", 60)
+                rc, out = sh(["scp", *SSH_OPTS, "-P", str(port), *befores,
+                              f"root@{ip}:/root/before/"], 300)
+                print(f"[scp before] attempt{attempt} rc={rc} "
+                      f"n={len(befores)}", flush=True)
+                if rc == 0:
+                    break
+                print(out[-600:], flush=True)
+                time.sleep(20)
+            else:
                 return 4
         rc, out = ssh(
             ip, port,
