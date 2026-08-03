@@ -103,8 +103,30 @@ NEEDS_BF16_TREE = ("bf16", "bf16c")
 NEEDS_FP8_TREE = ("fp8", "fp8c")
 NEEDS_SVDQ_CK = ("base", "basec", "native", "nativec")
 
-HUB_BASE = os.environ.get("COZY_HUB_BASE", "http://localhost:30070")
-FP8_REF = ("tensorhub", "qwen-image", "latest", "fp8-w8a8")
+HUB_BASE = os.environ.get("COZY_HUB_BASE", "http://localhost:31550")
+
+# Model family under test. `edit` is image+text conditioned: same shapes, same
+# reporting contract, no svdq arm (no 4-bit edit artifact exists), and the
+# BEFORE images ship from the banked gate inputs.
+FAMILIES = {
+    "t2i": {
+        "fp8_ref": ("tensorhub", "qwen-image", "prod", "fp8-w8a8"),
+        "bench": "bench_arm.py",
+        "prompts": "bench_prompts.json",
+        "mat_flag": "",
+        "arms": set(ARMS),
+        "before_dir": "",
+    },
+    "edit": {
+        "fp8_ref": ("tensorhub", "qwen-image-edit-2511", "prod", "fp8-w8a8"),
+        "bench": "bench_edit_arm.py",
+        "prompts": "edit_prompts.json",
+        "mat_flag": "--edit",
+        "arms": {"bf16", "bf16c", "fp8", "fp8c"},
+        "before_dir": str(Path.home() / "cozy" / "samples"
+                          / "qwen-edit-fp8-20260727"),
+    },
+}
 
 
 def dotenv(names):
@@ -213,6 +235,7 @@ def wait_for(ip, port, log, marker, deadline_s, tick=45, label=""):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpu", default="b200", choices=sorted(CARDS))
+    ap.add_argument("--family", default="t2i", choices=sorted(FAMILIES))
     ap.add_argument("--cells", default="mat,corr,bb,bf,e:bf16,e:base,"
                                        "e:native,e:nativec,met")
     ap.add_argument("--rows", default="",
@@ -242,10 +265,13 @@ def main() -> int:
               "404=", confirm_404(api, args.terminate))
         return 0
 
+    fam = FAMILIES[args.family]
     cells = [c.strip() for c in args.cells.split(",") if c.strip()]
     e2e_arms = [c[2:] for c in cells if c.startswith("e:")]
     for a in e2e_arms:
-        assert a in ARMS, f"unknown arm {a}; known: {sorted(ARMS)}"
+        assert a in fam["arms"], (
+            f"unknown arm {a} for family {args.family}; "
+            f"known: {sorted(fam['arms'])}")
     want_bf16 = any(a in NEEDS_BF16_TREE for a in e2e_arms)
     want_fp8 = any(a in NEEDS_FP8_TREE for a in e2e_arms)
 
@@ -290,8 +316,9 @@ def main() -> int:
         print(f"[pod] attached {pod_id}", flush=True)
     (res / "pod.txt").write_text(f"{pod_id} {int(started)} {args.gpu}\n")
 
-    manifest = {"pod": pod_id, "gpu": args.gpu, "image": IMAGE,
-                "cells": cells, "started": started, "results": {}}
+    manifest = {"pod": pod_id, "gpu": args.gpu, "family": args.family,
+                "image": IMAGE, "cells": cells, "started": started,
+                "results": {}}
 
     def bank():
         (res / "manifest.json").write_text(json.dumps(manifest, indent=1))
@@ -327,8 +354,9 @@ def main() -> int:
             return 3
 
         files = [str(HERE / f) for f in
-                 ("bench_b0.py", "bench_arm.py", "materialize_bench.py",
-                  "metrics_pod.py", "bench_prompts.json")]
+                 ("bench_b0.py", "bench_arm.py", "bench_edit_arm.py",
+                  "materialize_bench.py", "metrics_pod.py",
+                  "bench_prompts.json", "edit_prompts.json")]
         files += [str(MODELS / f) for f in OVERLAY]
         rc, out = sh(["scp", *SSH_OPTS, "-P", str(port), *files,
                       f"root@{ip}:/root/"], 300)
@@ -336,6 +364,20 @@ def main() -> int:
         if rc != 0:
             print(out[-1500:], flush=True)
             return 4
+        if fam["before_dir"]:
+            # The conditioning inputs. bench_edit_arm.py sha256-verifies them
+            # against the recipe, so a wrong/missing BEFORE fails loudly
+            # rather than benchmarking a different workload.
+            spec = json.loads((HERE / fam["prompts"]).read_text())
+            befores = [str(Path(fam["before_dir"]) / r["before"])
+                       for r in spec["edit"]]
+            ssh(ip, port, "mkdir -p /root/before", 60)
+            rc, out = sh(["scp", *SSH_OPTS, "-P", str(port), *befores,
+                          f"root@{ip}:/root/before/"], 300)
+            print(f"[scp before] rc={rc} n={len(befores)}", flush=True)
+            if rc != 0:
+                print(out[-1500:], flush=True)
+                return 4
         rc, out = ssh(
             ip, port,
             'M=$(python3 -c "import gen_worker.models, pathlib; '
@@ -373,8 +415,10 @@ def main() -> int:
 
                 if cell == "mat":
                     flag = "--bf16" if want_bf16 else ""
+                    if fam["mat_flag"]:
+                        flag += " " + fam["mat_flag"]
                     if want_fp8:
-                        org, name, tag, flavor = FP8_REF
+                        org, name, tag, flavor = fam["fp8_ref"]
                         url = (f"{HUB_BASE}/api/v1/repos/{org}/{name}/resolve"
                                f"?tag={tag}&flavor={flavor}")
                         with urllib.request.urlopen(url, timeout=120) as fh:
@@ -475,11 +519,12 @@ def main() -> int:
                     rows = f"--rows {args.rows}" if args.rows else ""
                     rows += (f" --norm-rows {args.norm_rows} "
                              f"--norm-shape {args.norm_shape}")
+                    ckarg = "" if args.family == "edit" else f"--ckpt {ck}"
                     ssh(ip, port,
                         f"setsid nohup env GEN_WORKER_NATIVE_KERNELS={env_val} "
-                        f"python3 /root/bench_arm.py {extra} --ckpt {ck} "
+                        f"python3 /root/{fam['bench']} {extra} {ckarg} "
                         f"--reference-tree {refs_tree} "
-                        f"--prompts /root/bench_prompts.json {rows} "
+                        f"--prompts /root/{fam['prompts']} {rows} "
                         f"--out /root/e2e/{name} > /root/arm_{name}.log 2>&1 & "
                         f"echo started", 60)
                     ok, tail = wait_for(ip, port, f"/root/arm_{name}.log",
