@@ -49,6 +49,11 @@ _RANK_ALIGN = 16
 
 _SELF_CHECK_PROBES = ((128, 512, 256), (77, 3072, 384))
 
+# Warps for the fused quant kernel, per SM — module level so a sweep can
+# rebind it (scripts/svdq_bench/bench_gemm.py) instead of editing source.
+_QUANT_WARPS_BY_SM = {100: 4, 103: 4, 120: 8, 121: 8}
+_QUANT_WARPS_DEFAULT = 4
+
 
 class SvdqFusedError(RuntimeError):
     """Typed fused-lane failure (contract mismatch — never silent-wrong)."""
@@ -240,10 +245,10 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
     def _quant_warps() -> int:
         try:
             major, minor = torch.cuda.get_device_capability()
-            return {100: 4, 103: 4, 120: 8, 121: 8}.get(
-                major * 10 + minor, 4)
+            return _QUANT_WARPS_BY_SM.get(major * 10 + minor,
+                                          _QUANT_WARPS_DEFAULT)
         except Exception:  # noqa: BLE001
-            return 4
+            return _QUANT_WARPS_DEFAULT
 
     def _quant_launch(x2: Any, smooth: Optional[Any], s2: Any,
                       blocked: bool) -> tuple[Any, Any]:

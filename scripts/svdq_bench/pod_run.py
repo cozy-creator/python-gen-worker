@@ -37,7 +37,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-os.environ.pop("SSH_AUTH_SOCK", None)
+# NOTE: do NOT drop SSH_AUTH_SOCK. The runpod key on this box is
+# passphrase-protected, so `-i` alone cannot authenticate — the agent holds
+# the only usable copy. Dropping it produced 90 silent "Permission denied"
+# retries that read exactly like a slow boot.
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -55,7 +58,7 @@ ENVF = Path(os.environ.get("COZY_BENCH_ENV",
 KEY = Path.home() / ".ssh" / "runpod"
 SSH_OPTS = ["-i", str(KEY), "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15",
-            "-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
+            "-o", "LogLevel=ERROR"]
 
 # cuda-13 profile tag of the deployed conversion image: the bare -linux-x86
 # tag of the same build is CPU torch.
@@ -306,14 +309,21 @@ def main() -> int:
         ip, port, rate = ep
         manifest["rate_per_hr"] = rate
         print(f"[pod] ssh root@{ip}:{port} rate=${rate}/hr", flush=True)
-        for _ in range(90):
-            rc, _o = sh(["ssh", *SSH_OPTS, "-p", str(port), f"root@{ip}",
-                         "true"], 30)
+        last = ""
+        for attempt in range(60):
+            rc, last = sh(["ssh", *SSH_OPTS, "-p", str(port), f"root@{ip}",
+                           "true"], 30)
             if rc == 0:
                 break
+            # Print the reason, every time. A retry loop that hides ssh's
+            # stderr cannot distinguish "still booting" from "wrong key".
+            if attempt % 5 == 0:
+                print(f"[pod] ssh not ready ({attempt}): "
+                      f"{last.strip()[-160:]}", flush=True)
             time.sleep(10)
         else:
-            print("[pod] ssh never came up", flush=True)
+            print(f"[pod] ssh never came up: {last.strip()[-300:]}",
+                  flush=True)
             return 3
 
         files = [str(HERE / f) for f in
@@ -331,17 +341,21 @@ def main() -> int:
             'M=$(python3 -c "import gen_worker.models, pathlib; '
             'print(pathlib.Path(gen_worker.models.__file__).parent)"); '
             + "cp " + " ".join(f"/root/{f}" for f in OVERLAY)
-            + ' "$M/"; echo overlay-ok; '
-            'python3 -c "import torch, gen_worker; '
-            'print(\'ENV\', torch.__version__, '
-            'torch.cuda.get_device_name(0), '
-            'torch.cuda.get_device_capability(), gen_worker.__version__)"',
-            180)
+            + ' "$M/" && echo overlay-ok', 180)
         print(f"[overlay] rc={rc} {out.strip()[-300:]}", flush=True)
         if rc != 0 or "overlay-ok" not in out:
             return 4
-        manifest["env_line"] = [ln for ln in out.splitlines()
-                                if ln.startswith("ENV")][:1]
+        # Environment census is EVIDENCE, never a gate: a probe that cannot
+        # read a version must not be able to delete a rented pod.
+        _rc, env_out = ssh(
+            ip, port,
+            'python3 -c "import torch, importlib.metadata as im; '
+            'print(\'ENV\', torch.__version__, '
+            'torch.cuda.get_device_name(0), '
+            'torch.cuda.get_device_capability(), '
+            'im.version(\'gen-worker\'))" 2>&1 | tail -3', 180)
+        print(f"[env] {env_out.strip()[-300:]}", flush=True)
+        manifest["env_line"] = env_out.strip().splitlines()[-3:]
         bank()
 
         ck = refs_tree = ""
