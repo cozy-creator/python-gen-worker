@@ -1279,11 +1279,15 @@ message BootPhase {
   int64  ordinal = 2;
   // 0 = a top-level phase.
   int64  parent_ordinal = 3;
-  // Vocabulary is wire-shared with gen_worker/boot_phases.py (PHASE_*):
-  //   process_start | env_seal | manifest_load | cache_preflight | cuda_probe
-  //   | hello | weights_fetch | pipeline_load | cell_discover | cell_fetch
-  //   | cell_load | cell_arm | first_request_servable | first_request
-  //   | warm_complete
+  // Vocabulary is wire-shared with gen_worker/boot_phases.py (PHASE_*), and
+  // is exactly the eight spans the shipping path PRODUCES (pgw#924):
+  //   hello | weights_fetch | pipeline_load | cell_discover | cell_fetch
+  //   | cell_arm | warmup | first_request_servable
+  // pgw#924 deleted the nine that had no producer or never fired
+  // (process_start, env_seal, manifest_load, cache_preflight, cuda_probe,
+  // cell_load, first_request, warm_complete, warmup_iteration) — a reader of
+  // the old list learned a vocabulary the system cannot emit, which is the
+  // C3 defect th#1562 fixed for FnUnavailable.
   // Unknown phases are stored verbatim, never rejected: an old hub must not
   // be able to refuse a newer worker's honest measurement.
   string phase = 4;
@@ -1309,8 +1313,11 @@ message BootPhase {
   string artifact_kind = 12;
   string artifact_key = 13;
   string function = 14;
-  // Graph class proved, for warm_complete (proof is by graph COVERAGE).
-  string graph_class = 15;
+  // 15 held `graph_class`, "graph class proved, for warm_complete". pgw#924
+  // deleted `warm_complete` and stopped producing the field; it was 0 of 517
+  // rows on chaos before the cut and nothing ever read it (th#1571 §3).
+  reserved 15;
+  reserved "graph_class";
   // ok | refused | failed | skipped. `refused` is a TYPED refusal that left
   // the worker serving something else (an unarmed cell), not an error.
   string outcome = 16;

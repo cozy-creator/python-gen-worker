@@ -1303,7 +1303,7 @@ class ActivityUpdate(_message.Message):
     def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ...) -> None: ...
 
 class BootPhase(_message.Message):
-    __slots__ = ("boot_id", "ordinal", "parent_ordinal", "phase", "terminal", "started_at_unix_ms", "duration_ms", "process_uptime_ms", "bytes", "source", "ref", "artifact_kind", "artifact_key", "function", "graph_class", "outcome", "reason", "detail", "cumulative")
+    __slots__ = ("boot_id", "ordinal", "parent_ordinal", "phase", "terminal", "started_at_unix_ms", "duration_ms", "process_uptime_ms", "bytes", "source", "ref", "artifact_kind", "artifact_key", "function", "outcome", "reason", "detail", "cumulative")
     BOOT_ID_FIELD_NUMBER: _ClassVar[int]
     ORDINAL_FIELD_NUMBER: _ClassVar[int]
     PARENT_ORDINAL_FIELD_NUMBER: _ClassVar[int]
@@ -1318,7 +1318,6 @@ class BootPhase(_message.Message):
     ARTIFACT_KIND_FIELD_NUMBER: _ClassVar[int]
     ARTIFACT_KEY_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_CLASS_FIELD_NUMBER: _ClassVar[int]
     OUTCOME_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
     DETAIL_FIELD_NUMBER: _ClassVar[int]
@@ -1337,12 +1336,11 @@ class BootPhase(_message.Message):
     artifact_kind: str
     artifact_key: str
     function: str
-    graph_class: str
     outcome: str
     reason: str
     detail: str
     cumulative: bool
-    def __init__(self, boot_id: _Optional[str] = ..., ordinal: _Optional[int] = ..., parent_ordinal: _Optional[int] = ..., phase: _Optional[str] = ..., terminal: _Optional[bool] = ..., started_at_unix_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., process_uptime_ms: _Optional[int] = ..., bytes: _Optional[int] = ..., source: _Optional[str] = ..., ref: _Optional[str] = ..., artifact_kind: _Optional[str] = ..., artifact_key: _Optional[str] = ..., function: _Optional[str] = ..., graph_class: _Optional[str] = ..., outcome: _Optional[str] = ..., reason: _Optional[str] = ..., detail: _Optional[str] = ..., cumulative: _Optional[bool] = ...) -> None: ...
+    def __init__(self, boot_id: _Optional[str] = ..., ordinal: _Optional[int] = ..., parent_ordinal: _Optional[int] = ..., phase: _Optional[str] = ..., terminal: _Optional[bool] = ..., started_at_unix_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., process_uptime_ms: _Optional[int] = ..., bytes: _Optional[int] = ..., source: _Optional[str] = ..., ref: _Optional[str] = ..., artifact_kind: _Optional[str] = ..., artifact_key: _Optional[str] = ..., function: _Optional[str] = ..., outcome: _Optional[str] = ..., reason: _Optional[str] = ..., detail: _Optional[str] = ..., cumulative: _Optional[bool] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")
