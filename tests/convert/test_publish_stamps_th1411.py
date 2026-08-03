@@ -17,6 +17,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from gen_worker.convert.produced import ProducedFlavor
 from gen_worker.convert.publish import publish_flavors
 
@@ -43,7 +45,9 @@ def _tree(tmp_path: Path) -> Path:
     return out
 
 
-def _resolve_body(*, objective: str, distilled: bool) -> dict:
+def _resolve_body(
+    *, objective: str, distilled: bool, distilled_status: str = "classified",
+) -> dict:
     payload = b"\x33" * 64
     return {
         "snapshot_digest": "sha256:" + "cd" * 32,
@@ -55,6 +59,7 @@ def _resolve_body(*, objective: str, distilled: bool) -> dict:
         }],
         "objective": objective,
         "distilled": distilled,
+        "distilled_status": distilled_status,
     }
 
 
@@ -86,12 +91,11 @@ def test_source_stamps_are_restated_by_default(
     assert _FakeHub.state["resolve_gets"], "stamps must come from the hub"
 
 
-def test_unstamped_source_publishes_distilled_false_and_no_objective(
+def test_classified_false_source_restates_distilled_false_and_no_objective(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
-    """A resolved-but-unstamped source: distilled=false is a known fact and
-    goes on the wire as the explicit clear; an empty objective is not
-    claimable and is omitted."""
+    """Distillation evidence is independent of objective evidence: a
+    classified false is restated even when objective is not classified."""
     _FakeHub.state["resolve_body"] = _resolve_body(
         objective="", distilled=False)
     ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}",
@@ -102,6 +106,37 @@ def test_unstamped_source_publishes_distilled_false_and_no_objective(
     req = _FakeHub.state["publish_request"]
     assert "objective" not in req
     assert req["distilled"] is False
+
+
+@pytest.mark.parametrize("status", ["unclassified", "inconclusive"])
+def test_unknown_source_distillation_is_not_authored_as_false(
+    fake_hub: Any, tmp_path: Path, status: str,
+) -> None:
+    _FakeHub.state["resolve_body"] = _resolve_body(
+        objective="", distilled=False, distilled_status=status
+    )
+    ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}",
+               source_ref="acme/base")
+
+    _publish(ctx, _tree(tmp_path))
+
+    req = _FakeHub.state["publish_request"]
+    assert "objective" not in req
+    assert "distilled" not in req
+
+
+def test_old_hub_without_status_preserves_legacy_restatement(
+    fake_hub: Any, tmp_path: Path,
+) -> None:
+    body = _resolve_body(objective="", distilled=False)
+    body.pop("distilled_status")
+    _FakeHub.state["resolve_body"] = body
+    ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}",
+               source_ref="acme/base")
+
+    _publish(ctx, _tree(tmp_path))
+
+    assert _FakeHub.state["publish_request"]["distilled"] is False
 
 
 def test_explicit_caller_override_wins(fake_hub: Any, tmp_path: Path) -> None:

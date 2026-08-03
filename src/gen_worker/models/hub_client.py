@@ -105,11 +105,12 @@ class WorkerResolvedRepo:
     # th#964: the resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
     model_family: str = ""
-    # pgw#654: the resolved checkpoint's hub-stamped training objective
-    # ("epsilon" | "v_prediction" | "flow"; "" = unstamped) and distillation
-    # fact.
+    # pgw#654/th#1566: resolved objective and distillation value plus the
+    # evidence status that distinguishes explicit false from unknown. Empty
+    # status is the backward-compatible shape from an older hub.
     objective: str = ""
     distilled: bool = False
+    distilled_status: str = ""
 
 
 class HubResolveError(RuntimeError):
@@ -298,6 +299,12 @@ def resolve_repo(
             size_bytes=int(row.get("size_bytes") or 0),
             placement=placement if isinstance(placement, dict) else None,
         ))
+    distilled_status = str(body.get("distilled_status") or "").strip()
+    if distilled_status not in ("", "classified", "unclassified", "inconclusive"):
+        raise HubResolveError(
+            f"tensorhub resolve for {ref.canonical()}: unknown "
+            f"distilled_status {distilled_status!r}"
+        )
     return WorkerResolvedRepo(
         snapshot_digest=digest, files=files,
         size_bytes=int(body.get("size_bytes") or 0),
@@ -305,4 +312,5 @@ def resolve_repo(
         model_family=str(body.get("model_family") or "").strip(),
         objective=str(body.get("objective") or "").strip(),
         distilled=bool(body.get("distilled") or False),
+        distilled_status=distilled_status,
     )
