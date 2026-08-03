@@ -40,6 +40,7 @@ from gen_worker.api.export_contract import (
 )
 from gen_worker import config as gw_config
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.cell_adopt import AdoptOutcome
 
 from harness.hub_double import hub_double, is_ready, is_result_for
 
@@ -246,7 +247,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: False)
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
