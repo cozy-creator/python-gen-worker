@@ -234,11 +234,13 @@ def run_bench(args) -> int:
     from gen_worker.models.svdq import detect_svdq_artifact
 
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
-    lane = nk.svdq_execution_lane()
+    lane = nk.svdq_linear_lane()
     report: dict = {"device": torch.cuda.get_device_name(0),
                     "torch": torch.__version__,
                     "gen_worker": getattr(gen_worker, "__version__", "?"),
-                    "lane": lane, "lane_reason": nk.svdq_lane_reason()}
+                    "lane": lane,
+                    "modulation_lane": nk.svdq_modulation_lane(),
+                    "lane_reason": nk.svdq_linear_lane_reason()}
     print(f"[bench] lane={lane} ({report['lane_reason']})", flush=True)
 
     art = detect_svdq_artifact(Path(args.ckpt))

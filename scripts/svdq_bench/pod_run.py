@@ -394,14 +394,15 @@ def main() -> int:
                         f"setsid nohup python3 /root/materialize_bench.py {flag} "
                         f"> /root/mat.log 2>&1 & echo started", 60,
                         env={"HF_TOKEN": hf})
-                    last, stalls = -1, 0
+                    last, stalls, mat_done = -1, 0, False
                     deadline = time.time() + 90 * 60
                     while time.time() < deadline:
                         time.sleep(60)
                         _rc, out = ssh(
                             ip, port,
-                            "grep -hE 'NUN_FILE=|REFS_TREE=' /root/mat.log "
-                            "2>/dev/null; du -sb /root/art 2>/dev/null | cut -f1",
+                            "grep -hE 'NUN_FILE=|REFS_TREE=|MAT_DONE' "
+                            "/root/mat.log 2>/dev/null; "
+                            "du -sb /root/art 2>/dev/null | cut -f1",
                             60)
                         size = 0
                         for line in out.splitlines():
@@ -409,9 +410,16 @@ def main() -> int:
                                 ck = line.split("=", 1)[1].strip()
                             elif line.startswith("REFS_TREE="):
                                 refs_tree = line.split("=", 1)[1].strip()
+                            elif line.strip() == "MAT_DONE":
+                                mat_done = True
                             elif line.strip().isdigit():
                                 size = int(line.strip())
-                        if ck and refs_tree:
+                        # An fp8 arm that starts while its shards are still
+                        # landing loads a PARTIAL state dict and dies on
+                        # missing keys — so when fp8 is wanted, wait for the
+                        # whole materialization, not just the two markers
+                        # every other arm needs.
+                        if ck and refs_tree and (mat_done or not want_fp8):
                             break
                         stalls = stalls + 1 if size == last else 0
                         last = size

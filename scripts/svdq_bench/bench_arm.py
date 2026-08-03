@@ -46,8 +46,10 @@ def load_ours(ckpt: Path, log):
     art = detect_svdq_artifact(ckpt)
     assert art is not None, f"no svdq artifact detected at {ckpt}"
     from gen_worker.models import native_kernels as nk
-    lane = nk.svdq_execution_lane()
-    log(f"execution lane={lane} ({nk.svdq_lane_reason()})")
+    lane = nk.svdq_linear_lane()
+    mod_lane = nk.svdq_modulation_lane()
+    log(f"linear lane={lane} ({nk.svdq_linear_lane_reason()}); "
+        f"modulation lane={mod_lane} ({nk.svdq_modulation_lane_reason()})")
     avail = svdq_native_available()
     log(f"svdq_native_available={avail} reason={svdq_native_reason()!r} "
         f"model_class={art.model_class} rank={art.rank} precision={art.precision}")
@@ -69,7 +71,9 @@ def load_ours(ckpt: Path, log):
     if lane == "fused":
         assert census["fused"] > 0, "fused lane armed but zero fused modules"
     return den, {"runtime": "gen_worker svdq_native", "lane": lane,
-                 "lane_reason": nk.svdq_lane_reason(), "swap_census": census,
+                 "modulation_lane": mod_lane,
+                 "lane_reason": nk.svdq_linear_lane_reason(),
+                 "swap_census": census,
                  "gen_worker": getattr(gen_worker, "__version__", "?"),
                  "svdq_mode": got, "rank": art.rank, "precision": str(art.precision)}
 

@@ -27,53 +27,83 @@ def _reset_arming(monkeypatch: pytest.MonkeyPatch):
 
 def test_unset_env_stays_baseline_dormant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(nk.NATIVE_ENV, raising=False)
-    assert nk.svdq_execution_lane() == "baseline"
-    assert "env-gated" in nk.svdq_lane_reason()
+    assert nk.svdq_linear_lane() == "baseline"
+    assert "env-gated" in nk.svdq_linear_lane_reason()
+    assert nk.svdq_modulation_lane() == "dense"
+    assert "env-gated" in nk.svdq_modulation_lane_reason()
 
 
 def test_kill_switch_forces_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "0")
     # Even a passing probe must not arm past the kill-switch.
-    monkeypatch.setattr(nk, "_probe_fused_lane", lambda: None)
-    assert nk.svdq_execution_lane() == "baseline"
-    assert "kill-switch" in nk.svdq_lane_reason()
+    monkeypatch.setattr(nk, "_probe_fused_linear", lambda sm: None)
+    monkeypatch.setattr(nk, "_probe_packed_modulation", lambda sm: None)
+    assert nk.svdq_linear_lane() == "baseline"
+    assert "kill-switch" in nk.svdq_linear_lane_reason()
+    assert nk.svdq_modulation_lane() == "dense"
 
 
 def test_opt_in_with_passing_probe_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    monkeypatch.setattr(nk, "_probe_fused_lane", lambda: None)
-    assert nk.svdq_execution_lane() == "fused"
+    monkeypatch.setattr(nk, "_gpu_sm", lambda: (120, None))
+    monkeypatch.setattr(nk, "_probe_fused_linear", lambda sm: None)
+    monkeypatch.setattr(nk, "_probe_packed_modulation", lambda sm: None)
+    assert nk.svdq_linear_lane() == "fused"
+    assert nk.svdq_modulation_lane() == "packed"
+
+
+def test_lanes_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pgw#863: a card whose fused LINEAR loses must still get the packed
+    modulation. Binding them cost sm_100 either the residency win or the
+    step time, and there was no way to take both."""
+    monkeypatch.setenv(nk.NATIVE_ENV, "1")
+    monkeypatch.setattr(nk, "_probe_fused_linear", lambda sm: "slower here")
+    monkeypatch.setattr(nk, "_probe_packed_modulation", lambda sm: None)
+    assert nk.svdq_linear_lane() == "baseline"
+    assert nk.svdq_modulation_lane() == "packed"
+
+
+def test_sm100_is_excluded_from_the_fused_linear_by_measurement() -> None:
+    """The exclusion is a measured verdict, not a capability gap — sm_100 has
+    the silicon (BLACKWELL_SMS) and still must not take the fused linear."""
+    assert 100 in nk.BLACKWELL_SMS
+    assert 100 in nk.PACKED_MODULATION_SMS
+    assert 100 not in nk.FUSED_LINEAR_SMS
+    reason = nk._probe_fused_linear(100)
+    assert reason and "SLOWER" in reason
 
 
 def test_opt_in_with_failing_probe_degrades_with_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    monkeypatch.setattr(nk, "_probe_fused_lane", lambda: "no fp4 here")
-    assert nk.svdq_execution_lane() == "baseline"
-    assert nk.svdq_lane_reason() == "no fp4 here"
+    monkeypatch.setattr(nk, "_probe_fused_linear", lambda sm: "no fp4 here")
+    assert nk.svdq_linear_lane() == "baseline"
+    assert nk.svdq_linear_lane_reason() == "no fp4 here"
 
 
 def test_opt_in_probe_raise_degrades_not_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def boom() -> str:
+    def boom(sm: int) -> str:
         raise RuntimeError("driver exploded")
 
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    monkeypatch.setattr(nk, "_probe_fused_lane", boom)
-    assert nk.svdq_execution_lane() == "baseline"
-    assert "driver exploded" in nk.svdq_lane_reason()
+    monkeypatch.setattr(nk, "_probe_fused_linear", boom)
+    assert nk.svdq_linear_lane() == "baseline"
+    assert "driver exploded" in nk.svdq_linear_lane_reason()
 
 
 def test_real_probe_on_this_host_degrades_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On a box without Blackwell the REAL probe must return a reason, never
-    raise (on sm_100/120 CI runners this instead arms — also fine)."""
+    raise (on an sm_120 runner this instead arms — also fine)."""
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    assert nk.svdq_execution_lane() in ("baseline", "fused")
-    assert nk.svdq_lane_reason()
+    assert nk.svdq_linear_lane() in ("baseline", "fused")
+    assert nk.svdq_linear_lane_reason()
+    assert nk.svdq_modulation_lane() in ("dense", "packed")
+    assert nk.svdq_modulation_lane_reason()
 
 
 # --- extension probe -------------------------------------------------------
@@ -180,7 +210,8 @@ def test_swap_picks_fused_lane_when_armed(
         pytest.skip("triton unavailable")
     dec = _tiny_decoded()
     model = _Model(dec.out_features, dec.in_features)
-    monkeypatch.setattr(nk, "svdq_execution_lane", lambda: "fused")
+    monkeypatch.setattr(nk, "svdq_linear_lane", lambda: "fused")
+    monkeypatch.setattr(nk, "svdq_modulation_lane", lambda: "packed")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts == {"blockwise": 0, "dense": 0, "fused": 1, "prefixes": 1,
                       "linears": 1}
@@ -190,7 +221,8 @@ def test_swap_picks_fused_lane_when_armed(
 def test_swap_baseline_when_lane_off(monkeypatch: pytest.MonkeyPatch) -> None:
     dec = _tiny_decoded()
     model = _Model(dec.out_features, dec.in_features)
-    monkeypatch.setattr(nk, "svdq_execution_lane", lambda: "baseline")
+    monkeypatch.setattr(nk, "svdq_linear_lane", lambda: "baseline")
+    monkeypatch.setattr(nk, "svdq_modulation_lane", lambda: "dense")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts["fused"] == 0
     assert counts["blockwise"] == 1
@@ -209,7 +241,8 @@ def test_swap_unsupported_shape_degrades_to_blockwise(
         second_kind=dec.second_kind, rank=0, proj_down=None, proj_up=None,
         smooth_factor=dec.smooth_factor, bias=dec.bias)
     model = _Model(dec.out_features, dec.in_features)
-    monkeypatch.setattr(nk, "svdq_execution_lane", lambda: "fused")
+    monkeypatch.setattr(nk, "svdq_linear_lane", lambda: "fused")
+    monkeypatch.setattr(nk, "svdq_modulation_lane", lambda: "packed")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts["fused"] == 0
     assert counts["blockwise"] == 1
