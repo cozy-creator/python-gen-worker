@@ -21,6 +21,45 @@ producer materializes the half of its output tree it did not compute.
   component is still passed through by inode, and a `-NNNNN-of-MMMMM` set with no index is
   still REFUSED rather than published.
 
+- **pgw#942: three SDK holes the 28 endpoints were each paying for, closed once.**
+  The framing, and the reason a P2 was worth doing: *if 28 endpoints all write the same
+  fifteen lines to do something ordinary, that is an SDK gap.* Measured across the
+  endpoint tree at 56,750 Python lines.
+  - **`gen_worker.testing` gains the `save_*` half — a `Recorder`.** `fake_context`
+    shipped for exactly this and reached 4/27 adoption; the other 23 hand-roll 26
+    `class _Ctx(RequestContext)` subclasses (473 lines) whose only real content is a
+    CAPTURING `save_image`/`save_audio` and a `log` override. Passing
+    `fake_context(recorder=Recorder())` records every save — kind, ref, the typed asset
+    with its real `sha256`/`size_bytes`, and the keyword arguments the handler passed —
+    **after** the production `save_*` ran, with outputs written to the recorder's own
+    directory instead of uploaded. `ctx.log`/`ctx.progress` are captured at the emitter
+    seam, so they need no override either. This closes a real hole rather than a
+    cosmetic one: **23 suites are green over an encode path they never call**, which is
+    the reason hidream's own test comment gives for migrating.
+  - **The SDK asserts its own deleted-field set, once** —
+    `gen_worker.api.shape_contract.DELETED_FIELDS`, with `assert_sdk_shape()` (the SDK's
+    self-check) and `assert_declaration_shape(decl)` (walks one endpoint's decl,
+    resources, compile and slots). 25 of 28 packages carried 91 `assert not hasattr(...)`
+    lines plus 46 `for deleted in (...)` loops asserting fields the pinned SDK *cannot*
+    ship, which is the mechanism by which one field rename breaks 25 downstream suites at
+    once. The table is the only place that can be right: `compute_capability` was deleted
+    at 0.60 and RESTORED at 0.75 (pgw#660), and every fleet-side copy of the list had to
+    be corrected by hand.
+  - **The bare-mypy `StringEnum` question is answered: a mypy run without the SDK
+    installed is UNSUPPORTED, and the SDK cannot fix it.** With the package absent,
+    `--ignore-missing-imports` types every SDK name `Any`, and mypy then resolves the
+    members of `class AspectRatio(StringEnum)` as bare `str` — false `dict-item` errors
+    on every ratio-keyed table (reproduced: 11 errors on sdxl). A `.pyi` inside the wheel
+    cannot help, because the wheel is what is missing. Endpoints type-check against the
+    installed SDK with `--follow-imports=silent` (measured: 0-1 error delta per package)
+    and delete the 20 `if TYPE_CHECKING: from enum import StrEnum as StringEnum` shims in
+    15 packages — production import blocks were being shaped by a report script.
+
+  **Endpoint-side ordering (ie#594):** the fleet pins `gen-worker==0.89.0`, so the
+  `Recorder` and `assert_declaration_shape` migrations cannot land until this ships and
+  a fleet repin train moves the 28 endpoints onto it. The `StringEnum` half depends on
+  no new SDK and can land immediately.
+
 - **pgw#930 (§1.17): `WORKER_MODE` is deleted; serve and mint are COMPOSABLE goals.**
   Paul: *"you can spawn a GPU and tell it to mint some AOT-cells, while also using it to
   serve jobs (inference) as needed."* `worker_mode.py` was a closed two-tuple
