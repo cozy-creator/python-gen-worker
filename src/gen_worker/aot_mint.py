@@ -1450,6 +1450,13 @@ def mint(
     positions are pushed out live, and the last one pushed is what an aborted
     table reports as ``at``.
     """
+    # pgw#929: say the podguard state ONCE, before any compile. `invalid` means
+    # this pod's progress signal goes nowhere, and a mint that looks
+    # unprogressing to the watchdog gets reaped mid-compile — the failure the
+    # `_touch_pod_progress` beats below exist to prevent. Reporting it only when
+    # a beat fires would announce the problem after the expensive part has
+    # started; reporting it here makes a broken handoff visible at boot.
+    report_podguard_status()
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
     if phase_snapshot is not None:
