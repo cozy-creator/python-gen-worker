@@ -179,8 +179,7 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
         fleet_cells.loading, "pipeline_weight_lane",
         lambda pipe: "w8a8-lora64")
     # The torch-VERSION floor for the lifted-LoRA fork is not what these tests
-    # measure and torch is not importable on a CPU dev box; `lane_admitted`
-    # (the #730 hold — the OTHER half of "no lane can mint") stays REAL.
+    # measure and torch is not importable on a CPU dev box.
     from gen_worker import aot_mint
 
     monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda spec: "")

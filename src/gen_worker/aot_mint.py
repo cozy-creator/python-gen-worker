@@ -21,14 +21,29 @@ module riding the compile-cache rails, and the dynamo mint stays live and
 fully-forced in parallel during rollout (#722: nothing retires before sdxl AOT
 is live in prod).
 
-Why the w8a8 lane first
------------------------
-pgw#704 measured w8a8 at 276.2 vs 274.6 ms — latency PARITY with dynamo, and
-numerics identical. The plain and fp8-storage lanes both carry an unexplained
-systematic ~7% AOTI regression (#730 owns it), so they mint only behind
-``allow_regressed_lanes``. That is not a preference: shipping a lane we
-measured 7% slower, while calling the migration a win, would be a regression
-sold as progress.
+The mint does not judge the lane (pgw#879, pgw#850)
+---------------------------------------------------
+Paul's ruling: *"here is the code, here is the lane, please compile this for
+all graphs we have declared. That's it."* The lane is an INPUT — chosen once,
+by the hub's resolution tree, and observed on the composed pipeline by
+``loading.pipeline_weight_lane``. This module compiles what it is handed.
+
+The refusal that used to live here (``lane_admitted`` / ``PARITY_LANES``, a
+one-member allowlist holding ``w8a8``) is deleted because it was a SECOND
+opinion about an already-resolved fact, and the two opinions composed into a
+total block: tensorhub's lane table makes ``fp8-w8a8-dynamic``
+compiled-only, so the hub withholds that lane from AUTO until a cell exists
+(th#1123/th#1127), and only a pod already serving the lane can mint one. The
+one lane the mint admitted was the one lane no pod could ever be on, and every
+lane a pod COULD be on (``bf16-w16a16``, ``fp8-w8a16``, ``svdq-*-w4a4``) was
+refused — quoting a 6.9-7.0% AOTI regression pgw#704 Q4 measured on sdxl's
+lanes at families and lanes it never measured. Measured result: zero fleet
+families reached the mint gate on AUTO, on any card (pgw#850).
+
+The pgw#704 Q4 / #730 measurement is not discarded — it is a RANKING input to
+the lane/execution choice (``+compiled`` vs ``+eager``), which lives in the
+hub. A lane held on dynamo is simply never asked for a cell; if one IS asked
+for, the mint compiles it.
 
 Where minting runs (#724 REJECTED — Paul, 2026-07-28)
 -----------------------------------------------------
@@ -94,30 +109,10 @@ from .aot_contract import (  # re-exported: the declaration layer's vocabulary
 )
 from .compile_cache import (
     _resolve_target,
-    lane_bucket,
-    lane_token,
     toolchain_present,
 )
 
 logger = logging.getLogger(__name__)
-
-#: Lane TOKENS measured at latency parity under AOTI (pgw#704 Q4). Everything
-#: else needs ``allow_regressed_lanes`` — see the module docstring.
-#:
-#: pgw#918: ``"w8a8-rowwise"`` was deleted. No loader ever stamped it and
-#: neither ``lane_token`` nor ``lane_bucket`` can synthesize it, so half of a
-#: two-member allowlist was a string ``lane_admitted`` could never be handed —
-#: which is why nobody noticed the sibling constant
-#: (``executor._SPECULATIVE_CELL_BASE_LANES``) was missing two lanes that CAN
-#: be stamped. Membership is proven against
-#: ``loading.STAMPABLE_BASE_LANES`` by
-#: ``tests/test_speculative_lane_completeness_pgw918.py``.
-#:
-#: The companion ``REGRESSED_LANES`` tuple was deleted with it: it had no
-#: reader anywhere in ``src/`` (``lane_admitted`` decides by absence from this
-#: tuple, never by presence in that one) and it too named an unstampable lane
-#: (``"fp8-storage"`` — loaders stamp ``"fp8-hooks"``).
-PARITY_LANES: Tuple[str, ...] = ("w8a8",)
 
 #: The inductor config that makes the package code-only. Not a knob: B1.
 CODE_ONLY_CONFIGS: Dict[str, Any] = {
@@ -226,22 +221,6 @@ def lifted_torch_gap(spec: ExportSpec) -> str:
             f"2.13 prod floor is a mint PRECONDITION for this lane, not a "
             f"preference")
     return ""
-
-
-def lane_admitted(spec: ExportSpec, *, allow_regressed_lanes: bool) -> str:
-    """'' when this lane may be minted, else the named refusal reason."""
-    base, _bucket = lane_bucket(spec.weight_lane)
-    token = lane_token(base)
-    if token in PARITY_LANES:
-        return ""
-    if allow_regressed_lanes:
-        return ""
-    return (
-        f"lane {token or '(plain)'!r} measured 6.9-7.0% SLOWER under AOTI than "
-        f"dynamo (pgw#704 Q4) and is HELD on dynamo by #730 until explained; "
-        f"mint the w8a8 lane first, or pass allow_regressed_lanes to override "
-        f"deliberately"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1427,7 +1406,6 @@ def mint(
     spec: ExportSpec,
     out_dir: Path,
     *,
-    allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
@@ -1483,7 +1461,6 @@ def mint(
     try:
         return _mint_cell(
             pipeline, spec, out_dir,
-            allow_regressed_lanes=allow_regressed_lanes,
             inductor_configs=inductor_configs,
             entry_workers=entry_workers,
             entry_peak_rss_bytes=entry_peak_rss_bytes,
@@ -1671,7 +1648,6 @@ def _mint_cell(
     spec: ExportSpec,
     out_dir: Path,
     *,
-    allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
@@ -1704,9 +1680,6 @@ def _mint_cell(
     """
     from .api.export_contract import export_declaration
 
-    refusal = lane_admitted(spec, allow_regressed_lanes=allow_regressed_lanes)
-    if refusal:
-        raise MintRefused(refusal)
     refusal = lifted_torch_gap(spec)
     if refusal:
         raise MintRefused(refusal)
@@ -3187,9 +3160,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--model", type=str, default="",
                         help="model path/ref to compose (default: the "
                              "request's source_ref)")
-    parser.add_argument("--allow-regressed-lanes", action="store_true",
-                        help="mint a lane #730 holds on dynamo (plain / "
-                             "fp8) — deliberate override")
     parser.add_argument("--publish", action="store_true",
                         help="publish through the fleet CellPublisher")
     parser.add_argument("--require-toolchain", action="store_true",
@@ -3227,10 +3197,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 3
     try:
         pipeline, _build_inputs = compose_for_mint(model, spec, body)
-        result = mint(
-            pipeline, spec, Path(args.out),
-            allow_regressed_lanes=args.allow_regressed_lanes,
-        )
+        result = mint(pipeline, spec, Path(args.out))
     except MintRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
@@ -3319,7 +3286,6 @@ __all__ = [
     "write_phase_snapshot",
     "MINT_COMPILE_THREADS",
     "MintResult",
-    "PARITY_LANES",
     "autotune_posture",
     "cell_identity",
     "compile_entry_files",
@@ -3332,7 +3298,6 @@ __all__ = [
     "export_program",
     "shared_identity_blocks",
     "LIFTED_LORA_TORCH_FLOOR",
-    "lane_admitted",
     "lifted_input_gaps",
     "lifted_torch_gap",
     "main",

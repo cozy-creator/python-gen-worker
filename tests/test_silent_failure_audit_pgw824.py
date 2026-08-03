@@ -265,7 +265,7 @@ def _mint(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
         return aot_mint.mint(
             types.SimpleNamespace(unet=_Tiny().eval()),
             aot_mint.ExportSpec(family=_FAMILY, target=""),
-            tmp_path / "out", allow_regressed_lanes=True, **kwargs)
+            tmp_path / "out", **kwargs)
     finally:
         reset_export_declarations()
 
