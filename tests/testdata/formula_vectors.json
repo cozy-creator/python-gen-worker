@@ -38,6 +38,16 @@
       "term_keys": ["1", "x/9.9999999999999995e-8"]
     },
     {
+      "name": "negative signed exponent",
+      "source": "a+b*x/1e-7",
+      "term_keys": ["1", "x/9.9999999999999995e-8"]
+    },
+    {
+      "name": "positive signed exponent",
+      "source": "a+b*x/1e+7",
+      "term_keys": ["1", "x/10000000"]
+    },
+    {
       "name": "seventeen digit canonicalization",
       "source": "a+b*x/1.2345678901234567",
       "term_keys": ["1", "x/1.2345678901234567"]
@@ -86,6 +96,51 @@
       "parse_error": true
     },
     {
+      "name": "hex literal is refused",
+      "source": "a+b*x/0x10",
+      "parse_error": true
+    },
+    {
+      "name": "numeric separator is refused",
+      "source": "a+b*x/1_000",
+      "parse_error": true
+    },
+    {
+      "name": "repeated unary is refused",
+      "source": "a+b*--x",
+      "parse_error": true
+    },
+    {
+      "name": "unicode identifier is refused",
+      "source": "a+b*é",
+      "parse_error": true
+    },
+    {
+      "name": "trailing comment is refused",
+      "source": "a+b*x # comment",
+      "parse_error": true
+    },
+    {
+      "name": "leading-zero decimal is refused",
+      "source": "a+b*x/01",
+      "parse_error": true
+    },
+    {
+      "name": "unary plus is refused",
+      "source": "a+b*+x",
+      "parse_error": true
+    },
+    {
+      "name": "carriage return is not formula whitespace",
+      "source": "a+b*x\r",
+      "parse_error": true
+    },
+    {
+      "name": "ascii whitespace is accepted everywhere",
+      "source": " \t a \n + \t b * ( x / 1e-7 ) \n",
+      "term_keys": ["1", "x/9.9999999999999995e-8"]
+    },
+    {
       "name": "range over limit stays fail soft for time",
       "source": "a+b*x",
       "values": {"x": 11},
@@ -132,6 +187,12 @@
     {
       "name": "finite negation",
       "source": "a+b*(-x)",
+      "values": {"x": 3},
+      "term_values": {"1": 1, "-x": -3}
+    },
+    {
+      "name": "unparenthesized unary factor",
+      "source": "a+b*-x",
       "values": {"x": 3},
       "term_values": {"1": 1, "-x": -3}
     },

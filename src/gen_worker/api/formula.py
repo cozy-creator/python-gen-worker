@@ -11,15 +11,27 @@ The grammar and term-key canonicalization mirror tensorhub's
 ``internal/formula`` package exactly — the formula STRING is the wire
 contract and both sides must mint identical term keys.
 
-Grammar: ``+ - * /``, parentheses, numeric literals, identifiers. Top level
-must be a '+'-joined sum; each term starts with a bare constant identifier
-(the learned coefficient), optionally ``* <payload expression>``.
+Grammar (ASCII only; ``WS`` is space, tab, or newline)::
+
+    runtime := rterm ('+' rterm)*
+    rterm   := IDENT ('*' term)?
+    expr    := term (('+'|'-') term)*
+    term    := unary (('*'|'/') unary)*
+    unary   := '-'? primary
+    primary := NUMBER | IDENT | '(' expr ')'
+    IDENT   := [A-Za-z_] [A-Za-z0-9_]*
+    NUMBER  := ('0' | [1-9][0-9]*) ('.' [0-9]*)? ([eE] [+-]? [0-9]+)?
+             | '.' [0-9]+ ([eE] [+-]? [0-9]+)?
+
+There are no comments, calls, comparisons, Unicode identifiers, or numeric
+separators. Top-level ``+`` joins learned-coefficient terms.
 """
 
 from __future__ import annotations
 
 import ast
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
@@ -34,6 +46,14 @@ __all__ = [
 ]
 
 _NUMERIC_TYPES = (int, float, bool)
+_FORMULA_SPACE = " \t\n"
+_TOKEN = re.compile(
+    r"(?P<space>[ \t\n]+)|"
+    r"(?P<number>(?:(?:0|[1-9][0-9]*)(?:\.[0-9]*)?|\.[0-9]+)"
+    r"(?:[eE][+-]?[0-9]+)?)|"
+    r"(?P<ident>[A-Za-z_][A-Za-z0-9_]*)|"
+    r"(?P<operator>[+\-*/()])"
+)
 
 
 @dataclass(frozen=True)
@@ -85,12 +105,16 @@ class RuntimeFormula:
     def __init__(
         self, source: str, *, limits: FormulaLimits = COMPUTE_TIME_LIMITS,
     ) -> None:
-        if not isinstance(source, str) or not source.strip():
+        if not isinstance(source, str):
             raise FormulaParseError(
                 "RuntimeFormula: source must be a non-empty string"
             )
         _validate_source(source, limits)
-        self.source = source.strip()
+        self.source = source.strip(_FORMULA_SPACE)
+        if not self.source:
+            raise FormulaParseError(
+                "RuntimeFormula: source must be a non-empty string"
+            )
         self._limits = limits
         self.terms: List[_Term] = _parse_terms(self.source, limits)
         self.fields: Tuple[str, ...] = tuple(sorted({
@@ -255,9 +279,45 @@ def _validate_source(source: str, limits: FormulaLimits) -> None:
         raise FormulaParseError("runtime formula: unbalanced parentheses")
 
 
+def _validate_lexical_source(source: str) -> None:
+    pos = 0
+    previous = ""
+    while pos < len(source):
+        token = _TOKEN.match(source, pos)
+        if token is None:
+            raise FormulaParseError(
+                f"runtime formula: unexpected {source[pos]!r} at offset {pos}"
+            )
+        kind = token.lastgroup
+        text = token.group()
+        pos = token.end()
+        if kind == "space":
+            continue
+        if kind in ("number", "ident"):
+            if previous == "value":
+                raise FormulaParseError(
+                    f"runtime formula: adjacent values at offset {token.start()}"
+                )
+            previous = "value"
+            continue
+        if text == "-" and previous in ("", "(", "+", "-", "*", "/"):
+            following = pos
+            while following < len(source) and source[following] in _FORMULA_SPACE:
+                following += 1
+            if following < len(source) and source[following] == "-":
+                raise FormulaParseError(
+                    f"runtime formula: repeated unary '-' at offset {token.start()}"
+                )
+        previous = "value" if text == ")" else text
+
+
 def _parse_terms(source: str, limits: FormulaLimits) -> List[_Term]:
+    _validate_lexical_source(source)
     try:
-        tree = ast.parse(source, mode="eval")
+        tree = ast.parse(
+            "".join(" " if char in _FORMULA_SPACE else char for char in source),
+            mode="eval",
+        )
         _check_nodes(tree.body)
         term_exprs = _split_sum(tree.body)
     except (SyntaxError, RecursionError) as exc:
