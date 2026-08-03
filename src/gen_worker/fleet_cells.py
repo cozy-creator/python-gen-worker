@@ -186,7 +186,8 @@ class ArmOutcome:
     retrying the identical unusable cell on every subsequent request.
 
     ``eager_reason`` (pgw#824) is the CLASSIFIED token for why this pipeline is
-    not serving from a cell — the same token the decline's
+    not serving from a cell — a :class:`~.cell_adopt.EagerPhase` member, which
+    is where that vocabulary is spelled ONCE — the same token the decline's
     ``self_mint_skipped``/``self_mint_started`` event carries in ``phase``, so a
     request row's ``fallback_reason`` and the worker's activity events join on
     one string. "" only when ``armed`` is true. Without it every eager request
