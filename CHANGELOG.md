@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#938:** isolate transient post-mortem evidence per compute group and make
+  concurrent grant downloads finalize through writer-unique temporary files.
+
 ## 0.91.0 (2026-08-02) — **the native kernel lane lands dormant** (pgw#862/pgw#864: env-gated opt-in, OFF by default — no serving path changes until the gate is set), the envelope gains the DEGREE axis (th#1426), an unprovable cell can no longer be declared (th#959), and v2 publish restates classification (th#1411)
 
 MINOR, not patch: `Resources` gains a field (`max_gpus_per_execution_group`), `@endpoint`

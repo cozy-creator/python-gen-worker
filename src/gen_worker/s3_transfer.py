@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -162,46 +163,63 @@ def download_file_with_grant(
         )
     dest = Path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".tmp")
-    client = _s3_client(grant)
+    # pgw#938: G compute children share this destination directory.  A fixed
+    # ``dest.tmp`` lets one process rename/unlink another process's verified
+    # download.  Each writer gets its own same-directory temp, preserving the
+    # atomic-finalize contract while making concurrent finalizers independent.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{dest.name}.", suffix=".tmp", dir=str(dest.parent)
+    )
+    os.close(fd)
+    tmp = Path(tmp_name)
     try:
-        client.download_file(grant.bucket, grant.key, str(tmp), Config=_transfer_config())
-    except Exception as exc:
-        raise ArtifactTransferError(
-            f"tensorhub SDK download failed: {exc}",
-            provider="tensorhub",
-            phase="sdk_download",
-            retryable=True,
-            cause_type=type(exc).__name__,
-        ) from exc
+        client = _s3_client(grant)
+        try:
+            client.download_file(
+                grant.bucket, grant.key, str(tmp), Config=_transfer_config()
+            )
+        except Exception as exc:
+            raise ArtifactTransferError(
+                f"tensorhub SDK download failed: {exc}",
+                provider="tensorhub",
+                phase="sdk_download",
+                retryable=True,
+                cause_type=type(exc).__name__,
+            ) from exc
 
-    size = int(tmp.stat().st_size)
-    if expected_size_bytes is not None and size != int(expected_size_bytes):
-        tmp.unlink(missing_ok=True)
-        raise ArtifactTransferError(
-            f"downloaded object size mismatch: expected {expected_size_bytes}, got {size}",
-            provider="tensorhub",
-            phase="sdk_download",
-            retryable=False,
+        size = int(tmp.stat().st_size)
+        if expected_size_bytes is not None and size != int(expected_size_bytes):
+            raise ArtifactTransferError(
+                f"downloaded object size mismatch: expected {expected_size_bytes}, got {size}",
+                provider="tensorhub",
+                phase="sdk_download",
+                retryable=False,
+            )
+        try:
+            verify_file_digest(tmp, expected_digest)
+        except (DigestMismatch, ValueError) as exc:
+            raise ArtifactTransferError(
+                f"downloaded object digest mismatch: {exc}",
+                provider="tensorhub",
+                phase="sdk_download",
+                retryable=False,
+            ) from exc
+        # Durable atomic finalize (gw#408): see cozy_cas — data must hit stable
+        # storage before the rename, or a pod hard-kill persists a truncated blob.
+        fsync_file(tmp)
+        os.replace(tmp, dest)
+        fsync_dir(dest.parent)
+        return S3TransferResult(
+            bucket=grant.bucket,
+            key=grant.key,
+            size_bytes=size,
+            digest=expected_digest,
         )
-    try:
-        verify_file_digest(tmp, expected_digest)
-    except (DigestMismatch, ValueError) as exc:
-        tmp.unlink(missing_ok=True)
-        raise ArtifactTransferError(
-            f"downloaded object digest mismatch: {exc}",
-            provider="tensorhub",
-            phase="sdk_download",
-            retryable=False,
-        ) from exc
-    # Durable atomic finalize (gw#408): see cozy_cas — data must hit stable
-    # storage before the rename, or a pod hard-kill persists a truncated blob.
-
-    fsync_file(tmp)
-    os.replace(tmp, dest)
-    fsync_dir(dest.parent)
-    return S3TransferResult(
-        bucket=grant.bucket, key=grant.key, size_bytes=size, digest=expected_digest)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class _sdk_upload_slot:

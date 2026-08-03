@@ -55,6 +55,7 @@ import signal
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import msgspec
@@ -266,6 +267,14 @@ class _ChildSlot:
         # DxD-rewritten topology, the sibling count. Applied over the parent's
         # shared child env at spawn.
         self.group_env: Dict[str, str] = dict(group.env)
+        self.inflight_marker_path = (
+            postmortem.group_inflight_path(group.ordinal, parent._postmortem_dir)
+            if parent._topology.execution_groups > 1 else None
+        )
+        self.fault_dump_path = (
+            postmortem.group_fault_dump_path(group.ordinal, parent._postmortem_dir)
+            if parent._topology.execution_groups > 1 else None
+        )
 
         self.server: Optional[asyncio.AbstractServer] = None
         self.link: Optional[_ChildLink] = None
@@ -818,7 +827,9 @@ class _ChildSlot:
             logger.info(
                 "compute child %s exited cleanly (rc=%s)", self.label, rc,
             )
-        postmortem.clear_inflight()   # nothing of this child may attribute the next
+        # Nothing of this child may attribute the next generation. At G>1 the
+        # explicit path cannot unlink a live sibling's marker (pgw#938).
+        postmortem.clear_inflight(path=self.inflight_marker_path)
         await p._finish_shutdown_flush(
             reason="terminating" if p._terminating else "drain"
         )
@@ -867,12 +878,14 @@ class _ChildSlot:
         if verdict.get("signaled"):
             try:
                 extra.update(postmortem.attribute_signal_death(
-                    signal_name=str(verdict.get("signal_name") or "")
+                    signal_name=str(verdict.get("signal_name") or ""),
+                    inflight_path=self.inflight_marker_path,
+                    dump_path=self.fault_dump_path,
                 ))
             except Exception:
                 logger.warning("signal-death attribution failed", exc_info=True)
         else:
-            postmortem.clear_inflight()
+            postmortem.clear_inflight(path=self.inflight_marker_path)
         # pgw#833: the dying child's own stderr tail rides the dial — the only
         # forensic channel that survives a pre-Hello death on a provider with
         # no container-logs API.
@@ -1100,6 +1113,12 @@ class ParentControl:
             else (shlex.split(env_cmd) if env_cmd else [sys.executable, "-m", "gen_worker.entrypoint"])
         )
         self._child_env = dict(child_env or {})
+        record_path = (
+            self._child_env.get("GEN_WORKER_BOOT_RECORD")
+            or os.environ.get("GEN_WORKER_BOOT_RECORD")
+            or str(postmortem.BOOT_RECORD_PATH)
+        )
+        self._postmortem_dir = Path(record_path).parent
         self._socket_path = socket_path or f"/tmp/gen-worker-compute-{os.getpid()}.sock"
         self._backoff_base = respawn_backoff_base_s
         self._backoff_cap = respawn_backoff_cap_s
@@ -2320,7 +2339,7 @@ def run_parent() -> int:
     from ..supervisor import report_previous_container_death
 
     report_previous_container_death()
-    postmortem.clear_inflight()
+    postmortem.clear_all_inflight()
     postmortem.write_boot_record()
     from ..config import get_settings
 
@@ -2328,5 +2347,5 @@ def run_parent() -> int:
     code = ParentControl(settings).run()
     if code == 0:
         postmortem.clear_boot_record()
-        postmortem.clear_inflight()
+        postmortem.clear_all_inflight()
     return code

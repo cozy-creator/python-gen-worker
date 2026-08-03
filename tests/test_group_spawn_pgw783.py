@@ -16,7 +16,6 @@ CPU-only, so it boots identically with or without CUDA visibility.
 from __future__ import annotations
 
 import os
-import signal
 import sys
 import threading
 import time
@@ -35,7 +34,7 @@ from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
 from gen_worker.procsplit.parent import DEATH_LABEL, ParentControl
 from gen_worker.topology import ExecutionTopology
 
-from harness.hub_double import FakeScheduler, is_ready, is_result_for
+from harness.hub_double import FakeScheduler, is_accept_for, is_ready, is_result_for
 
 TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = TESTS_DIR.parent / "src"
@@ -115,9 +114,15 @@ def _isolated_postmortem(tmp_path, monkeypatch):
     from gen_worker import postmortem
 
     d = _postmortem_dir(tmp_path)
-    monkeypatch.setattr(postmortem, "INFLIGHT_PATH", d / "inflight.json")
-    monkeypatch.setattr(postmortem, "CRASH_REGISTRY_PATH", d / "crash.json")
-    monkeypatch.setattr(postmortem, "FAULT_DUMP_PATH", d / "fault.txt")
+    monkeypatch.setattr(
+        postmortem, "INFLIGHT_PATH", d / "gen-worker-inflight.json"
+    )
+    monkeypatch.setattr(
+        postmortem, "CRASH_REGISTRY_PATH", d / "gen-worker-crash-streaks.json"
+    )
+    monkeypatch.setattr(
+        postmortem, "FAULT_DUMP_PATH", d / "gen-worker-fault-dump.txt"
+    )
     return d
 
 
@@ -175,7 +180,9 @@ def test_two_children_boot_and_each_group_serves_its_own_dispatch(g2):
     assert g2.alive and g2.exit_code is None
 
 
-def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(g2):
+def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(
+    g2, _dials, tmp_path,
+):
     """A group where one of the children dies is not a dead group: only the dead
     child's in-flight job is attributed, only its group respawns, and the sibling
     group serves throughout — the pgw#783 failure model on real processes."""
@@ -184,18 +191,53 @@ def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(g2)
 
     slot1_pid_before = g2.pc._slots[1].proc.pid
 
-    # Kill group 0's child with a job that SIGKILLs its own process.
+    # Keep a real request open in g1 while g0 dies.  Its marker is the exact
+    # cross-process evidence pgw#938 found the shared path could unlink.
     conn.send(run_job=pb.RunJob(
-        request_id="r-die-g0", attempt=1, function_name="die-hard",
+        request_id="r-sleep-g1", attempt=1, function_name="sleepy",
+        input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=1)))
+    conn.wait_for(is_accept_for("r-sleep-g1"), timeout=30.0)
+    g1_marker = _postmortem_dir(tmp_path) / "g1" / "gen-worker-inflight.json"
+    deadline = time.monotonic() + 10.0
+    while not g1_marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert g1_marker.exists(), "g1 never published its per-group in-flight marker"
+
+    # Kill group 0 below Python while group 1's request and fault-dump file are
+    # live.  The parent must consume only g0's one-writer evidence.
+    conn.send(run_job=pb.RunJob(
+        request_id="r-die-g0", attempt=1, function_name="segfault",
         input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=0)))
     died = conn.wait_for(is_result_for("r-die-g0"), timeout=60.0)
     assert died.job_result.status == pb.JOB_STATUS_FATAL
     assert DEATH_LABEL in died.job_result.safe_message
-    assert "function=die-hard" in died.job_result.safe_message
+    assert "function=segfault" in died.job_result.safe_message
+
+    deadline = time.monotonic() + 10.0
+    while not any('"group": 0' in d for d in _dials) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    g0_dials = [d for d in _dials if '"group": 0' in d]
+    assert g0_dials, "group-0 death produced no typed post-mortem dial"
+    assert any(
+        '"function": "segfault"' in d
+        and "r-die-g0" in d
+        and "fault_dump_tail" in d
+        and "procsplit_endpoints.py" in d
+        for d in g0_dials
+    )
+    assert all("r-sleep-g1" not in d for d in g0_dials), (
+        "group 0 was attributed to group 1's live request"
+    )
+    assert g1_marker.exists() and "r-sleep-g1" in g1_marker.read_text(), (
+        "reaping group 0 destroyed group 1's live marker"
+    )
 
     # The sibling group (g1) never died — same process — and still serves.
     assert g2.pc._slots[1].proc is not None
     assert g2.pc._slots[1].proc.pid == slot1_pid_before, "sibling group was disturbed"
+    conn.send(cancel_job=pb.CancelJob(request_id="r-sleep-g1", attempt=1))
+    slept = conn.wait_for(is_result_for("r-sleep-g1"), timeout=30.0)
+    assert slept.job_result.status == pb.JOB_STATUS_CANCELED
     conn.send(run_job=pb.RunJob(
         request_id="r-g1-after", attempt=1, function_name="whoami",
         input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=1)))
