@@ -82,9 +82,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from . import activity as activity_mod
 from . import (
     aot_compile_pool, aot_export_parallel, aot_export_reuse, aot_package,
-    aot_serve, aot_wrapper_split, cell_key)
+    aot_serve, aot_wrapper_split, cell_key, graph_hash)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
     DynamicDim,
@@ -100,12 +101,23 @@ from .compile_cache import (
 
 logger = logging.getLogger(__name__)
 
-#: Lanes measured at latency parity under AOTI (pgw#704 Q4). Everything else
-#: needs ``allow_regressed_lanes`` — see the module docstring.
-PARITY_LANES = ("w8a8", "w8a8-rowwise")
-
-#: Lanes measured SLOWER under AOTI, held on dynamo by #730 until explained.
-REGRESSED_LANES = ("", "fp8-hooks", "fp8-storage")
+#: Lane TOKENS measured at latency parity under AOTI (pgw#704 Q4). Everything
+#: else needs ``allow_regressed_lanes`` — see the module docstring.
+#:
+#: pgw#918: ``"w8a8-rowwise"`` was deleted. No loader ever stamped it and
+#: neither ``lane_token`` nor ``lane_bucket`` can synthesize it, so half of a
+#: two-member allowlist was a string ``lane_admitted`` could never be handed —
+#: which is why nobody noticed the sibling constant
+#: (``executor._SPECULATIVE_CELL_BASE_LANES``) was missing two lanes that CAN
+#: be stamped. Membership is proven against
+#: ``loading.STAMPABLE_BASE_LANES`` by
+#: ``tests/test_speculative_lane_completeness_pgw918.py``.
+#:
+#: The companion ``REGRESSED_LANES`` tuple was deleted with it: it had no
+#: reader anywhere in ``src/`` (``lane_admitted`` decides by absence from this
+#: tuple, never by presence in that one) and it too named an unstampable lane
+#: (``"fp8-storage"`` — loaders stamp ``"fp8-hooks"``).
+PARITY_LANES: Tuple[str, ...] = ("w8a8",)
 
 #: The inductor config that makes the package code-only. Not a knob: B1.
 CODE_ONLY_CONFIGS: Dict[str, Any] = {
@@ -1791,7 +1803,14 @@ def _mint_cell(
     # and the pool has not built a kernel yet. A width-1 serial mint has
     # already compiled as it exported, so there it refuses late; correct
     # either way, cheap where it matters.
-    _gate_dispatch_ambiguity(minted)
+    #
+    # pgw#917: and it MERGES before it refuses. Declared rows that reduce to
+    # one ingress contract over one target with byte-identical code are one
+    # dispatchable class — compiling each of them separately buys nothing and
+    # makes the cell undispatchable, which is the same fact twice.
+    minted, class_aliases = canonicalize_dispatch_classes(minted)
+    timings["canonicalized_entries"] = float(
+        sum(len(rows) for rows in class_aliases.values()))
 
     if parallel:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
@@ -1847,6 +1866,21 @@ def _mint_cell(
     entry_blocks: Dict[str, Dict[str, Any]] = {}
     for row in minted:
         entry_blocks[row.name] = _gate_and_declare_entry(row, package)
+        # pgw#917: the declared-class names this entry absorbed. Recorded so
+        # the merge is auditable from the envelope alone — a reader asking
+        # "where did class row X go" gets an answer instead of an absence.
+        # NOT a `class_hash` fact (see `aot_serve.class_hash`, which folds
+        # named fields only): an alias declares no traffic the surviving
+        # entry's own contract does not already declare, so it must not
+        # re-key an otherwise identical cell.
+        merged = class_aliases.get(row.name) or ()
+        if merged:
+            entry_blocks[row.name]["aliases"] = [
+                {"name": alias.name,
+                 "class_dims": [
+                     [str(n), int(v)] for n, v in sorted(alias.spec.class_dims)]}
+                for alias in sorted(merged, key=lambda r: r.name)
+            ]
     _write_literals(minted, package, work)
 
     try:
@@ -2068,8 +2102,8 @@ class _DeclaredArg:
 
 def _entry_ingress_declaration(
     row: "_MintedEntry",
-) -> Tuple[Any, Tuple[Dict[str, Any], ...]]:
-    """``(contract, representative calls)`` for one entry.
+) -> Tuple[Any, Tuple[Dict[str, Any], ...], Dict[str, Any]]:
+    """``(contract, representative calls, declaration meta)`` for one entry.
 
     The contract is built from ``aot_package.input_contract`` — the exact rows
     the packed cell will carry — and read back through
@@ -2111,7 +2145,7 @@ def _entry_ingress_declaration(
         call = _at(pick)
         if call not in calls:
             calls.append(call)
-    return contract, tuple(calls)
+    return contract, tuple(calls), meta
 
 
 def _admits(contract: Any, call: Mapping[str, Any]) -> bool:
@@ -2127,36 +2161,92 @@ def _admits(contract: Any, call: Mapping[str, Any]) -> bool:
     return True
 
 
-def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
-    """Refuse a cell whose entries CANNOT be told apart at dispatch.
+def _class_identity(
+    row: "_MintedEntry", declaration: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Every axis except the class-row COORDINATE that two declared classes
+    must share to be one logical class (pgw#917).
+
+    The entry key and the ingress contract have to be the same object. When
+    two rows collide at ingress the only question left is whether they are the
+    same *thing* — same code, same target, same compatibility metadata — and
+    each key here is one axis a human can be told about by name when they are
+    not.
+
+    ``graph_hash`` is the canonical form of the EXPORTED program (nodes,
+    signature and declared ranges), so "byte-identical code" is asked of the
+    artifact rather than assumed from the declaration. Read before a single
+    kernel is compiled, which is the whole pgw#847 win: four rows that reduce
+    to one dispatchable shape must cost one compile, not four.
+    """
+    return {
+        "target": str(row.spec.target),
+        "fork": [[str(n), v] for n, v in sorted(row.spec.fork)],
+        "graph": graph_hash.graph_hash(row.program),
+        "ingress": aot_serve.range_digest(declaration),
+        "pytree": _pytree_facts(row.program),
+        "literal_values": aot_package.literal_values_digest(row.program),
+        "specialization": _specialization_facts(row.spec),
+        "lifted_inputs": sorted(str(n) for n in row.spec.lifted_inputs),
+        "precision": str(row.spec.precision or ""),
+        "lora_bucket": int(row.spec.lora_bucket or 0),
+        "strict": bool(row.spec.strict),
+        "source_digest": str(row.spec.source_digest or ""),
+    }
+
+
+def _differing_axes(
+    identities: Mapping[str, Mapping[str, Any]],
+) -> Tuple[str, ...]:
+    """The named identity axes on which a colliding cluster disagrees."""
+    axes = sorted({axis for ident in identities.values() for axis in ident})
+    out: List[str] = []
+    for axis in axes:
+        values = {
+            json.dumps(ident.get(axis), sort_keys=True, default=str)
+            for ident in identities.values()
+        }
+        if len(values) > 1:
+            out.append(axis)
+    return tuple(out)
+
+
+def canonicalize_dispatch_classes(
+    minted: Sequence["_MintedEntry"],
+) -> Tuple[List["_MintedEntry"], Dict[str, Tuple["_MintedEntry", ...]]]:
+    """Collapse declared classes that are ONE dispatchable entry; refuse the
+    ones that are not (pgw#917).
 
     :meth:`aot_serve.EntryDispatch.select` calls two entries admitting one
     call ``entry_ambiguous`` — "a declaration that cannot discriminate two
     graph classes by ingress, which is a defect to surface, never a coin to
-    flip". It is a per-REQUEST refusal, so without this gate the cell arms,
-    reports armed, and serves those coordinates 100 % eager.
+    flip". It is a per-REQUEST refusal, so a cell with a colliding declaration
+    arms, reports armed, and serves those coordinates 100 % eager: 4,200
+    refused calls across gen-worker 0.89.0/0.90.0 on the standing stack, every
+    single one ``entry_ambiguous``, zero of any other phase.
 
-    Found and MEASURED on a pod (pgw#844, attempt twelve, L4
-    `o0legpgj5olhic`), on the retired regional shape: entries exported one
-    block deep collided on the flattened token PRODUCT (sdxl's nine aspect
-    rows reduce to four token counts), so eight of nine buckets were
-    `entry_ambiguous` -> eager while the cell reported armed. Regional is
-    gone (pgw#846), but the failure class is not regional-specific: any two
-    whole-graph entries of one dispatch whose declared contracts admit the
-    same call — e.g. a static row shadowed by a dynamic sibling over the same
-    hull — serve eager per request with no refusal at mint.
+    **The collision is arithmetic, not a race.** sdxl's aspect rows at one
+    megapixel bucket are area-preserving — 112x144 = 144x112 = 168x96 =
+    96x168 = 16,128 — and a ``BasicTransformerBlock`` never sees ``H_lat`` and
+    ``W_lat``, only the flattened sequence ``(B, H_lat*W_lat, C)``. The
+    declaration keys entries on the pair; the ingress contract can only
+    observe the product. So ambiguity is GUARANTEED for every area-preserving
+    aspect family at a fixed bucket, which is exactly how the fleet's shape
+    rows are generated.
 
-    THE QUESTION IS ADMISSION, NOT EQUALITY (pgw#844). This gate used to
-    compare a digest of each entry's placeholder shapes, which catches only
-    entries whose contracts are IDENTICAL. Dispatch does not ask that: it asks
-    which entries ADMIT the call, and a static row and a dynamic row over the
-    same hull have different digests while both admitting. So every entry's
-    own declared call is run against every sibling's contract through the
-    real ingress assertion, and more than one admitter is refused.
+    **Merge, don't only refuse.** Four rows that produce one ingress contract
+    over one target with byte-identical code are one logical class: mint ONE
+    entry and keep the declared-class names as aliases (36 of the regional
+    shape's 72 compiles bought nothing — the direct pgw#847 shape-invariant
+    win). Refusal is reserved for a collision whose members are NOT the same
+    thing, and then it names the colliding pair AND the differing axis, which
+    a bare "these two clash" never could.
 
     Grouped exactly the way the serve path groups — target, adapter arm —
     because those are the axes dispatch resolves BEFORE ingress, and two
     entries on different arms are meant to differ only by the lifted pair.
+
+    Returns ``(entries to compile and package, aliases by surviving entry)``.
     """
     groups: Dict[Tuple[str, Any], List["_MintedEntry"]] = {}
     for row in sorted(minted, key=lambda r: r.name):
@@ -2164,11 +2254,15 @@ def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
         key = (str(row.spec.target), fork.get(ADAPTER_FORK))
         groups.setdefault(key, []).append(row)
 
-    clashes: List[Tuple[str, List[str]]] = []
+    dropped: Dict[str, "_MintedEntry"] = {}
+    aliases: Dict[str, Tuple["_MintedEntry", ...]] = {}
+    conflicts: List[str] = []
     for rows in groups.values():
         if len(rows) < 2:
             continue
-        declared: Dict[str, Tuple[Any, Tuple[Dict[str, Any], ...]]] = {}
+        by_name = {row.name: row for row in rows}
+        declared: Dict[
+            str, Tuple[Any, Tuple[Dict[str, Any], ...], Dict[str, Any]]] = {}
         for row in rows:
             try:
                 declared[row.name] = _entry_ingress_declaration(row)
@@ -2179,30 +2273,81 @@ def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
                     f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
                     f"the declared ingress contract, so this cell cannot be "
                     f"shown to be dispatchable at all: {exc}") from exc
-        for name, (_own, calls) in declared.items():
-            admitting = sorted({
-                other
-                for call in calls
-                for other, (contract, _c) in declared.items()
-                if _admits(contract, call)
-            })
-            if len(admitting) > 1:
-                clashes.append((name, admitting))
-    if not clashes:
-        return
-    detail = "; ".join(
-        f"{name!r} is admitted by {len(admitting)} entries "
-        f"({admitting[:3]!r}" + (
-            f" +{len(admitting) - 3} more)" if len(admitting) > 3 else ")")
-        for name, admitting in clashes[:4])
-    raise MintRefused(
-        f"dispatch-ambiguity gate: {len(clashes)} declared class row(s) are "
-        f"admitted by more than one entry of the same dispatch, so every call "
-        f"they carry is refused 'entry_ambiguous' and served EAGER — "
-        f"{detail}. Two class rows that reduce to one dispatchable shape are "
-        f"one entry: fix the declaration so every entry's ingress contract is "
-        f"uniquely admitting, rather than compiling and publishing a class "
-        f"the cell can never select")
+        # Union the mutual-admission relation into clusters. Asked through
+        # `aot_serve.assert_ingress` itself, on the contract shape the pod
+        # parses, so the gate cannot drift from what dispatch will do.
+        cluster_of: Dict[str, str] = {name: name for name in declared}
+
+        def _root(name: str) -> str:
+            while cluster_of[name] != name:
+                cluster_of[name] = cluster_of[cluster_of[name]]
+                name = cluster_of[name]
+            return name
+
+        for name, (_own, calls, _m) in declared.items():
+            for other, (contract, _c, _dm) in declared.items():
+                if other == name or not any(
+                    _admits(contract, call) for call in calls
+                ):
+                    continue
+                a, b = _root(name), _root(other)
+                if a != b:
+                    cluster_of[min(a, b)] = min(a, b)
+                    cluster_of[max(a, b)] = min(a, b)
+        clusters: Dict[str, List[str]] = {}
+        for name in sorted(declared):
+            clusters.setdefault(_root(name), []).append(name)
+
+        for members in clusters.values():
+            if len(members) < 2:
+                continue
+            identities = {
+                name: _class_identity(by_name[name], declared[name][2])
+                for name in members
+            }
+            axes = _differing_axes(identities)
+            if axes:
+                conflicts.append(
+                    f"{sorted(members)[:4]!r} collide at ingress but are NOT "
+                    f"one class — they differ on {list(axes)!r}")
+                continue
+            keep, *rest = sorted(members)
+            aliases[keep] = tuple(by_name[name] for name in rest)
+            for name in rest:
+                dropped[name] = by_name[name]
+
+    if conflicts:
+        raise MintRefused(
+            f"dispatch-ambiguity gate: {len(conflicts)} cluster(s) of declared "
+            f"class rows are admitted by more than one entry of the same "
+            f"dispatch, so every call they carry would be refused "
+            f"'entry_ambiguous' and served EAGER — "
+            + "; ".join(conflicts[:4]) + ". Rows that reduce to ONE "
+            "dispatchable ingress contract are one entry and are merged "
+            "automatically; these cannot be, because the named axes say they "
+            "are different artifacts. Fix the declaration so every entry's "
+            "ingress contract is uniquely admitting, rather than compiling "
+            "and publishing a class the cell can never select")
+
+    if dropped:
+        for keep, merged_rows in sorted(aliases.items()):
+            logger.info(
+                "aot-mint: pgw#917 canonicalized %d declared class row(s) onto "
+                "entry %r — identical ingress contract, target and code, so "
+                "they are ONE dispatchable class: %s",
+                len(merged_rows), keep, [r.name for r in merged_rows])
+        activity_mod.emit_event(
+            "aot_class_canonicalized",
+            f"{len(dropped)} of {len(minted)} declared class rows reduce to an "
+            f"ingress contract a sibling already declares; merged onto "
+            f"{len(aliases)} entry/entries as aliases instead of compiling a "
+            f"class the dispatch could never select: "
+            + "; ".join(
+                f"{keep} <- {[r.name for r in merged_rows]}"
+                for keep, merged_rows in sorted(aliases.items())[:4]),
+            phase="entry_merged",
+        )
+    return [row for row in minted if row.name not in dropped], aliases
 
 
 def _gate_and_declare_entry(
@@ -3118,7 +3263,6 @@ __all__ = [
     "MINT_COMPILE_THREADS",
     "MintResult",
     "PARITY_LANES",
-    "REGRESSED_LANES",
     "autotune_posture",
     "cell_identity",
     "compile_entry_files",
