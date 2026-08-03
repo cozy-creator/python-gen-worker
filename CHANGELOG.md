@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.91.4 (2026-08-03) — **endpoint authors can explicitly keep a non-root model slot inside its architecture-family gates**
+
 - **pgw#766 / th#1566: `Slot(family=...)` makes non-root model governance
   explicit.** pgw#747 correctly stopped stamping family-agnostic auxiliaries
   with a function's model family, but inferred agnosticism from the proxy
