@@ -182,28 +182,32 @@ class ResolvedSlot(Generic[D]):
     is handler logic; this object only carries the resolved catalog recipe.
 
     ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
-    hub-stamped facts. ``objective`` is ``""`` when the hub did not stamp
-    one. ``ctx.for_request`` applies the objective to the per-request
-    scheduler view automatically; handlers may also branch on ``distilled``
-    (e.g. a dual-mode turbo lane skips its distillation LoRA for
-    already-distilled weights).
+    hub-stamped values. ``distilled_status`` distinguishes an evidenced false
+    value from an unclassified or inconclusive one. An empty status means an
+    older hub omitted the additive field. ``ctx.for_request`` applies the
+    objective to the per-request scheduler view automatically; handlers may
+    also branch on the distillation value and its evidence status.
     """
 
-    __slots__ = ("ref", "defaults", "objective", "distilled")
+    __slots__ = (
+        "ref", "defaults", "objective", "distilled", "distilled_status",
+    )
 
     def __init__(
         self, ref: ModelRef, defaults: D, objective: str = "",
-        distilled: bool = False,
+        distilled: bool = False, distilled_status: str = "",
     ) -> None:
         self.ref = ref
         self.defaults = defaults
         self.objective = objective
         self.distilled = distilled
+        self.distilled_status = distilled_status
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"ResolvedSlot(ref={self.ref!r}, defaults={self.defaults!r}, "
-            f"objective={self.objective!r}, distilled={self.distilled!r})"
+            f"objective={self.objective!r}, distilled={self.distilled!r}, "
+            f"distilled_status={self.distilled_status!r})"
         )
 
 
@@ -263,6 +267,7 @@ def _finish_resolved(
     *,
     objective: str,
     distilled: bool,
+    distilled_status: str,
     allowed_objectives: Optional[Sequence[str]],
     allowed_distilled: Optional[bool],
 ) -> "ResolvedSlot[Any]":
@@ -271,9 +276,19 @@ def _finish_resolved(
     the hub gates checkpoint<->function compatibility at deploy and request
     time upstream — reaching a mismatch here means version skew or a hub
     bug, never a normal-path outcome. The backstop only fires on STAMPED
-    facts (``objective`` non-empty); an unclassified checkpoint passes."""
+    facts. Explicitly unknown distillation evidence fails closed when the
+    function declares that axis. Empty status preserves the old-sender
+    behavior: objective-stamped bindings treat the bool as known, while fully
+    unstamped bindings pass as they did before the additive field existed."""
+    status = str(distilled_status or "").strip()
+    if status not in ("", "classified", "unclassified", "inconclusive"):
+        raise ObjectiveMismatchError(
+            f"slot {name!r}: resolved checkpoint carries unknown "
+            f"distilled_status={status!r}"
+        )
     resolved = ResolvedSlot(
         ref=ref, defaults=defaults, objective=objective, distilled=distilled,
+        distilled_status=status,
     )
     if resolved.objective:
         if allowed_objectives is not None and resolved.objective not in allowed_objectives:
@@ -282,7 +297,18 @@ def _finish_resolved(
                 f"{resolved.objective!r} is not in the invoked function's "
                 f"declared objectives {tuple(allowed_objectives)!r}"
             )
-        if allowed_distilled is not None and resolved.distilled != allowed_distilled:
+    if allowed_distilled is not None:
+        if status in ("unclassified", "inconclusive"):
+            raise ObjectiveMismatchError(
+                f"slot {name!r}: resolved checkpoint distillation evidence is "
+                f"{status}; the invoked function declares "
+                f"distilled={allowed_distilled!r}"
+            )
+        # Empty is an old sender. Preserve its pre-field behavior: only an
+        # objective-stamped binding treated the adjacent bool as evidenced.
+        distilled_known = (
+            status == "classified" or (not status and bool(resolved.objective)))
+        if distilled_known and resolved.distilled != allowed_distilled:
             raise ObjectiveMismatchError(
                 f"slot {name!r}: resolved checkpoint distilled="
                 f"{resolved.distilled!r} but the invoked function declares "
@@ -302,6 +328,7 @@ def resolve_slot(
     lora_metadata_json: Sequence[str] = (),
     objective: str = "",
     distilled: bool = False,
+    distilled_status: str = "",
     allowed_objectives: Optional[Sequence[str]] = None,
     allowed_distilled: Optional[bool] = None,
 ) -> "ResolvedSlot[Any]":
@@ -323,7 +350,8 @@ def resolve_slot(
     by field — see :func:`_apply_lora_overrides`.
 
     ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
-    hub-stamped facts ("" / False on hubs/paths that don't send them).
+    hub-stamped values; ``distilled_status`` distinguishes an evidenced false
+    from unknown evidence (empty means an older sender).
     ``allowed_objectives``/``allowed_distilled``, when given, are the
     invoked function's declared ``@worker_function`` contract — see
     :func:`_finish_resolved`.
@@ -357,6 +385,7 @@ def resolve_slot(
         return _finish_resolved(
             name, ref, defaults,
             objective=objective, distilled=distilled,
+            distilled_status=distilled_status,
             allowed_objectives=allowed_objectives,
             allowed_distilled=allowed_distilled,
         )
@@ -365,6 +394,7 @@ def resolve_slot(
         return _finish_resolved(
             name, ref, neutral,
             objective=objective, distilled=distilled,
+            distilled_status=distilled_status,
             allowed_objectives=allowed_objectives,
             allowed_distilled=allowed_distilled,
         )
@@ -373,6 +403,7 @@ def resolve_slot(
     return _finish_resolved(
         name, ref, None,
         objective=objective, distilled=distilled,
+        distilled_status=distilled_status,
         allowed_objectives=allowed_objectives,
         allowed_distilled=allowed_distilled,
     )

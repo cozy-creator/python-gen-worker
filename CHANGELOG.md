@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **th#1566: distillation `false` no longer means “unknown.”** The vendored
+  worker protocol now carries `ModelBinding.distilled_status`; the SDK exposes
+  it on resolved slots and refuses an explicitly unclassified or inconclusive
+  checkpoint when a function declares a distillation contract. Conversion
+  publishes propagate only evidenced values, so an unknown source can no
+  longer mint a derived checkpoint classified as non-distilled.
+
 ## 0.92.0 (2026-08-03) — **`weight_set` is deleted from `@endpoint`** (pgw#919/th#1559: NFS volumes follow `kind=`, not an author declaration), and child-call pipelining is answered by measurement (pgw#943)
 
 MINOR: `@endpoint(weight_set=)` is removed. It was declared by **0 of 1,129** function rows

@@ -162,9 +162,11 @@ def test_resolved_slot_carries_objective_facts() -> None:
     resolved = resolve_slot(
         "pipeline", Slot(object), ref=HF("acme/gonzalomo-xl"),
         defaults_cls=ExampleDefaults, objective="flow", distilled=True,
+        distilled_status="classified",
     )
     assert resolved.objective == "flow"
     assert resolved.distilled is True
+    assert resolved.distilled_status == "classified"
     assert isinstance(resolved.defaults, ExampleDefaults)
 
 
@@ -178,6 +180,7 @@ def test_resolve_slot_defaults_to_unstamped() -> None:
     )
     assert resolved.objective == ""
     assert resolved.distilled is False
+    assert resolved.distilled_status == ""
 
 
 def test_objective_mismatch_raises_typed_backstop_error() -> None:
@@ -202,13 +205,46 @@ def test_distilled_mismatch_raises_typed_backstop_error() -> None:
         resolve_slot(
             "pipeline", Slot(object), ref=HF("acme/dmd2-merge"),
             defaults_cls=ExampleDefaults,
-            objective="epsilon", distilled=True, allowed_distilled=False,
+            objective="epsilon", distilled=True,
+            distilled_status="classified",
+            allowed_distilled=False,
         )
 
 
-def test_unstamped_checkpoint_passes_the_backstop() -> None:
-    # The backstop fires on STAMPED facts only: an unclassified checkpoint
-    # (objective "") must not be refused by a declared contract.
+@pytest.mark.parametrize("status", ["unclassified", "inconclusive"])
+def test_unknown_distillation_evidence_fails_closed(status: str) -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
+    from _example_family import ExampleDefaults
+
+    with pytest.raises(ObjectiveMismatchError, match=status):
+        resolve_slot(
+            "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+            defaults_cls=ExampleDefaults,
+            distilled=False, distilled_status=status, allowed_distilled=False,
+        )
+
+
+def test_explicit_false_distillation_evidence_is_independent_of_objective() -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import Slot, resolve_slot
+    from _example_family import ExampleDefaults
+
+    resolved = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+        defaults_cls=ExampleDefaults,
+        objective="", distilled=False,
+        distilled_status="classified",
+        allowed_distilled=False,
+    )
+    assert resolved.objective == ""
+    assert resolved.distilled is False
+    assert resolved.distilled_status == "classified"
+
+
+def test_old_sender_unstamped_checkpoint_preserves_legacy_backstop() -> None:
+    # Empty status is only an older sender. Its fully unstamped binding keeps
+    # the rolling-upgrade behavior that predated the additive evidence field.
     from gen_worker.api.binding import HF
     from gen_worker.api.slot import Slot, resolve_slot
     from _example_family import ExampleDefaults
@@ -219,6 +255,58 @@ def test_unstamped_checkpoint_passes_the_backstop() -> None:
         allowed_objectives=("epsilon",), allowed_distilled=False,
     )
     assert resolved.objective == ""
+
+
+def test_unknown_distillation_status_is_rejected() -> None:
+    from gen_worker.api.binding import HF
+    from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
+    from _example_family import ExampleDefaults
+
+    with pytest.raises(ObjectiveMismatchError, match="unknown distilled_status"):
+        resolve_slot(
+            "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+            defaults_cls=ExampleDefaults,
+            distilled_status="guessed",
+        )
+
+
+def test_wire_distillation_status_reaches_the_slot_backstop() -> None:
+    from gen_worker import Slot
+    from gen_worker.api.binding import HF
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+    from gen_worker.registry import extract_specs
+    from gen_worker.warmup import resolved_slots_kwargs
+
+    @endpoint(
+        models={
+            "pipeline": Slot(object, default_checkpoint=HF("acme/plain-xl")),
+        }
+    )
+    class Gen:
+        def setup(self, pipeline: object) -> None:
+            self.pipeline = pipeline
+
+        @worker_function(distilled=False)
+        def render(self, ctx: RequestContext, data: RIn) -> ROut:
+            return ROut(y="ok")
+
+    spec = extract_specs(Gen)[0]
+    run = pb.RunJob(
+        models=[
+            pb.ModelBinding(
+                slot="pipeline",
+                ref="acme/plain-xl",
+                distilled=False,
+                distilled_status="unclassified",
+            )
+        ]
+    )
+
+    result = resolved_slots_kwargs(spec, run)
+
+    assert "pipeline" not in result["resolved_slots"]
+    assert "unclassified" in result["slot_errors"]["pipeline"]
+    assert pb.ModelBinding.DISTILLED_STATUS_FIELD_NUMBER == 8
 
 
 def test_stamped_facts_within_contract_resolve_cleanly() -> None:
@@ -267,9 +355,11 @@ def _fake_resolve(monkeypatch: pytest.MonkeyPatch, body: dict) -> "object":
 def test_resolve_repo_parses_objective_facts(monkeypatch: pytest.MonkeyPatch) -> None:
     resolved = _fake_resolve(monkeypatch, {
         "model_family": "z-image", "objective": "flow", "distilled": True,
+        "distilled_status": "classified",
     })
     assert resolved.objective == "flow"
     assert resolved.distilled is True
+    assert resolved.distilled_status == "classified"
 
 
 def test_resolve_repo_defaults_unstamped_on_older_hubs(
@@ -278,6 +368,16 @@ def test_resolve_repo_defaults_unstamped_on_older_hubs(
     resolved = _fake_resolve(monkeypatch, {})
     assert resolved.objective == ""
     assert resolved.distilled is False
+    assert resolved.distilled_status == ""
+
+
+def test_resolve_repo_rejects_unknown_distillation_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gen_worker.models.hub_client import HubResolveError
+
+    with pytest.raises(HubResolveError, match="unknown distilled_status"):
+        _fake_resolve(monkeypatch, {"distilled_status": "guessed"})
 
 
 # ---------------------------------------------------------------------------

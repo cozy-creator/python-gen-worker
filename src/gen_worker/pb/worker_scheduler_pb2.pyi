@@ -1010,7 +1010,7 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref", "loras", "inference_defaults", "components", "objective", "distilled")
+    __slots__ = ("slot", "ref", "loras", "inference_defaults", "components", "objective", "distilled", "distilled_status")
     class ComponentsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -1025,6 +1025,7 @@ class ModelBinding(_message.Message):
     COMPONENTS_FIELD_NUMBER: _ClassVar[int]
     OBJECTIVE_FIELD_NUMBER: _ClassVar[int]
     DISTILLED_FIELD_NUMBER: _ClassVar[int]
+    DISTILLED_STATUS_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
     loras: _containers.RepeatedCompositeFieldContainer[LoraOverlay]
@@ -1032,7 +1033,8 @@ class ModelBinding(_message.Message):
     components: _containers.ScalarMap[str, str]
     objective: str
     distilled: bool
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., components: _Optional[_Mapping[str, str]] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ...) -> None: ...
+    distilled_status: str
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., components: _Optional[_Mapping[str, str]] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ..., distilled_status: _Optional[str] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
     __slots__ = ("ref", "weight", "inference_defaults")
