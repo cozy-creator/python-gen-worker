@@ -116,6 +116,21 @@
       "parse_error": true
     },
     {
+      "name": "reserved literal identifier is refused",
+      "source": "a+b*True",
+      "parse_error": true
+    },
+    {
+      "name": "reserved constant identifier is refused",
+      "source": "lambda+b*x",
+      "parse_error": true
+    },
+    {
+      "name": "reserved async identifier is refused",
+      "source": "a+b*await",
+      "parse_error": true
+    },
+    {
       "name": "trailing comment is refused",
       "source": "a+b*x # comment",
       "parse_error": true

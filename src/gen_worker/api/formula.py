@@ -19,7 +19,7 @@ Grammar (ASCII only; ``WS`` is space, tab, or newline)::
     term    := unary (('*'|'/') unary)*
     unary   := '-'? primary
     primary := NUMBER | IDENT | '(' expr ')'
-    IDENT   := [A-Za-z_] [A-Za-z0-9_]*
+    IDENT   := [A-Za-z_] [A-Za-z0-9_]*, excluding ``_RESERVED_IDENTIFIERS``
     NUMBER  := ('0' | [1-9][0-9]*) ('.' [0-9]*)? ([eE] [+-]? [0-9]+)?
              | '.' [0-9]+ ([eE] [+-]? [0-9]+)?
 
@@ -47,6 +47,13 @@ __all__ = [
 
 _NUMERIC_TYPES = (int, float, bool)
 _FORMULA_SPACE = " \t\n"
+_RESERVED_IDENTIFIERS = frozenset({
+    "False", "None", "True", "and", "as", "assert", "async", "await",
+    "break", "class", "continue", "def", "del", "elif", "else", "except",
+    "finally", "for", "from", "global", "if", "import", "in", "is",
+    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+    "while", "with", "yield",
+})
 _TOKEN = re.compile(
     r"(?P<space>[ \t\n]+)|"
     r"(?P<number>(?:(?:0|[1-9][0-9]*)(?:\.[0-9]*)?|\.[0-9]+)"
@@ -297,6 +304,10 @@ def _validate_lexical_source(source: str) -> None:
             if previous == "value":
                 raise FormulaParseError(
                     f"runtime formula: adjacent values at offset {token.start()}"
+                )
+            if kind == "ident" and text in _RESERVED_IDENTIFIERS:
+                raise FormulaParseError(
+                    f"runtime formula: reserved identifier {text!r}"
                 )
             previous = "value"
             continue
