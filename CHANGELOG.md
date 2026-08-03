@@ -4,6 +4,21 @@
 
 - **pgw#938:** isolate transient post-mortem evidence per compute group and make
   concurrent grant downloads finalize through writer-unique temporary files.
+- **pgw#937: a dead execution group's last frame no longer outvotes the live ones.** The
+  parent's per-group fan-in state (`_group_activities`, `_group_fn_unavail`,
+  `_group_fn_degraded`, `slot.last_state_delta`) is now GENERATION-SCOPED and gated on a
+  liveness predicate. The ruling, written where `parent.py` already claimed it in prose: **a
+  group without a live child is not a participant, and its facts are UNKNOWN — neither "still
+  true" nor the live-group default — so its identity element is EXCLUSION from every merge.**
+  A bare `.pop()` would have been worse than the leak, because absence-of-a-value already means
+  "this group serves it". Fixes: an activity pinned RUNNING forever, a dead group vetoing a live
+  group's `self_stalled` confession, a natively-served function retired worker-wide, a down
+  group's functions and free VRAM still advertised, and the parent's dispatch-time observations
+  orphaned by the death path (which silently stopped billing attestation on a crash-looping
+  pod). The death path now EMITS the consequences — a terminal for every activity kind the dead
+  generation held open, plus the recomputed worker StateDelta — so the hub learns the capacity
+  dropped instead of inferring it from an update that stopped arriving. G == 1 is untouched by
+  construction.
 
 ## 0.91.0 (2026-08-02) — **the native kernel lane lands dormant** (pgw#862/pgw#864: env-gated opt-in, OFF by default — no serving path changes until the gate is set), the envelope gains the DEGREE axis (th#1426), an unprovable cell can no longer be declared (th#959), and v2 publish restates classification (th#1411)
 

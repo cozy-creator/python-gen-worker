@@ -151,9 +151,15 @@ _MEASURE_TIMEOUT_S = 180.0
 _MEASURE_BEFORE_SPAWN_S = 60.0
 _ATTESTATION_REPORT_MIN_INTERVAL_S = 300.0
 _CAPABILITY_REPORT_MIN_INTERVAL_S = 300.0
-# Bounded: an observation is dropped when its result passes back, so this only
-# has to survive jobs whose results never arrive (child deaths).
+# Bounded: an observation is dropped when its result passes back OR when the
+# death path attributes its job (pgw#937), so nothing but a live job holds one.
 _OBSERVATION_CAP = 512
+# The WorkerMessage kinds the fan-in reconciles across groups into one worker
+# view. Everything else is per-request or per-object and forwards verbatim.
+# Only a LIVE group may contribute one of these (see "down-group semantics").
+_WORKER_SCOPED_MSGS = frozenset(
+    {"state_delta", "activity_update", "fn_unavailable", "fn_degraded"}
+)
 # pgw#833: the child's stderr is captured by the parent (teed through to the
 # container log unchanged) so a pre-Hello death carries its OWN crash text in
 # the post-mortem dial. RunPod exposes no container-logs API (gw#640), so a
@@ -310,6 +316,19 @@ class _ChildSlot:
         # re-sends the merge of all groups'.
         self.last_state_delta: Optional[pb.WorkerMessage] = None
         self.last_state_delta_at = 0.0
+        # pgw#937 / DESIGN-RULINGS §4.15: a respawn is a NEW GENERATION of this
+        # same group. `generation` counts the incarnations that have spoken; it
+        # is stamped into the retirement dial so a fact attributed to the wrong
+        # incarnation is visible rather than inferred.
+        self.generation = 0
+        # PARTICIPATION is the fan-in's liveness predicate: do this group's
+        # facts count as the worker's? It goes False when an incarnation stops
+        # being able to speak and True again when the next one connects. A group
+        # that has not spoken YET starts True — it has no facts to be wrong
+        # about, and its absence from the dicts is the live-group default. The
+        # defect is only ever a group that HAS spoken and then died. See
+        # "down-group semantics" in the fan-in section.
+        self.participating = True
         self.last_crash_loop_report_at = _NEVER_REPORTED
         # Set once the link read loop has finished (EOF drained), so death
         # attribution never races the child's last frames.
@@ -326,6 +345,16 @@ class _ChildSlot:
     @property
     def label(self) -> str:
         return f"g{self.ordinal}"
+
+    def begin_generation(self) -> None:
+        """A NEW incarnation of this group starts speaking (pgw#937, §4.15).
+
+        It enters the merge with EMPTY fan-in state — the death path retired the
+        previous generation's — so "absent" once again means the live-group
+        default and never a dead incarnation's last frame.
+        """
+        self.generation += 1
+        self.participating = True
 
     # ---- unix socket server (one per group) ------------------------------
 
@@ -368,6 +397,7 @@ class _ChildSlot:
         self.last_frame_at = time.monotonic()
         self.link_closed.clear()
         self.link_ready.set()
+        self.begin_generation()
         logger.info("compute child %s connected on %s", self.label, self.socket_path)
         # pgw#783: at G>1 a RESPAWNED child (not the first boot) comes up empty
         # and needs the hub to re-drive its desired residency. The death path
@@ -395,6 +425,13 @@ class _ChildSlot:
             if self.link is link:
                 self.link = None
                 self.link_ready.clear()
+                # pgw#937: participation ends the moment this generation stops
+                # being able to speak, not when the OS finally reaps it. A group
+                # the parent already answers RETRYABLE for must not still be
+                # voting in the worker's merged view. (`self.link is link` keeps
+                # a superseded link's teardown from retiring the live one.)
+                self.participating = False
+                self.p._note_state_delta()
             waiter = self.hello_waiter
             if waiter is not None and not waiter.done():
                 waiter.set_exception(ConnectionError("compute child link lost"))
@@ -420,7 +457,10 @@ class _ChildSlot:
                 # delta 3: the billable numbers pass through the one component
                 # that watched this job from outside the process doing it.
                 await self.p._attest_result(r, self)
-            elif which == "state_delta":
+            elif which == "state_delta" and self.participating:
+                # pgw#937: a retired generation's late frame is a dead process's
+                # claim about a worker it has left. Recording it would put the
+                # group back into the merge without a live child behind it.
                 self.last_state_delta = msg
                 self.last_state_delta_at = time.monotonic()
                 self.p._note_state_delta()
@@ -752,6 +792,8 @@ class _ChildSlot:
             self.link = None
             self.link_ready.clear()
             self.link_closed.set()
+        # pgw#937: whatever route got us here, this generation is done speaking.
+        self.participating = False
 
     async def await_exit(self, timeout: float) -> bool:
         """TimeoutStopSec: wait for THIS child to exit, then SIGKILL it."""
@@ -788,6 +830,12 @@ class _ChildSlot:
         try:
             for (rid, att), fn in sorted(died_jobs.items()):
                 self.reported_dead[(rid, att)] = fn
+                # pgw#937: the death path is the OTHER exit from the parent's
+                # dispatch-time observation. `_attest_result` pops it on the
+                # child's JobResult; a job whose child died never produces one,
+                # and 512 orphans FIFO-evict LIVE jobs' observations — which
+                # silently stops billing attestation on a crash-looping pod.
+                self.p._observations.pop((rid, att), None)
                 while len(self.reported_dead) > _REPORTED_DEAD_CAP:
                     self.reported_dead.popitem(last=False)
                 await self.p.transport.send(pb.WorkerMessage(job_result=pb.JobResult(
@@ -873,8 +921,19 @@ class _ChildSlot:
             sorted(r for r, _ in died_jobs) or "none",
         )
 
+        # 1b) pgw#937: RETIRE this generation from the worker view before
+        # anything else ships. Until this runs, the dead child's last frame is
+        # still a vote — it can pin an activity RUNNING, retire a function a
+        # live group serves, and (merge.py's `all(...)`) veto a live group's
+        # `self_stalled` confession, which is the one that costs money.
+        for out in p._retire_group_generation(self):
+            try:
+                await p.transport.send(out)
+            except Exception:
+                logger.debug("retirement message send failed", exc_info=True)
+
         # 2) Post-mortem dial (gw#640 typed exit capture; pgw#676/714 parity).
-        extra: Dict[str, Any] = {"group": self.ordinal}
+        extra: Dict[str, Any] = {"group": self.ordinal, "generation": self.generation}
         if verdict.get("signaled"):
             try:
                 extra.update(postmortem.attribute_signal_death(
@@ -919,8 +978,11 @@ class _ChildSlot:
                 f"phase=compute_crash_loop group={self.ordinal} "
                 f"deaths={len(recent)} window_s={p._start_limit_interval:.0f} "
                 f"deaths_before_hello={self.deaths_before_hello} last_cause={cause} "
-                f"spawns={self.spawn_count} — respawn continues; this group "
-                "advertises no serving capacity while its child is down"
+                f"spawns={self.spawn_count} generation={self.generation} — "
+                "respawn continues; this group advertises no serving capacity "
+                "while its child is down, and contributes no fact to the "
+                "worker's merged view either (pgw#937 down-group semantics: "
+                "a down group is EXCLUDED from the fan-in, not defaulted)"
             )
 
         # 4) Give the live stream a moment to ship the FATALs.
@@ -1677,21 +1739,141 @@ class ParentControl:
         """
 
     # ---- fan-in: N children -> ONE worker view (pgw#783, Paul ruling 2) ----
+    #
+    # DOWN-GROUP SEMANTICS (pgw#937 ruling; the rule `_handle_child_death`'s
+    # crash-loop dial has always claimed in prose and nothing implemented).
+    #
+    # **A group without a live child is not a participant in the worker view,
+    # and its facts are UNKNOWN — which is neither "still true" nor the
+    # live-group default.** Every fan-in structure here is generation-scoped:
+    # it holds what the CURRENT incarnation of that group said, and it is
+    # dropped the moment that incarnation ends (§4.15 — a respawn is a new
+    # generation of the same group, under the same worker session).
+    #
+    # The vocabulary has three states per (group, function/kind), and the bug
+    # class this fixes is the §4.22 one — a *default* being made to carry a
+    # missing *fact*:
+    #
+    #   present entry -> a fact the live incarnation reported
+    #   absent entry  -> the live-group DEFAULT (serves it / no activity open)
+    #   not a member  -> UNKNOWN: this group has no live child
+    #
+    # so the identity element of a down group is **exclusion from the merge**,
+    # in every one of the four aggregations:
+    #
+    #   last_state_delta   -> dropped from `merge_state_deltas`: the group
+    #                         contributes no functions to the union, no free
+    #                         VRAM to the sum, and no vote to the phase min.
+    #   _group_fn_unavail  -> dropped from `worker_fn_unavailable`'s mapping.
+    #                         NOT set to None: None means "this group serves
+    #                         it", so popping alone would make a dead group
+    #                         read as serving EVERYTHING — strictly worse than
+    #                         the stale entry it replaced.
+    #   _group_fn_degraded -> dropped from both the mapping and the
+    #                         `served_native_somewhere` scan, for the same
+    #                         reason (absence there means "serves it native").
+    #   _group_activities  -> dropped from `reconcile_activity_kind`, so a dead
+    #                         group can no longer pin a kind RUNNING or veto a
+    #                         live group's `self_stalled` confession.
+    #
+    # Exclusion is chosen over inserting an explicit "unknown" sentinel because
+    # it carries the same information without teaching four merge functions a
+    # third case and without touching the wire vocabulary.
+    #
+    # A down group is not silently forgotten, though — that would replace one
+    # missing fact with another. `_retire_group_generation` EMITS the
+    # consequences: a terminal for every activity kind the dead generation held
+    # open that no live group still runs, and the recomputed worker StateDelta.
+    # The hub learns the capacity dropped; it never has to infer it from an
+    # update that stopped arriving.
+
+    def _live_slots(self) -> List["_ChildSlot"]:
+        """The groups whose facts are the worker's, i.e. the participating ones."""
+        return [s for s in self._slots if s.participating]
 
     def _note_state_delta(self) -> None:
         """Recompute the worker's freshest StateDelta after a group published.
         At G==1 it IS the child's message (byte-identical beat); at G>1 it is the
-        merge of every group's latest."""
+        merge of every LIVE group's latest."""
         self._last_state_delta_at = time.monotonic()
         if self.execution_groups == 1:
             self._last_state_delta = self._slots[0].last_state_delta
             return
-        deltas = [s.last_state_delta.state_delta for s in self._slots
+        deltas = [s.last_state_delta.state_delta for s in self._live_slots()
                   if s.last_state_delta is not None]
         if deltas:
             self._last_state_delta = pb.WorkerMessage(
                 state_delta=merge.merge_state_deltas(deltas)
             )
+            return
+        # Every group is down. Advertising the last live group's function set
+        # would keep the hub dispatching into `_dispatch_run_job`'s "compute
+        # process restarting" RETRYABLE — on a loop, with no end the hub can
+        # see. The honest worker-level fact is: nothing is served, and the pod
+        # is coming back.
+        self._last_state_delta = pb.WorkerMessage(
+            state_delta=pb.StateDelta(phase=pb.WORKER_PHASE_BOOTING)
+        )
+
+    def _retire_group_generation(self, slot: _ChildSlot) -> List[pb.WorkerMessage]:
+        """This group's child is gone: end its generation's participation.
+
+        Drops every fan-in fact the dead incarnation reported (see "down-group
+        semantics" above) and returns the worker-level messages the hub must
+        receive as a consequence — the terminals for activity kinds only that
+        group had open, then the recomputed worker StateDelta.
+
+        At G==1 the fan-in structures are never populated (`_fan_in` returns the
+        child's message verbatim), so this is a no-op there BY CONSTRUCTION, and
+        the single-child parent stays byte-identical.
+        """
+        if self.execution_groups == 1:
+            return []
+        slot.participating = False
+        slot.last_state_delta = None
+        open_kinds = self._group_activities.pop(slot.ordinal, {})
+        self._group_fn_unavail.pop(slot.ordinal, None)
+        self._group_fn_degraded.pop(slot.ordinal, None)
+
+        out: List[pb.WorkerMessage] = []
+        live_ordinals = {s.ordinal for s in self._live_slots()}
+        for kind in sorted(open_kinds):
+            per_group = {
+                ordinal: kinds[kind]
+                for ordinal, kinds in self._group_activities.items()
+                if kind in kinds and ordinal in live_ordinals
+            }
+            self._activity_seq += 1
+            if per_group:
+                # A live group still runs this kind: re-state the worker's
+                # activity WITHOUT the dead group's progress and without its
+                # vote on `self_stalled`.
+                merged = merge.reconcile_activity_kind(
+                    per_group, seq=self._activity_seq
+                )
+            else:
+                # Nobody runs it any more. It did not complete — the process
+                # doing it died — so the terminal is FAILED, not COMPLETED.
+                merged = pb.ActivityUpdate()
+                merged.CopyFrom(open_kinds[kind])
+                merged.state = pb.ACTIVITY_STATE_FAILED
+                merged.seq = self._activity_seq
+                merged.self_stalled = False
+                merged.stalled_for_ms = 0
+                if not merged.error:
+                    merged.error = "compute process died with this activity open"
+                merged.detail = (
+                    f"{merged.detail + '; ' if merged.detail else ''}"
+                    "the execution group running this activity died "
+                    "(worker alive; the group respawns)"
+                )[:512]
+            out.append(pb.WorkerMessage(activity_update=merged))
+
+        self._note_state_delta()
+        merged_delta = self._last_state_delta
+        if merged_delta is not None:
+            out.append(merged_delta)
+        return out
 
     def _fan_in(
         self, slot: _ChildSlot, msg: pb.WorkerMessage,
@@ -1707,6 +1889,13 @@ class ParentControl:
         if self.execution_groups == 1:
             return msg
         which = msg.WhichOneof("msg")
+        if which in _WORKER_SCOPED_MSGS and not slot.participating:
+            # pgw#937: a retired generation cannot speak for the worker. Its
+            # per-request frames still forward (they are about a job, and the
+            # death path has already attributed the ones it knows about); its
+            # WORKER-scoped claims are a dead process's view of a worker it has
+            # left, and re-recording them would resurrect it into the merge.
+            return None
         if which == "state_delta":
             merged = self._last_state_delta
             return merged if merged is not None else msg
@@ -1728,10 +1917,14 @@ class ParentControl:
             by_kind.pop(act.kind, None)
         else:
             by_kind[act.kind] = act
+        # Only LIVE groups vote. A dead group's last frame must not pin the kind
+        # RUNNING, and must not outvote a live group's `self_stalled` confession
+        # (merge.py's `all(...)`) — pgw#937.
+        live_ordinals = {s.ordinal for s in self._live_slots()}
         per_group = {
             ordinal: kinds[act.kind]
             for ordinal, kinds in self._group_activities.items()
-            if act.kind in kinds
+            if act.kind in kinds and ordinal in live_ordinals
         }
         if not per_group:
             # Every group's activity of this kind is terminal: emit the terminal
@@ -1751,8 +1944,13 @@ class ParentControl:
         fu = msg.fn_unavailable
         by_fn = self._group_fn_unavail.setdefault(slot.ordinal, {})
         by_fn[fu.function_name] = fu
+        # THE CONVENTION, stated at the call site because writing it backwards
+        # is the pgw#937 defect: `merge.worker_fn_unavailable` reads a `None`
+        # value as "this group SERVES the function". So a group is put in the
+        # mapping only while it is live — a down group is EXCLUDED, never
+        # entered as `None`, which would make it read as serving everything.
         per_group: Dict[int, Optional[pb.FnUnavailable]] = {}
-        for s in self._slots:
+        for s in self._live_slots():
             per_group[s.ordinal] = self._group_fn_unavail.get(
                 s.ordinal, {}
             ).get(fu.function_name)
@@ -1768,17 +1966,20 @@ class ParentControl:
         fd = msg.fn_degraded
         by_fn = self._group_fn_degraded.setdefault(slot.ordinal, {})
         by_fn[fd.function_name] = fd
+        live = self._live_slots()
         per_group: Dict[int, Optional[pb.FnDegraded]] = {}
-        for s in self._slots:
+        for s in live:
             per_group[s.ordinal] = self._group_fn_degraded.get(
                 s.ordinal, {}
             ).get(fd.function_name)
         # A group serves this function NATIVE when it reports neither degraded
-        # nor unavailable for it.
+        # nor unavailable for it. Absence means native here too, so a DOWN group
+        # is excluded rather than scanned — otherwise a dead group would veto a
+        # live group's degradation report (pgw#937).
         served_native = any(
             fd.function_name not in self._group_fn_degraded.get(s.ordinal, {})
             and fd.function_name not in self._group_fn_unavail.get(s.ordinal, {})
-            for s in self._slots
+            for s in live
         )
         worker_level = merge.worker_fn_degraded(
             per_group, served_native_somewhere=served_native
