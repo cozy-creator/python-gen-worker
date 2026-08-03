@@ -49,14 +49,14 @@ def test_declared_lane_executes_and_ctx_lane_reports_it() -> None:
         conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
             request_id="r-lane", attempt=1, function_name="lane-echo",
-            input_payload=_payload(), lane="fp8-w8a8-dynamic+eager"))
+            input_payload=_payload(), lane="fp8-w8a8-dynamic+compiled"))
         res = conn.wait_for(is_result_for("r-lane")).job_result
         assert res.status == pb.JOB_STATUS_OK, res.safe_message
         body = _decode(res)
         # ctx.lane carried the executing lane into the author branch...
-        assert body["response"] == "author-kernel:fp8-w8a8-dynamic+eager"
+        assert body["response"] == "author-kernel:fp8-w8a8-dynamic+compiled"
         # ...and JobMetrics.lane reports the SAME executing truth.
-        assert res.metrics.lane == "fp8-w8a8-dynamic+eager"
+        assert res.metrics.lane == "fp8-w8a8-dynamic+compiled"
 
 
 def test_undeclared_dispatch_is_todays_behavior() -> None:
@@ -78,7 +78,7 @@ def test_unhandled_lane_still_refuses_typed() -> None:
         conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
             request_id="r-nope", attempt=1, function_name="lane-echo",
-            input_payload=_payload(), lane="nvfp4-w4a4-static+eager"))
+            input_payload=_payload(), lane="nvfp4-w4a4-static+compiled"))
         res = conn.wait_for(is_result_for("r-nope")).job_result
         assert res.status == pb.JOB_STATUS_INVALID
         assert "lane_unavailable" in res.safe_message

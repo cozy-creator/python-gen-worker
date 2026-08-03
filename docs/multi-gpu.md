@@ -29,11 +29,13 @@ unknown key is how a hub that bought degree 2 gets served degree 1 in silence.
 Growing the contract is therefore its own two-release transition.
 
 **th#1375 rename, in transition.** `group_degree` -> `gpus_per_execution_group`
-and `groups` -> `execution_groups`. Prod pins gen-worker 0.79.0 and every
-released tag reads only the old spelling, so the hub emits BOTH and the worker
-accepts both (they must agree, else `topology_alias_disagree`). Deploy order is
-therefore irrelevant. th#1376 deletes the old spelling, after which it becomes
-an unknown key and is refused by the rule above.
+and `groups` -> `execution_groups`. The hub emits BOTH and the worker accepts
+both (they must agree, else `topology_alias_disagree`), so deploy order is
+irrelevant. The new spelling shipped in 0.91.0 (`topology.py`
+`KEY_GPUS_PER_GROUP` / `KEY_EXECUTION_GROUPS`); the dual-emission window exists
+only for pods still on an older tag. th#1376 deletes the old spelling, after
+which it becomes an unknown key and is refused by the rule above — check
+whether any pod still predates 0.91 before assuming this paragraph is live.
 
 An **execution group** is the serving unit — the cards that cooperate on one
 request. It is *not* a PyTorch `ProcessGroup`, which is the communication

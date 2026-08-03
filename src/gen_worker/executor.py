@@ -5065,21 +5065,11 @@ class Executor:
             return spec
         # th#1050: a lane the endpoint DECLARES (handles=) is served by the
         # author's own code branching on ctx.lane — satisfiable with no
-        # laddered rebind (custom loaders/kernels have nothing to rebind),
-        # and exempt from the platform-kernel compiled-only rule.
+        # laddered rebind (custom loaders/kernels have nothing to rebind).
         declared_lane = (
             req.lane is not None
             and lanespec.lane_body_id(req.lane) in getattr(spec, "handles", ())
         )
-        if not declared_lane and (
-                req.lane is not None and req.lane.weights == lanespec.WEIGHTS_FP8
-                and req.lane.activation == lanespec.ACT_W8A8
-                and req.lane.execution == lanespec.EXEC_EAGER):
-            # gw#586: w8a8 serves compiled-only; an eager w8a8 request would
-            # resurrect the silent-eager hole.
-            raise lanespec.LaneUnavailableError(
-                raw, "fp8-w8a8 serves compiled-only on this fleet")
-
         def pick_lane_of(pick: "Optional[Tuple[Any, ...]]") -> "Optional[Any]":
             if pick is None or not pick[2]:
                 return None
@@ -5272,9 +5262,9 @@ class Executor:
     def _served_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
         """The CONCRETE lane this spec's instance executes as, for
         JobMetrics.lane and ctx.lane reporting: the most-quantized pipeline
-        binding's lane (table rank), execution axis from the record's live
-        compile state. A declared (handles=) instructed lane wins outright —
-        the author's kernels execute it regardless of binding surgery."""
+        binding's lane (table rank), with live compile state as a preference.
+        Fixed-mode bodies override it; a declared (handles=) instruction owns
+        the full lane outright."""
         from .models import lanes as lanespec
 
         compiled = False
@@ -5286,8 +5276,7 @@ class Executor:
                     for t in rec.compile_targets.values())
         handled = self._handled_lane_body(spec, instructed)
         if handled:
-            exec_axis = lanespec.EXEC_COMPILED if compiled else lanespec.EXEC_EAGER
-            return f"{handled}+{exec_axis}"
+            return lanespec.lane_id(lanespec.parse_lane(instructed))
         # Report the most-quantized binding's lane: quantized lanes always
         # outrank bf16 (a bf16 VAE riding a w8a16 pipeline is still the
         # w8a16 lane), ties by table rank.

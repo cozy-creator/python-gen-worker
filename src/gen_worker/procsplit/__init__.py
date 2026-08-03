@@ -41,9 +41,10 @@ ENV_SESSION_ID = "GEN_WORKER_SESSION_ID"
 # pgw#783: one child per EXECUTION GROUP. The hub's delivered packing is the
 # only source of G — there is no new knob to mis-set.
 ENV_TOPOLOGY = "WORKER_EXECUTION_TOPOLOGY"
-# Which group this child owns. Labelling only (logs, dials, per-group dirs);
-# no behaviour reads it, because the child is rewritten into a SINGLE-group
-# worker over its own cards (see procsplit.group).
+# Which group this child owns. It labels logs/dials and selects one-writer
+# per-group filesystem carriers (inductor cache and post-mortem markers); it
+# never changes serving policy, because the child is rewritten into a
+# SINGLE-group worker over its own cards (see procsplit.group).
 ENV_GROUP_ORDINAL = "GEN_WORKER_GROUP_ORDINAL"
 # How many compute children share this pod's cgroup. The one fact a child
 # needs about its siblings: the CPU (pgw#782) and host-RAM (pgw#752) budgets

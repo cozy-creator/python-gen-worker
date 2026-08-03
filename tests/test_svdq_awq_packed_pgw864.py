@@ -89,9 +89,17 @@ def test_awq_kernel_compiles_for_blackwell() -> None:
     assert pk.awq_op() is not None
     fn = None
     for obj in gc.get_objects():
-        if isinstance(obj, Autotuner) and getattr(
-                obj.fn, "__name__", "") == "_awq_mm_kernel":
-            fn = obj.fn
+        try:
+            if not isinstance(obj, Autotuner):
+                continue
+            candidate = obj.fn
+            if getattr(candidate, "__name__", "") == "_awq_mm_kernel":
+                fn = candidate
+                break
+        except ReferenceError:
+            # gc.get_objects() can contain an expired weak proxy. It is not a
+            # kernel candidate, and dereferencing it must not flake this proof.
+            continue
     assert fn is not None
     src = ASTSource(
         fn=fn,

@@ -113,6 +113,43 @@ def test_previous_container_death_is_reported_on_next_boot(tmp_path):
     assert not record.exists()
 
 
+def test_previous_container_death_aggregates_every_group_marker(
+    tmp_path, monkeypatch,
+):
+    """Per-group files must not erase whole-container post-mortem coverage."""
+    from gen_worker import postmortem
+
+    record = tmp_path / "boot.json"
+    record.write_text(json.dumps({
+        "pid": 4242, "boot_unix": 1.0, "oom_kill_at_boot": 0,
+    }))
+    monkeypatch.setattr(
+        postmortem, "CRASH_REGISTRY_PATH", tmp_path / "crash-streaks.json"
+    )
+    for ordinal, function in enumerate(("image", "video")):
+        group_dir = tmp_path / f"g{ordinal}"
+        group_dir.mkdir()
+        (group_dir / "gen-worker-inflight.json").write_text(json.dumps({
+            "active": [{
+                "kind": "request", "function": function,
+                "request_id": f"r-{ordinal}", "pid": 100 + ordinal,
+            }],
+        }))
+        (group_dir / "gen-worker-fault-dump.txt").write_text(
+            f"fault-tail-g{ordinal}"
+        )
+
+    detail = postmortem.previous_boot_detail(record)
+    assert detail is not None
+    assert all(value in detail for value in (
+        '"function": "image"', '"function": "video"',
+        "fault-tail-g0", "fault-tail-g1",
+    ))
+    assert not list(tmp_path.glob("g*/gen-worker-inflight.json"))
+    streaks = postmortem.native_crash_streaks()
+    assert streaks["image"]["count"] == streaks["video"]["count"] == 1
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX only")
 def test_sigterm_is_forwarded_to_the_worker(tmp_path):
     """Drain must still work: PID 1 is the supervisor, the worker is the child."""

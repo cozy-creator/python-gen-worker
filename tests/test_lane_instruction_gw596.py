@@ -7,7 +7,7 @@ apply_model_resolutions), never mocks of them:
      instance stays resident (gw#551 cycling) while the bf16 variant loads.
   2. RunJob.lane="fp8-w8a8-dynamic+compiled" keeps the pick.
   3. A w8a8 request with no w8a8 pick refuses TYPED, naming the lane.
-  4. "fp8-w8a8-dynamic+eager" refuses (w8a8 is compiled-only).
+  4. "fp8-w8a8-dynamic+eager" is outside the shared lane vocabulary.
   5. Family "fp8" without a stored pick expands to the local cast lane.
   6. An unknown lane string is a ValidationError (INVALID), not a crash.
   7. JobMetrics.lane reports the CONCRETE serving lane.
@@ -106,9 +106,8 @@ def test_w8a8_without_pick_refuses_typed() -> None:
 def test_w8a8_eager_refuses() -> None:
     ex = _executor()
     _with_w8a8_pick(ex)
-    with pytest.raises(LaneUnavailableError) as e:
+    with pytest.raises(ValidationError, match="not a known lane"):
         ex._lane_effective_spec(ex.specs["generate"], "fp8-w8a8-dynamic+eager")
-    assert "compiled-only" in str(e.value)
 
 
 def test_fp8_family_without_stored_pick_expands_to_cast_lane() -> None:
@@ -157,7 +156,7 @@ def test_served_lane_reports_concrete_lane() -> None:
     assert ex._served_lane(spec) == "bf16-w16a16+eager"
     # w8a8 pick applied: the pipeline's lane wins over the bf16 vae.
     _with_w8a8_pick(ex)
-    assert ex._served_lane(ex.specs["generate"]) == "fp8-w8a8-dynamic+eager"
+    assert ex._served_lane(ex.specs["generate"]) == "fp8-w8a8-dynamic+compiled"
     # cast pick: w8a16.
     ex.apply_model_resolutions({BASE: (BASE, "fp8", "fp8-w8a16+eager")})
     assert ex._served_lane(ex.specs["generate"]) == "fp8-w8a16+eager"

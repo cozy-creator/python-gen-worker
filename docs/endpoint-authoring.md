@@ -161,69 +161,39 @@ runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
 below platform standards) rather than falling straight to CPU offload.
 Fit ladder: bf16 → `#fp8` → `#nvfp4` (Blackwell) → emergency-nf4 → offload.
 
-## Model selection: `model=` is a payload argument (pgw#509)
+## Model selection
 
-Checkpoint selection is a runtime PAYLOAD FIELD, not a build-time fan-out. A
-handler whose payload declares a field typed with a `ModelChoice` subclass
-picks, per request, which curated checkpoint runs against the resident base.
-16 near-identical fine-tunes = ONE `generate(model=)`, not 16 functions.
+Checkpoint selection is a runtime PAYLOAD FIELD, not a build-time fan-out:
+16 near-identical fine-tunes = ONE `generate(model=)`, not 16 functions. Use
+`Slot` (below) — the model SET is CATALOG, not code.
 
-Declare the curated set as DATA — one row per checkpoint carrying its
-`ModelRef` binding + typed per-model defaults:
-
-```python
-class SdxlDefaults(ModelDefaults, frozen=True):
-    scheduler: Literal["euler_a", "dpmpp_2m_karras"]
-    steps: int
-    guidance: float
-
-class SdxlModel(ModelChoice[SdxlDefaults], enum.Enum):
-    WAI  = Model("wai-illustrious",     Hub("tensorhub/wai-illustrious"), SdxlDefaults("euler_a", 28, 6.0), hot=True)
-    PONY = Model("cyberrealistic-pony", Hub("tensorhub/cyberrealistic-pony"), SdxlDefaults("dpmpp_2m_karras", 30, 5.0))
-
-class TextToImage(msgspec.Struct):
-    prompt: str
-    model: SdxlModel = SdxlModel.WAI          # curated-only
-
-@endpoint(models={"pipeline": Hub("tensorhub/wai-illustrious"), "vae": Hub("tensorhub/sdxl-vae")})
-class SDXLFamily:
-    def setup(self, pipeline, vae): ...
-    def generate(self, ctx, p: TextToImage) -> ImageOutput:
-        d = p.model.defaults                  # typed SdxlDefaults — no ctx.models sniffing
-        ...
-```
-
-On the wire a pick is its id string (`"wai-illustrious"`); the JSON schema is
-a closed `enum` (the curated allowlist). Defaults are manifest-exported so the
-catalog/UI can render `steps: 28` before submit. Discovery emits the whole set
-(each choice's binding + defaults + `hot`/`price` hints) for the scheduler to
-warm-pool per checkpoint.
-
-**BYOM is the field TYPE.** `model: SdxlModel` is curated-only; `model:
-SdxlModel | ModelRef` additionally accepts an arbitrary client-supplied
-`ModelRef` (bring-your-own-model). No `@byom` decorator, no `sources=` —
-architecture compatibility is derived from the pipeline the endpoint's
-`models=` loads. Per-method policy falls out of method=contract: a `generate`
-method can be BYOM-open while a `generate_turbo` method (fixed distillation
-LoRA) stays curated.
+**BYOM is the field TYPE.** The payload field named by `selected_by` is plain
+`str` for curated-only, or `str | ModelRef` to additionally accept an
+arbitrary client-supplied `ModelRef` (bring-your-own-model). No `@byom`
+decorator, no `sources=` — architecture compatibility is derived from the
+pipeline the endpoint's `models=` loads. Per-method policy falls out of
+method=contract: a `generate` method can be BYOM-open while a
+`generate_turbo` method (fixed distillation LoRA) stays curated.
 
 Divergent WIRE contracts are separate METHODS, not `Optional` fields; only
 weight-sharing forces one class. A distilled turbo that shares the base is a
 `generate_turbo` method on the same class (shares the resident base); a
 standalone distilled checkpoint is a separate class/endpoint.
 
+> The older pgw#509 `ModelChoice` / `Model` / `ModelDefaults` enum API that
+> baked the curated set into the endpoint image is **gone** — those names have
+> no definition in `gen_worker` and importing them fails. `Slot` replaced it.
+
 ## `Slot`: hub-resolved model slots (SDK v2, pgw#647)
 
-`ModelChoice` above bakes the curated set into the endpoint image — fine
-for a first-party endpoint that ships its own recipes, but the model SET is
-CATALOG, not code (th#767): adding a checkpoint shouldn't be a software
-release. `Slot(pipeline_cls, selected_by=, default_checkpoint=)` is the
-hub-resolved alternative, and under SDK v2 the declaration shrinks to the
-ROOT of the component tree:
+`Slot(pipeline_cls, selected_by=, default_checkpoint=)` resolves the model set
+from the hub catalog (th#767) rather than from code, so adding a checkpoint is
+not a software release. Under SDK v2 the declaration shrinks to the ROOT of the
+component tree:
 
 ```python
 from gen_worker import HF, RequestContext, Slot, endpoint
-from gen_worker.families import SdxlDefaults
+from .defaults import SdxlDefaults   # YOUR family vocabulary — see below
 
 @endpoint(models={
     "pipeline": Slot(
@@ -271,9 +241,13 @@ class Generate:
   refcounted across checkpoint picks; there is nothing to declare
   (`share_components=` is deleted).
 
-**Per-family defaults vocabulary** (`gen_worker.families`): a typed,
-versioned, JSON-Schema-exportable struct per architecture — the shape
-tensorhub validates catalog recipe values against:
+**Per-family defaults vocabulary**: a typed, versioned,
+JSON-Schema-exportable struct per architecture — the shape tensorhub validates
+catalog recipe values against. `gen_worker.families` ships the REGISTRY and
+nothing else: **you declare the vocabulary in your own endpoint** (pgw#740
+moved `SdxlDefaults`/`WanDefaults` out of the SDK — a vocabulary in the library
+would need a wheel release to change). Declare it anywhere imported before
+discovery runs:
 
 ```python
 from gen_worker.families import GenerationDefaults, family
@@ -286,8 +260,9 @@ class SdxlDefaults(GenerationDefaults, frozen=True):
     max_guidance: float | None = None   # a CLAMP constraint, never a wire reshape
 ```
 
-`gen-worker families export-schemas <dir>` writes `<family>.schema.json`
-per registered family. Code owns this SCHEMA; the catalog owns the VALUES.
+`gen-worker families export-schemas <dir>` writes one
+`<family>[.lora].schema.json` per registered family (LoRA-kind families get the
+`.lora` infix). Code owns this SCHEMA; the catalog owns the VALUES.
 
 **Per-request views**: `ctx.for_request(self.pipeline, sampler=, seed=)`
 returns a container copy sharing every module by reference (zero weight
@@ -330,7 +305,7 @@ unless breaking a genuine cycle or deferring an optional extra.
 ```python
 from gen_worker.testing import fake_context
 from gen_worker import HF
-from gen_worker.families import SdxlDefaults
+from .defaults import SdxlDefaults   # YOUR family vocabulary
 
 ctx = fake_context(slots={
     "pipeline": (HF("stabilityai/stable-diffusion-xl-base-1.0"), SdxlDefaults(steps=28)),
@@ -363,9 +338,12 @@ Declare ONLY what the endpoint cannot run without:
 Resources(gpu=True, libraries=("nunchaku",))
 ```
 
-Fields: `gpu`, `gpu_count`, `libraries`, `strict_vram` (bindings that
-cannot tolerate CPU-resident weights), `vcpus`, `compute_capability`, and
-the two hints `vram_gb_hint` / `ram_gb_hint`.
+Fields: `gpu`, `gpu_count`, `max_gpu_count`,
+`max_gpus_per_execution_group`, `parallel`, `libraries`, `strict_vram`
+(bindings that cannot tolerate CPU-resident weights), `vcpus`,
+`compute_capability`, and the two hints `vram_gb_hint` / `ram_gb_hint`.
+`max_gpus_per_execution_group` / `parallel` are the multi-GPU axis — see
+[multi-gpu.md](multi-gpu.md).
 
 **Hints vs. gates — the distinction is the whole contract.**
 
@@ -498,7 +476,8 @@ class Chat:
 
 ## RequestContext
 
-At most 15 members:
+The members you will actually reach for (the class has ~27 public members;
+`request_context/__init__.py` is the full list):
 
 | member | |
 |---|---|
@@ -521,12 +500,18 @@ watching the job should see.
 
 ## Project config
 
-`pyproject.toml` carries the one config value (there is no endpoint.toml):
+The SDK reads `pyproject.toml` only:
 
 ```toml
 [tool.gen_worker]
 main = "my_endpoint.main"
+# optional: discovery_heavy_deps = [...]  — extra heavy import roots
 ```
+
+`endpoint.toml` is a different file at a different layer: the platform-side
+build/deploy manifest that **tensorhub** owns and reads (`[[build.profiles]]`,
+`[resources]`). gen-worker never parses it. See
+[dockerfile.md](dockerfile.md) for the build-profile side.
 
 ## Errors
 
