@@ -51,8 +51,19 @@ _SELF_CHECK_PROBES = ((128, 512, 256), (77, 3072, 384))
 
 # Warps for the fused quant kernel, per SM — module level so a sweep can
 # rebind it (scripts/svdq_bench/bench_gemm.py) instead of editing source.
-_QUANT_WARPS_BY_SM = {100: 4, 103: 4, 120: 8, 121: 8}
+# Quantizer launch config per SM. Module level so scripts/svdq_bench/
+# tune_quant.py can sweep it per card instead of anyone editing source.
+# sm_120: 8 warps (pgw#862, strided kernel). sm_100: 1 warp on the contiguous
+# kernel — a whole-sweep optimum on B200, where more warps only add
+# contention on an already memory-bound kernel (pgw#863).
+_QUANT_WARPS_BY_SM = {100: 1, 103: 1, 120: 8, 121: 8}
 _QUANT_WARPS_DEFAULT = 4
+# 16-element blocks handled per program, per SM.
+_QBPP = 128
+_QBPP_BY_SM = {100: 128, 103: 128, 120: 128, 121: 128}
+# SMs served by the contiguous-load quantizer (pgw#863). sm_120 keeps the
+# strided kernel: register re-layout measured SLOWER there (pgw#862).
+_CONTIG_QUANT_SMS = (100, 103)
 
 
 class SvdqFusedError(RuntimeError):
@@ -108,8 +119,18 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
     # smooth divide (bf16-rounded to match the aten reference) and FLAT
     # [M, K/16] scale stores (dot_scaled's native layout) instead of the
     # cuBLAS blocked swizzle.
-    _QBPP = 128
-
+    #
+    # The stride-2 pair of loads is why there are TWO kernels below. It costs
+    # nothing on sm_120, but on sm_100 it leaves the quantizer at 9-21% of
+    # B200's own measured 6.0 TB/s copy roofline, and no (blocks-per-program,
+    # warps) combination moves it — the whole sweep lands in one band
+    # (pgw#863, scripts/svdq_bench/tune_quant.py). `_quant_contig_kernel`
+    # loads the block as ONE contiguous [BPP, 16] tile and de-interleaves in
+    # registers instead; measured 1.10-1.73x on B200 across the real qwen
+    # shapes, bit-identical output in both scale layouts. It is NOT made the
+    # sm_120 path: the 5090 lesson above is that re-layout in registers loses
+    # there, and a shared "improvement" that regresses the card we actually
+    # ship on is not an improvement.
     @triton.jit
     def _quant_smooth_kernel(  # type: ignore[no-untyped-def]
         x_ptr, sm_ptr, s2_ptr, q_ptr, s_ptr,
@@ -156,6 +177,53 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
             tile = rb * NCB + (offs_b // 4)
             in_tile = (rr % 32) * 16 + (rr // 32) * 4 + (offs_b % 4)
             tl.store(s_ptr + tile * 512 + in_tile, scale_f8, mask=blk_ok)
+        else:
+            tl.store(s_ptr + row * KB + offs_b, scale_f8, mask=blk_ok)
+
+    @triton.jit
+    def _quant_contig_kernel(  # type: ignore[no-untyped-def]
+        x_ptr, sm_ptr, s2_ptr, q_ptr, s_ptr,
+        K, KB, NCB,
+        HAS_SMOOTH: tl.constexpr, BLOCKED: tl.constexpr, BPP: tl.constexpr,
+    ):
+        """Same arithmetic as ``_quant_smooth_kernel``, contiguous loads.
+
+        Every value is read exactly once by an adjacent lane; the even/odd
+        split the packer needs happens after the codes exist, as a register
+        reshape + split. Bit-identity with the strided kernel is enforced by
+        ``fused_self_check`` before the lane can arm."""
+        row = tl.program_id(0)
+        blk0 = tl.program_id(1) * BPP
+        s2 = tl.load(s2_ptr)
+
+        offs_b = blk0 + tl.arange(0, BPP)
+        blk_ok = offs_b < KB
+        offs = offs_b[:, None] * 16 + tl.arange(0, 16)[None, :]
+        m2 = blk_ok[:, None]
+        tile = tl.load(x_ptr + row * K + offs, mask=m2,
+                       other=0.0).to(tl.float32)
+        if HAS_SMOOTH:
+            smv = tl.load(sm_ptr + offs, mask=m2, other=1.0).to(tl.float32)
+            tile = tl.math.div_rn(tile, smv).to(tl.bfloat16).to(tl.float32)
+
+        amax = tl.max(tl.abs(tile), axis=1)
+        scale = tl.math.div_rn(amax, 6.0 * s2)
+        scale = tl.minimum(tl.maximum(scale, 0.001953125), 448.0)
+        scale_f8 = scale.to(tl.float8e4nv)
+        denom = (scale_f8.to(tl.float32) * s2)[:, None]
+
+        codes = _e2m1_code(tl.math.div_rn(tile, denom))
+        lo, hi = tl.split(tl.reshape(codes, (BPP, 8, 2)))
+        packed = lo | (hi << 4)
+
+        offs_p = offs_b[:, None] * 8 + tl.arange(0, 8)[None, :]
+        tl.store(q_ptr + row * (K // 2) + offs_p, packed, mask=m2)
+        if BLOCKED:
+            rb = row // 128
+            rr = row % 128
+            tile_i = rb * NCB + (offs_b // 4)
+            in_tile = (rr % 32) * 16 + (rr // 32) * 4 + (offs_b % 4)
+            tl.store(s_ptr + tile_i * 512 + in_tile, scale_f8, mask=blk_ok)
         else:
             tl.store(s_ptr + row * KB + offs_b, scale_f8, mask=blk_ok)
 
@@ -242,13 +310,19 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         tl.store(out_ptr + offs_m[:, None] * N + offs_n[None, :],
                  y.to(tl.bfloat16), mask=m_ok[:, None] & n_ok[None, :])
 
-    def _quant_warps() -> int:
+    def _sm() -> int:
         try:
             major, minor = torch.cuda.get_device_capability()
-            return _QUANT_WARPS_BY_SM.get(major * 10 + minor,
-                                          _QUANT_WARPS_DEFAULT)
+            return major * 10 + minor
         except Exception:  # noqa: BLE001
-            return _QUANT_WARPS_DEFAULT
+            return 0
+
+    def _quant_warps() -> int:
+        return _QUANT_WARPS_BY_SM.get(_sm(), _QUANT_WARPS_DEFAULT)
+
+    def _quant_kernel():  # type: ignore[no-untyped-def]
+        return (_quant_contig_kernel if _sm() in _CONTIG_QUANT_SMS
+                else _quant_smooth_kernel)
 
     def _quant_launch(x2: Any, smooth: Optional[Any], s2: Any,
                       blocked: bool) -> tuple[Any, Any]:
@@ -265,10 +339,10 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         else:
             s = torch.empty(m, kb, dtype=torch.float8_e4m3fn,
                             device=x2.device)
-        bpp = min(_QBPP, kb)
+        bpp = min(_QBPP_BY_SM.get(_sm(), _QBPP), kb)
         while kb % bpp and bpp > 1:
             bpp //= 2
-        _quant_smooth_kernel[(m, (kb + bpp - 1) // bpp)](
+        _quant_kernel()[(m, (kb + bpp - 1) // bpp)](
             x2, smooth if smooth is not None else x2, s2, q, s, k, kb, ncb,
             HAS_SMOOTH=smooth is not None, BLOCKED=blocked, BPP=bpp,
             num_warps=_quant_warps())
