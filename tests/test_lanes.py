@@ -71,3 +71,21 @@ def test_parse_lane_spec_dual_form() -> None:
 ])
 def test_lane_of_binding(flavor: str, storage: str, compiled: bool, want: str) -> None:
     assert lanes.lane_id(lanes.lane_of_binding(flavor, storage, compiled)) == want
+
+
+def test_lane_of_binding_covers_every_body_with_valid_execution() -> None:
+    inputs = [
+        ("", ""),
+        ("", "fp8"),
+        ("fp8-w8a8", ""),
+        ("svdq-fp4-r128", ""),
+        ("svdq-int4-r128", ""),
+        ("nvfp4-w4a4", ""),
+    ]
+    bodies = set()
+    for flavor, storage in inputs:
+        for compiled in (False, True):
+            lane = lanes.lane_of_binding(flavor, storage, compiled)
+            assert lanes.valid_lane(lane)
+            bodies.add(lanes.lane_body_id(lane))
+    assert bodies == set(lanes.known_lane_bodies())

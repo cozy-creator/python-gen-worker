@@ -5262,9 +5262,9 @@ class Executor:
     def _served_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
         """The CONCRETE lane this spec's instance executes as, for
         JobMetrics.lane and ctx.lane reporting: the most-quantized pipeline
-        binding's lane (table rank), execution axis from the record's live
-        compile state. A declared (handles=) instructed lane wins outright —
-        the author's kernels execute it regardless of binding surgery."""
+        binding's lane (table rank), with live compile state as a preference.
+        Fixed-mode bodies override it; a declared (handles=) instruction owns
+        the full lane outright."""
         from .models import lanes as lanespec
 
         compiled = False
