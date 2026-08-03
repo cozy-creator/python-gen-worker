@@ -16,7 +16,8 @@ from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import content_credentials
 from . import receipts
-from . import worker_mode
+from . import mint_goal as mint_goal_mod
+from . import worker_goals
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
@@ -295,9 +296,10 @@ class Lifecycle:
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
-        # th#1359: the forge driver, on a mint-only pod. None on every
-        # serving worker.
-        self._forge_task: Optional[asyncio.Task] = None
+        # pgw#930: the scheduled-mint goal driver. None on a pod that was
+        # given no mint goal — which is every ordinary serving pod, and is a
+        # different fact from "this pod may not compile".
+        self._mint_goal_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._disk_report_at = 0.0
         self._disk_report_refresh_task: Optional[asyncio.Task] = None
@@ -424,12 +426,13 @@ class Lifecycle:
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=gw_version,
             image_digest=self._settings.worker_image_digest,
-            # th#1359 Part 2: the RAW declared mode. The hub keys dispatch
-            # exclusion and drain immunity on it, so it ships as declared —
-            # `worker_mode.mode()` normalises an unknown value to "serve"
-            # locally, but the hub must be able to SEE that it sent something
-            # this image does not understand rather than infer a serving pod.
-            worker_mode=worker_mode.declared(),
+            # pgw#930: the goal set projected onto the wire field the hub
+            # still keys dispatch exclusion and drain immunity on. It ships the
+            # RAW declaration when there was one, so a spelling this image does
+            # not understand is VISIBLE at the hub as a disagreement rather
+            # than silently read as a serving pod. Replaced by th#1488's
+            # `repeated Goal goals`, which reports each goal independently.
+            worker_mode=worker_goals.current().wire_declaration(),
             # git_commit intentionally unpopulated (pgw#514/P4): no launcher
             # ever set WORKER_GIT_COMMIT and Go never read WorkerResources
             # .git_commit — dead on both ends. Field stays on the wire
@@ -1350,17 +1353,16 @@ class Lifecycle:
         # milestone, and that is the finding (same doctrine as an open span).
         await self.set_phase(pb.WORKER_PHASE_READY)
 
-        # th#1359: a forge pod's boot is not the end of its story — it is the
-        # start of the only work it was bought for. The driver waits for the
-        # mint disposition to be final, joins the publish, states a typed
-        # terminal and drains itself. Started AFTER READY so the mint's own
-        # setup path is byte-identical to a serving pod's: the forge is a
-        # MODE, and a mode that boots differently is a fork.
-        if worker_mode.is_forge():
-            from . import forge as forge_mod
-
-            self._forge_task = asyncio.create_task(
-                forge_mod.run(self), name="forge-driver")
+        # pgw#930 (§1.17): a SCHEDULED MINT goal's boot is not the end of the
+        # pod's story — it is the start of work it was bought for. The driver
+        # waits for the mint disposition to be final, joins the publish, states
+        # a typed terminal, and retires the pod ONLY if no serve goal is also
+        # held. Started AFTER READY so the mint's setup path is byte-identical
+        # whether or not a serve goal is present: goals compose, and a goal
+        # that boots differently is a fork.
+        if worker_goals.current().drives_mint():
+            self._mint_goal_task = asyncio.create_task(
+                mint_goal_mod.run(self), name="mint-goal-driver")
 
     def _mark_servable(self) -> None:
         """Close the boot: mark first-request-servable from process start.

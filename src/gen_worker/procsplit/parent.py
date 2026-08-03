@@ -65,7 +65,7 @@ from ..pb import worker_scheduler_pb2 as pb
 from ..transport import FatalTransportError, Transport
 from ..topology import ExecutionTopology
 from .. import postmortem
-from .. import worker_mode
+from .. import config, worker_credential, worker_goals
 from .. import worker_fatal
 from . import (
     ENV_CHILD,
@@ -1175,9 +1175,13 @@ class ParentControl:
             else (shlex.split(env_cmd) if env_cmd else [sys.executable, "-m", "gen_worker.entrypoint"])
         )
         self._child_env = dict(child_env or {})
+        # pgw#931: was `child_env or os.environ or default` — the same env read
+        # through two doors, neither of which was the loader. `Settings` owns the
+        # value now; the child_env override stays because it is this parent
+        # deliberately pointing THIS child somewhere else.
         record_path = (
             self._child_env.get("GEN_WORKER_BOOT_RECORD")
-            or os.environ.get("GEN_WORKER_BOOT_RECORD")
+            or self._settings.boot_record_path
             or str(postmortem.BOOT_RECORD_PATH)
         )
         self._postmortem_dir = Path(record_path).parent
@@ -1318,9 +1322,14 @@ class ParentControl:
             # a cold pod so the chown is free, metadata-only when warm. Read
             # from env/Settings rather than models.cache_paths — importing that
             # package pulls the model layer, and this process never imports torch.
+            # pgw#931 VIOLATION-A #1: `_settings.tensorhub_cache_dir` and a raw
+            # read of the SAME env sat in adjacent lines of this expression —
+            # four sources for one fact, two of them the same variable through
+            # different doors. `Settings` also loads from yaml, /run/secrets and
+            # `.env`, so the raw read could only ever WIN where the loader had
+            # already lost. Deleted.
             self._child_env.get("TENSORHUB_CACHE_DIR", "")
             or self._settings.tensorhub_cache_dir
-            or os.environ.get("TENSORHUB_CACHE_DIR", "")
             or _DEFAULT_TENSORHUB_CACHE_DIR,
             self._child_env.get("TENSORHUB_CAS_DIR", "")
             or self._settings.tensorhub_cas_dir,
@@ -1332,7 +1341,7 @@ class ParentControl:
             str(postmortem.BOOT_RECORD_PATH.parent),
             os.path.dirname(
                 self._child_env.get("GEN_WORKER_BOOT_RECORD", "")
-                or os.environ.get("GEN_WORKER_BOOT_RECORD", "")
+                or self._settings.boot_record_path
             ),
             # th#1087's mutable-config snapshot: the CHILD atomically rewrites
             # it on every config-generation push (tmp file in the SAME dir plus
@@ -1342,7 +1351,6 @@ class ParentControl:
             os.path.dirname(
                 self._child_env.get("GEN_WORKER_CONFIG_SNAPSHOT_PATH", "")
                 or self._settings.config_snapshot_path
-                or os.environ.get("GEN_WORKER_CONFIG_SNAPSHOT_PATH", "")
                 or _DEFAULT_CONFIG_SNAPSHOT_PATH
             ),
         ]
@@ -1351,8 +1359,7 @@ class ParentControl:
         # The datacenter-warm fill source is a mounted network volume we only
         # ever READ. It is deliberately not in the granted set — say so rather
         # than let a later reader assume it was missed.
-        fill = (self._settings.tensorhub_fill_source_dir
-                or os.environ.get("TENSORHUB_FILL_SOURCE_DIR", ""))
+        fill = self._settings.tensorhub_fill_source_dir
         if fill and not os.access(fill, os.R_OK | os.X_OK):
             logger.warning(
                 "fill source %s is not readable by the compute uid; warm fill "
@@ -1488,7 +1495,7 @@ class ParentControl:
             # 2026-08-02, pods ld425b16fca080 / rd88n91cz0mxxl at 391s each,
             # WORKER_MODE="forge" present in the container env throughout).
             # RAW declared value, same contract as the other builder.
-            worker_mode=worker_mode.declared(),
+            worker_mode=worker_goals.current().wire_declaration(),
             instance_id=self._settings.runpod_pod_id or "",
         )
 
@@ -2542,9 +2549,10 @@ def run_parent() -> int:
     report_previous_container_death()
     postmortem.clear_all_inflight()
     postmortem.write_boot_record()
-    from ..config import get_settings
-
-    settings = get_settings()
+    # §1.18: the bootstrap-owned load for the CONTROL-PARENT process entry.
+    settings = config.install(config.load_settings())
+    worker_goals.install(worker_goals.from_settings(settings))
+    worker_credential.install_bootstrap(settings)
     code = ParentControl(settings).run()
     if code == 0:
         postmortem.clear_boot_record()

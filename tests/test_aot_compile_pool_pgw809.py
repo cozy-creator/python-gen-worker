@@ -476,15 +476,14 @@ def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
     than argued. The pool changes WHEN entries compile, never what."""
     from gen_worker import env_seal
 
+    # pgw#929: the loop that used to sit here set GEN_WORKER_AOT_ENTRY_WORKERS
+    # and asserted the digest was unmoved. NOTHING IN src/ HAS EVER READ THAT
+    # NAME — the live width constant is `aot_compile_pool.MAX_ENTRY_WORKERS` —
+    # so the assertion held for the one reason that proves nothing (C1: a test
+    # exercising a knob that does not exist). The real property, that the
+    # shared cache DIR is a location and not a recipe, is asserted below
+    # against a value the code actually reads.
     base = env_seal.inductor_config_digest()
-    for width in (1, 2, 4, 8):
-        os.environ["GEN_WORKER_AOT_ENTRY_WORKERS"] = str(width)
-        try:
-            assert env_seal.inductor_config_digest() == base, (
-                f"K={width} moved the inductor config digest — the pool "
-                f"would retire every published cell")
-        finally:
-            os.environ.pop("GEN_WORKER_AOT_ENTRY_WORKERS", None)
     env = pool.child_env(str(tmp_path / "cache"))
     assert env["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "cache")
     assert env_seal.inductor_config_digest() == base, (

@@ -55,9 +55,9 @@ class SplitProbe:
         if str(os.environ.get("WORKER_JWT", "") or "").strip():
             found.append("env:WORKER_JWT")
         try:
-            from gen_worker.config import get_settings
+            from gen_worker import config as gw_config
 
-            if str(getattr(get_settings(), "worker_jwt", "") or "").strip():
+            if str(getattr(gw_config.current(), "worker_jwt", "") or "").strip():
                 found.append("settings.worker_jwt")
         except Exception:
             pass

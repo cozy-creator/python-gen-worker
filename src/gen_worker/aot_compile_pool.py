@@ -64,6 +64,8 @@ from typing import (
 import msgspec
 
 from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
+from . import worker_goals
+from .worker_goals import WorkerGoals
 from .postmortem import cpu_quota_cores
 
 logger = logging.getLogger(__name__)
@@ -328,10 +330,13 @@ class PoolWidth:
     #: summed over its real descendant tree (``_peak_rss_bytes``), banked by
     #: the serving parent (``mint_budget.record_entry_peak_rss``).
     per_entry_rss_basis: str = "default"
-    #: th#1359: whether the tenant reserves were applied. A K of 1 on a
-    #: serving pod and a K of 1 on a forge pod are different defects, and the
-    #: row has to say which one it is.
-    forge: bool = False
+    #: pgw#930 (§1.17): the two goals, reported INDEPENDENTLY. A K of 1 on a
+    #: pod holding a serve goal and a K of 1 on a mint-only pod are different
+    #: defects, and the row has to say which one it is. This was one boolean
+    #: named `forge`, which could not describe a pod holding both goals — the
+    #: exact case Paul's ruling requires to work.
+    serve_goal: bool = True
+    mint_goal: bool = False
 
     @property
     def underwidth(self) -> int:
@@ -357,7 +362,8 @@ class PoolWidth:
             "underwidth": int(self.underwidth),
             "per_entry_device_basis": self.per_entry_device_basis,
             "per_entry_rss_basis": self.per_entry_rss_basis,
-            "forge": bool(self.forge),
+            "serve_goal": bool(self.serve_goal),
+            "mint_goal": bool(self.mint_goal),
             "width_reason": self.reason,
         }
         for block in (self.cpu, self.memory, self.device):
@@ -538,7 +544,7 @@ def entry_workers(
     device_basis: str = "",
     limit: int = 0,
     device_lock: Optional[bool] = None,
-    forge: Optional[bool] = None,
+    goals: Optional[WorkerGoals] = None,
 ) -> PoolWidth:
     """How many entries this pod may compile at once.
 
@@ -571,25 +577,29 @@ def entry_workers(
     say why — so an unexplained K is a defect in itself.
     """
     entries = max(0, int(entries))
-    if forge is None:
-        from . import worker_mode
-
-        forge = worker_mode.is_forge()
-    # th#1359 / pgw#848: THREE of this policy's terms are tenant reserves, and
-    # on a forge pod there is no tenant. `SERVING_HEADROOM_CPUS` keeps cores
+    if goals is None:
+        goals = worker_goals.current()
+    # pgw#930 (§1.17): THREE of this policy's terms are tenant reserves, and a
+    # pod with no SERVE goal has no tenant. `SERVING_HEADROOM_CPUS` keeps cores
     # for an eager forward and a heartbeat; `DEVICE_RESERVE_BYTES` keeps VRAM
     # for the tenant's peak; `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a
-    # request arriving mid-mint does not meet the OOM killer. A mint-only pod
-    # receives no tenant dispatch, so all three protect nobody — and on
-    # pgw#846's attempts fourteen and fifteen the VRAM reserve alone held the
-    # pool at K=1 on a host that could have run it 127 CPU-side.
+    # request arriving mid-mint does not meet the OOM killer. A pod holding no
+    # serve goal receives no tenant dispatch, so all three protect nobody — and
+    # on pgw#846's attempts fourteen and fifteen the VRAM reserve alone held
+    # the pool at K=1 on a host that could have run it 127 CPU-side.
     #
-    # A SMALL host-RAM reserve survives: the OS, the page cache and the mint
-    # child's own supervisor are real on a forge pod too. It is the TENANT's
-    # share that goes, not prudence.
-    cpu_headroom = 0 if forge else SERVING_HEADROOM_CPUS
-    device_reserve = 0 if forge else DEVICE_RESERVE_BYTES
-    rss_reserve = FORGE_RSS_RESERVE_BYTES if forge else ENTRY_RSS_RESERVE_BYTES
+    # These three used to be `0 if forge else X` — strictly two-valued, keyed
+    # on an exclusive mode. Keyed on the SERVE GOAL they compose: a pod serving
+    # one small model while driving a scheduled mint keeps every reserve, which
+    # is the case the mode could not express.
+    #
+    # A SMALL host-RAM reserve survives regardless: the OS, the page cache and
+    # the mint child's own supervisor are real on a mint-only pod too. It is
+    # the TENANT's share that goes, not prudence.
+    reserve = goals.tenant_reserve_applies()
+    cpu_headroom = SERVING_HEADROOM_CPUS if reserve else 0
+    device_reserve = DEVICE_RESERVE_BYTES if reserve else 0
+    rss_reserve = ENTRY_RSS_RESERVE_BYTES if reserve else FORGE_RSS_RESERVE_BYTES
     locked = aot_device_lock.supported() if device_lock is None \
         else bool(device_lock)
     if entries <= 1:
@@ -605,7 +615,7 @@ def entry_workers(
             per_entry_rss_bytes=0, per_entry_device_bytes=0,
             per_entry_rss_basis="not-read", per_entry_device_basis="not-read",
             device_lock=locked, binding="entries", ceiling=1,
-            forge=bool(forge or False),
+            serve_goal=goals.serve, mint_goal=goals.mint,
             reason=(
                 f"{entries} entr{'y' if entries == 1 else 'ies'}: serial "
                 f"(no cpu/memory/device bound was read — the entry count "
@@ -696,7 +706,7 @@ def entry_workers(
             memory=memory, device=device,
             per_entry_device_basis=device_basis,
             per_entry_rss_basis=rss_basis,
-            forge=bool(forge))
+            serve_goal=goals.serve, mint_goal=goals.mint)
 
     workers = max(
         1, min(cpu_workers, mem_workers, device_workers, ceiling, entries))
@@ -713,7 +723,8 @@ def entry_workers(
         (device_workers, "vram"), (ceiling, "ceiling"),
         (entries, "entries"))[1]
     reason = (
-        f"K={workers} ({binding}-bound{', forge' if forge else ''}): "
+        f"K={workers} ({binding}-bound, goals="
+        f"{'serve+mint' if goals.serve and goals.mint else 'serve' if goals.serve else 'mint' if goals.mint else 'none'}): "
         f"{vcpus} vCPU ({cpu.basis}) -> "
         f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) -> "
         f"{mem_workers}, {free_vram / 1024**3:.1f} GiB VRAM ({device.basis}) "

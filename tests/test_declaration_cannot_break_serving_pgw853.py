@@ -38,7 +38,7 @@ from gen_worker.api.export_contract import (
     import_export_declaration, register_export_declaration,
     registered_export_families, reset_export_declarations,
 )
-from gen_worker.config import get_settings
+from gen_worker import config as gw_config
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.hub_double import hub_double, is_ready, is_result_for
@@ -242,7 +242,7 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """A real AOT discovery miss on an otherwise mint-capable pod."""
     monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
@@ -265,7 +265,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     reset_export_declarations()
     yield
     reset_export_declarations()
-    get_settings.cache_clear()
+    gw_config.reload_for_test()
 
 
 def test_the_mint_gate_declines_typed_and_keeps_the_blocker_text(

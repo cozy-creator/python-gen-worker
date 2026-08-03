@@ -26,6 +26,17 @@ import pytest
 
 from gen_worker import aot_mint, mint_budget, mint_child, mint_process
 
+import inspect
+
+from gen_worker.worker_goals import WorkerGoals
+
+# pgw#930: these were `forge=True` / `forge=False`. The pool no longer takes a
+# mode boolean — it takes the GOAL SET, and derives its three tenant reserves from
+# whether a serve goal is held. Naming the goals makes the test say which fact it
+# is exercising instead of which branch of a two-valued ternary.
+_SERVE_ONLY = WorkerGoals(serve=True, mint=False, declared="serve")
+_MINT_ONLY = WorkerGoals(serve=False, mint=True, declared="forge")
+
 _GIB = 1 << 30
 
 #: sdxl's UNet as both pods measured it, and the fraction the old ceiling
@@ -170,21 +181,46 @@ def test_every_terminus_reports_the_device_peak() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_forge_mode_has_no_tenant_to_reserve_for() -> None:
+def test_no_serve_goal_means_no_tenant_to_reserve_for(monkeypatch) -> None:
     """The premise of this whole module is a co-resident serving process.
 
-    A forge pod receives no tenant dispatch and holds no resident serving
-    model, so the reserve is not "small" — it is zero, and the mint gets the
-    card. Stated explicitly rather than left to emerge from `allocated -> 0`:
-    "mostly falls out on its own" is how the 11.09 GiB ceiling survived
-    fifteen attempts.
-    """
-    import inspect
+    A pod holding no serve goal receives no tenant dispatch and holds no
+    resident serving model, so the reserve is not "small" — it is zero, and the
+    mint gets the card. Stated explicitly rather than left to emerge from
+    `allocated -> 0`: "mostly falls out on its own" is how the 11.09 GiB ceiling
+    survived fifteen attempts.
 
-    source = inspect.getsource(mint_budget.co_residency)
-    assert "if forge:" in source and "activation = 0" in source
-    # The signature takes the mode, and defaults to reading it from the process.
-    assert "forge" in inspect.signature(mint_budget.co_residency).parameters
+    pgw#930 rewrote this from a source-text assertion (`"if forge:" in
+    inspect.getsource(...)`) into a BEHAVIOURAL one. The old form could only
+    ever check that a particular branch was still spelled a particular way, so
+    it would have passed unchanged if the branch had been keyed on the wrong
+    fact — and it would fail on any refactor that kept the behaviour. It also
+    could not express the case that matters now: a pod holding BOTH goals keeps
+    its reserve, which is a third answer the two-valued check had no room for.
+    """
+    reading = mint_budget._DeviceRead(
+        free_bytes=40 * _GIB, allocated=5 * _GIB,
+        measured_activation=0, activation=3 * _GIB, cache_slack=0)
+    monkeypatch.setattr(mint_budget, "_read_device", lambda device: reading)
+
+    serve_only = mint_budget.co_residency(0, goals=_SERVE_ONLY)
+    mint_only = mint_budget.co_residency(0, goals=_MINT_ONLY)
+    both = mint_budget.co_residency(
+        0, goals=WorkerGoals(serve=True, mint=True))
+
+    assert serve_only.activation_bytes == 3 * _GIB, (
+        "a pod holding a serve goal must keep its tenant activation reserve")
+    assert mint_only.activation_bytes == 0, (
+        "a pod holding no serve goal has no tenant to reserve for")
+    assert both.activation_bytes == serve_only.activation_bytes, (
+        "a pod serving AND minting kept no tenant reserve — this is the case "
+        "the deleted `forge` boolean could not express, and getting it wrong "
+        "is pgw#846's 11.09 GiB ceiling pointed at a live tenant")
+
+    # The signature takes the GOAL SET, not a mode, and defaults to reading the
+    # goals the process entry published.
+    params = inspect.signature(mint_budget.co_residency).parameters
+    assert "goals" in params and "forge" not in params
 
 
 def test_a_forge_pool_drops_all_three_tenant_reserves() -> None:
@@ -197,38 +233,49 @@ def test_a_forge_pool_drops_all_three_tenant_reserves() -> None:
         vcpus=127, available_bytes=116 * _GIB, device_bytes=int(11.09 * _GIB),
         device_lock=True)
     serving = pool.entry_workers(
-        36, free_vram_bytes=int(21.48 * _GIB), forge=False, **hw)
+        36, free_vram_bytes=int(21.48 * _GIB), goals=_SERVE_ONLY, **hw)
     forge = pool.entry_workers(
-        36, free_vram_bytes=int(44.39 * _GIB), forge=True, **hw)
+        36, free_vram_bytes=int(44.39 * _GIB), goals=_MINT_ONLY, **hw)
 
     assert serving.workers == 1 and serving.binding == "vram", serving.reason
     assert forge.workers > serving.workers, (
-        f"the forge pod must not inherit the serving pod's reserves: "
+        f"a pod holding no serve goal must not inherit the tenant reserves: "
         f"{serving.reason!r} vs {forge.reason!r}")
     # Every reserve, individually, on identical hardware.
     same = dict(hw, free_vram_bytes=int(44.39 * _GIB))
-    a = pool.entry_workers(36, forge=False, **same)
-    b = pool.entry_workers(36, forge=True, **same)
+    a = pool.entry_workers(36, goals=_SERVE_ONLY, **same)
+    b = pool.entry_workers(36, goals=_MINT_ONLY, **same)
     assert b.cpu_workers > a.cpu_workers, "CPU headroom not dropped"
     assert b.mem_workers > a.mem_workers, "host-RAM reserve not dropped"
     assert b.device_workers > a.device_workers, "VRAM reserve not dropped"
 
 
 def test_the_width_row_says_which_regime_it_was() -> None:
-    """A K of 1 on a serving pod and a K of 1 on a forge pod are different
-    defects. The row has to say which."""
+    """A K of 1 with a serve goal and a K of 1 without one are different
+    defects. The row has to say which — and pgw#930 makes that TWO facts
+    rather than one boolean, because a pod can hold both goals at once and a
+    single `forge` flag could not describe it."""
     from gen_worker import aot_compile_pool as pool
 
-    forge = pool.entry_workers(
+    mint_only = pool.entry_workers(
         36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, forge=True)
-    assert forge.facts()["forge"] is True
-    assert "forge" in forge.reason
+        device_lock=True, goals=_MINT_ONLY)
+    assert mint_only.facts()["serve_goal"] is False
+    assert mint_only.facts()["mint_goal"] is True
+    assert "goals=mint" in mint_only.reason
     serving = pool.entry_workers(
         36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, forge=False)
-    assert serving.facts()["forge"] is False
-    assert "forge" not in serving.reason
+        device_lock=True, goals=_SERVE_ONLY)
+    assert serving.facts()["serve_goal"] is True
+    assert serving.facts()["mint_goal"] is False
+    assert "goals=serve" in serving.reason
+
+    # The combination the deleted boolean could not spell.
+    both = pool.entry_workers(
+        36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+        device_lock=True, goals=WorkerGoals(serve=True, mint=True))
+    assert (both.facts()["serve_goal"], both.facts()["mint_goal"]) == (True, True)
+    assert "goals=serve+mint" in both.reason
 
 
 def test_serving_mode_is_completely_unchanged() -> None:
@@ -238,7 +285,7 @@ def test_serving_mode_is_completely_unchanged() -> None:
 
     w = pool.entry_workers(
         18, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, forge=False)
+        device_lock=True, goals=_SERVE_ONLY)
     assert w.cpu_workers == (16 - pool.SERVING_HEADROOM_CPUS) // 2 == 7
     assert w.mem_workers == (64 * _GIB - pool.ENTRY_RSS_RESERVE_BYTES) // (
         pool.DEFAULT_ENTRY_PEAK_RSS_BYTES)

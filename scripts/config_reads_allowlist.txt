@@ -1,0 +1,203 @@
+# pgw#929 + pgw#931 — the env census, classified. Enforced by scripts/lint_config_reads.py.
+#
+# Ruling §1.18: exactly one component per process reads the environment
+# (`gen_worker.config`). Every OTHER `os.environ` / `os.getenv` access in
+# `src/gen_worker` needs a line here or CI fails.
+#
+# FORMAT:  <path>:<line>  <CLASSIFICATION>  <reason>
+#
+#   VIOLATION   a config value read behind the pipeline. A DEFECT, listed only
+#               so the gate can be green while it is burned down. Every line
+#               must name what blocks it. Adding one needs a reason a reviewer
+#               will accept, not just a passing build.
+#   BOOTSTRAP   read before config can exist. Must stay a named, tiny set — if
+#               it grows, the boundary is drawn in the wrong place.
+#   IPC         a parent handing a value to a child across an exec boundary.
+#               §1.17's verdict is that these belong on argv; §1.18's addition
+#               is that a value ORIGINATING in config must reach the child as
+#               config, never as an env the parent re-exported.
+#   LIBRARY     the target library reads env at import and exposes no other
+#               API (torch/inductor/triton/NCCL). Legitimate mechanism; the
+#               VALUE should still come from a Settings-derived builder.
+#   STANDALONE  a CLI/convert path that loads no app config.
+#   TRIPWIRE    a guard whose entire purpose is to fire on a misconfiguration.
+#               It carries no behaviour of its own and is correctly loud.
+#
+# Baselined the way th#1383 baselined the Go gate: seeded with today's accepted
+# sites so it is green on arrival, then burned down. A gate that fails on day
+# one gets switched off.
+#
+# SCOREBOARD at the pgw#929/930/931 landing: 100 sites (106 before; six raw
+# config reads were deleted outright, five of them `or os.environ.get(...)`
+# clauses sitting next to the Settings field for the SAME fact).
+#
+# The count went UP against the issue's 103 because the gate catches a shape the
+# issue's grep could not: `os.environ` bound as a VALUE (`dict(os.environ)`,
+# `source = os.environ`). Eight such sites, and they are the widest reads in the
+# tree - three of them are the child-env denylist.
+#   VIOLATION 17 | BOOTSTRAP 6 | IPC 21 | LIBRARY 30 | STANDALONE 18 | TRIPWIRE 8
+
+# ---------------------------------------------------------------------------
+# VIOLATION — the burn-down list. Each names its blocker.
+# ---------------------------------------------------------------------------
+src/gen_worker/compile_cache.py:553 VIOLATION WORKER_IMAGE_DIGEST is a Settings field AND a compile-cache KEY AXIS. runtime_key() has 21 callers and no settings; needs an install-once image identity. Latent not live: production pods receive this via env so the loader and the raw read agree - it diverges only on a deployment configuring it from yaml/.env/secrets, where the cell would silently key on "".
+src/gen_worker/executor.py:843 VIOLATION RUNPOD_POD_ID as a proxy for "managed runtime". Blocked on pgw#921/th#1488 RuntimeIdentity.managed - pgw#929 AMBIGUOUS #5 forbids adding a vendor Settings field instead.
+src/gen_worker/executor.py:844 VIOLATION RUNPOD_PROVIDER, same blocker. This is why a Vast pod has to be given a RunPod-named variable (vast/provider.go:414).
+src/gen_worker/executor.py:846 VIOLATION TENSORHUB_FILL_SOURCE_DIR has a Settings field; Executor.__init__ takes no Settings. Fix with the same pass that threads settings into the executor.
+src/gen_worker/postmortem.py:86 VIOLATION GEN_WORKER_BOOT_RECORD now HAS a field (boot_record_path). BOOT_RECORD_PATH is computed at IMPORT, before any process entry can have loaded config; needs an install-once path.
+src/gen_worker/postmortem.py:89 VIOLATION TENSORHUB_CACHE_DIR, same import-time constant, same fix.
+src/gen_worker/runtime_config.py:51 VIOLATION GEN_WORKER_CONFIG_SNAPSHOT_PATH has a field; this module is reached from paths with no Settings in hand.
+src/gen_worker/runtime_config.py:66 VIOLATION same.
+src/gen_worker/runtime_config.py:69 VIOLATION config->env WRITE-BACK. This is the mechanism keeping the raw readers working, so per pgw#931 sequencing it may only be deleted atomically with the LAST of them - never first.
+src/gen_worker/parallel/runtime.py:248 VIOLATION config->env write-back of boot.cache_dir, used as an intra-process bus. Same sequencing rule.
+src/gen_worker/url_fetch.py:84 VIOLATION GEN_WORKER_URL_FETCH_ALLOWED_HOSTS is an SSRF allow-list: security policy the hub owns and may need to change on a RUNNING worker. Ruled a Directive field (th#1488). As an env, a policy change needs a pod replacement.
+src/gen_worker/input_assets.py:451 VIOLATION GEN_WORKER_INTERNAL_OBJECT_HOSTS, same SSRF ruling, same blocker.
+src/gen_worker/env_seal.py:511 VIOLATION COZY_CELL_EPOCH is an axis of the cell key, so it looks like a value - but bumping it DISOWNS EVERY PREVIOUSLY MINTED CELL. That is a fleet-wide recall, and a recall must be a recorded operator intent with an actor and a reason. `cell_revocations` already exists on the hub and is the right home (th#1499).
+src/gen_worker/entrypoint.py:320 VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR from a computed path. Legitimate library steering, but belongs in the one Settings-derived torch_env() builder rather than here.
+
+src/gen_worker/procsplit/parent.py:497 VIOLATION `dict(os.environ)` then `pop(_CHILD_FORBIDDEN_ENVS)` is a DENYLIST: the compute child inherits every variable not explicitly named. Correct shape is an allowlist built from Settings. Same shape th#1502 records at registry.go, and the reason tenant code can see anything nobody thought to strip.
+src/gen_worker/procsplit/parent.py:1359 VIOLATION same denylist shape for the silicon-measurement child.
+src/gen_worker/topology.py:573 VIOLATION binds the WHOLE environment as the default source and reads WORKER_EXECUTION_TOPOLOGY out of it. The hub-delivered topology has no Settings field; absent is legal and means one slot, so a misspelling silently serves one card on a multi-GPU pod.
+src/gen_worker/aot_compile_pool.py:975 IPC seeds the AOT entry child's env from this process's, then sets GEN_WORKER_AOT_ENTRY_CHILD. Parent-to-child handoff; the inherited base is the denylist shape above.
+src/gen_worker/mint_process.py:455 IPC seeds the mint child's env, then sets GEN_WORKER_MINT_CHILD. Same handoff shape.
+src/gen_worker/runtimes/server.py:119 IPC seeds an engine-server subprocess's env. The engine is a third-party binary configured by environment; there is no other API.
+src/gen_worker/subproc.py:140 IPC seeds a per-invoke subprocess's env in order to set GEN_WORKER_CONFIG_SNAPSHOT_PATH. §1.18 ownership test FAILS with its sibling at :144 - the snapshot path originates in Settings.
+src/gen_worker/env_seal.py:136 LIBRARY scrub_env() ITERATES the environment to find every name under SCRUB_PREFIXES and erase it before torch imports. Reading all of it is the mechanism; this is the one place §1.18 is already mechanically enforced in either repo.
+
+# ---------------------------------------------------------------------------
+# BOOTSTRAP — six sites. The one thing this repo already gets right.
+# ---------------------------------------------------------------------------
+src/gen_worker/entrypoint.py:26 BOOTSTRAP PYTORCH_CUDA_ALLOC_CONF setdefault must precede any torch import; the reason is given at the site and is load-bearing.
+src/gen_worker/entrypoint.py:35 BOOTSTRAP TORCHINDUCTOR_AUTOGRAD_CACHE setdefault, same pre-import constraint.
+src/gen_worker/procsplit/__init__.py:72 BOOTSTRAP GEN_WORKER_COMPUTE_CHILD decides WHICH OF TWO PROGRAMS this process is, before _run_main and before any config exists.
+src/gen_worker/supervisor.py:66 BOOTSTRAP pre-fork supervisor predicate; runs before the worker process entry.
+src/gen_worker/supervisor.py:68 BOOTSTRAP pre-fork re-entry guard, same.
+src/gen_worker/aot_compile_child.py:292 BOOTSTRAP child log level, applied before the child has any config.
+
+# ---------------------------------------------------------------------------
+# IPC — parent to child across exec. §1.17 routes these to argv (pgw#929).
+# ---------------------------------------------------------------------------
+src/gen_worker/procsplit/__init__.py:59 IPC GEN_WORKER_HOST_SIBLINGS, parent-minted per child. Note pgw#929 AMBIGUOUS #4: it is ALSO a CPU/RAM budget divisor (a value) and <=1 skips inductor-cache isolation (a gate). The two want splitting.
+src/gen_worker/procsplit/__init__.py:66 IPC GEN_WORKER_GROUP_ORDINAL, parent-minted per child.
+src/gen_worker/procsplit/child.py:52 IPC GEN_WORKER_CHILD_SOCKET, parent-minted.
+src/gen_worker/procsplit/child.py:105 IPC GEN_WORKER_CHILD_WATCHDOG_PING_S, parent-minted.
+src/gen_worker/procsplit/child.py:126 IPC GEN_WORKER_CHILD_LIVENESS_FD, parent-minted.
+src/gen_worker/procsplit/child.py:246 IPC GEN_WORKER_CHILD_SOCKET, second reader in the same child.
+src/gen_worker/procsplit/parent.py:1109 IPC GEN_WORKER_CHILD_CMD is literally an argv override delivered by env - the sharpest case for the argv conversion.
+src/gen_worker/procsplit/parent.py:1171 IPC watchdog ping cadence handed down to the child.
+src/gen_worker/procsplit/privdrop.py:160 IPC GEN_WORKER_COMPUTE_UID, parent-minted per child.
+src/gen_worker/intent_registry.py:106 IPC GEN_WORKER_SESSION_ID must SURVIVE RESPAWN, so it is a genuine handoff value - keep it, on argv.
+src/gen_worker/env_seal.py:321 IPC GEN_WORKER_SEAL_LIB_MEMO, parent-minted memo path.
+src/gen_worker/subproc.py:144 IPC forwards GEN_WORKER_CONFIG_SNAPSHOT_PATH to a child. §1.18 ownership test FAILS: this value ORIGINATES in Settings, so the child must receive config rather than re-derive it from an env the parent re-exported.
+src/gen_worker/supervisor.py:226 IPC GEN_WORKER_SUPERVISED marks the forked child.
+src/gen_worker/supervisor.py:152 IPC GEN_WORKER_POSTMORTEM_FILE sink path for the pre-fork supervisor.
+src/gen_worker/lifecycle.py:185 IPC WORKER_EXECUTION_TOPOLOGY (topology.ENV_VAR), the hub-delivered multi-GPU topology JSON, re-read here only to decide whether the "GPUs are invisible" warning applies. Absent is legal and means one slot - which is why an unset value on a multi-GPU pod needs the warning at all.
+src/gen_worker/host_canary.py:566 IPC restores the child's saved env after the canary subprocess.
+src/gen_worker/host_canary.py:568 IPC restores the child's saved env after the canary subprocess.
+
+# ---------------------------------------------------------------------------
+# LIBRARY — torch / inductor / triton / NCCL read env at import. Accepted as a
+# MECHANISM. The VALUES are authored constants scattered across nine files,
+# which is C4 dressed as plumbing: pgw#931 deliverable 6 folds them into one
+# inspectable Settings-derived builder.
+# ---------------------------------------------------------------------------
+src/gen_worker/compile_cache.py:1219 LIBRARY reads the inductor/triton env block for the seal snapshot.
+src/gen_worker/compile_cache.py:1450 LIBRARY writes the inductor cache dir torch reads at import.
+src/gen_worker/compile_cache.py:1481 LIBRARY TORCHINDUCTOR_AUTOGRAD_CACHE=0; torch offers no other API.
+src/gen_worker/compile_cache.py:1621 LIBRARY CXX host-compiler discovery, the toolchain's own convention.
+src/gen_worker/compile_cache.py:1698 LIBRARY reads back the inductor cache dir torch was steered to.
+src/gen_worker/compile_cache.py:1794 LIBRARY reads back the inductor cache dir torch was steered to.
+src/gen_worker/compile_cache.py:4119 LIBRARY saves the inductor env block around a scoped override.
+src/gen_worker/compile_cache.py:4130 LIBRARY restores the saved inductor env block.
+src/gen_worker/compile_cache.py:4132 LIBRARY restores the saved inductor env block.
+src/gen_worker/aot_export_reuse.py:236 LIBRARY scopes TORCHINDUCTOR_CACHE_DIR around the reuse gate.
+src/gen_worker/aot_export_reuse.py:237 LIBRARY scopes TORCHINDUCTOR_CACHE_DIR around the reuse gate.
+src/gen_worker/aot_export_reuse.py:254 LIBRARY restores TORCHINDUCTOR_CACHE_DIR.
+src/gen_worker/aot_export_reuse.py:256 LIBRARY restores TORCHINDUCTOR_CACHE_DIR.
+src/gen_worker/host_canary.py:493 LIBRARY reads NCCL_P2P_DISABLE for the canary's recorded facts.
+src/gen_worker/host_canary.py:532 LIBRARY saves the NCCL/torch-distributed env before the canary.
+src/gen_worker/host_canary.py:534 LIBRARY MASTER_ADDR, torch.distributed reads it at init.
+src/gen_worker/host_canary.py:535 LIBRARY MASTER_PORT, torch.distributed reads it at init.
+src/gen_worker/host_canary.py:537 LIBRARY NCCL_P2P_DISABLE for the canary run.
+src/gen_worker/host_canary.py:539 LIBRARY restores NCCL_P2P_DISABLE.
+src/gen_worker/parallel/group.py:175 LIBRARY reads the prior NCCL_NVLS_ENABLE only to REPORT that it is being overwritten.
+src/gen_worker/parallel/group.py:176 LIBRARY NCCL_NVLS_ENABLE=0, written UNCONDITIONALLY immediately before communicator creation (pgw#929 AMBIGUOUS #3). NCCL reads env at init and offers no other API; the operator/image override was deleted.
+src/gen_worker/env_seal.py:138 LIBRARY scrub_env() ERASES the behaviour namespaces before torch imports. The one place §1.18 is already mechanically enforced in either repo - copy it, do not weaken it.
+src/gen_worker/env_seal.py:159 LIBRARY PYTHONHASHSEED is a CPython interpreter fact the seal must record.
+src/gen_worker/env_seal.py:169 LIBRARY PYTHONHASHSEED, second recording site.
+src/gen_worker/models/native_kernels.py:136 LIBRARY GEN_WORKER_NATIVE_KERNELS_LIB, explicit .so path override for the loader.
+src/gen_worker/aot_wrapper_split.py:327 LIBRARY GEN_WORKER_AOT_HOST_COMPILE_JOBS, per-entry host-compile fan-out; derived from the pod budget when unset.
+src/gen_worker/aot_export_parallel.py:55 LIBRARY DARK FEATURE, off by default. See the note at the end of this file - it must NOT be made unconditional.
+src/gen_worker/aot_export_reuse.py:82 LIBRARY DARK FEATURE, off by default. Same note.
+src/gen_worker/aot_wrapper_split.py:569 LIBRARY GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF. LIVE: five SDXL releases (0.2.111/112/113/116/117) declare it in `release_env_declarations` and one endpoint has a non-deleted `endpoint_env_entries` row. Verified on the standing hub 2026-08-03. NOT a deletion candidate.
+
+# ---------------------------------------------------------------------------
+# STANDALONE — CLI / convert paths that load no app config.
+# ---------------------------------------------------------------------------
+src/gen_worker/cli/local_context.py:74 STANDALONE GEN_WORKER_LOCAL_OUTPUT_DIR, local-run output dir.
+src/gen_worker/cli/local_context.py:224 STANDALONE USER, for the local-dev owner label.
+src/gen_worker/convert/clone.py:634 STANDALONE COZY_CONVERT_SCRATCH_TTL_S, convert-tool scratch TTL.
+src/gen_worker/convert/clone.py:665 STANDALONE COZY_CONVERT_WORKDIR, convert-tool scratch base.
+src/gen_worker/convert/ingest.py:69 STANDALONE COZY_CLONE_DOWNLOAD_ATTEMPTS, convert-tool retry count.
+src/gen_worker/models/download.py:733 STANDALONE COZY_CIVITAI_DOWNLOAD_ATTEMPTS, provider retry count.
+src/gen_worker/net.py:44 STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "read from env on every call (test-tunable)" - i.e. env used as a TEST SEAM, which is what loader `init_kwargs` exists for. Worth fixing; it is the last piece of prose from the old 5-file exception list that is still true.
+src/gen_worker/local_cells.py:74 STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, local cell store for offline runs.
+src/gen_worker/video_encode.py:125 STANDALONE GEN_WORKER_VIDEO_ENCODER. pgw#929 rules this MEASURED-then-requested (th#1458-1460 store the evidence, pgw#891 carries the exact requested implementation). Env until then.
+src/gen_worker/video_encode.py:155 STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
+src/gen_worker/models/native_kernels.py:48 STANDALONE GEN_WORKER_NATIVE_KERNELS, same measured-then-requested ruling as the video encoder.
+src/gen_worker/models/svdq.py:218 STANDALONE GEN_WORKER_SVDQ_ENGINE, same measured-then-requested ruling.
+src/gen_worker/aot_resume.py:150 STANDALONE GEN_WORKER_MINT_RESUME_MAX_BYTES, resume-area capacity bound.
+src/gen_worker/aot_resume.py:216 STANDALONE GEN_WORKER_MINT_RESUME_DIR. pgw#929: the ENABLE used to be hidden inside an empty string; `resume_enabled()` now states it.
+src/gen_worker/executor.py:618 STANDALONE GEN_WORKER_BG_YIELD=0 restores the pre-pgw#677 shape. See the kill-switch note below.
+src/gen_worker/executor.py:2840 STANDALONE GEN_WORKER_EAGER_FIRST_BOOT=0. See the kill-switch note below.
+src/gen_worker/mint_delegate.py:71 STANDALONE GEN_WORKER_MINT_IN_PROCESS forces the in-process mint shape, which VIOLATES the liveness contract and is kept reachable to prove that, not to run.
+src/gen_worker/mint_delegate.py:75 STANDALONE GEN_WORKER_EAGER_FIRST_BOOT, second reader; the two switches move together.
+
+# ---------------------------------------------------------------------------
+# TRIPWIRE — guards whose entire purpose is to fire on a misconfiguration.
+# ---------------------------------------------------------------------------
+src/gen_worker/content_credentials.py:191 TRIPWIRE GEN_WORKER_C2PA_KEY_PEM / _KEY_PATH presence RAISES and refuses the boot (th#1307). A private key must never reach a pod. Correctly loud; carries no behaviour of its own.
+src/gen_worker/models/memory.py:1191 TRIPWIRE GEN_WORKER_FORBID_CPU_OFFLOAD, now enforced at the REAL placement boundary (pgw#929 AMBIGUOUS #1). Read as env rather than Settings because a control-plane box exports it box-wide with no worker config in sight.
+src/gen_worker/benchmarks/swap_latency.py:84 TRIPWIRE GEN_WORKER_FORBID_CPU_OFFLOAD, the original single reader. Retained: refusing the benchmark is still correct.
+src/gen_worker/host_move_guard.py:44 TRIPWIRE GEN_WORKER_HOST_MOVE_GUARD, the pgw#763 host-move guard's disable escape hatch. See the kill-switch note below.
+src/gen_worker/aot_wrapper_split.py:529 TRIPWIRE GEN_WORKER_AOT_WRAPPER_SPLIT_OFF, v1 ctor-split disable. See the kill-switch note below.
+src/gen_worker/aot_mint.py:1548 TRIPWIRE PODGUARD_STATE, gated on podguard_status()==armed.
+src/gen_worker/aot_mint.py:1581 TRIPWIRE PODGUARD_STATE validation. External watchdog adapter with a producer OUTSIDE this process (`podguard.arm()` on rented pods), so there is no argv to move it to and no Settings that could own it. pgw#929 owns its validation and observability permanently; deletion is explicitly out of scope.
+src/gen_worker/aot_mint.py:1604 TRIPWIRE PODGUARD_STATE, reported in the invalid-state diagnostic.
+
+# ---------------------------------------------------------------------------
+# NOTE — the seven "kill switches" pgw#929 lists for deletion. FIVE can go once
+# their unconditional path has a named observable; TWO CANNOT, and saying so is
+# part of the finding.
+#
+# Measured on the standing hub 2026-08-03: `release_env_declarations` and
+# `endpoint_env_entries` carry exactly two GEN_WORKER_* names fleet-wide,
+# GEN_WORKER_PREFER_AOT (19 declarations, 2 live entries) and
+# GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF (5 declarations, 1 live entry). None of the
+# seven kill switches is declared anywhere.
+#
+# Zero declarations is NOT the same fact as safe-to-delete, and the direction of
+# the default decides which:
+#
+#   DEFAULT-ON  (HOST_MOVE_GUARD, MINT_IN_PROCESS, EAGER_FIRST_BOOT, BG_YIELD,
+#               AOT_WRAPPER_SPLIT_OFF) — deleting the env makes the CURRENT
+#               PRODUCTION BEHAVIOUR unconditional. Safe. Blocked only on the
+#               replacement observable pgw#929 requires, plus the fact that the
+#               tests set BG_YIELD=0 / EAGER_FIRST_BOOT=0 as red-verification
+#               seams: those need a real parameter, not an env, before the
+#               switch goes.
+#
+#   DEFAULT-OFF (AOT_EXPORT_PARALLEL, AOT_EXPORT_REUSE) — deleting the env would
+#               make an UNPROVEN path unconditional. Both ship dark by their own
+#               docstrings ("turning it on needs the export-phase VRAM
+#               measurement first"; "ships dark until a real family's mint has
+#               run the gate on a pod"), and neither enable path has ever run in
+#               production. Making them unconditional is not a deletion, it is a
+#               launch. pgw#929's "delete seven kill switches" is WRONG for
+#               these two.
+#
+#               If they encode a decision nobody makes — which the measurement
+#               supports — the §2.2 answer is to delete the FEATURES, ~500 lines
+#               of dark code. That is a call for Paul, not a side effect of an
+#               env census, so it is recorded here rather than taken.
+# ---------------------------------------------------------------------------

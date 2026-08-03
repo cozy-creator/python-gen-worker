@@ -3,19 +3,28 @@
 Orchestrator-injected pod config and anything an operator needs to override
 at deploy time flows through the typed `Settings` struct (`config/settings.py`),
 loaded by `config/loader.py` with precedence env → `./.env` → `/run/secrets`
-→ yaml → struct defaults. Call sites read `Settings` (the startup instance,
-or the cached `get_settings()`).
+→ yaml → struct defaults.
 
-A handful of modules that also work as standalone libraries/CLIs outside a
-full worker bring-up (`net.py`, `convert/ingest.py`, `convert/clone.py`,
-`compile_cache.py`, `url_fetch.py`, `input_assets.py`, `host_move_guard.py`,
-`supervisor.py`, `env_seal.py`, `procsplit/*`, ...) read env vars directly
-instead — see "Internal plumbing" below.
+**Ruling §1.18: exactly one component in this process reads the environment.**
+Each process entry performs one bootstrap-owned `load_settings()` and the
+resulting `Settings` is **passed by parameter**. `get_settings()` — the
+`lru_cache`d process-global — was DELETED in pgw#931; where a module is too
+deep to be handed a parameter it reads what the entry published
+(`config.current()`), which raises rather than silently loading if nothing was
+installed.
 
-The authoritative list of Settings-backed env names is `_ENV_TO_FIELD` in
-`config/loader.py`; the tables below track it but are not a substitute for it.
-Raw-env reads outside `Settings` are not centrally registered anywhere, so
-"Internal plumbing" is best-effort — grep before assuming a var is unused.
+**Raw-env reads ARE centrally registered now.** They are
+`scripts/config_reads_allowlist.txt`, one classified line per accepted site,
+enforced by `scripts/lint_config_reads.py` in CI. That file — not this page —
+is the authoritative census; this page is orientation. The previous prose
+version of that list named 5 files while the reads lived in 41.
+
+An unrecognised key inside a gen-worker-owned namespace (`GEN_WORKER_`,
+`TENSORHUB_`, `WORKER_`, `COZY_`) in `.env`, `/run/secrets` or yaml now
+**raises** `UnknownSettingError` instead of being accepted and ignored. In the
+process environment it is reported at boot (`unknown_owned_env`) but not
+refused — the pod env is assembled by Tensorhub, which legitimately injects
+owned-namespace names this worker has no reader for.
 
 Tenant *endpoint* code reads its own envs freely (`docs/endpoint-envs.md`);
 this page covers the worker itself.
@@ -41,9 +50,10 @@ this page covers the worker itself.
 | `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant; also read raw by `compile_cache.py` to stamp `image_digest` into every compile cell |
 | `WORKER_RELEASE_ID` | `worker_release_id` | release identity; re-exported into the compute child |
 | `WORKER_CONFIG_GENERATION` | `boot_config_generation` | boot-config generation, for detecting hub-injected config |
-| `WORKER_MODE` | `worker_mode` | operating mode: `serve` (default) or `forge` (mint-only — registers, takes no tenant dispatch, holds no resident serving model). An unrecognized value reads as `serve`. There is NO `trainer` mode |
+| `WORKER_MODE` | `worker_mode` | the hub's pod-launch **goal declaration**, and a bootstrap SEED only. §1.17: serve and mint are composable goals, not an exclusive mode — a pod may hold both. `worker_goals.from_settings()` is the ONLY interpreter of the `serve`/`forge` spelling, and the whole field disappears when th#1488's Directive delivers `repeated Goal goals`. An unrecognised value seeds serve-only, records `declaration_understood=False`, and is echoed raw so the hub sees the disagreement. There is NO `trainer` mode |
 | `WORKER_EXECUTION_TOPOLOGY` | — (raw, `topology.py`) | hub-delivered multi-GPU topology JSON (see [multi-gpu.md](multi-gpu.md)). Absent is legal and means one slot — so an unset value on a multi-GPU pod silently serves one card |
 | `GEN_WORKER_CONFIG_SNAPSHOT_PATH` | `config_snapshot_path` | runtime-config snapshot path; also read raw and propagated to every subprocess |
+| `GEN_WORKER_BOOT_RECORD` | `boot_record_path` | post-mortem boot-record carrier. Added in pgw#931: it had no field and was read raw in three places, so the parent and the child could disagree about where the record lived. Empty = `postmortem` picks a durable default |
 
 ## Tuning knobs (Settings fields)
 
@@ -116,15 +126,17 @@ compile evidence.
   llama-server CUDA smoke in `tests/test_llama_runtime.py`); never read by
   worker runtime code. Real-model GPU coverage now lives in the e2e repo's
   nightly `TestJ6` cloud journey, not a gen-worker-repo GPU lane.
-- `GEN_WORKER_FORBID_CPU_OFFLOAD` — a DEV-BOX guard with exactly ONE read site
-  in the package: `benchmarks/swap_latency.py::check_on_pod()`, called only
-  from that benchmark's `main()`. Set it on a control-plane box and
-  `python -m gen_worker.benchmarks.swap_latency` refuses to run. It does
-  **not** affect placement, offload ladders, serveability, or any inference
-  path — it was removed from `plan_serve`/`gate_functions` and then from
-  placement entirely; placement follows the worker's own fit and
-  OOM-demotion logic. If you want a real CPU-move guard, that is
-  `GEN_WORKER_HOST_MOVE_GUARD` (above).
+- `GEN_WORKER_FORBID_CPU_OFFLOAD` — a DEV-BOX tripwire. **pgw#929 made the
+  documented contract true.** It previously had exactly one read site,
+  `benchmarks/swap_latency.py::check_on_pod()`, and affected nothing else —
+  while the workspace `CLAUDE.md` told operators it "makes gen-worker raise on
+  any CPU-touching placement". It now also refuses at the real placement
+  boundary: `models/memory.py` raises `CpuOffloadForbidden` before
+  `enable_model_cpu_offload` and `enable_sequential_cpu_offload`. Set it on a
+  control-plane box and both the swap-latency benchmark and any CPU-offloading
+  placement refuse. It is a tripwire, not configuration — it carries no
+  behaviour of its own. `GEN_WORKER_HOST_MOVE_GUARD` (above) remains the
+  separate, always-on `Module.to`/`.cpu` guard.
 
 ## Internal plumbing (raw env)
 
@@ -150,11 +162,24 @@ compile evidence.
 - `GEN_WORKER_INTERNAL_OBJECT_HOSTS` — hosts whose resolver-minted URLs bypass
   the SSRF policy (`input_assets.py`).
 - `GEN_WORKER_SUPERVISOR` (`=0` disables the OOM-reporting supervisor fork),
-  `GEN_WORKER_COMPUTE_UID` (privilege-drop target uid), `GEN_WORKER_BOOT_RECORD`,
+  `GEN_WORKER_COMPUTE_UID` (privilege-drop target uid),
   `GEN_WORKER_EAGER_FIRST_BOOT`, `GEN_WORKER_LOCAL_CELLS_DIR`,
   `GEN_WORKER_NATIVE_KERNELS`, `GEN_WORKER_VIDEO_ENCODER`, `GEN_WORKER_AOT_*`,
-  `GEN_WORKER_MINT_*`, `RUNPOD_PROVIDER` — further raw reads. This list is
-  best-effort; grep before assuming a var is unused.
+  `GEN_WORKER_MINT_*`, `RUNPOD_PROVIDER` — further raw reads. **This list is no
+  longer the source of truth**: `scripts/config_reads_allowlist.txt` is, and it
+  is complete by construction because CI fails on any site missing from it.
+- `NCCL_NVLS_ENABLE` — NOT a knob. `parallel/group.py` overwrites it to `0`
+  unconditionally immediately before communicator creation (pgw#929): NVLS
+  multicast cannot be bound in our containers and every Ulysses all-to-all dies
+  with `ncclUnhandledCudaError` / CUDA 401. The image/operator override was
+  deleted; a future collective that can use NVLS needs a measured capability
+  and its own issue.
+- `PODGUARD_STATE` — an **external watchdog adapter**, not config. Its producer
+  is `podguard.arm()`, which runs before this process exists on pods podguard
+  rents, so it can be neither argv nor a `Settings` field. pgw#929 owns its
+  validation permanently: `aot_mint.podguard_status()` reports
+  `armed` / `not_present` / `invalid`, so a set-but-unusable path is no longer
+  the same silent no-op as a hub-created pod that legitimately has none.
 - `GEN_WORKER_LOCAL_OUTPUT_DIR`, `USER` — cozy-local app plumbing / login
   fallback (`cli/local_context.py`).
 - `COZY_HTTP_CONNECT_TIMEOUT_S` / `COZY_HTTP_READ_TIMEOUT_S` — http timeout
@@ -162,8 +187,11 @@ compile evidence.
 - `COZY_CIVITAI_DOWNLOAD_ATTEMPTS`, `COZY_CLONE_DOWNLOAD_ATTEMPTS` —
   per-call test-tunable retry counts (`models/download.py`,
   `convert/ingest.py`).
-- `COZY_CONVERT_WORKDIR` / `_SCRATCH_TTL_S` / `_RETAIN_WORKDIR` —
+- `COZY_CONVERT_WORKDIR` / `_SCRATCH_TTL_S` —
   convert-job scratch knobs set by the invoking harness (`convert/clone.py`).
+  `COZY_CONVERT_RETAIN_WORKDIR` was **deleted** in pgw#929: retaining a failed
+  job's scratch is a debugging action against one run, not a deployment mode,
+  and as an env it could only ever be set fleet-wide and forgotten.
   Clone disk admission itself is derived from the resolved source and output
   operations and cannot be weakened by an environment override. The preflight
   covers plan-known files; repackage tools fail normally if they later fetch

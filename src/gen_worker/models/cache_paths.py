@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ..config import get_settings
+from ..config import Settings, current_or
+
+_STANDALONE = Settings()
 
 
 TENSORHUB_CACHE_DIR = "/tmp/tensorhub-cache"
@@ -23,9 +25,9 @@ def tensorhub_cache_dir() -> Path:
     back to the ``/tmp`` default when unset. The CAS implementation itself is
     deliberately backend-agnostic: nothing branches on what's mounted here.
     """
-    env = get_settings().tensorhub_cache_dir.strip()
-    if env:
-        return Path(env).expanduser()
+    configured = current_or(_STANDALONE).tensorhub_cache_dir.strip()
+    if configured:
+        return Path(configured).expanduser()
     return Path(TENSORHUB_CACHE_DIR)
 
 
@@ -48,10 +50,10 @@ def tensorhub_fill_source_dir() -> Path | None:
     volume leave this unset, which is the degenerate case: fetch goes
     straight to R2, byte-identical to pre-th#850 behavior.
     """
-    env = get_settings().tensorhub_fill_source_dir.strip()
-    if not env:
+    configured = current_or(_STANDALONE).tensorhub_fill_source_dir.strip()
+    if not configured:
         return None
-    path = Path(env).expanduser()
+    path = Path(configured).expanduser()
     if not os.path.ismount(path):
         return None
     return path

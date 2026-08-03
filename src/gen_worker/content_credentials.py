@@ -342,20 +342,20 @@ def _active_config() -> Optional[_SignerConfig]:
     global _configured, _config
     if _configured:
         return _config
-    # Library-standalone path (no worker bring-up called configure()):
-    # resolve lazily from the cached Settings loader. configure() is
-    # idempotent, so a benign race between threads is fine.
-    try:
-        from .config import get_settings
-
-        settings = get_settings()
-    except Exception:
-        with _lock:
-            _config = None
-            _configured = True
-        return None
-    configure(settings)
-    return _config
+    # pgw#931 (§1.18): this used to resolve lazily from the cached Settings
+    # loader, i.e. a signing module that could go and find its own signing
+    # config from the environment at first use. It cannot: `configure()` is
+    # called by the process entry with the entry's `Settings`, and a process
+    # that never configured signing is a process where signing is OFF.
+    #
+    # That is also the honest answer. th#1307 makes cert material's PRESENCE
+    # the gate, so "unconfigured" and "configured with no cert" must not be the
+    # same silent state as "found some env" — see the C2PA disposition in
+    # pgw#929: signing being dark is a reported fact, never an inference.
+    with _lock:
+        _config = None
+        _configured = True
+    return None
 
 
 def _generator_version() -> str:

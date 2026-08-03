@@ -660,8 +660,7 @@ def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
 def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
     """Workdir keyed by (provider, source, destination) so concurrent
     duplicates of the same clone serialize on one flock. Removed after every
-    job — success or failure (COZY_CONVERT_RETAIN_WORKDIR=1 keeps a failed
-    job's scratch for debugging). Base dir: ``$COZY_CONVERT_WORKDIR`` or
+    job — success or failure. Base dir: ``$COZY_CONVERT_WORKDIR`` or
     ``<tmp>/gen-worker-convert``."""
     base = Path(os.environ.get("COZY_CONVERT_WORKDIR", "").strip()
                 or Path(tempfile.gettempdir()) / "gen-worker-convert")
@@ -1078,15 +1077,14 @@ def run_clone(
         # gw#462: a long-running worker must not leak scratch — the workdir
         # goes after EVERY job. Cross-run resume lives in the publish bank
         # (th#592) + CAS dedup, not in retained local bytes.
-        retain = os.environ.get("COZY_CONVERT_RETAIN_WORKDIR", "").strip() == "1"
-        if succeeded or not retain:
-            shutil.rmtree(workdir, ignore_errors=True)
-            if not succeeded:
-                logger.warning(
-                    "clone failed; workdir %s removed "
-                    "(COZY_CONVERT_RETAIN_WORKDIR=1 keeps it for debugging)", workdir)
-        else:
-            logger.warning("clone failed; workdir retained: %s", workdir)
+        # pgw#929: COZY_CONVERT_RETAIN_WORKDIR deleted. Retaining a failed
+        # job's scratch is a DEBUGGING ACTION taken against one run, not a
+        # deployment mode a pod is booted in — and as an env it could only ever
+        # be set fleet-wide and forgotten, which is how a long-running worker
+        # leaks scratch (the gw#462 defect this cleanup exists for).
+        shutil.rmtree(workdir, ignore_errors=True)
+        if not succeeded:
+            logger.warning("clone failed; workdir %s removed", workdir)
         os.close(lock_fd)  # releases the flock
 
 

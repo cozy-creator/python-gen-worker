@@ -106,7 +106,8 @@ import msgspec  # noqa: E402  (used by manifest baking)
 import pytest  # noqa: E402
 
 from gen_worker import boot_phases  # noqa: E402
-from gen_worker.config.loader import get_settings  # noqa: E402
+from gen_worker import config as gw_config  # noqa: E402
+from gen_worker import worker_goals as gw_worker_goals  # noqa: E402
 
 from harness.blob_host import BlobHost  # noqa: E402
 from harness.hardware_report_hub import closed_port_addr  # noqa: E402
@@ -120,10 +121,17 @@ from harness.progress_wait import Cadence, StalledError  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _fresh_settings_cache():
-    get_settings.cache_clear()
+def _fresh_process_settings():
+    """pgw#931: Settings are PUBLISHED by a process entry, not cached lazily.
+    Each test starts from a clean install over its own env (see
+    tests/conftest.py for the full rationale)."""
+    gw_config.reset_for_test()
+    gw_worker_goals.reset_for_test()
+    gw_config.install(gw_config.load_settings())
+    gw_worker_goals.install(gw_worker_goals.from_settings(gw_config.current()))
     yield
-    get_settings.cache_clear()
+    gw_config.reset_for_test()
+    gw_worker_goals.reset_for_test()
 
 
 @pytest.fixture(autouse=True)

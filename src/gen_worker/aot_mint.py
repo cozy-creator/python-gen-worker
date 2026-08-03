@@ -1555,9 +1555,9 @@ def _touch_pod_progress(note: str) -> None:
     telemetry file could not be written, and the whole call is inert when
     `PODGUARD_STATE` is unset (every non-podguard pod, and this box).
     """
-    state = os.environ.get(PODGUARD_STATE_ENV, "")
-    if not state:
+    if podguard_status() != PODGUARD_ARMED:
         return
+    state = os.environ.get(PODGUARD_STATE_ENV, "").strip()
     try:
         Path(state).mkdir(parents=True, exist_ok=True)
         # CONTENT, not mtime: the watchdog compares the token, so a value that
@@ -1565,6 +1565,58 @@ def _touch_pod_progress(note: str) -> None:
         (Path(state) / "progress").write_text(note)
     except OSError:
         logger.debug("aot-mint: could not touch podguard progress", exc_info=True)
+
+
+#: The three states pgw#929 requires this adapter to be able to REPORT. The
+#: distinction that matters is `not_present` vs `invalid`: a hub-created pod
+#: legitimately has no podguard producer, whereas a path that is set but
+#: unusable is a rented pod whose progress signal is silently going nowhere —
+#: and a mint that looks unprogressing to a watchdog gets reaped.
+PODGUARD_ARMED = "armed"
+PODGUARD_NOT_PRESENT = "not_present"
+PODGUARD_INVALID = "invalid"
+
+
+def podguard_status() -> str:
+    """Validate the external watchdog handoff and say which state it is in.
+
+    pgw#929 keeps `PODGUARD_STATE` deliberately — it is the ONE env in the IPC
+    bucket that is NOT a mechanical parent-to-child handoff this program could
+    move to argv. Its producer is `podguard.arm()`, an external process that
+    runs before this one exists on pods podguard rents, so there is no argv to
+    put it on and no `Settings` that could own it. It is an adapter contract
+    with an outside system, and it stays.
+
+    What pgw#929 adds is that the adapter must be HONEST about its own state
+    rather than treating "unset" and "broken" as the same silent no-op.
+    """
+    raw = os.environ.get(PODGUARD_STATE_ENV, "").strip()
+    if not raw:
+        return PODGUARD_NOT_PRESENT
+    path = Path(raw)
+    if not path.is_absolute():
+        return PODGUARD_INVALID
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return PODGUARD_INVALID
+    if not os.access(path, os.W_OK):
+        return PODGUARD_INVALID
+    return PODGUARD_ARMED
+
+
+def report_podguard_status() -> str:
+    """Log the podguard state once, so a broken handoff is visible at boot."""
+    status = podguard_status()
+    if status == PODGUARD_INVALID:
+        logger.warning(
+            "podguard=invalid: %s=%r is set but is not a usable absolute "
+            "writable directory. This pod's mint progress signal goes nowhere "
+            "and the watchdog will read it as unprogressing (pgw#929).",
+            PODGUARD_STATE_ENV, os.environ.get(PODGUARD_STATE_ENV, ""))
+    else:
+        logger.info("podguard=%s", status)
+    return status
 
 
 def write_phase_snapshot(path: Path, progress: MintProgress) -> None:
@@ -3217,14 +3269,12 @@ def _publisher_from_settings() -> Any:
     from settings. Refuses by name when either is absent rather than attempting
     an unauthenticated publish.
     """
-    from . import worker_credential
-    from .config import get_settings
+    from . import config, worker_credential
     from .fleet_cells import CellPublisher
 
-    settings = get_settings()
+    settings = config.current()
     base_url = str(
-        getattr(settings, "tensorhub_public_url", "")
-        or getattr(settings, "tensorhub_url", "") or "").strip()
+        settings.tensorhub_public_url or settings.tensorhub_url or "").strip()
     # pgw#876 §2: this read `getattr(settings, "worker_jwt", "")`, a field
     # pgw#848 RENAMED — the getattr default swallowed the AttributeError the
     # rename exists to raise, so WORKER_JWT was silently invisible here and

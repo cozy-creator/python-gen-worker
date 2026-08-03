@@ -2,6 +2,96 @@
 
 ## Unreleased
 
+- **pgw#930 (§1.17): `WORKER_MODE` is deleted; serve and mint are COMPOSABLE goals.**
+  Paul: *"you can spawn a GPU and tell it to mint some AOT-cells, while also using it to
+  serve jobs (inference) as needed."* `worker_mode.py` was a closed two-tuple
+  `(serve, forge)` with one predicate, `is_forge()`, so "serve" was defined everywhere as
+  *not forge* and "both" could not be spelled at all. It is replaced by
+  `worker_goals.WorkerGoals` — independent `serve` and `mint` goals — and all five
+  production consumers now ask a better question:
+  - `executor` admits dispatch on `serve_admitted()`, not on a mode. (Kept rather than
+    deleted: reading the hub's declared goal set is not a second copy of the hub's
+    placement decision, and the failure it prevents — a tenant's latency behind a
+    multi-hour compile — is measured.)
+  - `mint_budget` and `aot_compile_pool` derive the three tenant reserves from
+    `tenant_reserve_applies()` (i.e. the serve goal) instead of `0 if forge else X`. A pod
+    serving one small model while minting now keeps a REAL reserve.
+  - `forge.py` → `mint_goal.py`. It states the same typed terminal, but retires the pod
+    only when no serve goal is held — the one line that makes the dual-goal case safe.
+    Previously `start_drain` was unconditional and would have torn down a live serving
+    instance.
+  - `PoolWidth.forge: bool` → `serve_goal` / `mint_goal`, reported independently.
+  The wire field `WorkerResources.worker_mode` is unchanged (the proto is a vendored
+  artifact of Tensorhub's canonical copy, pgw#944) and is now PROJECTED from the goal set,
+  carrying the raw declaration so an unrecognised spelling stays visible at the hub.
+
+  The two EMITTED ACTIVITY KINDS were decided separately, on row counts read from the
+  standing hub rather than on symmetry: `forge_terminal` keeps its string (1 historical row —
+  renaming it would silently orphan that row; only the Python name changed, to
+  `KIND_MINT_GOAL`), while `forge_dispatch_refused` became
+  `serve_goal_absent_dispatch_refused` (0 rows, nothing to orphan, and the old name asserted
+  a mode that no longer exists). Also confirmed there: **zero `worker_mode`/`forge` columns
+  across all 120 `tensorhub` tables**, so the hub never persisted the mode at all — exactly
+  what pgw#930 predicted.
+
+- **pgw#931 (§1.18): `get_settings()` is deleted; the config struct is passed.**
+  The `functools.lru_cache(maxsize=1)` accessor let any module at any depth materialise
+  configuration out of the environment, so content depended on which module imported first
+  and nothing could tell whether config had been loaded at all. Now: each process entry
+  performs one bootstrap-owned `load_settings()` and PUBLISHES it
+  (`entrypoint._bootstrap_configuration`, `procsplit.parent.main`); `config.current()`
+  raises `SettingsNotInstalled` rather than reading env behind the pipeline. Six raw config
+  reads deleted outright, five of them `or os.environ.get(...)` clauses sitting in the same
+  expression as the `Settings` field for the SAME fact. `worker_credential` and
+  `content_credentials` are handed their config instead of fetching it, restoring the
+  pgw#848 rename's teeth (the C8 `getattr(..., default)` inside `except Exception` is gone).
+  New `Settings.boot_record_path` (`GEN_WORKER_BOOT_RECORD`), which previously had no field
+  and was read raw in three places.
+
+  **Behaviour note:** C2PA signing on the STANDALONE CLI is now explicitly off rather than
+  lazily configured from env at first `save_bytes`. Unchanged on real pods —
+  `entrypoint._run_main` calls `content_credentials.configure(settings)` with the entry's
+  `Settings`, and th#1307's key-material boot refusal still fires there. The CLI lost nothing
+  it had: th#1307 moved the private key hub-side, so signing arms at HelloAck and a CLI run has
+  no HelloAck.
+
+- **pgw#931: the loader no longer accepts and ignores a key it owns.**
+  `_normalize_key` returned `None` for anything unrecognised and every source layer then
+  silently skipped it, so a typo'd `TENSORHUB_CHACE_DIR` in `.env` or `/run/secrets` was
+  accepted and inert. Owned-namespace keys (`GEN_WORKER_`, `TENSORHUB_`, `WORKER_`,
+  `COZY_`) from the file sources now raise `UnknownSettingError`. The PROCESS environment
+  is reported, not refused — Tensorhub injects owned-namespace names this worker has no
+  reader for, so refusing there would be a fleet of dead pods.
+
+- **pgw#931: `scripts/lint_config_reads.py` + a classified allowlist, gating in CI.**
+  Every `os.environ` access outside `gen_worker/config` needs a line naming its §1.18
+  classification. The gate also proves the loader's unknown-key exemption set still covers
+  the tree, so the refusal above cannot rot. Replaces the prose exception list in
+  `config/settings.py`, which named 5 files while the reads lived in 41.
+
+- **pgw#929 (§1.17): env census — deletions and corrections.**
+  - `COZY_CONVERT_RETAIN_WORKDIR` **deleted**. Retaining a failed job's scratch is a
+    debugging action against one run, not a deployment mode.
+  - `GEN_WORKER_AOT_ENTRY_WORKERS` **deleted** from the test that set it: nothing in
+    `src/` has ever read that name, so the assertion held for the one reason that proves
+    nothing.
+  - `NCCL_NVLS_ENABLE` is now overwritten to `0` **unconditionally** immediately before
+    communicator creation. It previously wrote only when unset, so an image or operator
+    could turn NVLS back on and take every Ulysses arm down with CUDA 401.
+  - `GEN_WORKER_FORBID_CPU_OFFLOAD` now **refuses at the real placement boundary**
+    (`models/memory.py`, both `enable_*_cpu_offload` calls). It had exactly one reader —
+    the swap-latency benchmark — while the workspace `CLAUDE.md` told operators it raised
+    on any CPU-touching placement. The documented contract is now true.
+  - `PODGUARD_STATE` **retained** as an external watchdog adapter (its producer runs before
+    this process exists, so it can be neither argv nor a `Settings` field) and now reports
+    `armed` / `not_present` / `invalid` — a set-but-unusable path was previously the same
+    silent no-op as a hub-created pod that legitimately has none.
+  - `aot_resume.resume_enabled()` states the decision that was hidden inside an empty
+    string.
+  - `docs/environment.md` corrected: it documented a `WORKER_JWT → worker_jwt` field that
+    pgw#848 renamed, and its raw-read list was best-effort prose. The allowlist is now the
+    census.
+
 - **pgw#938:** isolate transient post-mortem evidence per compute group and make
   concurrent grant downloads finalize through writer-unique temporary files.
 - **pgw#937: a dead execution group's last frame no longer outvotes the live ones.** The

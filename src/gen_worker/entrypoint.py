@@ -67,7 +67,9 @@ from typing import Any, Dict, List, Optional
 
 import msgspec
 
-from .config import get_settings
+from . import config
+from . import worker_credential
+from . import worker_goals
 from .cuda_probe import CUDA_PROBE_FAILED_MARKER, probe_cuda, should_probe_cuda
 from .hardware_report import report_hardware_unsuitable
 from .models.cache_paths import tensorhub_cas_dir
@@ -308,7 +310,7 @@ def _isolate_group_inductor_cache() -> None:
     if host_siblings() <= 1:
         return
     ordinal = group_ordinal()
-    base = (os.environ.get("TENSORHUB_CACHE_DIR") or tempfile.gettempdir())
+    base = (config.current().tensorhub_cache_dir.strip() or tempfile.gettempdir())
     root = os.path.join(base, "gen-worker-inductor", f"g{ordinal}")
     try:
         for sub, var in (("inductor", "TORCHINDUCTOR_CACHE_DIR"),
@@ -355,11 +357,30 @@ def _impose_group_host_policy() -> None:
     )
 
 
+def _bootstrap_configuration() -> config.Settings:
+    """THE bootstrap-owned load for this process entry (§1.18), and the one
+    place derived process facts are published from it.
+
+    One function rather than four lines in `_run_main` because these must not
+    drift apart: the goal set and the boot credential are DERIVED from these
+    exact `Settings`, so a second entry that loaded config without publishing
+    them would leave the process holding two answers (§4.22).
+    """
+    settings = config.install(config.load_settings())
+    for name in config.unrecognised_owned_env():
+        logger.warning(
+            "unknown_owned_env %s: set in a gen-worker-owned namespace but no "
+            "reader exists in this build — it is INERT, not applied", name)
+    worker_goals.install(worker_goals.from_settings(settings))
+    worker_credential.install_bootstrap(settings)
+    return settings
+
+
 def _run_main() -> int:
     _log_startup_phase("boot", status="starting")
     _install_stack_dump_handler()
     try:
-        settings = get_settings()
+        settings = _bootstrap_configuration()
     except Exception as e:
         logger.exception("Failed to load worker settings: %s", e)
         _log_worker_fatal("settings_load", e, exit_code=1)
