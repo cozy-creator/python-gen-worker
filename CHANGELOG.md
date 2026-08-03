@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.91.3 (2026-08-03) — **SECURITY: the th#1307 private-key refusal is reachable again**, and the NVLS override stays deleted
+
+PATCH: no wire-contract, `@endpoint` or `Resources` change. Both items are promotion blockers
+found on `release/20260803-night-pgw3`; both trace to the pgw#929/#931 env work.
+
+- **SECURITY — `content_credentials`: a C2PA private key delivered to a pod stopped being
+  refused unless something called `configure()`.** 0.91.x rewrote `_active_config` to stop
+  resolving lazily from the cached `Settings` loader. That part is right and stays — a signing
+  module must not go and find its own config in the environment — but the th#1307 ratchet
+  (`GEN_WORKER_C2PA_KEY_PEM` / `_KEY_PATH` present ⇒ raise) was riding *inside* the
+  `configure()` call the lazy path made, so deleting the path deleted the refusal with it.
+  `configure()` still refused; nothing else did. Any process that does not run the worker
+  bring-up — a library embed, a compute child, an endpoint importing the module directly —
+  got a quiet `enabled() == False` and shipped media **unsigned, beside a platform-wide
+  signing key sitting in `os.environ`**: both failure directions of th#1307 at once.
+  `_refuse_pod_private_key_material()` is now hoisted out of `configure()` and evaluated at
+  the top of `_active_config()`, *before* the `_configured` memo — so it fires for `enabled()`,
+  `sign_media_bytes()` and `sign_media_file()`, whether or not this process configured signing
+  and whether or not the key arrived after a clean configure. The refusal is a property of the
+  pod's environment; no entry point owns it.
+
+- **`NCCL_NVLS_ENABLE`: the unconditional write STANDS — the stale pgw#773 test did not.**
+  `tests/test_nccl_nvls_pgw773.py` still asserted that a pre-set `=1` survives. Checked against
+  pgw#773 before overriding it: pgw#773 never argued for the override — it was a live CUDA-401
+  bug hunt, and respect-if-set was the incidental shape of the one-line fix. pgw#929 §1.17
+  re-adjudicated the same variable as a library-adapter handoff, because the failure it guards
+  is TOTAL (every all-to-all of every arm dies) rather than gradual, so an env inherited from a
+  base image can silently take sequence parallelism to zero. The test encoded an assumption, not
+  a contract, and now encodes the ruling. The removed escape hatch is still covered: the
+  override is never silently discarded — the warning names the variable, the dropped value, the
+  measured reason, and the route forward (a measured capability and a new issue, never this
+  env), and that warning is now part of the pinned contract.
+
 ## 0.91.2 (2026-08-03) — **a produced flavor's passthrough components are one file too**: th#1362's producer invariant stops refusing the married trees it was meant to protect (the te#137 svdq publish blocker)
 
 PATCH: nothing here touches the worker<->hub wire contract, `@endpoint` or `Resources`, so no

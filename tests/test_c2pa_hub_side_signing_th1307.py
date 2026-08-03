@@ -152,6 +152,52 @@ def test_private_key_in_pod_env_is_refused(chain, monkeypatch, env_name):
     _reset(monkeypatch)
 
 
+@pytest.mark.parametrize("env_name", ["GEN_WORKER_C2PA_KEY_PEM", "GEN_WORKER_C2PA_KEY_PATH"])
+def test_key_bearing_pod_is_refused_even_if_configure_was_never_called(chain, monkeypatch, env_name):
+    """The refusal belongs to the POD, not to one entry point.
+
+    pgw#931 removed `_active_config`'s lazy `configure()` fallback. That is the
+    right call on its own terms — a signing module must not resolve its own
+    config from the environment — but the th#1307 refusal was riding inside
+    that `configure()` call, so it left with it. Every process that does not
+    run the worker bring-up (a library embed, a compute child, an endpoint that
+    imports the module itself) then got a quiet `enabled() == False` while a
+    platform-wide private key sat in `os.environ`, and shipped media unsigned.
+
+    So: no `configure()` here, deliberately. This is the shape that regressed.
+    """
+    _reset(monkeypatch)
+    monkeypatch.setenv(env_name, chain["key"].read_text())
+
+    for call in (
+        lambda: cc.enabled(),
+        lambda: cc.sign_media_bytes(_png(), ref="outputs/a.png"),
+        lambda: cc.sign_media_file("/nonexistent.png", ref="outputs/a.png"),
+    ):
+        with pytest.raises(cc.C2paSigningError) as e:
+            call()
+        assert env_name in str(e.value)
+    _reset(monkeypatch)
+
+
+def test_key_delivered_after_a_clean_configure_is_still_refused(chain, monkeypatch):
+    """Memoisation must not outrank the ratchet.
+
+    `_active_config` short-circuits on `_configured`. If the refusal sat behind
+    that fast path, a pod that configured cleanly and was handed key material
+    afterwards would sign happily for the rest of its life.
+    """
+    _configure_cert_only(chain, monkeypatch)
+    try:
+        assert cc.enabled()
+        monkeypatch.setenv("GEN_WORKER_C2PA_KEY_PEM", chain["key"].read_text())
+        with pytest.raises(cc.C2paSigningError) as e:
+            cc.enabled()
+        assert "GEN_WORKER_C2PA_KEY_PEM" in str(e.value)
+    finally:
+        _reset(monkeypatch)
+
+
 def test_settings_have_no_private_key_field_at_all():
     """The ratchet in the config layer: nothing can carry a key into Settings."""
     from gen_worker.config.loader import _ENV_TO_FIELD
