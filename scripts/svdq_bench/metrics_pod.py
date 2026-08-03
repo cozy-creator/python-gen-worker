@@ -48,7 +48,11 @@ def main() -> int:
     if args.rows:
         ids = [r.strip() for r in args.rows.split(",") if r.strip()]
     else:
-        ids = sorted(p.stem for p in ref_dir.glob("t*.webp"))
+        # Every counted row, whatever the family names them (t2i writes
+        # t01…, edit writes m00…). Warmups and the normalized-shape block are
+        # not comparison rows.
+        ids = sorted(p.stem for p in ref_dir.glob("*.webp")
+                     if not p.stem.startswith(("norm_", "warmup")))
 
     import torch
     from PIL import Image
