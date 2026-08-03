@@ -16,6 +16,7 @@ import pytest
 from gen_worker import compile_cache as cc
 from gen_worker import guard_closure
 from gen_worker import local_cells as lc
+from gen_worker.cell_adopt import AdoptOutcome
 
 
 @pytest.fixture(autouse=True)
@@ -190,7 +191,9 @@ def _local_env(monkeypatch, tmp_path):
     # keep the delivered-artifact leg deterministic on GPU-less CI
     from gen_worker.models import provision
 
-    monkeypatch.setattr(provision, "enable_compiled", lambda *a, **k: False)
+    monkeypatch.setattr(
+        provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_cell"))
     return tmp_path / "store"
 
 

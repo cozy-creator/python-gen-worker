@@ -74,7 +74,6 @@ KIND_SHAPE_GAP = "shape_gap"
 # ``detail`` naming the identifiers (ref/function/label/request) + the
 # exception. Fail-soft BEHAVIOR is unchanged — these are confessions.
 KIND_SERVE_DEGRADE = "serve_degrade"
-KIND_TRT_ADOPT = "trt_adopt"
 KIND_LORA_HYGIENE = "lora_hygiene"
 # pgw#794: the serve-side adapter-fidelity gate. `phase=refused` is a
 # fail-CLOSED decision (the request also gets a typed error); `phase=degraded`

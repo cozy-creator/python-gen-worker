@@ -47,6 +47,7 @@ from gen_worker.executor import (
     _mint_modules,
 )
 from gen_worker.registry import CompileCell, extract_specs
+from gen_worker.cell_adopt import AdoptOutcome
 
 GIB = 1 << 30
 STUB_MODULE = "harness.mint_child_stub"
@@ -106,7 +107,8 @@ def test_the_arm_returns_armed_false_with_a_delegated_pending(
     """Restating it from the other side, so the two halves cannot drift: the
     arming brain really does hand back armed=False plus an obligation."""
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled", lambda *a, **k: False)
+        fleet_cells.provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda *a, **k: True)
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda pipe: False)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)

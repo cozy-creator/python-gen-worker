@@ -179,11 +179,7 @@ def test_the_boot_close_is_last_so_no_span_is_suppressed(ladder) -> None:
     silently deletes the rest of the ladder. Assert the close is last."""
     rows = ladder
     servable = _one(rows, boot_phases.PHASE_FIRST_REQUEST_SERVABLE)
-    later = [
-        r for r in rows
-        if r.ordinal > servable.ordinal
-        and r.phase not in (boot_phases.PHASE_WARM_COMPLETE,)
-    ]
+    later = [r for r in rows if r.ordinal > servable.ordinal]
     assert not later, (
         "phases recorded after the boot closed (they would have been "
         f"suppressed by in_boot()): {[r.phase for r in later]}"
@@ -260,38 +256,43 @@ def test_a_warmup_row_says_whether_a_cell_was_armed(ladder) -> None:
         assert tags["armed"] in ("0", "1")
 
 
-def test_per_iteration_warm_cost_is_recorded(ladder) -> None:
-    """The first forward dominates (allocator growth, CUDA module load, algo
-    selection). A total without the sequence cannot say what a cell removes."""
-    rows = ladder
-    warms = _terminal(rows, boot_phases.PHASE_WARMUP)
-    iters = _terminal(rows, boot_phases.PHASE_WARMUP_ITERATION)
-    assert iters, (
-        "no warmup_iteration rows — the harness endpoint declares "
-        "Resources(gpu=True) precisely so `warmup.plan` schedules a real warm "
-        "job; without them this issue's per-iteration question is unanswerable"
+def test_a_warmup_row_exists_ONLY_when_a_forward_actually_ran(ladder) -> None:
+    """pgw#924, the headline. This bracket used to open unconditionally, so a
+    setup slot with no planned warm units — most of them: a non-inference spec,
+    a class with no declared warmup, a bare component slot — still emitted a
+    `warmup` row at `duration_ms=0`. Live, that was 240 of 240 rows and 245 of
+    245 `warmup` activity events, and every consumer of "what does warmup cost
+    at boot" read zero. "Nobody warmed" and "warming was free" are different
+    answers; only one of them was ever true.
+
+    This harness endpoint declares `Resources(gpu=True)` precisely so
+    `warmup.plan` schedules a REAL warm job, so the rows here must carry a real
+    forward count — and any row that exists must have run at least one.
+    """
+    warms = _terminal(ladder, boot_phases.PHASE_WARMUP)
+    assert warms, (
+        "no warmup row on a boot whose endpoint declares a warm plan — the "
+        "gate is now suppressing real work, which is the opposite defect"
     )
-    warm_ordinals = {w.ordinal for w in warms}
-    assert all(i.parent_ordinal in warm_ordinals for i in iters), (
-        "warmup_iteration rows are not children of their warmup span"
-    )
-    seq = [int(_detail(i).get("iteration", "0")) for i in iters]
-    assert seq == sorted(seq) and seq[0] == 1, (
-        f"iteration indices are not a 1-based ordered sequence: {seq}"
-    )
+    for w in warms:
+        forwards = int(_detail(w).get("forwards", "0"))
+        assert forwards >= 1, (
+            f"a warmup row was emitted for a pass that ran no forward: "
+            f"{w.detail!r}"
+        )
 
 
-def test_warm_complete_is_emitted_on_a_boot_with_no_background_mint(ladder) -> None:
-    """pgw#789 put `warm_complete` in `_background_mint`'s finally only, and
-    `rec.background_mint` is set ONLY under eager-first — so an inline-mint,
-    cell-adopt or plain eager boot emitted nothing and was read as "compiled
-    serving never reached" when the truth was "never measured"."""
-    row = _one(ladder, boot_phases.PHASE_WARM_COMPLETE)
-    assert row.cumulative, "warm_complete is a milestone off process start"
-    assert row.outcome in (
-        boot_phases.OUTCOME_OK, boot_phases.OUTCOME_REFUSED)
-    if row.outcome == boot_phases.OUTCOME_REFUSED:
-        assert row.reason == "serving_eager"
+def test_no_row_carries_a_phase_outside_the_declared_vocabulary(ladder) -> None:
+    """pgw#924: the declaration and the producers must be the SAME set. Seventeen
+    phase names were declared; nine of them could only ever report nothing, and
+    a reader of the ladder could not tell a name that means "zero" from a name
+    that means "never measured"."""
+    seen = {r.phase for r in ladder}
+    assert seen <= boot_phases.PHASES, (
+        f"a real boot emitted phases outside the vocabulary: "
+        f"{sorted(seen - boot_phases.PHASES)}"
+    )
+    assert boot_phases.PHASE_HELLO in seen
 
 
 def test_the_ladder_reconciles_against_the_boot_total(ladder) -> None:

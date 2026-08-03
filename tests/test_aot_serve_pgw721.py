@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker import aot_serve as aot
+from gen_worker.cell_adopt import AdoptOutcome
 
 FAMILY = "sdxl-base"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
@@ -684,7 +685,7 @@ def test_enable_arms_and_binds_from_resident_weights(tmp_path, monkeypatch, stub
     pipeline = FakePipeline(module)
     original = module.forward
 
-    assert aot.enable(pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)) is True
+    assert aot.enable(pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)).armed is True
     assert aot.is_armed(pipeline) is True
     assert module.forward is not original
     # constants came from the RESIDENT weights, not from the artifact
@@ -699,28 +700,28 @@ def test_enable_stays_eager_on_any_miss(tmp_path, monkeypatch, stub_runtime):
     original = module.forward
 
     # no artifact
-    assert aot.enable(pipeline, Cfg(), tmp_path / "c") is False
+    assert aot.enable(pipeline, Cfg(), tmp_path / "c").armed is False
     # wrong runtime key
     monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
     assert aot.enable(
         pipeline, Cfg(), tmp_path / "c",
-        _tar(tmp_path, _meta(torch="2.12.0"), name="old.tar.gz")) is False
+        _tar(tmp_path, _meta(torch="2.12.0"), name="old.tar.gz")).armed is False
     # package will not load
     def _boom(path, entry="model"):
         raise RuntimeError("dlopen failed: undefined symbol")
     monkeypatch.setattr(aot, "_load_package", _boom)
-    assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)) is False
+    assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)).armed is False
     # constants cannot bind
     monkeypatch.setattr(
         aot, "_load_package",
         lambda p, e="model": FakePackage(fqns=("nope.weight",)))
-    assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)) is False
+    assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)).armed is False
 
     # pipeline without the target module
     class Bare:
         pass
 
-    assert aot.enable(Bare(), Cfg(), tmp_path / "c", _tar(tmp_path)) is False
+    assert aot.enable(Bare(), Cfg(), tmp_path / "c", _tar(tmp_path)).armed is False
 
     # every miss leaves the pipeline exactly eager
     assert module.forward == original
@@ -751,7 +752,7 @@ def test_provision_dispatches_aot_kind_and_reports_a_hit(tmp_path, monkeypatch, 
     module = FakeModule()
     pipeline = FakePipeline(module)
     assert provision.enable_compiled(
-        pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)) is True
+        pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)).armed is True
     assert aot.is_armed(pipeline) is True
 
 
@@ -772,7 +773,7 @@ def test_provision_falls_through_to_inductor_when_the_pt2_is_unusable(
 
     pipeline = FakePipeline()
     assert provision.enable_compiled(
-        pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)) is False
+        pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)).armed is False
     # the unusable .pt2 was DROPPED, not handed to the inductor lane
     assert seen == [None]
 
@@ -783,11 +784,11 @@ def test_provision_still_routes_trt_and_inductor_kinds(tmp_path, monkeypatch, st
     from gen_worker.models import provision
 
     monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
-    monkeypatch.setattr(te, "enable", lambda *a, **k: True)
+    monkeypatch.setattr(te, "enable", lambda *a, **k: AdoptOutcome.hit())
     pipeline = FakePipeline()
     trt = _tar(tmp_path, _meta(kind="trt-engine"), name="trt.tar.gz")
     assert provision.enable_compiled(
-        pipeline, Cfg(), tmp_path / "cache", trt) is True
+        pipeline, Cfg(), tmp_path / "cache", trt).armed is True
     assert aot.is_armed(pipeline) is False
 
     calls: list = []
@@ -798,7 +799,7 @@ def test_provision_still_routes_trt_and_inductor_kinds(tmp_path, monkeypatch, st
     monkeypatch.setattr(cc, "enable", _inductor)
     inductor = _tar(tmp_path, _meta(kind="compile-cache"), name="cc.tar.gz")
     assert provision.enable_compiled(
-        FakePipeline(), Cfg(), tmp_path / "cache", inductor) is True
+        FakePipeline(), Cfg(), tmp_path / "cache", inductor).armed is True
     assert calls == [inductor]
 
 
@@ -822,7 +823,7 @@ def test_provision_drops_the_artifact_when_the_receipts_gate_refuses(
     monkeypatch.setattr(cc, "enable", _inductor)
 
     assert provision.enable_compiled(
-        FakePipeline(), Cfg(), tmp_path / "cache", _tar(tmp_path)) is False
+        FakePipeline(), Cfg(), tmp_path / "cache", _tar(tmp_path)).armed is False
     assert seen == [None]
 
 
@@ -981,7 +982,7 @@ def test_enable_refuses_a_lifted_module_against_a_branchless_cell(
     pipeline = FakePipeline(module)
     original = module.forward
 
-    assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)) is False
+    assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)).armed is False
     assert aot.is_armed(pipeline) is False
     assert module.forward == original
 
@@ -995,7 +996,7 @@ def test_enable_arms_a_lifted_module_against_a_lifted_cell(
     pipeline = FakePipeline(module)
     art = _tar(tmp_path, _meta(inputs=LIFTED_INPUTS), name="lifted.tar.gz")
 
-    assert aot.enable(pipeline, Cfg(), tmp_path / "c", art) is True
+    assert aot.enable(pipeline, Cfg(), tmp_path / "c", art).armed is True
     assert module.forward(*_in_range_call()[0]) == "ARTIFACT_OUTPUT"
     assert package.invocations[0][0][3] is binding.tensors[0]
     assert aot.execution_count(pipeline) == 1

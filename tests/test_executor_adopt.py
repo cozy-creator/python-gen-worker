@@ -1150,16 +1150,27 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
     assert any(
         "STORE_SERVED_BOOT_COMPILED" in r.message for r in caplog.records
     ), "a store-served boot that hid a real compile must alarm loudly"
-    adopted = [
+    # pgw#923: the alarm has its OWN typed event. It used to ride
+    # `ModelEvent{ADOPTED}` with `duration_ms` redefined to mean "inductor
+    # compile wall" — a second meaning for the one field the adoption
+    # measurement lane (`compile_cache_adopt`) percentiles over, on the only
+    # other boot-path sender of that message. Two meanings for one field is
+    # how the lane could never be read.
+    alarms = [
+        m for m in sent
+        if m.HasField("activity_update")
+        and m.activity_update.kind == "store_served_boot_compiled"
+    ]
+    (alarm,) = alarms
+    assert CACHE_REF in alarm.activity_update.detail
+    assert DIGEST_A in alarm.activity_update.detail
+    assert alarm.activity_update.duration_ms == 45000
+    assert not [
         m for m in sent
         if m.HasField("model_event")
         and m.model_event.state == pb.MODEL_STATE_ADOPTED
-    ]
-    (msg,) = adopted
-    assert msg.model_event.ref == CACHE_REF
-    assert msg.model_event.snapshot_digest == DIGEST_A
-    assert msg.model_event.cache_hits >= 1
-    assert msg.model_event.duration_ms == 45000
+        and m.model_event.duration_ms == 45000
+    ], "the alarm still hijacks the adoption measurement's duration field"
 
 
 def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
@@ -1545,7 +1556,7 @@ def test_pending_self_mint_boot_packs_and_publishes_only_the_proven_capture(
     )
     monkeypatch.setattr(
         ex, "_enable_compiled",
-        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+        lambda p, cfg, artifact, delivered=None: fleet_cells.enable_compiled(
             p, cfg, ex.store._cache_dir, artifact, publisher=pub))
     _MintingEndpoint.setups = _MintingEndpoint.warmups = 0
 
@@ -1654,7 +1665,7 @@ def test_pending_self_mint_unproven_fails_closed_and_never_publishes(
     )
     monkeypatch.setattr(
         ex, "_enable_compiled",
-        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+        lambda p, cfg, artifact, delivered=None: fleet_cells.enable_compiled(
             p, cfg, ex.store._cache_dir, artifact, publisher=pub))
     _UnprovenEndpoint.setups = _UnprovenEndpoint.warmups = 0
 
@@ -3905,7 +3916,7 @@ def _dual_mint_boot(tmp_path, monkeypatch, *, publisher, warm_second: bool):
     )
     monkeypatch.setattr(
         ex, "_enable_compiled",
-        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+        lambda p, cfg, artifact, delivered=None: fleet_cells.enable_compiled(
             p, cfg, ex.store._cache_dir, artifact, publisher=publisher))
     snapshots = {
         wire_ref(spec.models["first"]): pb.Snapshot(digest=MODEL_DIGEST),
@@ -4114,7 +4125,7 @@ def _routed_mint_boot(tmp_path, monkeypatch, *, publisher):
     )
     monkeypatch.setattr(
         ex, "_enable_compiled",
-        lambda p, cfg, artifact: fleet_cells.enable_compiled(
+        lambda p, cfg, artifact, delivered=None: fleet_cells.enable_compiled(
             p, cfg, ex.store._cache_dir, artifact, publisher=publisher))
     snapshots = {
         wire_ref(spec.models["first"]): pb.Snapshot(digest=MODEL_DIGEST),

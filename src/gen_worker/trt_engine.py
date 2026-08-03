@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from . import activity as activity_mod
+from .cell_adopt import AdoptOutcome
 from .compile_cache import (
     AdoptError,
     CompiledLaneUnavailableError,
@@ -575,44 +576,46 @@ def enable(
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
-) -> bool:
+) -> AdoptOutcome:
     """Consumer entry point: verify + unpack a TRT engine artifact, refit it
-    with the resident module's weights, and swap the module forward. Returns
-    False (staying eager) on ANY miss; raises :class:`AdoptError` only via
-    the adopt path (executor catches + classifies)."""
+    with the resident module's weights, and swap the module forward. Falsy
+    (staying eager) on ANY miss; raises :class:`AdoptError` only via the adopt
+    path (executor catches + classifies).
+
+    pgw#923: the outcome is RETURNED, for the same reason the exported arm's
+    is. The classified reason used to leave here only as the ``phase`` of a
+    free-text ``trt_adopt`` event — a THIRD spelling of "a cell adopted, and
+    what it cost", alongside ``aot_adopt`` and the measured
+    ``compile_cache_adopt``. The arming policy now measures this arm and the
+    executor reports it on the one lane that carries numbers.
+    """
     if artifact is None:
-        return False
+        return AdoptOutcome.miss("no_artifact")
     try:
         meta = load_and_wrap(pipeline, cfg, Path(artifact), cache_dir=cache_dir)
-        logger.info(
-            "trt-engine: armed %s (sku=%s trt=%s precision=%s, refit from resident weights)",
-            meta.get("module"), meta.get("sku"), meta.get("trt"), meta.get("precision"),
-        )
-        activity_mod.emit_event(
-            activity_mod.KIND_TRT_ADOPT,
-            f"family={getattr(cfg, 'family', '')} "
-            f"module={meta.get('module')} sku={meta.get('sku')} "
-            f"trt={meta.get('trt')} precision={meta.get('precision')}: "
-            f"armed {Path(artifact).name}",
-            phase="armed",
-        )
-        return True
     except Exception as exc:
         # pgw#760 (the pgw#733 pattern, TRT half): the classified AdoptError
-        # reason was reduced to logger.warning — structurally invisible on
-        # hub-spawned workers. phase carries the reason class, countable
-        # hub-side; detail names the candidate artifact.
+        # reason must not be reduced to logger.warning — that is structurally
+        # invisible on hub-spawned workers. The reason token is the countable
+        # fact and it now rides the adoption's own wire event.
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
         logger.warning(
             "trt-engine: artifact unusable (%s: %s); staying eager",
             reason, exc)
-        activity_mod.emit_event(
-            activity_mod.KIND_TRT_ADOPT,
+        return AdoptOutcome.miss(
+            reason,
             f"family={getattr(cfg, 'family', '')} "
             f"artifact={Path(artifact).name}: {type(exc).__name__}: {exc}",
-            phase=reason,
-        )
-        return False
+            f"artifact={Path(artifact).name}")
+    logger.info(
+        "trt-engine: armed %s (sku=%s trt=%s precision=%s, refit from resident weights)",
+        meta.get("module"), meta.get("sku"), meta.get("trt"), meta.get("precision"),
+    )
+    return AdoptOutcome.hit(
+        f"family={getattr(cfg, 'family', '')} "
+        f"module={meta.get('module')} sku={meta.get('sku')} "
+        f"trt={meta.get('trt')} precision={meta.get('precision')}: "
+        f"armed {Path(artifact).name}")
 
 
 def load_and_wrap(

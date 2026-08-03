@@ -21,6 +21,46 @@ producer materializes the half of its output tree it did not compute.
   component is still passed through by inode, and a `-NNNNN-of-MMMMM` set with no index is
   still REFUSED rather than published.
 
+- **pgw#923 + pgw#924: two telemetry lanes that reported zeros.** A lane that reports zeros is
+  worse than an absent one — it looks like a measurement.
+  - **The adoption fact had three spellings and the measured one was empty.** th#1329/th#1352's
+    `compile_cache_adopt` — durable, two partial indexes, a p50/p95/max admin surface — held
+    **0 rows on both live stacks**, while every real adoption rode free-text `aot_adopt` at
+    `duration_ms=0` (5 rows chaos, 27 master) and `trt_adopt` held 0. Z-gated, not unused: the
+    only sender of the measured `ModelEvent{ADOPTED}` was the hub-commanded
+    `ADOPT_COMPILE_CACHE` handler, which no stack has ever dispatched. Real adoptions are boot
+    attaches through `fleet_cells`, and that path sent no `ModelEvent` at all. The mechanism was
+    a return type: `aot_serve.enable` / `provision.arm_aot` / `provision.enable_compiled` /
+    `trt_engine.enable` narrated the outcome into an event and returned a bool, so the frame
+    that knew the outcome was not the frame that owns the wire. **They now return a typed
+    `AdoptOutcome`** (`gen_worker.cell_adopt`; still truthy/falsy, so every
+    `if enable_compiled(...)` reads unchanged), `fleet_cells.enable_compiled` measures each arm
+    onto `ArmOutcome.adoptions`, and `Executor._report_adoptions` sends one `ModelEvent` per
+    attempt after the boot warmup so `duration_ms` (arm) and `warmup_s` (what the armed cell
+    still costs) are both real. `operation_id` stays empty — already the wire contract's own
+    name for a boot-attached cell, so no proto or hub change is needed. `aot_adopt` and
+    `trt_adopt` are DELETED; their tokens survive as `adopt_failed:<reason>`, the grammar the
+    commanded path already uses, so one `kind=compile_cache_adopt` query returns the whole
+    outcome distribution. The STORE_SERVED_BOOT_COMPILED alarm stops hijacking
+    `ModelEvent{ADOPTED}` with `duration_ms` redefined as inductor compile wall — a second
+    meaning for the one field that lane percentiles over — and gets its own typed event.
+  - **The boot ladder declared 17 phases and had 8 producers.** `process_start`, `env_seal`,
+    `manifest_load`, `cache_preflight`, `cuda_probe`, `cell_load` and `first_request` had no
+    producer anywhere in `src/` — only unit tests constructed them — and are deleted.
+    `cell_arm` was in the same state but is RETAINED and its producer BUILT: it brackets the
+    real arm in `fleet_cells`, over the same interval the adoption reports, so the ladder and
+    the hub's measurement cannot disagree about what an arm cost. `warm_complete` is deleted
+    for a stronger reason — live rows reach **4,863,664 ms**, eighty minutes past the boot it
+    claimed to be a phase of (the deferred background mint) — while the mint-goal latch and the
+    pgw#805 eager-forever backstop it also performed are kept. `warmup` is the §4.22 defect:
+    the bracket opened unconditionally around a plan that is empty on most setup slots, so
+    240/240 boot rows and 336/336 activity events read `duration_ms=0`. It is now recorded only
+    when a forward actually ran, with the count in `detail` — "nobody warmed" and "warming was
+    free" stop being the same row. `warmup_iteration` is deleted on the vocabulary ruling, not
+    on absence: it is NOT unwired, the pgw#797 real-boot harness fires it, and its zero on both
+    stacks is traffic. `graph_class` (0/517 live) is no longer produced; the proto field is a
+    vendored artifact under a digest gate, so its removal is tensorhub's.
+
 - **pgw#942: three SDK holes the 28 endpoints were each paying for, closed once.**
   The framing, and the reason a P2 was worth doing: *if 28 endpoints all write the same
   fifteen lines to do something ordinary, that is an SDK gap.* Measured across the

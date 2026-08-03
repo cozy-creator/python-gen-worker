@@ -85,6 +85,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from . import activity as activity_mod
 from . import host_isa
+from .cell_adopt import AdoptOutcome
 from . import shape_growth
 from .compile_cache import (
     AdoptError,
@@ -101,12 +102,6 @@ METADATA_NAME = "metadata.json"
 PACKAGE_NAME = "model.pt2"
 LITERALS_NAME = "constants.safetensors"
 ARTIFACT_KIND = "aot-inductor"
-#: pgw#733 (arm half): every adopt/arm outcome of an AOT artifact — success
-#: AND every classified refusal — rides this ONE typed wire event. ``phase``
-#: carries the outcome class (``armed`` / the AdoptError reason), countable
-#: hub-side; ``detail`` names the candidate cell. Hub-spawned workers expose
-#: no stdout, so a reason that only reaches the logger does not exist.
-ADOPT_EVENT = "aot_adopt"
 #: pgw#791: an input the artifact was compiled for as 16-byte aligned arrived
 #: unaligned (or non-contiguous) and this ingress realigned it. Typed and
 #: hub-visible because the ALTERNATIVE is what shipped: AOTInductor's own
@@ -2153,44 +2148,42 @@ def enable(
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
-) -> bool:
+) -> AdoptOutcome:
     """Consumer entry point: verify + load + bind + swap an AOTI artifact.
 
-    Returns False (staying eager) on ANY miss — the caller's ordinary miss
-    policy (fleet self-mint / eager / typed refusal) takes over, exactly as
-    for a TRT engine. Returning True IS the HIT: ``fleet_cells`` treats it
-    as a genuine match and skips the self-mint.
+    Falsy (staying eager) on ANY miss — the caller's ordinary miss policy
+    (fleet self-mint / eager / typed refusal) takes over, exactly as for a TRT
+    engine. Truthy IS the HIT: ``fleet_cells`` treats it as a genuine match and
+    skips the self-mint.
+
+    pgw#923: the outcome is RETURNED rather than narrated. The classified
+    refusal reason used to leave this function only as the ``phase`` of a
+    free-text ``aot_adopt`` event, which is why the adoption that actually
+    happens on every boot had no measured row anywhere — the caller could not
+    see what it had just been told.
     """
     if artifact is None:
-        return False
+        return AdoptOutcome.miss("no_artifact")
     try:
         meta = load_and_wrap(pipeline, cfg, Path(artifact), cache_dir=cache_dir)
     except Exception as exc:
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
+        identity = _adopt_identity(Path(artifact))
         logger.warning(
             "aot-serve: artifact unusable (%s: %s); staying eager",
             reason, exc)
-        activity_mod.emit_event(
-            ADOPT_EVENT,
-            f"{_adopt_identity(Path(artifact))}: "
-            f"{type(exc).__name__}: {exc}",
-            phase=reason,
-        )
-        return False
+        return AdoptOutcome.miss(
+            reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
     logger.info(
         "aot-serve: armed %s [%d entr%s] (sku=%s torch=%s precision=%s, "
         "constants bound from resident weights)",
         meta.get("family"), len(meta.get("entries") or {}),
         "y" if len(meta.get("entries") or {}) == 1 else "ies",
         meta.get("sku"), meta.get("torch"), meta.get("precision"))
-    activity_mod.emit_event(
-        ADOPT_EVENT,
+    return AdoptOutcome.hit(
         f"family={meta.get('family')} key={meta.get('cell_key')} "
         f"entries={len(meta.get('entries') or {})} sku={meta.get('sku')} "
-        f"torch={meta.get('torch')} precision={meta.get('precision')}",
-        phase="armed",
-    )
-    return True
+        f"torch={meta.get('torch')} precision={meta.get('precision')}")
 
 
 def _marker_states(pipeline: Any) -> List[Dict[str, Any]]:
@@ -2357,7 +2350,7 @@ def unwrap(pipeline: Any) -> bool:
 
 
 __all__ = [
-    "ADOPT_EVENT",
+    "AdoptOutcome",
     "ARTIFACT_FORMAT",
     "ARTIFACT_KIND",
     "ArtifactContract",

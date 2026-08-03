@@ -219,8 +219,14 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 
 def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         packages: Dict[str, ProbePackage],
-        meta: Dict[str, Any] | None = None) -> Tuple[Any, Any, bool]:
-    """Drive the REAL arm path and return ``(pipeline, module, armed)``."""
+        meta: Dict[str, Any] | None = None) -> Tuple[Any, Any, Any]:
+    """Drive the REAL arm path and return ``(pipeline, module, outcome)``.
+
+    pgw#923: the arm returns a typed :class:`AdoptOutcome` rather than a bool,
+    so its verdict — armed, or refused with the classified reason — is a value
+    the caller can assert on and the executor can put on the wire. It stays
+    truthy/falsy, so `assert outcome` reads exactly as `assert armed` did.
+    """
     from gen_worker.models import provision
 
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
@@ -228,9 +234,9 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         aot, "_load_package", lambda path, entry="model": packages[entry])
     module = ProbeDenoiser()
     pipeline = ProbePipeline(module)
-    armed = provision.arm_aot(
+    outcome = provision.arm_aot(
         pipeline, decl, tmp_path / "cache", artifact(tmp_path, meta), 0)
-    return pipeline, module, armed
+    return pipeline, module, outcome
 
 
 def numerics_rows(said: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
@@ -255,20 +261,22 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     returns True and the 0.99-cosine cell serves every subsequent request.
     """
     packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
-    pipeline, module, armed = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, module, outcome = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert armed is False, "a cell that lost 1% of the output's direction armed"
+    assert outcome.armed is False, "a cell that lost 1% of the output's direction armed"
     # Refused means UNARMED, not merely reported: the module must be eager.
     assert aot.is_armed(pipeline) is False
     assert aot.armed_targets(pipeline) == {}
     assert isinstance(module.forward(torch.zeros(8, 8), torch.tensor(1.0)),
                       torch.Tensor)
 
-    # The ADOPT ledger closes too: `enable` said `armed` before the gate ran,
-    # so a reader counting armed adoptions must see the retraction.
-    adopt = [(d, ph) for k, d, ph in events if k == aot.ADOPT_EVENT]
-    assert [ph for _d, ph in adopt] == ["armed", "numerics_refused"], adopt
-    assert "UNARMED by the numerics gate" in adopt[-1][0]
+    # pgw#923: the adopt ledger cannot need closing, because nothing is
+    # announced until the arm is FINAL. `enable` used to say `armed` before
+    # this gate ran, so a reader counting armed adoptions over-counted every
+    # numerics refusal and a second "retraction" row existed only to correct
+    # the first. The arm returns ONE outcome, with the gate's verdict in it.
+    assert outcome.reason == "numerics_refused"
+    assert "UNARMED by the numerics gate" in outcome.detail
 
     rows = numerics_rows(events)
     assert rows, "a refused cell said nothing on the wire"
@@ -286,9 +294,9 @@ def test_between_floor_and_warn_it_ARMS_and_records_the_warning(
     """The gray band is not a refusal and not a silence. It serves, and it
     confesses — a fleet-wide rate is only countable from activity records."""
     packages = {entry_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
-    pipeline, _module, armed = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert armed is True, "a cell inside the declared gray band failed to arm"
+    assert outcome.armed is True, "a cell inside the declared gray band failed to arm"
     assert aot.is_armed(pipeline) is True
     rows = numerics_rows(events)
     assert [p for _d, p in rows] == ["degraded"], rows
@@ -303,9 +311,9 @@ def test_a_faithful_cell_arms_AND_THE_PASS_IS_ANNOUNCED(
     this program's signature failure. So the pass is a hub row too, carrying
     every axis it was taken on."""
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    pipeline, _module, armed = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert armed is True
+    assert outcome.armed is True
     assert aot.is_armed(pipeline) is True
     rows = numerics_rows(events)
     assert [p for _d, p in rows] == ["checked"], rows
@@ -333,9 +341,9 @@ def test_a_cell_that_cannot_be_MEASURED_does_not_arm(
     is the ordinary miss policy of every other adopt gate, so the cost of a
     probe defect is an un-armed cell — never a silently degraded one."""
     packages = {entry_name(h, w): package for h, w in ROWS}
-    pipeline, _module, armed = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert armed is False
+    assert outcome.armed is False
     assert aot.is_armed(pipeline) is False
     detail, phase = numerics_rows(events)[-1]
     assert phase == "unmeasurable"
@@ -349,10 +357,10 @@ def test_an_undeclared_family_cannot_be_probed_AND_THEREFORE_CANNOT_ARM(
     state the whole fleet was in, and it must read as a refusal."""
     reset_export_declarations()
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    _pipeline, _module, armed = arm(
+    _pipeline, _module, outcome = arm(
         tmp_path, monkeypatch, declaration(), packages)
 
-    assert armed is False
+    assert outcome.armed is False
     detail, phase = numerics_rows(events)[-1]
     assert phase == "unmeasurable"
     assert "no_input_contract" in detail
@@ -398,9 +406,9 @@ def test_the_verdict_is_bisectable_to_ONE_named_axis(
 
     good, bad = entry_name(*ROWS[0]), entry_name(*ROWS[1])
     packages = {good: ProbePackage(), bad: ProbePackage(cosine=0.90)}
-    pipeline, _module, armed = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert armed is False
+    assert outcome.armed is False
     detail, phase = numerics_rows(events)[-1]
     assert phase == "refused"
     # The whole-cell verdict names the class that parted from eager, and the
@@ -416,7 +424,7 @@ def test_the_verdict_is_bisectable_to_ONE_named_axis(
     module = ProbeDenoiser()
     pipeline = ProbePipeline(module)
     assert aot.enable(pipeline, declared, tmp_path / "c2",
-                      artifact(tmp_path)) is True
+                      artifact(tmp_path)).armed is True
     one = numerics_probe.probe_cell(
         pipeline, declared, aot.armed_metadata(pipeline), only=bad)
     assert [v.axis.name for v in one.verdicts] == [bad]
@@ -456,8 +464,8 @@ def test_the_probe_does_not_disturb_the_serving_RNG(
     torch.manual_seed(4242)
     before = torch.get_rng_state().clone()
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    _pipeline, _module, armed = arm(tmp_path, monkeypatch, declared, packages)
-    assert armed is True
+    _pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    assert outcome.armed is True
     assert torch.equal(torch.get_rng_state(), before)
 
 
@@ -476,8 +484,8 @@ def test_a_REAL_arm_reaches_the_gate(tmp_path, monkeypatch, declared, events):
     `invocations` stays 0 and `armed` is True.
     """
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    _pipeline, _module, armed = arm(tmp_path, monkeypatch, declared, packages)
-    assert armed is True
+    _pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    assert outcome.armed is True
     assert all(p.invocations == 1 for p in packages.values()), (
         "a REAL arm did not run the cell against its eager reference: "
         f"{ {k: p.invocations for k, p in packages.items()} }")
