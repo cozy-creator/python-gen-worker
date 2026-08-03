@@ -2911,6 +2911,12 @@ class _InjectionResult:
     # that ended this setup WITHOUT an armed cell. Carried into the record, so
     # the reason outlives the function that computed it.
     eager_postures: List[str] = dc_field(default_factory=list)
+    # pgw#923: every measured adoption ATTEMPT this injection made, in order.
+    # The arm happens here; the warmup that prices it happens after setup
+    # returns, so the terminal wire event is sent once BOTH halves are known —
+    # which is exactly why the boot-attached adoption never had a measured row
+    # while the hub-commanded one (arm and warm in a single frame) did.
+    adoptions: List["fleet_cells.CellAdoption"] = dc_field(default_factory=list)
 
     def add_compile_object(
         self, pipeline: Any, slots: typing.Iterable[str],
@@ -3220,6 +3226,9 @@ class Executor:
         self._warm_contract_runs: Dict[Any, set] = {}
         # pgw#797: warm forwards counted by the in-flight `warmup` span.
         self._warm_iterations: int = 0
+        # pgw#923: the boot warmup's measured cost, joined onto the
+        # adoption event for every cell this boot attached.
+        self._boot_warm_ms: int = 0
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
         # Runtime compile failures are owned by the exact record/target that
@@ -5816,23 +5825,20 @@ class Executor:
             return instance
 
     def _mark_warm_complete(self, rec: "_ClassRecord", function: str) -> None:
-        """Close the compiled-serving milestone once per process (pgw#797).
+        """Latch this process's compiled-serving disposition as FINAL.
 
-        `outcome` says whether compiled serving was reached at all; `ref` names
-        the cell that got there. `mark_once` keeps the several owners — inline
-        setup here, the deferred background mint — from double-claiming it.
+        pgw#924 removed the `warm_complete` BOOT PHASE this used to record. It
+        was never a phase of the boot: live rows reached 4,863,664 ms — the
+        deferred background mint finishes eighty minutes after the worker
+        became servable — so summing it against the boot window was arithmetic
+        on two different clocks, and the `first_request_servable` milestone
+        already answers "when could this worker serve". What survives is the
+        part that was always real: the mint-goal latch and the pgw#805 backstop
+        below.
         """
         armed = next(
             (t.active_compile_ref for t in rec.compile_targets.values()
              if t.active_compile_ref), "")
-        boot_mod.mark_once(
-            boot_mod.PHASE_WARM_COMPLETE,
-            since_process_start=True,
-            function=function,
-            ref=armed,
-            outcome=(boot_mod.OUTCOME_OK if armed else boot_mod.OUTCOME_REFUSED),
-            reason="" if armed else "serving_eager",
-        )
         # th#1359: reaching here means this boot's mint disposition is FINAL
         # on every path (inline setup, adopted cell, eager-without-mint, and
         # the background mint's own `finally`). The mint-goal driver waits on
@@ -5866,7 +5872,7 @@ class Executor:
     @contextmanager
     def _warmup_span(
         self, spec: EndpointSpec, rec: "_ClassRecord", inj: Any
-    ) -> typing.Iterator[Optional[boot_mod.BootSpan]]:
+    ) -> typing.Iterator[None]:
         """`warmup`, nested under the open `pipeline_load` (pgw#797).
 
         The armed/unarmed tag is the point of the row, not decoration: an
@@ -5874,43 +5880,67 @@ class Executor:
         difference between the two IS what a cell saves on warmup. They are
         separate ROWS here rather than two code paths that happen to share a
         name, so the question is a `GROUP BY`.
+
+        pgw#924: the row is emitted only when a warm forward actually ran. This
+        bracket used to open unconditionally, and most setup slots plan no warm
+        units at all (a non-inference spec, a class with no declared warmup, a
+        bare component slot), so 240 of 240 live `warmup` rows and 245 of 245
+        `warmup` activity events reported `duration_ms=0` — a bracket around
+        nothing, read by everyone downstream as "boot warmup is free". Whether
+        work ran is known only at the END of the body, so the row is recorded
+        then, against the `pipeline_load` ordinal it belongs to, rather than
+        opened on a guess.
         """
         if not boot_mod.in_boot():
-            yield None
+            yield
             return
         armed_refs = sorted(
             {sel.ref for sel in inj.active_compile_artifacts.values() if sel.ref}
         )
         armed = bool(armed_refs)
         minting = bool(inj.pending_self_mints)
-        with boot_mod.span(
-            boot_mod.PHASE_WARMUP,
-            function=spec.name,
-            # An armed warm is a LOAD-class cost; unarmed it is COMPILE.
-            klass=boot_mod.CLASS_LOAD if armed else boot_mod.CLASS_COMPILE,
-            ref=armed_refs[0] if armed_refs else "",
-            parent=rec.boot_load_ordinal or None,
-        ) as sp:
-            t0 = time.monotonic()
-            try:
-                yield sp
-            finally:
-                warm_ms = int(round((time.monotonic() - t0) * 1000))
-                sp.note(
-                    f"armed={int(armed)} minting={int(minting)} "
-                    f"iterations={self._warm_iterations} "
-                    f"refs={','.join(armed_refs[:4])}"
+        started = time.monotonic()
+        failure: Optional[BaseException] = None
+        try:
+            yield
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            warm_ms = int(round((time.monotonic() - started) * 1000))
+            ran = self._warm_iterations
+            self._warm_iterations = 0
+            self._boot_warm_ms = warm_ms if ran else 0
+            if ran or failure is not None:
+                boot_mod.mark(
+                    boot_mod.PHASE_WARMUP,
+                    duration_ms=warm_ms,
+                    function=spec.name,
+                    # An armed warm is a LOAD-class cost; unarmed it is COMPILE.
+                    klass=(boot_mod.CLASS_LOAD if armed
+                           else boot_mod.CLASS_COMPILE),
+                    ref=armed_refs[0] if armed_refs else "",
+                    parent=rec.boot_load_ordinal or 0,
+                    outcome=(boot_mod.OUTCOME_FAILED if failure is not None
+                             else boot_mod.OUTCOME_OK),
+                    reason=("" if failure is None
+                            else (str(getattr(failure, "reason", "") or "")
+                                  or type(failure).__name__)),
+                    detail=(
+                        f"armed={int(armed)} minting={int(minting)} "
+                        f"forwards={ran} refs={','.join(armed_refs[:4])}"
+                    ),
                 )
                 # th#1322's numeric home, so the boot span and the activity
                 # stream agree on one number rather than two derivations.
                 activity_mod.emit_event(
                     "warmup",
                     f"boot warmup for {spec.name} "
-                    f"({'armed' if armed else 'unarmed'})",
+                    f"({'armed' if armed else 'unarmed'}, {ran} forward"
+                    f"{'' if ran == 1 else 's'})",
                     phase=activity_mod.PHASE_WARMUP_FORWARD,
                     duration_ms=warm_ms,
                 )
-                self._warm_iterations = 0
 
     def _warmup_plan(
         self, spec: EndpointSpec, rec: _ClassRecord,
@@ -6156,29 +6186,21 @@ class Executor:
                         torch.cuda.empty_cache()
                     return False
             evidence.count += 1
-            # pgw#797: per-ITERATION warm cost. The first forward is typically
-            # far slower than the rest (allocator growth, CUDA module load,
-            # cuDNN/cuBLAS algorithm selection), so a warmup total without the
-            # shape of the sequence cannot say what a cell removes — a cell
-            # removes the compile inside the FIRST forward, not the whole pass.
-            # One nested span per forward: counts are small and bounded by the
-            # declared handler set, and `iteration=` orders them.
-            iter_ms = int(round((time.monotonic() - t0) * 1000))
             if boot_mod.in_boot():
-                # Counted INSIDE the gate: a steady-state warm hours later has
-                # no `warmup` span to belong to, and letting it bump the counter
-                # would misreport the next boot span's iteration total.
+                # pgw#924: this counter is what makes the `warmup` boot row
+                # honest — it is the difference between "the warm pass cost
+                # nothing" and "there was no warm pass". Counted INSIDE the
+                # gate: a steady-state warm hours later has no boot row to
+                # belong to, and letting it bump the counter would misreport
+                # the next boot's warmup.
+                #
+                # The per-forward `warmup_iteration` row that used to be
+                # recorded here is DELETED. It was wired and never fired once
+                # on either live stack (0 rows against 240 `warmup` rows),
+                # because the plan that reaches this line is empty on the
+                # shipping path; a per-iteration decomposition of a pass that
+                # does not run is not a measurement anyone can read.
                 self._warm_iterations += 1
-                boot_mod.mark(
-                    boot_mod.PHASE_WARMUP_ITERATION,
-                    duration_ms=iter_ms,
-                    function=wj.spec.name,
-                    graph_class=str(getattr(wj, "graph_key", "") or "")[:200],
-                    detail=(
-                        f"iteration={self._warm_iterations} mode={mode} "
-                        f"armed={int(bool(objects))}"
-                    ),
-                )
             for obj in objects:
                 calls_before, trt_before, aot_before = before[id(obj)]
                 inductor_proven = (
@@ -6960,6 +6982,12 @@ class Executor:
             compile_seconds = (
                 compile_cache.compile_wall_seconds() - compile_seconds_before
                 if proves_inductor else 0.0)
+            # id(pipeline) -> (calls, cache_hits, cache_misses) observed across
+            # this setup's warmup. Declared out here because pgw#923's adoption
+            # report reads it whether or not this boot proved anything: a cell
+            # that armed and then warmed to zero hits is exactly the adoption
+            # the measurement lane exists to price.
+            proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
             if proves_inductor or proves_exported:
                 # gw#595 per-object provability: the proof scopes to objects
                 # the warmup actually EXERCISED (calls>0). An exercised object
@@ -6983,7 +7011,6 @@ class Executor:
                     mint_sharers.setdefault(id(_pending), []).append(_obj_id)
                 proven_mint_objs: set[int] = set()
                 calls_by_obj: Dict[int, int] = {}
-                proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
                     aot_before = aot_proof_before.get(id(pipe))
@@ -7383,14 +7410,24 @@ class Executor:
                     except Exception:
                         logger.debug(
                             "fx-key forensics unavailable", exc_info=True)
-                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                        ref=ref,
-                        state=pb.MODEL_STATE_ADOPTED,
-                        snapshot_digest=digest,
-                        cache_hits=hits,
-                        cache_misses=misses,
+                    # pgw#923: this alarm used to ride the ADOPTED ModelEvent
+                    # with `duration_ms` redefined to mean "inductor compile
+                    # wall" — a second meaning for the one field the adoption
+                    # measurement lane percentiles over. It has its own typed
+                    # event now, so `compile_cache_adopt.duration_ms` means the
+                    # arm, always, and this alarm keeps its own number.
+                    activity_mod.emit_event(
+                        "store_served_boot_compiled",
+                        f"family={family} cell={ref} digest={digest}: a "
+                        f"store-served boot burned {compile_seconds:.1f}s of "
+                        f"inductor compile wall (alarm threshold "
+                        f"{_STORE_SERVED_COMPILE_ALARM_S:.0f}s, cache_hits="
+                        f"{hits} cache_misses={misses}) — the delivered cell "
+                        f"is not serving the graphs this boot compiled",
+                        phase="alarm",
                         duration_ms=int(compile_seconds * 1000),
-                    )))
+                    )
+            await self._report_adoptions(inj, proof_by_obj)
             # pgw#815: THE assertion. `finalize completed` must be
             # unreachable while a mint obligation is unresolved — running it
             # OUTSIDE the `proves_inductor or proves_exported` block is the
@@ -8720,6 +8757,7 @@ class Executor:
                             outcome = await _to_thread_complete(
                                 self._enable_compiled,
                                 pipe, spec.compile_cell(), compile_artifact,
+                                compile_selection,
                             )
                         except compile_cache.CompiledLaneUnavailableError as exc:
                             # Mandatory (w8a8/w4a4) lane: self-mint also hit a
@@ -8735,6 +8773,7 @@ class Executor:
                             raise
                         armed = outcome.armed
                         pipe_mint = outcome.self_mint
+                        result.adoptions.extend(outcome.adoptions)
                         # pgw#824: the arming brain already classified WHY it
                         # is not arming; without carrying it here the reason
                         # died at the end of this function and every eager
@@ -9921,6 +9960,7 @@ class Executor:
 
     def _enable_compiled(
         self, pipe: Any, cfg: Any, artifact: Optional[Path],
+        delivered: Optional["_CompileArtifactSelection"] = None,
     ) -> "fleet_cells.ArmOutcome":
         """Arm the best available compiled path for a freshly loaded pipeline.
 
@@ -9943,6 +9983,8 @@ class Executor:
         return fleet_cells.enable_compiled(
             pipe, cfg, self.store._cache_dir, artifact,
             publisher=self._cell_publisher(),
+            delivered_ref=delivered.ref if delivered else "",
+            delivered_digest=delivered.snapshot_digest if delivered else "",
         )
 
     def _arming_enable(
@@ -10056,6 +10098,79 @@ class Executor:
         finally:
             if self._compile_cache_adoption_active == intent_id:
                 self._compile_cache_adoption_active = ""
+
+    async def _report_adoptions(
+        self,
+        inj: "_InjectionResult",
+        proof_by_obj: Dict[int, Tuple[int, int, int]],
+    ) -> None:
+        """Send ONE terminal `ModelEvent` per boot-attached adoption (pgw#923).
+
+        This is the producer the `compile_cache_adopt` measurement lane never
+        had. th#1329/th#1352 gave the hub a durable, indexed, percentile-backed
+        home for "what did arming this cell cost, and what does it still cost
+        at warm time" — and both live stacks held ZERO rows in it, because the
+        only worker-side sender was the hub-commanded `ADOPT_COMPILE_CACHE`
+        handler and no stack has ever issued that operation. Every adoption
+        that actually happens is a boot attach, and a boot attach reported
+        itself in prose (`aot_adopt`, `duration_ms=0`) on a lane with no
+        numbers in it. Two builders, one fact, and only the unmeasured builder
+        reached the consumer.
+
+        `operation_id` is empty by construction here: the wire contract already
+        specifies empty as "boot-attached cell", so the hub stores these
+        without being taught a second spelling.
+
+        Telemetry only. A send failure never changes what this worker serves —
+        the cell is already armed or already refused by the time this runs.
+        """
+        if not inj.adoptions:
+            return
+        warmup_s = round(max(0, self._boot_warm_ms) / 1000.0, 3)
+        for adoption in inj.adoptions:
+            if not adoption.ref:
+                # An arm with no candidate identity is not an adoption anyone
+                # can attribute; recording it would add a row that answers
+                # nothing. (The hub applies the same rule from its side.)
+                continue
+            calls, hits, misses = proof_by_obj.get(adoption.pipeline_id, (0, 0, 0))
+            if adoption.armed:
+                event = pb.ModelEvent(
+                    ref=adoption.ref,
+                    snapshot_digest=adoption.snapshot_digest,
+                    # Empty: the wire contract's own name for a boot-attached
+                    # cell, so the hub stores these without a second spelling.
+                    operation_id="",
+                    target_incarnation_id="",
+                    state=pb.MODEL_STATE_ADOPTED,
+                    duration_ms=adoption.arm_ms,
+                    cache_hits=max(0, hits),
+                    cache_misses=max(0, misses),
+                    warmup_s=warmup_s,
+                )
+            else:
+                event = pb.ModelEvent(
+                    ref=adoption.ref,
+                    snapshot_digest=adoption.snapshot_digest,
+                    operation_id="",
+                    target_incarnation_id="",
+                    state=pb.MODEL_STATE_FAILED,
+                    # The same `adopt_failed:<reason>` grammar the commanded
+                    # path uses, so one `kind=compile_cache_adopt` query
+                    # returns the whole outcome distribution rather than two
+                    # half-populations that have to be unioned by hand.
+                    error=f"adopt_failed:{adoption.reason or 'no_cell'}",
+                    duration_ms=adoption.arm_ms,
+                )
+            logger.info(
+                "cell adoption %s ref=%s digest=%s arm_ms=%d warmup_s=%.3f "
+                "calls=%d hits=%d misses=%d%s",
+                "ADOPTED" if adoption.armed else "FAILED",
+                adoption.ref, adoption.snapshot_digest, adoption.arm_ms,
+                warmup_s, calls, hits, misses,
+                "" if adoption.armed else f" reason={adoption.reason}")
+            await self._send(pb.WorkerMessage(model_event=event))
+        inj.adoptions.clear()
 
     def _adoption_event(
         self,
@@ -10540,14 +10655,18 @@ class Executor:
                 # and the adopt event answer "what does an armed cell still pay
                 # on warmup" identically instead of by two derivations. Always
                 # armed=1 by construction — this runs after the wrap.
-                if boot_mod.in_boot():
+                if boot_mod.in_boot() and warmed:
+                    # pgw#924: `and warmed`. A warmup that ran no forward has
+                    # no cost to report, and a zero-duration row here reads
+                    # identically to "an armed cell warms instantly" — the
+                    # exact reading 240 live rows of `duration_ms=0` invited.
                     boot_mod.mark(
                         boot_mod.PHASE_WARMUP,
                         duration_ms=int(round(warmup_s * 1000)),
                         function=spec.name,
                         ref=ref,
                         klass=boot_mod.CLASS_LOAD,
-                        detail=f"armed=1 minting=0 iterations={warmed} adopt=1",
+                        detail=f"armed=1 minting=0 forwards={warmed} adopt=1",
                     )
                 hits = 0
                 misses = 0

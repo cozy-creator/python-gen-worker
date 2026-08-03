@@ -15,6 +15,7 @@ import pytest
 from gen_worker import compile_cache as cc
 from gen_worker import trt_engine as te
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.cell_adopt import AdoptOutcome
 
 from test_executor_adopt import (  # noqa: F401 — shared harness
     CACHE_REF,
@@ -485,7 +486,7 @@ def test_enable_compiled_dispatches_on_artifact_kind(tmp_path, monkeypatch):
 
     def _trt_enable(p, c, d, a):
         seen["trt"] = Path(a)
-        return True
+        return AdoptOutcome.hit()
 
     def _cc_enable(p, c, d, a):
         seen["cc"] = a

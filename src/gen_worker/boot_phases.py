@@ -49,31 +49,39 @@ from .pb import worker_scheduler_pb2 as pb
 logger = logging.getLogger(__name__)
 
 # --- phase vocabulary (wire-shared with tensorhub's bootphase.go) -----------
-# Reuses the entrypoint's existing de-facto boot phase names (_log_startup_phase)
-# rather than inventing a second vocabulary for the same milestones.
-PHASE_PROCESS_START = "process_start"
-PHASE_ENV_SEAL = "env_seal"
-PHASE_MANIFEST_LOAD = "manifest_load"
-PHASE_CACHE_PREFLIGHT = "cache_preflight"
-PHASE_CUDA_PROBE = "cuda_probe"
+# pgw#924: EXACTLY eight values, and every one of them has a production
+# producer on the shipping path. The previous vocabulary declared seventeen;
+# eight of those (`process_start`, `env_seal`, `manifest_load`,
+# `cache_preflight`, `cuda_probe`, `cell_load`, `first_request`, and — as a
+# phase — `cell_arm`) were constructed only by unit tests, and
+# `warmup_iteration` was wired to a body that never ran. A declared phase with
+# no producer is not "coverage we have not gotten to": every reader of the
+# ladder saw a name that could only ever report nothing, which is a default
+# read as a fact. `warm_complete` is deleted for a different and stronger
+# reason — live rows reach 4,863,664 ms, i.e. eighty minutes after the boot it
+# was supposedly a phase of. It is a serving-tier disposition, not a boot
+# phase, and it now lives only where it belongs (the mint-goal latch and the
+# `self_mint_skipped` backstop).
 PHASE_HELLO = "hello"
 PHASE_WEIGHTS_FETCH = "weights_fetch"
 PHASE_PIPELINE_LOAD = "pipeline_load"
 #: pgw#797: the warmup forwards, split OUT of `pipeline_load` and nested under
 #: it, so `pipeline_load` becomes weights->VRAM by subtraction and "what does a
 #: cell save on warmup" is a column instead of an estimate.
+#:
+#: pgw#924: emitted ONLY when warm work actually runs. It used to bracket the
+#: warm call unconditionally, and on the shipping path — where most setup slots
+#: plan no warm units at all — that produced 240 live rows of `duration_ms=0`.
+#: A skipped warmup now emits no row, because "nobody warmed" and "warming was
+#: free" are different answers and only one of them was ever true.
 PHASE_WARMUP = "warmup"
-#: One warm forward. The first iteration dominates (allocator growth, CUDA
-#: module load, cuDNN/cuBLAS algorithm selection), so a warmup total without the
-#: shape of the sequence cannot answer what a cell removes.
-PHASE_WARMUP_ITERATION = "warmup_iteration"
 PHASE_CELL_DISCOVER = "cell_discover"
 PHASE_CELL_FETCH = "cell_fetch"
-PHASE_CELL_LOAD = "cell_load"
+#: pgw#923/#924: the arm of ONE delivered or discovered cell. Its duration is
+#: the same quantity the hub stores as the adoption's `duration_ms`, measured
+#: once, in the one place that does the arming.
 PHASE_CELL_ARM = "cell_arm"
 PHASE_FIRST_REQUEST_SERVABLE = "first_request_servable"
-PHASE_FIRST_REQUEST = "first_request"
-PHASE_WARM_COMPLETE = "warm_complete"
 
 #: The boot's closing milestone: the phase whose completion means this worker
 #: can serve. Everything after it is optimization, not boot.
@@ -87,27 +95,23 @@ CLASS_LOAD = "load"        # weights -> VRAM, cell load+arm
 CLASS_SETUP = "setup"      # probes, seals, manifests, handshake
 
 _CLASS_BY_PHASE: Dict[str, str] = {
-    PHASE_PROCESS_START: CLASS_SETUP,
-    PHASE_ENV_SEAL: CLASS_SETUP,
-    PHASE_MANIFEST_LOAD: CLASS_SETUP,
-    PHASE_CACHE_PREFLIGHT: CLASS_SETUP,
-    PHASE_CUDA_PROBE: CLASS_SETUP,
     PHASE_HELLO: CLASS_SETUP,
     PHASE_WEIGHTS_FETCH: CLASS_FETCH,
     PHASE_CELL_DISCOVER: CLASS_SETUP,
     PHASE_CELL_FETCH: CLASS_FETCH,
-    PHASE_CELL_LOAD: CLASS_LOAD,
     PHASE_CELL_ARM: CLASS_LOAD,
     PHASE_PIPELINE_LOAD: CLASS_LOAD,
     # pgw#797: an UNARMED warm pays the compile; an ARMED one pays only the
     # call. The default is the expensive reading; `span(..., klass=)` overrides
     # per row, which is why classification is a lookup and not a constant.
     PHASE_WARMUP: CLASS_COMPILE,
-    PHASE_WARMUP_ITERATION: CLASS_COMPILE,
-    PHASE_WARM_COMPLETE: CLASS_COMPILE,
     PHASE_FIRST_REQUEST_SERVABLE: CLASS_SETUP,
-    PHASE_FIRST_REQUEST: CLASS_COMPILE,
 }
+
+#: The complete vocabulary (pgw#924). Exported so a test can assert the
+#: declaration and the production producers are the SAME set — the property
+#: that failed here, silently, for seventeen names.
+PHASES: frozenset = frozenset(_CLASS_BY_PHASE)
 
 
 def phase_class(phase: str, ordinal: int = 0) -> str:
@@ -365,7 +369,6 @@ class BootSpan:
             artifact_kind=self._row.artifact_kind,
             artifact_key=self._row.artifact_key,
             function=self._row.function,
-            graph_class=self._row.graph_class,
             outcome=outcome,
             reason=reason[:300],
             detail=detail[:2000],
@@ -379,7 +382,6 @@ def open_span(
     function: str = "",
     artifact_kind: str = "",
     artifact_key: str = "",
-    graph_class: str = "",
     parent: Optional[int] = None,
     klass: str = "",
 ) -> BootSpan:
@@ -412,7 +414,6 @@ def open_span(
         function=function,
         artifact_kind=artifact_kind,
         artifact_key=artifact_key,
-        graph_class=graph_class,
     )
     _emit(row)
     return BootSpan(phase, ordinal, parent, row)
@@ -426,7 +427,6 @@ def span(
     function: str = "",
     artifact_kind: str = "",
     artifact_key: str = "",
-    graph_class: str = "",
     parent: Optional[int] = None,
     klass: str = "",
 ) -> Iterator[BootSpan]:
@@ -439,8 +439,7 @@ def span(
     """
     handle = open_span(
         phase, ref=ref, function=function, artifact_kind=artifact_kind,
-        artifact_key=artifact_key, graph_class=graph_class,
-        parent=parent, klass=klass,
+        artifact_key=artifact_key, parent=parent, klass=klass,
     )
     token = _stack_var.set(_stack_var.get() + (handle.ordinal,))
     try:
@@ -463,19 +462,25 @@ def mark(
     function: str = "",
     artifact_kind: str = "",
     artifact_key: str = "",
-    graph_class: str = "",
     bytes_moved: int = 0,
     source: str = "",
     outcome: str = OUTCOME_OK,
     reason: str = "",
     detail: str = "",
     klass: str = "",
+    parent: Optional[int] = None,
 ) -> None:
     """Record an instantaneous boot MILESTONE as a single closed row.
 
     ``since_process_start=True`` measures the milestone from OS process start —
     which is what "time to first-request-servable" means and what the
     autoscaler's cold-boot horizon needs.
+
+    ``parent`` names the enclosing span's ordinal EXPLICITLY, for the same
+    reason :func:`open_span` takes one: a phase measured across an ``await``
+    boundary cannot read its parent off the implicit stack. pgw#924's `warmup`
+    is exactly that shape — it is decided and measured around the warm call but
+    only recorded once its cost is known to be real.
 
     A boot-CLOSING milestone (:data:`SERVABLE_PHASES`) recorded before ``hello``
     is HELD, not emitted: see the ``_hello_seen`` note. It is released, with its
@@ -491,7 +496,7 @@ def mark(
                         since_process_start=since_process_start,
                         ref=ref, function=function,
                         artifact_kind=artifact_kind, artifact_key=artifact_key,
-                        graph_class=graph_class, bytes_moved=bytes_moved,
+                        bytes_moved=bytes_moved,
                         source=source, outcome=outcome, reason=reason,
                         detail=detail,
                     )
@@ -508,7 +513,10 @@ def mark(
     # the servable mark rides a StateDelta task created inside the setup span,
     # so it INHERITED that span's context. Cumulative rows are top-level, by
     # construction rather than by the caller remembering.
-    parent = 0 if since_process_start else (_stack()[-1] if _stack() else 0)
+    if since_process_start:
+        parent = 0
+    elif parent is None:
+        parent = _stack()[-1] if _stack() else 0
     if klass:
         with _lock:
             _class_override[ordinal] = klass
@@ -540,7 +548,6 @@ def mark(
         function=function,
         artifact_kind=artifact_kind,
         artifact_key=artifact_key,
-        graph_class=graph_class,
         outcome=outcome,
         reason=reason[:300],
         detail=detail[:2000],
@@ -701,23 +708,15 @@ __all__ = [
     "recorded_rows",
     "reset_for_tests",
     "servable_ms",
-    "PHASE_PROCESS_START",
-    "PHASE_ENV_SEAL",
-    "PHASE_MANIFEST_LOAD",
-    "PHASE_CACHE_PREFLIGHT",
-    "PHASE_CUDA_PROBE",
+    "PHASES",
     "PHASE_HELLO",
     "PHASE_WEIGHTS_FETCH",
     "PHASE_PIPELINE_LOAD",
     "PHASE_WARMUP",
-    "PHASE_WARMUP_ITERATION",
     "PHASE_CELL_DISCOVER",
     "PHASE_CELL_FETCH",
-    "PHASE_CELL_LOAD",
     "PHASE_CELL_ARM",
     "PHASE_FIRST_REQUEST_SERVABLE",
-    "PHASE_FIRST_REQUEST",
-    "PHASE_WARM_COMPLETE",
     "OUTCOME_OK",
     "OUTCOME_REFUSED",
     "OUTCOME_FAILED",

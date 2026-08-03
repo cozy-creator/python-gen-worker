@@ -52,7 +52,7 @@ def _phases(rows: List[pb.BootPhase]) -> List[str]:
 
 
 def test_boot_rows_are_ordered_and_carry_one_boot_id() -> None:
-    with boot_phases.span(boot_phases.PHASE_ENV_SEAL):
+    with boot_phases.span(boot_phases.PHASE_CELL_DISCOVER):
         pass
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     with boot_phases.span(boot_phases.PHASE_WEIGHTS_FETCH, ref="repo/sdxl") as fetch:
@@ -60,7 +60,7 @@ def test_boot_rows_are_ordered_and_carry_one_boot_id() -> None:
 
     rows = boot_phases.recorded_rows()
     assert _phases(rows) == [
-        boot_phases.PHASE_ENV_SEAL,
+        boot_phases.PHASE_CELL_DISCOVER,
         boot_phases.PHASE_HELLO,
         boot_phases.PHASE_WEIGHTS_FETCH,
     ]
@@ -80,7 +80,7 @@ def test_boot_rows_are_ordered_and_carry_one_boot_id() -> None:
 def test_a_span_opens_a_row_and_closes_the_same_ordinal() -> None:
     """th#1269's shape: a pod that dies mid-phase leaves the OPEN row behind,
     which is how the hub can still say which phase it died in."""
-    handle = boot_phases.open_span(boot_phases.PHASE_CELL_LOAD)
+    handle = boot_phases.open_span(boot_phases.PHASE_PIPELINE_LOAD)
     rows = boot_phases.recorded_rows()
     assert len(rows) == 1 and rows[0].terminal is False
     opened_ordinal = rows[0].ordinal
@@ -94,7 +94,7 @@ def test_a_span_opens_a_row_and_closes_the_same_ordinal() -> None:
 def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
     """The boot window IS the no-sink window. Everything before bind must
     arrive, in order, once the stream comes up."""
-    boot_phases.mark(boot_phases.PHASE_CUDA_PROBE)
+    boot_phases.mark(boot_phases.PHASE_CELL_DISCOVER)
     with boot_phases.span(boot_phases.PHASE_WEIGHTS_FETCH, ref="repo/a"):
         pass
 
@@ -121,7 +121,7 @@ def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
     assert all(m.WhichOneof("msg") == "boot_phase" for m in sent)
     shipped = [m.boot_phase for m in sent]
     # The pre-bind rows were flushed, and the post-bind row followed them.
-    assert boot_phases.PHASE_CUDA_PROBE in _phases(shipped)
+    assert boot_phases.PHASE_CELL_DISCOVER in _phases(shipped)
     assert boot_phases.PHASE_WEIGHTS_FETCH in _phases(shipped)
     assert _phases(shipped)[-1] == boot_phases.PHASE_FIRST_REQUEST_SERVABLE
 
@@ -132,8 +132,8 @@ def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
 
 
 def test_nested_phases_charge_the_child_so_the_boot_reconciles() -> None:
-    with boot_phases.span(boot_phases.PHASE_CELL_ARM):
-        with boot_phases.span(boot_phases.PHASE_CELL_LOAD):
+    with boot_phases.span(boot_phases.PHASE_PIPELINE_LOAD):
+        with boot_phases.span(boot_phases.PHASE_WARMUP):
             pass
     # pgw#797: `hello` gates the boot close (see the flush test above).
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
@@ -141,9 +141,9 @@ def test_nested_phases_charge_the_child_so_the_boot_reconciles() -> None:
                      since_process_start=True)
 
     rows = {r.phase: r for r in boot_phases.recorded_rows() if r.terminal}
-    arm = rows[boot_phases.PHASE_CELL_ARM]
-    load = rows[boot_phases.PHASE_CELL_LOAD]
-    assert load.parent_ordinal == arm.ordinal
+    load = rows[boot_phases.PHASE_PIPELINE_LOAD]
+    warm = rows[boot_phases.PHASE_WARMUP]
+    assert warm.parent_ordinal == load.ordinal
 
     recon = boot_phases.reconciliation()
     # The nested load is charged once, to the child — the parent keeps only its
@@ -185,7 +185,7 @@ def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
     already account for. Summing both double-counts the entire boot — and any
     hub-side SUM(duration_ms) would inherit the error, which is why
     `cumulative` is a wire field and not an SDK-local detail."""
-    with boot_phases.span(boot_phases.PHASE_ENV_SEAL):
+    with boot_phases.span(boot_phases.PHASE_CELL_DISCOVER):
         pass
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     boot_phases.mark(boot_phases.PHASE_FIRST_REQUEST_SERVABLE,
@@ -194,7 +194,7 @@ def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
     rows = {r.phase: r for r in boot_phases.recorded_rows() if r.terminal}
     assert rows[boot_phases.PHASE_HELLO].cumulative is True
     assert rows[boot_phases.PHASE_FIRST_REQUEST_SERVABLE].cumulative is True
-    assert rows[boot_phases.PHASE_ENV_SEAL].cumulative is False
+    assert rows[boot_phases.PHASE_CELL_DISCOVER].cumulative is False
 
     recon = boot_phases.reconciliation()
     # measured_ms counts the env_seal span only; the two milestones are the
@@ -204,11 +204,8 @@ def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
 
 
 def test_phase_classes_cover_the_vocabulary() -> None:
-    for phase in (
-        boot_phases.PHASE_WEIGHTS_FETCH, boot_phases.PHASE_CELL_FETCH,
-        boot_phases.PHASE_CELL_LOAD, boot_phases.PHASE_CELL_ARM,
-        boot_phases.PHASE_HELLO, boot_phases.PHASE_WARM_COMPLETE,
-    ):
+    assert boot_phases.PHASES, "the vocabulary cannot be empty"
+    for phase in boot_phases.PHASES:
         assert boot_phases.phase_class(phase) != "", phase
     # An unknown phase is reported unattributed rather than guessed.
     assert boot_phases.phase_class("something_new") == ""
@@ -218,11 +215,11 @@ def test_telemetry_never_breaks_the_boot_it_measures() -> None:
     """A span that raises still closes (as failed, with the classified reason)
     and re-raises: this is a measurement, never a behaviour change."""
     with pytest.raises(AdoptError):
-        with boot_phases.span(boot_phases.PHASE_CELL_LOAD):
+        with boot_phases.span(boot_phases.PHASE_PIPELINE_LOAD):
             raise AdoptError("artifact_invalid", "truncated tar")
 
     row = [r for r in boot_phases.recorded_rows()
-           if r.terminal and r.phase == boot_phases.PHASE_CELL_LOAD][0]
+           if r.terminal and r.phase == boot_phases.PHASE_PIPELINE_LOAD][0]
     assert row.outcome == boot_phases.OUTCOME_FAILED
     assert row.reason == "artifact_invalid"
     assert "truncated tar" in row.detail

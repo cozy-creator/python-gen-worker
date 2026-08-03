@@ -62,7 +62,7 @@ def test_a_refused_arm_rides_a_boot_row_with_its_reason(
     artifact.write_bytes(b"not-a-real-artifact")
 
     # Behaviour is unchanged: a refused arm stays eager and returns False.
-    assert aot_serve.enable(object(), object(), artifact=artifact) is False
+    assert aot_serve.enable(object(), object(), artifact=artifact).armed is False
 
     arms = [r for r in boot_phases.recorded_rows()
             if r.terminal and r.phase == boot_phases.PHASE_CELL_ARM]
@@ -85,7 +85,7 @@ def test_an_armed_cell_rides_an_ok_boot_row(
     artifact = tmp_path / "ck5_feed.tar.gz"
     artifact.write_bytes(b"x")
 
-    assert aot_serve.enable(object(), object(), artifact=artifact) is True
+    assert aot_serve.enable(object(), object(), artifact=artifact).armed is True
     arms = [r for r in boot_phases.recorded_rows()
             if r.terminal and r.phase == boot_phases.PHASE_CELL_ARM]
     assert len(arms) == 1

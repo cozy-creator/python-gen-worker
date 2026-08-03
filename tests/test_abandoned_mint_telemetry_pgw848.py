@@ -34,6 +34,7 @@ import pytest
 
 from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_mint, mint_delegate, mint_process
+from gen_worker.cell_adopt import AdoptOutcome
 
 _GIB = 1 << 30
 
@@ -501,7 +502,8 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
 
     assert not hasattr(provision, "_announce_unchecked_numerics")
 
-    monkeypatch.setattr(aot_serve, "enable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        aot_serve, "enable", lambda *a, **k: AdoptOutcome.hit())
     said: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         activity_mod, "emit_event",
@@ -511,7 +513,8 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     cfg = type("Cfg", (), {"family": "sdxl", "numerics_floor": 0.995,
                            "numerics_warn": 0.999, "lora_bucket": 0,
                            "targets": ()})()
-    assert provision.arm_aot(object(), cfg, None, Path("cell.pt2"), 0) is False
+    assert provision.arm_aot(
+        object(), cfg, None, Path("cell.pt2"), 0).armed is False
     rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_CELL_NUMERICS]
     assert rows, "an arm that could not be measured said nothing"
     detail, phase = rows[-1]

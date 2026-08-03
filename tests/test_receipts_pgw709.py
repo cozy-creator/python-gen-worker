@@ -379,7 +379,7 @@ class TestProvisionHook:
             family = FAMILY
             lora_bucket = 0
 
-        armed = provision.enable_compiled(object(), Cfg(), tmp_path, artifact)
+        armed = provision.enable_compiled(object(), Cfg(), tmp_path, artifact).armed
         assert armed is False
         assert seen["artifact"] is None, (
             "refused delivered artifact leaked through to compile_cache.enable"
@@ -408,7 +408,7 @@ class TestProvisionHook:
             family = FAMILY
             lora_bucket = 0
 
-        armed = provision.enable_compiled(object(), Cfg(), tmp_path, artifact)
+        armed = provision.enable_compiled(object(), Cfg(), tmp_path, artifact).armed
         assert armed is True
         assert seen["artifact"] == artifact
 

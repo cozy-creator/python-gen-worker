@@ -29,6 +29,7 @@ from gen_worker.executor import Executor, ModelStore
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec, extract_specs
+from gen_worker.cell_adopt import AdoptOutcome
 
 FAMILY = "wan-2.2-t2v-a14b"
 
@@ -170,7 +171,9 @@ def test_arm_compile_inside_scope_reaches_enable_compiled(monkeypatch, tmp_path)
     seen: list = []
     monkeypatch.setattr(
         provision, "enable_compiled",
-        lambda pipe, c, cache_dir, artifact: seen.append((pipe, c, cache_dir, artifact)) or True,
+        lambda pipe, c, cache_dir, artifact: (
+            seen.append((pipe, c, cache_dir, artifact))
+            or AdoptOutcome.hit()),
     )
     pipe = _StubPipe()
     scope = provision.ArmingScope(cfg, tmp_path, None)
@@ -359,7 +362,7 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
             "originals": [],
             "regional_mods": [],
         })
-        return True
+        return AdoptOutcome.hit()
 
     class Endpoint:
         def setup(self, model: str) -> None:
