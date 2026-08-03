@@ -72,6 +72,7 @@ from .intent_registry import IntentRegistry
 from .models import cozy_snapshot
 from .models import disk_gc
 from .models import disk_telemetry
+from .models import loading
 from .models import provision
 from .models import residency as residency_mod
 from .models import staging as staging_mod
@@ -2479,7 +2480,13 @@ class ModelStore:
 # speculated only ""/"fp8-hooks", so the armed cell was unreachable and all
 # 9 workers re-minted. Verify-on-receipt remains the arming gate; a wrong
 # speculation is only ever a benign extra lookup key.
-_SPECULATIVE_CELL_BASE_LANES = ("", "fp8-hooks", "w8a8")
+#
+# pgw#918: this was a SECOND authored copy of the lane vocabulary and it was
+# missing "w4a4" and "svdq-native" — the identical ie#546 defect, unrepaired
+# for two more lanes, in the constant whose own comment describes the
+# incident. It is now the loader's own list, so a new lane cannot be stamped
+# without appearing here.
+_SPECULATIVE_CELL_BASE_LANES: Tuple[str, ...] = loading.STAMPABLE_BASE_LANES
 
 
 # ---------------------------------------------------------------------------
@@ -4488,6 +4495,8 @@ class Executor:
                     logger.info(
                         "hot-swap: eager-while-compiling enabled for %s",
                         spec.name)
+                else:
+                    self._report_no_growth_path(spec, target, pipeline)
         if requested_lane and not rec.compile_targets:
             # pgw#672: degrade, never die — the loaded pipeline serves its
             # functions eagerly; the missing compile target is loud on the
@@ -8916,6 +8925,47 @@ class Executor:
             worker_jwt=self.worker_jwt_provider,
             image_digest=str(
                 getattr(self._settings, "worker_image_digest", "") or ""),
+        )
+
+    def _report_no_growth_path(
+        self, spec: EndpointSpec, target: "_CompileTargetRecord", pipeline: Any,
+    ) -> None:
+        """pgw#916: this armed target has NO serve-window shape-growth path.
+
+        ``hot_swap.enable`` returns False whenever the pipeline carries no
+        dynamo router, which is every AOT and TRT arm by construction —
+        ``provision.enable_compiled`` returns as soon as ``arm_aot`` succeeds,
+        so ``compile_cache.enable`` (the only thing that installs the router)
+        is never reached.  The consequence is total: a class the cell does not
+        cover serves eager for the life of the pod, every pod, forever.
+
+        Until this existed the ONLY named observable was a success log line
+        that simply never printed — an absence nobody can query.  A silent
+        no-op on the serving path is the pgw#760 defect class; this is its
+        confession, and it is countable per (release, SKU, arm) hub-side
+        exactly the way pgw#680 counts dynamo guard misses.
+        """
+        from . import aot_serve, shape_growth, trt_engine
+
+        arm = shape_growth.ARM_DYNAMO
+        if aot_serve.is_armed(pipeline):
+            arm = shape_growth.ARM_AOT
+        elif trt_engine.is_armed(pipeline):
+            arm = "trt"
+        with target.state_lock:
+            cell = target.active_compile_ref
+        logger.warning(
+            "shape-growth: %s is armed on arm=%s with NO serve-window growth "
+            "path (pgw#916); every declared class the cell does not cover "
+            "serves eager for the life of this pod", spec.name, arm)
+        activity_mod.emit_event(
+            activity_mod.KIND_SHAPE_GAP,
+            f"arm={arm} fn={sorted(target.function_names)} "
+            f"cell={cell or '<none>'}: this armed target has no serve-window "
+            f"shape-growth path — a request at a class the cell does not "
+            f"cover is served eager and NOTHING will grow the cell, on this "
+            f"pod or any other",
+            phase="no_growth_path",
         )
 
     def _shape_warm_republisher(

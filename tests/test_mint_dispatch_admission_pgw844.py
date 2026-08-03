@@ -121,35 +121,44 @@ def test_the_whole_graph_sdxl_shape_is_ADMITTED():
                     _row_name(b, h, w, arm=arm, cfg=cfg),
                     _export(b, h, w, arm=arm), arm=arm, cfg=cfg))
     assert len(minted) == 36
-    aot_mint._gate_dispatch_ambiguity(minted)  # must not raise
+    kept, aliases = aot_mint.canonicalize_dispatch_classes(minted)
+    assert len(kept) == 36 and not aliases
 
 
-def test_two_entries_of_one_dispatch_group_admitting_one_call_are_refused():
-    """Two identical ingress coordinates in ONE (target, adapter arm) group:
-    dispatch would refuse every call `entry_ambiguous`, so the mint must."""
+def test_two_entries_of_one_dispatch_group_admitting_one_call_are_MERGED():
+    """Two identical ingress coordinates in ONE (target, adapter arm) group.
+
+    Before pgw#917 this was a whole-cell refusal.  It is not a defect: the two
+    rows produce one ingress contract over one target with byte-identical
+    code, so they ARE one dispatchable class — the mint packages one entry and
+    keeps the other declared name as an alias.  Refusal is reserved for a
+    collision whose members are not the same artifact (below).
+    """
     minted = [
         _entry("unet/a", _export(1, 128, 128), arm=False),
         _entry("unet/b", _export(1, 128, 128), arm=False),
     ]
-    with pytest.raises(aot_mint.MintRefused) as err:
-        aot_mint._gate_dispatch_ambiguity(minted)
-    assert "dispatch-ambiguity" in str(err.value)
-    assert "entry_ambiguous" in str(err.value)
-    assert "admitted by more than one entry" in str(err.value)
+    kept, aliases = aot_mint.canonicalize_dispatch_classes(minted)
+    assert [row.name for row in kept] == ["unet/a"]
+    assert {k: [r.name for r in v] for k, v in aliases.items()} == {
+        "unet/a": ["unet/b"]}
 
 
-def test_a_static_row_shadowed_by_a_dynamic_sibling_is_refused():
+def test_a_static_row_shadowed_by_a_dynamic_sibling_is_refused_BY_AXIS():
     """The case an equality digest cannot see, and the reason this gate had to
     change (pgw#844): the two contracts are DIFFERENT and both admit the same
-    call."""
+    call.  pgw#917 additionally NAMES the axis they differ on, so the refusal
+    tells a declaration author what to fix."""
     minted = [
         _entry("unet/static", _export(1, 128, 128), arm=False),
         _entry("unet/dynamic", _export(1, 128, 128, hull=(80, 192)),
                arm=False),
     ]
     with pytest.raises(aot_mint.MintRefused) as err:
-        aot_mint._gate_dispatch_ambiguity(minted)
+        aot_mint.canonicalize_dispatch_classes(minted)
     assert "entry_ambiguous" in str(err.value)
+    assert "'ingress'" in str(err.value)
+    assert "unet/dynamic" in str(err.value)
 
     # ...and the digest the gate used BEFORE pgw#844 would have passed it:
     # the two programs do not declare the same placeholder shapes at all.
@@ -162,12 +171,13 @@ def test_adapter_arms_partition_the_dispatch():
     — the lifted pair (positively declared on one side, excluded on the
     other) is what discriminates them, so the same (B, H, W) on both arms is
     correct, never ambiguous."""
-    aot_mint._gate_dispatch_ambiguity([
+    kept, aliases = aot_mint.canonicalize_dispatch_classes([
         _entry(_row_name(1, 128, 128, arm=True, cfg=False),
                _export(1, 128, 128, arm=True), arm=True),
         _entry(_row_name(1, 128, 128, arm=False, cfg=False),
                _export(1, 128, 128), arm=False),
     ])
+    assert len(kept) == 2 and not aliases
 
 
 def test_distinct_coordinates_stay_admitted():
@@ -175,7 +185,8 @@ def test_distinct_coordinates_stay_admitted():
     coordinates — including a transposed aspect pair, whose token PRODUCTS
     collide but whose whole-graph ingress shapes do not — discriminate by
     ingress."""
-    aot_mint._gate_dispatch_ambiguity([
+    kept, aliases = aot_mint.canonicalize_dispatch_classes([
         _entry("unet/H_lat=192,W_lat=80", _export(1, 192, 80), arm=False),
         _entry("unet/H_lat=80,W_lat=192", _export(1, 80, 192), arm=False),
     ])
+    assert len(kept) == 2 and not aliases

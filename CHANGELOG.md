@@ -5,6 +5,73 @@
 - **pgw#938:** isolate transient post-mortem evidence per compute group and make
   concurrent grant downloads finalize through writer-unique temporary files.
 
+## 0.91.1 (2026-08-03) — **the AOT serving path stops lying about its coverage**: a declaration whose rows collapse to one ingress contract is MERGED instead of published undispatchable (pgw#917), the base-weight-lane vocabulary becomes one checked list (pgw#918), and the AOT arm finally has a shape-gap fact the hub can count (pgw#916)
+
+PATCH, deliberately: nothing here touches the worker<->hub wire contract, `@endpoint`, or
+`Resources`, so no `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` move is needed. The surface that
+does change is internal mint vocabulary — `aot_mint.PARITY_LANES` loses a member,
+`aot_mint.REGRESSED_LANES` is deleted (both named lanes nothing can stamp), and
+`aot_mint._gate_dispatch_ambiguity` is replaced by `aot_mint.canonicalize_dispatch_classes`.
+One additive activity kind (`shape_gap`); the hub logs unknown kinds verbatim.
+
+### pgw#917 (P1) — a regional multi-entry AOT cell was undispatchable BY CONSTRUCTION
+
+Measured, read-only, on the standing stack: `worker_activity_events` holds **24
+`aot_ingress_refused` rows, every one `phase='entry_ambiguous'`** — zero of any other phase —
+summing to **4,200 refused calls** across gen-worker 0.89.0 and 0.90.0, against a cell that
+adopted and armed (`family=sdxl mode=regional entries=72 precision=w8a8-lora64`). The cell
+armed, advertised, and served nothing.
+
+The mechanism is arithmetic: 112x144 = 144x112 = 168x96 = 96x168 = 16,128, and a
+`BasicTransformerBlock` never sees `H_lat`/`W_lat` — only the flattened sequence
+`(B, H_lat*W_lat, C)`. The declaration keys entries on the pair; the ingress contract can only
+observe the product. Ambiguity is guaranteed for every area-preserving aspect family at a fixed
+bucket, which is how the fleet's shape rows are generated.
+
+`_gate_dispatch_ambiguity` (pgw#844) already refused such a cell. Refusal is the wrong verdict
+for the common half: rows that produce one ingress contract over one target with byte-identical
+code ARE one dispatchable class. `canonicalize_dispatch_classes` now merges them to one entry
+and keeps the declared names as `entries[*].aliases` (not a `class_hash` fact — an alias declares
+no traffic the survivor already declares, so an otherwise identical cell does not re-key), and
+refuses only a collision whose members differ, **naming the pair and the differing axis**
+(`graph`, `ingress`, `specialization`, ...). Runs post-export/pre-compile, so the 36 of 72
+compiles that bought nothing are never paid — the direct pgw#847 shape-invariant win.
+
+### pgw#918 (P1) — `_SPECULATIVE_CELL_BASE_LANES` violated the invariant its own comment states
+
+The constant's comment describes ie#546 (9 workers re-minted a cell published on a lane no lookup
+speculated) and the constant was missing `w4a4` and `svdq-native` — the same defect, unrepaired,
+for two more lanes. `loading.STAMPABLE_BASE_LANES` is now the single source, the executor
+speculates exactly it, and a test PARSES every `_cozy_weight_lane` assignment site under
+`gen_worker/models` so a new lane cannot be stamped without appearing there.
+
+Second half: `PARITY_LANES` held `"w8a8-rowwise"`, a token `lane_admitted` can never be handed
+(no loader stamps it, `lane_token`/`lane_bucket` never synthesize it) — deleted, with a test that
+every member names something a loader can stamp. `REGRESSED_LANES` went with it: no reader in
+`src/`, and it too named an unstampable lane (`"fp8-storage"`).
+
+### pgw#916 (P1) — the AOT arm had NO shape-growth path
+
+`hot_swap.enable` returns False without a **dynamo** router, and an AOT-armed pipeline never has
+one (`provision.enable_compiled` returns as soon as `arm_aot` succeeds, so `compile_cache.enable`
+is never reached). Every one of the executor's three growth call sites was a silent no-op on an
+AOT arm; the measured cost is one live `compiled_shape_coverage` row reporting **2 of 18 declared
+graph classes served compiled**, with nothing able to heal the other 16 — on any pod, ever.
+
+New `gen_worker/shape_growth.py` is the one arm-agnostic module: the `ShapeGap` vocabulary keyed
+on a NAMED declared class (not a dynamo signature), a deduplicating ledger, the countable
+`shape_gap` activity kind (the AOT counterpart of pgw#680's dynamo-only `guard_miss`), the lifted
+turn-gate/`Debounce` primitives (`hot_swap` imports them — one implementation), and the per-arm
+backend seam. `aot_serve` now names the missing declared class at ingress
+(`aot_serve.ingress_class_name`) and reports+submits it; `hot_swap` books its permanent holes in
+the same ledger; and an armed target with no growth path emits `shape_gap phase=no_growth_path`
+instead of the success log line that simply never printed.
+
+**Not closed:** the AOT growth BACKEND (compile the named class and republish the grown cell)
+is unregistered, so `submit` refuses loudly by name. Building it here would mean building the
+second task/device scheduler this issue's own acceptance forbids; it belongs to pgw#910
+Reconciler + pgw#911 DeviceExecutor under pgw#888 CompileRuntime. A dependency test holds that
+line.
 ## 0.91.0 (2026-08-02) — **the native kernel lane lands dormant** (pgw#862/pgw#864: env-gated opt-in, OFF by default — no serving path changes until the gate is set), the envelope gains the DEGREE axis (th#1426), an unprovable cell can no longer be declared (th#959), and v2 publish restates classification (th#1411)
 
 MINOR, not patch: `Resources` gains a field (`max_gpus_per_execution_group`), `@endpoint`

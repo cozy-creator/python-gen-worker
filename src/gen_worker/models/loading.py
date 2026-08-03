@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import activity as activity_mod
 from ..component_vocab import (
@@ -819,6 +819,28 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # types and hook counts in `compile_cache.execution_contract`, i.e. new cell
 # keys, no cross-lane adoption.
 _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
+
+#: EVERY base lane a loader can leave on ``_WEIGHT_LANE_ATTR`` (pgw#918).
+#:
+#: THE single source of this vocabulary. It is authored here, next to the
+#: attribute itself, because this is where the assignments live — and
+#: ``tests/test_speculative_lane_completeness_pgw918.py`` parses every
+#: assignment site under ``gen_worker/models`` and fails if a loader stamps a
+#: lane this tuple does not name. An authored list nothing checks is what
+#: ie#546 cost 9 pods, and what pgw#918 found still open for two more lanes.
+#:
+#: ``"bf16-resident"`` is deliberately absent: :func:`pipeline_weight_lane`
+#: folds it to ``""`` (it traces identically to plain bf16), so it is never a
+#: distinct cell-identity lane. Bucketed LoRA lanes
+#: (``w8a8_lora.lora_lane``) are these bases with a rank suffix and are
+#: decomposed by ``compile_cache.lane_bucket``, so the BASE set is complete.
+STAMPABLE_BASE_LANES: Tuple[str, ...] = (
+    "",              # loading.py (plain/bf16-resident, folded)
+    "fp8-hooks",     # loading.py fp8 storage cast
+    "w8a8",          # models/w8a8.py
+    "w4a4",          # models/w4a4.py
+    "svdq-native",   # models/svdq_native.py
+)
 
 
 def pipeline_weight_lane(pipeline: Any) -> str:

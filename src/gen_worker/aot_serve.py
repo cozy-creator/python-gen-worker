@@ -85,6 +85,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from . import activity as activity_mod
 from . import host_isa
+from . import shape_growth
 from .compile_cache import (
     AdoptError,
     CompiledLaneUnavailableError,
@@ -1675,6 +1676,45 @@ class EntryDispatch:
 # ---------------------------------------------------------------------------
 
 
+def ingress_class_name(
+    target: str, args: Sequence[Any], kwargs: Mapping[str, Any],
+) -> str:
+    """The DECLARED CLASS one refused call names (pgw#916).
+
+    A shape alone is not a growable unit of work — a mint is asked for a
+    class, and a class is the whole ingress coordinate of one target: every
+    declared input, in position order, with its dtype and extents.  Rendering
+    it here (rather than logging "a shape was refused") is what lets the
+    growth path submit the exact thing that is missing, and what lets two
+    pods agree they are missing the SAME thing.
+
+    Deliberately independent of any artifact: the whole point is that the
+    call arrived at a class no packaged entry declares, so there is no entry
+    block to read it off.
+    """
+    parts: List[str] = []
+
+    def render(name: str, value: Any) -> None:
+        shape = getattr(value, "shape", None)
+        dtype = getattr(value, "dtype", None)
+        if shape is None:
+            parts.append(f"{name}={value!r}"[:64])
+            return
+        extents = ",".join(str(int(d)) for d in tuple(shape))
+        token = str(dtype or "").replace("torch.", "")
+        parts.append(f"{name}={token}[{extents}]")
+
+    for index, value in enumerate(args):
+        render(f"#{index}", value)
+    for name in sorted(kwargs):
+        value = kwargs[name]
+        if value is None or isinstance(value, (bool, int, float, str)):
+            parts.append(f"{name}={value!r}")
+            continue
+        render(name, value)
+    return f"{target}/{','.join(parts)}"
+
+
 def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
     """The lifted-adapter call kwargs for one denoiser, or ``{}`` (pgw#725).
 
@@ -1855,6 +1895,21 @@ def wrap_module(
                 phase=exc.reason,
             )
             report_ingress_refusal(state, exc.reason, str(exc))
+            # pgw#916: the refusal is also a SHAPE GAP — the armed cell does
+            # not cover this declared class, and on the AOT arm nothing was
+            # ever going to grow it (hot_swap.enable returns False without a
+            # dynamo router, so the executor's three growth call sites are
+            # no-ops on every AOT arm). Named, counted, and submitted through
+            # the one arm-agnostic growth module.
+            shape_growth.report_and_submit(shape_growth.ShapeGap(
+                arm=shape_growth.ARM_AOT,
+                family=str(meta.get("family") or ""),
+                target=label,
+                declared_class=ingress_class_name(label, args, kwargs),
+                reason=exc.reason,
+                detail=str(exc)[:400],
+                cell_key=str(meta.get("cell_key") or ""),
+            ))
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
             # Reaching here means the arm order was violated. The gate did
@@ -2337,6 +2392,7 @@ __all__ = [
     "find_artifact",
     "flavor_label",
     "host_isa_reason",
+    "ingress_class_name",
     "ingress_refusals",
     "is_aot_artifact",
     "is_aot_ref",
