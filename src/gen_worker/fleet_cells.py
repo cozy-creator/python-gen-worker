@@ -70,7 +70,7 @@ from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from . import guard_closure
 from . import topology as topology_mod
-from .cell_adopt import AdoptOutcome, CellAdoption
+from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
 from .models.chunk_cas import sha256_file
 from .procsplit import broker
 # module import (not `from .loading import pipeline_weight_lane`): tests
@@ -186,7 +186,8 @@ class ArmOutcome:
     retrying the identical unusable cell on every subsequent request.
 
     ``eager_reason`` (pgw#824) is the CLASSIFIED token for why this pipeline is
-    not serving from a cell — the same token the decline's
+    not serving from a cell — a :class:`~.cell_adopt.EagerPhase` member, which
+    is where that vocabulary is spelled ONCE — the same token the decline's
     ``self_mint_skipped``/``self_mint_started`` event carries in ``phase``, so a
     request row's ``fallback_reason`` and the worker's activity events join on
     one string. "" only when ``armed`` is true. Without it every eager request
@@ -941,14 +942,14 @@ def _arming_policy(
     if not family:
         return _fail_closed(
             pipe, "Compile decl has no family", selection_bug,
-            phase="no_family")
+            phase=EagerPhase.NO_FAMILY)
     if not _cuda_ready():
         return _fail_closed(
-            pipe, "CUDA unavailable", selection_bug, phase="no_cuda")
+            pipe, "CUDA unavailable", selection_bug, phase=EagerPhase.NO_CUDA)
     if not cc.toolchain_present():
         return _fail_closed(
             pipe, "no C compiler for the self-mint", selection_bug,
-            phase="no_toolchain")
+            phase=EagerPhase.NO_TOOLCHAIN)
     # gw#608 ROOT CAUSE gates (order matters — BEFORE any process-global
     # cache-dir mutation):
     # (a) a slot object with no resolvable compile target (the LTX upsampler
@@ -962,7 +963,7 @@ def _arming_policy(
     if not cc.has_compile_target(pipe, cfg):
         return _fail_closed(
             pipe, "no compile target resolves on this pipeline", selection_bug,
-            phase="no_compile_target")
+            phase=EagerPhase.NO_COMPILE_TARGET)
     if cc.delivered_cell_seeded() and not delegate:
         # pgw#784: this gate exists ONLY because an in-process capture moves
         # the process-global inductor cache dir. A DELEGATED mint's capture
@@ -974,7 +975,7 @@ def _arming_policy(
             "a delivered cell is seeded in this process; a self-mint "
             "capture would re-point the process-global inductor cache dir "
             "away from it (gw#608)", selection_bug,
-            phase="delivered_cell_seeded")
+            phase=EagerPhase.DELIVERED_CELL_SEEDED)
 
     # gw#561: the eager-miss rollback in provision.enable_compiled dropped
     # the branch lane; the mint must key + trace the DECLARED graph family.
@@ -1000,7 +1001,7 @@ def _arming_policy(
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe, f"self-mint key computation failed: {exc}", selection_bug,
-            phase="key_computation_failed")
+            phase=EagerPhase.KEY_COMPUTATION_FAILED)
 
     # pgw#672: consult the process ledgers BEFORE opening a capture.
     key_ref = f"{cc.system_repo(family)}#{key}"
@@ -1026,11 +1027,11 @@ def _arming_policy(
             f"was quarantined by a failed serve/finalize proof earlier in this "
             f"process; re-minting it is the churn loop, so this worker serves "
             f"eager for the rest of its life and publishes nothing",
-            phase="cell_quarantined",
+            phase=EagerPhase.CELL_QUARANTINED,
         )
         return ArmOutcome(
             armed=False, selection_bug=selection_bug,
-            eager_reason="cell_quarantined")
+            eager_reason=EagerPhase.CELL_QUARANTINED)
     finalized_prior = finalized_in_process(key)
     if finalized_prior is not None:
         # This process already minted, proved, and FOLDED this exact cell
@@ -1082,7 +1083,7 @@ def _arming_policy(
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe, f"another self-mint capture is pending (key {conflict})",
-            selection_bug, phase="capture_conflict")
+            selection_bug, phase=EagerPhase.CAPTURE_CONFLICT)
 
     if existing is not None:
         mint_root, capture_dir = existing.mint_root, existing.capture_dir
@@ -1144,7 +1145,7 @@ def _arming_policy(
             # `mint_in_progress` is a fleet that is warming up; one carrying
             # `no_toolchain` is a fleet that never will. Reading them as the
             # same "" was the whole gap.
-            eager_reason="mint_in_progress")
+            eager_reason=EagerPhase.MINT_IN_PROGRESS)
 
     # pgw#777 / DPA-8: the IN-PROCESS capture moves the process-global
     # TORCHINDUCTOR_CACHE_DIR and clears inductor's latch for the whole
@@ -1168,7 +1169,7 @@ def _arming_policy(
             pipe,
             f"in-process mint refused at groups={topo.execution_groups}: the inductor "
             "capture env is process-global (pgw#777/DPA-8)",
-            selection_bug, phase="multi_group_in_process")
+            selection_bug, phase=EagerPhase.MULTI_GROUP_IN_PROCESS)
 
     try:
         cc.begin_fleet_mint(pipe, cfg, capture_dir)
@@ -1180,7 +1181,7 @@ def _arming_policy(
             cc.drop_lora_lane(pipe)
         return _fail_closed(
             pipe, f"self-mint arm failed: {exc}", selection_bug,
-            phase="capture_arm_failed")
+            phase=EagerPhase.CAPTURE_ARM_FAILED)
 
     if existing is not None:
         logger.info(
@@ -1840,7 +1841,7 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
 def _fail_closed(
     pipe: Any, reason: str,
     selection_bug: Optional["cc.CellSelectionBugError"] = None,
-    *, phase: str = "mint_unavailable",
+    *, phase: EagerPhase = EagerPhase.MINT_UNAVAILABLE,
 ) -> ArmOutcome:
     """The quantized-lane policy at every exit that cannot produce a cell:
     plain lanes serve eager (never-raise miss policy), w8a8/w4a4 keep the
