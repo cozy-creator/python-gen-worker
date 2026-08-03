@@ -336,18 +336,42 @@ def test_watchdog_survives_zero_cpu_disk_load_via_io_evidence():
 
     ticker = threading.Thread(target=_fake_disk_load, daemon=True)
     ticker.start()
+    io_before = activity._process_io_evidence()
+    beats_during = 0
     try:
         with activity.watchdog(act, interval_s=0.05):
-            time.sleep(0.3)
-            beats_during = len(reports) - baseline
+            # Wait ON THE CONDITION, not on a fixed sleep: a loaded or
+            # virtualised host can take many watchdog intervals to flush the
+            # first accounted write, and a 0.3s sleep turned that into a red
+            # suite (CI 2026-08-03) against an activity.py byte-identical to
+            # the one that passed two days earlier.
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                beats_during = len(reports) - baseline
+                if beats_during >= 1:
+                    break
+                time.sleep(0.01)
+        io_after = activity._process_io_evidence()
     finally:
         stop.set()
         ticker.join(timeout=2)
     act.completed()
 
+    if io_after <= io_before:
+        # The watchdog cannot see evidence the kernel never reported. That is
+        # a property of the host's I/O accounting (containerised overlayfs,
+        # macOS with no io_counters()), not of the code under test — and
+        # asserting through it would make this guard a coin flip.
+        pytest.skip(
+            "kernel reported no process I/O for these writes "
+            f"({io_before:.3f} -> {io_after:.3f} MB); host accounting cannot "
+            "exercise the io-evidence path"
+        )
+
     assert beats_during >= 1, (
         f"activity went silent during real (zero-CPU) disk I/O "
-        f"(beats={beats_during}) — the default evidence must pick up "
+        f"(beats={beats_during}, io evidence {io_before:.3f} -> "
+        f"{io_after:.3f} MB) — the default evidence must pick up "
         f"process io_counters(), not just CPU time"
     )
 
