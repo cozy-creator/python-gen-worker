@@ -75,7 +75,7 @@ class GroupPlan:
     children: Tuple[ChildGroup, ...]
 
     @property
-    def groups(self) -> int:
+    def execution_groups(self) -> int:
         return len(self.children)
 
     def child(self, ordinal: int) -> ChildGroup:
@@ -97,7 +97,7 @@ class GroupPlan:
         flooring a hub/worker packing disagreement onto group 0 is the silent
         bug that piles every mis-dispatch onto the busiest card.
         """
-        if self.topology.groups <= 1:
+        if self.topology.execution_groups <= 1:
             return 0
         if gpu_index is None:
             raise ValueError(
@@ -125,7 +125,7 @@ class GroupPlan:
         *,
         socket_path: str,
     ) -> "GroupPlan":
-        groups = int(topology.groups)
+        groups = int(topology.execution_groups)
         children = []
         for ordinal in range(groups):
             devices = tuple(topology.group(ordinal).devices)
@@ -158,11 +158,11 @@ def _child_env(
     ``probe_host_ram``); what this stage fixes is the CONTRACT, so the child
     already carries the sibling count it will be budgeted against.
     """
-    if topology.groups <= 1:
+    if topology.execution_groups <= 1:
         return {}
     local = ExecutionTopology(
         gpu_count=len(devices),
-        group_degree=topology.group_degree,
+        gpus_per_execution_group=topology.gpus_per_execution_group,
         parallel=topology.parallel,
     )
     return {
@@ -182,5 +182,5 @@ def _child_env(
         # pgw#752's host-RAM probe would tell each child the whole pod's RAM
         # is its own, making pgw#763's move guard G-times too permissive on
         # precisely the pods most likely to OOM.
-        ENV_HOST_SIBLINGS: str(int(topology.groups)),
+        ENV_HOST_SIBLINGS: str(int(topology.execution_groups)),
     }

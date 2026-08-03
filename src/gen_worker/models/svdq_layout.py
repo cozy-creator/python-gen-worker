@@ -34,6 +34,23 @@ forward packer backwards; the citations are exact, at
   smooth_factor_orig BF16 [in]  provenance only — never read at runtime
   bias      BF16 [out]          pack_scale swizzled
 
+te#148 QUANTIZED LOW-RANK BRANCH (cozy extension, LoRaQ arXiv 2604.18117):
+the ``__metadata__`` key ``lowrank_quant`` = ``"int8"`` | ``"fp8_e4m3"``
+declares that the branch pair is stored quantized. Per-block scales, block=32
+along each factor's CONTRACTION dim (LoRaQ §4.3 quantizes by MX blocks of 32;
+at 8 bits their MXFP8e4 edges MXINT8 — Table 3 — so both lanes ship and the
+gate picks). nunchaku cannot serve a quantized-branch file regardless, so
+these four tensors are PLAIN row-major — the 16x16 lowrank fragment pack is
+defined for 16-bit operands only and is not applied:
+
+  proj_down        I8|E4M3 [in, rank]     logical, NOT fragment-packed
+  proj_down_scale  F32 [in/32, rank]      per-block absmax scale
+  proj_up          I8|E4M3 [out, rank]    logical, NOT fragment-packed
+  proj_up_scale    F32 [out, rank/32]     per-block absmax scale
+
+Everything else in the file keeps the nunchaku-v1 layout above; a bf16-branch
+artifact (no ``lowrank_quant`` key) is byte-identical to the historical format.
+
 Decoding lands in a LOGICAL domain first (nibble codes [out, in] + flat scales
 [out, in/16] + row-major vectors) for a reason: nunchaku fuses q/k/v into one
 ``to_qkv`` while diffusers keeps ``to_q``/``to_k``/``to_v`` separate, and
@@ -83,6 +100,13 @@ _LR_UNPACK_PERM = (0, 1, 4, 2, 6, 5, 3, 7)  # inverse, L208
 E2M1_LUT = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
             -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 
+# te#148 quantized low-rank branch.
+LOWRANK_QUANT_KEY = "lowrank_quant"          # __metadata__ flag
+LOWRANK_QUANT_SCHEMES = ("int8", "fp8_e4m3")
+LOWRANK_QUANT_BLOCK = 32                     # LoRaQ MX block size
+_INT8_QMAX = 127.0
+_E4M3_QMAX = 448.0
+
 
 class SvdqLayoutError(ValueError):
     """A checkpoint layout we do not understand — never guessed around."""
@@ -110,6 +134,7 @@ class DecodedLinear:
     proj_up: Optional[Any] = None     # [out, rank]
     smooth_factor: Optional[Any] = None  # [in]
     bias: Optional[Any] = None        # [out]
+    lowrank_quant: str = "bf16"       # on-disk branch scheme (decoded to bf16)
 
 
 @dataclass(frozen=True)
@@ -155,7 +180,8 @@ def unpack_qweight(qweight: Any, out_features: int, in_features: int) -> Any:
     n_tiles, k_tiles = n // g["mem_n"], k // g["mem_k"]
     words = qweight.reshape(-1).view(torch.int32)
     nib = (words.unsqueeze(-1)
-           >> torch.arange(0, 32, 4, dtype=torch.int32)) & 0xF
+           >> torch.arange(0, 32, 4, dtype=torch.int32,
+                           device=words.device)) & 0xF
     logical = (n_tiles, g["num_n_packs"], g["n_pack_size"], g["num_n_lanes"],
                g["reg_n"], k_tiles, g["num_k_packs"], g["k_pack_size"],
                g["num_k_lanes"], g["reg_k"])
@@ -281,7 +307,8 @@ def pack_qweight(codes: Any) -> Any:
         g["reg_n"], k_tiles, g["num_k_packs"], g["k_pack_size"],
         g["num_k_lanes"], g["reg_k"])
     w = w.permute(*_FWD_PERM).contiguous().bitwise_and(0xF)
-    w = w.bitwise_left_shift(torch.arange(0, 32, 4, dtype=torch.int32))
+    w = w.bitwise_left_shift(torch.arange(0, 32, 4, dtype=torch.int32,
+                                          device=w.device))
     return w.sum(dim=-1, dtype=torch.int32).view(torch.int8).view(n, -1)
 
 
@@ -330,14 +357,139 @@ def pack_lowrank(weight: Any, *, down: bool) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Quantized low-rank branch (te#148). Plain row-major on disk — see header.
+# ---------------------------------------------------------------------------
+
+
+def _lowrank_qdtype(scheme: str) -> Any:
+    import torch
+
+    if scheme == "int8":
+        return torch.int8
+    if scheme == "fp8_e4m3":
+        return torch.float8_e4m3fn
+    raise SvdqLayoutError(
+        f"unknown lowrank_quant scheme {scheme!r} "
+        f"(known: {', '.join(LOWRANK_QUANT_SCHEMES)})")
+
+
+def _lowrank_scheme_of(t: Any) -> str:
+    """The scheme a stored factor's dtype declares, or "bf16" for any float."""
+    import torch
+
+    if t.dtype == torch.int8:
+        return "int8"
+    if t.dtype == torch.float8_e4m3fn:
+        return "fp8_e4m3"
+    return "bf16"
+
+
+def _lowrank_block_absmax(w32: Any, block_dim: int) -> Any:
+    """absmax per block of LOWRANK_QUANT_BLOCK along ``block_dim``:
+    [n0, n1] -> [n0/B, n1] (dim 0) | [n0, n1/B] (dim 1)."""
+    if block_dim not in (0, 1):
+        raise SvdqLayoutError(f"block_dim must be 0 or 1, got {block_dim}")
+    n0, n1 = int(w32.shape[0]), int(w32.shape[1])
+    n = n0 if block_dim == 0 else n1
+    if n % LOWRANK_QUANT_BLOCK:
+        raise SvdqLayoutError(
+            f"low-rank factor dim {n} is not a multiple of the quant block "
+            f"{LOWRANK_QUANT_BLOCK}")
+    nb = n // LOWRANK_QUANT_BLOCK
+    if block_dim == 0:
+        return w32.reshape(nb, LOWRANK_QUANT_BLOCK, n1).abs().amax(dim=1)
+    return w32.reshape(n0, nb, LOWRANK_QUANT_BLOCK).abs().amax(dim=2)
+
+
+def quantize_lowrank(w: Any, *, scheme: str,
+                     block_dim: int) -> tuple[Any, Any]:
+    """One low-rank factor -> (quantized tensor, fp32 per-block scales).
+
+    Symmetric absmax per block of :data:`LOWRANK_QUANT_BLOCK` along
+    ``block_dim`` (the factor's contraction dim: 0 for ``proj_down`` [in,
+    rank], 1 for ``proj_up`` [out, rank]). Encode side for the te#137
+    producer and the tests; serving only dequantizes."""
+    import torch
+
+    qdtype = _lowrank_qdtype(scheme)
+    w32 = w.float()
+    qmax = _INT8_QMAX if scheme == "int8" else _E4M3_QMAX
+    scale = (_lowrank_block_absmax(w32, block_dim) / qmax).clamp(min=1e-12)
+    scaled = w32 / scale.repeat_interleave(LOWRANK_QUANT_BLOCK, dim=block_dim)
+    if scheme == "int8":
+        q = scaled.round().clamp(-_INT8_QMAX, _INT8_QMAX).to(torch.int8)
+    else:
+        q = scaled.clamp(-_E4M3_QMAX, _E4M3_QMAX).to(qdtype)
+    return q, scale.float()
+
+
+def dequantize_lowrank(q: Any, scale: Any, *, block_dim: int) -> Any:
+    """(quantized factor, per-block scales) -> the bf16 logical factor."""
+    import torch
+
+    scheme = _lowrank_scheme_of(q)
+    if scheme == "bf16":
+        raise SvdqLayoutError(
+            f"dequantize_lowrank got a {q.dtype} tensor — not a quantized "
+            f"low-rank factor")
+    n = int(q.shape[block_dim])
+    nb = n // LOWRANK_QUANT_BLOCK
+    if block_dim == 0:
+        want = (nb, int(q.shape[1]))
+    else:
+        want = (int(q.shape[0]), nb)
+    if tuple(scale.shape) != want:
+        raise SvdqLayoutError(
+            f"low-rank scale shape {tuple(scale.shape)} != {want} for a "
+            f"{tuple(q.shape)} factor blocked along dim {block_dim}")
+    s = scale.float().repeat_interleave(LOWRANK_QUANT_BLOCK, dim=block_dim)
+    return (q.float() * s).to(torch.bfloat16)
+
+
+def _decode_quantized_lowrank(
+    tensors: dict[str, Any], out_features: int, in_features: int,
+) -> tuple[Any, Any, int, str]:
+    """The quantized-branch leg of :func:`decode_linear`."""
+    down, up = tensors["proj_down"], tensors["proj_up"]
+    dscale = tensors.get("proj_down_scale")
+    uscale = tensors.get("proj_up_scale")
+    scheme = _lowrank_scheme_of(down)
+    if _lowrank_scheme_of(up) != scheme:
+        raise SvdqLayoutError(
+            f"low-rank pair mixes schemes: proj_down {down.dtype} vs "
+            f"proj_up {up.dtype}")
+    if dscale is None or uscale is None:
+        raise SvdqLayoutError(
+            f"quantized ({scheme}) low-rank branch is missing "
+            f"{'proj_down_scale' if dscale is None else 'proj_up_scale'}")
+    rank = int(down.shape[1])
+    if tuple(down.shape) != (int(in_features), rank):
+        raise SvdqLayoutError(
+            f"quantized proj_down {tuple(down.shape)} != "
+            f"[in_features={in_features}, rank]")
+    if tuple(up.shape) != (int(out_features), rank):
+        raise SvdqLayoutError(
+            f"quantized proj_up {tuple(up.shape)} != "
+            f"[out_features={out_features}, rank={rank}]")
+    return (dequantize_lowrank(down, dscale, block_dim=0),
+            dequantize_lowrank(up, uscale, block_dim=1), rank, scheme)
+
+
+# ---------------------------------------------------------------------------
 # Decode / split / pack.
 # ---------------------------------------------------------------------------
 
 
 def decode_linear(tensors: dict[str, Any], out_features: int,
-                  in_features: int) -> DecodedLinear:
+                  in_features: int, *,
+                  lowrank_quant: Optional[str] = None) -> DecodedLinear:
     """One nunchaku svdq Linear's tensors -> :class:`DecodedLinear`. Raises on
-    a layout we do not understand rather than guessing."""
+    a layout we do not understand rather than guessing.
+
+    ``lowrank_quant`` is the artifact-level ``__metadata__`` declaration
+    ("bf16" | "int8" | "fp8_e4m3"): when given, a branch stored in any OTHER
+    scheme refuses — the flag and the bytes must agree. ``None`` decodes
+    whatever the tensors self-describe (dtype is unambiguous, not a guess)."""
 
     missing = [k for k in ("qweight", "wscales") if k not in tensors]
     if missing:
@@ -367,21 +519,43 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
     if (down is None) != (up is None):
         raise SvdqLayoutError(
             "svdq linear has only one half of the low-rank branch")
+    if lowrank_quant is not None and lowrank_quant not in (
+            ("bf16",) + LOWRANK_QUANT_SCHEMES):
+        raise SvdqLayoutError(
+            f"unknown lowrank_quant declaration {lowrank_quant!r} "
+            f"(known: bf16, {', '.join(LOWRANK_QUANT_SCHEMES)})")
     rank = 0
+    scheme = "bf16"
     if down is not None and up is not None:
-        rank = int(down.shape[1])
-        if int(down.shape[0]) != int(in_features):
+        scheme = _lowrank_scheme_of(down)
+        if scheme == "bf16" and ("proj_down_scale" in tensors
+                                 or "proj_up_scale" in tensors):
             raise SvdqLayoutError(
-                f"proj_down {tuple(down.shape)} does not start with "
-                f"in_features {in_features}")
-        if tuple(up.shape) != (int(out_features), rank):
+                "low-rank scale tensors present but the branch pair is not "
+                "stored in a quantized dtype")
+        if lowrank_quant is not None and scheme != lowrank_quant:
             raise SvdqLayoutError(
-                f"proj_up {tuple(up.shape)} != [out_features={out_features}, "
-                f"rank={rank}]")
-        # Fragment-packed on disk. unpack_lowrank returns [rank, in] for the
-        # down leg; SvdqLinear/fold_to_dense want [in, rank] for `x @ down`.
-        down = unpack_lowrank(down, down=True).t().contiguous()
-        up = unpack_lowrank(up, down=False)
+                f"artifact declares lowrank_quant={lowrank_quant!r} but the "
+                f"branch is stored as {scheme!r}")
+        if scheme != "bf16":
+            # te#148 quantized branch: plain row-major on disk (see header).
+            down, up, rank, scheme = _decode_quantized_lowrank(
+                tensors, out_features, in_features)
+        else:
+            rank = int(down.shape[1])
+            if int(down.shape[0]) != int(in_features):
+                raise SvdqLayoutError(
+                    f"proj_down {tuple(down.shape)} does not start with "
+                    f"in_features {in_features}")
+            if tuple(up.shape) != (int(out_features), rank):
+                raise SvdqLayoutError(
+                    f"proj_up {tuple(up.shape)} != "
+                    f"[out_features={out_features}, rank={rank}]")
+            # Fragment-packed on disk. unpack_lowrank returns [rank, in] for
+            # the down leg; SvdqLinear/fold_to_dense want [in, rank] for
+            # `x @ down`.
+            down = unpack_lowrank(down, down=True).t().contiguous()
+            up = unpack_lowrank(up, down=False)
 
     smooth = tensors.get("smooth_factor")
     if smooth is not None:
@@ -394,7 +568,7 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
         out_features=int(out_features), in_features=int(in_features),
         codes=codes, scales=scales, second=second, second_kind=second_kind,
         rank=rank, proj_down=down, proj_up=up,
-        smooth_factor=smooth, bias=bias,
+        smooth_factor=smooth, bias=bias, lowrank_quant=scheme,
     )
 
 
@@ -430,6 +604,7 @@ def split_decoded(dec: DecodedLinear,
             smooth_factor=dec.smooth_factor,
             bias=(dec.bias[start:stop].contiguous()
                   if dec.bias is not None else None),
+            lowrank_quant=dec.lowrank_quant,
         ))
         start = stop
     return tuple(out)
@@ -473,15 +648,20 @@ def dequantize_decoded(dec: DecodedLinear) -> Any:
 
 __all__ = [
     "DecodedLinear",
+    "LOWRANK_QUANT_BLOCK",
+    "LOWRANK_QUANT_KEY",
+    "LOWRANK_QUANT_SCHEMES",
     "SvdqBuffers",
     "SvdqLayoutError",
     "convert_linear",
     "decode_linear",
     "dequantize_decoded",
+    "dequantize_lowrank",
     "pack_lowrank",
     "pack_qweight",
     "pack_vector",
     "pack_wscales",
+    "quantize_lowrank",
     "split_decoded",
     "to_buffers",
     "unpack_lowrank",

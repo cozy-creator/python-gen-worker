@@ -34,6 +34,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from .writer import NEVER_SHARD_MAX_SIZE
+from .writer import assert_one_file_per_component
 from .writer import streaming_dtype_cast
 from .writer import streaming_fp8_storage_cast
 import json as _json
@@ -170,12 +172,11 @@ class InlineConversionResult:
     """Result of an inline conversion pass.
 
     Mirrors the shape of streaming_dtype_cast / streaming_fp8_storage_cast so
-    callers can promote ``output_paths`` + ``index_path`` to CAS the same
+    callers can promote ``output_paths`` to CAS the same
     way they handle the existing per-component conversion jobs.
     """
 
     output_paths: list[Path] = field(default_factory=list)
-    index_path: Path | None = None
     target_dtype: str = ""
     target_file_type: str = "safetensors"
     attributes: dict[str, str] = field(default_factory=dict)
@@ -192,7 +193,7 @@ def run_inline_conversion(
     out_dir: Path,
     target_dtype: str,
     target_file_type: str = "safetensors",
-    shard_prefix: str = "model",
+    output_stem: str = "model",
     source_repo_dir: Path | None = None,
     fp8_block_scope: bool = False,
 ) -> InlineConversionResult:
@@ -245,7 +246,7 @@ def run_inline_conversion(
             source_path=source_path,
             out_dir=out_dir,
             target_dtype=dtype,
-            shard_prefix=shard_prefix,
+            output_stem=output_stem,
         )
 
     # fp8-E4M3 storage flavor — streaming per-tensor cast, no model load.
@@ -253,7 +254,7 @@ def run_inline_conversion(
         return _run_fp8_storage_inline(
             source_path=source_path,
             out_dir=out_dir,
-            shard_prefix=shard_prefix,
+            output_stem=output_stem,
             block_scope=fp8_block_scope,
         )
 
@@ -284,7 +285,7 @@ def _run_cast_inline(
     source_path: Path,
     out_dir: Path,
     target_dtype: str,
-    shard_prefix: str,
+    output_stem: str,
 ) -> InlineConversionResult:
     """bf16/fp16/fp32 streaming dtype cast."""
     import torch
@@ -306,13 +307,10 @@ def _run_cast_inline(
         Path(source_path),
         Path(out_dir),
         target_dtype=torch_dtype,
-        shard_prefix=shard_prefix,
+        output_stem=output_stem,
     )
 
     output_paths = [Path(p) for p in result.get("output_paths") or []]
-    index_path = result.get("index_path")
-    if index_path is not None:
-        index_path = Path(index_path)
 
     attrs = {
         "dtype": dtype,
@@ -323,7 +321,6 @@ def _run_cast_inline(
     }
     return InlineConversionResult(
         output_paths=output_paths,
-        index_path=index_path,
         target_dtype=dtype,
         target_file_type="safetensors",
         attributes=attrs,
@@ -335,7 +332,7 @@ def _run_fp8_storage_inline(
     *,
     source_path: Path,
     out_dir: Path,
-    shard_prefix: str,
+    output_stem: str,
     block_scope: bool = False,
 ) -> InlineConversionResult:
     """fp8-E4M3 storage cast of one weight set (the ``#fp8`` flavor),
@@ -346,10 +343,9 @@ def _run_fp8_storage_inline(
     params only)."""
 
     result = streaming_fp8_storage_cast(
-        Path(source_path), Path(out_dir), shard_prefix=shard_prefix,
+        Path(source_path), Path(out_dir), output_stem=output_stem,
         block_scope=block_scope,
     )
-    index_path = result.get("index_path")
     attrs = {
         "dtype": "fp8",
         "file_type": "safetensors",
@@ -360,7 +356,6 @@ def _run_fp8_storage_inline(
     }
     return InlineConversionResult(
         output_paths=[Path(p) for p in result.get("output_paths") or []],
-        index_path=Path(index_path) if index_path is not None else None,
         target_dtype="fp8",
         target_file_type="safetensors",
         attributes=attrs,
@@ -464,13 +459,14 @@ def _run_bnb_inline(
         ) from exc
 
     try:
-        model.save_pretrained(str(out_dir))
+        model.save_pretrained(str(out_dir), max_shard_size=NEVER_SHARD_MAX_SIZE)
     except Exception as exc:
         raise InlineConversionNotPossible(
             reason=f"bitsandbytes save_pretrained failed for {dtype}: {exc}",
             target_dtype=dtype,
         ) from exc
 
+    assert_one_file_per_component(out_dir, producer="bitsandbytes quantize")
     saved_files: list[Path] = sorted(
         f for f in out_dir.rglob("*") if f.is_file()
     )
@@ -496,7 +492,6 @@ def _run_bnb_inline(
         attrs["quant_library_version"] = bnb_version
     return InlineConversionResult(
         output_paths=saved_files,
-        index_path=None,
         target_dtype=produced_dtype,
         target_file_type="safetensors",
         attributes=attrs,
@@ -580,7 +575,8 @@ def _run_bnb_diffusers_inline(
 
             comp_out.mkdir(parents=True, exist_ok=True)
             try:
-                module.save_pretrained(str(comp_out))
+                module.save_pretrained(
+                    str(comp_out), max_shard_size=NEVER_SHARD_MAX_SIZE)
             except Exception as exc:
                 raise InlineConversionNotPossible(
                     reason=(
@@ -589,6 +585,8 @@ def _run_bnb_diffusers_inline(
                     ),
                     target_dtype=dtype,
                 ) from exc
+            assert_one_file_per_component(
+                comp_out, producer=f"bitsandbytes quantize [{comp_name}]")
             quantized_components.append(comp_name)
             del module
         else:
@@ -633,7 +631,6 @@ def _run_bnb_diffusers_inline(
         attrs["quant_library_version"] = bnb_version
     return InlineConversionResult(
         output_paths=saved_files,
-        index_path=None,
         target_dtype=dtype,
         target_file_type="safetensors",
         attributes=attrs,
@@ -741,7 +738,6 @@ def _run_gguf_inline(
     }
     return InlineConversionResult(
         output_paths=[final_path],
-        index_path=None,
         target_dtype=dtype,
         target_file_type="gguf",
         attributes=attrs,

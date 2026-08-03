@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.89.0"
+version = "0.91.0"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -94,6 +94,12 @@ dev = [
     "pyarrow>=17.0.0",
     "ruff>=0.6.0",
     "pytest>=9.0.0",
+    # pgw#867: property-based tests over the decode boundaries (topology wire,
+    # ref grammar, chunked-manifest entries). hypothesis rather than atheris —
+    # these decoders are shallow, so libFuzzer coverage feedback buys little,
+    # and `@example(...)` puts the seed corpus in the source as ordinary
+    # always-run cases instead of opaque corpus blobs.
+    "hypothesis>=6.100",
     # pgw#796: the suite is ~190 files of independent processes/sockets/temp
     # dirs; `--dist loadfile` keeps each file (and its module/session fixtures)
     # on one worker, so nothing shares state that did not already share it.

@@ -24,7 +24,7 @@ def test_bind_topology_wires_the_pinned_pool_fair_share():
     whole pinned budget on a G=4 pod."""
     pool = staging.pinned_pool()
     assert pool.group_count == 1
-    _store().bind_topology(ExecutionTopology(gpu_count=4, group_degree=1))
+    _store().bind_topology(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     assert pool.group_count == 4
 
 
@@ -33,7 +33,7 @@ def test_bind_topology_creates_every_groups_registry_eagerly(tmp_path):
     the boot disk re-track (a union over all_residencies()) was a no-op for
     groups 1..G-1 — their eviction/preserve views started blind."""
     store = _store()
-    store.bind_topology(ExecutionTopology(gpu_count=4, group_degree=1))
+    store.bind_topology(ExecutionTopology(gpu_count=4, gpus_per_execution_group=1))
     regs = store.all_residencies()
     assert len(regs) == 4
     # And the union walk actually sees a disk ref banked before group 3 ever
@@ -50,7 +50,7 @@ def test_residency_snapshot_unions_every_group(tmp_path):
     the resident set, so cache-aware victims, keep-warm objectives and warm
     routing decided on a quarter of the truth."""
     store = _store()
-    store.bind_topology(ExecutionTopology(gpu_count=2, group_degree=1))
+    store.bind_topology(ExecutionTopology(gpu_count=2, gpus_per_execution_group=1))
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir(), b.mkdir()
     store.residency_for(0).track_disk("hub:fam/zero", a)
@@ -62,7 +62,7 @@ def test_residency_snapshot_unions_every_group(tmp_path):
 
 def test_residency_snapshot_merges_a_ref_at_its_best_tier(tmp_path):
     store = _store()
-    store.bind_topology(ExecutionTopology(gpu_count=2, group_degree=1))
+    store.bind_topology(ExecutionTopology(gpu_count=2, gpus_per_execution_group=1))
     d = tmp_path / "d"
     d.mkdir()
     store.residency_for(0).track_disk("hub:fam/m", d)

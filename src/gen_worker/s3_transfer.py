@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .api.errors import ArtifactTransferError
-from .presigned_upload import blake3_hash_file
+from .models.chunk_cas import DigestMismatch, verify_file_digest
 from .models.cozy_cas import fsync_dir, fsync_file
 
 _MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
@@ -76,7 +76,13 @@ class S3TransferResult:
     bucket: str
     key: str
     size_bytes: int
-    blake3: str
+    #: LEGACY, upload side only: the bare blake3 the caller declared. The
+    #: DOWNLOAD side no longer produces one — it reports ``digest``, which is
+    #: algorithm-tagged. This field dies with the media/dataset declare
+    #: grammar (th#1303 S1, gated on the user-media + dataset-cas backfills).
+    blake3: str = ""
+    #: Algorithm-tagged whole-object digest ("sha256:<hex>").
+    digest: str = ""
     etag: str = ""
 
 
@@ -137,9 +143,23 @@ def download_file_with_grant(
     *,
     grant: S3TransferGrant,
     dest_path: str | Path,
-    expected_blake3: str = "",
+    expected_digest: str,
     expected_size_bytes: int | None = None,
 ) -> S3TransferResult:
+    """th#1303 S1: ``expected_digest`` is ALGORITHM-TAGGED and MANDATORY.
+
+    It used to be ``expected_blake3: str = ""`` — every downloaded object was
+    blake3-hashed unconditionally and then compared only ``if expected_blake3``,
+    so a v2 caller paid for a full hash and got NO check from it. Now the hash
+    dispatches on the ref's own tag and an absent digest is a refusal.
+    """
+    if not str(expected_digest or "").strip():
+        raise ArtifactTransferError(
+            "refusing grant download with no expected digest",
+            provider="tensorhub",
+            phase="sdk_download",
+            retryable=False,
+        )
     dest = Path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
@@ -164,22 +184,24 @@ def download_file_with_grant(
             phase="sdk_download",
             retryable=False,
         )
-    digest = blake3_hash_file(tmp)
-    if expected_blake3 and digest.lower() != expected_blake3.lower():
+    try:
+        verify_file_digest(tmp, expected_digest)
+    except (DigestMismatch, ValueError) as exc:
         tmp.unlink(missing_ok=True)
         raise ArtifactTransferError(
-            "downloaded object BLAKE3 mismatch",
+            f"downloaded object digest mismatch: {exc}",
             provider="tensorhub",
             phase="sdk_download",
             retryable=False,
-        )
+        ) from exc
     # Durable atomic finalize (gw#408): see cozy_cas — data must hit stable
     # storage before the rename, or a pod hard-kill persists a truncated blob.
 
     fsync_file(tmp)
     os.replace(tmp, dest)
     fsync_dir(dest.parent)
-    return S3TransferResult(bucket=grant.bucket, key=grant.key, size_bytes=size, blake3=digest)
+    return S3TransferResult(
+        bucket=grant.bucket, key=grant.key, size_bytes=size, digest=expected_digest)
 
 
 class _sdk_upload_slot:

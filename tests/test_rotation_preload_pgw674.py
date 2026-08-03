@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import blake3
+import hashlib
 import msgspec
 import pytest
 
@@ -179,7 +179,7 @@ def _pick(ex: Executor, name: str, ref: str) -> Any:
 def _snapshots(ref: str, digest: str) -> Dict[str, pb.Snapshot]:
     return {ref: pb.Snapshot(digest=digest, files=[pb.SnapshotFile(
         path="model.safetensors", size_bytes=len(_PLAIN_BYTES),
-        blake3=blake3.blake3(_PLAIN_BYTES).hexdigest(),
+        digest="sha256:" + hashlib.sha256(_PLAIN_BYTES).hexdigest(),
         url="http://r2.invalid/presigned")])}
 
 
@@ -319,17 +319,17 @@ def _composed_tree_writer(ref: str, p: Path) -> None:
 
 
 def _composed_snapshot(ref: str, digest: str) -> Dict[str, pb.Snapshot]:
-    def _b3(data: bytes) -> str:
-        return blake3.blake3(data).hexdigest()
+    def _dig(data: bytes) -> str:
+        return "sha256:" + hashlib.sha256(data).hexdigest()
 
     return {ref: pb.Snapshot(digest=digest, files=[
         pb.SnapshotFile(path="denoiser/weights.bin",
                         size_bytes=len(_DENOISER_BYTES),
-                        blake3=_b3(_DENOISER_BYTES),
+                        digest=_dig(_DENOISER_BYTES),
                         url="http://r2.invalid/a"),
         pb.SnapshotFile(path="vae/weights.bin",
                         size_bytes=len(_VAE_BYTES),
-                        blake3=_b3(_VAE_BYTES),
+                        digest=_dig(_VAE_BYTES),
                         url="http://r2.invalid/b"),
     ])}
 

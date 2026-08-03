@@ -147,8 +147,20 @@ def test_probe_failure_is_terminal_no_respawn_exits_1(tmp_path: Path) -> None:
     )
     combined = result.stdout + result.stderr
     assert result.returncode == 1
-    # Exactly one spawn: a hardware verdict is never crash-to-retry.
-    assert combined.count("spawning compute child") == 1, combined
+    # A hardware verdict is never crash-to-retry: NOTHING respawns after it.
+    #
+    # Asserting a single TOTAL spawn instead was over-strict and did not test
+    # this property — any unrelated pre-Hello crash breaks it while pgw#826
+    # holds perfectly. Measured on the 0.91.0 promotion: child #1 aborted at
+    # 0.8s with SIGABRT out of gRPC's fork handler ("Other threads are
+    # currently calling into gRPC" / "Epoll1Poller ... Bad file descriptor")
+    # before the CUDA probe ever ran. The parent rightly respawned that
+    # pre-Hello crash; child #2 then reached the probe, relayed the terminal
+    # verdict, and the parent exited 1 without respawning — the invariant this
+    # test names, passing, while the old assertion failed the promotion.
+    verdict = combined.find("reported a TERMINAL boot verdict")
+    assert verdict != -1, combined
+    assert "spawning compute child" not in combined[verdict:], combined
     assert "cuda_probe_boot_fatal" in combined
     assert "compute_boot_fatal" in combined
 

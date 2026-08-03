@@ -139,6 +139,15 @@ message WorkerResources {
   // which is harmless for old workers, because they never call the publish
   // route at all.
   string gen_worker_version = 11;
+  // th#1359 Part 2: this worker's OPERATING MODE, as declared to it at pod
+  // launch (WORKER_MODE): "" / "serve" = a normal serving worker; "forge" =
+  // mint-only — it registers, receives no tenant dispatch, holds no resident
+  // serving model, mints what it was scheduled for, publishes, and retires.
+  // Additive: old workers send it unset and the hub reads that as "serve".
+  // The RAW declared value, not the worker's normalisation of it, so a mode
+  // the worker did not recognise is visible at the hub as a disagreement
+  // rather than a silent demotion to serving.
+  string worker_mode = 12;
 }
 
 // Worker -> orchestrator: this worker's boot-time hardware suitability probe

@@ -17,7 +17,7 @@ between one release and another's weights. It is therefore:
     re-materialization re-downloads instead of re-linking the same bad bytes.
     Upstream reports stay untrusted hints (pgw#769's ruling).
 *   **FILE-PARALLEL** — hashing is CPU-bound and releases the GIL inside
-    ``hashlib``/``blake3``, so N files hash on N cores. At ~2 GB/s per core, 8
+    ``hashlib``, so N files hash on N cores. At ~2 GB/s per core, 8
     cores put a 40 GiB tree at a few seconds.
 *   **MEMOIZED per (root, digest)** — content-addressed bytes cannot change
     under a digest, so re-verifying the same blob in the same root within a
@@ -63,8 +63,9 @@ def clear_memo() -> None:
 
 @dataclass(frozen=True)
 class VerifyTarget:
-    """One file to verify. ``ref`` is algorithm-tagged (or bare hex = legacy
-    blake3); ``size`` of 0 means the manifest declared none."""
+    """One file to verify. ``ref`` is ALGORITHM-TAGGED — an untagged ref is an
+    unreadable digest, i.e. CORRUPT, not "nothing to check" (pgw#871). ``size``
+    of 0 means the manifest declared none."""
 
     path: Path
     ref: str
@@ -187,12 +188,12 @@ def snapshot_verify_targets(
     ``files`` are protobuf SnapshotFile messages (duck-typed here so this module
     stays free of the transport). Returns ``(targets, skipped_paths)``.
 
-    The digest is read PREFIX-FIRST from ``f.digest`` and only then from the
-    legacy ``f.blake3`` field. That order is the whole point: under manifest v2
-    ``blake3`` is EMPTY and reading it first yields no digest, which the old
-    call site treated as "nothing to check" — a clean verdict over an unhashed
-    tree. Files the manifest gives no digest for are returned as skipped so the
-    caller can account for them explicitly instead of losing them.
+    The digest is read from ``f.digest`` — algorithm-tagged — and from nowhere
+    else. th#1303 S1 removed the legacy ``f.blake3`` fallback: it is EMPTY on
+    every v2 entry, and reading it first was how a whole tree got a clean
+    verdict without being hashed. Files the manifest gives no digest for are
+    returned as SKIPPED so the caller must account for them explicitly instead
+    of losing them into a pass.
     """
     from .cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
 
@@ -208,8 +209,6 @@ def snapshot_verify_targets(
             skipped.append(path_attr)
             continue
         ref = (getattr(f, "digest", "") or "").strip().lower()
-        if not ref:
-            ref = (getattr(f, "blake3", "") or "").strip().lower()
         if not ref:
             skipped.append(path_attr)
             continue

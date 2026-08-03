@@ -29,10 +29,10 @@ DIGEST = "b" * 64
 
 def _resolved(*paths: str) -> WorkerResolvedRepo:
     return WorkerResolvedRepo(
-        snapshot_digest="blake3:" + DIGEST,
+        snapshot_digest="sha256:" + DIGEST,
         files=[
             WorkerResolvedRepoFile(
-                path=p, size_bytes=16, blake3="a" * 64,
+                path=p, size_bytes=16, digest="sha256:" + "a" * 64,
                 url="https://example.invalid/" + p, transfer_grant=None,
             )
             for p in paths
@@ -75,7 +75,7 @@ def test_resolve_accepts_a_clean_snapshot() -> None:
         "archive.ptx",
     ))
     assert len(res.files) == 8
-    assert res.snapshot_digest == DIGEST
+    assert res.snapshot_digest == "sha256:" + DIGEST
 
 
 def test_extension_set_matches_the_hub_ban() -> None:

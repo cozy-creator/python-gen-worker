@@ -32,8 +32,8 @@ from gen_worker.host_canary import (
 )
 from gen_worker.topology import ENV_VAR, TopologyError, delivered_topology
 
-_SP_2x2 = '{"gpu_count":4,"group_degree":2,"groups":2,"parallel":"sequence"}'
-_SP_1x4 = '{"gpu_count":4,"group_degree":4,"groups":1,"parallel":"sequence"}'
+_SP_2x2 = '{"gpu_count":4,"gpus_per_execution_group":2,"execution_groups":2,"parallel":"sequence"}'
+_SP_1x4 = '{"gpu_count":4,"gpus_per_execution_group":4,"execution_groups":1,"parallel":"sequence"}'
 
 
 def _env(raw: str) -> dict:
@@ -67,7 +67,7 @@ def test_proven_fabric_keeps_the_group() -> None:
     topo = delivered_topology(
         _env(_SP_2x2), interconnect=INTERCONNECT_NVLINK, peer_gbps=241.9
     )
-    assert (topo.groups, topo.degree, topo.parallel) == (2, 2, "sequence")
+    assert (topo.execution_groups, topo.degree, topo.parallel) == (2, 2, "sequence")
 
 
 def test_wedged_fabric_refuses_at_boot_typed() -> None:
@@ -79,7 +79,7 @@ def test_wedged_fabric_refuses_at_boot_typed() -> None:
     assert not is_fabric_wedge(False, 0.0)  # not measured, no verdict
     assert not is_fabric_wedge(True, 30.2)
 
-    for raw in (_SP_2x2, '{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"internal"}'):
+    for raw in (_SP_2x2, '{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"internal"}'):
         with pytest.raises(TopologyError) as err:
             delivered_topology(
                 _env(raw),
@@ -93,6 +93,6 @@ def test_wedged_fabric_refuses_at_boot_typed() -> None:
 def test_internal_groups_still_never_bandwidth_demoted() -> None:
     # The devices are the model's, not the platform's: a slow fabric demotes
     # nothing on parallel="internal" (only a WEDGE refuses, above).
-    raw = '{"gpu_count":2,"group_degree":2,"groups":1,"parallel":"internal"}'
+    raw = '{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"internal"}'
     topo = delivered_topology(_env(raw), interconnect="host-staged", peer_gbps=1.96)
-    assert (topo.groups, topo.degree, topo.parallel) == (1, 2, "internal")
+    assert (topo.execution_groups, topo.degree, topo.parallel) == (1, 2, "internal")

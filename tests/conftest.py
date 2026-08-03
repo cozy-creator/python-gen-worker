@@ -12,6 +12,7 @@ issue #345.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -29,6 +30,28 @@ os.environ.setdefault(
     "GEN_WORKER_BOOT_RECORD",
     str(Path(tempfile.mkdtemp(prefix="pgw-postmortem-")) / "boot-record.json"),
 )
+
+# pgw#848: put THIS directory on `sys.path` before any test module is
+# imported, so `from harness import ...` cannot depend on import ORDER.
+#
+# pytest's `prepend` import mode inserts a test file's rootdir into `sys.path`
+# as it imports that file, so the first module in `tests/` to be imported is
+# what makes `harness` importable for everyone after it. That is an ordering
+# dependency nobody declared, and ~15 modules rely on it. It is fine right up
+# until something changes the order or narrows what a process imports — and
+# then it is a COLLECTION error, which fails a whole run rather than a test.
+#
+# conftest.py is the one module pytest guarantees to import first, in every
+# mode including each xdist worker, so this is the single place the guarantee
+# can be made rather than re-made per file (`test_compile_duration_th1322.py`
+# already carries a private copy of this line; it is now redundant, not wrong).
+#
+# REPRODUCED at the mechanism level: exec'ing `test_mint_memory_fit_pgw848.py`
+# with `src/` on the path but not `tests/` raises
+# `ModuleNotFoundError: No module named 'harness'` — a collection error, from a
+# file whose tests pass 5/5 standalone.
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
 
 import gen_worker  # noqa: E402
 

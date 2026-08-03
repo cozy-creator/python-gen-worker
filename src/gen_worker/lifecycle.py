@@ -16,13 +16,19 @@ from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import content_credentials
 from . import receipts
+from . import worker_mode
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
 from .intent_registry import IntentRegistry, UnreportedIntentWait
 from .pb import worker_scheduler_pb2 as pb
 from .runtime_config import ConfigSnapshotWriteError, extract_config_push
-from .transport import FatalTransportError, PROTOCOL_VERSION, Transport
+from .transport import (
+    FatalTransportError,
+    KEEPALIVE_TIMEOUT_S,
+    PROTOCOL_VERSION,
+    Transport,
+)
 from .api.binding import wire_ref
 # module import: tests monkeypatch worker_fatal.report_worker_error_async; stay late-bound.
 from . import worker_fatal
@@ -192,7 +198,7 @@ def _warn_once_if_gpus_are_invisible() -> None:
 
 
 def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
-    """Snapshot CONTENT identity: digest + per-file (path, size, blake3).
+    """Snapshot CONTENT identity: digest + per-file (path, size, digest).
 
     Presigned URL bytes are deliberately excluded — the hub refreshes
     expiring snapshot URLs on every release-config rebuild (~15s TTL) and
@@ -204,7 +210,7 @@ def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
         return ()
     return (
         snap.digest,
-        tuple(sorted((f.path, f.size_bytes, f.blake3) for f in snap.files)),
+        tuple(sorted((f.path, f.size_bytes, f.digest) for f in snap.files)),
     )
 
 
@@ -244,10 +250,16 @@ class Lifecycle:
         # Identity: JWT claims are authoritative (sub = worker_id, release_id);
         # Hello echoes them for dev mode / cross-checking only.
         claims: Dict[str, Any] = {}
-        if (settings.worker_jwt or "").strip():
+        # pgw#848: the BOOTSTRAP token by intent, not by accident. This runs at
+        # construction, before any stream exists, and it reads IDENTITY claims
+        # (sub / release_id) which rotation never changes — so the frozen copy is
+        # the right and only available answer here. Anything reading a
+        # credential to AUTHENTICATE must use `worker_credential.current()`.
+        _boot_jwt = (settings.bootstrap_worker_jwt or "").strip()
+        if _boot_jwt:
             from .request_context import _decode_unverified_jwt_claims
 
-            claims = _decode_unverified_jwt_claims(settings.worker_jwt.strip())
+            claims = _decode_unverified_jwt_claims(_boot_jwt)
         self.worker_id = (
             settings.worker_id or str(claims.get("sub") or "").strip() or f"py-worker-{os.getpid()}"
         )
@@ -283,6 +295,9 @@ class Lifecycle:
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
+        # th#1359: the forge driver, on a mint-only pod. None on every
+        # serving worker.
+        self._forge_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._disk_report_at = 0.0
         self._disk_report_refresh_task: Optional[asyncio.Task] = None
@@ -409,6 +424,12 @@ class Lifecycle:
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=gw_version,
             image_digest=self._settings.worker_image_digest,
+            # th#1359 Part 2: the RAW declared mode. The hub keys dispatch
+            # exclusion and drain immunity on it, so it ships as declared —
+            # `worker_mode.mode()` normalises an unknown value to "serve"
+            # locally, but the hub must be able to SEE that it sent something
+            # this image does not understand rather than infer a serving pod.
+            worker_mode=worker_mode.declared(),
             # git_commit intentionally unpopulated (pgw#514/P4): no launcher
             # ever set WORKER_GIT_COMMIT and Go never read WorkerResources
             # .git_commit — dead on both ends. Field stays on the wire
@@ -1329,6 +1350,18 @@ class Lifecycle:
         # milestone, and that is the finding (same doctrine as an open span).
         await self.set_phase(pb.WORKER_PHASE_READY)
 
+        # th#1359: a forge pod's boot is not the end of its story — it is the
+        # start of the only work it was bought for. The driver waits for the
+        # mint disposition to be final, joins the publish, states a typed
+        # terminal and drains itself. Started AFTER READY so the mint's own
+        # setup path is byte-identical to a serving pod's: the forge is a
+        # MODE, and a mode that boots differently is a fork.
+        if worker_mode.is_forge():
+            from . import forge as forge_mod
+
+            self._forge_task = asyncio.create_task(
+                forge_mod.run(self), name="forge-driver")
+
     def _mark_servable(self) -> None:
         """Close the boot: mark first-request-servable from process start.
 
@@ -1452,7 +1485,19 @@ class Lifecycle:
                     pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
                 )
                 await self.maybe_send_state_delta()
-                flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
+                # pgw#845: this used to be `max(0.0, deadline_at - loop.time())`,
+                # which is exactly 0.0 on every path that gets here after the
+                # tenant wait expired — i.e. precisely when `abort_all` above has
+                # just produced the typed RETRYABLE results whose entire purpose
+                # is to tell the hub to re-dispatch. A bound that is provably
+                # zero is not a bound. The deadline governs waiting for TENANT
+                # WORK; shipping results we already hold is not that, so the
+                # floor is the channel's own peer-dead threshold: we try for as
+                # long as the transport would still call the hub alive.
+                flush_timeout = (
+                    None if deadline_at is None
+                    else max(KEEPALIVE_TIMEOUT_S, deadline_at - loop.time())
+                )
                 await self.intent_registry.guard_await(
                     drain_intent,
                     self.transport.close_after_flush(timeout=flush_timeout),

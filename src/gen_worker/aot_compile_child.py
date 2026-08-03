@@ -40,7 +40,9 @@ import msgspec
 
 from . import aot_compile_spans
 from .aot_compile_pool import (
+    CODE_DIGEST,
     COMPILED,
+    PACKAGE_ROOT,
     arm_parent_death_signal,
     EXIT_BAD_JOB,
     EXIT_COMPILED,
@@ -61,10 +63,29 @@ def _write(path: Path, report: EntryReport) -> None:
 
 
 def _peak_rss() -> int:
+    """This entry's host high-water — the interpreter AND the compiler it ran.
+
+    pgw#848, MEASURED: ``RUSAGE_SELF`` alone is not this entry's peak, it is
+    the peak of everything EXCEPT the peak. The real sdxl wrapper TU compiled
+    with the production flags on a quiet box peaks at **2.04 GiB in cc1plus**,
+    a process this interpreter never allocates a byte for — ``RUSAGE_SELF``
+    read 0.012 GiB across the same 177 s. The number feeds
+    ``aot_compile_pool.entry_workers(peak_rss_bytes=...)``, which bounds K, so
+    an instrument that cannot see the largest allocation in the entry is the
+    difference between a pool that fits and a pool the OOM killer sizes.
+
+    SUM, not max: the two overlap by construction — this process is holding
+    the loaded ``ExportedProgram`` and inductor's IR the whole time g++ runs,
+    which is precisely why the pair is what a concurrent slot must reserve.
+    ``RUSAGE_CHILDREN`` counts reaped children only, and every compiler
+    process is reaped by the time ``aot_compile`` returns.
+    """
     try:
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+        me = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        kids = int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
     except (OSError, ValueError):
         return 0
+    return (me + kids) * 1024
 
 
 def _device_lock_wait_s() -> float:
@@ -80,6 +101,44 @@ def _device_lock_wait_s() -> float:
 
     lock = aot_device_lock.installed()
     return round(float(getattr(lock, "waited_s", 0.0) or 0.0), 3) if lock else 0.0
+
+
+def _peak_device() -> tuple:
+    """This entry child's DEVICE high-water — allocated and reserved.
+
+    pgw#868 A4. Nothing has ever measured this, and it is the number that
+    holds K to 1-2. The pool's per-entry device ask is
+    `mint_budget.co_residency().need_bytes`, which is NOT a compile-child
+    measurement at all: it is `resident_weights * 1.25 + 5 GiB`, i.e. sdxl's
+    4.87 GiB of weights plus an activation term the module's own docstring
+    calls "a fraction nobody measured" plus a flat context+workspace constant.
+    That estimate used to report as `per_entry_device_basis: 'measured'`,
+    which meant only "the caller handed a probed number" and never "somebody
+    watched a compile child"; pgw#877 renamed the value to `'estimated'`, and
+    the axis has no `'measured'` value until something reads THIS number.
+
+    So this reports what the child ACTUALLY peaked at. Telemetry only: no
+    decision reads it, and the width policy is deliberately NOT changed in the
+    same breath (pgw#830's rule — instrument first, optimise never in the same
+    change). BOTH numbers, because they answer different questions: `allocated`
+    is what the compile needed, `reserved` is what the caching allocator held
+    and therefore what a concurrent sibling actually cannot have.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return (0, 0)
+        return (int(torch.cuda.max_memory_allocated()),
+                int(torch.cuda.max_memory_reserved()))
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        return (0, 0)
+
+
+def _device_fields() -> dict:
+    allocated, reserved = _peak_device()
+    return {"peak_device_bytes": allocated,
+            "peak_device_reserved_bytes": reserved}
 
 
 def run(job: EntryJob) -> int:
@@ -137,11 +196,20 @@ def run(job: EntryJob) -> int:
                 f"{type(exc).__name__}: {exc}"),
             elapsed_s=round(time.monotonic() - started, 2),
             peak_rss_bytes=_peak_rss(),
+            **_device_fields(),
             **_span_fields(ledger, {}, {}, seal_detail)))
         return EXIT_REFUSED
 
     # pgw#757's phase split is read from dynamo's IN-PROCESS counters, so it
     # has to be measured here, in the process that does the compiling.
+    # pgw#868 A4: reset so the high-water below is this ENTRY'S COMPILE, not
+    # whatever `torch.export.load` or the seal's own torch import allocated
+    # first. A probe: it reads and clears a counter and decides nothing.
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        pass
     before = aot_compile_spans.phase_snapshot()
     try:
         with ledger.span("compile_wall_s"):
@@ -154,6 +222,7 @@ def run(job: EntryJob) -> int:
             entry=job.entry, status=REFUSED, detail=str(exc),
             elapsed_s=round(time.monotonic() - started, 2),
             peak_rss_bytes=_peak_rss(),
+            **_device_fields(),
             **_span_fields(ledger, partition, overlays, seal_detail)))
         return EXIT_REFUSED
 
@@ -165,6 +234,7 @@ def run(job: EntryJob) -> int:
         detail=f"{len(files)} loose file(s)",
         elapsed_s=round(time.monotonic() - started, 2),
         peak_rss_bytes=_peak_rss(),
+        **_device_fields(),
         metrics_raw={k: v for k, v in sorted(raw.items())},
         **_span_fields(ledger, partition, overlays, seal_detail)))
     return EXIT_COMPILED
@@ -209,6 +279,11 @@ def _span_fields(
         "module_import_epoch": MODULE_IMPORT_EPOCH,
         "run_start_epoch": ledger.start_epoch,
         "report_epoch": time.time(),
+        # pgw#840: WHICH gen_worker this was. Carried on every report shape
+        # (compiled and both refusals) because a skewed child's refusal is as
+        # misleading as its success — it is a verdict from other code.
+        "code_digest": CODE_DIGEST,
+        "code_dir": PACKAGE_ROOT,
     }
 
 

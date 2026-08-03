@@ -115,8 +115,8 @@ def _executor_at(topology: ExecutionTopology) -> Any:
 def test_a_context_parallel_pod_installs_no_compile_targets() -> None:
     from gen_worker.executor import _ClassRecord
 
-    sp = ExecutionTopology(gpu_count=2, group_degree=2, parallel="sequence")
-    assert sp.degree == 2 and sp.groups == 1
+    sp = ExecutionTopology(gpu_count=2, gpus_per_execution_group=2, parallel="sequence")
+    assert sp.degree == 2 and sp.execution_groups == 1
     ex = _executor_at(sp)
     assert ex._eager_only_reason()
 
@@ -132,13 +132,13 @@ def test_degree_one_is_unchanged() -> None:
     # The G=1/D=1 invariant: nothing about eager-only may touch a pod that has
     # never heard of sequence parallelism.
     assert _executor_at(ExecutionTopology.single())._eager_only_reason() == ""
-    dp = ExecutionTopology(gpu_count=4, group_degree=1)
-    assert dp.degree == 1 and dp.groups == 4
+    dp = ExecutionTopology(gpu_count=4, gpus_per_execution_group=1)
+    assert dp.degree == 1 and dp.execution_groups == 4
     assert _executor_at(dp)._eager_only_reason() == ""
 
 
 def test_internal_parallelism_is_not_context_parallelism() -> None:
     # `parallel="internal"` means the MODEL spans the cards by its own
     # arrangement — no CP hooks, so compile is still legal.
-    topo = ExecutionTopology(gpu_count=2, group_degree=2, parallel="internal")
+    topo = ExecutionTopology(gpu_count=2, gpus_per_execution_group=2, parallel="internal")
     assert _executor_at(topo)._eager_only_reason() == ""

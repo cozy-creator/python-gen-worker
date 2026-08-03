@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional
 
 import pytest
 import requests
-from blake3 import blake3
+import hashlib
 
 from gen_worker.stall import ProgressFloor, SilenceWindow
 
@@ -352,7 +352,7 @@ def _fetch(url: str, dst: Path, blob: bytes) -> None:
     from gen_worker.models import cozy_cas
 
     asyncio.run(cozy_cas._download_one_file(
-        url, dst, len(blob), blake3(blob).hexdigest(),
+        url, dst, len(blob), "sha256:" + hashlib.sha256(blob).hexdigest(),
     ))
 
 
@@ -605,10 +605,56 @@ def test_the_wall_clock_constants_are_gone(relpath: str, gone: str) -> None:
 
 TESTS = Path(__file__).resolve().parent
 
-_LITERAL_DEADLINE = re.compile(r"time\.(?:monotonic|time)\(\)\s*\+\s*[0-9]")
-_ELAPSED_UPPER_BOUND = re.compile(
-    r"^\s*assert\s+[^#\n]*(?:elapsed|wall|_ms\b|_s\b|took)[^#\n]*<=?\s*[0-9]"
+_CLOCK = r"time\.(?:monotonic|time|perf_counter)\(\)"
+
+_LITERAL_DEADLINE = re.compile(rf"{_CLOCK}\s*\+\s*[0-9]")
+
+# pgw#845: the two regexes below used to require a DIGIT and a small token
+# vocabulary, and both holes were load-bearing.
+#
+#   `deadline = time.monotonic() + _TIMEOUT`  (_TIMEOUT = 15.0)
+#
+# is the pgw#795 shape with the number spelled as a name, and it walked past
+# `_LITERAL_DEADLINE` — including inside tests/harness/, which made
+# `test_the_shared_test_harness_has_no_wall_clock_deadline` a guard that could
+# not fail. A deadline built from a PARAMETER or from a harness quantity is a
+# different thing (the caller chose it, and anchoring to a measured or
+# configured quantity is the recommended fix), so only names bound to a literal
+# duration IN THE SAME MODULE count.
+_NAMED_DEADLINE = re.compile(rf"{_CLOCK}\s*\+\s*([A-Za-z_][A-Za-z0-9_]*)\b")
+_DURATION_CONST = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)\s*[:=][^=][^#\n]*?=?\s*([0-9][0-9_]*(?:\.[0-9]*)?)\s*(?:#.*)?$"
 )
+_SIMPLE_CONST = re.compile(r"^([A-Z_][A-Z0-9_]*)\s*=\s*([0-9][0-9_]*(?:\.[0-9]*)?)\s*(?:#.*)?$")
+
+# ...and a measured duration compared to a constant is dangerous in BOTH
+# directions: `< N` fails on a slow runner, `>= N` fails on a fast one. The
+# vocabulary now includes the clock call itself (`assert time.monotonic() -
+# start < 60` named nothing) plus latency/rtt/duration. A comparison against
+# literal zero is a positivity check, not a budget, and is excluded.
+_MEASURED = rf"(?:{_CLOCK}|elapsed|wall\b|latency|rtt|_ms\b|_s\b|took)"
+_ELAPSED_UPPER_BOUND = re.compile(
+    rf"^\s*assert\s+[^#\n]*{_MEASURED}[^#\n]*[<>]=?\s*([0-9][0-9_]*(?:\.[0-9]*)?)"
+)
+
+#: A clock-plus-duration handed to a TOKEN CONSTRUCTOR is a credential's
+#: lifetime — the SUBJECT under test — not a budget for an awaited event.
+#:
+#: pgw#848's `dc7bf6b` builds JWTs that are already expired, about to expire, or
+#: healthy (`_jwt(time.time() + 120)`, `+ 3600`, `- 90`) and asserts on the
+#: event `_transport_probe` emits SYNCHRONOUSLY. Nothing waits on the value and
+#: its expiry cannot fail the test — the probe returns in microseconds. Class 4
+#: ("a fixed duration whose EXPIRY FAILS the test") does not apply.
+#:
+#: This is a CARVE-OUT, not an exemption list: it is keyed on the shape
+#: (`jwt(`/`token(` immediately before the clock), so a genuine deadline in the
+#: same file is still caught, and `token_deadline = time.monotonic() + 15` — no
+#: call parenthesis — still fails as it should. Same spirit as the `> 0`
+#: positivity carve-out in `_scan` below: keep the guard broad, and make the
+#: places where the pattern MISREADS the code precise rather than blanket a file
+#: into a burn-down list that would assert a debt this file does not have.
+_TOKEN_EXPIRY_ARG = re.compile(
+    rf"(?:jwt|token)\w*\([^#\n]*{_CLOCK}\s*[-+]", re.IGNORECASE)
 
 #: Wait loops in test modules that still race a fixed clock instead of waiting
 #: on progress (``harness.progress_wait.await_count`` is the replacement). Every
@@ -634,7 +680,32 @@ _ELAPSED_ASSERT_BURNDOWN = {
     "test_mint_process_pgw784.py",         # hang bound: reap must not wait out a 600s child
     "test_subprocess_stall_gw665.py",      # hang bound: stall window << 30s
     "test_mint_reopen_pgw677.py",          # LATENCY BUDGET — anchor it next
+    # pgw#845 — exposed by the widened pattern below, each reviewed:
+    "test_p6_cancel_stream_backpressure.py",  # LOWER bound on 2x an induced 0.5s
+                                              # handler sleep: only OVERLAP can
+                                              # fail it, slowness only raises it
+    "test_progress_gw621.py",                 # LOWER bound on the fixture's own
+                                              # configured freeze window
+    "test_mint_gate_pgw677.py",               # LOWER bounds on induced seed work
+    "test_procsplit_pgw763.py",               # hang bound: cancel across the seam
+                                              # << 3s against a 50ms handler poll
 }
+
+#: Fixtures in tests/harness/ that spend a fixed duration PRODUCING the stimulus
+#: (class 1), rather than giving up on an awaited event. They are named here so
+#: the harness guard states a true claim it can still fail: a NEW clock in the
+#: harness, or a clock in a waiting path, is a failure.
+_HARNESS_INDUCED_DURATION = {
+    "harness/progress_endpoints.py",        # ticks a progress counter for TICK_S
+    "harness/stubborn_endpoints_pgw687.py",  # self-cap on a deliberately wedged
+                                             # handler, so a bug cannot hang the
+                                             # suite forever
+}
+
+
+def _code_lines(path: Path) -> list:
+    return [line for line in path.read_text().splitlines()
+            if not line.lstrip().startswith("#")]
 
 
 def _scan(root: Path, pattern: "re.Pattern[str]", *, match: bool = False) -> set:
@@ -642,10 +713,32 @@ def _scan(root: Path, pattern: "re.Pattern[str]", *, match: bool = False) -> set
     for path in sorted(root.rglob("*.py")):
         if path.name == Path(__file__).name:
             continue
-        for line in path.read_text().splitlines():
-            if line.lstrip().startswith("#"):
+        for line in _code_lines(path):
+            found = pattern.match(line) if match else pattern.search(line)
+            if not found:
                 continue
-            if (pattern.match(line) if match else pattern.search(line)):
+            if pattern is _ELAPSED_UPPER_BOUND and float(found.group(1)) == 0:
+                continue  # `> 0` is a positivity check, not a budget
+            if (pattern in (_LITERAL_DEADLINE, _NAMED_DEADLINE)
+                    and _TOKEN_EXPIRY_ARG.search(line)):
+                continue  # a token's `exp` claim is data, not a wait
+            hits.add(path.relative_to(TESTS).as_posix())
+    return hits
+
+
+def _deadlines_from_named_constants(root: Path) -> set:
+    """Files where a deadline is built from a module-level literal duration."""
+    hits = set()
+    for path in sorted(root.rglob("*.py")):
+        if path.name == Path(__file__).name:
+            continue
+        lines = _code_lines(path)
+        constants = {
+            m.group(1) for m in (_SIMPLE_CONST.match(line) for line in lines) if m
+        }
+        for line in lines:
+            named = _NAMED_DEADLINE.search(line)
+            if named is not None and named.group(1) in constants:
                 hits.add(path.relative_to(TESTS).as_posix())
     return hits
 
@@ -656,11 +749,26 @@ def test_the_shared_test_harness_has_no_wall_clock_deadline() -> None:
     ``DEFAULT_TIMEOUT_S`` on ``wait_for`` / ``wait_for_count`` /
     ``wait_connection``), and they are gone — waits there are progress-gated
     unless the caller passes an explicit ``timeout=`` to probe for absence."""
-    assert _scan(TESTS / "harness", _LITERAL_DEADLINE) == set()
+    found = (
+        _scan(TESTS / "harness", _LITERAL_DEADLINE)
+        | _deadlines_from_named_constants(TESTS / "harness")
+    )
+    new = found - _HARNESS_INDUCED_DURATION
+    assert not new, (
+        f"wall-clock deadline(s) in a shared harness WAIT: {sorted(new)} — a "
+        f"clock here is a clock in every hub-double test; pgw#795"
+    )
+    assert not (_HARNESS_INDUCED_DURATION - found), (
+        f"gone! remove {sorted(_HARNESS_INDUCED_DURATION - found)} from the list"
+    )
 
 
 def test_no_new_fixed_deadline_wait_appears_in_a_test() -> None:
-    found = {p for p in _scan(TESTS, _LITERAL_DEADLINE) if not p.startswith("harness/")}
+    found = {
+        p for p in _scan(TESTS, _LITERAL_DEADLINE)
+        | _deadlines_from_named_constants(TESTS)
+        if not p.startswith("harness/")
+    }
     new = found - _DEADLINE_BURNDOWN
     assert not new, (
         f"new fixed-deadline wait(s) in {sorted(new)} — wait on progress "

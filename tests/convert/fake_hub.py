@@ -59,6 +59,17 @@ class _FakeHub(BaseHTTPRequestHandler):
             st["proxy_gets"] -= 1
             self._send_proxy_page(int(st.get("proxy_status", 503)))
             return
+        if self.path.split("?", 1)[0].endswith("/resolve"):
+            # th#1411 source-stamp reads: answer the pgw#654 resolve shape
+            # from state["resolve_body"], 404 when unset.
+            st.setdefault("resolve_gets", []).append(self.path)
+            body = st.get("resolve_body")
+            if body is None:
+                self._send(404, {"error": {"code": "not_found",
+                                           "message": "no such repo"}})
+                return
+            self._send(200, body)
+            return
         self._send(200, {"repo": {"path": self.path}})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -198,7 +209,11 @@ class _FakeHub(BaseHTTPRequestHandler):
                        if op["type"] == "add")
             self._send(201, {"revision_id": "rev-1", "uploads": uploads,
                              "deletions": [], "copies": [], "tags": req.get("tags") or [],
-                             "mode": req.get("mode") or "merge"})
+                             # th#1400: the hub's normalizePublishMode("")
+                             # returns "replace" on BOTH routes now. A double
+                             # that still echoed "merge" would assert the
+                             # retired default back into existence.
+                             "mode": req.get("mode") or "replace"})
             return
         if "/commits/" in self.path and self.path.endswith("/uploads"):
             # th#699 re-open: fresh presigned upload for one stashed add whose

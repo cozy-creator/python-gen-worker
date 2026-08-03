@@ -17,7 +17,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from blake3 import blake3
+import hashlib
 
 import gen_worker.executor as executor_mod
 import gen_worker.models.cozy_snapshot as snap_mod
@@ -29,7 +29,8 @@ from gen_worker.models.refs import TensorhubRef
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 _PAYLOAD = b"managed-tier-fill-source-payload" * 4096  # ~128KB
-_BLAKE3 = blake3(_PAYLOAD).hexdigest()
+_HEX = hashlib.sha256(_PAYLOAD).hexdigest()
+_DIGEST = "sha256:" + _HEX
 _SNAPSHOT = "c7" * 32
 
 
@@ -40,7 +41,7 @@ def _resolved() -> WorkerResolvedRepo:
             WorkerResolvedRepoFile(
                 path="model.safetensors",
                 size_bytes=len(_PAYLOAD),
-                blake3=_BLAKE3,
+                digest=_DIGEST,
                 url="https://tensorhub.invalid/authorized-blob",
             )
         ],
@@ -48,19 +49,19 @@ def _resolved() -> WorkerResolvedRepo:
 
 
 def _blob_at(cas_root: Path, digest: str) -> Path:
-    return cas_root / "blobs" / "blake3" / digest[:2] / digest[2:4] / digest
+    return cas_root / "blobs" / "sha256" / digest[:2] / digest[2:4] / digest
 
 
 def _blob(cas_root: Path) -> Path:
-    return _blob_at(cas_root, _BLAKE3)
+    return _blob_at(cas_root, _HEX)
 
 
 def _stub_r2(monkeypatch, calls: list) -> None:
     async def _public_get(
-        _url: str, dst: Path, expected_size: int, expected_blake3: str,
+        _url: str, dst: Path, expected_size: int, expected_digest: str,
         on_bytes=None,
     ) -> None:
-        del expected_size, expected_blake3
+        del expected_size, expected_digest
         calls.append(1)
         dst.write_bytes(_PAYLOAD)
         if on_bytes is not None:
@@ -196,7 +197,7 @@ def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) 
             pb.Snapshot(digest=_SNAPSHOT, files=[
                 pb.SnapshotFile(
                     path="model.safetensors", size_bytes=len(_PAYLOAD),
-                    blake3=_BLAKE3, url="https://tensorhub.invalid/authorized-blob",
+                    digest=_DIGEST, url="https://tensorhub.invalid/authorized-blob",
                 ),
             ]),
         )
@@ -220,7 +221,7 @@ def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) 
     calls.clear()
     sent.clear()
     payload2 = _PAYLOAD + b"-2"
-    digest2 = blake3(payload2).hexdigest()
+    digest2 = hashlib.sha256(payload2).hexdigest()
     dst2 = _blob_at(volume, digest2)
     dst2.parent.mkdir(parents=True, exist_ok=True)
     dst2.write_bytes(payload2)
@@ -231,7 +232,7 @@ def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) 
             pb.Snapshot(digest="d2" * 32, files=[
                 pb.SnapshotFile(
                     path="model.safetensors", size_bytes=len(payload2),
-                    blake3=digest2, url="https://tensorhub.invalid/authorized-blob-2",
+                    digest="sha256:" + digest2, url="https://tensorhub.invalid/authorized-blob-2",
                 ),
             ]),
         )
@@ -263,10 +264,10 @@ def test_network_bytes_is_a_running_total_on_downloading_ticks(
     assert chunk * n_chunks == _PAYLOAD
 
     async def _chunked_get(
-        _url: str, dst: Path, expected_size: int, expected_blake3: str,
+        _url: str, dst: Path, expected_size: int, expected_digest: str,
         on_bytes=None,
     ) -> None:
-        del expected_size, expected_blake3
+        del expected_size, expected_digest
         with open(dst, "wb") as f:
             for _ in range(n_chunks):
                 f.write(chunk)
@@ -290,7 +291,7 @@ def test_network_bytes_is_a_running_total_on_downloading_ticks(
             pb.Snapshot(digest=_SNAPSHOT, files=[
                 pb.SnapshotFile(
                     path="model.safetensors", size_bytes=len(_PAYLOAD),
-                    blake3=_BLAKE3, url="https://tensorhub.invalid/authorized-blob",
+                    digest=_DIGEST, url="https://tensorhub.invalid/authorized-blob",
                 ),
             ]),
         )
@@ -328,10 +329,10 @@ def test_downloading_progress_reports_populated_bytes_done_and_total(
     assert chunk * n_chunks == _PAYLOAD
 
     async def _chunked_get(
-        _url: str, dst: Path, expected_size: int, expected_blake3: str,
+        _url: str, dst: Path, expected_size: int, expected_digest: str,
         on_bytes=None,
     ) -> None:
-        del expected_size, expected_blake3
+        del expected_size, expected_digest
         with open(dst, "wb") as f:
             for _ in range(n_chunks):
                 f.write(chunk)
@@ -355,7 +356,7 @@ def test_downloading_progress_reports_populated_bytes_done_and_total(
             pb.Snapshot(digest=_SNAPSHOT, files=[
                 pb.SnapshotFile(
                     path="model.safetensors", size_bytes=len(_PAYLOAD),
-                    blake3=_BLAKE3, url="https://tensorhub.invalid/authorized-blob",
+                    digest=_DIGEST, url="https://tensorhub.invalid/authorized-blob",
                 ),
             ]),
         )

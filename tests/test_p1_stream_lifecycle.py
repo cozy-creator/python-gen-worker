@@ -197,14 +197,19 @@ def test_kill_mid_job_reconcile_ships_result_exactly_once() -> None:
 
 
 def test_drain_finishes_in_flight_then_closes_and_rejects_new_work() -> None:
-    with hub_double() as (scheduler, _harness):
+    with hub_double() as (scheduler, harness):
         conn = scheduler.wait_connection(0)
         conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
             request_id="r-last", attempt=1, function_name="sleepy",
             input_payload=_msgpack("marco")))
         conn.wait_for(is_accept_for("r-last"))
-        conn.send(drain=pb.Drain(deadline_ms=5000))
+        # pgw#845: `deadline_ms=5000` made the runner a party to the property.
+        # Zero means "wait without a cutoff" (Lifecycle.drain), which is exactly
+        # what "finishes in-flight work, THEN closes" asserts — and it holds no
+        # matter how slow the box is. The deadline-expiry half of the contract
+        # is pinned separately, below.
+        conn.send(drain=pb.Drain(deadline_ms=0))
         conn.send(run_job=pb.RunJob(
             request_id="r-after-drain", attempt=1, function_name="echo",
             input_payload=_msgpack("marco")))
@@ -215,6 +220,11 @@ def test_drain_finishes_in_flight_then_closes_and_rejects_new_work() -> None:
         finished = conn.wait_for(is_result_for("r-last")).job_result
         assert finished.status == pb.JOB_STATUS_OK
         assert conn.client_done.wait(15.0), "worker must close the stream after drain"
+        # pgw#845's other half. The drain that dropped r-last also left run()
+        # by exception — grpc.aio's cancelled RPC surfaces as a CancelledError
+        # out of read(), which rode past every handler — so the process died
+        # with no exit code at all. A drain ends at exit 0 or it did not end.
+        assert harness.join() == 0
 
 
 def test_cancel_mid_job_is_cooperative_abort() -> None:
@@ -402,11 +412,21 @@ def test_worker_survives_hub_restart_and_reconnects(tmp_path, monkeypatch) -> No
         before = len(worker.transport.reconnect_delays)
         assert server.stop(grace=0).wait(_TIMEOUT)
 
-        deadline = time.monotonic() + _TIMEOUT
-        while len(worker.transport.reconnect_delays) < before + 4:
-            assert thread.is_alive(), "worker exited while hub was down"
-            assert time.monotonic() < deadline, "worker did not keep reconnecting"
-            time.sleep(0.02)
+        # pgw#845: this was a 15s deadline hiding behind a name — the exact
+        # pgw#795 shape, invisible to the source guard because the digit was
+        # spelled `_TIMEOUT`. The property is that the worker KEEPS retrying
+        # while the hub is down, so wait on the retries and give up only when
+        # the worker is gone.
+        await_count(
+            lambda: len(worker.transport.reconnect_delays) - before,
+            4,
+            what="reconnect attempts while the hub is down",
+            cadence=Cadence(),
+            gone=lambda: (
+                None if thread.is_alive()
+                else "the worker exited while the hub was down"
+            ),
+        )
 
         replacement_scheduler = FakeScheduler()
         replacement = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
@@ -432,3 +452,33 @@ def test_worker_survives_hub_restart_and_reconnects(tmp_path, monkeypatch) -> No
 )
 def test_outbound_silence_produces_periodic_heartbeats() -> None:
     raise AssertionError("unreachable: proto fields for pgw#605 do not exist yet")
+
+
+def test_a_drain_that_runs_out_of_time_still_ships_its_typed_abort() -> None:
+    """pgw#845: the abort's whole purpose is to tell the hub to re-dispatch.
+
+    When the drain deadline expires, `_finish_drain` calls `abort_all` to turn
+    every in-flight job into a typed RETRYABLE result — and then flushed the
+    transport with `max(0.0, deadline_at - now)`, which at that exact point is
+    arithmetically ZERO. The results the abort had just produced were
+    guaranteed never to ship, so the hub learned nothing and the tenant's
+    request sat until some hub-side timeout. This is what CI 30715985046 saw:
+    `job_accepted(r-last)` ... then the worker ended the stream with no result
+    for it at all.
+
+    The deadline bounds waiting for TENANT WORK. Delivering results we have
+    already produced is not waiting for the tenant.
+    """
+    with hub_double() as (scheduler, _harness):
+        conn = scheduler.wait_connection(0)
+        conn.wait_for(is_ready)
+        # `slow` sleeps far past any drain deadline, so the expiry is the
+        # test's stimulus rather than a race with the runner.
+        conn.send(run_job=pb.RunJob(
+            request_id="r-overrun", attempt=1, function_name="slow",
+            input_payload=_msgpack("marco")))
+        conn.wait_for(is_accept_for("r-overrun"))
+        conn.send(drain=pb.Drain(deadline_ms=200))
+        aborted = conn.wait_for(is_result_for("r-overrun")).job_result
+        assert aborted.status == pb.JOB_STATUS_RETRYABLE, aborted
+        assert "draining" in aborted.safe_message

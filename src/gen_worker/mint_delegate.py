@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from . import activity as activity_mod
+from . import aot_resume
 from . import mint_budget
 from . import mint_process
 from . import progress as progress_mod
@@ -165,9 +166,12 @@ def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
 
 def build_request(
     task: MintTask, *, workdir: Path, cap_bytes: int,
+    entry_peak_rss_bytes: int = 0, entry_device_peak_bytes: int = 0,
 ) -> MintRequest:
     pending = task.pending
     return MintRequest(
+        entry_peak_rss_bytes=int(entry_peak_rss_bytes),
+        entry_device_peak_bytes=int(entry_device_peak_bytes),
         function=task.function,
         modules=tuple(task.modules),
         family=str(pending.family),
@@ -175,6 +179,22 @@ def build_request(
         target=str(Path(workdir) / "cell.tar.gz"),
         capture=str(pending.capture_dir),
         report=str(Path(workdir) / mint_process.REPORT_NAME),
+        # pgw#848: where the child writes its LIVE table. `report` is written
+        # once, at a terminus the child reaches under its own power; this is
+        # written on every beat, so a mint the parent abandons still hands
+        # back what it measured.
+        phases_snapshot=str(
+            Path(workdir) / mint_process.PHASES_SNAPSHOT_NAME),
+        # pgw#848 item 5: outside the mint's own tree entirely. Every other
+        # path here is per-attempt by design; this one must outlive not just
+        # the attempt but the PENDING — `abandon_self_mint` rmtree's
+        # `mint_root`, and abandonment is how a crashed mint ends, so a bank
+        # sited there would be deleted on its way out of the one case it
+        # exists for. Keyed by the pending's `cell_key` as a SCOPE (identity is
+        # the per-entry re-derivation inside it), so a mint child restarted in
+        # place on the same pod — or a whole new pending for the same cell on a
+        # later boot — finds the same bank.
+        resume=str(aot_resume.bank_root(pending.cell_key)),
         cfg=cfg_spec(pending.cfg),
         snapshots=dict(task.snapshots),
         component_paths={
@@ -191,6 +211,22 @@ def build_request(
         # the permanent-miss loop this issue exists to close.
         recipe=str(getattr(pending, "recipe", "dynamo") or "dynamo"),
     )
+
+
+def _pool_stat(phases: Any, key: str) -> int:
+    """One measurement out of a mint's phase table `pool` block, or 0.
+
+    pgw#877: this was written out by hand three times over two banks, each
+    with its own try/except and its own idea of which exceptions to swallow.
+    The next reader added the fourth copy or, more likely, did not add it at
+    all — which is how `peak_child_device_bytes` came to be published and
+    never read.
+    """
+    try:
+        block = (phases or {}).get("pool")
+        return int((block or {}).get(key) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
 
 
 def _on_frame(act: Any) -> Any:
@@ -281,24 +317,63 @@ async def build_cell(
         workdir = Path(pending.mint_root) / f"child-{attempts}"
         workdir.mkdir(parents=True, exist_ok=True)
         request = build_request(
-            task, workdir=workdir, cap_bytes=budget.need_bytes)
+            # pgw#848: the CEILING, not the estimate. `need_bytes` answers
+            # "should this start"; handing it to the child as a hard cap is
+            # what pinned two mints at 11.09 GiB on cards with 21.48 GiB free.
+            task, workdir=workdir, cap_bytes=budget.cap_bytes,
+            # pgw#848: whatever a previous mint on this pod measured one entry
+            # child to peak at. Read here rather than in the child because the
+            # child is the thing that dies.
+            entry_peak_rss_bytes=mint_budget.entry_peak_rss(
+                family, task.weight_lane),
+            # pgw#877: and the DEVICE measurement, which until now had no way
+            # to reach the process that sizes K.
+            entry_device_peak_bytes=mint_budget.entry_device_peak(
+                family, task.weight_lane))
         act.phase(activity_mod.PHASE_LOAD)
         outcome = await mint_process.run_mint(
             request, workdir=workdir, on_frame=_on_frame(act),
             on_evidence=_on_evidence(act), abandon=abandon)
         last = outcome.detail
 
-        if outcome.report is not None and outcome.report.peak_vram_bytes:
+        if outcome.report is not None:
+            # pgw#848: banked on EVERY outcome, not only a minted one. This
+            # was gated on a truthy `peak_vram_bytes`, which a child dying
+            # inside `torch.export` never produced — so attempt N+1 re-asked
+            # identically, forever, which is most of why the failure presented
+            # as deterministic. The device side now has the shape the host
+            # side got below: the attempt that FAILED is exactly the attempt
+            # whose measurement the next one needs.
             mint_budget.record_child_peak(
-                family, task.weight_lane, outcome.report.peak_vram_bytes)
-        # pgw#817: BOTH AOT recipes report through `aot_mint_phases`. A
-        # string-literal `== "aot"` here would have sent every regional mint's
-        # phase table down the `jit_compile` kind instead — and
-        # `aot_mint_phases` is the channel the minutes-scale acceptance is
-        # measured on, so the one number the whole issue turns on would have
-        # been recorded under the wrong kind.
-        if str(getattr(pending, "recipe", "")) in (
-                fleet_cells.RECIPE_AOT, fleet_cells.RECIPE_AOT_REGIONAL):
+                family, task.weight_lane,
+                int(outcome.report.peak_vram_bytes or 0))
+            # pgw#848: the host half of the same loop. The pool has always
+            # measured `peak_child_rss_bytes` and put it in the phase table
+            # that rides `mint_phases`; nothing has ever read it, so every
+            # mint sized `mem_workers` off a 3 GiB constant. Banked on EVERY
+            # outcome, not just a minted one: an aborted mint's entries still
+            # peaked where they peaked, and the attempt that follows it is
+            # exactly the one that needs the fact.
+            mint_budget.record_entry_peak_rss(
+                family, task.weight_lane,
+                _pool_stat(outcome.report.mint_phases,
+                           "peak_child_rss_bytes"))
+            # pgw#877 #1/#2: the DEVICE half of the same loop, banked on the
+            # same terms. pgw#868 A4 measured this and left it telemetry-only;
+            # this is the read that makes it a decision.
+            mint_budget.record_entry_device_peak(
+                family, task.weight_lane,
+                _pool_stat(outcome.report.mint_phases,
+                           "peak_child_device_bytes"))
+        # pgw#848: ...and from the SNAPSHOT when the child never wrote a
+        # report at all, which is every killed and every abandoned mint.
+        mint_budget.record_entry_peak_rss(
+            family, task.weight_lane,
+            _pool_stat(outcome.partial_phases, "peak_child_rss_bytes"))
+        mint_budget.record_entry_device_peak(
+            family, task.weight_lane,
+            _pool_stat(outcome.partial_phases, "peak_child_device_bytes"))
+        if str(getattr(pending, "recipe", "")) == fleet_cells.RECIPE_AOT:
             _emit_aot_phases(outcome, family=family, lane=task.weight_lane)
         else:
             _emit_jit_compile(
@@ -315,6 +390,11 @@ async def build_cell(
             minted = fleet_cells.adopt_delegated_mint(
                 task.pipe, pending, outcome.artifact)
             if minted is not None:
+                # pgw#848 item 5: the ONE terminus where the bank's job is
+                # finished. It survives every failure (that is the point) and
+                # is dropped on success, which is what keeps a healthy pod's
+                # resume area from being the only thing that grows.
+                aot_resume.discard(str(pending.cell_key))
                 return DelegatedResult(
                     status=ADOPTED, minted=minted, attempts=attempts,
                     budget=budget)
@@ -360,6 +440,16 @@ def _emit_aot_phases(
     report = outcome.report
     table = dict(getattr(report, "mint_phases", None) or {}) \
         if report is not None else {}
+    if not table and outcome.partial_phases:
+        # pgw#848: the ABANDONED path. `f9c1b2d` gave the aborted path its
+        # measurements back; this is the same code with a different exit, and
+        # it never got them. Attempt sixteen compiled for 29 minutes and
+        # reported ONE row — `status=abandoned total_s=1741.33 — no cell
+        # produced`, zero `entry:` rows, no `pool` row — because the child was
+        # group-killed before it could write a report. The snapshot is what
+        # survives a signal.
+        table = dict(outcome.partial_phases)
+        table["recovered_from"] = "phase_snapshot"
     try:
         total_s = float(
             report.elapsed_s if report is not None and report.elapsed_s > 0
@@ -374,10 +464,17 @@ def _emit_aot_phases(
                 **dict(table.get("totals") or {}),
                 "child_elapsed_s": round(total_s, 2),
             }
+        # pgw#848: an ABANDONED mint is not an aborted one. Nothing about the
+        # mint failed — a co-tenancy decision (a drain of the endpoint
+        # instances) destroyed it while it was working, and a roll-up that
+        # calls that "aborted" hides the only actionable fact in the row.
+        terminus = ""
+        if not outcome.minted:
+            terminus = ABANDONED if outcome.status == ABANDONED else "aborted"
         if table:
+            table["terminus"] = terminus or table.get("terminus") or ""
             aot_mint.emit_phase_events(
-                family=family, lane=lane, table=table,
-                terminus="" if outcome.minted else "aborted")
+                family=family, lane=lane, table=table, terminus=terminus)
         if outcome.minted or table:
             return
         if total_s <= 0:

@@ -551,7 +551,91 @@ def discover_functions(
 
     _assert_unique_function_names(functions)
     _validate_variant_targets(functions)
+    _audit_source_only_imports(root=root, top_level=top_level)
     return functions
+
+
+class SourceOnlyModuleError(ValueError):
+    """pgw#833: the bake imported a module the installed package won't have.
+
+    ``discover_functions`` injects ``root`` and ``root/src`` into ``sys.path``
+    so discovery also works in an uninstalled source tree. In a BUILT image
+    that injection is a trap: a module the wheel forgot to package (wan-2.2
+    1.6.0's ``src/cozy_finish.py``, absent from hatch ``only-include``) still
+    imports at bake time from the source tree, the gate passes, and the
+    worker then dies at boot with ``ModuleNotFoundError`` on every pod the
+    release ever staffs — untyped, pre-Hello, fleet-wide. The gate must run
+    the runtime's predicate: when the walked project is INSTALLED, everything
+    the walk imported must resolve without the source tree.
+    """
+
+
+def _audit_source_only_imports(*, root: Path, top_level: str) -> None:
+    """Fail the bake when the walk leaned on source-tree-only modules.
+
+    Applies only when the walked project is INSTALLED (its top-level package
+    resolves with the injected ``root``/``root/src`` entries removed) — an
+    uninstalled dev tree keeps working, since there the source tree IS the
+    module set. In installed mode, every top-level module that was imported
+    from under ``root`` must also resolve from the installed environment;
+    ``cwd`` is deliberately not honoured (the worker's import set must not
+    depend on the directory it happens to start in).
+    """
+    import importlib.machinery
+
+    root_str = str(root)
+    src_str = str(root / "src")
+
+    def _under_root(filename: str) -> bool:
+        return filename.startswith(src_str + "/") or filename.startswith(root_str + "/")
+
+    clean_path = [
+        p for p in sys.path
+        if p not in ("", ".", root_str, src_str)
+    ]
+
+    def _resolves_installed(name: str) -> bool:
+        try:
+            # PathFinder directly: importlib.util.find_spec consults
+            # sys.modules first, which holds the source-tree import we are
+            # trying to look past.
+            spec = importlib.machinery.PathFinder.find_spec(name, clean_path)
+        except Exception:
+            return False
+        origin = getattr(spec, "origin", None) if spec is not None else None
+        if spec is None:
+            return False
+        # A spec that itself points back into the source tree (e.g. via a
+        # lingering .pth or cwd artifact) does not count as installed.
+        if isinstance(origin, str) and _under_root(origin):
+            return False
+        return True
+
+    if not _resolves_installed(top_level):
+        return  # dev flow: project not installed; the source tree is the truth
+
+    offenders: List[str] = []
+    for name, mod in list(sys.modules.items()):
+        if "." in name:
+            continue  # submodules resolve with their package
+        filename = getattr(mod, "__file__", None)
+        if not isinstance(filename, str) or not _under_root(filename):
+            continue
+        if _resolves_installed(name):
+            continue
+        offenders.append(f"{name} (imported from {filename})")
+
+    if offenders:
+        raise SourceOnlyModuleError(
+            "discovery imported module(s) that exist ONLY in the source tree, "
+            "but the project is installed — the runtime worker will not have "
+            "them and every pod of this release will die at boot with "
+            "ModuleNotFoundError (pgw#833):\n  "
+            + "\n  ".join(sorted(offenders))
+            + "\nFix: include the module in the built package (e.g. hatch "
+            "[tool.hatch.build.targets.wheel] only-include / py-modules), or "
+            "drop the import."
+        )
 
 
 def _validate_variant_targets(functions: List[Dict[str, Any]]) -> None:
@@ -712,6 +796,14 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
+        # Paul 2026-08-02: the WEIGHT-SET declaration the placement side reads
+        # to decide whether a cached volume can help this endpoint. OMITTED
+        # when undeclared — the consumer must be able to tell "the author said
+        # per_request" from "nobody said", because a cached volume lives in
+        # exactly ONE datacenter and attaching one that cannot be used
+        # collapses placement rather than merely wasting disk.
+        if es.weight_set is not None:
+            fn["weight_set"] = es.weight_set
         # th#1087: declared config parameters + env names — the hub persists
         # these as the release's declared surface and 422s config writes
         # outside it.

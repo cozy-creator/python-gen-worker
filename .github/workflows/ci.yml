@@ -55,6 +55,9 @@ jobs:
       - name: HTTP timeout guard (gw#467)
         run: uv run python scripts/lint_http_timeouts.py
 
+      - name: pgw#849 guard 2 - unreached public surface (aot/mint/serve)
+        run: uv run python scripts/lint_unreached_surface.py
+
       # Pinned CPU build so the gw#402 llama.cpp runtime tests exercise the
       # real llama-server codepath (tests skip when the binary is absent).
       - name: Install llama-server (pinned, CPU)

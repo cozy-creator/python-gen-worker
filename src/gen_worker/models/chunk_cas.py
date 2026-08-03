@@ -7,29 +7,38 @@ the parent carries control and progress only, and chunk bytes must never be
 routed through it. Keep it that way — the module imports nothing from the
 worker's transport.
 
-The download shape is **bounded out-of-order fetch, in-order commit**:
+The download shape is **positional materialisation** (th#1362 item 1): the
+destination is preallocated and every chunk is streamed straight to ITS OWN
+byte range by a bounded worker pool. Retiring safetensors sharding means a
+component arrives as ONE multi-GB file, so this function is where everything
+sharding used to buy (parallel transfer, resume, partial-failure refetch) has
+to actually live.
 
-*   A window of ``K`` chunks is fetched concurrently. Each arrives in RAM and is
-    sha256-verified BEFORE it is committed, so a corrupt chunk is discarded and
-    refetched rather than written.
-*   Chunks are committed to the destination **in order**, and the commit stream
-    feeds the whole-file hasher. The manifest's whole-file sha256 is therefore
-    verified in the SAME pass that assembles the file — pgw#769's fused-check
-    requirement — with no second read of the bytes. The whole-file hash is not
-    store-enforced (only the chunks are), so this is where that gap closes, and
-    it closes FAIL-CLOSED: a mismatch deletes and refetches, then raises typed.
-*   The committed prefix IS the crash-resume floor. A restart re-fetches at most
-    the in-flight window, because a partial file of length L means chunks
-    ``0..L/chunk_size`` are already durable.
+*   ``K`` chunks are fetched concurrently and each worker ``pwrite``s its blocks
+    at ``offset_i`` as they arrive, hashing them on the way past. A chunk counts
+    as DONE only once its sha256 matches; until then its range is nobody else's
+    business, so a bad attempt is simply overwritten by the retry. RAM per
+    worker is one 4 MiB read block, not one 64 MiB chunk — so the window is
+    bounded by the pool, not by memory, which is what lets it be wide.
+*   The whole-file sha256 runs on its OWN thread over the CONTIGUOUS verified
+    prefix, advancing as chunks land. ``hashlib`` drops the GIL, so it overlaps
+    the transfer and the file is hashed by about the time it finishes arriving —
+    pgw#769's fused check, preserved without an in-order commit bottleneck. The
+    whole-file hash is not store-enforced (only the chunks are), so this is
+    where that gap closes, and it closes FAIL-CLOSED.
+*   **Resume is per chunk and out of order**, recorded in a sidecar journal next
+    to the part file. The journal is a HINT, never a durability claim: on
+    restart every range it names is re-hashed off disk before it is trusted, so
+    an unsynced write that never landed is simply refetched. That is why there
+    is no fsync per chunk — the old in-order scheme needed one to make its
+    "committed prefix" claim true, and it cost a sync per 64 MiB.
 *   pgw#786 is solved PER CHUNK: every chunk fetch carries its own
     :class:`ProgressFloor`, so a source trickling 4 MiB per retry is abandoned
     and refetched on a fresh connection instead of holding a 35 GB file hostage.
     Only when the whole route is bad does the aggregate floor raise a typed
     stall for the hub to re-place the pod.
-
-Why the window is small: ``K`` chunks of 64 MiB are held in RAM at once, so
-K=6 is ~384 MiB. It is scaled down against the cgroup budget rather than the
-host's total RAM (a pod's memory.max is what kills it).
+*   Disk is proven UP FRONT with ``posix_fallocate``, so a 2 TB file that will
+    not fit fails in milliseconds instead of 90% of the way through.
 """
 
 from __future__ import annotations
@@ -39,8 +48,7 @@ import hashlib
 import logging
 import os
 import threading
-import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterator, Optional, Sequence
@@ -81,7 +89,12 @@ _READ_CHUNK_BYTES = 4 * 1024 * 1024
 # of magnitude below healthy and unambiguously a lemon.
 _CHUNK_PROGRESS_FLOOR_BYTES = 4 * 1024 * 1024
 _CHUNK_MAX_ATTEMPTS = 6
-_DEFAULT_WINDOW = 6
+# th#1362: with positional writes a worker holds one 4 MiB read block instead of
+# a whole 64 MiB chunk, so the window is priced in threads and sockets rather
+# than in gigabytes. 16 is where the measured curve flattens (see
+# tests/test_chunk_cas_parallel_th1362.py) — past it the connection pool and the
+# GIL give the bytes back.
+_DEFAULT_WINDOW = 16
 
 
 class DigestMismatch(ValueError):
@@ -113,18 +126,22 @@ class ChunkSpec:
 def parse_cas_ref(ref: str) -> tuple[str, str]:
     """Split ``"<algo>:<hex>"`` into its parts.
 
-    A BARE hex string is read as legacy blake3 — matching the hub's read-path
-    rule — because pre-migration manifests legitimately carry bare hex. New
-    code must always emit the tagged form; bare hex is refused at phase 4.
+    An UNTAGGED ref is REFUSED — the same rule as the hub's
+    ``storage.ParseCASRef`` (th#1357, which deleted the bare-hex default there).
+    A 64-character hex cannot distinguish blake3 from sha256, because both
+    digests are 32 bytes: the length check is not a discriminator, it only looks
+    like one. Inferring an algorithm addresses the WRONG namespace silently
+    (pgw#871).
     """
     s = (ref or "").strip().lower()
     if not s:
         raise ValueError("cas ref: empty")
-    if ":" in s:
-        algo, _, hexpart = s.partition(":")
-        algo, hexpart = algo.strip(), hexpart.strip()
-    else:
-        algo, hexpart = "blake3", s
+    if ":" not in s:
+        raise ValueError(
+            'cas ref: not algorithm-tagged (bare hex is refused; write "sha256:<hex>")'
+        )
+    algo, _, hexpart = s.partition(":")
+    algo, hexpart = algo.strip(), hexpart.strip()
     if algo not in ("sha256", "blake3"):
         raise ValueError(f"cas ref: unsupported algorithm {algo!r}")
     if len(hexpart) != 64 or any(c not in "0123456789abcdef" for c in hexpart):
@@ -159,30 +176,27 @@ def sha256_file(path: Path, chunk_size: int = _READ_CHUNK_BYTES) -> str:
 
 def hash_file(path: Path, algo: str) -> str:
     """Hash a file with the named algorithm. No default: the caller must have
-    read the algorithm off the digest, never assumed it."""
+    read the algorithm off the digest, never assumed it.
+
+    th#1303 S1: ``blake3`` is no longer hashable here. `parse_cas_ref` still
+    RECOGNISES a blake3 ref (that grammar dies at S2, with the shared
+    cross-language vectors), so a v1 ref reaching a verifier lands here and
+    RAISES. That asymmetry is deliberate: after the repoint no tag resolves to
+    a v1 manifest, so the only way to arrive with one is a stale pointer, and
+    the safe answer to "I cannot check these bytes" is a refusal, never a skip.
+    """
     if algo == "sha256":
         return sha256_file(path)
-    if algo == "blake3":
-        from blake3 import blake3  # local: the dep leaves at phase 4
-
-        h = blake3(max_threads=blake3.AUTO)
-        with open(path, "rb") as f:
-            while True:
-                b = f.read(_READ_CHUNK_BYTES)
-                if not b:
-                    break
-                h.update(b)
-        return h.hexdigest()
     raise ValueError(f"unsupported hash algorithm {algo!r}")
 
 
 def verify_file_digest(path: Path, ref: str) -> None:
     """Verify a file against an algorithm-tagged ref, DISPATCHING ON THE PREFIX.
 
-    This is the whole dual-read window on the worker side. Hardcoding the
-    algorithm per call site — which is what the 198 blake3 references did — is
-    how a sha256 digest gets checked with blake3 and every honest file looks
-    corrupt.
+    Hardcoding the algorithm per call site — which is what the 198 blake3
+    references did — is how a sha256 digest gets checked with blake3 and every
+    honest file looks corrupt. An empty or undigestable ref RAISES out of
+    `parse_cas_ref`; there is no "nothing to check" path through this function.
     """
     algo, want = parse_cas_ref(ref)
     got = hash_file(path, algo)
@@ -192,24 +206,44 @@ def verify_file_digest(path: Path, ref: str) -> None:
         )
 
 
-def _fetch_chunk_bytes(
+def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
+    """``os.pwrite`` is allowed to write short. Positional writes are the whole
+    correctness story here, so the loop is not optional."""
+    view = memoryview(data)
+    while view:
+        n = os.pwrite(fd, view, offset)
+        if n <= 0:
+            raise OSError(f"pwrite wrote {n} bytes at offset {offset}")
+        view = view[n:]
+        offset += n
+
+
+def _fetch_chunk_to_offset(
     session: requests.Session,
     spec: ChunkSpec,
+    fd: int,
+    offset: int,
     *,
     on_bytes: Optional[Callable[[int], None]],
-) -> bytes:
-    """Fetch ONE chunk into RAM, verify its sha256, return the bytes.
+) -> None:
+    """Stream ONE chunk straight into its byte range, verifying as it goes.
 
     Abandon-and-refetch is per attempt and per chunk (pgw#786): an attempt that
     stops clearing its own progress floor is dropped and retried on a FRESH
-    connection, so one bad connection cannot hold the file. The chunk is
-    verified in RAM, before it can be committed.
+    connection, so one bad connection cannot hold the file.
+
+    The chunk is verified AFTER it lands rather than before, which is safe
+    precisely because the range belongs to this chunk alone: an attempt that
+    fails verification is overwritten by the retry, and nothing reads the range
+    until the caller marks the chunk done. That is the trade that drops RAM per
+    worker from a whole 64 MiB chunk to one read block.
     """
     last_exc: Optional[BaseException] = None
     for attempt in range(1, _CHUNK_MAX_ATTEMPTS + 1):
         floor = ProgressFloor(_CHUNK_PROGRESS_FLOOR_BYTES)
         delivered = 0
-        buf = bytearray()
+        hasher = hashlib.sha256()
+        pos = offset
         try:
             with session.get(spec.url, stream=True, timeout=(60, 180)) as resp:
                 sc = int(resp.status_code)
@@ -221,26 +255,28 @@ def _fetch_chunk_bytes(
                 for block in resp.iter_content(chunk_size=_READ_CHUNK_BYTES):
                     if not block:
                         continue
-                    buf.extend(block)
                     delivered += len(block)
-                    if on_bytes is not None:
-                        on_bytes(len(block))
-                    if len(buf) > spec.length:
+                    if delivered > spec.length:
                         raise DigestMismatch(
                             f"chunk {spec.sha256[:12]}: source sent more than {spec.length} bytes"
                         )
-            if len(buf) != spec.length:
+                    _pwrite_all(fd, block, pos)
+                    pos += len(block)
+                    hasher.update(block)
+                    if on_bytes is not None:
+                        on_bytes(len(block))
+            if delivered != spec.length:
                 raise DigestMismatch(
-                    f"chunk {spec.sha256[:12]}: got {len(buf)} bytes, manifest says {spec.length}"
+                    f"chunk {spec.sha256[:12]}: got {delivered} bytes, manifest says {spec.length}"
                 )
-            got = hashlib.sha256(buf).hexdigest()
+            got = hasher.hexdigest()
             if got != spec.sha256:
                 # With store-enforced writes the object at this key provably
                 # holds these bytes, so a mismatch is TRANSIT corruption.
                 raise DigestMismatch(
                     f"chunk {spec.sha256[:12]}: bytes hash to {got[:12]} (transit corruption)"
                 )
-            return bytes(buf)
+            return
         except UrlExpiredError:
             raise
         except (requests.RequestException, DigestMismatch, OSError) as exc:
@@ -364,6 +400,162 @@ def download_chunked_file(
         )
 
 
+class _Prefix:
+    """Which chunks are verified-on-disk, and how far the CONTIGUOUS verified
+    prefix reaches. The whole-file hasher rides this: it may only read bytes
+    that some worker has already proven."""
+
+    def __init__(self, n: int) -> None:
+        self._n = n
+        self._done: set[int] = set()
+        self._reach = 0
+        self._aborted = False
+        self._cv = threading.Condition()
+
+    def mark(self, index: int) -> None:
+        with self._cv:
+            self._done.add(index)
+            while self._reach < self._n and self._reach in self._done:
+                self._reach += 1
+            self._cv.notify_all()
+
+    def abort(self) -> None:
+        with self._cv:
+            self._aborted = True
+            self._cv.notify_all()
+
+    def done(self) -> set[int]:
+        with self._cv:
+            return set(self._done)
+
+    def await_index(self, index: int) -> bool:
+        """Block until chunk ``index`` is inside the verified prefix. False if
+        the download aborted first."""
+        with self._cv:
+            while self._reach <= index and not self._aborted:
+                self._cv.wait()
+            return self._reach > index
+
+
+def _journal_header(want_whole: str, total_size: int) -> str:
+    return f"sha256:{want_whole} {total_size}"
+
+
+def _adopt_partial(
+    fd: int,
+    chunks: Sequence[ChunkSpec],
+    offsets: Sequence[int],
+    journal: Path,
+    header: str,
+    window: int,
+) -> set[int]:
+    """Re-establish what a previous run left behind.
+
+    The journal names chunks a prior run believed it wrote. It is a HINT: every
+    range it claims is re-hashed off disk here, so a write that never reached
+    the platter is simply refetched. This is what buys resume WITHOUT an fsync
+    per chunk, and it resumes out of order — the old committed-prefix scheme
+    could only resume a prefix, and in practice could not resume at all,
+    because the part file's name carried a fresh uuid on every call.
+    """
+    try:
+        lines = journal.read_text().splitlines()
+    except OSError:
+        return set()
+    if not lines or lines[0] != header:
+        # A different file, size or digest was assembled under this name.
+        journal.unlink(missing_ok=True)
+        return set()
+    claimed = sorted({
+        int(ln) for ln in (s.strip() for s in lines[1:])
+        if ln.isdigit() and 0 <= int(ln) < len(chunks)
+    })
+    if not claimed:
+        return set()
+
+    def _verify(i: int) -> Optional[int]:
+        h = hashlib.sha256()
+        pos, remaining = offsets[i], chunks[i].length
+        while remaining > 0:
+            b = os.pread(fd, min(_READ_CHUNK_BYTES, remaining), pos)
+            if not b:
+                return None
+            h.update(b)
+            pos += len(b)
+            remaining -= len(b)
+        return i if h.hexdigest() == chunks[i].sha256 else None
+
+    with ThreadPoolExecutor(max_workers=max(1, min(window, len(claimed)))) as pool:
+        kept = {i for i in pool.map(_verify, claimed) if i is not None}
+    _log.info("chunk_resume path=%s journal_claimed=%d verified=%d/%d chunks",
+              journal.name, len(claimed), len(kept), len(chunks))
+    return kept
+
+
+def _hash_verified_prefix(
+    fd: int,
+    chunks: Sequence[ChunkSpec],
+    offsets: Sequence[int],
+    prefix: "_Prefix",
+    out: Dict[str, str],
+) -> None:
+    """Hash the whole file on its own thread, following the verified prefix.
+
+    ``hashlib`` releases the GIL, so this overlaps the transfer: by the time the
+    last chunk lands the digest is essentially ready. It re-reads bytes that were
+    just written — from page cache in the normal case — which is the price of
+    dropping the in-order commit that used to serialise every worker behind one
+    file handle.
+    """
+    h = hashlib.sha256()
+    for i in range(len(chunks)):
+        if not prefix.await_index(i):
+            return
+        pos, remaining = offsets[i], chunks[i].length
+        while remaining > 0:
+            b = os.pread(fd, min(_READ_CHUNK_BYTES, remaining), pos)
+            if not b:
+                raise OSError(f"short read hashing chunk {i} at offset {pos}")
+            h.update(b)
+            pos += len(b)
+            remaining -= len(b)
+    out["digest"] = h.hexdigest()
+
+
+def _preallocate(fd: int, total_size: int, where: Path) -> None:
+    """Prove the disk NOW. A 2 TB single file that will not fit must fail in
+    milliseconds, not 90% of the way through the transfer."""
+    if os.fstat(fd).st_size != total_size:
+        os.ftruncate(fd, total_size)
+    fallocate = getattr(os, "posix_fallocate", None)
+    if fallocate is None:
+        return
+    try:
+        fallocate(fd, 0, total_size)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == 28:  # ENOSPC
+            raise InsufficientDiskError(
+                f"insufficient disk to allocate {total_size} bytes for {where.name}",
+                path=str(where.parent),
+            ) from exc
+        # EOPNOTSUPP and friends: the ftruncate above still gave us the file.
+
+
+def _size_session_pool(session: requests.Session, window: int) -> None:
+    """urllib3's default pool holds 10 connections. Above that a wide window
+    spends its time discarding and re-establishing sockets — measured as a
+    THROUGHPUT REGRESSION at window 16 and 32 before this was fixed."""
+    try:
+        from requests.adapters import HTTPAdapter
+
+        adapter = HTTPAdapter(pool_connections=max(10, window),
+                              pool_maxsize=max(10, window))
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+    except Exception:  # noqa: BLE001 - a caller-supplied session may not mount
+        pass
+
+
 def _download_chunked_locked(
     chunks: Sequence[ChunkSpec],
     dst: Path,
@@ -377,147 +569,180 @@ def _download_chunked_locked(
     """The reassembly itself, run while holding the cross-process CAS fetch lock
     (``download_chunked_file`` does the shape checks and the dedup)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    # Writer-unique, stable for this call so its own resume works, but distinct
-    # from every other writer of the same digest — including another PROCESS
-    # sharing a network CAS volume (th#850).
-    writer_id = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
-    tmp = dst.parent / f".{dst.name}.chunkpart-{writer_id}"
+    # The part file name is STABLE, which is what makes resume reachable at all.
+    # It is safe because writers of one CAS entry write IDENTICAL bytes to
+    # IDENTICAL offsets — positional writes make concurrent assembly of the same
+    # digest convergent rather than corrupting, where the old append stream had
+    # to hide behind a per-call uuid (and thereby never resumed).
+    tmp = dst.parent / f".{dst.name}.chunkpart"
+    journal = dst.parent / f".{dst.name}.chunkdone"
+    header = _journal_header(want_whole, total_size)
 
-    # ---- crash-resume: the committed prefix is the floor ----
-    committed = 0
-    start_index = 0
-    if tmp.exists():
-        have = tmp.stat().st_size
-        # Only a WHOLE number of chunks is trusted as durable: a torn tail
-        # belongs to a chunk whose commit did not finish.
-        while start_index < len(chunks) and committed + chunks[start_index].length <= have:
-            committed += chunks[start_index].length
-            start_index += 1
-        if committed != have:
-            # Truncate the torn tail rather than re-fetching everything.
-            with open(tmp, "r+b") as f:
-                f.truncate(committed)
-        if start_index:
-            _log.info(
-                "chunk_resume path=%s committed=%d/%d chunks (%d bytes)",
-                dst.name, start_index, len(chunks), committed,
+    offsets: list[int] = []
+    running = 0
+    for c in chunks:
+        offsets.append(running)
+        running += c.length
+
+    max_inflight = max(1, min(window, len(chunks)))
+    fd = os.open(str(tmp), os.O_RDWR | os.O_CREAT, 0o644)
+    jfd: Optional[int] = None
+    try:
+        _preallocate(fd, total_size, tmp)
+        already = _adopt_partial(fd, chunks, offsets, journal, header, max_inflight)
+
+        prefix = _Prefix(len(chunks))
+        for i in sorted(already):
+            prefix.mark(i)
+
+        # Rewrite the journal from what actually verified, so a false claim is
+        # never inherited twice.
+        with open(journal, "w") as jf:
+            jf.write(header + "\n")
+            for i in sorted(already):
+                jf.write(f"{i}\n")
+        jfd = os.open(str(journal), os.O_WRONLY | os.O_APPEND)
+
+        hashed: Dict[str, str] = {}
+        hasher = threading.Thread(
+            target=_hash_verified_prefix,
+            args=(fd, chunks, offsets, prefix, hashed),
+            daemon=True,
+        )
+        hasher.start()
+        try:
+            _fetch_pending(
+                chunks, offsets, prefix, jfd, fd, dst,
+                already=already, max_inflight=max_inflight,
+                on_bytes=on_bytes, session_factory=session_factory,
             )
+        except BaseException:
+            prefix.abort()
+            hasher.join(timeout=30)
+            raise
+        hasher.join()
+        got = hashed.get("digest")
+        if got is None:
+            raise OSError(f"{dst.name}: whole-file hash did not complete")
+        _finalize(fd, tmp, journal, dst, got=got, want_whole=want_whole,
+                  total_size=total_size)
+    finally:
+        if jfd is not None:
+            os.close(jfd)
+        os.close(fd)
 
-    hasher = hashlib.sha256()
-    if start_index:
-        # The resumed prefix must be re-read to seed the hasher. This is the
-        # ONLY case where bytes are read twice, and it is bounded by what a
-        # previous process already committed — never by the whole file on a
-        # fresh download.
-        with open(tmp, "rb") as seed:
-            remaining = committed
-            while remaining > 0:
-                b = seed.read(min(_READ_CHUNK_BYTES, remaining))
-                if not b:
-                    raise OSError(f"{tmp}: short read while seeding the resume hash")
-                hasher.update(b)
-                remaining -= len(b)
 
-    pending = list(range(start_index, len(chunks)))
+def _fetch_pending(
+    chunks: Sequence[ChunkSpec],
+    offsets: Sequence[int],
+    prefix: "_Prefix",
+    jfd: int,
+    fd: int,
+    dst: Path,
+    *,
+    already: set[int],
+    max_inflight: int,
+    on_bytes: Optional[Callable[[int], None]],
+    session_factory: Callable[[], requests.Session],
+) -> None:
+    pending = [i for i in range(len(chunks)) if i not in already]
     if not pending:
-        _finalize(tmp, dst, hasher, want_whole, total_size)
         return
 
-    # ---- bounded out-of-order fetch, in-order commit ----
-    max_inflight = max(1, min(window, len(pending)))
-    ready: Dict[int, bytes] = {}
-    next_commit = start_index
     aggregate = ProgressFloor(_CHUNK_PROGRESS_FLOOR_BYTES * max_inflight)
     delivered_total = 0
-    lock = threading.Lock()
+    counter = threading.Lock()
 
     def _count(n: int) -> None:
         nonlocal delivered_total
-        with lock:
+        with counter:
             delivered_total += n
         if on_bytes is not None:
             on_bytes(n)
 
     session = session_factory()
+    _size_session_pool(session, max_inflight)
+
+    def _one(i: int) -> None:
+        _fetch_chunk_to_offset(session, chunks[i], fd, offsets[i], on_bytes=_count)
+        # O_APPEND makes a short line atomic across threads, so the journal
+        # needs no lock of its own.
+        os.write(jfd, f"{i}\n".encode())
+        prefix.mark(i)
+
     try:
-        with open(tmp, "ab") as out, ThreadPoolExecutor(max_workers=max_inflight) as pool:
-            inflight: Dict[int, "Future[bytes]"] = {}
-            cursor = start_index
-
-            def _submit_until_full() -> None:
-                nonlocal cursor
-                while len(inflight) < max_inflight and cursor < len(chunks):
-                    idx = cursor
-                    inflight[idx] = pool.submit(
-                        _fetch_chunk_bytes, session, chunks[idx], on_bytes=_count
-                    )
-                    cursor += 1
-
-            _submit_until_full()
-            while next_commit < len(chunks):
-                fut = inflight.pop(next_commit)
+        with ThreadPoolExecutor(max_workers=max_inflight) as pool:
+            futures: Dict["Future[None]", int] = {
+                pool.submit(_one, i): i for i in pending
+            }
+            failure: Optional[tuple[int, BaseException]] = None
+            for fut in as_completed(futures):
                 try:
-                    data = fut.result()
-                except UrlExpiredError:
-                    raise
-                except DigestMismatch:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - classified below
-                    if getattr(exc, "errno", None) == 28:  # ENOSPC
-                        raise InsufficientDiskError(
-                            f"insufficient disk assembling {dst.name}",
-                            path=str(dst.parent),
-                        ) from exc
-                    if not aggregate.cleared(delivered_total):
-                        # Nothing anywhere is moving: the ROUTE is bad, not one
-                        # connection. Typed so the hub re-places the pod.
-                        raise ChunkedDownloadStalled(
-                            f"{dst.name}: chunk {next_commit} failed and no chunk "
-                            f"cleared the aggregate floor ({delivered_total} bytes "
-                            f"delivered) — download_stalled"
-                        ) from exc
-                    raise
-                ready[next_commit] = data
-                # Commit in order, feeding the whole-file hasher from the SAME
-                # bytes that reach the disk.
-                while next_commit in ready:
-                    block = ready.pop(next_commit)
-                    out.write(block)
-                    hasher.update(block)
-                    next_commit += 1
-                out.flush()
-                os.fsync(out.fileno())
-                _submit_until_full()
+                    fut.result()
+                except BaseException as exc:  # noqa: BLE001 - classified below
+                    failure = (futures[fut], exc)
+                    del exc
+                    for other in futures:
+                        other.cancel()
+                    break
+        if failure is not None:
+            index, cause = failure
+            if isinstance(cause, (UrlExpiredError, DigestMismatch)):
+                raise cause
+            if getattr(cause, "errno", None) == 28:  # ENOSPC
+                raise InsufficientDiskError(
+                    f"insufficient disk assembling {dst.name}",
+                    path=str(dst.parent),
+                ) from cause
+            if not aggregate.cleared(delivered_total):
+                # Nothing anywhere is moving: the ROUTE is bad, not one
+                # connection. Typed so the hub re-places the pod.
+                raise ChunkedDownloadStalled(
+                    f"{dst.name}: chunk {index} failed and no chunk "
+                    f"cleared the aggregate floor ({delivered_total} bytes "
+                    f"delivered) — download_stalled"
+                ) from cause
+            raise cause
     finally:
         session.close()
 
-    _finalize(tmp, dst, hasher, want_whole, total_size)
-
 
 def _finalize(
-    tmp: Path, dst: Path, hasher: "hashlib._Hash", want_whole: str, total_size: int
+    fd: int,
+    tmp: Path,
+    journal: Path,
+    dst: Path,
+    *,
+    got: str,
+    want_whole: str,
+    total_size: int,
 ) -> None:
-    actual = tmp.stat().st_size
+    actual = os.fstat(fd).st_size
     if actual != total_size:
         tmp.unlink(missing_ok=True)
+        journal.unlink(missing_ok=True)
         raise DigestMismatch(
             f"{dst.name}: assembled {actual} bytes, manifest says {total_size}"
         )
-    got = hasher.hexdigest()
     if got != want_whole:
         # FAIL-CLOSED. The whole-file hash is NOT store-enforced (only the
         # chunks are), so this is the one place a lying manifest label is
-        # caught — and it must never install the file anyway.
+        # caught — and it must never install the file anyway. Every chunk
+        # verified individually and landed at an offset the manifest itself
+        # dictated, so the bytes on disk ARE the manifest's file: what is wrong
+        # is the label, or the chunk list it labels.
         tmp.unlink(missing_ok=True)
+        journal.unlink(missing_ok=True)
         raise DigestMismatch(
             f"{dst.name}: reassembled bytes hash to {got[:16]}…, manifest says "
             f"{want_whole[:16]}… (chunks were individually valid, so the "
             f"whole-file label is wrong or the chunk ORDER is)"
         )
     # Durable atomic finalize (gw#408): rename is atomic in the NAMESPACE only.
-    from .cozy_cas import fsync_dir, fsync_file
+    from .cozy_cas import fsync_dir
 
-    fsync_file(tmp)
+    os.fsync(fd)
     tmp.replace(dst)
     fsync_dir(dst.parent)
+    journal.unlink(missing_ok=True)
     _log.info("chunk_download_done path=%s size=%d sha256=%s", dst.name, total_size, got[:16])

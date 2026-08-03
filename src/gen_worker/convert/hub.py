@@ -364,7 +364,18 @@ class HubClient:
         destination_repo: str,
         files: list[CommitFile],
         tags: list[str] | None = None,
-        mode: str = "merge",
+        # th#1400: "replace" — a checkpoint is COMPLETE IN ITSELF. "merge"
+        # unions this publish with the repo's prior :latest, so a caller that
+        # never mentioned a sibling inherits its bytes; te#44 shipped an #fp8
+        # checkpoint carrying 5.2 GB of fp16 base weights that way, and a
+        # differently-sharded base splices into a quantization the same way.
+        # te#44 was fixed at ONE call site (publish_flavors' own default)
+        # instead of here, so every future caller re-acquired the bug — the
+        # hub's normalizePublishMode("") had the same default until th#1400.
+        # Both are "replace" now; pass mode="merge" explicitly and only for
+        # what it is for: assembling ONE checkpoint across several commits
+        # (clone.py's chunked full-clone, _stream.py's streamed output).
+        mode: str = "replace",
         flavor: str = "",
         flavors: list[str] | None = None,
         default_flavor: str = "",
@@ -460,7 +471,10 @@ class HubClient:
             "mode": mode,
             "files": [d.to_wire() for d in decls],
         }
-        if tags:
+        # th#1411: an EMPTY list is an explicit "move no tags" and must reach
+        # the wire (the classification gate refuses an OMITTED tags field on
+        # repos that carry tag rows); only None omits the field.
+        if tags is not None:
             df = _token(default_flavor)
             body["tags"] = [
                 {"tag": t, **({"default_flavor": df} if df else {})} for t in tags

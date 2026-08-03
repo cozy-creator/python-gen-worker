@@ -120,7 +120,6 @@ def test_first_job_on_converged_v5_worker_does_not_error(tmp_path) -> None:
             conn.wait_for(
                 lambda m: m.WhichOneof("msg") == "state_delta"
                 and _FN in m.state_delta.available_functions,
-                timeout=30.0,
             )
 
             # FULL v5 convergence: the command's materialize intent must be
@@ -133,7 +132,7 @@ def test_first_job_on_converged_v5_worker_does_not_error(tmp_path) -> None:
                     for i in m.lifecycle_snapshot.intents
                 )
 
-            conn.wait_for(_mat_succeeded, timeout=30.0)
+            conn.wait_for(_mat_succeeded)
 
             # First tenant job, runs well past the 2.0s grace.
             conn.send(run_job=pb.RunJob(
@@ -161,10 +160,21 @@ def test_first_job_on_converged_v5_worker_does_not_error(tmp_path) -> None:
             result = conn.wait_for(
                 lambda m: m.WhichOneof("msg") == "job_result"
                 and m.job_result.request_id == "r-long",
-                timeout=30.0,
             ).job_result
             assert result.status == pb.JOB_STATUS_OK
 
+            # And the bumped desired state still converges after the job. A
+            # run_job cancels the reconcile mid-pass; pgw#845 was the cancel
+            # landing on a granted ref lock, which leaked it and stopped this
+            # worker converging anything, ever.
+            conn.wait_for(
+                lambda m: m.WhichOneof("msg") == "model_event"
+                and m.model_event.ref == _REF_B
+                and m.model_event.state == pb.MODEL_STATE_ON_DISK,
+            )
+
+            # Checked LAST, so it sees the whole run: an ERROR raised after the
+            # job result used to be invisible to this assertion.
             errors = conn.count(
                 lambda m: m.WhichOneof("msg") == "state_delta"
                 and m.state_delta.phase == pb.WORKER_PHASE_ERROR
@@ -172,14 +182,6 @@ def test_first_job_on_converged_v5_worker_does_not_error(tmp_path) -> None:
             assert errors == 0, (
                 "worker reported WORKER_PHASE_ERROR — the pgw#654 false "
                 "model_load_failure regression is back"
-            )
-
-            # And the bumped desired state still converges after the job.
-            conn.wait_for(
-                lambda m: m.WhichOneof("msg") == "model_event"
-                and m.model_event.ref == _REF_B
-                and m.model_event.state == pb.MODEL_STATE_ON_DISK,
-                timeout=30.0,
             )
     finally:
         blobs.shutdown()

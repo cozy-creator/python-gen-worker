@@ -75,6 +75,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -82,8 +83,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    aot_compile_pool, aot_package, aot_regional, aot_serve, aot_wrapper_split,
-    cell_key)
+    aot_compile_pool, aot_export_parallel, aot_export_reuse, aot_package,
+    aot_serve, aot_wrapper_split, cell_key)
+from .aot_contract import (  # re-exported: the declaration layer's vocabulary
+    ADAPTER_FORK,
+    DynamicDim,
+    ExportSpec,
+    MintRefused,
+)
 from .compile_cache import (
     _resolve_target,
     lane_bucket,
@@ -106,144 +113,72 @@ CODE_ONLY_CONFIGS: Dict[str, Any] = {
 }
 
 
-#: pgw#790: the SDK-owned fork coordinate of a LoRA-bucket family — one graph
-#: class WITH the lifted adapter inputs and one WITHOUT.
-#:
-#: gw#627 gave every branch-capable leaf a canonical zeroed rank-bucket branch
-#: so a curated attach is a buffer copy instead of a recompile. Measured
-#: (WARM-INFERENCE-MATRIX §2b, 4090+5090, n=28 warm): those zeroed branches
-#: cost **+31.8% / +44.9% of the compiled per-forward** and roughly DOUBLE the
-#: kernel-launch count, and adapter-free traffic pays all of it to compute
-#: zeros. On the hub's own record 95% of sdxl denoiser forwards name no
-#: adapter, so the branch-bearing graph was the minority case wearing the
-#: majority's clothes.
-#:
-#: This is a FORK, not a flag: both classes are exported, compiled, keyed and
-#: shipped in the same cell (Paul: "worst case compile 2x more graphs, one with
-#: LoRAs and one without"), and the serve path picks between them by the
-#: DECLARED ingress contract. Nothing about a program varies with Python state
-#: — the arm is a mint coordinate that lands in the class hash, exactly like
-#: any other fork.
-ADAPTER_FORK = "adapter"
+class MintResourceExhausted(RuntimeError):
+    """This mint ran out of MEMORY. It is not a refusal, and the difference
+    is the whole point (pgw#848).
 
+    Deliberately NOT a subclass of :class:`MintRefused`. ``mint_child`` maps
+    every ``MintRefused`` to ``EXIT_REFUSED``, which ``mint_process``
+    documents as "typed, deterministic — terminal", so an OOM-killed entry
+    child inherited a never-retry verdict: the one failure class a narrower
+    pool would have fixed was the one class that could never try a narrower
+    pool. Raising a sibling type instead lets the child's own
+    ``_is_resource_error`` see it (via ``mint_resource_shortfall``) and exit
+    ``EXIT_RESOURCE``, which the parent re-budgets and retries.
 
-class MintRefused(RuntimeError):
-    """A named, terminal refusal to produce or publish an artifact.
-
-    Every mint failure is one of these with a reason that names the offending
-    thing — a lane, a tensor, a missing declaration field. A mint that cannot
-    say what went wrong is the silent-failure path the doctrine forbids.
-
-    ``mint_phases`` carries the PARTIAL phase table of the mint that refused
-    (pgw#825): the entries that did export and compile before the refusal
-    spent real minutes on a real pod, and a terminus that reports only a
-    wall-clock total is a measurement lost to a pod that no longer exists.
-    Populated by :func:`mint`; empty for a refusal raised before any entry.
+    ``peak_rss_bytes`` is the dead entry's MEASURED high-water, sampled by
+    the parent while it lived — a child the OOM killer takes writes no
+    report, so this is the only measurement of it that will ever exist.
     """
 
-    def __init__(self, *args: Any, mint_phases: Optional[Mapping[str, Any]] = None) -> None:
-        super().__init__(*args)
-        self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
+    #: Duck type read by ``mint_child._is_resource_error`` so that module
+    #: does not have to import this one (it deliberately imports as little
+    #: of the arming brain as it can).
+    mint_resource_shortfall = True
+
+    def __init__(
+        self, detail: str, *, entry: str = "", basis: str = "",
+        peak_rss_bytes: int = 0,
+    ) -> None:
+        super().__init__(detail)
+        self.entry = entry
+        self.basis = basis
+        self.peak_rss_bytes = int(peak_rss_bytes)
+
+
+def raise_if_device_oom(exc: BaseException, where: str) -> None:
+    """Re-raise a CUDA OOM as the RESOURCE type instead of letting a broad
+    ``except Exception`` launder it into a deterministic refusal (pgw#848).
+
+    The mint path is full of broad catches that exist to name a failure. They
+    are right about naming and wrong about classification: an out-of-memory is
+    the one failure whose whole remedy is "try again with more room", and
+    every one of these sites was converting it to the verdict that guarantees
+    it never will be.
+    """
+    from .models.memory import is_cuda_oom
+
+    if not is_cuda_oom(exc):
+        return
+    peak = 0
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            peak = int(torch.cuda.max_memory_allocated())
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        peak = 0
+    raise MintResourceExhausted(
+        f"{where}: OUT OF DEVICE MEMORY ({type(exc).__name__}: {exc}). "
+        f"This process peaked at {peak / (1 << 30):.2f} GiB against the cap "
+        f"the parent set from `mint_budget.co_residency`; it is a resource "
+        f"shortfall to be retried with more room, NOT a deterministic "
+        f"refusal", peak_rss_bytes=0) from exc
 
 
 # ---------------------------------------------------------------------------
 # The declared export contract
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class DynamicDim:
-    """One declared symbolic dimension of one input.
-
-    ``multiple_of`` expresses a divisibility the graph genuinely requires (SDXL
-    latents downsample 3x, so latent H/W must be multiples of 8) as a Dim
-    factor rather than a comment. Without it export 0/1-specializes or produces
-    a guard it cannot express, and the "one artifact serves every aspect ratio"
-    headline quietly stops holding.
-
-    ``dim`` is the DECLARED ``Compile.Dim`` this row came from, and it is what
-    makes a multi-carrier dim expressible (pgw#812 D1). A declaration may bind
-    ONE logical axis to several inputs — flux2 declares
-    ``Dim("T_img", carried_by=(("hidden_states", 1), ("img_ids", 1)))``
-    precisely so the edit lane cannot let ``img_ids`` specialize while
-    ``hidden_states`` stays free. Every carrier of one declared dim must
-    therefore share ONE torch symbol; rows that carry no declared name (the
-    hand-registered builder path, where latent H and W are genuinely
-    independent axes of one input) keep a symbol each.
-    """
-
-    input_name: str
-    axis: int
-    min: int
-    max: int
-    multiple_of: int = 1
-    dim: str = ""
-
-    def as_row(self) -> Dict[str, Any]:
-        return {
-            "input": self.input_name, "axis": self.axis,
-            "min": self.min, "max": self.max, "multiple_of": self.multiple_of,
-        }
-
-
-@dataclass
-class ExportSpec:
-    """Everything the mint needs to produce one artifact.
-
-    ``example_inputs`` is a zero-arg factory rather than tensors so a caller
-    can build them on meta (tests, control-plane) or on cuda (a real mint)
-    without this module deciding. ``lora_fqns`` names the adapter tensors that
-    must stay dynamic; ``lifted_inputs`` names what was promoted to a graph
-    input to keep them that way.
-    """
-
-    family: str
-    target: str
-    weight_lane: str = ""
-    precision: str = "bf16"
-    lora_bucket: int = 0
-    shapes: Tuple[Tuple[int, ...], ...] = ()
-    #: Traced batch. 0 = the family's input builder decides. Declared rather
-    #: than inferred from ``guidance_scales`` because CFG batching is a FAMILY
-    #: fact: sdxl runs CFG as one batch-2 forward, wan as two sequential batch-1
-    #: forwards, so guidance changes wan's call COUNT and not its shape
-    #: (ie#566 G2).
-    batch: int = 0
-    text_lens: Tuple[int, ...] = ()
-    guidance_scales: Tuple[float, ...] = ()
-    dynamic: Tuple[DynamicDim, ...] = ()
-    #: pgw#739 declaration coordinate: the fork arm values and (for a
-    #: static-rows family) the class row this artifact is minted at. Both
-    #: KEY (a fork is a distinct graph class in #716's hash) — see
-    #: :func:`cell_identity`. Sorted (name, value) pairs.
-    fork: Tuple[Tuple[str, Any], ...] = ()
-    class_dims: Tuple[Tuple[str, int], ...] = ()
-    specialization: Dict[str, Any] = field(default_factory=dict)
-    lora_fqns: Tuple[str, ...] = ()
-    lifted_inputs: Tuple[str, ...] = ()
-    strict: bool = True
-    source_ref: str = ""
-    source_digest: str = ""
-    closure_roots: Tuple[str, ...] = ()
-    #: pgw#817: this cell's entries are BLOCK CLASSES of the target, not shape
-    #: coordinates of its whole forward. Keys the ck5 ``mode`` axis, so a
-    #: regional cell can never be confused with a whole-graph cell of the same
-    #: family x lane x sm.
-    regional: bool = False
-    #: pgw#812 S3.3, MANDATORY for a regional cell. A regional artifact
-    #: describes a PART of the model, so ``combined_graph_hash`` — which is a
-    #: proxy for "the graph the fleet serves" — no longer covers the assembly.
-    #: Two models with identical blocks and different shells must not collide.
-    #: Computed by :func:`aot_regional.shell_digest` off the resolved module.
-    shell_digest: str = ""
-
-    def lane_label(self) -> str:
-        base, observed = lane_bucket(self.weight_lane)
-        bucket = observed or self.lora_bucket
-        token = lane_token(base)
-        if bucket:
-            return f"{token}-lora{bucket}" if token else f"lora{bucket}"
-        return token
 
 
 #: The lifted-LoRA mint's torch floor (pgw#723 residuals, pod 8): torch 2.9
@@ -304,6 +239,7 @@ def lane_admitted(spec: ExportSpec, *, allow_regressed_lanes: bool) -> str:
 
 def dynamic_shapes_spec(
     dims: Sequence[DynamicDim], input_names: Sequence[str],
+    containers: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, Any]:
     """``torch.export`` ``dynamic_shapes`` for the declared dims.
 
@@ -363,7 +299,30 @@ def dynamic_shapes_spec(
         raise MintRefused(
             f"declared dynamic dims name inputs the target does not take: "
             f"{unknown!r} (target inputs: {list(input_names)!r})")
-    return {name: by_input.get(name) for name in input_names}
+    # pgw#853: `dynamic_shapes` must MIRROR the example feed's container
+    # structure or torch refuses by name. z-image measured the sentence:
+    #
+    #     Detected mismatch between the structure of `inputs` and
+    #     `dynamic_shapes`: `inputs['x']` is a <class 'list'>, but
+    #     `dynamic_shapes['x']` is a <class 'dict'>
+    #
+    # and the nested form torch wants — {'x': [{2: Dim, 3: Dim}]} — exports
+    # fine, so this was an SDK gap, not a torch limitation. The arity comes
+    # from the SAME class row the feed was built from
+    # (`aot_declaration.container_arities`), never re-guessed here.
+    arities = dict(containers or {})
+    out: Dict[str, Any] = {}
+    for name in input_names:
+        spec = by_input.get(name)
+        arity = arities.get(name)
+        if arity is None:
+            out[name] = spec
+        else:
+            # One entry per element; every element of a declared container
+            # shares the container's declared axes, which is what makes the
+            # elements one graph class rather than N.
+            out[name] = [spec for _ in range(int(arity))]
+    return out
 
 
 def export_program(
@@ -384,10 +343,67 @@ def export_program(
             strict=strict,
         )
     except Exception as exc:
+        # pgw#848: a CUDA OOM here is NOT a refusal. This broad catch turned
+        # "the child hit its own memory cap on entry 1 of 36" into
+        # `MintRefused` -> `EXIT_REFUSED` -> never retried — so the mint that
+        # a bigger cap would fix was the one mint that could never be given
+        # one. Same defect as the entry pool's (item 4), at the other end.
+        raise_if_device_oom(
+            exc,
+            f"torch.export(strict={strict}) for {type(module).__name__}")
         raise MintRefused(
             f"torch.export(strict={strict}) failed for "
             f"{type(module).__name__}: {type(exc).__name__}: {exc}"
         ) from exc
+
+
+#: pgw#847: measured ONCE per mint process, and read by nobody.
+#:
+#: `torch.export.export` runs once per declared class row, SERIALLY, in this
+#: parent (`_export_entry`) — sdxl is 36 entries at a banked `export_s` of
+#: 37.8 s, so that loop is ~22 minutes of wall the pgw#809 pool never covered.
+#: An exported graph's `graph_module.code` is byte-identical across shape rows
+#: (the row lives in node metadata), and ONE export plus a per-row
+#: `FakeTensorProp` reproduces the compiled artifact byte for byte — wrapper,
+#: kernel and the linked `.so` — proven with `torch.export.export` monkeypatched
+#: to raise. The saving is therefore `export_s - prop_s`, and `prop_s` on a real
+#: family's graph has never been measured; off-pod probes bound it only to
+#: 0.25-0.97x. This is that one number, so the next real mint settles it.
+_PROP_PROBE_DONE = False
+
+
+def _probe_prop_s(program: Any) -> Optional[float]:
+    """Time `FakeTensorProp` over this program's own graph, once per process.
+
+    Probe only: it mutates a FRESH `program.module()` (never the program), no
+    decision reads it, and any failure records nothing rather than touching a
+    mint. `.module()` is excluded from the timing because the current path
+    pays it too (`compile_entry_files`), so the comparison stays like-for-like.
+    """
+    global _PROP_PROBE_DONE
+    if _PROP_PROBE_DONE:
+        return None
+    _PROP_PROBE_DONE = True
+    try:
+        import torch
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.passes.fake_tensor_prop import FakeTensorProp
+
+        args, _kwargs = program.example_inputs
+        gm = program.module(check_guards=False)
+        t0 = time.monotonic()
+        mode = FakeTensorMode(allow_non_fake_inputs=True)
+        with mode:
+            fake = tuple(
+                mode.from_tensor(a) if isinstance(a, torch.Tensor) else a
+                for a in args)
+            FakeTensorProp(gm, mode=mode).propagate(*fake)
+        return round(time.monotonic() - t0, 2)
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "aot-mint: pgw#847 prop probe skipped: %s: %s",
+            type(exc).__name__, exc)
+        return None
 
 
 def _placeholder_shapes(program: Any) -> Dict[str, Tuple[Any, ...]]:
@@ -558,8 +574,7 @@ def _is_tautology(expr: Any) -> bool:
     and ``3072*s + 1572864 == 64 * (48*s + 24576)``, so that is
     ``Mod(64*X, X) == 0`` — identically true, pinning nothing. The algebra
     comes from attention's ``unflatten``/``flatten`` over the concatenated
-    image+text stream, so it appears on the whole-graph AND the block export;
-    regional does not dodge it.
+    image+text stream, so every export of the graph carries it.
 
     Only a PROOF admits: anything sympy cannot reduce to ``true`` keeps
     refusing, so the gate still fails closed on an unrecognised guard.
@@ -864,26 +879,6 @@ class _MintedEntry:
     timings: Dict[str, Any]
 
 
-def _regional_dynamic(
-    declared: Sequence[DynamicDim], block_inputs: Sequence[str],
-) -> Tuple[DynamicDim, ...]:
-    """The declared dynamic rows that SURVIVE into a block's own inputs.
-
-    A block's inputs are internal and captured, never declared (pgw#812 S5) —
-    but a declared carrier frequently reaches the block under its own name
-    (flux2's ``hidden_states`` is the block's first argument). Those rows ride;
-    a carrier the block never sees is dropped, because marking an axis on an
-    input that does not exist is a mint error and inventing a range for an
-    input the declaration never described would be worse.
-
-    The result is that ``regional + dynamic`` is expressible without a second,
-    deeper contract for the endpoint to maintain — the inner gate is derived
-    from the artifact's OWN recorded ranges (S5), not from a new declaration.
-    """
-    names = set(str(n) for n in block_inputs)
-    return tuple(d for d in declared if str(d.input_name) in names)
-
-
 def adapter_arm(fork: Sequence[Tuple[str, Any]]) -> Optional[bool]:
     """The pgw#790 adapter arm a fork coordinate states, or ``None`` when the
     coordinate does not carry one (a bucket-0 family, or a target that carries
@@ -919,7 +914,8 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
     specialization = dict(spec.specialization)
-    specialization.setdefault("shape_strategy", str(decl.shape_strategy or ""))
+    specialization.setdefault(
+        "shape_strategy", _decl.effective_shape_strategy(decl))
     specialization.setdefault("warm_changes_key", bool(decl.warm_changes_key))
     for name, value in plan.fork:
         specialization.setdefault(f"fork.{name}", value)
@@ -955,6 +951,7 @@ def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
         with torch.no_grad():
             module(*args)
     except Exception as exc:
+        raise_if_device_oom(exc, f"entry {entry!r}: declared mint-warm forward")
         raise MintRefused(
             f"entry {entry!r}: declared mint-warm forward failed "
             f"({type(exc).__name__}: {exc}) — warm_changes_key=True makes "
@@ -970,11 +967,22 @@ def _export_entry(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     compile_now: bool = True,
+    reuse: Optional[aot_export_reuse.ReuseState] = None,
+    reuse_key: Any = None,
+    rows: int = 0,
 ) -> _MintedEntry:
     """Resolve, feed, (warm,) export, gate, and compile ONE declared graph
     class. Every refusal is prefixed with the entry name — a multi-graph
     mint that cannot say WHICH class failed is the silent-failure path in
     a new hat (pgw#758).
+
+    ``reuse`` (pgw#847, OFF unless `GEN_WORKER_AOT_EXPORT_REUSE` is set) may
+    hand back a program re-specialized from an earlier row's graph instead of
+    a fresh `torch.export.export`, but only after its own gate has PROVEN, by
+    byte-comparing every emitted file including the linked `.so`, that the two
+    routes agree for this family. It falls back to a full export on anything
+    it cannot prove, so this parameter can only change how long the export
+    takes, never what comes out.
 
     ``compile_now=False`` stops after the export-side gates and returns the
     entry with no files: pgw#809's pool then compiles every entry K-wide out
@@ -1060,16 +1068,34 @@ def _export_entry(
 
     input_names = _input_names(module, args, kwargs)
     flat_names = flat_input_names(module, args, kwargs)
-    dynamic = dynamic_shapes_spec(espec.dynamic, input_names) \
-        if espec.dynamic else None
+    dynamic = dynamic_shapes_spec(
+        espec.dynamic, input_names,
+        _decl.container_arities(decl, espec, module),
+    ) if espec.dynamic else None
+
+    def _full_export() -> Any:
+        try:
+            return export_program(
+                module, args, kwargs, dynamic_shapes=dynamic,
+                strict=espec.strict)
+        except MintRefused as exc:
+            raise MintRefused(f"entry {entry!r}: {exc}") from exc
 
     t0 = time.monotonic()
-    try:
-        program = export_program(
-            module, args, kwargs, dynamic_shapes=dynamic, strict=espec.strict)
-    except MintRefused as exc:
-        raise MintRefused(f"entry {entry!r}: {exc}") from exc
+    if reuse is None:
+        program, how = _full_export(), "full"
+    else:
+        program, how = reuse.program(
+            (espec.target, reuse_key), entry=entry, rows=rows,
+            args=args, kwargs=kwargs, full_export=_full_export)
     timings["export_s"] = round(time.monotonic() - t0, 2)
+    if how != "full":
+        timings["export_how"] = how
+    # pgw#847, telemetry only: the one number that sizes "export once,
+    # re-propagate per row". Once per process, so a 36-entry mint pays it once.
+    prop_probe = _probe_prop_s(program)
+    if prop_probe is not None:
+        timings["prop_probe_s"] = prop_probe
 
     gaps = declared_range_gaps(program, espec.dynamic)
     if gaps:
@@ -1124,210 +1150,6 @@ def _export_entry(
         name=entry, spec=espec, module=module, owner=owner, program=program,
         input_names=input_names, flat_names=flat_names, files=files,
         timings=timings)
-
-
-def _export_regional_entries(
-    pipeline: Any,
-    spec: ExportSpec,
-    plan: Any,
-    decl: Any,
-    *,
-    inductor_configs: Optional[Mapping[str, Any]] = None,
-    compile_now: bool = True,
-) -> List[_MintedEntry]:
-    """Export one mint plan's target as BLOCK entries instead of one graph.
-
-    pgw#817, implementing pgw#812 S1: the cell is still one ``.pt2`` and the
-    entry grammar is unchanged — ``<target>/block=<class>#<n>/<dims>`` — but
-    the entries enumerate BLOCK CLASSES of the target instead of shape
-    coordinates of its whole forward. sdxl's 70 UNet blocks collapse to 2
-    entries; flux2's 25+25 to 2.
-
-    The shell stays EAGER (S2), which is the honest bound on the win: the
-    compiled fraction of the model equals the repeated-block fraction. The
-    alternative — exporting the shell with the blocks elided — is not
-    expressible in ``torch.export`` today, because blocks are inlined at
-    trace time.
-
-    Everything before and after this function is unchanged: the same
-    per-entry gates, the same class hashes, the same packaging, the same
-    pool. Only the module being exported and the feed it is exported on
-    change.
-    """
-    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
-    from . import aot_inputs
-
-    espec = _entry_spec(spec, plan, decl)
-    label = _decl.plan_entry_name(plan)
-
-    resolved = _resolve_target(pipeline, espec.target)
-    if resolved is None:
-        raise MintRefused(
-            f"entry {label!r}: pipeline {type(pipeline).__name__} has no "
-            f"compile target {espec.target!r}")
-    owner, attr, _fn = resolved
-    if attr != "forward":
-        raise MintRefused(
-            f"entry {label!r}: regional export needs a MODULE with declared "
-            f"repeated blocks; target {espec.target!r} resolves to a callable "
-            f"attribute ({attr!r}), which has no block structure to compile "
-            f"per class")
-    groups = aot_regional.repeated_block_groups(owner)
-    if not groups:
-        raise MintRefused(
-            f"entry {label!r}: {type(owner).__name__} declares no "
-            f"`_repeated_blocks`, so there is no repeated structure to "
-            f"compile once and reuse — mint this target whole-graph "
-            f"(regional=False) or fix the model class")
-
-    module = owner
-    builder = aot_inputs.builder_for(espec.family, espec.target)
-    args, kwargs = builder(owner, espec)
-    if kwargs:
-        raise MintRefused(
-            f"entry {label!r}: example feed carries keyword argument(s) "
-            f"{sorted(kwargs)!r} — all-positional feeds are a mint obligation")
-
-    import torch
-
-    def _run() -> None:
-        with torch.no_grad():
-            module(*args)
-
-    t0 = time.monotonic()
-    feeds = aot_regional.capture_block_feeds(groups, _run)
-    capture_s = round(time.monotonic() - t0, 2)
-
-    out: List[_MintedEntry] = []
-    for group in groups:
-        block_args, block_kwargs = feeds[group.key]
-        block = group.prototype
-        pos, names = aot_regional.positional_feed(
-            block, block_args, block_kwargs)
-        bspec = replace_spec(
-            espec,
-            fork=tuple(sorted(
-                tuple(espec.fork) + aot_regional.block_entry_fork(group.key),
-                key=lambda kv: str(kv[0]))),
-            dynamic=_regional_dynamic(espec.dynamic, names),
-            regional=True,
-            # pgw#825: a BLOCK never carries the lifted signature. Input
-            # lifting (pgw#725) is a whole-graph-cell mechanism — it wraps the
-            # DENOISER's forward so the flat pair arrives in the call — and the
-            # regional entry is exported one block deep, from the block's own
-            # signature. The block's branch pair stays module-resident and is
-            # bound per instance BY REFERENCE (`user_managed=True`), which
-            # gives regional the same property lifting gives the family graph:
-            # an adapter swap is an in-place buffer write, never a recompile
-            # and never a rebind. Inheriting the family's `lifted_inputs` here
-            # would record a contract this entry's program does not have.
-            lifted_inputs=(),
-            lora_fqns=(),
-        )
-        entry = _decl.entry_name(espec.target, bspec.fork, bspec.class_dims)
-        timings: Dict[str, Any] = {
-            "capture_s": capture_s, "instances": group.count}
-        t0 = time.monotonic()
-        dynamic = dynamic_shapes_spec(bspec.dynamic, names) \
-            if bspec.dynamic else None
-        try:
-            program = export_program(
-                block, tuple(pos), {}, dynamic_shapes=dynamic,
-                strict=bspec.strict)
-        except MintRefused as exc:
-            raise MintRefused(f"entry {entry!r}: {exc}") from exc
-        timings["export_s"] = round(time.monotonic() - t0, 2)
-
-        gaps = declared_range_gaps(program, bspec.dynamic)
-        if gaps:
-            raise MintRefused(
-                f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
-
-        # pgw#825: the block's own bind table, asked BEFORE its compile. A
-        # regional mint pays 4-6 minutes per entry, and this mismatch is a
-        # property of the exported program — the refusal must cost seconds.
-        unbindable = aot_package.unbindable_program_constants(
-            program, _state_dict_keys(block))
-        if unbindable:
-            raise MintRefused(
-                f"entry {entry!r}: pre-compile bindability gate: "
-                + "; ".join(unbindable))
-        baked = _regional_branch_gaps(block, program, int(bspec.lora_bucket or 0))
-        if baked:
-            raise MintRefused(
-                f"entry {entry!r}: regional no-baked-adapter gate (#725 G3): "
-                + "; ".join(baked))
-
-        files: List[Any] = []
-        if compile_now:
-            before = _phase_snapshot()
-            t0 = time.monotonic()
-            files = compile_entry_files(
-                program, entry, inductor_configs=inductor_configs)
-            timings["compile_s"] = round(time.monotonic() - t0, 2)
-            phases = _phase_delta(before, _phase_snapshot())
-            if phases:
-                timings["phases"] = phases
-
-        # `owner` is the state_dict TEMPLATE the bindability gate compares the
-        # artifact's constant table against — and pgw#812 S4 is explicit that
-        # for a block entry that template is the BLOCK, not the target: the
-        # entry's FQNs are block-relative (`attn.to_q.weight`), and at serve
-        # time the values come from `transformer_blocks[i].state_dict()`, once
-        # per instance. Handing the gate the whole target here would compare
-        # `lin.weight` against `blocks.0.lin.weight` and refuse every correct
-        # regional mint by name.
-        out.append(_MintedEntry(
-            name=entry, spec=bspec, module=block, owner=block,
-            program=program, input_names=tuple(names), flat_names=tuple(names),
-            files=files, timings=timings))
-    return out
-
-
-def _regional_branch_gaps(
-    block: Any, program: Any, bucket: int,
-) -> List[str]:
-    """pgw#725 G3, in the shape a REGIONAL entry can be asked it.
-
-    The family gate asserts the adapter is a graph INPUT. A block cannot take
-    that form — the lift wraps the denoiser, and a block entry is exported
-    from the block's own signature — so regional's equivalent invariant is
-    that every branch pair is a NAMED, bindable buffer of the block. Two lanes
-    make that a real question rather than a formality:
-
-    * the w8a8 lane registers the pair as non-persistent buffers, which export
-      lifts under their true FQN — bindable, and the whole point of pgw#825;
-    * the cast-hook/plain-Linear lanes keep it in the module ``__dict__``,
-      where export can lift it as an ANONYMOUS tensor constant whose bytes
-      then SHIP in the literal payload. That is a baked, permanently zeroed
-      adapter: the cell arms, serves, and silently returns the base model for
-      every attach — pgw#704 S9 with no error anywhere.
-
-    Only the adapter-bearing fork class is asked (``bucket`` is zero on the
-    branchless one, whose pair is deliberately absent).
-    """
-    if not bucket:
-        return []
-    from .models import w8a8_lora
-
-    lifted = set(aot_package.program_state_dict_fqns(program))
-    missing: List[str] = []
-    for path, mod in w8a8_lora.branch_modules(block).items():
-        for slot in ("lora_a", "lora_b"):
-            if getattr(mod, slot, None) is None:
-                continue
-            fqn = f"{path}.{slot}" if path else slot
-            if fqn not in lifted:
-                missing.append(fqn)
-    if not missing:
-        return []
-    return [
-        f"{len(missing)} branch tensor(s) of this bucket-{bucket} block did "
-        f"not survive export as bindable buffers, e.g. {sorted(missing)[:6]!r}"
-        f" — a branch that is not a lifted buffer was either baked as a "
-        f"literal (a permanently ZEROED adapter that serves the base model "
-        f"silently) or traced away entirely"
-    ]
 
 
 def replace_spec(spec: ExportSpec, **changes: Any) -> ExportSpec:
@@ -1562,6 +1384,10 @@ class MintProgress:
     timings: Dict[str, float] = field(default_factory=dict)
     minted: List[_MintedEntry] = field(default_factory=list)
     width: Optional[aot_compile_pool.PoolWidth] = None
+    #: pgw#842: the pool's own ledger (pgw#830) once it has run, carried here
+    #: so it reaches the phase table — and therefore the hub — instead of
+    #: dying in the mint child's log with the pod.
+    pool_ledger: Dict[str, Any] = field(default_factory=dict)
     #: The last position :meth:`beat` reported, verbatim.
     at: Dict[str, Any] = field(default_factory=dict)
 
@@ -1592,7 +1418,10 @@ def mint(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
+    entry_peak_rss_bytes: int = 0,
+    entry_device_peak_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
+    phase_snapshot: Optional[Path] = None,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
 
@@ -1611,15 +1440,145 @@ def mint(
     """
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
+    if phase_snapshot is not None:
+        # pgw#848: every beat re-writes the on-disk table, so a mint that is
+        # KILLED still leaves 29 minutes of measurement behind it. Wrapped
+        # around the caller's sink rather than replacing it: both are
+        # best-effort and neither may cost a mint.
+        inner = progress.on_progress
+        snap = Path(phase_snapshot)
+
+        def _beat(phase: str, step: int, total: int, note: str) -> None:
+            try:
+                write_phase_snapshot(snap, progress)
+                # pgw#848: the SAME beat tells the pod-side reaper this mint
+                # is progressing. It has to be a CHANGING token, so it carries
+                # the position — which is the honest signal anyway.
+                _touch_pod_progress(f"aot_mint {phase} {step}/{total} {note}")
+            except Exception:  # noqa: BLE001 — telemetry never fails a mint
+                logger.debug("aot-mint: phase snapshot failed", exc_info=True)
+            if inner is not None:
+                inner(phase, step, total, note)
+
+        progress.on_progress = _beat
     try:
         return _mint_cell(
             pipeline, spec, out_dir,
             allow_regressed_lanes=allow_regressed_lanes,
             inductor_configs=inductor_configs,
-            entry_workers=entry_workers, progress=progress)
+            entry_workers=entry_workers,
+            entry_peak_rss_bytes=entry_peak_rss_bytes,
+            entry_device_peak_bytes=entry_device_peak_bytes,
+            progress=progress)
     except BaseException as exc:
         _attach_partial_phases(exc, progress)
         raise
+
+
+def partial_phase_table(
+    progress: MintProgress, *, terminus: str = "aborted",
+) -> Dict[str, Any]:
+    """Everything this mint has measured SO FAR, as a phase table.
+
+    Empty dict when there is nothing yet — "no measurement" and "zero" must
+    not read the same.
+    """
+    minted = list(progress.minted)
+    timings = dict(progress.timings)
+    started = progress.t_mint
+    where = dict(progress.at)
+    if not minted and not timings and not where:
+        return {}
+    if started is not None:
+        # The mint's OWN wall clock, so an aborted total is comparable
+        # with a completed one rather than being a sum of entry seconds.
+        timings["total_s"] = round(time.monotonic() - float(started), 2)
+    table = _mint_phase_table(
+        minted, timings, progress.inductor_configs, progress.width,
+        progress.pool_ledger)
+    table["terminus"] = terminus
+    if where:
+        # pgw#824 x pgw#825: the entries block names what FINISHED; this
+        # names what the mint was ON. Without it an 18-entry mint that
+        # dies in entry 12's export reports 11 rows and no twelfth, and
+        # the row that matters is the missing one.
+        table["at"] = where
+    return table
+
+
+#: pgw#848 long-fuse sweep: where the POD-SIDE reaper reads progress from.
+#: Set by `podguard.arm()` on every pod it rents; absent everywhere else, so
+#: this is inert off-pod and costs one `os.environ.get` per beat.
+PODGUARD_STATE_ENV = "PODGUARD_STATE"
+
+
+def _touch_pod_progress(note: str) -> None:
+    """Tell the pod-side reaper this mint is still doing work.
+
+    pgw#848. podguard's own docstring says both its layers "kill on liveness +
+    progress-staleness" — Paul's rule, implemented — and the pod-side layer
+    reads a token file that `podguard-progress` writes. **Nothing in the SDK
+    has ever written it.** Zero references to podguard anywhere in gen_worker,
+    so the pod-side progress path had no producer and the ONLY signal keeping
+    a minting pod alive was podguard's own renewal thread.
+
+    SCOPE, stated because it is narrower than it looks. `PODGUARD_STATE` is
+    injected by `podguard.arm()`, which runs only when PODGUARD creates the
+    pod. A HUB-created pod never passes through it, carries no watchdog and no
+    state dir, and this call is therefore a no-op there — which is most pods,
+    and will include th#1359 forge pods. So this makes lane-rented pods
+    progress-keyed and leaves hub-created pods on renter-liveness plus a fixed
+    1800 s grace (`lease_seconds` 900 x `REAP_LEASE_MULTIPLE` 2.0).
+
+    It did NOT cause pgw#846 attempt sixteen and would not have prevented it:
+    that pod's verdict was UNREACHABLE (podguard cannot ssh a hub-created pod
+    — no lane key), so `reap()` fell through to `box_stale=1950s > 1800s` and
+    terminated on RENTER liveness alone, which an unstarted Keeper had frozen.
+    One failure, not two. The structural fix for hub-created pods is for
+    `reap()` to ask the HUB whether a pod is progressing — the signal already
+    exists (`SelfMintActivityRunning`, refreshed every ~5 s by
+    `mint_process._observe`) — rather than to ssh the pod at all.
+
+    Best-effort and unconditional-safe: a mint must not fail because a
+    telemetry file could not be written, and the whole call is inert when
+    `PODGUARD_STATE` is unset (every non-podguard pod, and this box).
+    """
+    state = os.environ.get(PODGUARD_STATE_ENV, "")
+    if not state:
+        return
+    try:
+        Path(state).mkdir(parents=True, exist_ok=True)
+        # CONTENT, not mtime: the watchdog compares the token, so a value that
+        # does not change reads as no progress even if the file is rewritten.
+        (Path(state) / "progress").write_text(note)
+    except OSError:
+        logger.debug("aot-mint: could not touch podguard progress", exc_info=True)
+
+
+def write_phase_snapshot(path: Path, progress: MintProgress) -> None:
+    """Put the partial table on DISK, atomically, as the mint runs.
+
+    pgw#848. Attaching the table to an exception (below) only reaches a mint
+    that gets to raise one. A mint that is KILLED — the parent abandons it,
+    the OOM killer takes it, the pod goes — raises nothing and writes no
+    report, and every measurement it made dies with the process.
+
+    That is not hypothetical: attempt sixteen compiled for **29 minutes** and
+    reported `status=abandoned total_s=1741.33 — no cell produced`. Zero
+    `entry:` rows. No `pool` row. K, its binding constraint, the per-entry
+    timings and the peaks were all measured and all discarded, and the
+    K-and-binding answer had to be re-bought with another pod.
+
+    A file the parent can read after a hard kill is the only shape that
+    survives a signal, which is the same reason the pgw#848 resume design
+    keys on content on disk rather than on the process staying alive.
+    """
+    table = partial_phase_table(progress, terminus="in_flight")
+    if not table:
+        return
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(table))
+    os.replace(tmp, path)   # atomic: a reader never sees a half-written table
 
 
 def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
@@ -1629,26 +1588,9 @@ def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
     refuses must refuse with ITS sentence, not with a reporting error.
     """
     try:
-        minted = list(progress.minted)
-        timings = dict(progress.timings)
-        started = progress.t_mint
-        where = dict(progress.at)
-        if not minted and not timings and not where:
-            return
-        if started is not None:
-            # The mint's OWN wall clock, so an aborted total is comparable
-            # with a completed one rather than being a sum of entry seconds.
-            timings["total_s"] = round(time.monotonic() - float(started), 2)
-        table = _mint_phase_table(
-            minted, timings, progress.inductor_configs, progress.width)
-        table["terminus"] = "aborted"
-        if where:
-            # pgw#824 x pgw#825: the entries block names what FINISHED; this
-            # names what the mint was ON. Without it an 18-entry mint that
-            # dies in entry 12's export reports 11 rows and no twelfth, and
-            # the row that matters is the missing one.
-            table["at"] = where
-        setattr(exc, "mint_phases", table)
+        table = partial_phase_table(progress)
+        if table:
+            setattr(exc, "mint_phases", table)
     except Exception:  # pragma: no cover — telemetry never fails a mint
         logger.debug("aot-mint: partial phase table unavailable", exc_info=True)
 
@@ -1661,6 +1603,8 @@ def _mint_cell(
     allow_regressed_lanes: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
+    entry_peak_rss_bytes: int = 0,
+    entry_device_peak_bytes: int = 0,
     progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
@@ -1721,42 +1665,44 @@ def _mint_cell(
 
     from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
-    # pgw#817: the declaration decides the mint SHAPE. `regional=True` means
-    # this family's entries are block classes of each target rather than shape
-    # coordinates of its whole forward — the same plans, the same forks, the
-    # same class rows, exported one block deep.
-    regional = bool(getattr(decl, "regional", False))
-    if regional:
-        spec = replace_spec(
-            spec, regional=True, shell_digest=_cell_shell_digest(pipeline, decl))
-        logger.info(
-            "aot-mint: REGIONAL cell for %s — entries are block classes; the "
-            "shell stays eager (pgw#812 S2), shell_digest=%s",
-            spec.family, spec.shell_digest)
-
+    # pgw#846 (Paul's ruling): the exported cell is always WHOLE-GRAPH.
+    # Regional (block-class) export is retired for production — a
+    # `Compile(regional=True)` declaration keeps its dynamo/JIT meaning
+    # (ie#381, compile_cache) and the AOT mint ignores it.
     rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
     # pgw#809: how wide this pod may compile. Derived from the pod's REAL
     # budget (cgroup-aware vCPUs minus serving headroom, and available host
     # RAM over the measured per-entry peak) — never os.cpu_count, never a
     # constant. K=1 IS the pre-#809 serial in-process path, which is the
     # honest answer on a narrow pod.
-    # pgw#817 / pgw#812 S7 — pgw#809 RE-PRICED, not assumed. Regional changes
-    # BOTH of the pool's inputs, in opposite directions:
-    #   * the entry COUNT goes up (one entry per block class per plan, not one
-    #     per plan), which is what K parallelises over;
-    #   * the per-entry DEVICE ask goes down by roughly the block fraction of
-    #     the model, and VRAM is the bound that actually binds K.
-    # Multiplying the two levers instead of re-pricing them would size the
-    # pool for a whole-model child that regional never runs.
-    entry_count = _regional_entry_count(pipeline, decl, rows) if regional \
-        else len(rows)
+    entry_count = len(rows)
+    # pgw#877: the DEVICE ask now has the same shape the HOST ask got in
+    # pgw#848 — a measurement made on this pod by a previous mint of this
+    # (family, lane), banked by the serving parent and handed down on the
+    # request. 0 keeps the estimate, and keeps saying so.
+    device_bytes, device_basis = _entry_device_bytes(
+        spec, int(entry_device_peak_bytes or 0))
     width = aot_compile_pool.entry_workers(
         entry_count, limit=int(entry_workers or 0),
-        device_bytes=_entry_device_bytes(
-            spec, block_fraction=_block_device_fraction(pipeline, decl)
-            if regional else 1.0))
+        device_bytes=device_bytes, device_basis=device_basis,
+        # pgw#848: the HOST ask, measured on this pod by a previous mint of
+        # this (family, lane) and banked by the serving parent. Until this
+        # existed the argument was never passed at ALL, so `mem_workers`
+        # divided available RAM by a 3 GiB constant on every mint the fleet
+        # has run and `per_entry_rss_basis` said "default" forever. 0 keeps
+        # the constant, and keeps saying so.
+        peak_rss_bytes=int(entry_peak_rss_bytes or 0))
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
+    if width.underwidth:
+        # pgw#842: a pool narrower than the cell could use is a COST, and it
+        # is the mint's only multiplicative lever. Say so at WARNING with the
+        # readings behind it — the same facts ride the `pool` event.
+        logger.warning(
+            "aot-mint: pgw#842 entry pool runs %d worker(s) narrower than "
+            "this cell could use (K=%d of %d), held by %s — inputs %s",
+            width.underwidth, width.workers,
+            min(entry_count, width.ceiling), width.binding, width.facts())
     progress.width = width
 
     minted = progress.minted
@@ -1765,7 +1711,31 @@ def _mint_cell(
     # forward. Arming it is this function's job, not the caller's — see
     # `_arm_branches`.
     _arm_branches(pipeline, int(spec.lora_bucket or 0))
+    # pgw#847, OFF unless opted in: one export per (target, adapter arm) and a
+    # re-specialization per row, admitted only by a gate that byte-compares
+    # every emitted file. Built HERE, per mint, so a verdict can never outlive
+    # the family it was reached for.
+    reuse_state = aot_export_reuse.ReuseState(
+        work, inductor_configs=inductor_configs)
     t_export = time.monotonic()
+    # pgw#868 A4: the EXPORT phase's own device high-water, which nothing has
+    # ever measured. `aot_compile_child` resets and samples around the INDUCTOR
+    # compile (`peak_device_bytes` in `EntryReport`), so that number is the
+    # compile's; export runs HERE, serially, in the parent, and was never
+    # sampled at all. The two are different questions and must not share a
+    # figure: export traces with FAKE tensors and executes no kernel, so the
+    # compile pool's `weights * 1.25 + 5 GiB` — whose activation and workspace
+    # terms are INDUCTOR'S, and ~56 % of which was never observed — does not
+    # describe it. That is exactly why `aot_export_parallel.width_for()`
+    # returns 1 while this is unknown rather than guessing and OOMing a
+    # 74-minute phase. A probe: it reads and clears a counter and decides
+    # nothing (pgw#830 — instrument first, optimise never in the same change).
+    try:
+        import torch as _t
+        if _t.cuda.is_available():
+            _t.cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        pass
     progress.beat(
         PHASE_TRACE_GRAPH, 0, len(rows),
         f"{len(rows)} declared class row(s)")
@@ -1784,29 +1754,85 @@ def _mint_cell(
             progress.beat(
                 PHASE_TRACE_GRAPH, index, len(rows),
                 _decl.plan_entry_name(plan))
-            if regional:
-                minted.extend(_export_regional_entries(
-                    pipeline, spec, plan, decl,
-                    inductor_configs=inductor_configs,
-                    compile_now=not parallel))
-            else:
-                minted.append(_export_entry(
-                    pipeline, spec, plan, decl,
-                    inductor_configs=inductor_configs,
-                    compile_now=not parallel))
+            minted.append(_export_entry(
+                pipeline, spec, plan, decl,
+                inductor_configs=inductor_configs,
+                compile_now=not parallel,
+                reuse=reuse_state, reuse_key=bool(arm), rows=len(rows)))
     finally:
         if disarmed:
             _arm_branches(pipeline, int(spec.lora_bucket or 0))
+    # pgw#868 A4: ALWAYS recorded, flag or no flag, because it is free — the
+    # mint already exported these rows. 1.0 = one export could serve this
+    # family's rows; 0.0 = its graph text moves with the row (measured true of
+    # sdxl, whose Transformer2DModel bakes the sequence length and the spatial
+    # extents), so reuse can never fire and no lane should spend a mint
+    # proving it. -1.0 = not determinable (fewer than two rows for any key).
+    if reuse_state.eligible:
+        timings["export_reuse_eligible"] = (
+            1.0 if all(reuse_state.eligible.values()) else 0.0)
+    else:
+        timings["export_reuse_eligible"] = -1.0
+    if reuse_state.active:
+        # FLAT scalars: `timings` is a float table and a nested dict there
+        # would be a shape nothing downstream parses. The gate's REASONS are
+        # logged at INFO by ReuseState, where a reader needs prose anyway.
+        timings["export_reuse_rows_full"] = float(reuse_state.exported)
+        timings["export_reuse_rows_reused"] = float(reuse_state.reused)
+        timings["export_reuse_respecialize_s"] = round(
+            reuse_state.respecialize_s, 2)
+        timings["export_reuse_gate_s"] = round(sum(
+            float(e.get("gate_s") or 0.0) for e in reuse_state.events), 2)
+
+    # Asked of the EXPORTED programs: a cell whose entries cannot be told
+    # apart at dispatch must cost seconds to refuse, not a full compile bill
+    # (the pgw#825 discipline, one gate over). Exact on the parallel path,
+    # which is every real mint — pgw#809 sizes width off the pod's own budget
+    # and the pool has not built a kernel yet. A width-1 serial mint has
+    # already compiled as it exported, so there it refuses late; correct
+    # either way, cheap where it matters.
+    _gate_dispatch_ambiguity(minted)
 
     if parallel:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
+        # Sampled BEFORE the pool is built, so no inductor allocation can be
+        # attributed to export. Reported even when zero (no CUDA / probe
+        # failed), because a missing key and a measured zero are different
+        # facts and the width rule must be able to tell them apart.
+        try:
+            import torch as _t
+            if _t.cuda.is_available():
+                timings["export_peak_device_bytes"] = float(
+                    _t.cuda.max_memory_allocated())
+                timings["export_peak_device_reserved_bytes"] = float(
+                    _t.cuda.max_memory_reserved())
+        except Exception:  # noqa: BLE001 — a probe never changes an outcome
+            pass
+        # pgw#868 A4: THE CONNECTION. The probe above is exactly
+        # `aot_export_parallel.width_for(per_export_device_bytes=)`. Both were
+        # built and neither ever called the other, so the flag was inert.
+        # Recorded on EVERY mint, flag or no flag: the DECISION is the
+        # observable, and a reader must be able to see what width export would
+        # have run at — and which fact bound it — from a mint that changed
+        # nothing.
+        try:
+            timings.update(aot_export_parallel.decide(rows, timings))
+        except Exception:  # noqa: BLE001 — telemetry never fails a mint
+            logger.debug("aot-mint: export-parallel decision failed",
+                         exc_info=True)
         progress.beat(
             PHASE_INDUCTOR_COMPILE, 0, len(minted),
             f"{len(minted)} entries, {width.workers} wide")
-        _compile_entries_parallel(
+        progress.pool_ledger = _compile_entries_parallel(
             minted, work, width, inductor_configs=inductor_configs,
+            progress=progress,
             on_entry=lambda name, done, total: progress.beat(
                 PHASE_INDUCTOR_COMPILE, done, total, name))
+        # NOTE: `_compile_entries_parallel` refreshes `progress.pool_ledger`
+        # on every completed entry (pgw#848), so the snapshot each beat writes
+        # already carries a LIVE ledger — K, its binding, efficiency, peaks —
+        # rather than only the width. An abandoned mint's row is the one that
+        # needs it most.
     timings["entry_workers"] = float(width.workers)
 
     t0 = time.monotonic()
@@ -1846,7 +1872,8 @@ def _mint_cell(
 
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
-    phase_table = _mint_phase_table(minted, timings, inductor_configs, width)
+    phase_table = _mint_phase_table(
+        minted, timings, inductor_configs, width, progress.pool_ledger)
     _emit_phase_event(spec, phase_table)
 
     meta["cell_key"] = key = cell_identity(meta, spec).digest
@@ -1871,104 +1898,35 @@ def _mint_cell(
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
 
 
-def _regional_targets(
-    pipeline: Any, decl: Any,
-) -> Dict[str, Tuple[Any, Tuple[aot_regional.BlockGroup, ...]]]:
-    """``{target: (module, block groups)}`` for every declared target with
-    repeated blocks — the regional mint's own view of the declaration.
+def _entry_device_bytes(
+    spec: ExportSpec, banked_device_peak: int = 0,
+) -> Tuple[int, str]:
+    """One entry child's DEVICE ask, and the PROVENANCE of that number.
 
-    The resolved MODULE rides along because every caller needs it (the shell
-    digest reads its config, the device re-price reads its parameter count)
-    and re-resolving per caller is how the two would drift apart.
+    pgw#877 #1/#2. Two sources, ranked, because they are not the same kind of
+    thing:
+
+    * ``banked_device_peak`` — what an entry child on THIS pod, for this
+      (family, lane), was actually measured to peak at
+      (``EntryReport.peak_device_reserved_bytes``), banked by the serving
+      parent and handed down on ``MintRequest.entry_device_peak_bytes``. It
+      travels on the WIRE and not through ``mint_budget``'s module globals,
+      which is the entire fix: those globals are written in the serving parent
+      and this function runs in the MINT CHILD, where they are empty by
+      construction. Basis ``"measured"``.
+    * ``mint_budget.co_residency().need_bytes`` — the fallback, and an
+      ESTIMATE of a different process: the mint child's whole co-residency
+      footprint (a full pipeline), used as one entry child's (one exported
+      program plus inductor). ~56 % of it was never observed. Basis
+      ``"estimated"``, which is what it used to call ``"measured"``.
+
+    ``(0, "unmeasured")`` means unprobeable, and the width policy refuses to
+    license concurrency on a card it cannot size against.
     """
-    out: Dict[str, Tuple[Any, Tuple[aot_regional.BlockGroup, ...]]] = {}
-    for target in tuple(getattr(decl, "targets", ()) or ()):
-        resolved = _resolve_target(pipeline, str(target))
-        if resolved is None:
-            continue
-        owner, attr, _fn = resolved
-        if attr != "forward":
-            continue
-        groups = aot_regional.repeated_block_groups(owner)
-        if groups:
-            out[str(target)] = (owner, groups)
-    return out
+    if banked_device_peak > 0:
+        from . import mint_budget
 
-
-def _cell_shell_digest(pipeline: Any, decl: Any) -> str:
-    """The cell-level shell digest: every regional target's shell, together.
-
-    A cell can carry more than one regional target, so the contract fact binds
-    ALL of them — binding only the first would leave a second target's shell
-    free to drift under an unchanged key, which is the collision class this
-    axis exists to close.
-    """
-    facts = {
-        target: aot_regional.shell_facts(owner)
-        for target, (owner, _groups) in _regional_targets(pipeline, decl).items()}
-    if not facts:
-        raise MintRefused(
-            f"family {getattr(decl, 'family', '?')!r} declares regional=True "
-            f"but no declared target resolves to a module with "
-            f"`_repeated_blocks` — there is no repeated structure to compile "
-            f"once and reuse")
-    encoded = json.dumps(
-        facts, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-        default=str).encode()
-    import hashlib
-
-    return hashlib.sha256(encoded).hexdigest()[:16]
-
-
-def _regional_entry_count(pipeline: Any, decl: Any, rows: Sequence[Any]) -> int:
-    """How many ENTRIES a regional mint of these plans will produce.
-
-    One per (plan, block class), which is what the compile pool parallelises
-    over. sdxl: 18 plans x 2 block classes; the whole-graph shape was 18.
-    """
-    by_target = _regional_targets(pipeline, decl)
-    total = 0
-    for plan, _arm in rows:
-        entry = by_target.get(str(getattr(plan, "target", "")))
-        total += len(entry[1]) if entry is not None else 0
-    return max(total, len(rows))
-
-
-def _block_device_fraction(pipeline: Any, decl: Any) -> float:
-    """The fraction of the model's DEVICE footprint one block-entry child
-    holds, read off the resolved module.
-
-    A whole-graph entry child loads the whole target and benchmarks kernels
-    against it; a regional child needs one BLOCK's weights and one block's
-    activation set. Measured off the module rather than assumed: the largest
-    block class's parameter count over the target's, floored at 0.1 because
-    the CUDA context, torch's own allocator arenas and the activation set do
-    NOT shrink with the block — a fraction that reads 0.014 (one of 70 sdxl
-    blocks) would license a pool the card cannot hold.
-    """
-    biggest = 0.0
-    for _target, (owner, groups) in _regional_targets(pipeline, decl).items():
-        total = float(sum(p.numel() for p in owner.parameters()))
-        if total <= 0.0:
-            continue
-        for group in groups:
-            block = float(sum(p.numel() for p in group.prototype.parameters()))
-            biggest = max(biggest, block / total)
-    return max(0.1, min(1.0, biggest)) if biggest > 0.0 else 1.0
-
-
-def _entry_device_bytes(spec: ExportSpec, *, block_fraction: float = 1.0) -> int:
-    """One entry child's DEVICE ask, from this process rather than a constant.
-
-    An AOTI compile benchmarks kernels on the card, so an entry child holds
-    its own weight copy, one activation set and a CUDA context — which is
-    exactly what ``mint_budget.co_residency`` already computes for the pgw#784
-    mint child, read off the pipeline THIS process has resident. Reused rather
-    than re-derived: the entry child loads the same weights at the same lane
-    and runs the same declared shapes, so the mint child's own footprint is a
-    proxy and not a guess. 0 means "unprobeable", and the width policy treats
-    that as "do not license concurrency on a card you cannot measure".
-    """
+        return mint_budget.entry_device_ask(int(banked_device_peak)), "measured"
     try:
         from . import mint_budget
 
@@ -1976,10 +1934,10 @@ def _entry_device_bytes(spec: ExportSpec, *, block_fraction: float = 1.0) -> int
             family=str(spec.family or ""),
             weight_lane=str(spec.lane_label() or ""))
     except Exception:  # noqa: BLE001
-        return 0
+        return 0, "unmeasured"
     if not budget.probed:
-        return 0
-    return int(int(budget.need_bytes) * max(0.0, min(1.0, block_fraction)))
+        return 0, "unmeasured"
+    return int(budget.need_bytes), "estimated"
 
 
 def _compile_entries_parallel(
@@ -1989,8 +1947,13 @@ def _compile_entries_parallel(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     on_entry: Optional[Callable[[str, int, int], None]] = None,
-) -> None:
+    progress: Optional["MintProgress"] = None,
+) -> Dict[str, Any]:
     """pgw#809: fill every entry's ``files`` K-wide, out of process.
+
+    Returns the pool's own ledger (pgw#830) so it reaches the phase table:
+    the pool emits it as a typed event too, but that emission happens in the
+    mint CHILD, which holds no orchestrator session — pgw#842.
 
     Mutates ``minted`` in place, and every entry MUST come back with files —
     a pool that quietly returned fewer entries than it was given would pack a
@@ -2007,13 +1970,34 @@ def _compile_entries_parallel(
         work.parent / "entry-pool", width=width,
         inductor_configs=inductor_configs)
     t0 = time.monotonic()
+
+    def _tick(name: str, done: int, total: int) -> None:
+        # pgw#848: refresh the ledger BEFORE the beat, so the snapshot the
+        # beat writes carries this entry's numbers. A mint killed at entry 30
+        # of 36 then leaves 30 entries' worth of measurement on disk instead
+        # of one bare "no cell produced" row.
+        if progress is not None:
+            progress.pool_ledger = _pool_facts(pool)
+        if on_entry is not None:
+            on_entry(name, done, total)
+
     try:
         by_entry = pool.compile(
-            [(row.name, row.program) for row in minted], on_entry=on_entry)
+            [(row.name, row.program) for row in minted], on_entry=_tick)
     except aot_compile_pool.EntryCompileFailed as exc:
-        # Named, and terminal: the siblings are already torn down group-wide
-        # by the pool. A mint that says only "a compile failed" over 18
-        # entries is the silent-failure path in a new hat (pgw#758).
+        # pgw#848: the pool's ledger and its MEASURED peak have to survive the
+        # failure, because the aborted phase table is what the parent banks
+        # and re-sizes K from. Without this the OOM'd attempt teaches the
+        # retry nothing and attempt 2 runs the identical width.
+        if progress is not None:
+            progress.pool_ledger = _pool_facts(pool)
+        # Named, and the siblings are already torn down group-wide by the
+        # pool. A mint that says only "a compile failed" over 18 entries is
+        # the silent-failure path in a new hat (pgw#758).
+        if exc.resource:
+            raise MintResourceExhausted(
+                str(exc), entry=exc.entry, basis=exc.basis,
+                peak_rss_bytes=exc.peak_rss_bytes) from exc
         raise MintRefused(str(exc)) from exc
     wall = time.monotonic() - t0
     missing = [row.name for row in minted if row.name not in by_entry]
@@ -2030,11 +2014,195 @@ def _compile_entries_parallel(
         phases = pool.entry_phases.get(row.name) or {}
         if phases:
             row.timings["phases"] = dict(phases)
+        # pgw#842: the overlays travel too. `child_seal_s` is a partition
+        # member and its SPLIT is an overlay — and the split is the whole
+        # answer to "what is the seal still costing": pgw#832 cut the library
+        # hash to ~0.07 s (measured), while the child's `import torch`, which
+        # `establish_config` owns, is the rest. Without the overlay a reader
+        # sees only the sum and re-opens a closed question.
+        overlays = pool.entry_overlays.get(row.name) or {}
+        if overlays:
+            row.timings["overlays"] = dict(overlays)
     logger.info(
         "aot-mint: pgw#809 pool compiled %d entr%s at K=%d in %.0fs "
         "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",
         len(minted), "y" if len(minted) == 1 else "ies", width.workers, wall,
         sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
+    return _pool_facts(pool)
+
+
+def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
+    """The pool block of the phase table, on BOTH termini (pgw#848).
+
+    An aborted mint's pool facts are the ones a reader most needs — they are
+    the inputs to the decision that has to change on the retry.
+    """
+    facts: Dict[str, Any] = {
+        **pool.ledger.facts(),
+        # Observed, not intended: the only load-independent evidence that the
+        # pool actually overlapped rather than looping K-wide on paper.
+        "peak_concurrency": int(pool.peak_concurrency),
+        "peak_child_rss_bytes": int(pool.peak_rss_bytes),
+        # pgw#877 #2: the entry children's own DEVICE high-water, which is what
+        # the NEXT mint's per-entry ask is sized from. It rides the phase table
+        # rather than a second event for the same reason the RSS figure does:
+        # the phase table is what survives the mint child, and the mint child
+        # is the process that dies.
+        "peak_child_device_bytes": int(pool.peak_device_bytes),
+    }
+    if pool.oom_entry:
+        facts["oom_entry"] = pool.oom_entry
+        facts["oom_basis"] = pool.oom_basis
+    return facts
+
+
+@dataclass(frozen=True)
+class _DeclaredArg:
+    """One declared input as the INGRESS ASSERTION sees a tensor: a shape and
+    a dtype, and nothing else. Nothing is allocated — the gate has to stay
+    cheap enough to run before a single kernel is built."""
+
+    shape: Tuple[int, ...]
+    dtype: str
+
+
+def _entry_ingress_declaration(
+    row: "_MintedEntry",
+) -> Tuple[Any, Tuple[Dict[str, Any], ...]]:
+    """``(contract, representative calls)`` for one entry.
+
+    The contract is built from ``aot_package.input_contract`` — the exact rows
+    the packed cell will carry — and read back through
+    :func:`aot_serve.contract_from_meta`, the serve path's OWN parser, so the
+    gate cannot drift from what dispatch will actually do.
+
+    The calls are that entry's own declared shapes: one per corner of its
+    symbol hull (all symbols at their lower bound, all at their upper, all at
+    the midpoint), deduplicated. A fully specialized entry — the sdxl case —
+    yields exactly one call, which is the call its class row exists to serve.
+    """
+    inputs, symbols = aot_package.input_contract(row.program, row.flat_names)
+    meta: Dict[str, Any] = {"inputs": inputs, "symbols": symbols}
+    if adapter_arm(row.spec.fork) is False:
+        # The NEGATIVE half of a branchless class's contract, exactly as
+        # `_gate_and_declare_entry` will pack it (pgw#790). Without it here the
+        # gate would ask a question the serve path never asks.
+        from .models import lora_lifted
+
+        meta["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
+    contract = aot_serve.contract_from_meta(meta)
+
+    def _at(pick: Callable[[int, int], int]) -> Dict[str, Any]:
+        return {
+            spec.name: _DeclaredArg(
+                tuple(
+                    dim if isinstance(dim, int)
+                    else pick(*contract.symbols[dim])
+                    for dim in spec.shape),
+                spec.dtype,
+            )
+            for spec in contract.inputs
+        }
+
+    calls: List[Dict[str, Any]] = []
+    for pick in (lambda lo, _hi: lo,
+                 lambda _lo, hi: hi,
+                 lambda lo, hi: (lo + hi) // 2):
+        call = _at(pick)
+        if call not in calls:
+            calls.append(call)
+    return contract, tuple(calls)
+
+
+def _admits(contract: Any, call: Mapping[str, Any]) -> bool:
+    """Does this entry admit this call? Asked of
+    :func:`aot_serve.assert_ingress` itself — the same function, on the same
+    contract shape, that :meth:`aot_serve.EntryDispatch.select` runs on a pod.
+    Keyword-fed, because that is how the negative contract (an EXCLUDED input
+    the call carries) is visible at all."""
+    try:
+        aot_serve.assert_ingress(contract, (), call)
+    except aot_serve.IngressContractError:
+        return False
+    return True
+
+
+def _gate_dispatch_ambiguity(minted: Sequence["_MintedEntry"]) -> None:
+    """Refuse a cell whose entries CANNOT be told apart at dispatch.
+
+    :meth:`aot_serve.EntryDispatch.select` calls two entries admitting one
+    call ``entry_ambiguous`` — "a declaration that cannot discriminate two
+    graph classes by ingress, which is a defect to surface, never a coin to
+    flip". It is a per-REQUEST refusal, so without this gate the cell arms,
+    reports armed, and serves those coordinates 100 % eager.
+
+    Found and MEASURED on a pod (pgw#844, attempt twelve, L4
+    `o0legpgj5olhic`), on the retired regional shape: entries exported one
+    block deep collided on the flattened token PRODUCT (sdxl's nine aspect
+    rows reduce to four token counts), so eight of nine buckets were
+    `entry_ambiguous` -> eager while the cell reported armed. Regional is
+    gone (pgw#846), but the failure class is not regional-specific: any two
+    whole-graph entries of one dispatch whose declared contracts admit the
+    same call — e.g. a static row shadowed by a dynamic sibling over the same
+    hull — serve eager per request with no refusal at mint.
+
+    THE QUESTION IS ADMISSION, NOT EQUALITY (pgw#844). This gate used to
+    compare a digest of each entry's placeholder shapes, which catches only
+    entries whose contracts are IDENTICAL. Dispatch does not ask that: it asks
+    which entries ADMIT the call, and a static row and a dynamic row over the
+    same hull have different digests while both admitting. So every entry's
+    own declared call is run against every sibling's contract through the
+    real ingress assertion, and more than one admitter is refused.
+
+    Grouped exactly the way the serve path groups — target, adapter arm —
+    because those are the axes dispatch resolves BEFORE ingress, and two
+    entries on different arms are meant to differ only by the lifted pair.
+    """
+    groups: Dict[Tuple[str, Any], List["_MintedEntry"]] = {}
+    for row in sorted(minted, key=lambda r: r.name):
+        fork = {str(n): v for n, v in tuple(row.spec.fork)}
+        key = (str(row.spec.target), fork.get(ADAPTER_FORK))
+        groups.setdefault(key, []).append(row)
+
+    clashes: List[Tuple[str, List[str]]] = []
+    for rows in groups.values():
+        if len(rows) < 2:
+            continue
+        declared: Dict[str, Tuple[Any, Tuple[Dict[str, Any], ...]]] = {}
+        for row in rows:
+            try:
+                declared[row.name] = _entry_ingress_declaration(row)
+            except (aot_package.PackageIntrospectionError, ValueError) as exc:
+                # An unreadable declaration is not "probably fine": it is a
+                # cell whose dispatchability nobody can prove.
+                raise MintRefused(
+                    f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
+                    f"the declared ingress contract, so this cell cannot be "
+                    f"shown to be dispatchable at all: {exc}") from exc
+        for name, (_own, calls) in declared.items():
+            admitting = sorted({
+                other
+                for call in calls
+                for other, (contract, _c) in declared.items()
+                if _admits(contract, call)
+            })
+            if len(admitting) > 1:
+                clashes.append((name, admitting))
+    if not clashes:
+        return
+    detail = "; ".join(
+        f"{name!r} is admitted by {len(admitting)} entries "
+        f"({admitting[:3]!r}" + (
+            f" +{len(admitting) - 3} more)" if len(admitting) > 3 else ")")
+        for name, admitting in clashes[:4])
+    raise MintRefused(
+        f"dispatch-ambiguity gate: {len(clashes)} declared class row(s) are "
+        f"admitted by more than one entry of the same dispatch, so every call "
+        f"they carry is refused 'entry_ambiguous' and served EAGER — "
+        f"{detail}. Two class rows that reduce to one dispatchable shape are "
+        f"one entry: fix the declaration so every entry's ingress contract is "
+        f"uniquely admitting, rather than compiling and publishing a class "
+        f"the cell can never select")
 
 
 def _gate_and_declare_entry(
@@ -2069,42 +2237,6 @@ def _gate_and_declare_entry(
         logger.info(
             "aot-mint: %s: %d lifted constant(s) fused away by the compiler "
             "(e.g. %s)", entry, len(fused), fused[:3])
-    if row.spec.regional and fused:
-        # pgw#827 (found by wiring the regional arm): "recorded, never fatal"
-        # is right for a WHOLE-GRAPH cell — it is minted from the very weights
-        # it serves, so a folded constant is that module's own value. It is
-        # FATAL for a regional cell. One artifact serves N INSTANCES with
-        # DIFFERENT weights, so a constant the compiler folded away carries
-        # the PROTOTYPE instance's bytes into every other instance, silently,
-        # with no unbound constant and no refusal anywhere.
-        #
-        # MEASURED off-pod (torch 2.13.0+cu130, CPU, a 3-block toy): with
-        # `ff.bias` folded, instance 0 reproduces eager exactly (0.0) and
-        # instance 1 is wrong by 0.53. Nothing in the artifact, the manifest
-        # or the bind gate can see it — which is why it is refused HERE.
-        #
-        # The remedy is proven and is NOT this refusal: compiling regional
-        # entries under `aot_inductor.use_runtime_constant_folding=True` keeps
-        # every folded constant a real bindable input (verified: `fused` goes
-        # to [] and `ff.bias` reappears in the artifact's own table). It also
-        # adds `_FOLDED_CONST_*` rows the manifest and the bind path must
-        # learn, and it re-keys every cell — so it is a change with a train,
-        # not a hotfix. Until then a cell that would serve wrong numbers must
-        # not be published.
-        state_dict_fused = [
-            name for name in fused
-            if name in set(aot_package.program_state_dict_fqns(row.program))]
-        if state_dict_fused:
-            raise MintRefused(
-                f"entry {entry!r}: the compiler folded {len(state_dict_fused)} "
-                f"state_dict constant(s) away "
-                f"({sorted(state_dict_fused)[:6]!r}). A REGIONAL entry is "
-                f"reused across every instance of its block class, so a "
-                f"folded constant bakes the PROTOTYPE instance's weights into "
-                f"all of them — the artifact is correct for instance 0 and "
-                f"silently wrong for the rest. Recompile with "
-                f"`aot_inductor.use_runtime_constant_folding=True`, which "
-                f"keeps them bindable")
     try:
         inputs, symbols = aot_package.input_contract(
             row.program, row.flat_names)
@@ -2139,6 +2271,7 @@ def _mint_phase_table(
     timings: Mapping[str, float],
     inductor_configs: Optional[Mapping[str, Any]],
     width: Optional[aot_compile_pool.PoolWidth] = None,
+    pool_ledger: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The per-mint phase table (#757's instrument-first deliverable): one
     readable record of where the mint's seconds went, per entry and in
@@ -2159,10 +2292,17 @@ def _mint_phase_table(
             float(row.timings.get("warm_s") or 0) for row in minted), 2),
     }
     phase_totals: Dict[str, float] = {}
+    overlay_totals: Dict[str, float] = {}
     for row in minted:
         for label, value in (row.timings.get("phases") or {}).items():
             phase_totals[label] = round(
                 phase_totals.get(label, 0.0) + float(value), 3)
+        # Kept OUT of `phases` on purpose (pgw#830): overlays nest inside
+        # partition members, and summing them in was the original
+        # attribution bug. Reported beside it, never inside it.
+        for label, value in (row.timings.get("overlays") or {}).items():
+            overlay_totals[label] = round(
+                overlay_totals.get(label, 0.0) + float(value), 3)
     # The ONE resolved inductor config every entry compiled under, recorded
     # verbatim: #757's open seal-bypass concern is a per-call config the
     # seal cannot see, so whatever the mint passed is either identity-inert
@@ -2180,8 +2320,18 @@ def _mint_phase_table(
         "inductor_configs": resolved,
         "totals": {**totals, **{k: v for k, v in timings.items()}},
         "phases": phase_totals,
+        "overlays": overlay_totals,
         "entries": entries,
-        "pool": width.facts() if width is not None else {"entry_workers": 1},
+        # pgw#842: the width's INPUTS and the pool's own ledger ride the same
+        # block, because the two questions a slow mint raises — "why this K"
+        # and "what did K buy" — are answered by different halves of it, and a
+        # record that carries only the scalar K (as this one did through
+        # attempts ten and eleven) can answer neither.
+        "pool": {
+            **(width.facts() if width is not None
+               else {"entry_workers": 1, "binding": "serial"}),
+            **dict(pool_ledger or {}),
+        },
     }
 
 
@@ -2214,6 +2364,52 @@ def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
         return
     emit_phase_events(family=family, lane=lane, table=table)
+
+
+#: pgw#842: the mint's WIDTH decision, as its own hub row.
+POOL_PHASE = "pool"
+
+
+def _emit_pool_event(
+    *, family: str, lane: str, table: Mapping[str, Any],
+) -> None:
+    """pgw#842: one event that says what K was, what chose it, and what it
+    bought — the standing "no silent decisions" rule applied to the mint's
+    only multiplicative lever.
+
+    Attempts ten and eleven compiled the same 72-entry sdxl cell for the same
+    seconds (1314.94 vs 1327.23) and took 347.94 s vs 554.78 s, because K was
+    5 and then 3. Nothing hub-side recorded WHY: the width block existed in
+    the phase table and was never emitted, and the pgw#830 pool ledger was
+    emitted from the mint CHILD, which holds no orchestrator session (see
+    ``mint_delegate._emit_aot_phases``) — so both were pod-log-only and died
+    with the pod. A width narrower than the pod could carry is a performance
+    defect; it must be READABLE from one mint's record, not inferred by
+    diffing two pods that no longer exist.
+    """
+    pool = dict(table.get("pool") or {})
+    if not pool:
+        return
+    from . import activity as activity_mod
+
+    workers = int(pool.get("entry_workers") or 1)
+    binding = str(pool.get("binding") or "unknown")
+    under = int(pool.get("underwidth") or 0)
+    wall_s = float(pool.get("pool_wall_s") or 0.0)
+    head = (
+        f"family={family} lane={lane} entry_workers={workers} "
+        f"binding={binding} underwidth={under}")
+    if under > 0:
+        # Named in the FIRST line, so a narrow pool is legible without
+        # parsing the dict: this is the number that cost attempt eleven 59 %.
+        head += (
+            f" — the pool ran {under} worker(s) narrower than this cell could "
+            f"use, held by {binding}")
+    activity_mod.emit_event(
+        MINT_PHASES_KIND, f"{head} pool={pool}",
+        phase=POOL_PHASE,
+        duration_ms=int(round(wall_s * 1000)),
+    )
 
 
 def emit_phase_events(
@@ -2251,10 +2447,12 @@ def emit_phase_events(
             f"family={family} lane={lane} status={roll_up} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
+            f"overlays={dict(table.get('overlays') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
             phase=roll_up,
             duration_ms=int(round(total_s * 1000)),
         )
+        _emit_pool_event(family=family, lane=lane, table=table)
         for name, timings in sorted((table.get("entries") or {}).items()):
             if not isinstance(timings, Mapping):
                 continue
@@ -2280,8 +2478,23 @@ def entry_graph_block(
     pytree spec, and the python branches export FROZE at trace time.
     Constant BYTE SIZES are deliberately absent — they are a property of the
     resident weights, and a fine-tune of one family must keep sharing
-    cells, which is the premise of family-scoped cells."""
-    return {
+    cells, which is the premise of family-scoped cells.
+
+    pgw#857: that exclusion is right for a WEIGHT and wrong for a LITERAL, and
+    both were excluded. A weight is rebound from the resident ``state_dict``
+    at load, so two fine-tunes should share a cell. A literal ships INSIDE the
+    artifact and is never rebound — *"nothing outside the artifact knows its
+    value"* — so for a literal the VALUE IS THE ARTIFACT, and two checkpoints
+    needing different literals were sharing a key. ``literal_values`` closes
+    that and nothing else: state_dict-sourced constants are still keyed by
+    NAME only, so fine-tune sharing is untouched.
+
+    **Emitted ONLY when the program lifts a literal.** A family with none
+    (sdxl: measured zero across five real mints) produces a byte-identical
+    block and does not re-key — the discipline ``range_digest`` already uses
+    for ``excluded``, and for the same reason: a field that says "unchanged"
+    must not strand already-published cells."""
+    block: Dict[str, Any] = {
         "v": 2,
         "constant_fqns": sorted(aot_package.constant_names(package, entry)),
         "fused_constants": sorted(
@@ -2290,6 +2503,10 @@ def entry_graph_block(
         "pytree": _pytree_facts(program),
         "specialization": _specialization_facts(spec),
     }
+    literals = aot_package.literal_values_digest(program)
+    if literals:
+        block["literal_values"] = literals
+    return block
 
 
 def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
@@ -2309,12 +2526,12 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
 
     return {
         "weight_lane": str(spec.weight_lane or ""),
-        # pgw#817: recorded so a CONSUMER can recompute the identity from the
-        # artifact's own facts — the standing ck5 discipline — instead of
-        # trusting the stamp. `mode` also tells the serve path which arm to
-        # take without re-deriving it from entry names.
-        "mode": aot_regional.MODE_REGIONAL if spec.regional else "",
-        "shell_digest": str(spec.shell_digest or ""),
+        # pgw#846: an exported cell is always WHOLE-GRAPH (`mode` "").
+        # `shell_digest` likewise: both keys are recorded at their whole-graph
+        # values ("") so the v3 contract-facts shape — and therefore every
+        # existing whole-graph cell key — is byte-identical to pre-#846.
+        "mode": "",
+        "shell_digest": "",
         "sm": str(cc.runtime_key().get("sm") or ""),
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
@@ -2379,12 +2596,11 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
     published ``aot-inductor`` cell; single-graph format-1 cells are RETIRED —
     correct and expected under ck5 exact identity.
 
-    CONTRACT-FACTS SHAPE CHANGE (v2 -> v3, pgw#817): ``shell_digest`` joins the
-    facts and the ``mode`` axis stops being hardcoded ``""``. This re-keys
-    every published ``aot-inductor`` cell again — correct and expected: a v2
-    key does not bind the assembly around the graphs, so a v2 REGIONAL cell
-    could collide across shells, and there is no way to add the binding
-    without moving the key.
+    CONTRACT-FACTS SHAPE CHANGE (v2 -> v3, pgw#817): ``shell_digest`` joined
+    the facts for the (since-retired) regional kind. pgw#846 retires regional
+    but deliberately KEEPS the v3 shape with ``shell_digest`` pinned ``""``
+    and the ``mode`` axis ``""`` — the whole-graph key is byte-identical to
+    what it was before and after pgw#817, so nothing re-keys.
     """
     from . import env_seal
 
@@ -2407,27 +2623,12 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         raise MintRefused(
             f"entries {unhashed[:4]!r} carry no class_hash; a class the key "
             f"cannot name is a class a mismatch cannot name (pgw#716)")
-    # pgw#812 S3.3 / pgw#817: the shell digest is a CONTRACT FACT, not an
-    # annotation. `combined_graph_hash` describes the graphs the cell carries;
-    # for a regional cell those are BLOCKS, so nothing else in the key covers
-    # the assembly around them — a different num_layers, a different rope
-    # construction or a diffusers minor that rewrites the outer forward would
-    # produce the same key and serve different math. Mandatory rather than
-    # optional: an absent digest is exactly the collision the axis exists to
-    # prevent, and a key that is sometimes assembly-bound and sometimes not is
-    # worse than either.
-    mode = aot_regional.MODE_REGIONAL if spec.regional else ""
-    shell = str(spec.shell_digest or meta.get("shell_digest") or "")
-    if mode and not shell:
-        raise MintRefused(
-            "a regional cell must carry a shell_digest: its entries are "
-            "BLOCKS, so the combined graph hash covers only the parts and two "
-            "models with identical blocks and different shells would key "
-            "identically while serving different math (pgw#812 S3.3)")
     contract_facts: Dict[str, Any] = {
         "v": 3,
         "combined_graph_hash": combined,
-        "shell_digest": shell,
+        # pgw#846: always "" — kept in the v3 shape so the whole-graph
+        # contract digest (and every derived cell identity) does not move.
+        "shell_digest": "",
         "targets": sorted({
             str((block or {}).get("target") or "") for block in entries.values()}),
         "shapes": sorted([int(v) for v in row] for row in spec.shapes),
@@ -2442,14 +2643,10 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         "kind": aot_serve.ARTIFACT_KIND,
         "family": str(meta.get("family") or ""),
         "lane": spec.lane_label(),
-        # pgw#817/D4. This used to hardcode "" under the comment "an exported
-        # cell is always whole-graph: 'regional' is a dynamo partitioning
-        # strategy with no export counterpart". pgw#812 falsified it by
-        # measurement — an exported regional cell exists, is 1.37 MB, and
-        # serves. The ck5 `mode` axis already existed and already fed the
-        # digest; setting it is the minimal change that makes a regional cell
-        # unconfusable with a whole-graph cell of the same family x lane x sm.
-        "mode": mode,
+        # pgw#846: an exported cell is always whole-graph again; "" is the
+        # optional-axis value `from_axes` omits, matching every pre-regional
+        # whole-graph key.
+        "mode": "",
         "sm": sm,
         "contract": contract,
         "env_seal": env_seal.seal_digest(dict(meta.get(env_seal.SEAL_KEY) or {})),
@@ -2875,6 +3072,7 @@ def _publisher_from_settings() -> Any:
     from settings. Refuses by name when either is absent rather than attempting
     an unauthenticated publish.
     """
+    from . import worker_credential
     from .config import get_settings
     from .fleet_cells import CellPublisher
 
@@ -2882,7 +3080,11 @@ def _publisher_from_settings() -> Any:
     base_url = str(
         getattr(settings, "tensorhub_public_url", "")
         or getattr(settings, "tensorhub_url", "") or "").strip()
-    token = str(getattr(settings, "worker_jwt", "")
+    # pgw#876 §2: this read `getattr(settings, "worker_jwt", "")`, a field
+    # pgw#848 RENAMED — the getattr default swallowed the AttributeError the
+    # rename exists to raise, so WORKER_JWT was silently invisible here and
+    # `--publish` refused on every pod that had one and no TENSORHUB_TOKEN.
+    token = str(worker_credential.current()
                 or getattr(settings, "tensorhub_token", "") or "").strip()
     if not base_url or not token:
         raise MintRefused(
@@ -2908,6 +3110,11 @@ __all__ = [
     "DynamicDim",
     "ExportSpec",
     "MintRefused",
+    "MintResourceExhausted",
+    "PODGUARD_STATE_ENV",
+    "partial_phase_table",
+    "raise_if_device_oom",
+    "write_phase_snapshot",
     "MINT_COMPILE_THREADS",
     "MintResult",
     "PARITY_LANES",
