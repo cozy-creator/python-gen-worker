@@ -63,11 +63,16 @@ _TWO_SLOT = """
 """
 
 
-def _slots(tmp_pkg: Path, name: str, src: str) -> dict[str, dict]:
+def _function(tmp_pkg: Path, name: str, src: str) -> dict:
     from gen_worker.discovery.discover import discover_functions
 
     _write(tmp_pkg / name, src)
     (fn,) = discover_functions(tmp_pkg, main_module=f"{name}.main")
+    return fn
+
+
+def _slots(tmp_pkg: Path, name: str, src: str) -> dict[str, dict]:
+    fn = _function(tmp_pkg, name, src)
     return {s["name"]: s for s in fn["slots"]}
 
 
@@ -94,6 +99,40 @@ def test_auxiliary_slot_that_names_a_ref_still_inherits(tmp_pkg: Path) -> None:
 
     assert slots["pipeline"]["family"] == "example"
     assert slots["interpolator"]["family"] == "example"
+
+
+def test_explicit_family_keeps_non_root_defaultless_model_governed(
+    tmp_pkg: Path,
+) -> None:
+    """pgw#766/th#1566: a deploy-bound non-root model slot has no ref by
+    design, so its explicit family must win over pgw#747's auxiliary-slot
+    inference."""
+    slots = _slots(
+        tmp_pkg, "ep_pgw766_explicit_model",
+        _TWO_SLOT.replace(
+            '"interpolator": Slot(Interpolator),',
+            '"interpolator": Slot(Interpolator, family="example"),'),
+    )
+
+    assert slots["interpolator"]["family"] == "example"
+
+
+def test_explicit_empty_family_keeps_ref_bearing_auxiliary_agnostic(
+    tmp_pkg: Path,
+) -> None:
+    """Explicit agnosticism also wins: a shared auxiliary may name its
+    bootstrap mirror without claiming the handler's architecture family."""
+    fn = _function(
+        tmp_pkg, "ep_pgw766_explicit_aux",
+        _TWO_SLOT.replace(
+            '"interpolator": Slot(Interpolator),',
+            '"interpolator": Slot(Interpolator, family="", '
+            'default_checkpoint=HF("example/aux")),'),
+    )
+    slots = {s["name"]: s for s in fn["slots"]}
+
+    assert "family" not in slots["interpolator"], slots["interpolator"]
+    assert "family" not in fn["bindings"]["interpolator"]
 
 
 def test_single_defaultless_slot_keeps_its_family(tmp_pkg: Path) -> None:
