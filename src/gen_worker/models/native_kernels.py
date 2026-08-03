@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,8 @@ def _probe_packed_modulation(sm: int) -> Optional[str]:
     return awq_packed_self_check()
 
 
-def _decide(kind: str, on: str, off: str, probe) -> str:
+def _decide(kind: str, on: str, off: str,
+            probe: Callable[[int], Optional[str]]) -> str:
     """One arming decision: env, then silicon, then numerics. Cached per
     process with the reason that produced it."""
     if kind in _LANES:
