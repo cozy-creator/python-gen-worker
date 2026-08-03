@@ -15,7 +15,8 @@ You satisfy three contract points; everything else is up to you.
 
 1. **`gen_worker` is importable in the runtime environment.** Whatever
    dependency manager you use, the resulting image must have `gen-worker`
-   (or just `gen-worker` for non-PyTorch endpoints) installed.
+   installed — `gen-worker[torch]` for PyTorch endpoints, plain `gen-worker`
+   for non-PyTorch ones. (Other extras: `vision`, `images`, `signing`.)
 
 2. **Discovery is baked into the image at `/app/.tensorhub/endpoint.lock`.**
    Run discovery during `docker build`:
@@ -73,7 +74,7 @@ Use `ARG BASE_IMAGE` when your build profile uses **managed mode**
 a build arg.
 
 ```dockerfile
-ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime@sha256:db80a41f8428644cebcb3d75b0b62df334ab6c0e75785951eb25f48bfbd42407
+ARG BASE_IMAGE=<a real pytorch/pytorch tag+digest matching your profile>
 FROM ${BASE_IMAGE}
 WORKDIR /app
 COPY . /app
@@ -105,6 +106,7 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG CUDA_VERSION
+SHELL ["/bin/bash", "-c"]   # ${VAR//.} is a bash substitution; RUN defaults to sh
 RUN pip install --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION//.} flash-attn
 ```
 
@@ -169,7 +171,7 @@ RUN echo "build-nonce=${BUILD_NONCE}" \
 ## Full real-world example (managed mode + uv)
 
 ```dockerfile
-ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime@sha256:db80a41f8428644cebcb3d75b0b62df334ab6c0e75785951eb25f48bfbd42407
+ARG BASE_IMAGE=<a real pytorch/pytorch tag+digest matching your profile>
 FROM ${BASE_IMAGE}
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

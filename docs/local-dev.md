@@ -24,10 +24,13 @@ gen-worker run --payload '{"text": "marco"}'
 Everything else derives from the code:
 
 - Model bindings come from the `@endpoint(models=…)` decorator argument.
-- The payload's `_models` field can override any binding that declared
-  `.allow_override(...)`, exactly the way it does in production.
-- Model weights resolve from the local CAS first
-  (`$TENSORHUB_CAS_DIR`, default `/tmp/tensorhub-cache/cas`).
+- Checkpoint selection is an ordinary payload field — the one a `Slot`
+  declares via `selected_by=` — exactly as in production.
+- Model weights resolve from the local CAS first. The CAS path is derived by
+  `models/cache_paths.tensorhub_cas_dir()` from **`$TENSORHUB_CACHE_DIR`**
+  (default `/tmp/tensorhub-cache`, so the CAS is `/tmp/tensorhub-cache/cas`).
+  Set `TENSORHUB_CACHE_DIR` to relocate it — `TENSORHUB_CAS_DIR` is a narrow
+  override that `cache_paths` does not consult and will not move the CLI's CAS.
 - On cache miss the CLI auto-fetches from the upstream registry
   (HuggingFace for `HF` bindings; cozy refs require an
   orchestrator-warmed cache today — see *Cozy ref cache miss* below).
@@ -42,8 +45,8 @@ helpers — that's what pytest is for.
 - **stdout** is for **results**. One JSON line per yielded item (generator
   methods) plus a final `{"event":"result", ...}` line. Use `| jq` to
   filter.
-- **stderr** is for **events** from `ctx.emit / progress / log`, model-
-  fetch progress lines, and tracebacks. One JSON line per event.
+- **stderr** is for **events** from `ctx.progress` / `ctx.log` / `ctx.stage`,
+  model-fetch progress lines, and tracebacks. One JSON line per event.
 
 This split keeps the result on stdout pipeable while the inner loop's
 diagnostics stay visible.
@@ -85,29 +88,20 @@ Filtering with `--class` and/or `--method`:
 - More than one match → exit 2, "ambiguous; specify --class and/or
   --method".
 
-## Payload overrides via `_models`
+## Choosing a checkpoint locally
 
-The reserved `_models` field on the payload lets you swap any binding
-that declared `.allow_override(...)` for an arbitrary ref. Same shape as
-production:
+Checkpoint selection is the payload field a `Slot` names via `selected_by=`
+(see [endpoint-authoring.md](endpoint-authoring.md)) — set it like any other
+payload field.
 
-```bash
-# String shorthand: owner/repo[:tag][#flavor]
-gen-worker run --payload '{
-  "prompt": "x",
-  "_models": {"pipe": "other/repo:canary#bf16"}
-}'
+Hub-less runs resolve through `models/provision.resolve_bindings`, which only
+honors a `Slot`'s `default_checkpoint=` ref. A payload that names a different
+model has no hub mapping to resolve against and is refused; point
+`TENSORHUB_URL` at a hub if you need the real selection path.
 
-# Structured form.
-gen-worker run --payload '{
-  "prompt": "x",
-  "_models": {"pipe": {"ref": "other/repo", "tag": "latest", "flavor": "bf16"}}
-}'
-```
-
-If the binding has no `.allow_override(...)`, the CLI rejects the
-override with exit 2 — matches production's `model_override_not_allowed`
-error.
+> The old `_models` payload envelope and `.allow_override(...)` binding
+> modifier are **gone** — neither name appears anywhere in the source, and
+> there is no `model_override_not_allowed` error.
 
 ## Model fetch + the local CAS
 
@@ -122,7 +116,7 @@ the upstream registry. You'll see a stderr line like:
 Subsequent invocations reuse the local cache. The cache locations:
 
 - `HF` bindings → `$HF_HOME` (default `~/.cache/huggingface`).
-- `Repo` (tensorhub) bindings → `$TENSORHUB_CAS_DIR` (default
+- `Hub` (tensorhub) bindings → `$TENSORHUB_CACHE_DIR/cas` (default
   `/tmp/tensorhub-cache/cas`).
 
 ### `--offline`
@@ -140,12 +134,12 @@ gen-worker run --offline --payload '{"prompt":"x"}'
 ### Cozy ref cache miss
 
 Cozy / tensorhub refs (`Hub("owner/repo")` — no `hf:` / `civitai:`
-prefix) use the worker's CAS at `$TENSORHUB_CAS_DIR`. If the requested
-snapshot isn't there, the CLI exits 3 with a pointer to invoke the
-endpoint via the orchestrator once to populate the cache. This is the
-one production-equivalence gap: cozy refs require an orchestrator-
-resolved presigned manifest, which is owned by the orchestrator and not
-yet wired into the local CLI. HuggingFace refs are fully self-contained.
+prefix) use the worker's CAS at `$TENSORHUB_CACHE_DIR/cas`. On a miss the CLI
+resolves them standalone against tensorhub's public resolve route (#379 /
+th#560) — no orchestrator needed. `TENSORHUB_URL` selects the hub;
+`TENSORHUB_TOKEN` unlocks private repos. This is the `hub_resolve`
+capability advertised in `run --list`. With no `TENSORHUB_URL` configured
+the CLI exits 3. HuggingFace refs are fully self-contained.
 
 ## SIGINT (Ctrl-C)
 
@@ -330,8 +324,8 @@ and the exit code propagates out of the container:
 
 ```bash
 docker run --rm \
-  -v ~/.cache/cozy:/cache -e TENSORHUB_CAS_DIR=/cache \
-  <img> gen-worker run generate "a cat" seed=42
+  -v ~/.cache/cozy:/cache -e TENSORHUB_CACHE_DIR=/cache \
+  <img> gen-worker run --method generate "a cat" seed=42
 ```
 
 Maps cleanly to a Kubernetes **Job** / **CronJob** (exit 0 = success).
@@ -343,7 +337,7 @@ access, and submit work either via `docker exec` or over a published port:
 
 ```bash
 docker run -d -p 8731:8731 \
-  -v ~/.cache/cozy:/cache -e TENSORHUB_CAS_DIR=/cache \
+  -v ~/.cache/cozy:/cache -e TENSORHUB_CACHE_DIR=/cache \
   <img> gen-worker serve --listen tcp://0.0.0.0:8731
 
 # submit via exec (shares the container's unix socket)…
@@ -358,7 +352,8 @@ one-worker-per-release model).
 ## Cancellation & signals (#352 / #353)
 
 Cancelling a request and stopping the worker both funnel through the same
-`ctx.cancel()` — so tenant code observes them identically, in prod and locally.
+`ctx._cancel()` — so tenant code observes them identically, in prod and locally
+(endpoint code only ever READS `ctx.cancelled` / `ctx.raise_if_cancelled()`).
 
 - **`run` / `invoke` client, Ctrl-C:** cancels **that request** on the server;
   the warm `serve` stays running. A **second** Ctrl-C within 2s detaches the

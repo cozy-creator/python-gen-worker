@@ -8,9 +8,14 @@ or the cached `get_settings()`).
 
 A handful of modules that also work as standalone libraries/CLIs outside a
 full worker bring-up (`net.py`, `convert/ingest.py`, `convert/clone.py`,
-`cli/run.py`, `compile_cache.py`) read a few env vars directly instead —
-see "Internal plumbing" below. This doc is the source of truth for which
-knobs are which.
+`compile_cache.py`, `url_fetch.py`, `input_assets.py`, `host_move_guard.py`,
+`supervisor.py`, `env_seal.py`, `procsplit/*`, ...) read env vars directly
+instead — see "Internal plumbing" below.
+
+The authoritative list of Settings-backed env names is `_ENV_TO_FIELD` in
+`config/loader.py`; the tables below track it but are not a substitute for it.
+Raw-env reads outside `Settings` are not centrally registered anywhere, so
+"Internal plumbing" is best-effort — grep before assuming a var is unused.
 
 Tenant *endpoint* code reads its own envs freely (`docs/endpoint-envs.md`);
 this page covers the worker itself.
@@ -20,8 +25,8 @@ this page covers the worker itself.
 | Env | Field | Why env |
 |---|---|---|
 | `HF_TOKEN` | `hf_token` | HF pulls of gated/private repos |
-| `WORKER_JWT` | `worker_jwt` | orchestrator-issued worker identity token |
-| `TENSORHUB_TOKEN` | `tensorhub_token` | standalone-CLI private tensorhub pulls |
+| `WORKER_JWT` | `bootstrap_worker_jwt` | orchestrator-issued worker identity token. The FIELD was renamed (pgw#848) so no call site can mistake it for the live credential; the env name is hub-fixed. Stripped from the compute child's env (`procsplit/parent.py` `_CHILD_FORBIDDEN_ENVS`) before tenant code runs, so an endpoint never sees it in `os.environ` |
+| `TENSORHUB_TOKEN` | `tensorhub_token` | private tensorhub pulls (standalone CLI) AND the mint/publish gate on real pods (`aot_mint.py`) |
 | `CIVITAI_API_KEY` (alias `CIVITAI_TOKEN`) | `civitai_api_key` | civitai provider downloads |
 
 ## Orchestrator-injected deployment config (Settings fields)
@@ -33,7 +38,12 @@ this page covers the worker itself.
 | `WORKER_ID` | `worker_id` | per-pod identity |
 | `ENDPOINT_LOCK_PATH` | `endpoint_lock_path` | discovery manifest path (baked default in images) |
 | `RUNPOD_POD_ID` | `runpod_pod_id` | set by the RunPod runtime |
-| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant |
+| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant; also read raw by `compile_cache.py` to stamp `image_digest` into every compile cell |
+| `WORKER_RELEASE_ID` | `worker_release_id` | release identity; re-exported into the compute child |
+| `WORKER_CONFIG_GENERATION` | `boot_config_generation` | boot-config generation, for detecting hub-injected config |
+| `WORKER_MODE` | `worker_mode` | operating mode: `serve` (default) or `forge` (mint-only — registers, takes no tenant dispatch, holds no resident serving model). An unrecognized value reads as `serve`. There is NO `trainer` mode |
+| `WORKER_EXECUTION_TOPOLOGY` | — (raw, `topology.py`) | hub-delivered multi-GPU topology JSON (see [multi-gpu.md](multi-gpu.md)). Absent is legal and means one slot — so an unset value on a multi-GPU pod silently serves one card |
+| `GEN_WORKER_CONFIG_SNAPSHOT_PATH` | `config_snapshot_path` | runtime-config snapshot path; also read raw and propagated to every subprocess |
 
 ## Tuning knobs (Settings fields)
 
@@ -41,7 +51,9 @@ this page covers the worker itself.
 |---|---|---|
 | `HF_HOME` | `hf_home` | HF cache root (also read by huggingface_hub itself) |
 | `TENSORHUB_URL` | `tensorhub_url` | standalone-CLI resolve base URL |
-| `TENSORHUB_CACHE_DIR` / `TENSORHUB_CAS_DIR` | `tensorhub_cache_dir` / `tensorhub_cas_dir` | move cache/CAS off `/tmp` (cozy local persistence); `CAS_DIR` also isolates the `cli/run.py` standalone CLI in tests |
+| `TENSORHUB_CACHE_DIR` | `tensorhub_cache_dir` | THE cache/CAS root knob — move cache/CAS off `/tmp` (cozy local persistence). `cache_paths.tensorhub_cas_dir()` derives the CAS from this and nothing else, so this is also what isolates the standalone `cli/run.py` in tests |
+| `TENSORHUB_CAS_DIR` | `tensorhub_cas_dir` | narrow override consulted at only two sites (`models/provision.py`, `procsplit/parent.py`). `cache_paths.tensorhub_cas_dir()` IGNORES it — setting it does not move the CAS for most call sites, and does not isolate `cli/run.py` |
+| `GEN_WORKER_PREFER_AOT` | `compile_prefer_aot` | prefer AOT compile cells over JIT. Deliberately NOT part of `env_seal`'s sealed config table |
 | `TENSORHUB_FILL_SOURCE_DIR` | `tensorhub_fill_source_dir` | th#850 managed-tier ruling: an endpoint-scoped datacenter-warm CAS mount (RunPod volume), checked before R2 on a blob miss and write-through warmed from R2. Never the CAS root — that always stays `TENSORHUB_CACHE_DIR`/local. tensorhub sets this only when a volume is attached; ismount-guarded, so a plain directory never gets mistaken for it |
 
 ## C2PA Content Credentials (Settings fields, th#714)
@@ -52,12 +64,23 @@ the EU AI Act Art. 50 machine-readable AI-marking. ON iff the cert is
 configured; unconfigured logs a loud startup warning and no-ops;
 configured-but-broken refuses to start.
 
+Only the PUBLIC half is pod config. The private key is **hub-side** (th#1307):
+the hub holds it and signs claims over `POST /v1/worker/c2pa/sign`, armed at
+HelloAck.
+
 | Env | Field | Notes |
 |---|---|---|
-| `GEN_WORKER_C2PA_CERT_PATH` | `c2pa_cert_path` | PEM signing-cert chain, leaf first (the ON switch) |
-| `GEN_WORKER_C2PA_KEY_PATH` | `c2pa_key_path` | PKCS#8 PEM private key for the leaf |
+| `GEN_WORKER_C2PA_CERT_PEM` | `c2pa_cert_pem` | inline PEM signing-cert chain, leaf first. What the hub injects at launch (RunPod pods have no file mounts); takes precedence over `_CERT_PATH` |
+| `GEN_WORKER_C2PA_CERT_PATH` | `c2pa_cert_path` | file-path variant for mounted deploys (the ON switch is either cert form) |
 | `GEN_WORKER_C2PA_ALG` | `c2pa_alg` | COSE alg matching the cert key (default `es256`) |
 | `GEN_WORKER_C2PA_TA_URL` | `c2pa_ta_url` | optional RFC3161 timestamp-authority URL |
+
+**`GEN_WORKER_C2PA_KEY_PEM` and `GEN_WORKER_C2PA_KEY_PATH` are REFUSED, not
+configured.** They are deliberately absent from `config/loader.py`'s env map,
+and `content_credentials.configure()` RAISES at startup if either is present in
+the pod environment (`_REFUSED_KEY_ENVS`). Tenant code runs in this process and
+could read a key delivered here, so their presence is treated as a platform
+regression that must kill the pod loudly. Do not set them.
 
 Needs the `signing` extra (`pip install gen-worker[signing]`, c2pa-python).
 
@@ -93,13 +116,45 @@ compile evidence.
   llama-server CUDA smoke in `tests/test_llama_runtime.py`); never read by
   worker runtime code. Real-model GPU coverage now lives in the e2e repo's
   nightly `TestJ6` cloud journey, not a gen-worker-repo GPU lane.
+- `GEN_WORKER_FORBID_CPU_OFFLOAD` — a DEV-BOX guard with exactly ONE read site
+  in the package: `benchmarks/swap_latency.py::check_on_pod()`, called only
+  from that benchmark's `main()`. Set it on a control-plane box and
+  `python -m gen_worker.benchmarks.swap_latency` refuses to run. It does
+  **not** affect placement, offload ladders, serveability, or any inference
+  path — it was removed from `plan_serve`/`gate_functions` and then from
+  placement entirely; placement follows the worker's own fit and
+  OOM-demotion logic. If you want a real CPU-move guard, that is
+  `GEN_WORKER_HOST_MOVE_GUARD` (above).
 
 ## Internal plumbing (raw env)
 
-- `PYTORCH_CUDA_ALLOC_CONF` — `entrypoint.py` setdefault before torch import.
-- `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR` — WRITTEN by
-  `compile_cache.py` to latch inductor/triton onto verified seeded dirs
-  (children inherit).
+- `PYTORCH_CUDA_ALLOC_CONF` — `entrypoint.py` setdefaults it at import, but
+  `env_seal.scrub_env()` then DELETES every `PYTORCH*` var during
+  `establish()`, and `CANONICAL_CONFIG` does not re-impose it. Neither the
+  default nor an operator override survives to the allocator. Treat this as
+  vestigial, not as a knob.
+- `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR` — both READ and WRITTEN, and
+  by more than one module: written by `compile_cache.py`, `entrypoint.py`
+  (deliberately re-set after the env seal scrubs `TORCH*`),
+  `aot_export_reuse.py`, and `aot_compile_pool.py`; read back by
+  `compile_cache.py` and `aot_export_reuse.py` to latch inductor/triton onto
+  verified seeded dirs (children inherit).
+- `GEN_WORKER_HOST_MOVE_GUARD` — the actual CPU-placement guard
+  (`host_move_guard.py`). Patches `torch.nn.Module.to`/`.cpu` and raises
+  `HostRamMoveRefusedError` for moves ≥ 1 GiB that exceed the cgroup RAM
+  budget. **ON by default; `=0` disables it** (inverted polarity — do not
+  confuse this with `GEN_WORKER_FORBID_CPU_OFFLOAD`, below).
+- `GEN_WORKER_URL_FETCH_ALLOWED_HOSTS` — deployment-wide egress bound
+  (`url_fetch.py`). When set, no fetch may leave those hosts; empty means no
+  bound.
+- `GEN_WORKER_INTERNAL_OBJECT_HOSTS` — hosts whose resolver-minted URLs bypass
+  the SSRF policy (`input_assets.py`).
+- `GEN_WORKER_SUPERVISOR` (`=0` disables the OOM-reporting supervisor fork),
+  `GEN_WORKER_COMPUTE_UID` (privilege-drop target uid), `GEN_WORKER_BOOT_RECORD`,
+  `GEN_WORKER_EAGER_FIRST_BOOT`, `GEN_WORKER_LOCAL_CELLS_DIR`,
+  `GEN_WORKER_NATIVE_KERNELS`, `GEN_WORKER_VIDEO_ENCODER`, `GEN_WORKER_AOT_*`,
+  `GEN_WORKER_MINT_*`, `RUNPOD_PROVIDER` — further raw reads. This list is
+  best-effort; grep before assuming a var is unused.
 - `GEN_WORKER_LOCAL_OUTPUT_DIR`, `USER` — cozy-local app plumbing / login
   fallback (`cli/local_context.py`).
 - `COZY_HTTP_CONNECT_TIMEOUT_S` / `COZY_HTTP_READ_TIMEOUT_S` — http timeout
