@@ -18,7 +18,6 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import time
 from concurrent import futures
 from pathlib import Path
 from typing import Optional
@@ -35,6 +34,7 @@ from gen_worker.procsplit.parent import DEATH_LABEL, ParentControl
 from gen_worker.topology import ExecutionTopology
 
 from harness.hub_double import FakeScheduler, is_accept_for, is_ready, is_result_for
+from harness.progress_wait import Cadence, await_count, await_progress
 
 TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = TESTS_DIR.parent / "src"
@@ -198,9 +198,13 @@ def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(
         input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=1)))
     conn.wait_for(is_accept_for("r-sleep-g1"), timeout=30.0)
     g1_marker = _postmortem_dir(tmp_path) / "g1" / "gen-worker-inflight.json"
-    deadline = time.monotonic() + 10.0
-    while not g1_marker.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
+    await_progress(
+        g1_marker.exists,
+        lambda exists: exists,
+        what="g1 per-group in-flight marker",
+        cadence=Cadence(),
+        gone=lambda: None if g2.alive else f"parent exited {g2.exit_code}",
+    )
     assert g1_marker.exists(), "g1 never published its per-group in-flight marker"
 
     # Kill group 0 below Python while group 1's request and fault-dump file are
@@ -213,9 +217,13 @@ def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(
     assert DEATH_LABEL in died.job_result.safe_message
     assert "function=segfault" in died.job_result.safe_message
 
-    deadline = time.monotonic() + 10.0
-    while not any('"group": 0' in d for d in _dials) and time.monotonic() < deadline:
-        time.sleep(0.02)
+    await_count(
+        lambda: sum('"group": 0' in d for d in _dials),
+        1,
+        what="group-0 post-mortem dials",
+        cadence=Cadence(),
+        gone=lambda: None if g2.alive else f"parent exited {g2.exit_code}",
+    )
     g0_dials = [d for d in _dials if '"group": 0' in d]
     assert g0_dials, "group-0 death produced no typed post-mortem dial"
     assert any(
