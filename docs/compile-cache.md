@@ -83,3 +83,68 @@ Fix one of:
    unconditionally (ie#522). An endpoint
    with several self-loaded pipelines sharing weights (e.g. one class
    assembling `self.t2i`/`self.i2v`/`self.v2v`) calls it once per object.
+
+## The serving-kernel lane is MEASURED at mint, not gated by SM (pgw#863, pgw#947)
+
+The svdq path has two independent kernel choices:
+
+| axis | armed | degraded | what it buys |
+|---|---|---|---|
+| `linear` | `fused` | `baseline` | throughput (W4A4 matmuls) |
+| `modulation` | `packed` | `dense` | residency (W4A16 AdaLN, 22.8 → 13.3 GB on B200) |
+
+Which one is faster is a per-card fact — a custom op is opaque to inductor,
+so on sm_120 our fusion beats what inductor does with the open chain and on
+sm_100 it loses to it — and it used to be two hand-maintained SM tuples, one
+$12 benchmark campaign and one human edit per new card class. While they were
+*one* tuple, sm_100 had to give up either the 9.5 GB or 19% of its step time,
+because a single switch cannot say "baseline linears, packed modulation".
+
+A lane is therefore the **combination**, written `<linear>+<modulation>`
+(`baseline+packed`, `fused+dense`, …). It is measured on the card the cell is
+minted for and recorded in the cell (`gen_worker/kernel_lane.py`):
+
+- **Mint.** `mint_child.lane_verdict_for` loads the endpoint once per
+  candidate combination (the swap happens at model load, so comparing lanes
+  means loading once each), runs `aot_mint.bench_step` — one forward of the
+  family's dominant declared graph class, on its own declared example feed,
+  under `torch.compile` — and times it with a fixed warmup/median protocol.
+  The winner's pipeline is the one that gets exported. Candidates come from
+  `kernel_lane.candidate_axes`, which asks only capability questions
+  (Blackwell block-scaled MMA for the fused linear; triton plus a numerics
+  self-check for the packed modulation, which has no SM term at all). An axis
+  with one buildable value contributes no candidates, so a non-Blackwell card
+  has exactly one combination and pays for no benchmark.
+- **The rule: fit-constrained speed maximization.** Among lanes whose
+  measured peak plus a stated allowance (`+20%` for activation spikes and
+  resolution variance, `+1 GiB` for fragmentation) fits the card, the
+  FASTEST wins. VRAM is a constraint, not an objective; it breaks a tie only
+  inside the 5% margin. A B200 therefore takes the baseline linears
+  (228 ms/step) over the fused ones (350 ms/step) — the card has the room —
+  while on a 24 GB card the same fit constraint excludes a lane outright.
+  Ranking combinations is what makes this one rule enough for both axes: the
+  packed modulation is speed-neutral, so it can only win on the VRAM
+  tiebreak, and it does — which is how sm_100 arrives at `baseline+packed`
+  without anyone hand-editing a tuple to say so.
+- **Determinism.** The 5% margin means measurement noise cannot flip a
+  recorded verdict between two mints on one card, and every number behind a
+  verdict is recorded as its evidence.
+- **Where it lands.** `metadata.json` inside the packed cell carries the
+  DISCRETE verdict (`kernel_lane`: winner, rule, binding term, margin,
+  candidates) — no wall clocks, because the #699 double-mint byte-compare
+  requires a reproducible artifact. The measurements ride the published
+  checkpoint metadata as `kernel_lane_evidence`, beside `mint_phases`.
+- **Serving.** The executor reads the verdict off the delivered cell and
+  pins it BEFORE `setup()` runs; each axis then projects its own value out of
+  the pin (`native_kernels.svdq_linear_lane` / `svdq_modulation_lane`). No
+  cell, a pre-pgw#947 cell, or an unreadable envelope is the declared
+  conservative default (`baseline+dense`) with a typed reason
+  (`kernel_lane_verdict_absent` / `_unreadable` / `_unknown_lane` /
+  `kernel_lane_no_cell`) — never a silent fall-through. An armed axis still
+  has to pass its OWN numerics self-check on the box; a gap degrades that
+  axis alone, same artifact, with the reason logged.
+
+`GEN_WORKER_NATIVE_KERNELS` survives only as the pgw#859 G0 rollout gate and
+kill switch (unset = off, `=0` = forced off). It gates the ROLLOUT and never
+picks a lane; flipping it is pgw#865's call. It is on th#1445's elimination
+list and must not grow new meanings.

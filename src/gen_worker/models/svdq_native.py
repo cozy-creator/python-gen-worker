@@ -511,10 +511,11 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                   else "cpu")
     dev = torch.device(device)
 
-    from .native_kernels import svdq_linear_lane, svdq_modulation_lane
+    from .native_kernels import svdq_modulation_lane
     from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
 
-    lane = svdq_linear_lane() if mode == "blockwise" else "baseline"
+    # Only the modulation axis is read here; `swap_svdq_linears` below owns
+    # the linear one and asks for it itself.
     mod_lane = svdq_modulation_lane() if mode == "blockwise" else "dense"
     t0 = time.perf_counter()
     plain: Dict[str, Any] = {}
