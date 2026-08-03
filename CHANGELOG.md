@@ -25,6 +25,15 @@
   artifact of Tensorhub's canonical copy, pgw#944) and is now PROJECTED from the goal set,
   carrying the raw declaration so an unrecognised spelling stays visible at the hub.
 
+  The two EMITTED ACTIVITY KINDS were decided separately, on row counts read from the
+  standing hub rather than on symmetry: `forge_terminal` keeps its string (1 historical row —
+  renaming it would silently orphan that row; only the Python name changed, to
+  `KIND_MINT_GOAL`), while `forge_dispatch_refused` became
+  `serve_goal_absent_dispatch_refused` (0 rows, nothing to orphan, and the old name asserted
+  a mode that no longer exists). Also confirmed there: **zero `worker_mode`/`forge` columns
+  across all 120 `tensorhub` tables**, so the hub never persisted the mode at all — exactly
+  what pgw#930 predicted.
+
 - **pgw#931 (§1.18): `get_settings()` is deleted; the config struct is passed.**
   The `functools.lru_cache(maxsize=1)` accessor let any module at any depth materialise
   configuration out of the environment, so content depended on which module imported first
