@@ -347,13 +347,13 @@ def swap_svdq_linears(
     alignment fold to dense individually rather than refusing."""
     import torch
 
-    from .native_kernels import svdq_execution_lane
+    from .native_kernels import svdq_linear_lane
     from .svdq_fused import build_svdq_fused_linear, fused_shape_supported
 
     compute = compute_dtype or torch.bfloat16
     if mode not in ("blockwise", "dense"):
         mode = "blockwise" if svdq_native_available() else "dense"
-    lane = svdq_execution_lane() if mode == "blockwise" else "baseline"
+    lane = svdq_linear_lane() if mode == "blockwise" else "baseline"
     counts = {"blockwise": 0, "dense": 0, "fused": 0, "prefixes": 0,
               "linears": 0}
     for prefix in sorted(decoded):
@@ -511,10 +511,11 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                   else "cpu")
     dev = torch.device(device)
 
-    from .native_kernels import svdq_execution_lane
+    from .native_kernels import svdq_linear_lane, svdq_modulation_lane
     from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
 
-    lane = svdq_execution_lane() if mode == "blockwise" else "baseline"
+    lane = svdq_linear_lane() if mode == "blockwise" else "baseline"
+    mod_lane = svdq_modulation_lane() if mode == "blockwise" else "dense"
     t0 = time.perf_counter()
     plain: Dict[str, Any] = {}
     swapped = awq = awq_packed = 0
@@ -531,9 +532,11 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                 splits = adanorm_splits_for(type(model).__name__, prefix)
                 out_f = int(target.out_features)
                 in_f = int(target.in_features)
-                # pgw#864: modulation stays packed-resident on the fused lane
-                # (the +6.8 GB delta was this dequant); degrade per-layer.
-                if lane == "fused" and awq_packed_supported(out_f, in_f):
+                # pgw#864: modulation stays packed-resident (the +6.8 GB
+                # delta was this dequant). pgw#863 split it off the linear
+                # lane — a card can want packed modulation and baseline
+                # linears at once, and sm_100 does. Degrade per-layer.
+                if mod_lane == "packed" and awq_packed_supported(out_f, in_f):
                     _set_module(model, prefix, build_awq_packed_linear(
                         tensors, out_f, in_f, adanorm_splits=splits,
                         compute_dtype=compute, device=dev))
