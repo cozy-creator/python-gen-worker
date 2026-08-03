@@ -39,6 +39,7 @@ from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
 from . import warmup
 from . import worker_credential
+from . import mint_goal as mint_goal_mod
 from . import worker_goals
 from .api.binding import ModelRef, wire_ref
 from .api.errors import (
@@ -5829,8 +5830,6 @@ class Executor:
         # exactly that fact rather than inventing a second notion of "boot is
         # over" that could disagree with the one boot telemetry publishes.
         try:
-            from . import mint_goal as mint_goal_mod
-
             mint_goal_mod.note_disposition_final()
         except Exception:  # pragma: no cover - a latch never breaks a boot
             logger.debug("mint-goal disposition latch failed", exc_info=True)

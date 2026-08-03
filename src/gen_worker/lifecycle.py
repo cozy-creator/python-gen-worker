@@ -16,6 +16,7 @@ from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import content_credentials
 from . import receipts
+from . import mint_goal as mint_goal_mod
 from . import worker_goals
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
@@ -1360,8 +1361,6 @@ class Lifecycle:
         # whether or not a serve goal is present: goals compose, and a goal
         # that boots differently is a fork.
         if worker_goals.current().drives_mint():
-            from . import mint_goal as mint_goal_mod
-
             self._mint_goal_task = asyncio.create_task(
                 mint_goal_mod.run(self), name="mint-goal-driver")
 
