@@ -83,3 +83,50 @@ Fix one of:
    unconditionally (ie#522). An endpoint
    with several self-loaded pipelines sharing weights (e.g. one class
    assembling `self.t2i`/`self.i2v`/`self.v2v`) calls it once per object.
+
+## The serving-kernel lane is MEASURED at mint, not gated by SM (pgw#946)
+
+The svdq path can run its linears through hand-fused native kernels or the
+baseline unfused chain. Which one is faster is a per-card fact — a custom op
+is opaque to inductor, so on sm_120 our fusion beats what inductor does with
+the open chain and on sm_100 it loses to it — and it used to be a
+hand-maintained SM tuple, one $12 benchmark campaign and one human edit per
+new card class.
+
+It is now measured on the card the cell is minted for and recorded in the
+cell (`gen_worker/kernel_lane.py`):
+
+- **Mint.** `mint_child.lane_verdict_for` loads the endpoint once per
+  candidate lane (the swap happens at model load, so comparing two lanes
+  means loading twice), runs `aot_mint.bench_step` — one forward of the
+  family's dominant declared graph class, on its own declared example feed,
+  under `torch.compile` — and times it with a fixed warmup/median protocol.
+  The winner's pipeline is the one that gets exported.
+- **The rule: fit-constrained speed maximization.** Among lanes whose
+  measured peak plus a stated allowance (`+20%` for activation spikes and
+  resolution variance, `+1 GiB` for fragmentation) fits the card, the
+  FASTEST wins. VRAM is a constraint, not an objective; it breaks a tie only
+  inside the 5% margin. A B200 therefore takes the baseline lane
+  (228 ms/step, 44.1 GB) over the fused lane (350 ms/step, 35.1 GB) — the
+  card has the room — while on a 24 GB card the same fit constraint excludes
+  a lane outright.
+- **Determinism.** The 5% margin means measurement noise cannot flip a
+  recorded verdict between two mints on one card, and every number behind a
+  verdict is recorded as its evidence.
+- **Where it lands.** `metadata.json` inside the packed cell carries the
+  DISCRETE verdict (`kernel_lane`: winner, rule, binding term, margin,
+  candidates) — no wall clocks, because the #699 double-mint byte-compare
+  requires a reproducible artifact. The measurements ride the published
+  checkpoint metadata as `kernel_lane_evidence`, beside `mint_phases`.
+- **Serving.** The executor reads the verdict off the delivered cell and
+  pins it BEFORE `setup()` runs. No cell, a pre-pgw#946 cell, or an
+  unreadable envelope is the declared conservative default (`baseline`) with
+  a typed reason (`kernel_lane_verdict_absent` / `_unreadable` /
+  `_unknown_lane` / `kernel_lane_no_cell`) — never a silent fall-through.
+  A `fused` verdict still has to pass the numerics self-check on the box; a
+  gap degrades to baseline, same artifact, with the reason logged.
+
+`GEN_WORKER_NATIVE_KERNELS` survives only as the pgw#859 G0 rollout gate and
+kill switch (unset = off, `=0` = forced off). It gates the ROLLOUT and never
+picks a lane; flipping it is pgw#865's call. It is on th#1445's elimination
+list and must not grow new meanings.

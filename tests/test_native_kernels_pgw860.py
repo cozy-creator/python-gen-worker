@@ -8,6 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from gen_worker import kernel_lane  # noqa: E402
 from gen_worker.models import native_kernels as nk  # noqa: E402
 from gen_worker.models import svdq_fused  # noqa: E402
 from gen_worker.models import svdq_native as native  # noqa: E402
@@ -18,8 +19,10 @@ from gen_worker.models.svdq_layout import DecodedLinear  # noqa: E402
 @pytest.fixture(autouse=True)
 def _reset_arming(monkeypatch: pytest.MonkeyPatch):
     nk.reset_native_kernels_arming()
+    kernel_lane.clear()
     yield
     nk.reset_native_kernels_arming()
+    kernel_lane.clear()
 
 
 # --- env gating ------------------------------------------------------------
@@ -33,47 +36,81 @@ def test_unset_env_stays_baseline_dormant(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_kill_switch_forces_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "0")
-    # Even a passing probe must not arm past the kill-switch.
-    monkeypatch.setattr(nk, "_probe_fused_lane", lambda: None)
+    # Even a fused verdict + a passing self-check must not arm past the
+    # kill-switch.
+    kernel_lane.pin("fused", "test")
+    monkeypatch.setattr(nk, "_self_check_gap", lambda: None)
     assert nk.svdq_execution_lane() == "baseline"
     assert "kill-switch" in nk.svdq_lane_reason()
 
 
-def test_opt_in_with_passing_probe_arms(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    monkeypatch.setattr(nk, "_probe_fused_lane", lambda: None)
-    assert nk.svdq_execution_lane() == "fused"
-
-
-def test_opt_in_with_failing_probe_degrades_with_reason(
+def test_fused_verdict_with_passing_self_check_arms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    monkeypatch.setattr(nk, "_probe_fused_lane", lambda: "no fp4 here")
+    kernel_lane.pin("fused", "cell verdict")
+    monkeypatch.setattr(nk, "_self_check_gap", lambda: None)
+    assert nk.svdq_execution_lane() == "fused"
+    assert "cell verdict" in nk.svdq_lane_reason()
+
+
+def test_fused_verdict_with_failing_self_check_degrades_with_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(nk.NATIVE_ENV, "1")
+    kernel_lane.pin("fused", "cell verdict")
+    monkeypatch.setattr(nk, "_self_check_gap", lambda: "no fp4 here")
     assert nk.svdq_execution_lane() == "baseline"
-    assert nk.svdq_lane_reason() == "no fp4 here"
+    assert "no fp4 here" in nk.svdq_lane_reason()
 
 
-def test_opt_in_probe_raise_degrades_not_raises(
+def test_self_check_raise_degrades_not_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def boom() -> str:
         raise RuntimeError("driver exploded")
 
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    monkeypatch.setattr(nk, "_probe_fused_lane", boom)
+    kernel_lane.pin("fused", "cell verdict")
+    monkeypatch.setattr(nk, "_self_check_gap", boom)
     assert nk.svdq_execution_lane() == "baseline"
     assert "driver exploded" in nk.svdq_lane_reason()
 
 
-def test_real_probe_on_this_host_degrades_cleanly(
+def test_baseline_verdict_never_runs_the_self_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On a box without Blackwell the REAL probe must return a reason, never
-    raise (on sm_100/120 CI runners this instead arms — also fine)."""
+    """A cell that says baseline is obeyed verbatim: no probe, no SM read."""
+    def boom() -> str:
+        raise AssertionError("the self-check must not run for a baseline "
+                             "verdict")
+
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    assert nk.svdq_execution_lane() in ("baseline", "fused")
-    assert nk.svdq_lane_reason()
+    kernel_lane.pin("baseline", "cell verdict: B200 measured 228 vs 350")
+    monkeypatch.setattr(nk, "_self_check_gap", boom)
+    assert nk.svdq_execution_lane() == "baseline"
+    assert "228 vs 350" in nk.svdq_lane_reason()
+
+
+def test_no_verdict_is_the_declared_default_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pgw#946 (d): nothing pinned a lane => the conservative default, with a
+    TYPED reason. Never a silent fall-through to a hand-written tuple."""
+    monkeypatch.setenv(nk.NATIVE_ENV, "1")
+    kernel_lane.clear()
+    assert nk.svdq_execution_lane() == kernel_lane.DEFAULT_LANE
+    assert kernel_lane.REASON_ABSENT in nk.svdq_lane_reason()
+
+
+def test_no_sm_allowlist_survives() -> None:
+    """pgw#946: the hand-maintained tuple is DELETED, not renamed. The only
+    SM fact left in the mechanism is the fused lane's capability floor, and it
+    lives in kernel_lane where the candidate enumeration is."""
+    assert not hasattr(nk, "FUSED_SMS")
+    assert not hasattr(nk, "FUSED_LINEAR_SMS")
+    assert not hasattr(nk, "PACKED_MODULATION_SMS")
+    assert kernel_lane.FUSED_MIN_SM == 100
 
 
 # --- extension probe -------------------------------------------------------

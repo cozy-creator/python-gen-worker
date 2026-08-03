@@ -34,6 +34,7 @@ import msgspec
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import cpu_budget
+from . import kernel_lane
 from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
@@ -6584,6 +6585,14 @@ class Executor:
             else await self._fetch_compile_snapshot(spec, snapshots)
         )
         compile_artifact = compile_selection.path if compile_selection else None
+        # pgw#946: the serving-kernel lane comes from the CELL, and it has to
+        # be pinned BEFORE setup() — the linears are swapped at model load, so
+        # a verdict read afterwards would arrive one whole pipeline too late.
+        # No cell (eager boot, self-minting boot, pre-pgw#946 cell) is the
+        # declared conservative default WITH a typed reason; there is no SM
+        # allowlist and no per-boot probe to fall back on any more.
+        kernel_lane.adopt_from_artifact(
+            compile_artifact, source=f"{spec.name} boot")
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._intent_lock(
