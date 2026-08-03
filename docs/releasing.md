@@ -38,7 +38,8 @@ times in a day.
 > date."*
 
 **The bound, and why:** `>=X.Y.Z,<X.(Y+1).0` — i.e. bounded at the **major.minor the hub gate already
-admits**. `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` matches on `major.minor` (`0.90`), which is
+admits**. `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` matches on `major.minor` (`0.91` as of this
+cut — bump it in lockstep with each MINOR), which is
 exactly why every patch this week rode without a hub bounce. Pinning wider than the hub admits would
 produce a worker the hub refuses at Hello; pinning narrower re-creates the problem this removes.
 
@@ -84,13 +85,18 @@ one version deliberately; do not reach for a global exact pin to get it.
 
 `ci.yml`, in order. **A local `pytest` run is not the gate** and will let you push a red:
 
-1. `uv sync --locked` — a version bump without `uv lock` fails here. It has.
-2. `mypy src/gen_worker`
-3. `ruff check src/gen_worker`
-4. `scripts/lint_http_timeouts.py` (gw#467)
-5. `scripts/lint_unreached_surface.py` (pgw#849 guard 2)
+1. `uv sync --locked --extra dev` — a version bump without `uv lock` fails here. It has.
+2. `mypy src/gen_worker` — GATING (gw#497; the tree is mypy-clean, no baseline)
+3. `scripts/lint_http_timeouts.py` (gw#467)
+4. `scripts/lint_unreached_surface.py` (pgw#849 guard 2)
+5. install pinned CPU `llama-server` (so the gw#402 runtime tests run for real)
 6. `pytest tests/ -n 4 --dist loadfile`
 7. `pytest tests_v2/ -n 4 --dist loadfile` — **`testpaths = ["tests"]`, so a bare `pytest` skips this.**
+8. `uv build` — a cut can still fail here, after every test is green.
+
+**`ruff check src/gen_worker` is NOT a gate.** `ci.yml` runs it with
+`continue-on-error: true` (lint debt, mostly `worker.py`) — it is visible in
+the logs and blocks nothing. Do not spend cut time on red ruff output.
 
 **Publishing additionally requires a green CI run carrying this exact TREE** (`publish.yml` compares
 tree SHAs, not commit SHAs). Tag a commit CI has already proven, or dispatch CI on the tag and re-run
