@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#938:** isolate transient post-mortem evidence per compute group and make
+  concurrent grant downloads finalize through writer-unique temporary files.
+
 ## 0.91.1 (2026-08-03) — **the AOT serving path stops lying about its coverage**: a declaration whose rows collapse to one ingress contract is MERGED instead of published undispatchable (pgw#917), the base-weight-lane vocabulary becomes one checked list (pgw#918), and the AOT arm finally has a shape-gap fact the hub can count (pgw#916)
 
 PATCH, deliberately: nothing here touches the worker<->hub wire contract, `@endpoint`, or
@@ -67,7 +72,6 @@ is unregistered, so `submit` refuses loudly by name. Building it here would mean
 second task/device scheduler this issue's own acceptance forbids; it belongs to pgw#910
 Reconciler + pgw#911 DeviceExecutor under pgw#888 CompileRuntime. A dependency test holds that
 line.
-
 ## 0.91.0 (2026-08-02) — **the native kernel lane lands dormant** (pgw#862/pgw#864: env-gated opt-in, OFF by default — no serving path changes until the gate is set), the envelope gains the DEGREE axis (th#1426), an unprovable cell can no longer be declared (th#959), and v2 publish restates classification (th#1411)
 
 MINOR, not patch: `Resources` gains a field (`max_gpus_per_execution_group`), `@endpoint`

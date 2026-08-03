@@ -1,7 +1,7 @@
 # Model transfer
 
 gen-worker has a closed model-weight provider surface: **Tensorhub**,
-**Hugging Face**, **Civitai**. It does not accept arbitrary URL model refs;
+**Hugging Face**, **Civitai**, **ModelScope**. It does not accept arbitrary URL model refs;
 storage URLs Tensorhub hands the worker are an internal transport detail,
 not a fourth provider.
 
@@ -30,6 +30,7 @@ digests, and finalization; R2 is only the byte store.
   Large HF artifacts stage to local disk before any Tensorhub upload
   (seekable files make multipart retry safe).
 - **Civitai**: a bounded provider-specific downloader/API integration.
+- **ModelScope**: fetched directly via `modelscope.snapshot_download`.
 - **Tensorhub**: presigned R2 GETs against the resolved snapshot manifest,
   digest-verified into the local CAS. The algorithm comes from the manifest
   entry's tagged `digest` (`sha256:<hex>` — v2, th#1303) and falls back to the

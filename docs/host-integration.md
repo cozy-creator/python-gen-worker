@@ -52,7 +52,7 @@ Document shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.15.2",
+  "gen_worker_version": "0.91.0",
   "capabilities": ["describe", "list_functions", "prefetch", "cancel",
                    "streaming", "tcp_listen", "serve_sidecar",
                    "hub_resolve"],
@@ -87,7 +87,12 @@ Notes:
   field prompts off it). Nested struct references stay under `$defs`.
 - **`models`** maps each model slot to its binding descriptor:
   `type`/`provider`/`ref` plus whichever of `tag`/`flavor`/`revision`/
-  `dtype`/`subfolder`/`version`/`storage_dtype`/`allow_lora`/`files` are set.
+  `dtype`/`subfolder`/`version`/`storage_dtype` are set (the exact key tuple
+  in `cli/listing.py`).
+- The document also carries a top-level **`detected`** block (GPU SM, torch /
+  CUDA versions, installed libraries) and a per-function **`fit`** verdict.
+  Both are omitted from the example above for brevity — do not treat the
+  example as the closed shape.
 
 `serve --list-functions --json` is a **thin alias** — it emits
 `{"functions": [...]}` using the identical per-function builder, so the array
@@ -111,8 +116,9 @@ One frame per line.
 ```
 
 - `function` (string, required) — the routable function name.
-- `payload` (object) — the decoded JSON payload; the reserved `_models` field
-  inside it overrides bindings exactly as in production.
+- `payload` (object) — the decoded JSON payload. Checkpoint selection is an
+  ordinary payload field (the one a `Slot` names via `selected_by=`); there is
+  no reserved `_models` envelope.
 - `request_id` (string) — required for cancellation to work; echoed back on
   responses.
 - `stream` (bool, optional) — request streamed frames (see below).
@@ -126,7 +132,7 @@ came in on:
 {"cancel": {"request_id": "abc123"}}
 ```
 
-The server looks the id up in its in-flight registry and trips `ctx.cancel()`
+The server looks the id up in its in-flight registry and trips `ctx._cancel()`
 for that request. The server keeps running; only that one request is canceled.
 The cancel frame is acked with `{"ok": true, "canceled": <bool>, "request_id": ...}`
 (`canceled` is `false` if no matching in-flight request was found).
@@ -188,7 +194,7 @@ Shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.15.2",
+  "gen_worker_version": "0.91.0",
   "pid": 12345,
   "listen": "/abs/path/.gen-worker.sock",
   "ready_at": 1733356800.0,
@@ -224,20 +230,25 @@ bare path (treated as a Unix socket).
 
 ## Cancellation — the end-to-end contract
 
-There is exactly **one** cancellation primitive — `RequestContext.cancel()` —
+There is exactly **one** cancellation primitive — `RequestContext._cancel()` —
 fed by many sources and observed by tenant code one way. Every source resolves a
-`request_id`, looks the ctx up in a per-request registry, and calls
-`ctx.cancel()`; cancelling a request never stops the worker.
+`request_id`, looks the ctx up in a per-request registry, and trips it;
+cancelling a request never stops the worker.
 
-**Sources → `ctx.cancel()`:**
+Note the underscore: `_cancel()` is deliberately not part of the tenant-facing
+surface. Endpoint code OBSERVES cancellation (`ctx.cancelled` /
+`ctx.raise_if_cancelled()`); only the runtime trips it. A host never calls it
+directly — it sends the cancel frame below.
+
+**Sources → `ctx._cancel()`:**
 
 | Where | Source | Path |
 |---|---|---|
-| Production | orchestrator user-facing cancel → `interrupt_job_cmd{request_id}` over gRPC | `Worker._handle_interrupt_request` looks up `_active_requests[request_id]` → `ctx.cancel()` (+ `engine.abort` for batched) |
-| Local — explicit | `{"cancel":{"request_id"}}` frame on any connection | `serve` looks up its in-flight registry → `ctx.cancel()` |
+| Production | orchestrator user-facing cancel → `CancelJob{request_id, attempt}` over gRPC | `Executor.handle_cancel(pb.CancelJob)` resolves the in-flight request → `ctx._cancel()` |
+| Local — explicit | `{"cancel":{"request_id"}}` frame on any connection | `serve` looks up its in-flight registry → `ctx._cancel()` |
 | Local — client `Ctrl-C` | `run`/`invoke` SIGINT (1st press) sends the cancel frame | same as above |
 | Local — disconnect | a streaming client's connection drops | server cancels that request (backstop) |
-| Worker stop | `serve` `Ctrl-C`/SIGTERM, or production drain | `cancel_all()` → `ctx.cancel()` on every in-flight request, then `shutdown()` |
+| Worker stop | `serve` `Ctrl-C`/SIGTERM, or production drain | cancels every in-flight request, then `shutdown()` |
 
 **Observation (tenant side) — identical everywhere:** call
 `ctx.raise_if_cancelled()` inside loops, or poll `ctx.cancelled`.
@@ -271,3 +282,6 @@ a host can branch on it directly.
 - [local-dev.md](local-dev.md) — the CLI shapes (`run`, `serve` + `invoke`),
   ergonomic payload args, and deployment topologies.
 - [endpoint-authoring.md](endpoint-authoring.md) — decorator + binding reference.
+- The production **gRPC** worker↔orchestrator wire contract is a different
+  surface from this one and is documented only in tensorhub, at
+  `internal/orchestrator/grpc/proto/CONTRACT.md`. This repo keeps no copy.

@@ -172,7 +172,8 @@ def _child_env(
         "CUDA_VISIBLE_DEVICES": ",".join(str(d) for d in devices),
         # Locally G == 1: the child is the most-tested shape in the worker.
         ENV_TOPOLOGY: json.dumps(local.as_dict(), separators=(",", ":")),
-        # Labelling only (logs, dials, per-group dirs). No behaviour reads it.
+        # Filesystem/process identity only (logs, dials, per-group dirs). It
+        # never selects serving behaviour.
         ENV_GROUP_ORDINAL: str(ordinal),
         # The ONE thing a child must know about its siblings: how many
         # processes share this pod's cgroup. Without it pgw#782's cpu_budget

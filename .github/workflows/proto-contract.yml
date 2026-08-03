@@ -1,0 +1,72 @@
+name: proto contract
+
+# pgw#944 / th#1562 — proto/worker_scheduler.proto is a VENDORED, byte-for-byte
+# copy of tensorhub's canonical copy. Until th#1457/#1488 makes the schema
+# generated, the two are maintained by hand and this gate keeps them identical.
+#
+# SEPARATE FROM ci.yml on purpose. ci.yml runs on PRs into master only, because
+# CI spend is metered (WORKSPACE-GIT-POLICY.md) — it installs llama-server and
+# runs two pytest suites. But the contract is edited at the lane -> dev PR, so a
+# master-only gate catches the mistake after it has already shipped into dev and
+# into every worker image built from it. This job is sha256sum plus one codegen,
+# so it can afford to run on dev too, and keeping it out of ci.yml is what
+# guarantees it stays that cheap.
+#
+# This side runs LAYER 1 ONLY (local copy vs the shared PROTO_DIGEST). Layer 2 —
+# comparing against tensorhub's copy — cannot run here: tensorhub is a PRIVATE
+# repo and this is a PUBLIC one, so the fetch would need a cross-repo token
+# exposed to fork PRs. That check runs in tensorhub, which can read this repo
+# over plain https with no credential at all. The asymmetry is deliberate.
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [dev, master]
+    paths:
+      - "proto/worker_scheduler.proto"
+      - "proto/PROTO_DIGEST"
+      - "scripts/proto-drift-check.sh"
+      - "scripts/vendor-proto.sh"
+      - "src/gen_worker/pb/**"
+      - ".github/workflows/proto-contract.yml"
+
+concurrency:
+  group: proto-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Layer 1 needs nothing but coreutils — run it before any setup so a
+      # hand-edited contract fails in seconds with a readable message.
+      - name: proto drift check (vs PROTO_DIGEST)
+        run: PROTO_SKIP_PEER=1 scripts/proto-drift-check.sh
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      # The .proto is the contract, but gen_worker imports the GENERATED
+      # bindings. A regenerated-and-uncommitted pb/ is the same drift one level
+      # down, so prove the committed bindings match the vendored .proto.
+      - name: generated bindings match the .proto
+        run: |
+          uv run --extra dev python -m grpc_tools.protoc \
+            -Iproto \
+            --python_out=src/gen_worker/pb \
+            --grpc_python_out=src/gen_worker/pb \
+            --pyi_out=src/gen_worker/pb \
+            proto/worker_scheduler.proto
+          git diff --exit-code -- src/gen_worker/pb

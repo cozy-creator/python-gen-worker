@@ -23,6 +23,13 @@ option go_package = "github.com/cozy-creator/tensorhub/internal/orchestrator/grp
 // Fencing is a single `attempt` integer bumped only by the orchestrator.
 //
 // Full field-by-field semantics: CONTRACT.md next to this file.
+//
+// CANONICAL COPY (th#1562). This file is the single source of truth for the
+// worker<->orchestrator schema. python-gen-worker carries a VENDORED copy at
+// proto/worker_scheduler.proto that must stay byte-for-byte identical to this
+// one — do not edit it by hand. To change the contract: edit THIS file, then
+// run scripts/vendor-proto.sh in python-gen-worker to resync and regenerate.
+// scripts/proto-drift-check.sh gates the two copies in both repos' CI.
 // ============================================================================
 
 // Exactly one live protocol version. Hello.protocol_version must equal
@@ -472,16 +479,16 @@ message FunctionCapability {
   repeated ModelIdentity models = 6;
   string compile_target_incarnation_id = 7;
   FunctionCapabilityState state = 8;
-  // th#1187/pgw#671 eager-first boot: the tier this READY function currently
-  // serves at — "" (pre-0.65 worker / unknown), "eager", or "compiled".
-  // A tier field on READY, deliberately NOT a new state enum value: an old
-  // hub ignores the unknown field and keeps dispatching (correct — the
-  // function genuinely serves), whereas an unknown enum numeric would read
-  // as not-dispatchable and starve a serving-capable worker. Flips
-  // eager->compiled on hot-swap (own mint arming or peer-cell adoption)
-  // with NO state flap; "serving eager while minting" is the hub-derived
-  // pair (state=READY, serving_tier=eager, self_mint_compile activity
-  // running).
+  // th#1187/pgw#671 eager-first boot. Execution tier this READY capability
+  // serves at: "" (pre-0.65 worker / unknown) | "eager" | "compiled". A TIER
+  // FIELD, never a new FunctionCapabilityState value: an unknown enum makes an
+  // old hub's switch refuse a genuinely serving worker (starvation), an
+  // unknown field is ignored and the old hub dispatches on state=READY exactly
+  // as today. The hub validates vocabulary loosely — an unrecognized tier
+  // reads as unknown, never as a shadow-state rejection. Flips
+  // eager->compiled on hot-swap (own mint arming or peer-cell adoption) with
+  // NO state flap; "serving eager while minting" is the hub-derived pair
+  // (state=READY, serving_tier=eager, self_mint_compile activity running).
   string serving_tier = 9;
 }
 
@@ -572,9 +579,9 @@ message ModelResolution {
   string lane         = 4;
   // pgw#714/th#1236: true when `lane` came from an OPERATOR endpoint-pin
   // (precision resolver source=endpoint-pin). A pinned `+eager` execution
-  // axis is a compile kill switch: the worker suppresses compile arming
-  // (no router, no background/foreground self-mint) instead of treating
-  // eager as merely the serving tier while a mint runs. Additive.
+  // axis is a compile kill switch on the worker: arming (router,
+  // background/foreground self-mint) is suppressed entirely, instead of
+  // treating eager as merely the serving tier while a mint runs. Additive.
   bool lane_pinned    = 5;
 }
 
@@ -815,14 +822,17 @@ message ModelBinding {
   // companion issue). Snapshots for these refs ride RunJob.snapshots /
   // DesiredResidency exactly like base refs. Additive: old workers ignore.
   map<string, string> components = 5;
-  // pgw#654 objective split (retires th#1017's never-landed regime field):
-  // the resolved checkpoint's hub-stamped training objective
-  // ("epsilon" | "v_prediction" | "flow"; "" = unstamped) and distillation
-  // fact. The SDK applies the objective to the per-request scheduler view
-  // and enforces the per-function @worker_function declaration as a
-  // backstop; the hub gates compatibility upstream. Additive.
+  // th#1139 (pgw#654) objective split, retiring th#1017's never-landed regime
+  // field: the resolved checkpoint's stamped serving facts. objective is the
+  // training objective ("epsilon" | "v_prediction" | "flow"; "" =
+  // unclassified/unstamped); distilled is the orthogonal post-training fact
+  // (false when unstamped). Populated at dispatch from the hub's catalog
+  // stamp — the SDK's scheduler construction reads them. The SDK applies the
+  // objective to the per-request scheduler view and enforces the per-function
+  // @worker_function declaration as a backstop; the hub gates compatibility
+  // upstream. Additive.
   string objective = 6;
-  bool distilled = 7;
+  bool   distilled = 7;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
@@ -851,12 +861,6 @@ message Snapshot {
   repeated SnapshotFile files = 2;
 }
 
-message ChunkRef {
-  string sha256 = 1;
-  string url    = 2; // presigned GET for this chunk
-  int64  len    = 3;
-}
-
 message SnapshotFile {
   string path       = 1;
   int64  size_bytes = 2;
@@ -882,6 +886,17 @@ message SnapshotFile {
   repeated ChunkRef chunks = 7;
 }
 
+// ChunkRef is one CAS object of a chunked file. sha256 is BARE lowercase hex
+// (the algorithm is fixed by schema). len is carried explicitly so the
+// cumulative offset of every chunk is readable without knowing the chunking
+// policy — which is what makes "file byte range X..Y" map to exactly one
+// (chunk index, offset) pair.
+message ChunkRef {
+  string sha256 = 1;
+  string url    = 2; // presigned GET for this chunk
+  int64  len    = 3;
+}
+
 // Worker -> orchestrator: dispatch acknowledged; the worker now owns
 // (request_id, attempt). Stops orchestrator retransmission.
 message JobAccepted {
@@ -904,16 +919,20 @@ message JobResult {
   }
   string safe_message = 6; // sanitized client-facing error text; empty when OK
   JobMetrics metrics = 7;
-  // pgw#654 caller-visible adjustment warnings: every divergence between a
-  // requested and a served value (clamp, substitution, injection) reaches
-  // the CALLER — the hub persists these on the request record and emits
-  // them on its events stream. Adjustments warn-and-serve; catalog-LOCKED
-  // recipe fields refuse typed upstream instead.
+  // th#1139 (pgw#654): caller-visible adjustments the worker's merge/clamp
+  // layer made to requested values — every divergence between a requested and
+  // a served value (clamp, substitution, injection), e.g. "guidance clamped
+  // 15->10 (model maximum)". The hub persists them on the request record,
+  // exposes them on the request read API, and emits them on the request events
+  // stream at result ingest — pod logs alone never reach the caller.
+  // Adjustments warn-and-serve; catalog-LOCKED recipe fields refuse typed
+  // upstream instead.
   repeated Adjustment adjustments = 8;
 }
 
-// One caller-visible adjustment: "guidance clamped 15 -> 10 (model
-// maximum)". Values are display-oriented strings.
+// One caller-visible adjustment: the worker served the request but modified
+// a requested value. requested/applied are rendered strings (the field's
+// JSON-ish spelling), reason is a short human-readable cause.
 message Adjustment {
   string field     = 1;
   string requested = 2;

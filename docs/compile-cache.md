@@ -11,7 +11,11 @@ split:
   `.tar.gz` flavor `#inductor-<sku>-torch<maj.min>` of the family system repo
   `root/family-<family>`.
 - **Consumer** — an endpoint opts in with
-  `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024))))`.
+  `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024)), text_len=512))`.
+  Every `compile=` endpoint MUST state `text_len` (ie#544): a positive value
+  pins the token length, `0` declares "no text conditioning". Omit it and a
+  prompt-length-dependent sequence dim mints a new graph per distinct prompt
+  length — unbounded and un-warmable.
   At load the worker seeds a VERIFIED artifact (exact-match on family, SKU,
   torch, triton, diffusers/transformers), then arms guarded `torch.compile`
   (static by declaration: `dynamic=None` + `assume_static_by_default` + explicit marks, SDK v2) on `Compile.targets`. Plain optional lanes fall back to eager
@@ -49,7 +53,11 @@ the worker loads itself — a slot annotated with the pipeline class (e.g.
 its own `setup()`, so the executor never sees the object and has nothing to
 arm compile on. Declaring `compile=Compile(...)` on such an endpoint used to
 be silently inert — the manifest/shape contract still got seeded, but
-nothing ever compiled. Discovery now hard-errors on this combination.
+nothing ever compiled. Registration (`registry.py` `_validate_compile_arms`,
+at decoration time, not discovery) now raises on this combination. It is a
+best-effort source scan, so it stays silent when `inspect.getsource(setup)`
+fails or when the string `arm_compile` appears anywhere in the setup body —
+do not treat a green build as proof that compile is armed.
 
 Fix one of:
 
@@ -69,7 +77,9 @@ Fix one of:
 
    `arm_compile` reads the endpoint's own `Compile` spec, cache dir, and any
    hub-attached artifact from a scope the executor holds open for the
-   duration of `setup()` — no `ctx` parameter needed, and it raises if
-   called anywhere else (compile is a setup-time-only concern). An endpoint
+   duration of `setup()` — no `ctx` parameter needed. With no active scope
+   (an eager release that declared no `compile=`) it logs once at info and
+   returns `False`; it never raises, so a self-loading `setup()` may call it
+   unconditionally (ie#522). An endpoint
    with several self-loaded pipelines sharing weights (e.g. one class
    assembling `self.t2i`/`self.i2v`/`self.v2v`) calls it once per object.

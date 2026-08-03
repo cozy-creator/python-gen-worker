@@ -12,8 +12,14 @@ import sys
 
 
 def main() -> int:
+    from gen_worker import postmortem
     from gen_worker.config import load_settings
     from gen_worker.worker import Worker
+
+    # The container entrypoint installs this before constructing Worker.  The
+    # harness enters one layer lower, so reproduce that production hook here
+    # rather than testing a child that cannot emit native-fault evidence.
+    postmortem.enable_fault_dump()
 
     # worker_jwt is deliberately NOT overridden: the loader reads WORKER_JWT
     # from the environment exactly as production does, so the pgw#763 delta-1

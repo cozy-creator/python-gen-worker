@@ -135,6 +135,13 @@ class SplitProbe:
         os.kill(os.getpid(), signal.SIGKILL)
         return ProbeOut(response="unreachable")
 
+    def segfault(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """Real native fault: exercises per-group faulthandler attribution."""
+        import ctypes
+
+        ctypes.string_at(0)
+        return ProbeOut(response="unreachable")
+
     def sleepy(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         """Long cancellable job: measures cancel latency across the seam."""
         for _ in range(1200):
