@@ -5,7 +5,7 @@ row by (tenant, name), fetch its blob manifest (th#698 wire format — a
 rows.jsonl-style entry index with presigned URLs / inline text / raw CAS
 blob digests) — polling 202 until the async snapshot build is ready
 (DATASET-V2 contract, gw#457) — and stream each entry to disk with
-algorithm-tagged digest verification + bounded retries.
+sha256 digest verification + bounded retries.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..api.errors import AuthError, SnapshotBuildFailedError
 from ..stall import SilenceWindow
 import requests
-import blake3
 
 logger = logging.getLogger(__name__)
 
@@ -247,12 +246,15 @@ def fetch_materialize_manifest(
         return str(data.get("snapshot_id") or ""), entries
 
 
-#: Digest algorithms this reader can verify. The hub emits ``sha256:`` for
-#: everything written since th#1303's dataset write flip; ``blake3`` stays only
-#: while the legacy corpus does (th#1412 phase 4).
+#: Digest algorithms this reader can verify.
+#:
+#: th#1412 phase 4: ``blake3`` is GONE. The dataset-CAS blake3 namespace was
+#: deleted 2026-08-03 (890 objects) and the hub can no longer build a blake3
+#: dataset key at all, so a ``blake3:`` checksum names bytes that do not exist.
+#: Keeping the hasher would let this reader verify a download that could never
+#: have been served -- and, worse, make a live blake3 entry look supported.
 _DIGEST_HASHERS: Dict[str, Callable[[], Any]] = {
     "sha256": hashlib.sha256,
-    "blake3": blake3.blake3,
 }
 
 

@@ -76,17 +76,16 @@ def test_sha256_checksum_accepts_right_bytes(serve, tmp_path: Path):
     assert (tmp_path / "shard.bin").read_bytes() == GOOD
 
 
-def test_blake3_checksum_still_rejects_wrong_bytes(serve, tmp_path: Path):
-    """The legacy corpus keeps its guard while it exists."""
-    url = serve(EVIL)
-    with pytest.raises(RuntimeError, match="digest mismatch"):
-        download_entries([_entry(url, f"blake3:{B3_GOOD}")], tmp_path)
-
-
-def test_blake3_checksum_accepts_right_bytes(serve, tmp_path: Path):
+def test_blake3_checksum_is_now_refused(serve, tmp_path: Path):
+    """th#1412 phase 4: the blake3 dataset namespace was DELETED (890 objects,
+    2026-08-03), so a blake3 checksum names bytes that cannot exist. It is
+    refused as an unsupported algorithm rather than verified -- verifying it
+    would make a dead spelling look supported. Correct bytes are served here on
+    purpose: the refusal must come from the ALGORITHM, not from a mismatch."""
     url = serve(GOOD)
-    download_entries([_entry(url, f"blake3:{B3_GOOD}")], tmp_path)
-    assert (tmp_path / "shard.bin").read_bytes() == GOOD
+    with pytest.raises(RuntimeError, match="unsupported digest algorithm"):
+        download_entries([_entry(url, f"blake3:{B3_GOOD}")], tmp_path)
+    assert not (tmp_path / "shard.bin").exists()
 
 
 def test_untagged_checksum_is_refused_not_guessed(serve, tmp_path: Path):
