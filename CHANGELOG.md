@@ -1,6 +1,54 @@
 # Changelog
 
-## Unreleased
+## 0.91.0 (2026-08-02) — **the native kernel lane lands dormant** (pgw#862/pgw#864: env-gated opt-in, OFF by default — no serving path changes until the gate is set), the envelope gains the DEGREE axis (th#1426), an unprovable cell can no longer be declared (th#959), and v2 publish restates classification (th#1411)
+
+MINOR, not patch: `Resources` gains a field (`max_gpus_per_execution_group`), `@endpoint`
+gains `weight_set=`, and th#959 turns a previously-declarable combination into a decoration-time
+refusal. The hub gate matches on major.minor, so **adoption requires `0.91` in
+`TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS`** — additive beside the current floor first, hardcut
+after the fleet moves (the fleet089 pattern).
+
+Range verified BY ANCESTRY: `git merge-base --is-ancestor` against the cut head for every
+must-ride, and `git rev-list --count v0.90.6..<cut>` counted at tag time (v0.90.6 was cut from
+`release/0.90.6`, which branched below chaos, so the range also re-lands that branch's three
+test repairs — cherry-picked back rather than re-derived).
+
+Highlights beyond the entries below:
+
+- **The native kernel lane (pgw#862 B0 + pgw#864), shipped DORMANT.** Hybrid serving path
+  settled on the 5090: fused smooth+quant kernel (blocked-scale store, bit-identical), proven
+  cuBLAS block-scaled GEMM, fused lora_up+scale+bias epilogue; AWQ W4A16 modulation served
+  packed-resident on the fused lane — in-kernel group-64 dequant GEMM at ~28% of the bf16
+  bytes, adanorm undo as an exact row permutation at load. Env-gated opt-in; the decode path
+  is unchanged and remains the degrade. `dot_scaled` GEMM stays registered as the measured
+  alternative and the sm_100 seed.
+- **th#959: `compile=` + `NoWarmup` is refused at decoration.** An unprovable cell must not be
+  declarable; the contradiction is named at import, not discovered on a pod.
+- **th#1411/pgw#654: `publish_flavors` restates the source checkpoint's classification**, so a
+  v2 re-publish can no longer strip the rows the hub's typed-400 gate (hub th#1411) now demands.
+- **th#1426: `Resources(max_gpus_per_execution_group=)` — the degree axis**, mirroring the hub's
+  envelope split of "how many GPUs" from "how they are grouped"; absent means "no opinion",
+  which resolves to the pod ceiling exactly as every deployed release already behaves.
+- **`@endpoint(weight_set=...)`: declare how BOUNDED an endpoint's weight set is** (Paul,
+  2026-08-02).
+- **th#1400: `HubClient.publish_v2` defaults to replace**, following the hub — a checkpoint is
+  complete in itself.
+- **pgw#882: a dataset shard is never accepted on size alone** — the hasher is chosen by the
+  checksum's TAG, and an untagged checksum is refused.
+- **pgw#848 item 5: crash-only mint.** A finished entry survives the attempt and is re-admitted
+  only when its identity RE-DERIVES; the bank now also outlives ABANDONMENT, which is how a
+  crashed mint ends and was deleting the recovery on its way out.
+- **pgw#868 A4: the export-parallel seam is WIRED** — producer and consumer were both built in
+  0.90.6 and never joined; still OFF behind `GEN_WORKER_AOT_EXPORT_PARALLEL`.
+- **pgw#869: an absent hub is a verdict about nothing** — the auth ladder no longer kills a
+  worker that outlived its token, and the outbox gains a durable lane for FACTS beside RESULTS.
+- **pgw#870/pgw#871: config numbers are type-checked, bounded, and non-integers refused; the
+  repo's two CAS readers now agree with each other AND with the hub.**
+- **pgw#858: credential floor in both `.dockerignore` files** — the build context can no longer
+  carry a secret into an image layer.
+- **te#152: three `writer.py` names promoted out of the private namespace.**
+- **docs: `docs/releasing.md`** — batch cuts (cut when a POD RUN needs one), endpoints pin
+  RANGES bounded at the hub-admitted major.minor, conversion tracks newest (Paul, 2026-08-02).
 
 - **pgw#876 §4 — the `worker_mode=""` fingerprint is now a red test instead of a paid pod.**
   `tests/test_wire_facts_pgw876.py` pins the two-builder hazard from both sides. **(a)** Feed
