@@ -5,6 +5,7 @@ Reads refs_map.json next to this file. Weights never touch the control box."""
 from __future__ import annotations
 
 import concurrent.futures as cf
+import hashlib
 import json
 import os
 import sys
@@ -97,22 +98,43 @@ def fp8_from_manifest(manifest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and dest.stat().st_size == f["size_bytes"]:
             return dest, f["size_bytes"], "cached"
+        # Big objects are chunk-CAS (th#1310): one presigned URL per chunk,
+        # in order. Small ones carry a single "url".
+        urls = f.get("chunk_urls") or ([f["url"]] if f.get("url") else [])
+        if not urls:
+            raise KeyError(f"{f['path']}: manifest entry has no url/chunk_urls")
+        tmp = dest.with_suffix(dest.suffix + ".part")
         for attempt in range(3):
             try:
-                with urllib.request.urlopen(f["url"], timeout=120) as r, \
-                        open(dest, "wb") as fh:
-                    while True:
-                        chunk = r.read(1 << 24)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
+                with open(tmp, "wb") as fh:
+                    for u in urls:
+                        with urllib.request.urlopen(u, timeout=300) as r:
+                            while True:
+                                chunk = r.read(1 << 24)
+                                if not chunk:
+                                    break
+                                fh.write(chunk)
+                got = tmp.stat().st_size
+                if got != f["size_bytes"]:
+                    raise OSError(f"{f['path']}: got {got} of "
+                                  f"{f['size_bytes']} bytes")
+                want = str(f.get("digest") or "")
+                if want.startswith("sha256:"):
+                    h = hashlib.sha256()
+                    with open(tmp, "rb") as fh:
+                        for blk in iter(lambda: fh.read(1 << 24), b""):
+                            h.update(blk)
+                    if h.hexdigest() != want.split(":", 1)[1]:
+                        raise OSError(f"{f['path']}: sha256 mismatch — "
+                                      f"chunk order or content is wrong")
+                tmp.rename(dest)
                 break
             except Exception as exc:  # noqa: BLE001
                 print(f"[mat] fp8 attempt{attempt} {f['path']}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
                 if attempt == 2:
                     raise
-        return dest, dest.stat().st_size, "get"
+        return dest, dest.stat().st_size, f"get({len(urls)} chunks)"
 
     with cf.ThreadPoolExecutor(max_workers=6) as ex:
         for fu in cf.as_completed([ex.submit(fetch, f) for f in want]):
@@ -125,6 +147,10 @@ def main() -> int:
     # chaos-R2 qwen refs blobs GC'd 2026-08-01 -> HF mirror is primary now.
     # --bf16 also pulls the transformer shards: the same-card bf16 arm.
     refs_from_hf("--bf16" in sys.argv)
+    # Markers as soon as each artifact is real: the reference tree and the
+    # svdq checkpoint are what every arm needs, and an optional extra
+    # artifact must never be able to invalidate them.
+    print("REFS_TREE=" + str(REFS), flush=True)
 
     NUN.mkdir(parents=True, exist_ok=True)
     from huggingface_hub import hf_hub_download
@@ -134,12 +160,17 @@ def main() -> int:
         revision="4d9f4f667ea571ab172e0ee29ac2c27b82a41a6b",
         local_dir=str(NUN), token=os.environ.get("HF_TOKEN") or None)
     print(f"[mat] nunchaku -> {fn} {Path(fn).stat().st_size/1e9:.2f} GB", flush=True)
+    print("NUN_FILE=" + str(fn), flush=True)
+
     man = Path("/root/fp8_manifest.json")
     if "--fp8" in sys.argv and man.exists():
-        fp8_from_manifest(man)
-
-    print("REFS_TREE=" + str(REFS), flush=True)
-    print("NUN_FILE=" + str(fn), flush=True)
+        try:
+            fp8_from_manifest(man)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[mat] fp8 flavor FAILED ({type(exc).__name__}: {exc}) — "
+                  f"the fp8 arms will be skipped, every other arm stands",
+                  flush=True)
+    print("MAT_DONE", flush=True)
     return 0
 
 

@@ -360,146 +360,166 @@ def main() -> int:
 
         ck = refs_tree = ""
 
+        dropped: set = set()
+
         for cell in cells:
+            if cell in dropped:
+                print(f"[skip] {cell} — dropped upstream", flush=True)
+                continue
             print(f"\n===== CELL {cell} "
                   f"(t+{(time.time() - started) / 60:.0f}min) =====",
                   flush=True)
+            try:
 
-            if cell == "mat":
-                flag = "--bf16" if want_bf16 else ""
-                if want_fp8:
-                    org, name, tag, flavor = FP8_REF
-                    url = (f"{HUB_BASE}/api/v1/repos/{org}/{name}/resolve"
-                           f"?tag={tag}&flavor={flavor}")
-                    with urllib.request.urlopen(url, timeout=120) as fh:
-                        man = json.loads(fh.read())
-                    manifest["fp8_checkpoint_id"] = man["checkpoint_id"]
-                    manifest["fp8_size_bytes"] = man["size_bytes"]
-                    mf = res / "fp8_manifest.json"
-                    mf.write_text(json.dumps(man))
-                    print(f"[mat] fp8 flavor {man['checkpoint_id']} "
-                          f"{man['size_bytes'] / 1e9:.1f} GB resolved",
-                          flush=True)
-                    rc, _o = sh(["scp", *SSH_OPTS, "-P", str(port), str(mf),
-                                 f"root@{ip}:/root/fp8_manifest.json"], 120)
-                    assert rc == 0, "fp8 manifest scp failed"
-                    flag += " --fp8"
-                ssh(ip, port,
-                    f"setsid nohup python3 /root/materialize_bench.py {flag} "
-                    f"> /root/mat.log 2>&1 & echo started", 60,
-                    env={"HF_TOKEN": hf})
-                last, stalls = -1, 0
-                deadline = time.time() + 90 * 60
-                while time.time() < deadline:
-                    time.sleep(60)
-                    _rc, out = ssh(
-                        ip, port,
-                        "grep -hE 'NUN_FILE=|REFS_TREE=' /root/mat.log "
-                        "2>/dev/null; du -sb /root/art 2>/dev/null | cut -f1",
-                        60)
-                    size = 0
-                    for line in out.splitlines():
-                        if line.startswith("NUN_FILE="):
-                            ck = line.split("=", 1)[1].strip()
-                        elif line.startswith("REFS_TREE="):
-                            refs_tree = line.split("=", 1)[1].strip()
-                        elif line.strip().isdigit():
-                            size = int(line.strip())
-                    if ck and refs_tree:
-                        break
-                    stalls = stalls + 1 if size == last else 0
-                    last = size
-                    print(f"[mat] {size / 2**30:.1f} GiB (stalls={stalls})",
-                          flush=True)
-                    if stalls >= 10:
-                        print("[mat] stalled 10min — abort", flush=True)
-                        break
-                print(f"[mat] ck={ck!r} refs={refs_tree!r}", flush=True)
-                if not (ck and refs_tree):
-                    return 5
-                if want_fp8:
-                    _rc, out = ssh(ip, port,
-                                   "ls /root/art/fp8/transformer/*.safetensors "
-                                   "| wc -l; du -sh /root/art/fp8", 60)
-                    print(f"[mat] fp8 tree: {out.strip()}", flush=True)
-                    assert out.strip().split()[0] != "0", "fp8 tree empty"
-                manifest["ckpt"], manifest["refs_tree"] = ck, refs_tree
-                bank()
-                continue
-
-            assert ck and refs_tree, "mat must run (or be resumed) first"
-
-            if cell in ("corr", "bb", "bf"):
-                mode = "correctness" if cell == "corr" else "bench"
-                env_val = "1" if cell in ("corr", "bf") else "0"
-                ssh(ip, port,
-                    f"setsid nohup env GEN_WORKER_NATIVE_KERNELS={env_val} "
-                    f"python3 /root/bench_b0.py --ckpt {ck} "
-                    f"--out /root/b0_{cell} --mode {mode} "
-                    f"> /root/{cell}.log 2>&1 & echo started", 60)
-                ok, tail = wait_for(ip, port, f"/root/{cell}.log",
-                                    "DONE", 45 * 60, 45, cell)
-                (res / f"{cell}_log.txt").write_text(tail)
-                sh(["scp", *SSH_OPTS, "-P", str(port), "-r",
-                    f"root@{ip}:/root/b0_{cell}", str(res) + "/"], 600)
-                print(f"[{cell}] ok={ok}\n{tail[-1200:]}", flush=True)
-                manifest["results"][cell] = "ok" if ok else "FAILED"
-                bank()
-                if not ok:
-                    return 6
-                continue
-
-            if cell.startswith("e:"):
-                name = cell[2:]
-                env_val, extra = ARMS[name]
-                rows = f"--rows {args.rows}" if args.rows else ""
-                rows += (f" --norm-rows {args.norm_rows} "
-                         f"--norm-shape {args.norm_shape}")
-                ssh(ip, port,
-                    f"setsid nohup env GEN_WORKER_NATIVE_KERNELS={env_val} "
-                    f"python3 /root/bench_arm.py {extra} --ckpt {ck} "
-                    f"--reference-tree {refs_tree} "
-                    f"--prompts /root/bench_prompts.json {rows} "
-                    f"--out /root/e2e/{name} > /root/arm_{name}.log 2>&1 & "
-                    f"echo started", 60)
-                ok, tail = wait_for(ip, port, f"/root/arm_{name}.log",
-                                    "DONE", 100 * 60, 90, f"arm {name}")
-                (res / f"arm_{name}_log.txt").write_text(tail)
-                sh(["scp", *SSH_OPTS, "-P", str(port), "-r",
-                    f"root@{ip}:/root/e2e/{name}", str(res) + "/"], 900)
-                print(f"[arm {name}] ok={ok}\n{tail[-1200:]}", flush=True)
-                manifest["results"][cell] = "ok" if ok else "FAILED"
-                bank()
-                if not ok:
-                    return 6
-                continue
-
-            if cell == "met":
-                done = [a for a in e2e_arms
-                        if manifest["results"].get(f"e:{a}") == "ok"]
-                if "bf16" not in done or len(done) < 2:
-                    print("[met] need bf16 + >=1 candidate arm — skipped",
-                          flush=True)
+                if cell == "mat":
+                    flag = "--bf16" if want_bf16 else ""
+                    if want_fp8:
+                        org, name, tag, flavor = FP8_REF
+                        url = (f"{HUB_BASE}/api/v1/repos/{org}/{name}/resolve"
+                               f"?tag={tag}&flavor={flavor}")
+                        with urllib.request.urlopen(url, timeout=120) as fh:
+                            man = json.loads(fh.read())
+                        manifest["fp8_checkpoint_id"] = man["checkpoint_id"]
+                        manifest["fp8_size_bytes"] = man["size_bytes"]
+                        mf = res / "fp8_manifest.json"
+                        mf.write_text(json.dumps(man))
+                        print(f"[mat] fp8 flavor {man['checkpoint_id']} "
+                              f"{man['size_bytes'] / 1e9:.1f} GB resolved",
+                              flush=True)
+                        rc, _o = sh(["scp", *SSH_OPTS, "-P", str(port), str(mf),
+                                     f"root@{ip}:/root/fp8_manifest.json"], 120)
+                        assert rc == 0, "fp8 manifest scp failed"
+                        flag += " --fp8"
+                    ssh(ip, port,
+                        f"setsid nohup python3 /root/materialize_bench.py {flag} "
+                        f"> /root/mat.log 2>&1 & echo started", 60,
+                        env={"HF_TOKEN": hf})
+                    last, stalls = -1, 0
+                    deadline = time.time() + 90 * 60
+                    while time.time() < deadline:
+                        time.sleep(60)
+                        _rc, out = ssh(
+                            ip, port,
+                            "grep -hE 'NUN_FILE=|REFS_TREE=' /root/mat.log "
+                            "2>/dev/null; du -sb /root/art 2>/dev/null | cut -f1",
+                            60)
+                        size = 0
+                        for line in out.splitlines():
+                            if line.startswith("NUN_FILE="):
+                                ck = line.split("=", 1)[1].strip()
+                            elif line.startswith("REFS_TREE="):
+                                refs_tree = line.split("=", 1)[1].strip()
+                            elif line.strip().isdigit():
+                                size = int(line.strip())
+                        if ck and refs_tree:
+                            break
+                        stalls = stalls + 1 if size == last else 0
+                        last = size
+                        print(f"[mat] {size / 2**30:.1f} GiB (stalls={stalls})",
+                              flush=True)
+                        if stalls >= 10:
+                            print("[mat] stalled 10min — abort", flush=True)
+                            break
+                    print(f"[mat] ck={ck!r} refs={refs_tree!r}", flush=True)
+                    if not (ck and refs_tree):
+                        return 5
+                    if want_fp8:
+                        _rc, out = ssh(ip, port,
+                                       "ls /root/art/fp8/transformer/"
+                                       "*.safetensors 2>/dev/null | wc -l; "
+                                       "du -sh /root/art/fp8 2>/dev/null", 60)
+                        print(f"[mat] fp8 tree: {out.strip()}", flush=True)
+                        # An OPTIONAL artifact that did not land drops its OWN
+                        # arms. It does not fail the run, and it must never tear
+                        # down a pod already carrying 70 GB of other artifacts.
+                        if out.strip().split()[:1] == ["0"]:
+                            dropped.update(f"e:{a}" for a in NEEDS_FP8_TREE)
+                            print("[mat] fp8 tree absent — fp8 arms dropped; "
+                                  "every other arm stands", flush=True)
+                    manifest["ckpt"], manifest["refs_tree"] = ck, refs_tree
+                    bank()
                     continue
-                cand = " ".join(f"--cand {a}=/root/e2e/{a}"
-                                for a in done if a != "bf16")
-                ssh(ip, port,
-                    "python3 -c 'import torchmetrics' 2>/dev/null || "
-                    "pip install -q torchmetrics lpips 2>&1 | tail -2", 900)
-                rc, out = ssh(
-                    ip, port,
-                    f"python3 /root/metrics_pod.py --ref /root/e2e/bf16 "
-                    f"{cand} --out /root/metrics.json 2>&1 | tail -60", 1800)
-                (res / "metrics_log.txt").write_text(out)
-                sh(["scp", *SSH_OPTS, "-P", str(port),
-                    f"root@{ip}:/root/metrics.json", str(res) + "/"], 300)
-                print(f"[met] rc={rc}\n{out[-2000:]}", flush=True)
-                manifest["results"]["met"] = "ok" if rc == 0 else "FAILED"
+
+                if not (ck and refs_tree):
+                    raise RuntimeError("mat must run before any other cell")
+
+                if cell in ("corr", "bb", "bf"):
+                    mode = "correctness" if cell == "corr" else "bench"
+                    env_val = "1" if cell in ("corr", "bf") else "0"
+                    ssh(ip, port,
+                        f"setsid nohup env GEN_WORKER_NATIVE_KERNELS={env_val} "
+                        f"python3 /root/bench_b0.py --ckpt {ck} "
+                        f"--out /root/b0_{cell} --mode {mode} "
+                        f"> /root/{cell}.log 2>&1 & echo started", 60)
+                    ok, tail = wait_for(ip, port, f"/root/{cell}.log",
+                                        "DONE", 45 * 60, 45, cell)
+                    (res / f"{cell}_log.txt").write_text(tail)
+                    sh(["scp", *SSH_OPTS, "-P", str(port), "-r",
+                        f"root@{ip}:/root/b0_{cell}", str(res) + "/"], 600)
+                    print(f"[{cell}] ok={ok}\n{tail[-1200:]}", flush=True)
+                    manifest["results"][cell] = "ok" if ok else "FAILED"
+                    bank()
+                    continue
+
+                if cell.startswith("e:"):
+                    name = cell[2:]
+                    env_val, extra = ARMS[name]
+                    rows = f"--rows {args.rows}" if args.rows else ""
+                    rows += (f" --norm-rows {args.norm_rows} "
+                             f"--norm-shape {args.norm_shape}")
+                    ssh(ip, port,
+                        f"setsid nohup env GEN_WORKER_NATIVE_KERNELS={env_val} "
+                        f"python3 /root/bench_arm.py {extra} --ckpt {ck} "
+                        f"--reference-tree {refs_tree} "
+                        f"--prompts /root/bench_prompts.json {rows} "
+                        f"--out /root/e2e/{name} > /root/arm_{name}.log 2>&1 & "
+                        f"echo started", 60)
+                    ok, tail = wait_for(ip, port, f"/root/arm_{name}.log",
+                                        "DONE", 100 * 60, 90, f"arm {name}")
+                    (res / f"arm_{name}_log.txt").write_text(tail)
+                    sh(["scp", *SSH_OPTS, "-P", str(port), "-r",
+                        f"root@{ip}:/root/e2e/{name}", str(res) + "/"], 900)
+                    print(f"[arm {name}] ok={ok}\n{tail[-1200:]}", flush=True)
+                    manifest["results"][cell] = "ok" if ok else "FAILED"
+                    bank()
+                    continue
+
+                if cell == "met":
+                    done = [a for a in e2e_arms
+                            if manifest["results"].get(f"e:{a}") == "ok"]
+                    if "bf16" not in done or len(done) < 2:
+                        print("[met] need bf16 + >=1 candidate arm — skipped",
+                              flush=True)
+                        continue
+                    cand = " ".join(f"--cand {a}=/root/e2e/{a}"
+                                    for a in done if a != "bf16")
+                    ssh(ip, port,
+                        "python3 -c 'import torchmetrics' 2>/dev/null || "
+                        "pip install -q torchmetrics lpips 2>&1 | tail -2", 900)
+                    rc, out = ssh(
+                        ip, port,
+                        f"python3 /root/metrics_pod.py --ref /root/e2e/bf16 "
+                        f"{cand} --out /root/metrics.json 2>&1 | tail -60", 1800)
+                    (res / "metrics_log.txt").write_text(out)
+                    sh(["scp", *SSH_OPTS, "-P", str(port),
+                        f"root@{ip}:/root/metrics.json", str(res) + "/"], 300)
+                    print(f"[met] rc={rc}\n{out[-2000:]}", flush=True)
+                    manifest["results"]["met"] = "ok" if rc == 0 else "FAILED"
+                    bank()
+                    continue
+
+                raise RuntimeError(f"unknown cell {cell}")
+
+            except Exception as exc:  # noqa: BLE001
+                # One cell's failure is one row missing from the table, not a
+                # lost pod. Only `mat` is load-bearing for everything after.
+                print(f"[{cell}] RAISED {type(exc).__name__}: {exc}",
+                      flush=True)
+                manifest["results"][cell] = f"RAISED {type(exc).__name__}"
                 bank()
+                if cell == "mat":
+                    return 5
                 continue
-
-            raise SystemExit(f"unknown cell {cell}")
-
         return 0
     finally:
         manifest["elapsed_min"] = (time.time() - started) / 60
