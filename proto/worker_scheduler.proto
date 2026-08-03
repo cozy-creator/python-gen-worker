@@ -1340,9 +1340,30 @@ message BootPhase {
 // function reappearing in StateDelta.available_functions.
 message FnUnavailable {
   string function_name = 1;
-  // reason vocabulary: compute_capability_unmet, insufficient_vram,
-  // missing_cuda_library, insufficient_disk, host_ram_capacity,
-  // cuda_unavailable, setup_failed.
+  // reason vocabulary — the CLOSED set. Every token here is a write into
+  // gen-worker's `ExecutorState.unavailable` map (gen_worker/executor.py),
+  // which `lifecycle._emit_unavailable` puts on this wire verbatim; nothing
+  // else may appear in this field. An incomplete list here is not cosmetic:
+  // O's per-reason lifetime policy (th#1100) reads these tokens, so a reason
+  // the list forgot is a reason nobody checked O's handling of.
+  //
+  // Machine FACTS about this pod — nothing O can wait for changes them, so O
+  // never re-probes them on a timer:
+  //   compute_capability_unmet, missing_cuda_library, cuda_unavailable,
+  //   hardware_unmet, native_crash_streak.
+  // `hardware_unmet` is HardwareUnmetError's base default: a gate subclass
+  // that declares no token of its own reports under it.
+  //
+  // State that can change — O re-probes these with backoff:
+  //   insufficient_vram, insufficient_disk, insufficient_host_ram,
+  //   host_ram_capacity, setup_failed, retry_exhausted, compile_cell_failed,
+  //   model_unavailable, multi_group_async_handler, cancel_unwind_stuck.
+  //
+  // `native_crash_streak` is not only an availability fact: W's own PROCESS
+  // died by signal on this pod and W's registry refuses the function there
+  // (pgw#676). It carries axes{streak, last_signal, last_kind}, and O
+  // condemns the WORKER on it (th#1205) — the pod is recycled, so the
+  // recovery from this one disable is the pod going away, not a re-probe.
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}
