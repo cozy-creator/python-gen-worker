@@ -34,6 +34,13 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 REF = "root/family-sdxl#ck5-" + "b" * 56
 DIGEST = "blake3:" + "c" * 64
 
+#: The arm is INDUCED to take this long, and the floor asserted against it is a
+#: share of that induced quantity rather than a bare constant (pgw#795). This is
+#: a LOWER bound on work the test itself produced: a slow runner only raises the
+#: measured value, so nothing here can fail because the machine was busy.
+_INDUCED_ARM_S = 0.05
+_MEASURED_ARM_FLOOR_MS = int(_INDUCED_ARM_S * 1000 * 0.8)
+
 
 @pytest.fixture(autouse=True)
 def _reset() -> Any:
@@ -155,7 +162,7 @@ def test_the_arm_is_measured_and_recorded_as_the_cell_arm_boot_phase(
     artifact.write_bytes(b"cell")
 
     def _slow_arm(pipe: Any, cfg: Any, cache_dir: Any, art: Any) -> AdoptOutcome:
-        time.sleep(0.05)
+        time.sleep(_INDUCED_ARM_S)
         return AdoptOutcome.hit("family=sdxl key=ck5-abc")
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _slow_arm)
@@ -165,14 +172,14 @@ def test_the_arm_is_measured_and_recorded_as_the_cell_arm_boot_phase(
 
     assert outcome.armed
     assert len(outcome.adoptions) == 1
-    assert outcome.adoptions[0].arm_ms >= 40
+    assert outcome.adoptions[0].arm_ms >= _MEASURED_ARM_FLOOR_MS
 
     arm_rows = [r for r in boot_phases.recorded_rows()
                 if r.phase == boot_phases.PHASE_CELL_ARM and r.terminal]
     assert len(arm_rows) == 1, "the arm recorded no cell_arm boot phase"
     assert arm_rows[0].ref == REF
     assert arm_rows[0].artifact_key == DIGEST
-    assert arm_rows[0].duration_ms >= 40
+    assert arm_rows[0].duration_ms >= _MEASURED_ARM_FLOOR_MS
     assert arm_rows[0].outcome == boot_phases.OUTCOME_OK
 
 

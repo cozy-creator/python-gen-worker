@@ -31,6 +31,13 @@ import pytest
 from gen_worker import activity, aot_cells, aot_serve, fleet_cells
 from gen_worker.cell_adopt import AdoptOutcome
 
+#: The arm is INDUCED to take this long, and the floor asserted against it is a
+#: share of that induced quantity rather than a bare constant (pgw#795). This is
+#: a LOWER bound on work the test itself produced: a slow runner only raises the
+#: measured value, so nothing here can fail because the machine was busy.
+_INDUCED_ARM_S = 0.02
+_MEASURED_ARM_FLOOR_MS = int(_INDUCED_ARM_S * 1000 * 0.75)
+
 FAMILY = "sdxl"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
            "cuda": "13.0"}
@@ -294,7 +301,7 @@ def test_fleet_success_is_one_measured_adoption_bound_to_the_candidate(
 ) -> None:
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
         pipe._cozy_aot = {"state": {"failed": False}}
-        time.sleep(0.02)  # a real arm costs time; a measured one records it
+        time.sleep(_INDUCED_ARM_S)  # a real arm costs time; a measured one records it
         return AdoptOutcome.hit(f"family={FAMILY} key={KEY}")
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)
@@ -308,7 +315,8 @@ def test_fleet_success_is_one_measured_adoption_bound_to_the_candidate(
     # measurement lane exists for. `arm_ms == 0` is what shipped for a year.
     assert row.ref == _f1.ref and row.snapshot_digest == _f1.snapshot_digest
     assert row.artifact_kind == aot_serve.ARTIFACT_KIND
-    assert row.arm_ms >= 15, "the adoption recorded no time at all"
+    assert row.arm_ms >= _MEASURED_ARM_FLOOR_MS, (
+        "the adoption recorded no time at all")
 
 
 def test_fleet_did_not_arm_is_a_measured_refusal_naming_the_candidate(
