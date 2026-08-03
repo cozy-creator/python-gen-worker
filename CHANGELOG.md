@@ -1,14 +1,42 @@
 # Changelog
 
-## Unreleased
+## 0.92.0 (2026-08-03) — **`weight_set` is deleted from `@endpoint`** (pgw#919/th#1559: NFS volumes follow `kind=`, not an author declaration), and child-call pipelining is answered by measurement (pgw#943)
 
-- **pgw#766 / th#1566: `Slot(family=...)` makes non-root model governance
-  explicit.** pgw#747 correctly stopped stamping family-agnostic auxiliaries
-  with a function's model family, but inferred agnosticism from the proxy
-  "non-root + no hardcoded checkpoint". That also emptied deploy-bound model
-  lanes such as qwen-image's `edit`, disabling the hub's binding and serving-
-  contract gates. A non-empty explicit family now overrides that inference;
-  an explicit empty family keeps an auxiliary agnostic, and omission preserves
+MINOR: `@endpoint(weight_set=)` is removed. It was declared by **0 of 1,129** function rows
+fleet-wide and shipped in no published tag, so nothing to migrate; passing it is now a
+`TypeError`. Publish is unaffected — `manifestFunction` decodes with plain `encoding/json`
+and no `DisallowUnknownFields`, so an older SDK still emitting the field has it dropped.
+
+- **`weight_set` deleted, not defaulted (pgw#919).** Paul's ruling (th#1559 §4.22):
+  *"inference gets NFS drives, hard stop, no question, whereas others do not get NFS
+  drives."* NFS volumes follow `@endpoint(kind=)`; there is no author declaration, no config
+  knob, and no derivation from slot policy — both were proposed and rejected. The 0-of-1,129
+  measurement was never an adoption gap: `weight_set` asked the author to compile in a fact an
+  operator invalidates post-deploy by flipping a slot to `open`. Gone from `api/decorators.py`
+  (`WEIGHT_SETS`, `_validate_weight_set`, `EndpointDecl.weight_set`, every signature and
+  forward site), `registry.py` (`EndpointSpec.weight_set` and its
+  `getattr(decl, "weight_set", None)` read — the defaulted read over a field nobody sets is
+  what kept the gap invisible across 31 packages) and the discovery manifest. Recorded in
+  `DELETED_FIELDS`, so `assert_sdk_shape()` enforces it everywhere at once. The hub half
+  (column drops, kind-keyed volume gate, 11 volumes / 1,061 GB reaped) is already promoted.
+- **Child calls do NOT release the GPU (pgw#943) — measured, on the real executor.** First
+  execution of `ctx.call_endpoint` end to end (`requests.parent_request_id` was non-empty on
+  0 of 800 rows; `max(call_depth)` was 0). Two facts, both now pinned by
+  `tests/test_child_call_pipelining_pgw943.py`: intake and the event loop stay free (a sync
+  handler parked in `CalloutClient.wait` sits on an `asyncio.to_thread` worker, so a second
+  dispatch is accepted and CPU endpoints genuinely pipeline), but at `gpu_slots=1` — the
+  `G == 1` packing every pod runs — the parent holds group 0's permit for the entire child
+  call, and the second GPU request enters its handler only ~10 ms after the child completes.
+  `_run_job` takes the permit before the handler (`executor.py:11741`) and
+  `RequestContext.call_endpoint` never enters `_gpu_slot_yielded`, the lease `save_bytes` uses
+  for exactly this reason (#382). No behaviour change here — the finding is filed, the
+  regression test flips deliberately when the yield lands.
+- **pgw#766 / th#1566: `Slot(family=...)` makes non-root model governance explicit.**
+  pgw#747 correctly stopped stamping family-agnostic auxiliaries with a function's model
+  family, but inferred agnosticism from the proxy "non-root + no hardcoded checkpoint". That
+  also emptied deploy-bound model lanes such as qwen-image's `edit`, disabling the hub's
+  binding and serving-contract gates. A non-empty explicit family now overrides that
+  inference; an explicit empty family keeps an auxiliary agnostic, and omission preserves
   pgw#747's compatibility behavior.
 
 ## 0.91.4 (2026-08-03) — **pgw#850: the self-mint path was dead fleet-wide by COMPOSITION, and the fix is a deletion**
