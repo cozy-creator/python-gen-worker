@@ -8,6 +8,11 @@ memory ... CUDA error 401"*. Sequence parallelism did not work at all on a stock
 
 Layer exercised: `parallel.group.init_rank` (the one function every rank of
 every group runs before any communicator exists).
+
+Contract UPDATED by pgw#929 §1.17 (AMBIGUOUS #3): the write is UNCONDITIONAL.
+pgw#773's respect-if-set behaviour was superseded, not regressed — see
+`test_nvls_is_off_whatever_the_image_says` for the argument and for the
+condition the override's removal has to keep meeting.
 """
 
 from __future__ import annotations
@@ -30,16 +35,52 @@ from gen_worker.parallel.group import (  # noqa: E402
 )
 
 
-def test_nvls_is_off_unless_the_image_says_otherwise(monkeypatch) -> None:
+def test_nvls_is_off_whatever_the_image_says(monkeypatch, caplog) -> None:
+    """pgw#929 §1.17 AMBIGUOUS #3 supersedes pgw#773's respect-if-set default.
+
+    pgw#773 wrote ``0`` only when the variable was UNSET and called that "a
+    default, not an override". It never argued for the override: the issue was
+    a live CUDA-401 bug hunt, and respect-if-set was the incidental shape of
+    the one-line fix, not a considered escape hatch with a named user. pgw#929
+    re-adjudicated the same variable and ruled it a LIBRARY-ADAPTER HANDOFF
+    rather than operator configuration, because the failure it guards is TOTAL
+    (every all-to-all of every arm dies) rather than gradual — so an env
+    inherited from an image can silently take sequence parallelism to zero.
+
+    This test therefore pins the ruling's own acceptance criterion: start at
+    ``1``, prove the adapter overwrites it to ``0`` before NCCL can observe it.
+    """
     monkeypatch.delenv(_NVLS_ENV, raising=False)
     _refuse_nvls_multicast()
     assert os.environ[_NVLS_ENV] == "0"
 
-    # An image that CAN bind multicast keeps its own answer: this decides a
-    # default, it is not an override.
     monkeypatch.setenv(_NVLS_ENV, "1")
+    with caplog.at_level("WARNING", logger="gen_worker.parallel.group"):
+        _refuse_nvls_multicast()
+    assert os.environ[_NVLS_ENV] == "0", "an image default may not re-enable NVLS"
+
+    # The losing half of the ruling still has to hold: removing an escape hatch
+    # is only acceptable while the removal REPORTS itself. Whoever set the
+    # variable learns that it was dropped, what it was, and where the real
+    # route runs — never a silent inversion of what they asked for.
+    assert caplog.records, "a dropped operator override must not be silent"
+    msg = caplog.records[-1].getMessage()
+    assert _NVLS_ENV in msg and "'1'" in msg
+    assert "new issue" in msg, "the warning must name the route, not just the refusal"
+
+
+@pytest.mark.parametrize("preset", ["1", "0", "", "true", "TRUE", "yes", "2", " 1 "])
+def test_no_image_value_can_revive_nvls(monkeypatch, preset: str) -> None:
+    """The ratchet, stated behaviourally rather than over source text.
+
+    The override is back the moment ANY incoming value survives, so the pin is
+    that every one of them lands on ``0`` — including the truthy spellings a
+    hand-written Dockerfile actually uses. A branch reintroduced anywhere on
+    the read side shows up here as a value that is not ``0``.
+    """
+    monkeypatch.setenv(_NVLS_ENV, preset)
     _refuse_nvls_multicast()
-    assert os.environ[_NVLS_ENV] == "1"
+    assert os.environ[_NVLS_ENV] == "0", f"{preset!r} survived the adapter"
 
 
 def test_forming_a_rank_sets_it_before_any_communicator_exists(monkeypatch) -> None:

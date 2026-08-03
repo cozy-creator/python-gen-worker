@@ -171,6 +171,12 @@ def _refuse_nvls_multicast() -> None:
 
     A future collective that can benefit from NVLS needs a measured capability
     and its own issue. It may not revive this as a gate.
+
+    Removing an override removes an escape hatch, so the override is never
+    silently discarded: whoever set it is TOLD, at the moment it is dropped,
+    what was dropped and where the real route runs. A hard override that
+    reports itself is recoverable; one that does not is the thing worth
+    refusing.
     """
     previous = os.environ.get(_NVLS_ENV)
     os.environ[_NVLS_ENV] = "0"
@@ -179,7 +185,10 @@ def _refuse_nvls_multicast() -> None:
             "%s was %r; overwritten to 0. NVLS multicast cannot be bound in "
             "our containers (measured: ncclUnhandledCudaError / CUDA 401 on "
             "the first all-to-all of every group) and Ulysses does not use it "
-            "— this is not an operator choice (pgw#929)",
+            "— this is not an operator choice (pgw#929). If you have a "
+            "collective and a container that genuinely bind NVLS multicast, "
+            "that is a measured capability and a new issue, not this env: "
+            "re-enabling it here takes down every arm of every group.",
             _NVLS_ENV, previous,
         )
 
