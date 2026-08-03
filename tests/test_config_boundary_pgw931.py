@@ -165,3 +165,36 @@ def test_a_foreign_env_is_never_reported(monkeypatch) -> None:
     reported = config.unrecognised_owned_env()
     assert "HF_HUB_ENABLE_HF_TRANSFER" not in reported
     assert "CUDA_VISIBLE_DEVICES" not in reported
+
+
+# ---------------------------------------------------------------------------
+# 4. Derived process facts are established WHERE THE SETTINGS ARRIVE
+# ---------------------------------------------------------------------------
+
+
+def test_parent_control_installs_the_boot_credential(monkeypatch) -> None:
+    """The control parent holds the worker credential; the compute child is
+    stripped of it and signs through the parent.
+
+    pgw#931 first installed the boot token in `procsplit.parent.run_parent`
+    ONLY. That is one of several ways a control parent gets built — the split
+    harness and the group-process tests construct `ParentControl` directly — so
+    every other path produced a parent with no credential and the mediated C2PA
+    sign refused with *"this pod holds no worker JWT"*. Caught by
+    `test_procsplit_security_pgw763` after the merge.
+
+    The lesson is §4.22's: a fact and its carrier must be established together,
+    at the seam the fact's owner is constructed, not at one convenient entry
+    point. This asserts the seam rather than the entry point.
+    """
+    from gen_worker import worker_credential
+    from gen_worker.procsplit.parent import ParentControl
+
+    monkeypatch.setattr(worker_credential, "_TOKEN", "")
+    monkeypatch.setattr(worker_credential, "_BOOTSTRAP", "")
+    assert worker_credential.current() == ""
+
+    ParentControl(config.Settings(bootstrap_worker_jwt="boot-jwt-xyz"))
+    assert worker_credential.current() == "boot-jwt-xyz", (
+        "building a control parent must install its boot credential — the "
+        "child cannot sign through a parent that has none")
