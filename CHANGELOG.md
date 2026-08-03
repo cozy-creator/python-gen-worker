@@ -1,6 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.91.2 (2026-08-03) — **a produced flavor's passthrough components are one file too**: th#1362's producer invariant stops refusing the married trees it was meant to protect (the te#137 svdq publish blocker)
+
+PATCH: nothing here touches the worker<->hub wire contract, `@endpoint` or `Resources`, so no
+`TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` move is needed. Three de-shard helpers become
+public and move module (`clone` -> `writer`); the behaviour change is confined to how a
+producer materializes the half of its output tree it did not compute.
+
+- **th#1362 / te#137: a produced flavor's PASSTHROUGH components are one file too.**
+  `copy_non_weight_files` — the one door untouched weights enter a tree we produce — now
+  COLLAPSES an HF shard set it copies through. Item 4's producer invariant was right and
+  stays; what was missing is that item 2 wired de-shard into `clone.py`'s mirror arms only,
+  so the married-tree producers (`build_svdq_flavor_tree`, te's fuse) hardlinked a
+  legacy-sharded base component straight into their output and `publish_flavors` refused it
+  (`sharded_producer_output: ... text_encoder/model-00001-of-00009.safetensors`, found live
+  blocking every te#137 svdq flavor publish off `tensorhub/qwen-image`). `deshard_mirror_tree`
+  / `deshard_indexed_safetensors` / `tree_has_sharded_safetensors` moved from `clone.py` to
+  `writer.py` next to the `merge_safetensors_by_offset` primitive they drive, and are public.
+  The source snapshot is untouched (only this tree's hardlinks are unlinked), an unsharded
+  component is still passed through by inode, and a `-NNNNN-of-MMMMM` set with no index is
+  still REFUSED rather than published.
 
 - **pgw#930 (§1.17): `WORKER_MODE` is deleted; serve and mint are COMPOSABLE goals.**
   Paul: *"you can spawn a GPU and tell it to mint some AOT-cells, while also using it to
