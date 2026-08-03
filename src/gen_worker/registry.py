@@ -499,8 +499,12 @@ def _spec_for_handler(
     # schema's own @family registration when both are present.
     function_family = compile_family or defaults_family
     slot_family = {
-        name: ("" if _slot_is_family_agnostic(name, slot, slots)
-               else function_family)
+        name: (
+            slot.family
+            if slot.family is not None
+            else ("" if _slot_is_family_agnostic(name, slot, slots)
+                  else function_family)
+        )
         for name, slot in slots.items()
     }
     # SDK v2: derive each introspectable pipeline slot's component tree.

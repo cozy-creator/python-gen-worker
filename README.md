@@ -98,7 +98,7 @@ SomeModelChoice | ModelRef` opens BYOM. Streaming = an async-generator handler.
 Engine-hosted endpoints declare `runtime="vllm"` and get a booted,
 health-checked server subprocess injected into `setup()`.
 
-`Slot(pipeline_cls, selected_by=, default_checkpoint=)` is the hub-resolved
+`Slot(pipeline_cls, selected_by=, family=, default_checkpoint=)` is the hub-resolved
 alternative to `ModelChoice`: the model SET lives in platform config, not
 code, and the COMPONENT TREE (`pipeline.unet`, `pipeline.vae`, ...) is
 derived from the pipeline class and published to the hub — parts are never
@@ -106,6 +106,10 @@ declared as sibling slots. The per-model config SCHEMA derives from the
 handler's context annotation (`ctx: RequestContext[SdxlDefaults]`, a
 `gen_worker.families.GenerationDefaults` vocabulary); the catalog owns the
 VALUES and `ctx.defaults` hands the resolved recipe to the handler typed.
+`family="sdxl"` explicitly keeps a non-root/defaultless model lane inside
+that architecture's binding gate; `family=""` explicitly marks a shared
+auxiliary as family-agnostic. Omitting it preserves the compatibility
+inference.
 
 Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 

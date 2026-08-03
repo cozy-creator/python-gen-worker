@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **pgw#766 / th#1566: `Slot(family=...)` makes non-root model governance
+  explicit.** pgw#747 correctly stopped stamping family-agnostic auxiliaries
+  with a function's model family, but inferred agnosticism from the proxy
+  "non-root + no hardcoded checkpoint". That also emptied deploy-bound model
+  lanes such as qwen-image's `edit`, disabling the hub's binding and serving-
+  contract gates. A non-empty explicit family now overrides that inference;
+  an explicit empty family keeps an auxiliary agnostic, and omission preserves
+  pgw#747's compatibility behavior.
+
 ## 0.91.3 (2026-08-03) — **SECURITY: the th#1307 private-key refusal is reachable again**, and the NVLS override stays deleted
 
 PATCH: no wire-contract, `@endpoint` or `Resources` change. Both items are promotion blockers

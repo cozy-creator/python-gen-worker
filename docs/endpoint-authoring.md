@@ -210,7 +210,7 @@ standalone distilled checkpoint is a separate class/endpoint.
 
 ## `Slot`: hub-resolved model slots (SDK v2, pgw#647)
 
-`Slot(pipeline_cls, selected_by=, default_checkpoint=)` resolves the model set
+`Slot(pipeline_cls, selected_by=, family=, default_checkpoint=)` resolves the model set
 from the hub catalog (th#767) rather than from code, so adding a checkpoint is
 not a software release. Under SDK v2 the declaration shrinks to the ROOT of the
 component tree:
@@ -260,6 +260,12 @@ class Generate:
   field; the SDK never bakes a curated list.
 - `default_checkpoint` seeds the hub mapping at first publish and is the
   ONLY resolution source in hub-less mode; a live hub mapping always wins.
+- `family=None` keeps the compatibility inference: root/ref-bearing slots
+  inherit the handler's family, while a non-root/defaultless slot is treated
+  as family-agnostic. Set `family="qwen-image"` when such a non-root slot is a
+  real deploy-bound model lane; set `family=""` when a ref-bearing auxiliary
+  explicitly remains architecture-agnostic. Explicit intent wins over the
+  inference and is published into the slot manifest.
 - **Component sharing is AUTOMATIC by content address** — byte-identical
   components (the qwen text encoder, a shared VAE) load once and are
   refcounted across checkpoint picks; there is nothing to declare
