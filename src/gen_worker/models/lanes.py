@@ -61,27 +61,68 @@ def family_of(lane: Lane) -> str:
     return ""
 
 
-# THE lane table's (weights, activation, scale) rows, ranked best-first.
-_KNOWN_BODIES: tuple[tuple[str, str, str], ...] = (
-    (WEIGHTS_FP8, ACT_W8A8, SCALE_DYNAMIC),
-    (WEIGHTS_NVFP4, ACT_W4A4, SCALE_STATIC),
-    (WEIGHTS_SVDQ_FP4, ACT_W4A4, ""),
-    (WEIGHTS_SVDQ_INT4, ACT_W4A4, ""),
-    (WEIGHTS_BF16, ACT_W16A16, ""),
-    (WEIGHTS_FP8, ACT_W8A16, ""),
+_EXECUTION_EITHER = "either"
+
+
+class _LaneBody(msgspec.Struct, frozen=True, kw_only=True):
+    weights: str
+    activation: str
+    execution_support: str
+    scale: str = ""
+
+
+# THE lane table's rows, ranked best-first. Execution support is authoritative:
+# lane enumeration, validation, and binding resolution all read this one field.
+_KNOWN_BODIES: tuple[_LaneBody, ...] = (
+    # Eager w8a8 has not been measured; keep Tensorhub's compiled-only answer.
+    _LaneBody(weights=WEIGHTS_FP8, activation=ACT_W8A8,
+              scale=SCALE_DYNAMIC, execution_support=EXEC_COMPILED),
+    # Eager nvfp4 has not been measured; keep Tensorhub's compiled-only answer.
+    _LaneBody(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
+              scale=SCALE_STATIC, execution_support=EXEC_COMPILED),
+    _LaneBody(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4,
+              execution_support=EXEC_EAGER),
+    _LaneBody(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4,
+              execution_support=EXEC_EAGER),
+    _LaneBody(weights=WEIGHTS_BF16, activation=ACT_W16A16,
+              execution_support=_EXECUTION_EITHER),
+    _LaneBody(weights=WEIGHTS_FP8, activation=ACT_W8A16,
+              execution_support=_EXECUTION_EITHER),
 )
 
-# Engines that never run under torch.compile wrapping (nunchaku kernels).
-_EAGER_ONLY_WEIGHTS = frozenset({WEIGHTS_SVDQ_FP4, WEIGHTS_SVDQ_INT4})
+
+def _supports(body: _LaneBody, execution: str) -> bool:
+    return body.execution_support == _EXECUTION_EITHER or body.execution_support == execution
+
+
+def _body_for_lane(lane: Lane) -> Optional[_LaneBody]:
+    for body in _KNOWN_BODIES:
+        if (
+            body.weights == lane.weights
+            and body.activation == lane.activation
+            and body.scale == lane.scale
+        ):
+            return body
+    return None
+
+
+def _lane_for_body(body: _LaneBody, execution: str) -> Lane:
+    return Lane(
+        weights=body.weights,
+        activation=body.activation,
+        scale=body.scale,
+        execution=execution,
+    )
 
 
 def known_lanes() -> list[str]:
     """Every concrete lane id, ranked (table order, compiled before eager)."""
     out: list[str] = []
-    for weights, act, scale in _KNOWN_BODIES:
-        if weights not in _EAGER_ONLY_WEIGHTS:
-            out.append(lane_id(Lane(weights=weights, activation=act, scale=scale, execution=EXEC_COMPILED)))
-        out.append(lane_id(Lane(weights=weights, activation=act, scale=scale, execution=EXEC_EAGER)))
+    for body in _KNOWN_BODIES:
+        if _supports(body, EXEC_COMPILED):
+            out.append(lane_id(_lane_for_body(body, EXEC_COMPILED)))
+        if _supports(body, EXEC_EAGER):
+            out.append(lane_id(_lane_for_body(body, EXEC_EAGER)))
     return out
 
 
@@ -98,17 +139,16 @@ def known_lane_bodies() -> list[str]:
     valid `handles=` declaration tokens (th#1050) — execution axis excluded:
     author kernels declare the quant scheme, the platform owns eager/compiled."""
     return [
-        lane_body_id(Lane(weights=w, activation=a, scale=s, execution=EXEC_EAGER))
-        for w, a, s in _KNOWN_BODIES
+        lane_body_id(_lane_for_body(body, EXEC_EAGER))
+        for body in _KNOWN_BODIES
     ]
 
 
 def valid_lane(lane: Lane) -> bool:
     if lane.execution not in (EXEC_EAGER, EXEC_COMPILED):
         return False
-    if lane.execution == EXEC_COMPILED and lane.weights in _EAGER_ONLY_WEIGHTS:
-        return False
-    return (lane.weights, lane.activation, lane.scale) in _KNOWN_BODIES
+    body = _body_for_lane(lane)
+    return body is not None and _supports(body, lane.execution)
 
 
 def parse_lane(s: str) -> Lane:
@@ -170,6 +210,19 @@ def is_w8a8_flavor(token: str) -> bool:
     return t == "fp8-w8a8" or t.startswith("fp8-w8a8-")
 
 
+def _with_supported_execution(lane: Lane, compiled: bool) -> Lane:
+    execution = EXEC_COMPILED if compiled else EXEC_EAGER
+    body = _body_for_lane(lane)
+    if body is not None and not _supports(body, execution):
+        execution = EXEC_COMPILED if _supports(body, EXEC_COMPILED) else EXEC_EAGER
+    return Lane(
+        weights=lane.weights,
+        activation=lane.activation,
+        scale=lane.scale,
+        execution=execution,
+    )
+
+
 def lane_of_binding(flavor: str, storage_dtype: str, compiled: bool) -> Lane:
     """The concrete lane a (flavor, cast/storage_dtype) binding executes as —
     the twin of tensorhub's ``LaneOfResolution``."""
@@ -182,23 +235,24 @@ def lane_of_binding(flavor: str, storage_dtype: str, compiled: bool) -> Lane:
         classify_flavor_token,
     )
 
-    execution = EXEC_COMPILED if compiled else EXEC_EAGER
     if str(storage_dtype or "").strip().lower() in ("fp8", "fp8+te"):
-        return Lane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution=execution)
-    cls = classify_flavor_token(flavor)
-    if cls == CLASS_FP8:
+        lane = Lane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
+    elif (cls := classify_flavor_token(flavor)) == CLASS_FP8:
         if is_w8a8_flavor(flavor):
-            return Lane(weights=WEIGHTS_FP8, activation=ACT_W8A8,
-                        scale=SCALE_DYNAMIC, execution=execution)
-        return Lane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution=execution)
-    if cls == CLASS_SVDQ_FP4:
-        return Lane(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4, execution=EXEC_EAGER)
-    if cls == CLASS_SVDQ_INT4:
-        return Lane(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4, execution=EXEC_EAGER)
-    if cls == CLASS_NVFP4_W4A4:
-        return Lane(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
-                    scale=SCALE_STATIC, execution=execution)
-    return Lane(weights=WEIGHTS_BF16, activation=ACT_W16A16, execution=execution)
+            lane = Lane(weights=WEIGHTS_FP8, activation=ACT_W8A8,
+                        scale=SCALE_DYNAMIC, execution="")
+        else:
+            lane = Lane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
+    elif cls == CLASS_SVDQ_FP4:
+        lane = Lane(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4, execution="")
+    elif cls == CLASS_SVDQ_INT4:
+        lane = Lane(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4, execution="")
+    elif cls == CLASS_NVFP4_W4A4:
+        lane = Lane(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
+                    scale=SCALE_STATIC, execution="")
+    else:
+        lane = Lane(weights=WEIGHTS_BF16, activation=ACT_W16A16, execution="")
+    return _with_supported_execution(lane, compiled)
 
 
 class LaneUnavailableError(ValueError):
