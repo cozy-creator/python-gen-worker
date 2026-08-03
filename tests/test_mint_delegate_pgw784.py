@@ -36,6 +36,7 @@ from gen_worker import fleet_cells, mint_budget, mint_delegate
 from gen_worker import mint_process as mp
 from gen_worker.api.decorators import DynamicDim
 from gen_worker.registry import CompileCell
+from gen_worker.cell_adopt import AdoptOutcome
 
 GIB = 1 << 30
 STUB_MODULE = "harness.mint_child_stub"
@@ -88,7 +89,8 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
         cc, "begin_fleet_mint",
         lambda *a, **k: armed.append("begin_fleet_mint"))
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled", lambda *a, **k: False)
+        fleet_cells.provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(cc, "has_compile_target", lambda *a, **k: True)
     monkeypatch.setattr(cc, "mandatory_serving", lambda pipe: False)
     monkeypatch.setattr(cc, "apply_lora_lane", lambda pipe, bucket: True)
