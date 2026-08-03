@@ -105,6 +105,14 @@ class Slot(Generic[D]):
     ``str`` (the schema enum of legal values is overlaid live by the hub,
     never baked into the SDK).
 
+    ``family`` is the slot's architecture-family intent. ``None`` keeps the
+    compatibility inference: a non-root, defaultless slot is treated as
+    family-agnostic, while a root/ref-bearing slot inherits the handler's
+    family. A non-empty value explicitly declares this slot's family and wins
+    over that inference; ``""`` explicitly declares a family-agnostic
+    auxiliary slot. This distinction matters for non-root model lanes that are
+    deploy-bound rather than hardcoding a checkpoint ref.
+
     ``default_checkpoint`` seeds the hub mapping at first publish and is the
     ONLY resolution source in hub-less mode (``cozy run``, hermetic tests) —
     a live hub mapping always wins when present. ``None`` means this slot
@@ -126,7 +134,8 @@ class Slot(Generic[D]):
     """
 
     __slots__ = (
-        "pipeline_cls", "selected_by", "default_checkpoint", "root", "optional",
+        "pipeline_cls", "selected_by", "family", "default_checkpoint", "root",
+        "optional",
     )
 
     def __init__(
@@ -134,6 +143,7 @@ class Slot(Generic[D]):
         pipeline_cls: type,
         *,
         selected_by: str = "",
+        family: Optional[str] = None,
         default_checkpoint: Optional[ModelRef] = None,
         root: bool = False,
     ) -> None:
@@ -149,6 +159,7 @@ class Slot(Generic[D]):
             )
         self.pipeline_cls = pipeline_cls
         self.selected_by = str(selected_by or "").strip()
+        self.family = None if family is None else str(family or "").strip()
         self.default_checkpoint = default_checkpoint
         self.root = bool(root)
         self.optional = False  # derived at decoration from setup()'s default
@@ -156,8 +167,8 @@ class Slot(Generic[D]):
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
-            f"default_checkpoint={self.default_checkpoint!r}, root={self.root!r}, "
-            f"optional={self.optional!r})"
+            f"family={self.family!r}, default_checkpoint={self.default_checkpoint!r}, "
+            f"root={self.root!r}, optional={self.optional!r})"
         )
 
 

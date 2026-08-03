@@ -688,14 +688,18 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # Every binding carries the endpoint's architecture family, when
         # known, so the hub's th#586 gate can family-police any LoRA
         # overlay attached at that slot (pgw#523: unconditional-when-known,
-        # not allow_lora-triggered). pgw#520:
-        # a Slot-declared binding with no Compile(family=...) may still carry
-        # a family via its own default_config preset's registration — that's what
-        # es.slot_family reconciles (Compile(family=) wins when both exist).
+        # not allow_lora-triggered). For Slot-declared bindings the slot map is
+        # AUTHORITATIVE: it already reconciles the function family with the
+        # slot's explicit intent. Bare bindings have no slot declaration and
+        # retain the function-level compile family fallback.
         compile_family = es.compile.family if es.compile is not None else ""
         for key, block in bindings_block.items():
-            slot_family = es.slot_family.get(key, "") if es.slot_family else ""
-            _stamp_family(block, compile_family or slot_family)
+            family = (
+                es.slot_family.get(key, "")
+                if key in es.slots
+                else compile_family
+            )
+            _stamp_family(block, family)
 
         # pgw#747: `es.slot_family` is AUTHORITATIVE per slot — it already
         # folds in Compile(family=...), and it deliberately holds "" for an
