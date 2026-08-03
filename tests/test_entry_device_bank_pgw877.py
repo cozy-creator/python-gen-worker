@@ -38,6 +38,15 @@ import pytest
 from gen_worker import aot_compile_pool as pool
 from gen_worker import mint_budget
 
+from gen_worker.worker_goals import WorkerGoals
+
+# pgw#930: these were `forge=True` / `forge=False`. The pool no longer takes a
+# mode boolean — it takes the GOAL SET, and derives its three tenant reserves from
+# whether a serve goal is held. Naming the goals makes the test say which fact it
+# is exercising instead of which branch of a two-valued ternary.
+_SERVE_ONLY = WorkerGoals(serve=True, mint=False, declared="serve")
+_MINT_ONLY = WorkerGoals(serve=False, mint=True, declared="forge")
+
 _GIB = 1 << 30
 
 
@@ -203,7 +212,7 @@ def test_the_measured_entry_ask_reaches_the_width_and_says_it_is_measured(
     both MOVE and be LABELLED differently from one sized off the estimate."""
     common: Dict[str, Any] = dict(
         entries=36, vcpus=127, available_bytes=116 * _GIB,
-        free_vram_bytes=int(21.48 * _GIB), device_lock=True, forge=True)
+        free_vram_bytes=int(21.48 * _GIB), device_lock=True, goals=_MINT_ONLY)
     estimated = pool.entry_workers(
         device_bytes=int(11.09 * _GIB), device_basis="estimated", **common)
     measured = pool.entry_workers(
@@ -228,13 +237,13 @@ def test_a_readable_card_with_no_footprint_refuses_to_widen() -> None:
     assert not hasattr(pool, "DEFAULT_ENTRY_DEVICE_BYTES")
     w = pool.entry_workers(
         36, vcpus=127, available_bytes=116 * _GIB,
-        free_vram_bytes=int(21.48 * _GIB), device_lock=True, forge=True)
+        free_vram_bytes=int(21.48 * _GIB), device_lock=True, goals=_MINT_ONLY)
     assert w.device_workers == 1, w.reason
     assert w.per_entry_device_basis == "unmeasured", w.reason
     # A CPU-only cell is a different case and keeps its unbounded device term.
     cpu_only = pool.entry_workers(
         36, vcpus=127, available_bytes=116 * _GIB, free_vram_bytes=0,
-        device_lock=True, forge=True)
+        device_lock=True, goals=_MINT_ONLY)
     assert cpu_only.device_workers == pool.MAX_ENTRY_WORKERS, cpu_only.reason
 
 
