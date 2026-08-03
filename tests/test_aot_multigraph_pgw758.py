@@ -88,7 +88,7 @@ def _mint(tmp_path: Path, pipe: Any = None) -> Tuple[Any, aot_mint.MintResult]:
     pipe = pipe or types.SimpleNamespace(unet=TinyUNet())
     spec = aot_mint.ExportSpec(family=FAMILY, target="")
     result = aot_mint.mint(
-        pipe, spec, tmp_path / "out", allow_regressed_lanes=True)
+        pipe, spec, tmp_path / "out")
     return pipe, result
 
 
@@ -224,7 +224,7 @@ def test_mint_refuses_a_family_with_no_declaration(tmp_path, fake_sm) -> None:
     pipe = types.SimpleNamespace(unet=TinyUNet())
     spec = aot_mint.ExportSpec(family="undeclared", target="")
     with pytest.raises(aot_mint.MintRefused, match="declaration"):
-        aot_mint.mint(pipe, spec, tmp_path, allow_regressed_lanes=True)
+        aot_mint.mint(pipe, spec, tmp_path)
 
 
 def test_mint_request_refuses_coordinate_subsets(tmp_path) -> None:
@@ -261,7 +261,7 @@ def test_export_failure_names_the_entry(tmp_path, fake_sm) -> None:
     pipe = types.SimpleNamespace(unet=Broken())
     spec = aot_mint.ExportSpec(family=FAMILY, target="")
     with pytest.raises(aot_mint.MintRefused) as err:
-        aot_mint.mint(pipe, spec, tmp_path, allow_regressed_lanes=True)
+        aot_mint.mint(pipe, spec, tmp_path)
     assert "unet/cfg=false/B=1" in str(err.value)
 
 
@@ -304,7 +304,7 @@ def test_declared_warm_family_mints_the_warmed_graph(tmp_path, fake_sm) -> None:
     module = WarmSensitive()
     pipe = types.SimpleNamespace(unet=module)
     spec = aot_mint.ExportSpec(family="warm758", target="")
-    result = aot_mint.mint(pipe, spec, tmp_path, allow_regressed_lanes=True)
+    result = aot_mint.mint(pipe, spec, tmp_path)
     # The pre-warm RAN before export (the cache branch is warm at trace time),
     # and the mint recorded its cost.
     assert module.warm_calls == 1
@@ -317,7 +317,7 @@ def test_undeclared_warm_family_is_not_warmed(tmp_path, fake_sm) -> None:
     module = WarmSensitive()
     pipe = types.SimpleNamespace(unet=module)
     spec = aot_mint.ExportSpec(family="cold758", target="")
-    result = aot_mint.mint(pipe, spec, tmp_path, allow_regressed_lanes=True)
+    result = aot_mint.mint(pipe, spec, tmp_path)
     # Export itself traces the cold branch; no separate warm forward ran and
     # none was recorded.
     entry = next(iter(result.metadata["mint_phases"]["entries"].values()))
@@ -342,7 +342,7 @@ def test_failed_declared_warm_is_a_named_refusal(tmp_path, fake_sm) -> None:
     pipe = types.SimpleNamespace(unet=Fails())
     spec = aot_mint.ExportSpec(family="warmfail758", target="")
     with pytest.raises(aot_mint.MintRefused, match="mint-warm"):
-        aot_mint.mint(pipe, spec, tmp_path, allow_regressed_lanes=True)
+        aot_mint.mint(pipe, spec, tmp_path)
 
 
 # ---------------------------------------------------------------------------

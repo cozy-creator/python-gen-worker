@@ -103,8 +103,6 @@ def test_the_parent_declines_the_AOT_recipe_by_name(
     monkeypatch.setattr(fleet_cells.cc, "cxx_toolchain_present", lambda: False)
     from gen_worker import aot_mint
 
-    monkeypatch.setattr(
-        aot_mint, "lane_admitted", lambda *a, **k: "")
     monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda *a, **k: "")
     monkeypatch.setattr(
         fleet_cells, "aot_export_spec", lambda *a, **k: object())

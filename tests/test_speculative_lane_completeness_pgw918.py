@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, Set, Tuple
 
 from gen_worker import aot_mint, executor
-from gen_worker.compile_cache import lane_bucket, lane_token
+from gen_worker.compile_cache import lane_bucket
 from gen_worker.models import loading
 from gen_worker.models.w8a8_lora import lora_lane
 
@@ -135,20 +135,20 @@ def test_the_executor_speculates_exactly_the_loader_vocabulary():
             == tuple(loading.STAMPABLE_BASE_LANES))
 
 
-def test_every_parity_lane_names_something_a_loader_can_stamp():
-    """pgw#918 second half: ``PARITY_LANES`` held ``"w8a8-rowwise"``, a token
-    ``lane_admitted`` could never be handed, so half the authored allowlist
-    was decorative."""
-    stampable_tokens = {
-        lane_token(lane_bucket(lane)[0])
-        for lane in loading.STAMPABLE_BASE_LANES
-    }
-    orphans = sorted(set(aot_mint.PARITY_LANES) - stampable_tokens)
-    assert not orphans, (
-        f"PARITY_LANES names lane token(s) nothing can stamp: {orphans}. "
-        f"lane_admitted is handed lane_token(lane_bucket(stamp)[0]), so a "
-        f"token outside {sorted(stampable_tokens)} is unreachable coverage."
-    )
+def test_the_mint_holds_no_lane_allowlist_at_all():
+    """pgw#850 superseded pgw#918's second half by DELETION.
+
+    ``PARITY_LANES`` was the surviving half of that allowlist — one member,
+    ``"w8a8"`` — and it composed with tensorhub's compiled-only
+    ``fp8-w8a8-dynamic`` lane into a total block: the hub withholds a
+    mandatory-compile lane until a cell exists, and only a pod already on the
+    lane can mint one, so the single admitted token named the single lane no
+    AUTO pod could ever be on. Checking an allowlist's members for
+    reachability is the wrong invariant when the right answer is that the mint
+    holds no allowlist. It is GIVEN a lane and compiles it.
+    """
+    assert not hasattr(aot_mint, "PARITY_LANES")
+    assert not hasattr(aot_mint, "lane_admitted")
 
 
 def test_the_one_derived_stamp_site_decomposes_to_a_named_base():

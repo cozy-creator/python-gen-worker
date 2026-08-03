@@ -120,7 +120,7 @@ def cell(tmp_path_factory, request) -> Dict[str, Any]:
     tmp = tmp_path_factory.mktemp("cell790")
     pipe = _armed_pipe()
     result = aot_mint.mint(
-        pipe, _spec(), tmp / "out", allow_regressed_lanes=True)
+        pipe, _spec(), tmp / "out")
     reset_export_declarations()
     return {"pipe": pipe, "result": result, "tmp": tmp}
 
@@ -265,7 +265,7 @@ def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
             assert lora_lifted.adapter_active(pipe.unet)
         out = tmp_path / f"active{int(active)}"
         result = aot_mint.mint(
-            pipe, _spec(), out, allow_regressed_lanes=True)
+            pipe, _spec(), out)
         keys.append(result.metadata["cell_key"])
         names.append(sorted(result.metadata["entries"]))
         reset_export_declarations()

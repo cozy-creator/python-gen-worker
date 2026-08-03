@@ -180,7 +180,7 @@ def cell(tmp_path_factory, request) -> Dict[str, Any]:
     tmp = tmp_path_factory.mktemp("cell822")
     pipe = _container_only_pipe()
     result = aot_mint.mint(
-        pipe, _spec(), tmp / "out", allow_regressed_lanes=True)
+        pipe, _spec(), tmp / "out")
     reset_export_declarations()
     return {"pipe": pipe, "result": result}
 
@@ -289,9 +289,6 @@ def test_the_parent_declines_the_mint_by_name_instead_of_renting(monkeypatch) ->
         guidance_scales=(), targets=("unet",))
 
     monkeypatch.setattr(fleet_cells.aot_cells, "prefer_aot", lambda: True)
-    monkeypatch.setattr(
-        aot_mint, "lane_admitted",
-        lambda spec, allow_regressed_lanes=False: "")
     monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda spec: "")
     events: list = []
     monkeypatch.setattr(

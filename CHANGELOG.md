@@ -11,6 +11,64 @@
   an explicit empty family keeps an auxiliary agnostic, and omission preserves
   pgw#747's compatibility behavior.
 
+## 0.91.4 (2026-08-03) — **pgw#850: the self-mint path was dead fleet-wide by COMPOSITION, and the fix is a deletion**
+
+PATCH: no wire-contract, `@endpoint` or `Resources` change. Removes `aot_mint.PARITY_LANES`,
+`aot_mint.lane_admitted`, the `allow_regressed_lanes` parameter/CLI flag, and the
+`self_mint_skipped phase=aot_lane_regressed` decline.
+
+### The composition, re-measured on `origin/dev` 2026-08-03 (the filing's numbers had moved)
+
+Each constraint is individually defensible; their intersection was empty, so nothing failed
+loudly — the path simply never ran.
+
+- **The mint admitted one lane token.** pgw#918 narrowed `PARITY_LANES` from two members to
+  `("w8a8",)` (the other named a lane no loader stamps). `lane_admitted` refused everything else
+  with a sentence quoting the 6.9-7.0% AOTI regression pgw#704 Q4 measured **on sdxl's lanes**,
+  at families and lanes it never measured.
+- **The hub cannot put an AUTO pod on that lane before a cell exists.** tensorhub PR #709 made
+  `fp8-w8a8-dynamic` **compiled-only** and `fp8-w8a8-dynamic+eager` refuse at parse. So
+  `RequiresCompiledCell` holds for every w8a8 row, `applyCompileCellAvailability` (th#1123) and
+  `applyPublishMintObligation` (th#1127) mark them `CompileCellUnavailable` while no cell exists,
+  and `autoEligibleModel` drops them. tensorhub's own comment: *"only a worker's own self-mint can
+  discharge it."*
+
+The one lane the mint admitted was the one lane no AUTO pod could be on; the four lanes a pod
+**can** be on — `""` (bf16-w16a16), `"fp8-hooks"` (fp8-w8a16), `"w4a4"` (nvfp4-w4a4-static) and
+`"svdq-native"` (svdq-fp4/int4-w4a4, newly servable after PR #709) — were each declined. Zero
+fleet families reached the mint gate on AUTO, on any card. The sub-sm_89 half filed originally
+(`FP8ComputeMinSM = 89`) still holds and is subsumed: below sm_89 the w8a8 lane is off the card
+outright.
+
+### The fix
+
+pgw#879's deletion, not a wider allowlist. The lane is an **input**: the hub's resolution tree
+chooses it, `loading.pipeline_weight_lane` observes it on the composed pipeline, and the mint
+compiles what it is handed — *"here is the code, here is the lane, please compile this for all
+graphs we have declared."* Every surviving mint check answers "can this compile physically run"
+(declaration existence, `declaration_module_gaps`, `cxx_toolchain_present`, delegation
+availability, torch floor, `MintResourceExhausted`); none reads lane policy, family history, or a
+measurement.
+
+The pgw#704 Q4 / #730 measurement is not discarded — it is a **ranking** input to the hub's
+`+compiled` vs `+eager` choice. A lane held on dynamo is never asked for a cell; a lane that IS
+asked for gets compiled.
+
+`tests/test_aot_selfmint_pgw805.py` now parametrises the real `mint_recipe` path over the whole
+`loading.STAMPABLE_BASE_LANES` vocabulary plus a bucketed LoRA stamp, asserting `RECIPE_AOT` and
+zero `self_mint_skipped`. Verified RED against the pre-fix source: exactly the four non-`w8a8`
+lanes failed.
+
+**Still open, and it needs a GPU.** Whether `fp8-w8a8` can execute **eager** is unmeasured
+(th#1556's open item); it is deliberately not liberalised here to make a composition work.
+Impossibility belongs in tensorhub's lane table, a performance judgement in its ranking. And the
+residue this deletion does **not** reach: a compiled-only lane still has no bootstrap path —
+tensorhub withholds it until a cell exists and only a pod already on it can mint one. That cycle
+is entirely hub-side (th#1408), and it is why `fp8-w8a8-dynamic` and `nvfp4-w4a4-static` stay
+unreachable on AUTO even now. What this release fixes is that `bf16-w16a16` and `fp8-w8a16` —
+both `either`-execution, both reachable without a pre-existing cell — can now mint the cells that
+make their compiled forms servable. The self-mint path is alive.
+
 ## 0.91.3 (2026-08-03) — **SECURITY: the th#1307 private-key refusal is reachable again**, and the NVLS override stays deleted
 
 PATCH: no wire-contract, `@endpoint` or `Resources` change. Both items are promotion blockers

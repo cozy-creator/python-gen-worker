@@ -30,6 +30,7 @@ kind. Three separate wires were missing, and each gets a test here:
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -43,6 +44,7 @@ from gen_worker.api.export_contract import (
 )
 from gen_worker import config as gw_config
 from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.models import loading
 
 FAMILY = "sdxl"
 
@@ -244,25 +246,75 @@ def test_a_compile_block_without_graph_classes_is_not_a_declaration() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. THE HELD LANES — #730's dynamo hold is a decision, and it must be audible
+# 3. THE LANE IS AN INPUT — pgw#850/#879: the mint compiles what it is handed
 # ---------------------------------------------------------------------------
 
 
-def test_a_lane_held_on_dynamo_declines_by_name(
+@pytest.mark.parametrize("base_lane", loading.STAMPABLE_BASE_LANES)
+def test_every_lane_a_pod_can_serve_reaches_the_aot_recipe(
+    base_lane: str,
     _miss: None, _events: List[Tuple[str, str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """This is the five L4 pods' ACTUAL state: `pipeline_weight_lane` was the
-    plain lane, which #730 holds on dynamo (6.9-7.0% slower under AOTI). The
-    hold is right; being unable to say so is the defect."""
+    """pgw#850's fix, proven over the WHOLE lane vocabulary rather than the
+    one lane the allowlist named.
+
+    The composition this replaces, measured on `origin/dev` 2026-08-03:
+    `aot_mint.PARITY_LANES` admitted exactly `"w8a8"`, and tensorhub's lane
+    table makes `fp8-w8a8-dynamic` compiled-only — so the hub withholds it
+    from AUTO until a cell exists (th#1123 `applyCompileCellAvailability`,
+    th#1127 `applyPublishMintObligation`), and tensorhub's own comment says
+    "only a worker's own self-mint can discharge it". The single admitted
+    lane was the single lane no AUTO pod could ever be on, and the four lanes
+    a pod COULD be on were each declined `aot_lane_regressed`, quoting a
+    6.9-7.0% AOTI regression measured on sdxl's lanes alone. Zero fleet
+    families reached the mint gate, on any card.
+
+    The lane is an INPUT now. `loading.STAMPABLE_BASE_LANES` is every lane a
+    loader can leave a pipeline on (pgw#918, mechanically checked), so this
+    parametrisation IS the fleet: each one must mint.
+    """
     register_export_declaration(_declaration())
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "")
+        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: base_lane)
 
     pending = _arm(delegate=True).self_mint
 
-    assert pending is not None and pending.recipe == fleet_cells.RECIPE_DYNAMO
-    assert "aot_lane_regressed" in _phases(_events, "self_mint_skipped")
+    assert pending is not None and pending.recipe == fleet_cells.RECIPE_AOT, (
+        f"lane {base_lane!r} did not reach the AOT recipe — a mint-side lane "
+        f"judgement has grown back")
+    assert not _phases(_events, "self_mint_skipped"), (
+        f"lane {base_lane!r} was declined: "
+        f"{[d for k, _p, d in _events if k == 'self_mint_skipped']}")
+
+
+def test_the_bucketed_lora_form_of_a_lane_mints_too(
+    _miss: None, _events: List[Tuple[str, str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stamp a pod carries in production is usually the BUCKETED form
+    (`w8a8-lora64`, `fp8-hooks-lora32`). It decomposes to a base lane and
+    must not be treated as an unknown string."""
+    register_export_declaration(_declaration())
+    monkeypatch.setattr(
+        fleet_cells.loading, "pipeline_weight_lane",
+        lambda pipe: "fp8-hooks-lora64")
+
+    pending = _arm(delegate=True).self_mint
+
+    assert pending is not None and pending.recipe == fleet_cells.RECIPE_AOT
+    assert not _phases(_events, "self_mint_skipped")
+
+
+def test_the_mint_holds_no_lane_predicate() -> None:
+    """The deletion itself. `lane_admitted`/`PARITY_LANES` were a SECOND
+    opinion about a lane the hub's resolution tree had already chosen; two
+    opinions in two repos is what composed into the total block. Every
+    surviving mint check answers "can this compile physically run"."""
+    assert not hasattr(aot_mint, "lane_admitted")
+    assert not hasattr(aot_mint, "PARITY_LANES")
+    assert "allow_regressed_lanes" not in inspect.signature(
+        aot_mint.mint).parameters
 
 
 def test_an_in_process_only_pod_declines_the_aot_recipe_by_name(
