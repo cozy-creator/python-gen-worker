@@ -39,6 +39,13 @@
   New `Settings.boot_record_path` (`GEN_WORKER_BOOT_RECORD`), which previously had no field
   and was read raw in three places.
 
+  **Behaviour note:** C2PA signing on the STANDALONE CLI is now explicitly off rather than
+  lazily configured from env at first `save_bytes`. Unchanged on real pods —
+  `entrypoint._run_main` calls `content_credentials.configure(settings)` with the entry's
+  `Settings`, and th#1307's key-material boot refusal still fires there. The CLI lost nothing
+  it had: th#1307 moved the private key hub-side, so signing arms at HelloAck and a CLI run has
+  no HelloAck.
+
 - **pgw#931: the loader no longer accepts and ignores a key it owns.**
   `_normalize_key` returned `None` for anything unrecognised and every source layer then
   silently skipped it, so a typo'd `TENSORHUB_CHACE_DIR` in `.env` or `/run/secrets` was
