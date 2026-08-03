@@ -22,6 +22,7 @@ torch/safetensors imports are deferred so importing gen_worker.convert stays che
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import shutil
@@ -37,6 +38,7 @@ from gen_worker.models.w8a8 import detect_w8a8_artifact
 if TYPE_CHECKING:
     import torch
 
+logger = logging.getLogger(__name__)
 
 
 class ConversionImplementationError(RuntimeError):
@@ -730,8 +732,21 @@ def _link_or_copy(src: Path, dst: Path) -> None:
 
 
 def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: set[str]) -> None:
-    """Hardlink every non-weight file into the output tree; weight files and
-    their sharded indexes for converted components are skipped."""
+    """Materialize the PASSTHROUGH half of a produced tree: hardlink every file
+    the caller is not writing itself. Weight files and sharded indexes of the
+    components named in ``skip_components`` are skipped — the caller writes
+    those.
+
+    A passthrough component that arrives as an HF shard set is COLLAPSED here
+    (th#1362). This is the only door untouched weights enter a tree we produce,
+    and every caller is one of our producers, so the one-file-per-component
+    invariant is satisfied at the door rather than at each of the callers. The
+    source is untouched: what is unlinked is this tree's hardlink, and the
+    merge verifies the bytes against the index it consumed, so a klein-4b-class
+    index/shard disagreement fails the produce instead of publishing an
+    unloadable component.
+    """
+    copied_indexes: list[Path] = []
     for f in sorted(source_dir.rglob("*")):
         if not f.is_file():
             continue
@@ -746,6 +761,11 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
         if name == ".civitai.json":
             continue
         _link_or_copy(f, out_dir / rel)
+        if name.endswith(".safetensors.index.json"):
+            copied_indexes.append(out_dir / rel)
+    for index_path in copied_indexes:
+        if index_path.is_file():
+            deshard_indexed_safetensors(index_path)
 
 
 # pgw#654: scheduler config overrides per checkpoint objective/distilled
@@ -1540,6 +1560,85 @@ def merge_safetensors_by_offset(
             os.close(fd)
 
 
+def deshard_indexed_safetensors(index_path: Path) -> Path:
+    """Collapse ONE HF shard set into a single ``<prefix>.safetensors``.
+
+    th#1362: bytes WE own are normalised to one file per component — mirrors we
+    ingest AND the passthrough components of the flavors we produce, which are
+    the same bytes one step later. Chunked CAS already gives resumable,
+    parallel, partial-failure-tolerant transfer BELOW the file, so the shard set
+    buys nothing and costs an index that can disagree with the bytes it names —
+    the bug that made klein-4b publish an unloadable text_encoder.
+
+    Provenance is unaffected: upstream per-file digests are recorded by the
+    provenance layer regardless of the layout we store.
+    """
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    weight_map = payload.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError(f"invalid safetensors index: {index_path}")
+    member_names: list[str] = []
+    for name in weight_map.values():
+        name = str(name)
+        if Path(name).name != name:
+            raise ValueError(
+                f"safetensors index member must be a basename: {index_path}")
+        if name not in member_names:
+            member_names.append(name)
+    members = [index_path.parent / name for name in member_names]
+    missing = [m for m in members if not m.is_file()]
+    if missing:
+        raise ValueError(f"safetensors index references a missing shard: {index_path}")
+
+    prefix = index_path.name.removesuffix(".safetensors.index.json")
+    merged = index_path.parent / f"{prefix}.safetensors"
+    if merged.exists() and merged not in members:
+        raise ValueError(f"deshard destination already exists: {merged}")
+    merge_safetensors_by_offset(members, merged)
+
+    # The merged header must name exactly the tensors the index claimed — the
+    # index-vs-bytes disagreement this whole change exists to kill is caught
+    # here, at ingest, instead of at load time on a GPU pod.
+    with open(merged, "rb") as f:
+        header_len = int.from_bytes(f.read(8), "little")
+        header = json.loads(f.read(header_len).decode("utf-8"))
+    got = {k for k in header if k != "__metadata__"}
+    want = {str(k) for k in weight_map}
+    if got != want:
+        merged.unlink(missing_ok=True)
+        raise ValueError(
+            f"deshard of {index_path} produced {len(got)} tensors, index names "
+            f"{len(want)} (missing={sorted(want - got)[:5]}, "
+            f"extra={sorted(got - want)[:5]})")
+
+    for member in members:
+        if member != merged:
+            member.unlink()
+    index_path.unlink()
+    logger.info("deshard index=%s shards=%d -> %s",
+                index_path.name, len(members), merged.name)
+    return merged
+
+
+def tree_has_sharded_safetensors(tree: Path) -> bool:
+    """Does this tree carry an HF shard set that mirror ingest must collapse?"""
+    return any(Path(tree).rglob("*.safetensors.index.json"))
+
+
+def deshard_mirror_tree(tree: Path) -> int:
+    """De-shard every HF shard set in a tree, in place.
+
+    One component at a time, unlinking each set's members as soon as its merged
+    file is verified, so the peak extra disk is the LARGEST component and not
+    the whole tree.
+    """
+    n = 0
+    for index_path in sorted(Path(tree).rglob("*.safetensors.index.json")):
+        deshard_indexed_safetensors(index_path)
+        n += 1
+    return n
+
+
 # ---------------------------------------------------------------------------
 # Canonical published filenames (gw#466 / gw#522)
 # ---------------------------------------------------------------------------
@@ -1617,6 +1716,9 @@ __all__ = [
     "normalize_variant_filenames",
     "list_shard_files_from_index",
     "merge_safetensors_by_offset",
+    "deshard_indexed_safetensors",
+    "deshard_mirror_tree",
+    "tree_has_sharded_safetensors",
     "NEVER_SHARD_MAX_SIZE",
     "find_producer_shards",
     "assert_one_file_per_component",
