@@ -206,12 +206,16 @@ def test_discovery_filter_drops_stamped_requirement(tmp_path: Path) -> None:
     assert "avx512f" in reason
 
 
-def test_legacy_cell_refused_via_torch_package_stamp(tmp_path: Path) -> None:
-    """A pre-pgw#754 cell has no metadata stamp; the .pt2's own
-    ``AOTI_CPU_ISA`` (present in the live SIGILL artifact:
-    'AVX512 AVX512_VNNI') must still turn the crash into a named refusal."""
-    _requires_avx512()
-    pt2 = tmp_path / "legacy.pt2"
+def test_an_unstamped_cell_is_refused_from_metadata_alone(
+    tmp_path: Path,
+) -> None:
+    """pgw#950: a cell carrying no ``host_isa`` stamp used to be waved past
+    the metadata gate and sniffed at stage time from the ``.pt2``'s own
+    ``AOTI_CPU_ISA``. That sniff is gone. An unstamped cell states no
+    requirement, so it is refused where the metadata is read — BEFORE any
+    download — and the miss policy re-mints one that does stamp.
+    """
+    pt2 = tmp_path / "unstamped.pt2"
     with zipfile.ZipFile(pt2, "w") as zf:
         zf.writestr(
             "model/data/aotinductor/model/abc.wrapper_metadata.json",
@@ -221,15 +225,16 @@ def test_legacy_cell_refused_via_torch_package_stamp(tmp_path: Path) -> None:
             }))
     content, meta = _artifact(tmp_path, pt2.read_bytes())
     meta.pop("host_isa")
-    artifact = aot_serve.pack(content, tmp_path / "legacy.tar.gz", meta)
+    # Discovery rules on it without fetching a byte.
+    reason = aot_serve.host_isa_reason(meta)
+    assert aot_serve.NO_HOST_ISA_STAMP in reason
+    assert aot_serve.NO_HOST_ISA_STAMP in aot_serve.verify(meta)
+    # And staging names the same refusal, on the same class.
+    artifact = aot_serve.pack(content, tmp_path / "unstamped.tar.gz", meta)
     with pytest.raises(aot_serve.AdoptError) as exc_info:
         aot_serve.stage_artifact(artifact, "sdxl")
     assert exc_info.value.reason == "host_isa_unsupported"
-    assert "avx512f" in str(exc_info.value)
-    assert "pre-pgw#754" in str(exc_info.value)
-    # Discovery-side verify must NOT over-refuse a legacy cell from
-    # metadata alone (the requirement is only knowable from the bytes).
-    assert aot_serve.host_isa_reason(meta) == ""
+    assert aot_serve.NO_HOST_ISA_STAMP in str(exc_info.value)
 
 
 def test_satisfiable_stamp_stages(tmp_path: Path) -> None:

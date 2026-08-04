@@ -158,15 +158,19 @@ def test_legacy_only_is_accepted_but_says_so() -> None:
     )
 
 
-def test_produced_topology_is_readable_by_both_sides() -> None:
-    """This worker PRODUCES topology too: the parent stamps one per split child
-    (`procsplit/group.py`), and a rolling image swap can put a pre-th#1375
-    reader on the other end of it."""
+def test_produced_topology_emits_the_canonical_spelling_only() -> None:
+    """pgw#950: this worker PRODUCES topology too (the parent stamps one per
+    split child, `procsplit/group.py`), and it now writes the canonical names
+    ONLY. Safe in either deploy order — tensorhub's `reconcileAlias` reads an
+    absent legacy key as "not written", so dropping the dual write cannot
+    disagree with anything."""
     emitted = ExecutionTopology(
         gpu_count=4, gpus_per_execution_group=2, parallel="sequence",
     ).as_dict()
-    assert emitted[KEY_GPUS_PER_GROUP] == emitted[LEGACY_KEY_GPUS_PER_GROUP] == 2
-    assert emitted[KEY_EXECUTION_GROUPS] == emitted[LEGACY_KEY_EXECUTION_GROUPS] == 2
+    assert emitted[KEY_GPUS_PER_GROUP] == 2
+    assert emitted[KEY_EXECUTION_GROUPS] == 2
+    assert LEGACY_KEY_GPUS_PER_GROUP not in emitted
+    assert LEGACY_KEY_EXECUTION_GROUPS not in emitted
     # and it round-trips through our own decoder (no key is unknown to us)
     assert ExecutionTopology.decode(json.dumps(emitted)).execution_groups == 2
 

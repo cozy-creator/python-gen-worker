@@ -95,14 +95,22 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
             meta = json.loads(member.read().decode())
     except Exception as exc:  # noqa: BLE001 — any unreadable cell re-mints
         return f"unreadable artifact ({exc})"
-    # th#883/gw#581: ONE compatibility brain — when both sides can state a
-    # cell key (local mints stamp one via artifact_metadata), the verdict is
-    # the exact key comparison fleet workers use; pre-key cells fall back to
-    # the legacy axis-by-axis verify.
-    reason = ""
-    try:
-        from . import cell_key
+    # th#883/gw#581: ONE compatibility brain when a key exists on both sides —
+    # the exact key comparison fleet workers use.
+    #
+    # pgw#950 deleted the arm below it: a cell that records no computable key
+    # used to fall through to ``cc.verify``'s axis-by-axis check, which is how
+    # a pre-gw#581 cell kept getting adopted. It does not any more. The local
+    # store is a cache; refusing a keyless cell costs one re-mint.
+    #
+    # The ``except`` that remains is NOT that arm. ``cell_key.compute`` needs a
+    # runtime ``sm``, so it raises on a host with no CUDA — the CLI, cozy-local
+    # and library use. There ``cc.verify`` is the only brain that can answer at
+    # all, so it is the no-GPU path, not a legacy one. Typed, so a real bug in
+    # the key brain surfaces instead of being read as "no GPU".
+    from . import cell_key
 
+    try:
         # pgw#686: the ONE base-lane resolution the mint's stamp uses —
         # the raw pipeline probe is blind to the w8a8 GEMM mode, so a
         # store save/lookup pair straddling apply_lora_lane would never
@@ -113,11 +121,10 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
             contract=cell_key.contract_digest(cc.declared_contract_facts(cfg)),
             regional=bool(getattr(cfg, "regional", False)),
         )
-        reason = cell_key.mismatch(meta, want)
-        if reason and "records no computable key" in reason:
-            reason = cc.verify(meta, family=family)
-    except Exception:
+    except cell_key.CellKeyError:
         reason = cc.verify(meta, family=family)
+    else:
+        reason = cell_key.mismatch(meta, want)
     if reason:
         return reason
     reason = cc.mode_drift(meta, pipe) or cc.lane_drift(meta, pipe)

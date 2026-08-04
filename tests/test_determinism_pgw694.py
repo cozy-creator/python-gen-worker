@@ -136,18 +136,22 @@ def test_mint_manifest_carries_the_posture_seal() -> None:
 def test_arm_refuses_on_posture_drift_named() -> None:
     """artifact_drift converts a sealed-vs-live posture mismatch into a
     named refusal at arm time — never a downstream guard miss."""
+    class _Pipe:
+        pass
+
+    _sig, _wc = cc.execution_contract(_Pipe(), _cfg())
     base = {
         "compile_mode": "whole", "shapes": [[64, 64]],
         "targets": ["transformer"], "guidance_scales": [],
+        # pgw#950: as every production mint does — a cell silent on the
+        # module-graph signature is no longer adoptable.
+        "graph_signature": _sig, "weight_contract": _wc,
     }
     meta = dict(base)
     meta[gc.MANIFEST_KEY] = {
         "v": 2, "graphs": [], "leaks": [],
         gc.POSTURE_KEY: dict(gc.CANONICAL_POSTURE),
     }
-
-    class _Pipe:
-        pass
 
     assert cc.artifact_drift(meta, _Pipe(), _cfg()) == ""
     with torch.no_grad():
