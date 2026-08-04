@@ -17,6 +17,31 @@
   `--lane`, `kernel_lane.META_KEY == "kernel_lane"` in minted cell metadata,
   and the `weight_lane` family (th#1580 Phase B) are byte-identical.
 
+- **pgw#955: a hub plan re-send that landed WHILE a residency reconcile was
+  running was dropped on the floor — the redrive's re-report never happened.**
+  It presented as a load-only test flake (`test_reissued_plan_republishes_held_
+  identity` stalling at "1 of 2 ON_DISK re-reports" on both attempts of PR
+  #470's `tests` job) and it is a product bug. gw#614 taught
+  `_replace_residency_reconcile` not to CANCEL an in-flight reconcile when the
+  re-sent plan's semantic model set is unchanged — a running `self_mint_compile`
+  needs its window — but it then returned having told the running loop nothing.
+  Meanwhile `replace_desired_snapshots` had already opened a republish epoch,
+  and only a reconcile pass ever reads one: no cancel, no restart, no
+  re-announce, and no later event to heal it. Under pgw#628/th#1070 v2 that
+  epoch IS the hub asking for a resync of the lost success observation, so the
+  swallow silently defeated the resync precisely when the worker was busiest —
+  the state in which observations get lost. The branch now signals the
+  level-triggered restart (gw#623's mechanism) instead of returning silently:
+  the loop finishes the item it is on, then re-converges and re-announces under
+  the new epoch. gw#614's no-cancel guarantee is untouched, the re-pass
+  short-circuits everything already satisfied, and the epoch guard still caps
+  emission at one re-report per ref per applied ack. The window was ~one
+  event-loop step wide when the plan materialized instantly, which is the whole
+  reason it read as a flake; the new test holds it open on purpose (a second
+  ref in the same plan parked on a blob the test does not answer until it has
+  proven the re-sent plan was applied) and reproduces the exact CI failure
+  message deterministically.
+
 - **pgw#943: a child-call wait now YIELDS the GPU permit — the worker
   pipelines while parked on a child request.** #455 measured the defect: at
   `gpu_slots=1` a parent in `ctx.call_endpoint` held its group permit for the
