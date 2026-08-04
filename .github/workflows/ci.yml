@@ -44,36 +44,40 @@ name: CI
 # cache in either.
 #
 #                                    old shape   THIS workflow (PR #467)
-#   Set up job + checkout                   4s      3s   both jobs
+#   Set up job + checkout                   4s      4s   both jobs
 #   Install uv + Set up Python 3.12         3s      2s   both jobs
-#   uv sync --locked --extra dev           21s     18s   both jobs
+#   uv sync --locked --extra dev           21s  21-28s   both jobs
 #   ------------------------------------------------------- gates
-#   Type check (mypy)                      60s     59s
+#   Type check (mypy)                      60s     58s
 #   Lint (ruff)                             0s      1s
 #   HTTP timeout guard                      1s      1s
 #   unreached public surface guard          2s      2s
 #   config reads guard                      2s      2s
 #   Build package                           2s      1s
 #                                       -------  ------
-#   gates TOTAL                         1m 35s  1m 29s   observed, green
+#   gates JOB WALL                      1m 35s  1m 42s   observed GREEN, twice
 #   ------------------------------------------------------- tests
-#   Install llama-server (pinned, CPU)      1s      0s
-#   Run tests (v1)                     10m 59s 10m 17s   3092 passed, 2 failed
-#   Run tests (v2)                      3m 47s      —    (see note)
+#   Install llama-server (pinned, CPU)      1s      1s
+#   Run tests (v1)                     10m 59s 11m 13s   3092 passed, 2 failed
+#   Run tests (v2)                      3m 47s   3m 54s   21 passed
 #                                       -------  ------
-#   tests TOTAL                        15m 15s ~14m 28s
+#   tests JOB WALL                     15m 15s 15m 37s
 #
-# The two jobs run concurrently, so the WALL time of a full run is ~14m 30s —
-# FASTER than the 16m 22s the single serial job cost, while also returning the
-# cheap half TEN times sooner (1m 29s). The split costs one extra 18s install
-# and buys that.
+# `tests/` runtime is the only noisy line — 10m 17s and 11m 13s on two runs of
+# the same tree. That is runner variance on a 4-core box, not a signal; size the
+# 40-minute timeout against the upper figure, not the lower.
 #
-# The `—` is not a missing measurement, it is a DEFECT this run exposed: with
-# `tests/` red, `tests_v2/` reported `skipped`, because a failing step skips
-# every later step by default. The step's own comment had claimed since pgw#808
-# that the two-step split existed so one suite's failure "must not erase the
-# other's answer" — it never did that. Fixed at the step with `if: !cancelled()`.
-# 3m 47s is that step's last unobstructed measurement, from the left column.
+# The two jobs run concurrently, so a full run is ~15m 40s of WALL time against
+# the old serial 16m 22s, while returning the cheap half TEN times sooner
+# (1m 42s). The split costs one extra ~25s install and buys that.
+#
+# NOTE ON THE `Run tests (v2)` LINE. Its first run on this PR reported `skipped`,
+# not a duration, because `tests/` was red and a failing step skips every later
+# step by default — so the two-step split had never once delivered the property
+# its own comment claimed for it since pgw#808 ("a collection error in either
+# must not erase the other's answer"). `if: !cancelled()` at the step is the fix,
+# and the 3m 54s / 21 passed above is the proof: same red `tests/`, v2 reported
+# anyway.
 #
 # NO CACHE STEP, deliberately, and this is the one place the tensorhub precedent
 # (th#1572) does NOT transfer. There, `setup-go`'s cache key was shared across
