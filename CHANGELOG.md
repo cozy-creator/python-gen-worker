@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- **pgw#952: a lane -> `dev` PR used to run NO CI AT ALL; `ci.yml` now runs on
+  `[dev, master]` as two parallel jobs.** Verified on PR #466 (215+/178-, merged
+  into `dev`): `statusCheckRollup` was `[]` — not a check that passed, no check
+  ran. `ci.yml` was `branches: [master]`, `proto-contract.yml` fires on `dev` but
+  its `paths:` filter matched nothing in that diff, and the other two workflows
+  are master/tag only. The stated reason — "CI spend is metered" — was inherited
+  from tensorhub, which is PRIVATE; **this repo is PUBLIC**, so standard-runner
+  minutes are free. The real constraint is latency, so the suite is split into
+  `fast gates` (mypy, ruff, the three script guards, `uv build` — 1m35s) and
+  `tests` (llama-server + both pytest suites — 15m15s), running concurrently.
+  Full-run wall time drops from 16m22s to 15m15s and the cheap verdict arrives
+  nine times sooner. Per-step times are measured on the runner, not locally, and
+  recorded in the workflow header along with what the gate does NOT catch —
+  above all that there is no GPU on `ubuntu-latest`, so a green says nothing
+  about the fleet.
+- **No `paths:` filter on `ci.yml`, and `paths-ignore: ["**.md"]` deleted
+  (pgw#952).** Three gates scan the whole tree — `lint_unreached_surface.py`,
+  `lint_config_reads.py`, and the gw#666 guards inside the suite — so they are
+  invalidated COLLATERALLY, by a change touching none of the files they read.
+  pgw#949 is exactly that: pgw#943 added one test file and broke two guards in a
+  file it never opened. `ready_for_review` is now in the trigger types, because
+  the jobs skip drafts and it is not a default type — without it a draft marked
+  ready gets no run for the head it actually merges.
+- **A red `tests/` silently erased the `tests_v2/` answer (pgw#952).** Since
+  pgw#808 the two suites have run as two steps, with a comment stating the split
+  existed so "a collection error in either must not erase the other's answer".
+  It never did that: a failing step skips every later step by default. Observed
+  on pgw#952's own PR — `tests/` failed on pgw#949's two guards and `tests_v2/`
+  reported `skipped`. The step now carries `if: ${{ !cancelled() }}`, so both
+  suites always report; `!cancelled()` rather than `always()` so a run superseded
+  by the concurrency group does not spend four more minutes on a dead result.
+- **`native-kernels.yml` gained the `dev` trigger; `proto-contract.yml` gained
+  `pyproject.toml`/`uv.lock` to its paths (pgw#952).** The latter regenerates
+  bindings with `grpc_tools.protoc` and diffs them, so the generator's pinned
+  version is an input to its verdict — a `grpcio-tools` bump could drift the
+  committed bindings while touching none of the filtered paths.
+
 - **pgw#947: a kernel-lane verdict is evidence, not an instruction — serving
   re-applies the fit rule on its own card.** Cell keys are keyed on SM and the
   lane is deliberately not a key axis, so one key spans a 96 GB RTX PRO 6000

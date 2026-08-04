@@ -83,16 +83,27 @@ one version deliberately; do not reach for a global exact pin to get it.
 
 ## The gate — what actually has to be green
 
-`ci.yml`, in order. **A local `pytest` run is not the gate** and will let you push a red:
+`ci.yml`. **A local `pytest` run is not the gate** and will let you push a red.
+
+Since pgw#952 it is TWO PARALLEL JOBS, and both must be green — `publish.yml` keys on
+the run's conclusion, which is success only when both are. It also runs on PRs into
+`dev`, not just `master`, so a cut no longer inherits a pile of unproven lane merges.
+
+**`fast gates`** (~1m35s):
 
 1. `uv sync --locked --extra dev` — a version bump without `uv lock` fails here. It has.
 2. `mypy src/gen_worker` — GATING (gw#497; the tree is mypy-clean, no baseline)
 3. `scripts/lint_http_timeouts.py` (gw#467)
 4. `scripts/lint_unreached_surface.py` (pgw#849 guard 2)
-5. install pinned CPU `llama-server` (so the gw#402 runtime tests run for real)
-6. `pytest tests/ -n 4 --dist loadfile`
-7. `pytest tests_v2/ -n 4 --dist loadfile` — **`testpaths = ["tests"]`, so a bare `pytest` skips this.**
-8. `uv build` — a cut can still fail here, after every test is green.
+5. `scripts/lint_config_reads.py` (pgw#931 guard)
+6. `uv build` — a cut can still fail here, after every test is green.
+
+**`tests`** (~15m15s):
+
+1. `uv sync --locked --extra dev`
+2. install pinned CPU `llama-server` (so the gw#402 runtime tests run for real)
+3. `pytest tests/ -n 4 --dist loadfile`
+4. `pytest tests_v2/ -n 4 --dist loadfile` — **`testpaths = ["tests"]`, so a bare `pytest` skips this.**
 
 **`ruff check src/gen_worker` is NOT a gate.** `ci.yml` runs it with
 `continue-on-error: true` (lint debt, mostly `worker.py`) — it is visible in
@@ -102,17 +113,26 @@ the logs and blocks nothing. Do not spend cut time on red ruff output.
 tree SHAs, not commit SHAs). Tag a commit CI has already proven, or dispatch CI on the tag and re-run
 publish.
 
-### Why a cut costs hours: chaos accrues CI debt and the cut pays all of it
+### Why a cut used to cost hours — and what pgw#952 changed
 
-`chaos` is a shared branch everyone commits to directly (by design), and **nothing gates a chaos
-commit on being green.** The publish gate is the first thing that ever demands a green run on an
-exact tree — so every red accumulated since the last cut lands on whoever cuts next, who usually
+**Historically:** `chaos` was a shared branch everyone committed to directly, and nothing gated a
+chaos commit on being green. The publish gate was the first thing that ever demanded a green run on
+an exact tree — so every red accumulated since the last cut landed on whoever cut next, who usually
 authored none of it.
 
 Measured on the 0.90.6 cut: three reds, none authored by the cutter — another lane's `mypy` error, a
 stale pgw#849 baseline entry, and **two tests that had never passed CI in their lives** (established
-by `git merge-base --is-ancestor` against the last green run). Budget hours, not minutes, and expect
-to choose between fixing another lane's code and branching around it.
+by `git merge-base --is-ancestor` against the last green run).
+
+**Since pgw#952** the same debt could still accrue on `dev` — `chaos` is retired, but until then
+`ci.yml` was `branches: [master]` and a lane -> `dev` PR ran NO CI AT ALL (PR #466's
+`statusCheckRollup` was literally `[]`). `ci.yml` now runs on `[dev, master]`, so a red is refused
+at the lane PR that introduces it rather than at the cut. Expect this section to shrink; do not
+assume it already has. `dev` was RED on pgw#949's two gw#666 guard tests when the gate was turned
+on, and anything that merged before pgw#952 was never gated.
+
+The rule for whoever cuts is unchanged while any pre-pgw#952 history is in range: budget hours, not
+minutes, and establish by ancestry — never from cut notes — whether a red is yours.
 
 **If the red is a semantics decision inside another lane's work, do not fix it to unblock your tag.**
 Branch the release from a commit that predates it and say so in the CHANGELOG. A cut that launders
