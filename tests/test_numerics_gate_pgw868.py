@@ -30,6 +30,7 @@ pod, and no test here may be cited as evidence about a real cell's numerics.
 from __future__ import annotations
 
 import math
+import platform
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -183,6 +184,11 @@ def metadata(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Dict[str, Any]:
         "family": FAMILY, "precision": "w8a8", "cell_key": "cell868",
         "entries": entries, "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False, "source_ref": "", "source_digest": "",
+        # pgw#950: every mint stamps a host-ISA requirement, and a cell that
+        # stamps none is refused rather than sniffed from the .pt2. Satisfiable
+        # anywhere: this host's machine, no ISA level.
+        "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
+                     "level": ""},
     }
     meta["combined_graph_hash"] = aot.combined_graph_hash(
         b["class_hash"] for b in entries.values())

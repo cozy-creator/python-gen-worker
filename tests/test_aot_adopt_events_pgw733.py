@@ -21,6 +21,7 @@ still named, and now it is also timed and bound to the candidate's ref+digest.
 
 from __future__ import annotations
 
+import platform
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,6 +129,11 @@ def _meta(**over: Any) -> Dict[str, Any]:
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         "source_ref": "", "source_digest": "",
+        # pgw#950: every mint stamps a host-ISA requirement, and a cell that
+        # stamps none is refused rather than sniffed from the .pt2. Satisfiable
+        # anywhere: this host's machine, no ISA level.
+        "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
+                     "level": ""},
     }
     m["combined_graph_hash"] = aot_serve.combined_graph_hash(
         str((b or {}).get("class_hash") or "")
@@ -234,14 +240,16 @@ def test_candidates_retire_unstamped_preclamp_cells(
     stub_runtime: None,
 ) -> None:
     """Live-proven 2026-07-29 (pod 3cjmd3ohuk98a5): an unstamped pre-clamp
-    cell passes every metadata gate, gets downloaded, then refuses at stage
-    (`host_isa_unsupported`, torch package stamp). Discovery must retire the
-    whole class instead of shipping doomed candidates."""
+    cell passes every metadata gate, gets downloaded, then refuses at stage.
+    Discovery must retire the whole class instead of shipping doomed
+    candidates. pgw#950 deleted the stage-time torch-package sniff that used
+    to catch the survivors, so this filter is now the ONLY thing between an
+    unstamped cell and a wasted download."""
     from gen_worker import host_isa
 
     stamped = _meta(host_isa=host_isa.stamp())
     unstamped = _meta()
-    assert "host_isa" not in unstamped
+    unstamped.pop("host_isa")
     items = [
         {"checkpoint_id": "ck-old-preclamp",
          "updated_at": "2026-07-30T00:00:00Z", "metadata": unstamped},
