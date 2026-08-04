@@ -607,7 +607,8 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     not maj.min, or the load either fails obscurely or is undefined.
 
     Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA +
-    contract hashes) and never on ``sku`` (pgw#765): a cell minted on an l4
+    contract hashes), each of them STRICTLY — an axis a cell is silent on is
+    refused by name, never skipped. Never on ``sku`` (pgw#765): a cell minted on an l4
     and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
     refusing the cross-SKU adoption discards the whole point of the pgw#691
     collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
@@ -630,14 +631,6 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
         return "torch not importable"
     for field_name in IDENTITY_AXES:
         want, have = str(meta.get(field_name) or ""), here[field_name]
-        if field_name == "sm" and not want:
-            # A pre-pgw#765 cell stamped no capability. Its REAL arch is
-            # readable from the .pt2's own AOTI_COMPUTE_CAPABILITY once the
-            # bytes are staged (:func:`verify_package_compute_capability`,
-            # the pgw#754 two-tier shape), so the axis is not silently
-            # dropped — it is ruled on where the answer exists, before any
-            # dlopen. Metadata-only callers (discovery) cannot know it.
-            continue
         if want != have:
             return f"{field_name} {want!r} != runtime {have!r}"
     isa_reason = host_isa_reason(meta)
@@ -670,45 +663,28 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     return ""
 
 
+#: :func:`host_isa_reason`'s refusal for a cell that stamped no requirement.
+#: Also the ``aot_cells`` discovery reject class, so the same fact has one name
+#: whether it is ruled on before download or after staging.
+NO_HOST_ISA_STAMP = "no_host_isa_stamp"
+
+
 def host_isa_reason(meta: Mapping[str, Any]) -> str:
     """'' when this host's CPU can execute the artifact's packaged host
     code, else the refusal reason (pgw#754).
 
     Reads the mint's ``host_isa`` requirement stamp — metadata-only, so
     discovery (``aot_cells._candidates``) filters unexecutable cells BEFORE
-    downloading them. Artifacts minted before the stamp existed return ''
-    here; :func:`verify_package_host_isa` covers them once bytes are staged.
+    downloading them. An artifact carrying NO stamp is refused here: its true
+    ISA need is undiscoverable from metadata, an AVX-512-built ``.pt2``
+    SIGILLs (exit 132 inside ``aoti_load_package``) on a host without it, and
+    the miss policy for a refused cell is a self-mint that stamps one.
     """
     block = meta.get("host_isa")
     if not isinstance(block, Mapping):
-        return ""
+        return f"artifact records no host_isa stamp ({NO_HOST_ISA_STAMP})"
     level, machine = host_isa.requirement_of_meta(block)
     return host_isa.unsupported_reason(level, machine)
-
-
-def verify_package_host_isa(meta: Mapping[str, Any], package: Path) -> str:
-    """The staged-bytes host-ISA gate: stamped requirement when present,
-    else torch's own ``AOTI_CPU_ISA``/``AOTI_MACHINE`` stamps inside the
-    ``.pt2`` (present since torch 2.x package format; the mint host's picked
-    vector ISA, which a ``-march=native`` build tracks). '' = executable.
-
-    This is what turns the live SIGILL class (exit 132 inside
-    ``aoti_load_package`` on a host lacking the mint host's AVX-512) into a
-    named ``adopt_failed:host_isa_unsupported`` refusal for every artifact,
-    including legacy cells minted before the metadata stamp existed.
-    """
-    reason = host_isa_reason(meta)
-    if reason:
-        return reason
-    if isinstance(meta.get("host_isa"), Mapping):
-        return ""  # stamped and satisfied; no legacy sniff needed
-    for row in _package_torch_stamps(package):
-        level = host_isa.vec_isa_level(str(row.get("AOTI_CPU_ISA") or ""))
-        machine = str(row.get("AOTI_MACHINE") or "")
-        reason = host_isa.unsupported_reason(level, machine)
-        if reason:
-            return reason + " (torch package stamp, pre-pgw#754 cell)"
-    return ""
 
 
 def _package_torch_stamps(package: Path) -> List[Dict[str, Any]]:
@@ -738,17 +714,15 @@ def _package_torch_stamps(package: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def verify_package_compute_capability(
-    meta: Mapping[str, Any], package: Path,
-) -> str:
+def verify_package_compute_capability(package: Path) -> str:
     """The staged-bytes GPU-architecture gate: torch's own
     ``AOTI_COMPUTE_CAPABILITY`` inside the ``.pt2`` against this device's
     capability. '' = same architecture (or unknowable).
 
     The second tier that lets :func:`verify` stop refusing on ``sku``
     without loosening the axis that actually matters (pgw#765). It rules on
-    the two cases metadata cannot: a pre-pgw#765 cell that stamped no ``sm``
-    axis at all, and a cell whose stamp disagrees with its own bytes. A
+    the one case metadata cannot: a cell whose ``sm`` stamp disagrees with
+    its own bytes. A
     cubin built for another arch has no PTX fallback (pgw#698 packs cubins
     only), so without this the refusal would be a raw CUDA load error
     instead of a named ``adopt_failed:sm_mismatch``.
@@ -764,7 +738,6 @@ def verify_package_compute_capability(
     # comparison also admits the dotted/tuple spellings other device
     # interfaces use, so a shape surprise is never read as a mismatch.
     here_digits = "".join(c for c in here if c.isdigit())
-    legacy = "" if meta.get("sm") else "pre-pgw#765 cell, "
     for row in _package_torch_stamps(package):
         raw = str(row.get("AOTI_COMPUTE_CAPABILITY") or "").strip()
         digits = "".join(c for c in raw if c.isdigit())
@@ -772,7 +745,7 @@ def verify_package_compute_capability(
             continue
         if digits != here_digits:
             return (f"sm 'sm_{digits}' != runtime {here!r} "
-                    f"({legacy}torch package stamp)")
+                    f"(torch package stamp)")
     return ""
 
 
@@ -895,9 +868,8 @@ def stage_artifact(
     try:
         meta = unpack(Path(artifact), root)
         # pgw#754: rule on host-CPU executability FIRST and by name — the
-        # one failure mode that must never reach dlopen. Covers stamped
-        # requirements and (via the .pt2's own torch stamps) legacy cells.
-        isa_reason = verify_package_host_isa(meta, root / PACKAGE_NAME)
+        # one failure mode that must never reach dlopen.
+        isa_reason = host_isa_reason(meta)
         if isa_reason:
             raise AdoptError("host_isa_unsupported", isa_reason)
         reason = verify(meta, family=family)
@@ -907,8 +879,7 @@ def stage_artifact(
         # on by name before dlopen — the tier that keeps cross-SKU adoption
         # honest now that ``sku`` no longer stands in for the arch. Runs
         # after `verify` so a stamped axis mismatch keeps its own name.
-        sm_reason = verify_package_compute_capability(
-            meta, root / PACKAGE_NAME)
+        sm_reason = verify_package_compute_capability(root / PACKAGE_NAME)
         if sm_reason:
             raise AdoptError("sm_mismatch", sm_reason)
         return _StagedAotArtifact(meta, root, temporary)
@@ -2385,6 +2356,7 @@ __all__ = [
     "find_artifact",
     "flavor_label",
     "host_isa_reason",
+    "NO_HOST_ISA_STAMP",
     "ingress_class_name",
     "ingress_refusals",
     "is_aot_artifact",
@@ -2410,6 +2382,5 @@ __all__ = [
     "unwrap",
     "verify",
     "verify_package_compute_capability",
-    "verify_package_host_isa",
     "wrap_module",
 ]

@@ -34,6 +34,7 @@ import msgspec
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import cpu_budget
+from . import kernel_lane
 from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
@@ -6584,6 +6585,18 @@ class Executor:
             else await self._fetch_compile_snapshot(spec, snapshots)
         )
         compile_artifact = compile_selection.path if compile_selection else None
+        # pgw#947: the serving-kernel lane comes from the CELL, and it has to
+        # be pinned BEFORE setup() — the linears are swapped at model load, so
+        # a verdict read afterwards would arrive one whole pipeline too late.
+        # No cell (eager boot, self-minting boot, pre-pgw#947 cell) is the
+        # declared conservative default WITH a typed reason; there is no SM
+        # allowlist and no per-boot probe to fall back on any more.
+        # The verdict is EVIDENCE, not an instruction: cells are keyed on SM
+        # and the lane is not a key axis, so a 96 GB card's winner can reach a
+        # 32 GB card of the same SM. adopt() re-applies the fit constraint
+        # against THIS device before pinning.
+        kernel_lane.adopt_from_artifact(
+            compile_artifact, source=f"{spec.name} boot")
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._intent_lock(

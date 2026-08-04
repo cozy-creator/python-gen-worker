@@ -221,17 +221,21 @@ def test_arm_names_env_seal_drift(monkeypatch: pytest.MonkeyPatch) -> None:
     """artifact_drift's config half: a cell sealed under a different
     environment refuses with the fact named — a foreign cell is
     diagnosable, never a silent inner-key miss."""
+    class _Pipe:
+        pass
+
+    _sig, _wc = cc.execution_contract(_Pipe(), _cfg())
     base = {
         "compile_mode": "whole", "shapes": [[64, 64]],
         "targets": ["transformer"], "guidance_scales": [],
+        # pgw#950: as every production mint does — a cell silent on the
+        # module-graph signature is no longer adoptable.
+        "graph_signature": _sig, "weight_contract": _wc,
         gc.MANIFEST_KEY: {
             "v": 2, "graphs": [], "leaks": [],
             gc.POSTURE_KEY: dict(gc.CANONICAL_POSTURE),
         },
     }
-
-    class _Pipe:
-        pass
 
     live = dict(base, **{env_seal.SEAL_KEY: env_seal.effective_seal()})
     assert cc.artifact_drift(live, _Pipe(), _cfg()) == ""

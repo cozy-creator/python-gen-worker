@@ -6,7 +6,12 @@ name: native-kernels compile
 on:
   workflow_dispatch: {}
   pull_request:
-    branches: [master]
+    # pgw#952: `dev` added. A csrc change otherwise reached `dev` unproven and
+    # was only compiled at the promotion PR, where the next lane pays for it.
+    # The `paths:` filter STAYS, unlike ci.yml's: this job compiles one
+    # directory and its verdict is a property of that directory alone — it is
+    # not tree-scanning, so nothing can invalidate it collaterally.
+    branches: [dev, master]
     paths:
       - "csrc/**"
       - "scripts/native/**"

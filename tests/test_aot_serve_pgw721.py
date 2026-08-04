@@ -17,6 +17,7 @@ The two tests that carry the issue:
 from __future__ import annotations
 
 import json
+import platform
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,13 @@ from gen_worker.cell_adopt import AdoptOutcome
 FAMILY = "sdxl-base"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
            "cuda": "13.0"}
+
+#: pgw#950: every mint stamps a host-ISA requirement (``artifact_metadata``
+#: calls ``host_isa.stamp()`` unconditionally), and a cell that stamps none is
+#: now refused rather than sniffed from the .pt2's own AOTI_CPU_ISA. This is
+#: the satisfiable-anywhere block: this host's machine, no ISA level.
+HOST_ISA = {"machine": platform.machine(), "march": "", "simdlen": 0,
+            "level": ""}
 
 # 1024x1024 exported with symbolic latent dims: the pgw#704 headline is that
 # the SAME artifact serves 1152x896 (144x112 latent units), so the declared
@@ -153,6 +161,7 @@ def _meta(**over):
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         "source_ref": "", "source_digest": "",
+        "host_isa": dict(HOST_ISA),
     }
     m["combined_graph_hash"] = aot.combined_graph_hash(
         str((b or {}).get("class_hash") or "")

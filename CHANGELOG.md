@@ -2,16 +2,175 @@
 
 ## Unreleased
 
-## 0.91.4 (2026-08-03) — **endpoint authors can explicitly keep a non-root model slot inside its architecture-family gates**
+- **pgw#952: a lane -> `dev` PR used to run NO CI AT ALL; `ci.yml` now runs on
+  `[dev, master]` as two parallel jobs.** Verified on PR #466 (215+/178-, merged
+  into `dev`): `statusCheckRollup` was `[]` — not a check that passed, no check
+  ran. `ci.yml` was `branches: [master]`, `proto-contract.yml` fires on `dev` but
+  its `paths:` filter matched nothing in that diff, and the other two workflows
+  are master/tag only. The stated reason — "CI spend is metered" — was inherited
+  from tensorhub, which is PRIVATE; **this repo is PUBLIC**, so standard-runner
+  minutes are free. The real constraint is latency, so the suite is split into
+  `fast gates` (mypy, ruff, the three script guards, `uv build` — 1m35s) and
+  `tests` (llama-server + both pytest suites — 15m15s), running concurrently.
+  Full-run wall time drops from 16m22s to 15m15s and the cheap verdict arrives
+  nine times sooner. Per-step times are measured on the runner, not locally, and
+  recorded in the workflow header along with what the gate does NOT catch —
+  above all that there is no GPU on `ubuntu-latest`, so a green says nothing
+  about the fleet.
+- **No `paths:` filter on `ci.yml`, and `paths-ignore: ["**.md"]` deleted
+  (pgw#952).** Three gates scan the whole tree — `lint_unreached_surface.py`,
+  `lint_config_reads.py`, and the gw#666 guards inside the suite — so they are
+  invalidated COLLATERALLY, by a change touching none of the files they read.
+  pgw#949 is exactly that: pgw#943 added one test file and broke two guards in a
+  file it never opened. `ready_for_review` is now in the trigger types, because
+  the jobs skip drafts and it is not a default type — without it a draft marked
+  ready gets no run for the head it actually merges.
+- **A red `tests/` silently erased the `tests_v2/` answer (pgw#952).** Since
+  pgw#808 the two suites have run as two steps, with a comment stating the split
+  existed so "a collection error in either must not erase the other's answer".
+  It never did that: a failing step skips every later step by default. Observed
+  on pgw#952's own PR — `tests/` failed on pgw#949's two guards and `tests_v2/`
+  reported `skipped`. The step now carries `if: ${{ !cancelled() }}`, so both
+  suites always report; `!cancelled()` rather than `always()` so a run superseded
+  by the concurrency group does not spend four more minutes on a dead result.
+- **`native-kernels.yml` gained the `dev` trigger; `proto-contract.yml` gained
+  `pyproject.toml`/`uv.lock` to its paths (pgw#952).** The latter regenerates
+  bindings with `grpc_tools.protoc` and diffs them, so the generator's pinned
+  version is an input to its verdict — a `grpcio-tools` bump could drift the
+  committed bindings while touching none of the filtered paths.
 
-- **pgw#766 / th#1566: `Slot(family=...)` makes non-root model governance
-  explicit.** pgw#747 correctly stopped stamping family-agnostic auxiliaries
-  with a function's model family, but inferred agnosticism from the proxy
-  "non-root + no hardcoded checkpoint". That also emptied deploy-bound model
-  lanes such as qwen-image's `edit`, disabling the hub's binding and serving-
-  contract gates. A non-empty explicit family now overrides that inference;
-  an explicit empty family keeps an auxiliary agnostic, and omission preserves
+- **pgw#947: a kernel-lane verdict is evidence, not an instruction — serving
+  re-applies the fit rule on its own card.** Cell keys are keyed on SM and the
+  lane is deliberately not a key axis, so one key spans a 96 GB RTX PRO 6000
+  and a 32 GB RTX 5090. Adoption used to `pin()` the recorded winner with no
+  local re-validation, so the small card could pin a lane whose measured peak
+  does not fit it — the kernels' numerics self-checks are correctness checks
+  and know nothing about memory, so the symptom is an OOM or a silent slide
+  into CPU-offload degraded mode. `kernel_lane.adopt()` now re-applies the fit
+  constraint (`peak x1.20 + 1 GiB` against the honestly detected total)
+  before pinning: the recorded winner fits, it stands; it does not, the
+  fastest recorded candidate that fits here is pinned
+  (`kernel_lane_refit_local`); nothing fits, the smallest recorded peak is
+  (`kernel_lane_refit_no_fit`) — never the declared default, which carries
+  the larger DENSE modulation and would be the biggest ask of all. With the
+  published `kernel_lane_evidence` in hand the re-fit is `select()` itself
+  re-run against the local total. A cell with no recorded peaks is adopted
+  and marked `kernel_lane_fit_unverified`.
+- **Peak bytes now ride the packed cell (pgw#947).** The envelope gained a
+  `fit` block — each measured candidate's peak QUANTIZED up to 256 MiB, plus
+  the fallback order — so a worker that will never see the timings can still
+  re-apply the fit half of the rule. Bytes are admissible under the #699
+  double-mint byte-compare where wall clocks are not, because quantizing them
+  makes them reproducible across two mints the same way `MARGIN_FRACTION`
+  makes the winner reproducible; rounding UP can only make the constraint
+  stricter. Cell keys do not move (`cell_identity` keys named facts, not the
+  envelope). The SPEED axis is a recorded, unfixed limitation: a ranking
+  minted on one card of an SM class can still be wrong on another, and
+  detecting it would need re-benchmarking at serve time.
+
+- **th#1566: distillation `false` no longer means “unknown.”** The vendored
+  worker protocol now carries `ModelBinding.distilled_status`; the SDK exposes
+  it on resolved slots and refuses an explicitly unclassified or inconclusive
+  checkpoint when a function declares a distillation contract. Conversion
+  publishes propagate only evidenced values, so an unknown source can no
+  longer mint a derived checkpoint classified as non-distilled.
+
+## 0.92.0 (2026-08-03) — **`weight_set` is deleted from `@endpoint`** (pgw#919/th#1559: NFS volumes follow `kind=`, not an author declaration), and child-call pipelining is answered by measurement (pgw#943)
+
+MINOR: `@endpoint(weight_set=)` is removed. It was declared by **0 of 1,129** function rows
+fleet-wide and shipped in no published tag, so nothing to migrate; passing it is now a
+`TypeError`. Publish is unaffected — `manifestFunction` decodes with plain `encoding/json`
+and no `DisallowUnknownFields`, so an older SDK still emitting the field has it dropped.
+
+- **`weight_set` deleted, not defaulted (pgw#919).** Paul's ruling (th#1559 §4.22):
+  *"inference gets NFS drives, hard stop, no question, whereas others do not get NFS
+  drives."* NFS volumes follow `@endpoint(kind=)`; there is no author declaration, no config
+  knob, and no derivation from slot policy — both were proposed and rejected. The 0-of-1,129
+  measurement was never an adoption gap: `weight_set` asked the author to compile in a fact an
+  operator invalidates post-deploy by flipping a slot to `open`. Gone from `api/decorators.py`
+  (`WEIGHT_SETS`, `_validate_weight_set`, `EndpointDecl.weight_set`, every signature and
+  forward site), `registry.py` (`EndpointSpec.weight_set` and its
+  `getattr(decl, "weight_set", None)` read — the defaulted read over a field nobody sets is
+  what kept the gap invisible across 31 packages) and the discovery manifest. Recorded in
+  `DELETED_FIELDS`, so `assert_sdk_shape()` enforces it everywhere at once. The hub half
+  (column drops, kind-keyed volume gate, 11 volumes / 1,061 GB reaped) is already promoted.
+- **Child calls do NOT release the GPU (pgw#943) — measured, on the real executor.** First
+  execution of `ctx.call_endpoint` end to end (`requests.parent_request_id` was non-empty on
+  0 of 800 rows; `max(call_depth)` was 0). Two facts, both now pinned by
+  `tests/test_child_call_pipelining_pgw943.py`: intake and the event loop stay free (a sync
+  handler parked in `CalloutClient.wait` sits on an `asyncio.to_thread` worker, so a second
+  dispatch is accepted and CPU endpoints genuinely pipeline), but at `gpu_slots=1` — the
+  `G == 1` packing every pod runs — the parent holds group 0's permit for the entire child
+  call, and the second GPU request enters its handler only ~10 ms after the child completes.
+  `_run_job` takes the permit before the handler (`executor.py:11741`) and
+  `RequestContext.call_endpoint` never enters `_gpu_slot_yielded`, the lease `save_bytes` uses
+  for exactly this reason (#382). No behaviour change here — the finding is filed, the
+  regression test flips deliberately when the yield lands.
+- **pgw#766 / th#1566: `Slot(family=...)` makes non-root model governance explicit.**
+  pgw#747 correctly stopped stamping family-agnostic auxiliaries with a function's model
+  family, but inferred agnosticism from the proxy "non-root + no hardcoded checkpoint". That
+  also emptied deploy-bound model lanes such as qwen-image's `edit`, disabling the hub's
+  binding and serving-contract gates. A non-empty explicit family now overrides that
+  inference; an explicit empty family keeps an auxiliary agnostic, and omission preserves
   pgw#747's compatibility behavior.
+
+## 0.91.4 (2026-08-03) — **pgw#850: the self-mint path was dead fleet-wide by COMPOSITION, and the fix is a deletion**
+
+PATCH: no wire-contract, `@endpoint` or `Resources` change. Removes `aot_mint.PARITY_LANES`,
+`aot_mint.lane_admitted`, the `allow_regressed_lanes` parameter/CLI flag, and the
+`self_mint_skipped phase=aot_lane_regressed` decline.
+
+### The composition, re-measured on `origin/dev` 2026-08-03 (the filing's numbers had moved)
+
+Each constraint is individually defensible; their intersection was empty, so nothing failed
+loudly — the path simply never ran.
+
+- **The mint admitted one lane token.** pgw#918 narrowed `PARITY_LANES` from two members to
+  `("w8a8",)` (the other named a lane no loader stamps). `lane_admitted` refused everything else
+  with a sentence quoting the 6.9-7.0% AOTI regression pgw#704 Q4 measured **on sdxl's lanes**,
+  at families and lanes it never measured.
+- **The hub cannot put an AUTO pod on that lane before a cell exists.** tensorhub PR #709 made
+  `fp8-w8a8-dynamic` **compiled-only** and `fp8-w8a8-dynamic+eager` refuse at parse. So
+  `RequiresCompiledCell` holds for every w8a8 row, `applyCompileCellAvailability` (th#1123) and
+  `applyPublishMintObligation` (th#1127) mark them `CompileCellUnavailable` while no cell exists,
+  and `autoEligibleModel` drops them. tensorhub's own comment: *"only a worker's own self-mint can
+  discharge it."*
+
+The one lane the mint admitted was the one lane no AUTO pod could be on; the four lanes a pod
+**can** be on — `""` (bf16-w16a16), `"fp8-hooks"` (fp8-w8a16), `"w4a4"` (nvfp4-w4a4-static) and
+`"svdq-native"` (svdq-fp4/int4-w4a4, newly servable after PR #709) — were each declined. Zero
+fleet families reached the mint gate on AUTO, on any card. The sub-sm_89 half filed originally
+(`FP8ComputeMinSM = 89`) still holds and is subsumed: below sm_89 the w8a8 lane is off the card
+outright.
+
+### The fix
+
+pgw#879's deletion, not a wider allowlist. The lane is an **input**: the hub's resolution tree
+chooses it, `loading.pipeline_weight_lane` observes it on the composed pipeline, and the mint
+compiles what it is handed — *"here is the code, here is the lane, please compile this for all
+graphs we have declared."* Every surviving mint check answers "can this compile physically run"
+(declaration existence, `declaration_module_gaps`, `cxx_toolchain_present`, delegation
+availability, torch floor, `MintResourceExhausted`); none reads lane policy, family history, or a
+measurement.
+
+The pgw#704 Q4 / #730 measurement is not discarded — it is a **ranking** input to the hub's
+`+compiled` vs `+eager` choice. A lane held on dynamo is never asked for a cell; a lane that IS
+asked for gets compiled.
+
+`tests/test_aot_selfmint_pgw805.py` now parametrises the real `mint_recipe` path over the whole
+`loading.STAMPABLE_BASE_LANES` vocabulary plus a bucketed LoRA stamp, asserting `RECIPE_AOT` and
+zero `self_mint_skipped`. Verified RED against the pre-fix source: exactly the four non-`w8a8`
+lanes failed.
+
+**Still open, and it needs a GPU.** Whether `fp8-w8a8` can execute **eager** is unmeasured
+(th#1556's open item); it is deliberately not liberalised here to make a composition work.
+Impossibility belongs in tensorhub's lane table, a performance judgement in its ranking. And the
+residue this deletion does **not** reach: a compiled-only lane still has no bootstrap path —
+tensorhub withholds it until a cell exists and only a pod already on it can mint one. That cycle
+is entirely hub-side (th#1408), and it is why `fp8-w8a8-dynamic` and `nvfp4-w4a4-static` stay
+unreachable on AUTO even now. What this release fixes is that `bf16-w16a16` and `fp8-w8a16` —
+both `either`-execution, both reachable without a pre-existing cell — can now mint the cells that
+make their compiled forms servable. The self-mint path is alive.
 
 ## 0.91.3 (2026-08-03) — **SECURITY: the th#1307 private-key refusal is reachable again**, and the NVLS override stays deleted
 

@@ -828,6 +828,9 @@ def resolved_slots_kwargs(
         b.slot: str(getattr(b, "objective", "") or "") for b in run_models}
     distilled_facts = {
         b.slot: bool(getattr(b, "distilled", False)) for b in run_models}
+    distilled_statuses = {
+        b.slot: str(getattr(b, "distilled_status", "") or "")
+        for b in run_models}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
     for name, slot in spec.slots.items():
@@ -841,6 +844,7 @@ def resolved_slots_kwargs(
                 lora_metadata_json=lora_defaults.get(name, ()),
                 objective=objectives.get(name, ""),
                 distilled=distilled_facts.get(name, False),
+                distilled_status=distilled_statuses.get(name, ""),
                 allowed_objectives=spec.objectives,
                 allowed_distilled=spec.distilled,
             )

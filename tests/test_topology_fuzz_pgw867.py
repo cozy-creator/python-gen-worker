@@ -276,9 +276,9 @@ def test_decode_of_arbitrary_text_is_typed(raw: str) -> None:
 def test_round_trip(gpu_count: int, degree: int, parallel: str) -> None:
     """P2: ``decode(as_dict(t)) == t`` for every constructible topology.
 
-    ``as_dict`` still emits the th#1375 legacy spellings alongside the new ones,
-    so this is also the assertion that the transition's dual write is readable
-    by the decoder that has to survive it.
+    pgw#950: ``as_dict`` emits the canonical spellings ONLY, so this is also
+    the assertion that the dual write is gone and the round trip never
+    depended on it.
     """
     try:
         topo = ExecutionTopology(
@@ -287,9 +287,10 @@ def test_round_trip(gpu_count: int, degree: int, parallel: str) -> None:
     except TopologyError:
         return
     payload = topo.as_dict()
-    # Both spellings present and agreeing — deploy order must not matter.
-    assert payload[LEGACY_KEY_GPUS_PER_GROUP] == payload[KEY_GPUS_PER_GROUP]
-    assert payload[LEGACY_KEY_EXECUTION_GROUPS] == payload[KEY_EXECUTION_GROUPS]
+    # pgw#950: the canonical spelling ONLY. The dual write is gone; the dual
+    # READ stays until th#1376 stops tensorhub emitting the legacy names.
+    assert LEGACY_KEY_GPUS_PER_GROUP not in payload
+    assert LEGACY_KEY_EXECUTION_GROUPS not in payload
     back = _decode(json.dumps(payload))
     assert back == topo, f"round trip changed the value: {topo} -> {payload} -> {back}"
     assert _decode(json.dumps(back.as_dict())) == back, "as_dict is not a fixed point"

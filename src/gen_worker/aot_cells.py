@@ -181,6 +181,16 @@ def _candidates(
         if not cell_key.is_key(key):
             _reject("unreadable_cell_key")
             continue
+        # Pre-clamp retirement (arm-events lane, live-proven 2026-07-29):
+        # a cell carrying no host-ISA stamp states no requirement, so its true
+        # ISA need is undiscoverable from metadata and an AVX-512-built .pt2
+        # SIGILLs a non-AVX-512 host. ``aot_serve.verify`` refuses it too;
+        # ruling here first keeps the fact its OWN reject class rather than
+        # folding it into a ``verify:`` string.
+        if not isinstance(meta.get("host_isa"), dict):
+            logger.debug("aot-cells: %s filtered: no host_isa stamp", key)
+            _reject(aot_serve.NO_HOST_ISA_STAMP)
+            continue
         reason = aot_serve.verify(meta, family=family)
         if reason:
             logger.debug("aot-cells: %s filtered: %s", key, reason)
@@ -188,19 +198,6 @@ def _candidates(
             # fleet-wide sm/torch/ISA/contract mismatch surfaces as itself
             # rather than as a generic "verify failed".
             _reject(f"verify:{reason}")
-            continue
-        # Pre-clamp retirement (arm-events lane, live-proven 2026-07-29):
-        # a cell minted before the pgw#754 host-ISA stamp carries no
-        # metadata requirement, so its true ISA need is only discoverable
-        # AFTER download, at stage time — where an AVX-512-built .pt2
-        # refuses every non-AVX-512 host by name. Unstamped cells are
-        # structurally unadoptable across the fleet; retire them from
-        # discovery instead of downloading doomed candidates.
-        if not isinstance(meta.get("host_isa"), dict):
-            logger.debug(
-                "aot-cells: %s filtered: no host_isa stamp (pre-clamp cell)",
-                key)
-            _reject("no_host_isa_stamp")
             continue
         if _lane_of_meta(meta) != want_lane:
             _reject("lane_mismatch")
@@ -212,15 +209,14 @@ def _candidates(
         ))
     # Preference order (pgw#765), all descending:
     #   1. same SKU — the cell's inductor autotuning ran on this board;
-    #   2. a stamped ``sm`` axis — provably this architecture pre-download,
-    #      where an unstamped legacy cell only resolves at stage time;
-    #   3. newest (checkpoint ``updated_at``), key digest as the
+    #   2. newest (checkpoint ``updated_at``), key digest as the
     #      deterministic tie-break.
+    # (``sm`` is no longer a tie-break: ``verify`` refuses a cell silent on
+    # the axis, so every survivor here is stamped and matching.)
     here_sku = aot_serve.runtime_key()["sku"]
     out.sort(
         key=lambda row: (
             str(row[2].get("sku") or "") == here_sku and bool(here_sku),
-            bool(str(row[2].get("sm") or "")),
             row[0],
             str(row[2].get("cell_key")),
         ),

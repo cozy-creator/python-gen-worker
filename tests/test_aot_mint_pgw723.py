@@ -666,20 +666,6 @@ def test_multiple_of_dim_actually_exports_with_the_declared_range() -> None:
         program, (aot_mint.DynamicDim("sample", 2, 64, 160, multiple_of=8),)) == []
 
 
-# ---------------------------------------------------------------------------
-# Lane order — w8a8 first
-# ---------------------------------------------------------------------------
-
-
-def test_mint_holds_a_regressed_lane_before_exporting(
-    tmp_path: Path, _gpu_runtime: None,
-) -> None:
-    spec = aot_mint.ExportSpec(family="tiny", target="", weight_lane="")
-    with pytest.raises(aot_mint.MintRefused, match="#730"):
-        aot_mint.mint(SimpleNamespace(unet=CellModule().eval()), spec, tmp_path)
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_mint_requires_the_declared_warm_canon(
     tmp_path: Path, _gpu_runtime: None,
 ) -> None:

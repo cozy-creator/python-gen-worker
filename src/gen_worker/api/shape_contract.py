@@ -101,6 +101,18 @@ DELETED_FIELDS: Tuple[DeletedField, ...] = (
         ),
     ),
     DeletedField(
+        owner=EndpointDecl,
+        name="weight_set",
+        deleted_at="0.92.0",
+        reason=(
+            "th#1559 §4.22 (Paul): NFS volumes follow `@endpoint(kind=)` — inference gets "
+            "one, no other kind does. `weight_set` asked the author to state a fact that "
+            "was not theirs: an operator flipping a slot to `open` post-deploy invalidates "
+            "the compiled-in value. Declared by 0 of 1,129 function rows, and the defaulted "
+            "`getattr(decl, 'weight_set', None)` read is what kept that invisible."
+        ),
+    ),
+    DeletedField(
         owner=Slot,
         name="default_config",
         deleted_at="0.60.0",

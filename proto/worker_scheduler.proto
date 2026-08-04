@@ -825,14 +825,16 @@ message ModelBinding {
   // th#1139 (pgw#654) objective split, retiring th#1017's never-landed regime
   // field: the resolved checkpoint's stamped serving facts. objective is the
   // training objective ("epsilon" | "v_prediction" | "flow"; "" =
-  // unclassified/unstamped); distilled is the orthogonal post-training fact
-  // (false when unstamped). Populated at dispatch from the hub's catalog
+  // unclassified/unstamped); distilled is the orthogonal post-training value.
+  // distilled_status preserves whether false is evidenced or merely the wire
+  // default ("classified" | "unclassified" | "inconclusive"). Populated at dispatch from the hub's catalog
   // stamp — the SDK's scheduler construction reads them. The SDK applies the
   // objective to the per-request scheduler view and enforces the per-function
   // @worker_function declaration as a backstop; the hub gates compatibility
   // upstream. Additive.
   string objective = 6;
   bool   distilled = 7;
+  string distilled_status = 8;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
@@ -1279,11 +1281,15 @@ message BootPhase {
   int64  ordinal = 2;
   // 0 = a top-level phase.
   int64  parent_ordinal = 3;
-  // Vocabulary is wire-shared with gen_worker/boot_phases.py (PHASE_*):
-  //   process_start | env_seal | manifest_load | cache_preflight | cuda_probe
-  //   | hello | weights_fetch | pipeline_load | cell_discover | cell_fetch
-  //   | cell_load | cell_arm | first_request_servable | first_request
-  //   | warm_complete
+  // Vocabulary is wire-shared with gen_worker/boot_phases.py (PHASE_*), and
+  // is exactly the eight spans the shipping path PRODUCES (pgw#924):
+  //   hello | weights_fetch | pipeline_load | cell_discover | cell_fetch
+  //   | cell_arm | warmup | first_request_servable
+  // pgw#924 deleted the nine that had no producer or never fired
+  // (process_start, env_seal, manifest_load, cache_preflight, cuda_probe,
+  // cell_load, first_request, warm_complete, warmup_iteration) — a reader of
+  // the old list learned a vocabulary the system cannot emit, which is the
+  // C3 defect th#1562 fixed for FnUnavailable.
   // Unknown phases are stored verbatim, never rejected: an old hub must not
   // be able to refuse a newer worker's honest measurement.
   string phase = 4;
@@ -1309,8 +1315,11 @@ message BootPhase {
   string artifact_kind = 12;
   string artifact_key = 13;
   string function = 14;
-  // Graph class proved, for warm_complete (proof is by graph COVERAGE).
-  string graph_class = 15;
+  // 15 held `graph_class`, "graph class proved, for warm_complete". pgw#924
+  // deleted `warm_complete` and stopped producing the field; it was 0 of 517
+  // rows on chaos before the cut and nothing ever read it (th#1571 §3).
+  reserved 15;
+  reserved "graph_class";
   // ok | refused | failed | skipped. `refused` is a TYPED refusal that left
   // the worker serving something else (an unarmed cell), not an error.
   string outcome = 16;
@@ -1340,9 +1349,30 @@ message BootPhase {
 // function reappearing in StateDelta.available_functions.
 message FnUnavailable {
   string function_name = 1;
-  // reason vocabulary: compute_capability_unmet, insufficient_vram,
-  // missing_cuda_library, insufficient_disk, host_ram_capacity,
-  // cuda_unavailable, setup_failed.
+  // reason vocabulary — the CLOSED set. Every token here is a write into
+  // gen-worker's `ExecutorState.unavailable` map (gen_worker/executor.py),
+  // which `lifecycle._emit_unavailable` puts on this wire verbatim; nothing
+  // else may appear in this field. An incomplete list here is not cosmetic:
+  // O's per-reason lifetime policy (th#1100) reads these tokens, so a reason
+  // the list forgot is a reason nobody checked O's handling of.
+  //
+  // Machine FACTS about this pod — nothing O can wait for changes them, so O
+  // never re-probes them on a timer:
+  //   compute_capability_unmet, missing_cuda_library, cuda_unavailable,
+  //   hardware_unmet, native_crash_streak.
+  // `hardware_unmet` is HardwareUnmetError's base default: a gate subclass
+  // that declares no token of its own reports under it.
+  //
+  // State that can change — O re-probes these with backoff:
+  //   insufficient_vram, insufficient_disk, insufficient_host_ram,
+  //   host_ram_capacity, setup_failed, retry_exhausted, compile_cell_failed,
+  //   model_unavailable, multi_group_async_handler, cancel_unwind_stuck.
+  //
+  // `native_crash_streak` is not only an availability fact: W's own PROCESS
+  // died by signal on this pod and W's registry refuses the function there
+  // (pgw#676). It carries axes{streak, last_signal, last_kind}, and O
+  // condemns the WORKER on it (th#1205) — the pod is recycled, so the
+  // recovery from this one disable is the pod going away, not a re-probe.
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}

@@ -90,7 +90,16 @@ def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None
         if th is None:
             return None, None
         resolved = resolve_repo(th, base_url=client.base_url, token=client.token)
-        return resolved.objective, resolved.distilled
+        # A new hub tells us whether false is evidence or merely the wire
+        # default. Never turn unknown/inconclusive into an authored false on
+        # the derived checkpoint. Empty status is an old hub, whose behavior
+        # remains unchanged for rolling compatibility.
+        distilled = (
+            resolved.distilled
+            if resolved.distilled_status in ("", "classified")
+            else None
+        )
+        return resolved.objective, distilled
     except Exception as exc:
         log = getattr(ctx, "log", None)
         if callable(log):

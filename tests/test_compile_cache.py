@@ -981,6 +981,10 @@ def test_guidance_regimes_are_artifact_contract_axis():
     meta = cc.artifact_metadata(
         family="sdxl", shapes=cfg.shapes, targets=cfg.targets,
         guidance_scales=cfg.guidance_scales,
+        # pgw#950: as every production mint does — a cell silent on the
+        # module-graph signature is no longer adoptable.
+        graph_signature=cc.execution_contract(_Pipe(), cfg)[0],
+        weight_contract=cc.execution_contract(_Pipe(), cfg)[1],
     )
     assert meta["guidance_scales"] == [5.0, 0.0]
     assert cc.contract_drift(meta, _Pipe(), cfg) == ""

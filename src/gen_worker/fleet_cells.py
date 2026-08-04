@@ -1757,13 +1757,13 @@ def mint_recipe(
     from . import aot_mint
 
     spec = aot_export_spec(pipe, cfg)
-    # #730's hold is a MEASURED policy (plain/fp8 are 6.9-7.0% slower under
-    # AOTI), so a pod on a held lane must decline BY NAME rather than mint a
-    # regression — and must never be silent about it, which is what the five
-    # measured L4 pods were.
-    refusal = aot_mint.lane_admitted(spec, allow_regressed_lanes=False)
-    if refusal:
-        return _decline("aot_lane_regressed", refusal)
+    # pgw#850/#879: there is NO lane admission here. The lane this pod serves
+    # was chosen by the hub's resolution tree and observed off the composed
+    # pipeline; re-ranking it at mint time was a second opinion that composed
+    # with tensorhub's compiled-only `fp8-w8a8-dynamic` into a total block —
+    # the one lane the mint admitted was the one lane no AUTO pod could be on.
+    # Every check below answers "can this compile physically run", never
+    # "should this lane exist".
     refusal = aot_mint.lifted_torch_gap(spec)
     if refusal:
         return _decline("aot_lifted_torch_gap", refusal)

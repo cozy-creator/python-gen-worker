@@ -219,8 +219,10 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
 
     Derived from the metadata, never from the stamped ``cell_key`` field, so
     a stamp can never disagree with the axes it summarizes. Raises
-    :class:`CellKeyError` for artifacts that don't record every required axis
-    (pre-gw#581 cells have no key and stay on the legacy verify path).
+    :class:`CellKeyError` for artifacts that don't record every required axis.
+    That is the ONLY verdict — pgw#950 deleted the second, axis-by-axis verify
+    path keyless cells used to fall back to, on both the fleet and the local
+    store. A cell with no computable key is refused and re-minted.
 
     EXPORTED (``aot-inductor``) cells are refused here BY NAME (pgw#735): they
     ride the same ck5 key space — the axis names are what :func:`from_axes`

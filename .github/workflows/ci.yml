@@ -1,23 +1,156 @@
 name: CI
 
-# th#960/pgw#609 Phase 4: one suite, one lane. Manual dispatch + PR-into-master
-# only — CI spend is metered (WORKSPACE-GIT-POLICY.md); no on-push trigger.
+# pgw#952 — this workflow now runs on PRs into `dev` AS WELL AS `master`, and is
+# split into two PARALLEL jobs. Both changes are corrections; the reasoning is
+# below because the premise that produced the old shape was measurably false.
+#
+# ─── THE GAP THIS CLOSES ───────────────────────────────────────────────────────
+#
+# Until pgw#952, a lane -> `dev` PR in this repository ran NO CI AT ALL. Verified
+# on PR #466 (`950-legacy-hardcut`, 215+/178-, merged into `dev`):
+# `statusCheckRollup` was `[]`. Not a check that passed — no check ran.
+#
+#   ci.yml             `branches: [master]`  -> silent on every dev PR
+#   proto-contract.yml `[dev, master]` BUT with a `paths:` filter #466 missed
+#   native-kernels.yml master only
+#   publish.yml        tag push only
+#
+# So every lane merged into `dev` having run whatever it happened to run locally,
+# and whatever it did not run was discovered by the NEXT lane rebasing onto it —
+# or by a promotion train, minutes before production. pgw#949 is that failure mode
+# already written down: `dev` has been RED on two gw#666 guard tests since PR #455
+# and nothing said so.
+#
+# ─── WHY THE OLD `branches: [master]` WAS WRONG HERE ───────────────────────────
+#
+# The retired header said "CI spend is metered (WORKSPACE-GIT-POLICY.md)". That is
+# true of tensorhub, which is PRIVATE. **This repository is PUBLIC**
+# (`gh repo view --json visibility` -> PUBLIC), and GitHub Actions on standard
+# runners is free and unmetered for public repositories. `ubuntu-latest` is a
+# standard runner. The constraint the split was designed around does not exist on
+# this repo — it was inherited from a sibling with different economics.
+#
+# What remains real is LATENCY, not spend. That is what the two jobs below are
+# for: a lane gets the cheap verdict in ~1m35s and does not wait 15m to learn
+# that mypy is unhappy.
+#
+# ─── MEASURED, ON THE RUNNER ───────────────────────────────────────────────────
+#
+# Not extrapolated from this 32-core box — a 4-core `ubuntu-latest` behaves
+# nothing like it, which is the trap th#1572's lane fell into by a factor of 40.
+# Left column: run 30847566437, the last green run of the old single-job shape,
+# re-attributed to the two jobs below. Right column: this workflow's OWN PR
+# (#467, head 91c73388) — the shape as it actually ships. Both cold; there is no
+# cache in either.
+#
+#                                    old shape   THIS workflow (PR #467)
+#   Set up job + checkout                   4s      4s   both jobs
+#   Install uv + Set up Python 3.12         3s      2s   both jobs
+#   uv sync --locked --extra dev           21s  21-28s   both jobs
+#   ------------------------------------------------------- gates
+#   Type check (mypy)                      60s     58s
+#   Lint (ruff)                             0s      1s
+#   HTTP timeout guard                      1s      1s
+#   unreached public surface guard          2s      2s
+#   config reads guard                      2s      2s
+#   Build package                           2s      1s
+#                                       -------  ------
+#   gates JOB WALL                      1m 35s  1m 42s   observed GREEN, twice
+#   ------------------------------------------------------- tests
+#   Install llama-server (pinned, CPU)      1s      1s
+#   Run tests (v1)                     10m 59s 11m 13s   3092 passed, 2 failed
+#   Run tests (v2)                      3m 47s   3m 54s   21 passed
+#                                       -------  ------
+#   tests JOB WALL                     15m 15s 15m 37s
+#
+# `tests/` runtime is the only noisy line — 10m 17s and 11m 13s on two runs of
+# the same tree. That is runner variance on a 4-core box, not a signal; size the
+# 40-minute timeout against the upper figure, not the lower.
+#
+# The two jobs run concurrently, so a full run is ~15m 40s of WALL time against
+# the old serial 16m 22s, while returning the cheap half TEN times sooner
+# (1m 42s). The split costs one extra ~25s install and buys that.
+#
+# NOTE ON THE `Run tests (v2)` LINE. Its first run on this PR reported `skipped`,
+# not a duration, because `tests/` was red and a failing step skips every later
+# step by default — so the two-step split had never once delivered the property
+# its own comment claimed for it since pgw#808 ("a collection error in either
+# must not erase the other's answer"). `if: !cancelled()` at the step is the fix,
+# and the 3m 54s / 21 passed above is the proof: same red `tests/`, v2 reported
+# anyway.
+#
+# NO CACHE STEP, deliberately, and this is the one place the tensorhub precedent
+# (th#1572) does NOT transfer. There, `setup-go`'s cache key was shared across
+# workflows, a cheap sibling won the save, and that job paid a 224s compile every
+# run — so two explicit `actions/cache` steps were load-bearing. The Python
+# equivalent does not bite: `uv sync --locked --extra dev` is 21 SECONDS cold, on
+# a runner with no warm cache at all. An `actions/cache` restore of a uv cache
+# large enough to matter would cost more than it saves, and would add a key that
+# can go stale against `uv.lock`. If this line ever stops being true, measure the
+# install step first — it is step 5 in every run.
+#
+# ─── NO `paths:` / `paths-ignore:` FILTER ──────────────────────────────────────
+#
+# The old `paths-ignore: ["**.md"]` is gone, and no `paths:` filter replaces it.
+# A path filter is precisely what made proto-contract.yml silently absent from
+# #466, and three of the gates below scan the WHOLE TREE:
+# `lint_unreached_surface.py` walks the public surface for unreached symbols,
+# `lint_config_reads.py` censuses every `os.environ` access against
+# `scripts/config_reads_allowlist.txt`, and the gw#666 guards inside the suite
+# scan all of `tests/` for fixed-deadline waits. Each is invalidated COLLATERALLY
+# — by a change touching none of the files it reads. pgw#949 is exactly that:
+# pgw#943 added ONE new test file and broke two guards in a file it never opened.
+# Any path filter narrow enough to be useful is the filter that misses these.
+#
+# A docs-only PR therefore runs the full suite. On an unmetered public repo that
+# is the cheaper mistake: "zero checks on this PR" is the state this issue exists
+# to make impossible, and a reader cannot tell it apart from "CI is broken".
+#
+# ─── WHAT THIS GATE DOES NOT CATCH — read this before trusting a green ─────────
+#
+#   * ANYTHING REQUIRING A GPU. There is no CUDA device on `ubuntu-latest`. Every
+#     device path here runs through fakes, skips, or CPU fallbacks. A regression
+#     that only manifests on a real card is NOT caught, and green here is not
+#     evidence about the fleet. That is the nightly GPU lane's job.
+#     native-kernels.yml proves the kernels COMPILE; it never runs one.
+#   * LINT. `Lint` is `continue-on-error` (pre-existing debt) — findings are
+#     visible in the log and block nothing.
+#   * DEPENDENCY-RESOLUTION DRIFT beyond `--locked`. `uv sync --locked` proves the
+#     lock is internally consistent, not that its pins are current.
+#   * CROSS-REPO CONTRACT DRIFT against tensorhub's canonical proto. That is
+#     proto-contract.yml layer 1 here and layer 2 in tensorhub, by design.
+#
+# What it DOES catch is the class that has actually been costing lanes time:
+# a behavioural regression in the ~3,000-test suite, and the three tree-scanning
+# guards. pgw#950's own lane found a 57-failure regression only by running a
+# baseline differential BY HAND against clean `origin/dev`; mypy, ruff and the
+# three script guards would every one of them have passed it. That is why the
+# suite is on the dev trigger and not just the cheap half.
 on:
   workflow_dispatch: {}
   pull_request:
-    branches: [master]
-    paths-ignore:
-      - "**.md"
+    branches: [dev, master]
+    # `ready_for_review` is NOT a default `pull_request` type, and the jobs below
+    # skip drafts. Without it listed here a lane that opens a draft, pushes, then
+    # clicks "Ready for review" gets NO run for the head it actually merges —
+    # the same invisible-green this issue exists to remove. (tensorhub's
+    # fast-gates.yaml has this bug; its comment claims the gate re-fires on ready.
+    # It does not. Not inherited here.)
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
+  # ~1m35s. Everything decidable without running the suite, so a lane learns
+  # about a type error or a guard violation in under two minutes instead of
+  # behind an 11-minute pytest run.
+  gates:
+    name: fast gates
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -35,7 +168,7 @@ jobs:
       # same resolution publish.yml uses on tag push, so PR-CI green
       # actually implies publish green (fails loudly instead if uv.lock
       # drifts from pyproject.toml, the 0.18.0 silent-publish-failure root
-      # cause).
+      # cause). Both jobs use this exact line; keep them identical.
       - name: Install dependencies
         run: uv sync --locked --extra dev
 
@@ -65,8 +198,40 @@ jobs:
       - name: pgw#931 guard - config reads outside the pipeline
         run: uv run python scripts/lint_config_reads.py
 
+      # Cheap (2s) and it belongs with the gates, not behind the suite: a
+      # broken sdist/wheel build is a publish-time failure, and publish.yml
+      # gates on a green run of THIS workflow.
+      - name: Build package
+        run: uv build
+
+  # ~15m15s. The only job that can catch a behavioural regression — see the
+  # header on why that is worth a dev trigger rather than master-only.
+  tests:
+    name: tests
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
       # Pinned CPU build so the gw#402 llama.cpp runtime tests exercise the
       # real llama-server codepath (tests skip when the binary is absent).
+      # Measured 1s on the runner — a ~20 MB tarball fetch, NOT part of what
+      # makes this suite expensive, so there is no version of this job worth
+      # running without it. Dropping it silently skips five tests.
       - name: Install llama-server (pinned, CPU)
         run: |
           curl -sSL --retry 3 -o /tmp/llama.tgz \
@@ -100,8 +265,16 @@ jobs:
       # "is the replacement ready"), and a collection error in either must not
       # erase the other's answer. The flip (pgw#808: point CI at `tests_v2/`,
       # `git rm -r tests/`) deletes the step above and this comment with it.
+      #
+      # pgw#952: `if: !cancelled()` is what makes the paragraph above TRUE. It
+      # never was — a failing step skips every later step by default, so a red
+      # `tests/` silently erased the `tests_v2/` answer, which is exactly the
+      # outcome the two-step split was written to prevent. Observed on this
+      # workflow's own PR: `tests/` failed on pgw#949's two guards and
+      # `tests_v2/` reported `skipped`, telling a reader nothing about the
+      # zero-based suite. `!cancelled()` rather than `always()` so a cancelled
+      # run (the concurrency group above cancels superseded pushes) does not
+      # spend four more minutes on a result nobody will read.
       - name: Run tests (v2, zero-based — pgw#808)
+        if: ${{ !cancelled() }}
         run: uv run pytest tests_v2/ -n 4 --dist loadfile
-
-      - name: Build package
-        run: uv build
