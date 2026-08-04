@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
+from .artifact_contract import CONTRACT_COZY_FP8_ROWWISE, implements_contract
 from typing import Any, Dict, List, Optional
 import shutil
 
@@ -514,6 +515,14 @@ def _denoiser_class(root: Path, component: str) -> Any:
     return cls
 
 
+@implements_contract(
+    contract=CONTRACT_COZY_FP8_ROWWISE,
+    serves=("fp8-w8a8-dynamic",),
+    composes_lora=True,
+    why="gw#547: Fp8ScaledLinear reads lora_a/lora_b non-persistent buffers "
+        "in its own forward, so the w8a8 lane composes runtime adapters "
+        "natively.",
+)
 def load_w8a8_denoiser(root: Path, art: W8a8Artifact, *,
                        compute_dtype: Any = None, mode: str = "",
                        cls: Any = None) -> Any:

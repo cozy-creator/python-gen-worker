@@ -25,6 +25,7 @@ import os
 import struct
 import sys
 
+from .artifact_contract import CONTRACT_PLAIN_BF16, implements_contract
 from .fp8_storage import restructure_fp8_storage
 from .memory import get_available_vram_gb, meta_tensors
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
@@ -1549,6 +1550,15 @@ def _adaptive_fit_rung(
     return "nf4", qc
 
 
+@implements_contract(
+    contract=CONTRACT_PLAIN_BF16,
+    serves=("bf16-w16a16", "fp8-w8a16"),
+    composes_lora=True,
+    why="the dense-weights path: plain bf16 bytes are read as stored "
+        "(bf16-w16a16), and `storage_dtype=fp8` restructures the SAME bytes "
+        "into fp8 storage with per-layer upcast (fp8-w8a16). Both are "
+        "adapter-branch-capable (gw#558).",
+)
 def load_from_pretrained(
     cls: Any,
     path: str | Path,
