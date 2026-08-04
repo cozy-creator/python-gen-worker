@@ -488,6 +488,11 @@ def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
         sd.pop(f"{name}{suffix}", None)
 
 
+# NO `@implements_contract` HERE, deliberately (th#1590): this flat nvfp4 layout
+# has no registry entry yet, and it is NOT `bfl.nvfp4-preswizzled@1` — that one is
+# HIGH-nibble with pre-swizzled scales, and conflating them measured LPIPS 1.11
+# (te#151). Registering ours needs a real artifact to read; none has ever passed
+# the publish gate (gw#540), so this decoder contributes no execution lane.
 def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
                        compute_dtype: Any = None, mode: str = "",
                        cls: Any = None) -> Any:

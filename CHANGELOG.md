@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **th#1590: `models/w4a4.py` stays contract-UNCLAIMED, on purpose.** Measured
+  against both standing catalogs and the R2 CAS: no artifact of our flat nvfp4
+  layout has ever been published, so no descriptor can be derived from real
+  bytes and the decoder declares no execution lane. The guard comment names the
+  wrong answer explicitly — `bfl.nvfp4-preswizzled@1` is HIGH-nibble with
+  pre-swizzled scales, and te#151 measured that conflation at LPIPS 1.11.
+
 - **th#1582 Phase A: the EXECUTION LANE concept is spelled `execution_lane`.**
   A names-only pass — 1,655 Python identifier tokens across 113 files (`Lane` ->
   `ExecutionLane`, `lane` -> `execution_lane`, `parse_lane_spec` ->
