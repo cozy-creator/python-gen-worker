@@ -137,7 +137,7 @@ def test_compute_matches_artifact_metadata_stamp(fixed_runtime):
     assert ck.from_artifact_metadata(meta).digest == want
 
 
-def test_lane_canonicalization(fixed_runtime):
+def test_execution_lane_canonicalization(fixed_runtime):
     """fp8-hooks and w8a16 are one graph family; buckets fold into the lane."""
     assert (ck.compute("f", "fp8-hooks", contract=_CONTRACT).digest
             == ck.compute("f", "w8a16", contract=_CONTRACT).digest)
@@ -208,21 +208,21 @@ def test_is_cache_ref_accepts_key_flavor():
     assert not cc.is_cache_ref(f"owner/repo#{key}")
 
 
-def test_cell_lane_matcher_uses_candidate_keys():
-    from gen_worker.executor import _cell_lane_matches
+def test_cell_execution_lane_matcher_uses_candidate_keys():
+    from gen_worker.executor import _cell_execution_lane_matches
 
     key = ck.from_axes(_AXES).digest
     ref = f"root/family-ltx-2.3#{key}"
-    assert _cell_lane_matches(
-        ref, "ltx-2.3", want_lane="w8a8", want_bucket=0,
+    assert _cell_execution_lane_matches(
+        ref, "ltx-2.3", want_execution_lane="w8a8", want_bucket=0,
         candidate_keys={key})
-    assert not _cell_lane_matches(
-        ref, "ltx-2.3", want_lane="w8a8", want_bucket=0,
+    assert not _cell_execution_lane_matches(
+        ref, "ltx-2.3", want_execution_lane="w8a8", want_bucket=0,
         candidate_keys={"ck1-" + "0" * 56})
     # legacy labels keep the lane-parse policy
-    assert _cell_lane_matches(
+    assert _cell_execution_lane_matches(
         "root/family-ltx-2.3#inductor-b200-torch2.13-w8a8",
-        "ltx-2.3", want_lane="w8a8", want_bucket=0)
+        "ltx-2.3", want_execution_lane="w8a8", want_bucket=0)
 
 
 class _Target:

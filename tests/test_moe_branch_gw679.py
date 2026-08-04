@@ -257,7 +257,7 @@ def test_a_broken_second_half_attaches_nothing_at_all() -> None:
 
 def test_lora_bucket_container_is_armed_on_both_experts() -> None:
     pipe = _wan_pipe()
-    assert compile_cache.apply_lora_lane(pipe, 32)
+    assert compile_cache.apply_lora_execution_lane(pipe, 32)
     assert w8a8_lora.branch_bucket(pipe.transformer) == 32
     assert w8a8_lora.branch_bucket(pipe.transformer_2) == 32
     assert w8a8_lora.pipeline_branch_bucket(pipe) == 32
@@ -323,7 +323,7 @@ def test_compiled_pipeline_refuses_a_set_that_needs_a_wider_bucket() -> None:
     """The no-recompile-at-swap-time rule is enforced over the SET (the sum
     of concatenated ranks on either expert)."""
     pipe = _wan_pipe()
-    compile_cache.apply_lora_lane(pipe, 16)
+    compile_cache.apply_lora_execution_lane(pipe, 16)
     pipe._cozy_compile = object()
     wide: Dict[str, Any] = {}
     for path, mod in w8a8_lora.branch_modules(pipe.transformer_2).items():

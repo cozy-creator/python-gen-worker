@@ -55,7 +55,7 @@ class GroupPlan:
     """
 
     # Which precision lane the group serves (bf16 / w8a8 / fp8-storage / ...).
-    precision_lane: str = ""
+    precision_execution_lane: str = ""
     # The w8a8 GEMM mode. Under context parallelism this MUST be rowwise:
     # a per-tensor ACTIVATION scale is computed from the local shard, so two
     # ranks holding different sequence shards derive different scales and

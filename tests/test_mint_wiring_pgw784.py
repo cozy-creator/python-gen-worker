@@ -215,7 +215,7 @@ def _wired(
         pipes={id(p): p for p in objs}, selections={},
         modules=("harness.toy_endpoints",),
         snapshot_paths={"pipeline": str(tmp_path / "snap")})
-    monkeypatch.setattr(ex, "_served_lane", lambda s, instructed="": "fp8-w8a16")
+    monkeypatch.setattr(ex, "_served_execution_lane", lambda s, instructed="": "fp8-w8a16")
     monkeypatch.setattr(ex, "_effective_config", lambda s, run=None: {"steps": 28})
     monkeypatch.setattr(
         executor_mod.mint_budget, "device_of", lambda pipe: 0)

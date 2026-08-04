@@ -226,9 +226,9 @@ def compose(
         # #725 option 2 through pgw#822's ONE arm: containers then lifted
         # signature. The dynamo lane stops after the containers (module state
         # export would bake); the exported lane lifts the adapter to call
-        # arguments ON TOP of them — `install_lifted_lora_lanes` alone has no
+        # arguments ON TOP of them — `install_lifted_lora_execution_lanes` alone has no
         # container to lay its flat pair out over.
-        lora_lifted.arm_lifted_lora_lanes(pipe, int(spec.lora_bucket))
+        lora_lifted.arm_lifted_lora_execution_lanes(pipe, int(spec.lora_bucket))
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
     return pipe, lambda module: builder(module, spec)

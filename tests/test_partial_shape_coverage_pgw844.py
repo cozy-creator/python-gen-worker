@@ -360,7 +360,7 @@ def _boot(
     return ex, generate, pipe, events
 
 
-def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_lane(
+def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution_lane(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     """THE pgw#844 assertion, on the real derived warm plan.
@@ -443,7 +443,7 @@ def test_an_ambiguous_request_is_charged_ingress_refused_not_counted_compiled(
     assert refused.fallback_reason == serving_mode.FALLBACK_INGRESS_REFUSED
 
 
-def test_the_partial_coverage_claim_is_scoped_to_the_exported_lane(
+def test_the_partial_coverage_claim_is_scoped_to_the_exported_execution_lane(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     """The relaxation is a statement about the EXPORTED lane only.

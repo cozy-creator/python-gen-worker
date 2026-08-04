@@ -70,7 +70,7 @@ class _Pipe:
         self.unet = unet
 
 
-def _hook_lane(unet: Any) -> List[str]:
+def _hook_execution_lane(unet: Any) -> List[str]:
     """Arm diffusers' layerwise casting (the lane as it shipped) and return
     the leaf paths it hooked."""
     unet.enable_layerwise_casting(storage_dtype=STORAGE, compute_dtype=COMPUTE)
@@ -102,11 +102,11 @@ def _nn_hook_count(module: Any) -> int:
 
 
 @pytest.fixture(scope="module")
-def lanes() -> Dict[str, Any]:
+def execution_lanes() -> Dict[str, Any]:
     """One hook-lane UNet and one restructured UNet from identical weights."""
     hooked = _tiny_unet()
     restructured = copy.deepcopy(hooked)
-    hooked_paths = _hook_lane(hooked)
+    hooked_paths = _hook_execution_lane(hooked)
     pipe = _Pipe(restructured)
     applied = apply_fp8_storage(pipe, compute_dtype=COMPUTE)
     assert applied is True
@@ -118,31 +118,31 @@ def lanes() -> Dict[str, Any]:
     }
 
 
-def test_hook_lane_has_hooks_restructured_lane_has_none(lanes: Dict[str, Any]) -> None:
-    assert len(lanes["hooked_paths"]) > 50, "the hook lane must actually hook"
-    assert _nn_hook_count(lanes["hooked"]) >= len(lanes["hooked_paths"])
-    assert _nn_hook_count(lanes["restructured"]) == 0
+def test_hook_execution_lane_has_hooks_restructured_execution_lane_has_none(execution_lanes: Dict[str, Any]) -> None:
+    assert len(execution_lanes["hooked_paths"]) > 50, "the hook lane must actually hook"
+    assert _nn_hook_count(execution_lanes["hooked"]) >= len(execution_lanes["hooked_paths"])
+    assert _nn_hook_count(execution_lanes["restructured"]) == 0
     assert not any(
-        "forward" in m.__dict__ for m in lanes["restructured"].modules()
+        "forward" in m.__dict__ for m in execution_lanes["restructured"].modules()
     ), "no instance-forward shadowing: the punned class owns forward"
 
 
-def test_coverage_matches_diffusers_own_rule(lanes: Dict[str, Any]) -> None:
+def test_coverage_matches_diffusers_own_rule(execution_lanes: Dict[str, Any]) -> None:
     """Anti-drift: our mirrored selection rule and the installed diffusers'
     rule must name the SAME leaves. If upstream changes its supported-layer
     set or default skip patterns, this fails here instead of on a pod."""
-    restructured = lanes["restructured"]
+    restructured = execution_lanes["restructured"]
     covered = sorted(fp8_storage.fp8_storage_leaves(restructured))
-    assert covered == sorted(lanes["hooked_paths"])
-    assert covered == sorted(fp8_storage.castable_leaves(lanes["hooked"]))
+    assert covered == sorted(execution_lanes["hooked_paths"])
+    assert covered == sorted(fp8_storage.castable_leaves(execution_lanes["hooked"]))
 
 
-def test_weights_reside_in_fp8_and_round_trip(lanes: Dict[str, Any]) -> None:
+def test_weights_reside_in_fp8_and_round_trip(execution_lanes: Dict[str, Any]) -> None:
     """Storage really is fp8, upcast really is the compute dtype, and the
     quantized values are the same bytes the hook lane holds."""
-    hooked, restructured = lanes["hooked"], lanes["restructured"]
+    hooked, restructured = execution_lanes["hooked"], execution_lanes["restructured"]
     checked = 0
-    for path in lanes["hooked_paths"]:
+    for path in execution_lanes["hooked_paths"]:
         a = hooked.get_submodule(path)
         b = restructured.get_submodule(path)
         assert b.weight.dtype is STORAGE
@@ -153,14 +153,14 @@ def test_weights_reside_in_fp8_and_round_trip(lanes: Dict[str, Any]) -> None:
             assert b.bias.dtype is STORAGE
             assert torch.equal(a.bias.to(COMPUTE), b.bias.to(COMPUTE))
         checked += 1
-    assert checked == len(lanes["hooked_paths"])
+    assert checked == len(execution_lanes["hooked_paths"])
 
 
-def test_outputs_are_bitwise_equal_to_the_hook_lane(lanes: Dict[str, Any]) -> None:
+def test_outputs_are_bitwise_equal_to_the_hook_execution_lane(execution_lanes: Dict[str, Any]) -> None:
     x, t, enc = _inputs()
     with torch.no_grad():
-        want = lanes["hooked"](x, t, enc).sample
-        have = lanes["restructured"](x, t, enc).sample
+        want = execution_lanes["hooked"](x, t, enc).sample
+        have = execution_lanes["restructured"](x, t, enc).sample
     assert torch.equal(want, have)
 
 
@@ -234,11 +234,11 @@ def test_no_bf16_original_survives_an_external_holder() -> None:
     assert after.get(str(COMPUTE), 0) <= skipped_bytes
 
 
-def test_restructured_lane_exports_and_the_hook_lane_is_refused(
-    lanes: Dict[str, Any],
+def test_restructured_execution_lane_exports_and_the_hook_execution_lane_is_refused(
+    execution_lanes: Dict[str, Any],
 ) -> None:
     args = _inputs()
-    exported = torch.export.export(lanes["restructured"], args, strict=False)
+    exported = torch.export.export(execution_lanes["restructured"], args, strict=False)
     nodes = list(exported.graph_module.graph.nodes)
     fp8_valued = sum(
         1 for n in nodes
@@ -246,19 +246,19 @@ def test_restructured_lane_exports_and_the_hook_lane_is_refused(
     )
     assert fp8_valued > 0, "the resident fp8 buffers must be visible in the graph"
     with pytest.raises(RuntimeError, match="Couldn't swap"):
-        torch.export.export(lanes["hooked"], args, strict=False)
+        torch.export.export(execution_lanes["hooked"], args, strict=False)
 
 
-def test_lane_value_kept_and_graph_contract_changed(lanes: Dict[str, Any]) -> None:
+def test_execution_lane_value_kept_and_graph_contract_changed(execution_lanes: Dict[str, Any]) -> None:
     """The wire lane value is unchanged ("fp8-hooks" — tensorhub maps it to
     w8a16); the traced graph is NOT, and the execution contract says so."""
     from gen_worker.compile_cache import execution_contract
 
-    pipe = lanes["pipe"]
+    pipe = execution_lanes["pipe"]
     assert pipe.unet._cozy_fp8_storage_applied is True
     assert pipeline_weight_lane(pipe) == "fp8-hooks"
 
-    hooked_pipe = _Pipe(lanes["hooked"])
+    hooked_pipe = _Pipe(execution_lanes["hooked"])
     hooked_pipe.unet._cozy_fp8_storage_applied = True
 
     class _Cfg:
@@ -280,7 +280,7 @@ def test_idempotent_and_refuses_to_compose_with_hooks() -> None:
     assert apply_fp8_storage(_Pipe(unet), compute_dtype=COMPUTE) is True
 
     hooked = _tiny_unet()
-    _hook_lane(hooked)
+    _hook_execution_lane(hooked)
     with pytest.raises(ValueError, match="already armed"):
         fp8_storage.restructure_fp8_storage(
             hooked, storage_dtype=STORAGE, compute_dtype=COMPUTE)
@@ -337,30 +337,30 @@ def test_fp8_storage_leaf_is_a_lora_branch_target() -> None:
     assert getattr(target, "lora_a", None) is None
 
 
-def test_model_dtype_still_reports_the_compute_dtype(lanes: Dict[str, Any]) -> None:
+def test_model_dtype_still_reports_the_compute_dtype(execution_lanes: Dict[str, Any]) -> None:
     """The defect this lane found (measured, CPU): diffusers resolves
     ``ModelMixin.dtype`` from the first floating-point PARAMETER, special-casing
     an armed layerwise-cast hook to return its ``compute_dtype``. Drop the hook
     and leave fp8 PARAMETERS and ``model.dtype`` starts answering fp8 — which
     silently breaks every denoiser that casts to ``self.dtype`` inside forward.
     fp8 storage therefore lives in BUFFERS."""
-    assert lanes["hooked"].dtype is COMPUTE  # upstream's answer
-    assert lanes["restructured"].dtype is COMPUTE  # ours must match it
-    for leaf in fp8_storage.fp8_storage_leaves(lanes["restructured"]).values():
+    assert execution_lanes["hooked"].dtype is COMPUTE  # upstream's answer
+    assert execution_lanes["restructured"].dtype is COMPUTE  # ours must match it
+    for leaf in fp8_storage.fp8_storage_leaves(execution_lanes["restructured"]).values():
         assert "weight" in leaf._buffers and "weight" not in leaf._parameters
         assert all(p.dtype is COMPUTE for p in leaf.parameters())
 
 
 def test_state_dict_keys_and_module_identity_are_preserved(
-    lanes: Dict[str, Any],
+    execution_lanes: Dict[str, Any],
 ) -> None:
     """A class pun, not a module replacement: same FQNs, same state_dict keys,
     same objects — so the offload rung, LoRA branch and every held reference
     keep working."""
     plain = _tiny_unet()
-    assert sorted(plain.state_dict()) == sorted(lanes["restructured"].state_dict())
-    for path in lanes["hooked_paths"]:
-        leaf = lanes["restructured"].get_submodule(path)
+    assert sorted(plain.state_dict()) == sorted(execution_lanes["restructured"].state_dict())
+    for path in execution_lanes["hooked_paths"]:
+        leaf = execution_lanes["restructured"].get_submodule(path)
         assert isinstance(leaf, type(plain.get_submodule(path)))
 
 
@@ -377,7 +377,7 @@ def test_a_denoiser_that_casts_to_self_dtype_runs_and_matches() -> None:
         up_block_types=("AttnUpBlock2D", "UpBlock2D"), norm_num_groups=8,
     ).to(COMPUTE).eval()
     restructured = copy.deepcopy(hooked)
-    hooked_paths = _hook_lane(hooked)
+    hooked_paths = _hook_execution_lane(hooked)
     covered = fp8_storage.restructure_fp8_storage(
         restructured, storage_dtype=STORAGE, compute_dtype=COMPUTE)
     assert sorted(covered) == sorted(hooked_paths)

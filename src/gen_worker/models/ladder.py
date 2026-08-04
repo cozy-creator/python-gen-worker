@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from .lanes import is_w8a8_flavor
+from .execution_lanes import is_w8a8_flavor
 from .svdq import SVDQ_FP4_SMS, SVDQ_INT4_SMS
 
 CLASS_BASE = "base"  # bare bf16/fp16/fp32 row — runs anywhere a card fits it

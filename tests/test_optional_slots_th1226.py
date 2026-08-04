@@ -38,9 +38,9 @@ def _decode(data: bytes) -> EchoOut:
 def test_optional_slot_is_derived_from_the_setup_default() -> None:
     """The signature is the single declaration — no second `optional=` flag
     to drift out of sync with it."""
-    from harness.toy_endpoints import OptionalLaneEndpoint
+    from harness.toy_endpoints import OptionalExecutionLaneEndpoint
 
-    slots = getattr(OptionalLaneEndpoint, "__gen_worker_endpoint__").slots
+    slots = getattr(OptionalExecutionLaneEndpoint, "__gen_worker_endpoint__").slots
     assert slots["t2i"].optional is False
     assert slots["edit"].optional is True
 
@@ -62,7 +62,7 @@ def test_defaulted_param_whose_annotation_rejects_none_is_a_decoration_error() -
                 return EchoOut(response="x")
 
 
-def test_single_lane_deploy_binds_only_the_required_slot(tmp_path) -> None:
+def test_single_execution_lane_deploy_binds_only_the_required_slot(tmp_path) -> None:
     """A Hot DesiredInstance naming ONLY `t2i` is accepted, setup runs with
     the unbound slot's own default, and the bound lane serves."""
     blobs = BlobHost(tmp_path)
@@ -109,7 +109,7 @@ def test_single_lane_deploy_binds_only_the_required_slot(tmp_path) -> None:
         blobs.shutdown()
 
 
-def test_unbound_lane_refuses_typed_and_never_crashes_setup(tmp_path) -> None:
+def test_unbound_execution_lane_refuses_typed_and_never_crashes_setup(tmp_path) -> None:
     """Calling the lane this deploy did not bind is a client-visible INVALID
     refusal that names the slot — not a retry storm, not a worker crash."""
     blobs = BlobHost(tmp_path)
@@ -141,7 +141,7 @@ def test_unbound_lane_refuses_typed_and_never_crashes_setup(tmp_path) -> None:
         blobs.shutdown()
 
 
-def test_both_lanes_still_bind_unchanged(tmp_path) -> None:
+def test_both_execution_lanes_still_bind_unchanged(tmp_path) -> None:
     """Optionality must not change the dual-lane deploy — the shape every
     existing release uses."""
     blobs = BlobHost(tmp_path)
@@ -192,10 +192,10 @@ def test_both_lanes_still_bind_unchanged(tmp_path) -> None:
 def test_manifest_marks_the_optional_slot() -> None:
     """The hub must be able to tell a partial bind is legal — absent field
     still means required, so existing manifests are unchanged."""
-    from harness.toy_endpoints import OptionalLaneEndpoint
+    from harness.toy_endpoints import OptionalExecutionLaneEndpoint
 
     from gen_worker.discovery.discover import _slot_to_manifest
 
-    slots = getattr(OptionalLaneEndpoint, "__gen_worker_endpoint__").slots
+    slots = getattr(OptionalExecutionLaneEndpoint, "__gen_worker_endpoint__").slots
     assert "optional" not in _slot_to_manifest("t2i", slots["t2i"], family="")
     assert _slot_to_manifest("edit", slots["edit"], family="")["optional"] is True

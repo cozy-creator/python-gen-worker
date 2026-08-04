@@ -147,7 +147,7 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
     req = types.SimpleNamespace(
         snapshots={}, component_paths={}, recipe=mint_child.RECIPE_AOT,
         target="/tmp/x", capture="/tmp/y", device=0, vram_cap_bytes=0,
-        modules=[], function="generate", cfg=None, configs={}, lane="",
+        modules=[], function="generate", cfg=None, configs={}, execution_lane="",
         report="/tmp/r", cell_key="")
     with pytest.raises(mint_child.MintChildRefused, match="no C\\+\\+ compiler"):
         mint_child.mint(req)
@@ -176,7 +176,7 @@ def test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate(
     req = types.SimpleNamespace(
         snapshots={}, component_paths={}, recipe=mint_child.RECIPE_DYNAMO,
         target="/tmp/x", capture="/tmp/y", device=0, vram_cap_bytes=0,
-        modules=[], function="generate", cfg=None, configs={}, lane="",
+        modules=[], function="generate", cfg=None, configs={}, execution_lane="",
         report="/tmp/r", cell_key="")
     with pytest.raises(RuntimeError, match="reached discovery"):
         mint_child.mint(req)

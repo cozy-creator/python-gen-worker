@@ -93,8 +93,8 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
         lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(cc, "has_compile_target", lambda *a, **k: True)
     monkeypatch.setattr(cc, "mandatory_serving", lambda pipe: False)
-    monkeypatch.setattr(cc, "apply_lora_lane", lambda pipe, bucket: True)
-    monkeypatch.setattr(cc, "drop_lora_lane", lambda pipe: True)
+    monkeypatch.setattr(cc, "apply_lora_execution_lane", lambda pipe, bucket: True)
+    monkeypatch.setattr(cc, "drop_lora_execution_lane", lambda pipe: True)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
@@ -144,7 +144,7 @@ def test_the_wire_form_preserves_the_contract_facts_exactly(
     assert rebuilt.lora_bucket == parent.lora_bucket == 64
 
 
-def test_the_request_carries_the_lane_and_the_effective_config(
+def test_the_request_carries_the_execution_lane_and_the_effective_config(
     tmp_path: Path,
 ) -> None:
     """Both steer the warm forwards, so both must be the PARENT's values —
@@ -157,10 +157,10 @@ def test_the_request_carries_the_lane_and_the_effective_config(
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",
         modules=("app",), snapshots={"pipeline": "/cas/sdxl"},
-        lane="fp8-w8a16", configs={"gen": {"steps": 28}}, device=3)
+        execution_lane="fp8-w8a16", configs={"gen": {"steps": 28}}, device=3)
     req = mint_delegate.build_request(
         task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
-    assert req.lane == "fp8-w8a16"
+    assert req.execution_lane == "fp8-w8a16"
     assert req.configs == {"gen": {"steps": 28}}
     assert req.snapshots == {"pipeline": "/cas/sdxl"}
     assert req.device == 3 and req.vram_cap_bytes == 7 * GIB

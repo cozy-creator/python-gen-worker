@@ -226,7 +226,7 @@ class RequestContext(Generic[D]):
             self._deadline = self._started_at + (timeout_ms / 1000.0)
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
-        self._lane = ""  # th#1050: executing lane, set by the executor
+        self._execution_lane = ""  # th#1050: executing lane, set by the executor
         self._config: Dict[str, Any] = {}  # th#1087: effective config params
         self._config_snapshot: Optional[bytes] = None
         self._cancel_event = threading.Event()
@@ -297,16 +297,16 @@ class RequestContext(Generic[D]):
         return self._deadline
 
     @property
-    def lane(self) -> str:
+    def execution_lane(self) -> str:
         """The EXECUTING precision lane of this call (th#1050), a full
         descriptor id like ``"fp8-w8a8-dynamic+compiled"`` — post-degrade
         truth, the same value JobMetrics.lane reports (th#1043 consistent).
         Read-only; always available. Handlers that declared
         ``handles=[...]`` branch on it; everyone else may ignore it."""
-        return self._lane or "bf16-w16a16+eager"
+        return self._execution_lane or "bf16-w16a16+eager"
 
-    def _set_lane(self, lane: str) -> None:
-        self._lane = str(lane or "").strip()
+    def _set_execution_lane(self, execution_lane: str) -> None:
+        self._execution_lane = str(execution_lane or "").strip()
 
     @property
     def config(self) -> Dict[str, Any]:

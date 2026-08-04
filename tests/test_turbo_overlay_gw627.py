@@ -168,7 +168,7 @@ def test_turbo_adapter_rides_the_branch_on_a_w8a8_pertensor_unet() -> None:
         unet, "down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_q")
     unet._cozy_w8a8_mode = "pertensor"
     pipe = _Pipe(unet)
-    # The arming path (Compile.lora_bucket / apply_lora_lane) pre-enables
+    # The arming path (Compile.lora_bucket / apply_lora_execution_lane) pre-enables
     # canonical zeroed branches; the compiled marker forbids resizes.
     w8a8_lora.enable_lora_branches(unet, 16)
     pipe._cozy_compile = object()

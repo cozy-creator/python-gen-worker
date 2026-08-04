@@ -28,7 +28,7 @@ log = logging.getLogger("gw551")
 
 ARM = os.environ.get("ARM", "after")
 GiB = 1024 ** 3
-LANE_GB = float(os.environ.get("LANE_GB", "38"))
+EXECUTION_LANE_GB = float(os.environ.get("LANE_GB", "38"))
 SHARED_GB = float(os.environ.get("SHARED_GB", "15"))
 DTYPE = torch.bfloat16
 WIDTH = 8192
@@ -45,7 +45,7 @@ def big_module(gb: float) -> nn.Module:
     return m.to_empty(device="cpu")
 
 
-class LanePipe:
+class ExecutionLanePipe:
     """diffusers-shaped pipeline: latents are created on the device it
     BELIEVES it is on (first transformer param); the shared encoder's cuda
     output feeds the transformer — the two te#79 crash shapes when demoted."""
@@ -73,13 +73,13 @@ class LanePipe:
         return str(out.device)
 
 
-def build(res) -> tuple["LanePipe", "LanePipe"]:
+def build(res) -> tuple["ExecutionLanePipe", "ExecutionLanePipe"]:
     from gen_worker.models.memory import estimate_cuda_resident_gb
     from gen_worker.models.residency import LoadedComponentKey
 
     t0 = time.monotonic()
     shared = big_module(SHARED_GB)
-    lanes = {"t2i": big_module(LANE_GB), "edit": big_module(LANE_GB)}
+    execution_lanes = {"t2i": big_module(EXECUTION_LANE_GB), "edit": big_module(EXECUTION_LANE_GB)}
     log.info("built modules in %.1fs", time.monotonic() - t0)
 
     shared.cuda()  # shared encoder: resident + refcount-held (gw#479 shape)
@@ -89,10 +89,10 @@ def build(res) -> tuple["LanePipe", "LanePipe"]:
                        vram_bytes=int(estimate_cuda_resident_gb(shared) * GiB))
 
     pipes = []
-    for name, tr in lanes.items():
+    for name, tr in execution_lanes.items():
         ref = f"tensorhub/gw551-{name}"
         excl = nn.ModuleDict({"transformer": tr})
-        need = int(LANE_GB * GiB)
+        need = int(EXECUTION_LANE_GB * GiB)
         res.make_room(need)
         if res.free_vram_bytes() >= need + 2 * GiB:
             t0 = time.monotonic()
@@ -104,7 +104,7 @@ def build(res) -> tuple["LanePipe", "LanePipe"]:
         else:
             log.info("lane %s stays host-resident (RAM tier)", name)
             res.track_ram(ref, excl)
-        pipes.append(LanePipe(tr, shared, name))
+        pipes.append(ExecutionLanePipe(tr, shared, name))
     return pipes[0], pipes[1]
 
 
@@ -116,20 +116,20 @@ def main() -> None:
     log.info("ARM=%s card=%s total=%.1fGiB free=%.1fGiB gen_worker=%s",
              ARM, torch.cuda.get_device_name(0), total / GiB, free / GiB,
              __import__("gen_worker").__file__)
-    assert 2 * LANE_GB + SHARED_GB > total / GiB, "not overcommitted; resize"
+    assert 2 * EXECUTION_LANE_GB + SHARED_GB > total / GiB, "not overcommitted; resize"
 
     res = Residency()
     t2i, edit = build(res)
     report: dict = {"arm": ARM, "card": torch.cuda.get_device_name(0),
-                    "lane_gb": LANE_GB, "shared_gb": SHARED_GB}
+                    "lane_gb": EXECUTION_LANE_GB, "shared_gb": SHARED_GB}
 
     refs = {"t2i": "tensorhub/gw551-t2i", "edit": "tensorhub/gw551-edit"}
     if ARM == "after":
         from gen_worker.api.errors import RetryableError
-        from gen_worker.models.lane_gate import LaneGate, arm_lane_gate
+        from gen_worker.models.execution_lane_gate import ExecutionLaneGate, arm_execution_lane_gate
 
         for p in (t2i, edit):
-            assert arm_lane_gate(p, LaneGate(
+            assert arm_execution_lane_gate(p, ExecutionLaneGate(
                 ref=refs[p.name], residency=res, label=refs[p.name],
                 retry_exc=RetryableError))
 
@@ -169,7 +169,7 @@ def main() -> None:
         report["alternating"] = timings
         report["transition_stats"] = res.transition_stats()
 
-    # ---- Part 3: raw swap timing on one ~LANE_GB transformer. --------------
+    # ---- Part 3: raw swap timing on one ~EXECUTION_LANE_GB transformer. --------------
     tr = t2i.transformer
     if ARM == "after":
         from gen_worker.models.pinned_swap import swap_module
@@ -187,12 +187,12 @@ def main() -> None:
             "demote_first_s": round(d1, 3), "promote_pinned_s": round(p1, 3),
             "demote_pointer_swap_s": round(d2, 3),
             "promote_pinned_2_s": round(p2, 3),
-            "promote_gib_per_s": round(LANE_GB / min(p1, p2), 1)}
+            "promote_gib_per_s": round(EXECUTION_LANE_GB / min(p1, p2), 1)}
         swap_module(tr, "cpu")
         swap_module(edit.transformer, "cpu")
     else:
         if next(tr.parameters()).device.type != "cuda":
-            res.make_room(int(LANE_GB * GiB))
+            res.make_room(int(EXECUTION_LANE_GB * GiB))
             tr.cuda(); torch.cuda.synchronize()
         t0 = time.perf_counter(); tr.cpu(); d1 = time.perf_counter() - t0
         torch.cuda.empty_cache()
@@ -200,7 +200,7 @@ def main() -> None:
         report["swap_timing"] = {
             "demote_pageable_s": round(d1, 3),
             "promote_pageable_s": round(p1, 3),
-            "promote_gib_per_s": round(LANE_GB / p1, 1)}
+            "promote_gib_per_s": round(EXECUTION_LANE_GB / p1, 1)}
         tr.cpu()
         edit.transformer.cpu()
     torch.cuda.empty_cache()
@@ -220,7 +220,7 @@ def main() -> None:
         d_cold = time.perf_counter() - t0
         report["disk_to_vram"] = {"save_s": round(d_save, 1),
                                   "load_to_cuda_s": round(d_cold, 1),
-                                  "gib_per_s": round(LANE_GB / d_cold, 1)}
+                                  "gib_per_s": round(EXECUTION_LANE_GB / d_cold, 1)}
         del sd
         os.remove(path)
 

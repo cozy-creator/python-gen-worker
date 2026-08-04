@@ -261,7 +261,7 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
         pending=pending, pipe=object(), function="gen",
         modules=bg.modules, snapshots=dict(bg.snapshot_paths),
         component_paths={k: dict(v) for k, v in bg.component_paths.items()},
-        lane="fp8-w8a16", device=0)
+        execution_lane="fp8-w8a16", device=0)
     request = mint_delegate.build_request(
         task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
 

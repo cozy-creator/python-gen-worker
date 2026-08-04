@@ -264,7 +264,7 @@ def test_declaration_and_bytes_must_agree() -> None:
                          lowrank_quant="bf16").lowrank_quant == "bf16"
 
 
-def test_bf16_lane_is_byte_identical_to_before() -> None:
+def test_bf16_execution_lane_is_byte_identical_to_before() -> None:
     """Backward compatibility: a bf16-branch checkpoint decodes exactly as it
     did before te#148, with or without the declaration."""
     out_f, in_f = 3072, 3072

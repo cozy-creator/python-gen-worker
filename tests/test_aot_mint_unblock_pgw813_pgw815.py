@@ -163,8 +163,8 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_lane", lambda p, b: None)
-    monkeypatch.setattr(fleet_cells.cc, "drop_lora_lane", lambda p: None)
+    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
+    monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     monkeypatch.setattr(
@@ -216,7 +216,7 @@ def test_a_w8a8_pipeline_has_an_eager_tier(
     assert compile_cache.eager_tier_available(pipe) is True
 
 
-def test_the_w8a8_lane_is_delegatable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_w8a8_execution_lane_is_delegatable(monkeypatch: pytest.MonkeyPatch) -> None:
     """RED at HEAD: `delegatable` refused `mandatory_serving(pipe)`, so the
     lane Paul ruled AOT-first was the one lane that could never get a
     delegated minter."""

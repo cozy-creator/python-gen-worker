@@ -33,7 +33,7 @@ from safetensors.torch import save_file
 
 from gen_worker.convert.writer import streaming_w8a8_cast
 from gen_worker.models.loading import (
-    QUANT_LANE_COMPUTE_DEFAULT,
+    QUANT_EXECUTION_LANE_COMPUTE_DEFAULT,
     composition_compute_dtype,
     load_component_override,
 )
@@ -99,18 +99,18 @@ def _fp32_vae_override(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_composition_compute_dtype_is_lane_aware_on_w8a8(
+def test_composition_compute_dtype_is_execution_lane_aware_on_w8a8(
     tmp_path: Path,
 ) -> None:
     """RED pre-fix: the majority sniff returned "fp16" for a w8a8 tree whose
     lane computes bf16."""
     root = _w8a8_base_tree(tmp_path)
-    assert composition_compute_dtype(root) == QUANT_LANE_COMPUTE_DEFAULT
+    assert composition_compute_dtype(root) == QUANT_EXECUTION_LANE_COMPUTE_DEFAULT
     # A declared binding dtype still wins outright.
     assert composition_compute_dtype(root, "fp16") == "fp16"
 
 
-def test_override_decodes_bf16_latents_on_the_w8a8_lane(
+def test_override_decodes_bf16_latents_on_the_w8a8_execution_lane(
     tmp_path: Path,
 ) -> None:
     """The exact production crash path, for real on CPU: load the override

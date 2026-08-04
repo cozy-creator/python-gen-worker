@@ -35,18 +35,18 @@ def test_flavor_label():
     assert cc.flavor_label("h100-80gb-hbm3", "2.11.0") == "inductor-h100-80gb-hbm3-torch2.11"
 
 
-def test_cell_lane_is_exact_and_checkpoint_free():
-    assert cc.cell_lane(
+def test_cell_execution_lane_is_exact_and_checkpoint_free():
+    assert cc.cell_execution_lane(
         "root/family-sdxl#inductor-rtx-4090-torch2.13-w8a8"
     ) == "w8a8"
-    assert cc.cell_lane(
+    assert cc.cell_execution_lane(
         "root/family-sdxl#inductor-rtx-4090-torch2.13"
     ) == ""
-    assert cc.cell_lane("owner/checkpoint#fp8-w8a8") == ""
+    assert cc.cell_execution_lane("owner/checkpoint#fp8-w8a8") == ""
 
 
 @pytest.mark.parametrize(
-    ("lane", "bucket"),
+    ("execution_lane", "bucket"),
     [
         ("", 0),
         ("fp8-hooks", 0),
@@ -58,12 +58,12 @@ def test_cell_lane_is_exact_and_checkpoint_free():
         ("w8a8-lora128", 128),
     ],
 )
-def test_compile_target_lane_vocabulary_matches_tensorhub(lane, bucket):
-    assert cc.compile_target_lane_error(lane, bucket) == ""
+def test_compile_target_execution_lane_vocabulary_matches_tensorhub(execution_lane, bucket):
+    assert cc.compile_target_execution_lane_error(execution_lane, bucket) == ""
 
 
 @pytest.mark.parametrize(
-    ("lane", "bucket"),
+    ("execution_lane", "bucket"),
     [
         ("w8a8-row", 0),
         ("fp8", 0),
@@ -73,8 +73,8 @@ def test_compile_target_lane_vocabulary_matches_tensorhub(lane, bucket):
         ("w8a8", 32),
     ],
 )
-def test_compile_target_lane_vocabulary_rejects_impossible_states(lane, bucket):
-    assert cc.compile_target_lane_error(lane, bucket)
+def test_compile_target_execution_lane_vocabulary_rejects_impossible_states(execution_lane, bucket):
+    assert cc.compile_target_execution_lane_error(execution_lane, bucket)
 
 
 def test_verify_mismatches():
@@ -264,7 +264,7 @@ def test_w8a8_guard_degrades_to_eager_and_revokes(caplog):
     assert any("DEGRADED" in r.message for r in caplog.records)
 
 
-def test_guard_revocation_failure_latches_fail_closed_for_optional_lane():
+def test_guard_revocation_failure_latches_fail_closed_for_optional_execution_lane():
     calls = {"compiled": 0, "eager": 0, "callback": 0}
 
     def eager(value):
@@ -282,11 +282,11 @@ def test_guard_revocation_failure_latches_fail_closed_for_optional_lane():
     signal = {"callback": revoke}
     guarded = cc._guarded(eager, broken, "transformer", failure_signal=signal)
     with pytest.raises(
-        cc.CompiledLaneUnavailableError, match="revocation failed",
+        cc.CompiledExecutionLaneUnavailableError, match="revocation failed",
     ):
         guarded(1)
     with pytest.raises(
-        cc.CompiledLaneUnavailableError, match="revocation failed",
+        cc.CompiledExecutionLaneUnavailableError, match="revocation failed",
     ):
         guarded(2)
     assert calls == {"compiled": 1, "eager": 0, "callback": 1}
@@ -692,7 +692,7 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
 
     # no artifact delivered
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="no cell artifact delivered"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="no cell artifact delivered"):
         cc.enable(pipe, cfg, cache_dir, artifact=None)
 
     # key mismatch: the axis and both values appear in the raise
@@ -703,7 +703,7 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
     meta["torch"] = "0.0.0+fake"
     source = _capture_tree(tmp_path / "cand")
     artifact = cc.pack(source, tmp_path / "cell.tar.gz", meta)
-    with pytest.raises(cc.CompiledLaneUnavailableError) as exc:
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as exc:
         cc.enable(pipe, cfg, cache_dir, artifact=artifact)
     assert "torch" in str(exc.value) and "0.0.0+fake" in str(exc.value)
 
@@ -717,7 +717,7 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
     meta.pop("cell_key", None)
     source2 = _capture_tree(tmp_path / "cand2")
     artifact2 = cc.pack(source2, tmp_path / "cell2.tar.gz", meta)
-    with pytest.raises(cc.CompiledLaneUnavailableError) as exc:
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as exc:
         cc.enable(pipe, cfg, cache_dir, artifact=artifact2)
     assert "module graph signature" in str(exc.value)
     assert "1" * 12 in str(exc.value)
@@ -1127,14 +1127,14 @@ def test_endpoint_compile_reaches_spec():
 
 
 def test_flavor_label_carries_weight_lane_gw534() -> None:
-    from gen_worker.compile_cache import flavor_label, is_cache_ref, lane_token
+    from gen_worker.compile_cache import flavor_label, is_cache_ref, execution_lane_token
 
     assert flavor_label("rtx-4090", "2.9.1+cu128") == "inductor-rtx-4090-torch2.9"
     assert flavor_label("h100-80gb-hbm3", "2.13.0+cu130", "w8a8") == (
         "inductor-h100-80gb-hbm3-torch2.13-w8a8")
     assert flavor_label("rtx-4090", "2.9.1", "fp8-hooks") == (
         "inductor-rtx-4090-torch2.9-w8a16")
-    assert lane_token("") == "" and lane_token("w8a8") == "w8a8"
+    assert execution_lane_token("") == "" and execution_lane_token("w8a8") == "w8a8"
     assert is_cache_ref("root/family-qwen-image#inductor-h100-80gb-hbm3-torch2.13-w8a8")
 
 
@@ -1283,7 +1283,7 @@ def test_offload_mode_drift_still_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cc, "apply", lambda pipeline, cfg, **kw: kw.get("cache_ready", False))
 
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="low_vram_mode"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="low_vram_mode"):
         cc.enable(pipe, cfg, tmp_path / "cache", artifact)
     assert pipe._cozy_low_vram_mode == "model_offload"
 

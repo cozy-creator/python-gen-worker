@@ -167,7 +167,7 @@ def test_prewarmed_signature_short_circuits():
     assert not router.pending
 
 
-def test_fail_closed_lane_never_enables():
+def test_fail_closed_execution_lane_never_enables():
     router = hot_swap.Router(fail_closed=True)
     assert not router.enable()
     wrapper = _wrapper(lambda x: "eager", lambda x: "compiled", router)

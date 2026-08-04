@@ -125,7 +125,7 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
     original = aot_mint.emit_phase_events
     aot_mint.emit_phase_events = _capture  # type: ignore[assignment]
     try:
-        mint_delegate._emit_aot_phases(outcome, family="sdxl", lane="w8a8")
+        mint_delegate._emit_aot_phases(outcome, family="sdxl", execution_lane="w8a8")
     finally:
         aot_mint.emit_phase_events = original  # type: ignore[assignment]
 
@@ -161,7 +161,7 @@ def test_a_report_beats_a_snapshot_when_both_exist(tmp_path: Path) -> None:
     aot_mint.emit_phase_events = (
         lambda **kw: emitted.append(kw))  # type: ignore[assignment]
     try:
-        mint_delegate._emit_aot_phases(outcome, family="sdxl", lane="w8a8")
+        mint_delegate._emit_aot_phases(outcome, family="sdxl", execution_lane="w8a8")
     finally:
         aot_mint.emit_phase_events = original  # type: ignore[assignment]
 

@@ -309,9 +309,9 @@ def test_trt_guard_revocation_failure_never_falls_back(monkeypatch):
         raise RuntimeError("state path unavailable")
 
     state["failure_callback"] = revoke
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="revocation failed"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="revocation failed"):
         module.forward(object())
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="revocation failed"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="revocation failed"):
         module.forward(object())
     assert calls == {"eager": 0, "runner": 1, "callback": 1}
 

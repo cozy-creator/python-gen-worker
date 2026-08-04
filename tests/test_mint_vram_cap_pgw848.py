@@ -149,13 +149,13 @@ def test_a_failed_attempt_banks_its_device_peak_so_the_next_ask_widens() -> None
     and refusal report paths carried none — so the attempt that hit the cap
     taught the retry nothing and attempt N+1 re-asked identically, forever.
     """
-    fam, lane = "pgw848-cap", "w8a8"
-    assert mint_budget.child_peak(fam, lane) == 0
+    fam, execution_lane = "pgw848-cap", "w8a8"
+    assert mint_budget.child_peak(fam, execution_lane) == 0
     # A child that died AT its cap reports that cap as its peak.
-    mint_budget.record_child_peak(fam, lane, 11 * _GIB)
-    assert mint_budget.child_peak(fam, lane) == 11 * _GIB
+    mint_budget.record_child_peak(fam, execution_lane, 11 * _GIB)
+    assert mint_budget.child_peak(fam, execution_lane) == 11 * _GIB
     # The next ask is built from the fact, not the fraction, and is BIGGER.
-    banked = mint_budget.child_peak(fam, lane)
+    banked = mint_budget.child_peak(fam, execution_lane)
     widened = banked + mint_budget._CUDA_CONTEXT_FLOOR_BYTES
     estimate = (_SDXL_RESIDENT
                 + int(_SDXL_RESIDENT * mint_budget._UNMEASURED_ACTIVATION_FRACTION)

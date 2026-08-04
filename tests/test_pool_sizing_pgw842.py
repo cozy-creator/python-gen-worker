@@ -276,7 +276,7 @@ def _relayed(table: Dict[str, Any]) -> List[pb.ActivityUpdate]:
     try:
         activity_mod.bind_sink(_send, loop)
         mint_delegate._emit_aot_phases(
-            outcome, family="sdxl", lane="w8a8-lora64")
+            outcome, family="sdxl", execution_lane="w8a8-lora64")
         loop.run_until_complete(asyncio.sleep(0.05))
     finally:
         activity_mod.bind_sink(None, None)

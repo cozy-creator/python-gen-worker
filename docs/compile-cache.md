@@ -102,7 +102,7 @@ because a single switch cannot say "baseline linears, packed modulation".
 
 A lane is therefore the **combination**, written `<linear>+<modulation>`
 (`baseline+packed`, `fused+dense`, …). It is measured on the card the cell is
-minted for and recorded in the cell (`gen_worker/kernel_lane.py`):
+minted for and recorded in the cell (`gen_worker/kernel_path.py`):
 
 - **Mint.** `mint_child.lane_verdict_for` loads the endpoint once per
   candidate combination (the swap happens at model load, so comparing lanes
@@ -110,7 +110,7 @@ minted for and recorded in the cell (`gen_worker/kernel_lane.py`):
   family's dominant declared graph class, on its own declared example feed,
   under `torch.compile` — and times it with a fixed warmup/median protocol.
   The winner's pipeline is the one that gets exported. Candidates come from
-  `kernel_lane.candidate_axes`, which asks only capability questions
+  `kernel_path.candidate_axes`, which asks only capability questions
   (Blackwell block-scaled MMA for the fused linear; triton plus a numerics
   self-check for the packed modulation, which has no SM term at all). An axis
   with one buildable value contributes no candidates, so a non-Blackwell card

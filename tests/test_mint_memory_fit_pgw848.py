@@ -224,15 +224,15 @@ def test_a_measured_per_entry_ask_actually_narrows_the_pool() -> None:
 
 def test_the_measured_ask_is_banked_and_survives_to_the_next_mint() -> None:
     """The bank is monotone and keyed like its device twin."""
-    fam, lane = "pgw848-fam", "w8a8-lora64"
-    assert mint_budget.entry_peak_rss(fam, lane) == 0
-    mint_budget.record_entry_peak_rss(fam, lane, 5 * _GIB)
-    assert mint_budget.entry_peak_rss(fam, lane) == 5 * _GIB
+    fam, execution_lane = "pgw848-fam", "w8a8-lora64"
+    assert mint_budget.entry_peak_rss(fam, execution_lane) == 0
+    mint_budget.record_entry_peak_rss(fam, execution_lane, 5 * _GIB)
+    assert mint_budget.entry_peak_rss(fam, execution_lane) == 5 * _GIB
     # A luckier run must not talk the ask down.
-    mint_budget.record_entry_peak_rss(fam, lane, 2 * _GIB)
-    assert mint_budget.entry_peak_rss(fam, lane) == 5 * _GIB
-    mint_budget.record_entry_peak_rss(fam, lane, 9 * _GIB)
-    assert mint_budget.entry_peak_rss(fam, lane) == 9 * _GIB
+    mint_budget.record_entry_peak_rss(fam, execution_lane, 2 * _GIB)
+    assert mint_budget.entry_peak_rss(fam, execution_lane) == 5 * _GIB
+    mint_budget.record_entry_peak_rss(fam, execution_lane, 9 * _GIB)
+    assert mint_budget.entry_peak_rss(fam, execution_lane) == 9 * _GIB
     # Keyed, not global.
     assert mint_budget.entry_peak_rss(fam, "plain") == 0
 
@@ -250,7 +250,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
     from gen_worker import mint_delegate, mint_process
     from gen_worker import aot_mint
 
-    fam, lane = "pgw848-relay", "w8a8-lora64"
+    fam, execution_lane = "pgw848-relay", "w8a8-lora64"
     width = pool.entry_workers(
         2, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
         device_lock=True, limit=2)
@@ -265,15 +265,15 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
         report=mint_process.MintReport(
             status=mint_process.MINTED, elapsed_s=1.0, mint_phases=table))
 
-    assert mint_budget.entry_peak_rss(fam, lane) == 0
+    assert mint_budget.entry_peak_rss(fam, execution_lane) == 0
     # The exact statement `build_cell` runs, against the real structures.
     pool_block = (outcome.report.mint_phases or {}).get("pool")
     mint_budget.record_entry_peak_rss(
-        fam, lane, int((pool_block or {}).get("peak_child_rss_bytes") or 0))
-    assert mint_budget.entry_peak_rss(fam, lane) == 6 * _GIB
+        fam, execution_lane, int((pool_block or {}).get("peak_child_rss_bytes") or 0))
+    assert mint_budget.entry_peak_rss(fam, execution_lane) == 6 * _GIB
 
     # ...and the request the NEXT attempt builds carries it to the child.
-    banked = mint_budget.entry_peak_rss(fam, lane)
+    banked = mint_budget.entry_peak_rss(fam, execution_lane)
     assert banked == 6 * _GIB
     request = mint_process.MintRequest(
         function="f", modules=(), family=fam, cell_key="k", target="t",

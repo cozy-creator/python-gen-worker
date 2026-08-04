@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import pytest
 
-from gen_worker.models import lanes
+from gen_worker.models import execution_lanes
 
 
-def test_known_lanes_stable() -> None:
-    assert lanes.known_lanes() == [
+def test_known_execution_lanes_stable() -> None:
+    assert execution_lanes.known_execution_lanes() == [
         "fp8-w8a8-dynamic+compiled",
         "nvfp4-w4a4-static+compiled",
         "svdq-fp4-w4a4+eager",
@@ -22,10 +22,10 @@ def test_known_lanes_stable() -> None:
     ]
 
 
-def test_parse_lane_round_trip() -> None:
-    parsed = [lanes.parse_lane(lane_id) for lane_id in lanes.known_lanes()]
-    assert [lanes.lane_id(lane) for lane in parsed] == lanes.known_lanes()
-    assert {lanes.lane_body_id(lane) for lane in parsed} == set(lanes.known_lane_bodies())
+def test_parse_execution_lane_round_trip() -> None:
+    parsed = [execution_lanes.parse_execution_lane(execution_lane_id) for execution_lane_id in execution_lanes.known_execution_lanes()]
+    assert [execution_lanes.execution_lane_id(execution_lane) for execution_lane in parsed] == execution_lanes.known_execution_lanes()
+    assert {execution_lanes.execution_lane_body_id(execution_lane) for execution_lane in parsed} == set(execution_lanes.known_execution_lane_bodies())
 
 
 @pytest.mark.parametrize("bad", [
@@ -38,23 +38,23 @@ def test_parse_lane_round_trip() -> None:
     "nvfp4-w4a4-static+eager",
     "int8-w8a8+eager",
 ])
-def test_parse_lane_rejects(bad: str) -> None:
+def test_parse_execution_lane_rejects(bad: str) -> None:
     with pytest.raises(ValueError):
-        lanes.parse_lane(bad)
+        execution_lanes.parse_execution_lane(bad)
 
 
-def test_parse_lane_spec_dual_form() -> None:
-    spec = lanes.parse_lane_spec("bf16")
-    assert spec.family == lanes.FAMILY_BF16 and spec.lane is None
+def test_parse_execution_lane_spec_dual_form() -> None:
+    spec = execution_lanes.parse_execution_lane_spec("bf16")
+    assert spec.family == execution_lanes.FAMILY_BF16 and spec.execution_lane is None
 
-    spec = lanes.parse_lane_spec("FP8-W8A8-Dynamic+Compiled")
-    assert spec.family == lanes.FAMILY_FP8
-    assert spec.lane is not None
-    assert lanes.lane_id(spec.lane) == "fp8-w8a8-dynamic+compiled"
+    spec = execution_lanes.parse_execution_lane_spec("FP8-W8A8-Dynamic+Compiled")
+    assert spec.family == execution_lanes.FAMILY_FP8
+    assert spec.execution_lane is not None
+    assert execution_lanes.execution_lane_id(spec.execution_lane) == "fp8-w8a8-dynamic+compiled"
 
-    assert lanes.parse_lane_spec("").is_zero
+    assert execution_lanes.parse_execution_lane_spec("").is_zero
     with pytest.raises(ValueError):
-        lanes.parse_lane_spec("int8")
+        execution_lanes.parse_execution_lane_spec("int8")
 
 
 @pytest.mark.parametrize("flavor,storage,compiled,want", [
@@ -69,11 +69,11 @@ def test_parse_lane_spec_dual_form() -> None:
     ("nvfp4-w4a4", "", True, "nvfp4-w4a4-static+compiled"),
     ("nvfp4-w4a4", "", False, "nvfp4-w4a4-static+compiled"),
 ])
-def test_lane_of_binding(flavor: str, storage: str, compiled: bool, want: str) -> None:
-    assert lanes.lane_id(lanes.lane_of_binding(flavor, storage, compiled)) == want
+def test_execution_lane_of_binding(flavor: str, storage: str, compiled: bool, want: str) -> None:
+    assert execution_lanes.execution_lane_id(execution_lanes.execution_lane_of_binding(flavor, storage, compiled)) == want
 
 
-def test_lane_of_binding_covers_every_body_with_valid_execution() -> None:
+def test_execution_lane_of_binding_covers_every_body_with_valid_execution() -> None:
     inputs = [
         ("", ""),
         ("", "fp8"),
@@ -85,7 +85,7 @@ def test_lane_of_binding_covers_every_body_with_valid_execution() -> None:
     bodies = set()
     for flavor, storage in inputs:
         for compiled in (False, True):
-            lane = lanes.lane_of_binding(flavor, storage, compiled)
-            assert lanes.valid_lane(lane)
-            bodies.add(lanes.lane_body_id(lane))
-    assert bodies == set(lanes.known_lane_bodies())
+            execution_lane = execution_lanes.execution_lane_of_binding(flavor, storage, compiled)
+            assert execution_lanes.valid_execution_lane(execution_lane)
+            bodies.add(execution_lanes.execution_lane_body_id(execution_lane))
+    assert bodies == set(execution_lanes.known_execution_lane_bodies())

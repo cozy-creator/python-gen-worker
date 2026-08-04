@@ -88,17 +88,17 @@ def test_a_measured_child_peak_BELOW_the_estimate_narrows_the_ask(
     child provably holds.
     """
     monkeypatch.setattr(mint_budget, "_CHILD_PEAKS", {})
-    fam, lane = "pgw877-narrow", "w8a8"
+    fam, execution_lane = "pgw877-narrow", "w8a8"
     # 8 GiB resident, a 9 GiB high-water -> activation floor is the 0.25 guess
     # (2 GiB) since measured (1 GiB) is smaller. Estimate = 8 + 2 + 4 + 1 = 15.
     _fake_card(monkeypatch, total_gib=80, resident_gib=8, peak_gib=9)
-    estimated = mint_budget.co_residency(0, family=fam, weight_lane=lane)
+    estimated = mint_budget.co_residency(0, family=fam, weight_lane=execution_lane)
     assert estimated.need_bytes == pytest.approx(15 * _GIB, rel=0.01), (
         f"{estimated.need_bytes / _GIB:.2f} GiB")
 
     # The child then actually ran and peaked at 10 GiB — BELOW the estimate.
-    mint_budget.record_child_peak(fam, lane, 10 * _GIB)
-    measured = mint_budget.co_residency(0, family=fam, weight_lane=lane)
+    mint_budget.record_child_peak(fam, execution_lane, 10 * _GIB)
+    measured = mint_budget.co_residency(0, family=fam, weight_lane=execution_lane)
     assert measured.need_bytes == pytest.approx(11 * _GIB, rel=0.01), (
         f"the measurement must replace the guesses it measured, not be maxed "
         f"against them: {measured.need_bytes / _GIB:.2f} GiB")
@@ -119,10 +119,10 @@ def test_a_measurement_may_never_narrow_below_a_weight_copy_and_a_context(
     fraction and the workspace are the guesses. Only the guesses may go.
     """
     monkeypatch.setattr(mint_budget, "_CHILD_PEAKS", {})
-    fam, lane = "pgw877-floor", "w8a8"
+    fam, execution_lane = "pgw877-floor", "w8a8"
     _fake_card(monkeypatch, total_gib=80, resident_gib=8, peak_gib=9)
-    mint_budget.record_child_peak(fam, lane, 1 * _GIB)   # died at load
-    budget = mint_budget.co_residency(0, family=fam, weight_lane=lane)
+    mint_budget.record_child_peak(fam, execution_lane, 1 * _GIB)   # died at load
+    budget = mint_budget.co_residency(0, family=fam, weight_lane=execution_lane)
     assert budget.need_bytes == pytest.approx(9 * _GIB, rel=0.01), (
         f"floor is resident + context, not the dead child's peak: "
         f"{budget.need_bytes / _GIB:.2f} GiB")
@@ -134,10 +134,10 @@ def test_the_write_side_ratchet_is_the_one_that_keeps_the_ask_honest(
     """Narrowing at the READ must not weaken monotonicity at the WRITE: a
     lucky run still cannot talk the ask down."""
     monkeypatch.setattr(mint_budget, "_CHILD_PEAKS", {})
-    fam, lane = "pgw877-monotone", "w8a8"
-    mint_budget.record_child_peak(fam, lane, 30 * _GIB)
-    mint_budget.record_child_peak(fam, lane, 2 * _GIB)
-    assert mint_budget.child_peak(fam, lane) == 30 * _GIB
+    fam, execution_lane = "pgw877-monotone", "w8a8"
+    mint_budget.record_child_peak(fam, execution_lane, 30 * _GIB)
+    mint_budget.record_child_peak(fam, execution_lane, 2 * _GIB)
+    assert mint_budget.child_peak(fam, execution_lane) == 30 * _GIB
 
 
 # --------------------------------------------------------------- part 2 (#2)
@@ -193,12 +193,12 @@ def test_the_entry_device_bank_is_keyed_monotone_and_narrows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(mint_budget, "_ENTRY_DEVICE_PEAKS", {})
-    fam, lane = "pgw877-entry", "w8a8"
-    assert mint_budget.entry_device_peak(fam, lane) == 0
-    mint_budget.record_entry_device_peak(fam, lane, 5 * _GIB)
-    assert mint_budget.entry_device_peak(fam, lane) == 5 * _GIB
-    mint_budget.record_entry_device_peak(fam, lane, 2 * _GIB)
-    assert mint_budget.entry_device_peak(fam, lane) == 5 * _GIB
+    fam, execution_lane = "pgw877-entry", "w8a8"
+    assert mint_budget.entry_device_peak(fam, execution_lane) == 0
+    mint_budget.record_entry_device_peak(fam, execution_lane, 5 * _GIB)
+    assert mint_budget.entry_device_peak(fam, execution_lane) == 5 * _GIB
+    mint_budget.record_entry_device_peak(fam, execution_lane, 2 * _GIB)
+    assert mint_budget.entry_device_peak(fam, execution_lane) == 5 * _GIB
     assert mint_budget.entry_device_peak(fam, "plain") == 0
     # The ask adds a CUDA context: the peak is the ALLOCATOR's high-water and
     # a context lives outside the allocator.

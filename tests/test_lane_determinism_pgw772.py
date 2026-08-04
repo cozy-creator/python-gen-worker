@@ -91,13 +91,13 @@ def _load_and_key(
         DDPMPipeline, str(root), slot="pipeline", device="cpu",
         binding=type("B", (), {"dtype": "", "storage_dtype": "fp8"})(),
     )
-    lane = cc.cell_base_lane(sl.obj)
+    execution_lane = cc.cell_base_execution_lane(sl.obj)
     cfg = _ContractCfg()
     key = ck.compute(
-        "sdxl", lane, cfg.lora_bucket,
+        "sdxl", execution_lane, cfg.lora_bucket,
         contract=ck.contract_digest(cc.declared_contract_facts(cfg)),
     )
-    return sl.obj, lane, key
+    return sl.obj, execution_lane, key
 
 
 def test_same_declared_config_same_key_across_free_vram(
@@ -112,11 +112,11 @@ def test_same_declared_config_same_key_across_free_vram(
     with tempfile.TemporaryDirectory() as td:
         root = _snapshot(Path(td))
         # The L4-shaped host: headroom below the old 4 GiB margin.
-        _, lane_tight, key_tight = _load_and_key(root, monkeypatch, free_gb=4.0)
+        _, execution_lane_tight, key_tight = _load_and_key(root, monkeypatch, free_gb=4.0)
         # The 4090-shaped host: headroom to spare.
-        _, lane_rich, key_rich = _load_and_key(root, monkeypatch, free_gb=999.0)
+        _, execution_lane_rich, key_rich = _load_and_key(root, monkeypatch, free_gb=999.0)
 
-    assert lane_tight == lane_rich == "fp8-hooks"
+    assert execution_lane_tight == execution_lane_rich == "fp8-hooks"
     # The issue's acceptance surface: the two requested_cell_axes dicts.
     assert key_tight.axes_dict() == key_rich.axes_dict()
     assert key_tight.digest == key_rich.digest

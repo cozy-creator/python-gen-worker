@@ -145,7 +145,7 @@ def test_the_two_flavors_really_do_compute_at_different_dtypes(
     assert composition_compute_dtype(w8a8, "") == "bf16"
 
 
-def test_effective_dtype_identity_separates_the_lanes(tmp_path: Path) -> None:
+def test_effective_dtype_identity_separates_the_execution_lanes(tmp_path: Path) -> None:
     """GREEN: keyed on the EFFECTIVE compute dtype — what the executor passes
     now — the same bytes under two lanes are two entries, so a bf16
     composition can never be handed the fp16 lane's module."""
@@ -291,11 +291,11 @@ def test_invariant_admits_every_legal_composition() -> None:
     assert_uniform_compute_dtype(
         _Pipe(unet=_linear_stack(torch.bfloat16),
               vae=_linear_stack(torch.float32)), "bf16")
-    fp8_lane = _linear_stack(torch.bfloat16)
-    for leaf in fp8_lane:
+    fp8_execution_lane = _linear_stack(torch.bfloat16)
+    for leaf in fp8_execution_lane:
         if isinstance(leaf, torch.nn.Linear):
             leaf.weight.data = leaf.weight.data.to(torch.float8_e4m3fn)
-    assert_uniform_compute_dtype(_Pipe(unet=fp8_lane), "bf16")
+    assert_uniform_compute_dtype(_Pipe(unet=fp8_execution_lane), "bf16")
     assert_uniform_compute_dtype(_linear_stack(torch.bfloat16), "bf16")
     # No compute-dtype opinion (an fp32-defaulting composition) never refuses
     # on the second verdict.

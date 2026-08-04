@@ -113,10 +113,10 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
     try:
         # pgw#686: the ONE base-lane resolution the mint's stamp uses —
         # the raw pipeline probe is blind to the w8a8 GEMM mode, so a
-        # store save/lookup pair straddling apply_lora_lane would never
+        # store save/lookup pair straddling apply_lora_execution_lane would never
         # match and every boot would re-mint.
         want = cell_key.compute(
-            family, cc.cell_base_lane(pipe),
+            family, cc.cell_base_execution_lane(pipe),
             int(getattr(cfg, "lora_bucket", 0) or 0),
             contract=cell_key.contract_digest(cc.declared_contract_facts(cfg)),
             regional=bool(getattr(cfg, "regional", False)),
@@ -127,7 +127,7 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
         reason = cell_key.mismatch(meta, want)
     if reason:
         return reason
-    reason = cc.mode_drift(meta, pipe) or cc.lane_drift(meta, pipe)
+    reason = cc.mode_drift(meta, pipe) or cc.execution_lane_drift(meta, pipe)
     if reason:
         return reason
     want_mode = "regional" if getattr(cfg, "regional", False) else "whole"
@@ -207,10 +207,10 @@ def _fail_closed(pipe: Any, reason: str) -> bool:
     TYPED (the same CompiledLaneUnavailableError the executor maps). Plain
     lanes keep the gw#555 never-raise miss policy (eager)."""
 
-    lane = pipeline_weight_lane(pipe)
-    if lane.startswith(("w8a8", "w4a4")):
-        raise cc.CompiledLaneUnavailableError(
-            f"{lane[:4].upper()} requires a compile cell and the local mint "
+    execution_lane = pipeline_weight_lane(pipe)
+    if execution_lane.startswith(("w8a8", "w4a4")):
+        raise cc.CompiledExecutionLaneUnavailableError(
+            f"{execution_lane[:4].upper()} requires a compile cell and the local mint "
             f"is unavailable ({reason})")
     return False
 
@@ -234,7 +234,7 @@ def enable_compiled(
     try:
         if provision.enable_compiled(pipe, cfg, cache_dir, artifact):
             return True
-    except cc.CompiledLaneUnavailableError:
+    except cc.CompiledExecutionLaneUnavailableError:
         # No delivered w8a8 cell => production would refuse here. The LOCAL
         # runtime's whole purpose is minting that cell (gw#555): fall
         # through to the store/mint path — the typed refusal re-asserts at
@@ -253,7 +253,7 @@ def enable_compiled(
     # family, so re-apply it for the rest of this arming attempt.
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket:
-        cc.apply_lora_lane(pipe, bucket)
+        cc.apply_lora_execution_lane(pipe, bucket)
 
     target = cell_path(family, pipeline_weight_lane(pipe))
     if target.exists():
@@ -272,7 +272,7 @@ def enable_compiled(
                 # store can always replace its cell).
                 _say(f"local-cells: cell_selection_bug: {exc}")
                 reason = f"cell_selection_bug: {exc}"
-            except cc.CompiledLaneUnavailableError:
+            except cc.CompiledExecutionLaneUnavailableError:
                 reason = "seed/arm failed (quantized-lane fail-closed)"
         _say(f"local-cells: stored cell no longer matches ({reason}); re-minting")
 
@@ -283,7 +283,7 @@ def enable_compiled(
             "Install one to let cozy compile once and cache the result."
         )
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         return _fail_closed(pipe, "no C compiler for the one-time local mint")
     _say(
         f"local-cells: no compile cell for this GPU/torch yet — compiling "
@@ -297,7 +297,7 @@ def enable_compiled(
         logger.warning("local-cells: mint failed (%s); serving eager", exc)
         cc.unwrap(pipe)
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         return _fail_closed(pipe, f"local mint failed: {exc}")
     # Adopt the just-saved cell through the delivered-cell path (drops the
     # unguarded mint wrappers; re-traces hit the captured FX cache). This
@@ -309,16 +309,16 @@ def enable_compiled(
     except cc.CellSelectionBugError as exc:
         _say(f"local-cells: cell_selection_bug on freshly minted cell: {exc}")
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         return _fail_closed(pipe, f"cell_selection_bug: {exc}")
-    except cc.CompiledLaneUnavailableError as exc:
+    except cc.CompiledExecutionLaneUnavailableError as exc:
         logger.warning("local-cells: minted cell failed re-adoption (%s)", exc)
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         raise
     logger.warning("local-cells: minted cell failed re-adoption; serving eager")
     if bucket:
-        cc.drop_lora_lane(pipe)
+        cc.drop_lora_execution_lane(pipe)
     return _fail_closed(pipe, "minted cell failed re-adoption")
 
 

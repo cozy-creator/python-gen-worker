@@ -21,15 +21,15 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import kernel_lane as kl
+from gen_worker import kernel_path as kl
 
 GB = 1000 ** 3  # the benchmark tables are in decimal GB
 GiB = 1 << 30
 
 
-def _m(lane: str, ms: float, peak_gb: float) -> kl.Measurement:
+def _m(execution_lane: str, ms: float, peak_gb: float) -> kl.Measurement:
     return kl.Measurement(
-        lane=lane, ms_per_step=ms, peak_bytes=int(peak_gb * GB),
+        execution_lane=execution_lane, ms_per_step=ms, peak_bytes=int(peak_gb * GB),
         samples_ms=(ms,))
 
 
@@ -52,7 +52,7 @@ def _clear_pin():
 # --- the rule --------------------------------------------------------------
 
 
-def test_fastest_that_fits_wins_even_when_it_is_the_larger_lane() -> None:
+def test_fastest_that_fits_wins_even_when_it_is_the_larger_execution_lane() -> None:
     """(a) Speed is the objective. B200 shape: the baseline lane is 9.5 GB
     BIGGER and 35% faster, and the card has the room — so it wins."""
     verdict = kl.select(
@@ -63,7 +63,7 @@ def test_fastest_that_fits_wins_even_when_it_is_the_larger_lane() -> None:
     assert "228.0" in verdict.detail and "350.0" in verdict.detail
 
 
-def test_a_lane_that_does_not_fit_is_excluded_even_when_faster() -> None:
+def test_a_execution_lane_that_does_not_fit_is_excluded_even_when_faster() -> None:
     """(b) Fit is a CONSTRAINT applied before ranking. Same two lanes, on a
     48 GB card: the baseline's 44.1 GB peak plus its allowance cannot fit, so
     the 35%-slower fused lane wins outright."""
@@ -75,7 +75,7 @@ def test_a_lane_that_does_not_fit_is_excluded_even_when_faster() -> None:
     assert "baseline+dense" in verdict.detail
 
 
-def test_headroom_allowance_excludes_a_lane_that_bare_peak_would_admit() -> None:
+def test_headroom_allowance_excludes_a_execution_lane_that_bare_peak_would_admit() -> None:
     """The allowance does real work: a 40 GB peak fits a 44 GB card by bare
     measurement and does NOT fit once the activation-spike + fragmentation
     allowance is applied — which is the point of stating one."""
@@ -85,7 +85,7 @@ def test_headroom_allowance_excludes_a_lane_that_bare_peak_would_admit() -> None
     assert row.required_bytes() == int(40 * GB * 1.20) + GiB
 
 
-def test_within_margin_ties_fall_to_the_smaller_lane() -> None:
+def test_within_margin_ties_fall_to_the_smaller_execution_lane() -> None:
     """(c) VRAM breaks a tie and ONLY a tie. 2% apart is noise, so the
     smaller peak wins; 6% apart is a real win, so speed does."""
     tie = kl.select(
@@ -116,7 +116,7 @@ def test_margin_makes_the_verdict_deterministic_across_mints() -> None:
 def test_unmeasurable_candidate_drops_out_with_its_reason() -> None:
     verdict = kl.select(
         [_m("baseline+dense", 400.0, 20.0),
-         kl.Measurement(lane="fused+packed", unavailable="triton compile failed")],
+         kl.Measurement(execution_lane="fused+packed", unavailable="triton compile failed")],
         device_total_bytes=180 * GB)
     assert verdict.winner == "baseline+dense"
     assert verdict.binding == kl.BIND_SOLE_CANDIDATE
@@ -133,7 +133,7 @@ def test_nothing_fits_names_itself_and_takes_the_smallest() -> None:
 
 def test_nothing_measured_is_the_declared_default() -> None:
     verdict = kl.select([], device_total_bytes=180 * GB)
-    assert verdict.winner == kl.DEFAULT_LANE
+    assert verdict.winner == kl.DEFAULT_EXECUTION_LANE
     assert verdict.binding == kl.BIND_NO_FIT
 
 
@@ -148,19 +148,19 @@ def test_probe_measures_every_candidate_and_a_build_failure_is_not_fatal(
     timings = {"baseline+dense": (250.0, 40 * GB),
                "fused+packed": (300.0, 30 * GB)}
 
-    def _measure(lane: str, step):
+    def _measure(execution_lane: str, step):
         step()
-        ms, peak = timings[lane]
-        return kl.Measurement(lane=lane, ms_per_step=ms, peak_bytes=peak,
+        ms, peak = timings[execution_lane]
+        return kl.Measurement(execution_lane=execution_lane, ms_per_step=ms, peak_bytes=peak,
                               samples_ms=(ms,))
 
     monkeypatch.setattr(kl, "measure", _measure)
     built = []
 
-    def _build(lane: str):
-        if lane == "fused+dense":
+    def _build(execution_lane: str):
+        if execution_lane == "fused+dense":
             raise RuntimeError("no kernels here")
-        built.append(lane)
+        built.append(execution_lane)
         return lambda: None
 
     verdict = kl.probe(
@@ -236,7 +236,7 @@ def _packed(tmp_path: Path, meta: dict) -> Path:
     return artifact
 
 
-def test_serving_adopts_the_lane_the_cell_names(
+def test_serving_adopts_the_execution_lane_the_cell_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
@@ -248,8 +248,8 @@ def test_serving_adopts_the_lane_the_cell_names(
         kl.META_KEY: kl.envelope_block(verdict),
     })
     assert kl.adopt_from_artifact(artifact) == "fused+packed"
-    lane, reason = kl.pinned()
-    assert lane == "fused+packed"
+    execution_lane, reason = kl.pinned()
+    assert execution_lane == "fused+packed"
     assert kl.REASON_ADOPTED in reason
 
 
@@ -259,12 +259,12 @@ def test_cell_without_a_verdict_is_the_default_with_a_typed_reason(
     """(d) A pre-pgw#947 cell records nothing. That is the declared default
     and it SAYS which case it was — never a silent fall-through."""
     artifact = _packed(tmp_path, {"kind": "aot-inductor"})
-    assert kl.adopt_from_artifact(artifact) == kl.DEFAULT_LANE
+    assert kl.adopt_from_artifact(artifact) == kl.DEFAULT_EXECUTION_LANE
     assert kl.REASON_ABSENT in kl.pinned()[1]
 
 
 def test_no_cell_at_all_is_the_default_with_its_own_reason() -> None:
-    assert kl.adopt(None) == kl.DEFAULT_LANE
+    assert kl.adopt(None) == kl.DEFAULT_EXECUTION_LANE
     assert kl.REASON_NO_CELL in kl.pinned()[1]
 
 
@@ -273,19 +273,19 @@ def test_unreadable_artifact_degrades_and_names_the_failure(
 ) -> None:
     junk = tmp_path / "not-a-tar.tar.gz"
     junk.write_bytes(b"definitely not a tarball")
-    assert kl.adopt_from_artifact(junk) == kl.DEFAULT_LANE
+    assert kl.adopt_from_artifact(junk) == kl.DEFAULT_EXECUTION_LANE
     assert kl.REASON_UNREADABLE in kl.pinned()[1]
 
 
-def test_a_lane_this_worker_does_not_implement_is_refused_by_name() -> None:
-    lane, reason = kl.lane_from_metadata(
+def test_a_execution_lane_this_worker_does_not_implement_is_refused_by_name() -> None:
+    execution_lane, reason = kl.execution_lane_from_metadata(
         {kl.META_KEY: {"winner": "tcgen05-v2", "binding": "speed"}})
-    assert lane == kl.DEFAULT_LANE
-    assert kl.REASON_UNKNOWN_LANE in reason
+    assert execution_lane == kl.DEFAULT_EXECUTION_LANE
+    assert kl.REASON_UNKNOWN_EXECUTION_LANE in reason
 
 
-def test_pin_refuses_a_lane_outside_the_vocabulary() -> None:
-    with pytest.raises(kl.LaneProbeError):
+def test_pin_refuses_a_execution_lane_outside_the_vocabulary() -> None:
+    with pytest.raises(kl.ExecutionLaneProbeError):
         kl.pin("made-up", "test")
 
 
@@ -352,8 +352,8 @@ def test_a_verdict_from_a_bigger_card_of_the_same_sm_is_refit_locally(
     _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
     assert kl.adopt(_minted_on_the_big_card()) == "fused+packed"
 
-    lane, reason = kl.pinned()
-    assert lane == "fused+packed"
+    execution_lane, reason = kl.pinned()
+    assert execution_lane == "fused+packed"
     assert kl.REASON_REFIT_LOCAL in reason
     # It names the recorded winner, this card, and the binding term.
     assert "baseline+dense" in reason
@@ -387,9 +387,9 @@ def test_nothing_fitting_locally_takes_the_smallest_not_the_default(
     _on_card(monkeypatch, 16 * GB, "NVIDIA RTX 5080", "sm_120")
     assert kl.adopt(_minted_on_the_big_card()) == "fused+packed"
 
-    lane, reason = kl.pinned()
+    execution_lane, reason = kl.pinned()
     assert kl.REASON_REFIT_NO_FIT in reason
-    assert lane != kl.DEFAULT_LANE  # the default is the 48 GB lane here
+    assert execution_lane != kl.DEFAULT_EXECUTION_LANE  # the default is the 48 GB lane here
     assert f"binding={kl.BIND_NO_FIT}" in reason
 
 
@@ -539,7 +539,7 @@ def test_the_fallback_order_is_the_ranking_and_the_winner_leads_it() -> None:
                      "fused+packed", "fused+dense")
 
 
-def test_the_refit_never_pins_a_lane_this_worker_cannot_implement(
+def test_the_refit_never_pins_a_execution_lane_this_worker_cannot_implement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cell from a newer worker may record candidates this one has no
@@ -550,7 +550,7 @@ def test_the_refit_never_pins_a_lane_this_worker_cannot_implement(
     meta[kl.META_KEY]["fit"]["peaks"]["tcgen05-v2"] = 1
     meta[kl.META_KEY]["fit"]["order"].insert(0, "tcgen05-v2")
     assert kl.adopt(meta) == "fused+packed"
-    assert kl.pinned()[0] in kl.LANES
+    assert kl.pinned()[0] in kl.EXECUTION_LANES
 
 
 # --- the mint-side A/B -----------------------------------------------------
@@ -571,10 +571,10 @@ def test_mint_probes_every_candidate_and_mints_the_winner_fresh(
     }
     loads: list[str] = []
 
-    def _load(lane: str):
-        loads.append(lane)
-        assert kl.pinned()[0] == lane, "the lane must be pinned BEFORE loading"
-        return f"pipe:{lane}", f"spec:{lane}"
+    def _load(execution_lane: str):
+        loads.append(execution_lane)
+        assert kl.pinned()[0] == execution_lane, "the lane must be pinned BEFORE loading"
+        return f"pipe:{execution_lane}", f"spec:{execution_lane}"
 
     monkeypatch.setattr(
         kl, "candidates_here", lambda: ("baseline+dense", "fused+packed"))
@@ -584,15 +584,15 @@ def test_mint_probes_every_candidate_and_mints_the_winner_fresh(
     monkeypatch.setattr(mint_child, "frame", lambda **kw: None)
     monkeypatch.setattr(mint_child, "_release", lambda: None)
 
-    def _measure(lane: str, step):
-        assert step == (f"pipe:{lane}", f"spec:{lane}")
-        ms, peak = timings[lane]
-        return kl.Measurement(lane=lane, ms_per_step=ms, peak_bytes=peak,
+    def _measure(execution_lane: str, step):
+        assert step == (f"pipe:{execution_lane}", f"spec:{execution_lane}")
+        ms, peak = timings[execution_lane]
+        return kl.Measurement(execution_lane=execution_lane, ms_per_step=ms, peak_bytes=peak,
                               samples_ms=(ms,))
 
     monkeypatch.setattr(kl, "measure", _measure)
 
-    verdict, pipe, spec = mint_child.lane_verdict_for(_load)
+    verdict, pipe, spec = mint_child.execution_lane_verdict_for(_load)
     assert verdict.winner == "baseline+dense"
     assert verdict.binding == kl.BIND_SPEED
     assert loads == ["baseline+dense", "fused+packed", "baseline+dense"]
@@ -603,7 +603,7 @@ def test_mint_probes_every_candidate_and_mints_the_winner_fresh(
     assert verdict.measurement("baseline+dense").peak_bytes == int(44.1 * GB)
 
 
-def test_mint_records_a_typed_verdict_when_only_one_lane_can_be_built(
+def test_mint_records_a_typed_verdict_when_only_one_execution_lane_can_be_built(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A card with no rival lane gets a real verdict, not an absence — and
@@ -621,8 +621,8 @@ def test_mint_records_a_typed_verdict_when_only_one_lane_can_be_built(
         kl, "measure",
         lambda *a: pytest.fail("no benchmark for a sole candidate"))
 
-    verdict, pipe, _spec = mint_child.lane_verdict_for(
-        lambda lane: (f"pipe:{lane}", f"spec:{lane}"))
+    verdict, pipe, _spec = mint_child.execution_lane_verdict_for(
+        lambda execution_lane: (f"pipe:{execution_lane}", f"spec:{execution_lane}"))
     assert verdict.winner == "baseline+dense"
     assert verdict.binding == kl.BIND_SOLE_CANDIDATE
     assert "sm_89 is not Blackwell" in verdict.detail
@@ -630,15 +630,15 @@ def test_mint_records_a_typed_verdict_when_only_one_lane_can_be_built(
     assert pipe == "pipe:baseline+dense"
 
 
-def test_a_lane_that_cannot_be_built_never_fails_the_mint(
+def test_a_execution_lane_that_cannot_be_built_never_fails_the_mint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from gen_worker import aot_mint, mint_child
 
-    def _load(lane: str):
-        if lane == "fused+packed":
+    def _load(execution_lane: str):
+        if execution_lane == "fused+packed":
             raise RuntimeError("triton kernels will not compile here")
-        return f"pipe:{lane}", f"spec:{lane}"
+        return f"pipe:{execution_lane}", f"spec:{execution_lane}"
 
     monkeypatch.setattr(
         kl, "candidates_here", lambda: ("baseline+dense", "fused+packed"))
@@ -648,10 +648,10 @@ def test_a_lane_that_cannot_be_built_never_fails_the_mint(
     monkeypatch.setattr(mint_child, "_release", lambda: None)
     monkeypatch.setattr(
         kl, "measure",
-        lambda lane, step: kl.Measurement(
-            lane=lane, ms_per_step=228.0, peak_bytes=int(44.1 * GB)))
+        lambda execution_lane, step: kl.Measurement(
+            execution_lane=execution_lane, ms_per_step=228.0, peak_bytes=int(44.1 * GB)))
 
-    verdict, pipe, _spec = mint_child.lane_verdict_for(_load)
+    verdict, pipe, _spec = mint_child.execution_lane_verdict_for(_load)
     assert verdict.winner == "baseline+dense"
     assert ("will not compile here"
             in verdict.measurement("fused+packed").unavailable)
@@ -733,7 +733,7 @@ def test_the_rule_derives_the_pgw863_split_without_a_hand_tuple() -> None:
     # residency win is simply not paid: the winner is the FAST linear lane.
     assert kl.linear_of(b200.winner) == kl.LINEAR_BASELINE
     assert kl.modulation_of(b200.winner) == kl.MOD_PACKED
-    assert b200.winner in kl.LANES
+    assert b200.winner in kl.EXECUTION_LANES
 
     # And the residency win is load-bearing, not decorative: shrink the card
     # until neither DENSE lane fits and the packed ones are the only
@@ -742,5 +742,5 @@ def test_the_rule_derives_the_pgw863_split_without_a_hand_tuple() -> None:
     tight = kl.select(four, device_total_bytes=45 * GB, sm="sm_100")
     assert tight.winner == "baseline+packed"
     assert sorted(
-        r.lane for r in four if not kl.fits(r, 45 * GB)
+        r.execution_lane for r in four if not kl.fits(r, 45 * GB)
     ) == ["baseline+dense", "fused+dense"]

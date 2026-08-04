@@ -52,7 +52,7 @@ import logging
 import os
 from typing import Any, Callable, Dict, Optional
 
-from .. import kernel_lane
+from .. import kernel_path
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ _EXT_DEFAULT = "/opt/cozy/native/libcozy_kernels.so"
 _EXT_NAMESPACE = "cozy_kernels"
 
 # Two independent decisions, each cached with the reason that produced it.
-_LANES: Dict[str, str] = {}
+_EXECUTION_LANES: Dict[str, str] = {}
 _REASONS: Dict[str, str] = {}
 
 
@@ -113,7 +113,7 @@ def _packed_modulation_self_check() -> Optional[str]:
 
 
 def _record(axis: str, value: str, reason: str) -> str:
-    _LANES[axis], _REASONS[axis] = value, reason
+    _EXECUTION_LANES[axis], _REASONS[axis] = value, reason
     return value
 
 
@@ -126,8 +126,8 @@ def _decide(
 ) -> str:
     """One axis's arming decision: env, then the recorded verdict, then this
     axis's numerics. Cached per process with the reason that produced it."""
-    if axis in _LANES:
-        return _LANES[axis]
+    if axis in _EXECUTION_LANES:
+        return _EXECUTION_LANES[axis]
 
     requested = native_kernels_requested()
     if requested is False:
@@ -139,21 +139,21 @@ def _decide(
         logger.info("native kernels [%s]: %s (%s)", axis, off, reason)
         return _record(axis, off, reason)
 
-    lane, lane_reason = kernel_lane.pinned()
-    if lane is None:
+    execution_lane, execution_lane_reason = kernel_path.pinned()
+    if execution_lane is None:
         # Nothing pinned a lane for this load: no cell was delivered, or the
         # executor never reached the adoption hook. The DECLARED default, and
         # it names itself — there is no SM allowlist left to fall back on.
-        reason = (f"{kernel_lane.REASON_ABSENT}: nothing recorded a measured "
+        reason = (f"{kernel_path.REASON_ABSENT}: nothing recorded a measured "
                   f"kernel-lane verdict for this load; serving the declared "
-                  f"default {kernel_lane.DEFAULT_LANE!r}")
+                  f"default {kernel_path.DEFAULT_EXECUTION_LANE!r}")
         logger.warning("native kernels [%s]: %s", axis, reason)
-        return _record(axis, project(kernel_lane.DEFAULT_LANE), reason)
+        return _record(axis, project(kernel_path.DEFAULT_EXECUTION_LANE), reason)
 
-    want = project(lane)
+    want = project(execution_lane)
     if want != armed:
-        logger.info("native kernels [%s]: %s (%s)", axis, want, lane_reason)
-        return _record(axis, want, lane_reason)
+        logger.info("native kernels [%s]: %s (%s)", axis, want, execution_lane_reason)
+        return _record(axis, want, execution_lane_reason)
     try:
         gap = self_check()
     except Exception as exc:  # noqa: BLE001 — any self-check gap => degrade
@@ -164,45 +164,45 @@ def _decide(
         logger.warning("native kernels [%s]: NOT armed — %s; %s serves the "
                        "same artifact", axis, reason, off)
         return _record(axis, off, reason)
-    reason = f"{lane_reason}; {axis} numerics self-check passed"
+    reason = f"{execution_lane_reason}; {axis} numerics self-check passed"
     logger.info("native kernels [%s]: %s armed (%s)", axis, armed, reason)
     return _record(axis, armed, reason)
 
 
-def svdq_linear_lane() -> str:
+def svdq_linear_execution_lane() -> str:
     """``"fused"`` | ``"baseline"`` for the W4A4 linears in this process.
     Call at LOAD time — the first call compiles kernels and self-checks."""
     return _decide(
-        kernel_lane.AXIS_LINEAR,
-        kernel_lane.LINEAR_FUSED, kernel_lane.LINEAR_BASELINE,
-        kernel_lane.linear_of, _fused_linear_self_check)
+        kernel_path.AXIS_LINEAR,
+        kernel_path.LINEAR_FUSED, kernel_path.LINEAR_BASELINE,
+        kernel_path.linear_of, _fused_linear_self_check)
 
 
-def svdq_modulation_lane() -> str:
+def svdq_modulation_execution_lane() -> str:
     """``"packed"`` | ``"dense"`` for the W4A16 AdaLN modulation. Independent
     of the linear lane: a card that wants the baseline linears can still want
     packed modulation, and sm_100 does."""
     return _decide(
-        kernel_lane.AXIS_MODULATION,
-        kernel_lane.MOD_PACKED, kernel_lane.MOD_DENSE,
-        kernel_lane.modulation_of, _packed_modulation_self_check)
+        kernel_path.AXIS_MODULATION,
+        kernel_path.MOD_PACKED, kernel_path.MOD_DENSE,
+        kernel_path.modulation_of, _packed_modulation_self_check)
 
 
-def svdq_linear_lane_reason() -> str:
+def svdq_linear_execution_lane_reason() -> str:
     """The recorded reason for the linear-lane decision."""
-    svdq_linear_lane()
-    return _REASONS[kernel_lane.AXIS_LINEAR]
+    svdq_linear_execution_lane()
+    return _REASONS[kernel_path.AXIS_LINEAR]
 
 
-def svdq_modulation_lane_reason() -> str:
+def svdq_modulation_execution_lane_reason() -> str:
     """The recorded reason for the modulation-lane decision."""
-    svdq_modulation_lane()
-    return _REASONS[kernel_lane.AXIS_MODULATION]
+    svdq_modulation_execution_lane()
+    return _REASONS[kernel_path.AXIS_MODULATION]
 
 
 def reset_native_kernels_arming() -> None:
     """Forget both lane decisions (tests only)."""
-    _LANES.clear()
+    _EXECUTION_LANES.clear()
     _REASONS.clear()
 
 
@@ -284,8 +284,8 @@ __all__ = [
     "load_extension",
     "native_kernels_requested",
     "reset_native_kernels_arming",
-    "svdq_linear_lane",
-    "svdq_linear_lane_reason",
-    "svdq_modulation_lane",
-    "svdq_modulation_lane_reason",
+    "svdq_linear_execution_lane",
+    "svdq_linear_execution_lane_reason",
+    "svdq_modulation_execution_lane",
+    "svdq_modulation_execution_lane_reason",
 ]

@@ -27,7 +27,7 @@ from .hub_client import WorkerResolvedRepo
 from .refs import TensorhubRef
 from .loading import FP8_STORAGE_FIT_FACTOR
 from .ladder import (placement_for_flavor, placement_from_metadata, w8a8_excluded_for_family)
-from .lanes import is_w8a8_flavor
+from .execution_lanes import is_w8a8_flavor
 import asyncio
 import time
 from .cozy_snapshot import ensure_snapshot_async

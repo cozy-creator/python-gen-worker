@@ -91,45 +91,45 @@ AXES = (AXIS_LINEAR, AXIS_MODULATION)
 
 LINEAR_BASELINE = "baseline"
 LINEAR_FUSED = "fused"
-LINEAR_LANES = (LINEAR_BASELINE, LINEAR_FUSED)
+LINEAR_EXECUTION_LANES = (LINEAR_BASELINE, LINEAR_FUSED)
 
 MOD_DENSE = "dense"
 MOD_PACKED = "packed"
-MOD_LANES = (MOD_DENSE, MOD_PACKED)
+MOD_EXECUTION_LANES = (MOD_DENSE, MOD_PACKED)
 
 # A lane NAME is the combination, so one string pins both axes, one verdict
 # ranks them together, and one grep finds a decision in a log.
 SEP = "+"
 
 
-def lane_of(linear: str, modulation: str) -> str:
+def execution_lane_of(linear: str, modulation: str) -> str:
     """The combination's canonical name."""
     return f"{linear}{SEP}{modulation}"
 
 
-def split_lane(lane: str) -> Tuple[str, str]:
+def split_execution_lane(execution_lane: str) -> Tuple[str, str]:
     """``(linear, modulation)`` for a combination name."""
-    linear, _, modulation = str(lane).partition(SEP)
+    linear, _, modulation = str(execution_lane).partition(SEP)
     return linear, modulation
 
 
-def linear_of(lane: str) -> str:
+def linear_of(execution_lane: str) -> str:
     """The linear-axis value a combination names."""
-    return split_lane(lane)[0]
+    return split_execution_lane(execution_lane)[0]
 
 
-def modulation_of(lane: str) -> str:
+def modulation_of(execution_lane: str) -> str:
     """The modulation-axis value a combination names."""
-    return split_lane(lane)[1]
+    return split_execution_lane(execution_lane)[1]
 
 
-LANES = tuple(
-    lane_of(linear, modulation)
-    for linear in LINEAR_LANES for modulation in MOD_LANES)
+EXECUTION_LANES = tuple(
+    execution_lane_of(linear, modulation)
+    for linear in LINEAR_EXECUTION_LANES for modulation in MOD_EXECUTION_LANES)
 
 # What a worker runs when no cell says otherwise: the pair that exists on
 # every card and is a pessimisation on none of them.
-DEFAULT_LANE = lane_of(LINEAR_BASELINE, MOD_DENSE)
+DEFAULT_EXECUTION_LANE = execution_lane_of(LINEAR_BASELINE, MOD_DENSE)
 
 # Envelope key (discrete facts, packed into metadata.json) and result key
 # (measurements, published with the checkpoint, NEVER packed).
@@ -181,7 +181,7 @@ FUSED_MIN_SM = 100
 # worker's degrade is greppable and never a silent fall-through.
 REASON_ABSENT = "kernel_lane_verdict_absent"
 REASON_UNREADABLE = "kernel_lane_verdict_unreadable"
-REASON_UNKNOWN_LANE = "kernel_lane_verdict_unknown_lane"
+REASON_UNKNOWN_EXECUTION_LANE = "kernel_lane_verdict_unknown_lane"
 REASON_NO_CELL = "kernel_lane_no_cell"
 REASON_ADOPTED = "kernel_lane_verdict_adopted"
 # The recorded winner does not fit THIS card (same SM class, smaller card):
@@ -202,7 +202,7 @@ BIND_SOLE_CANDIDATE = "sole_candidate"
 BIND_NO_FIT = "no_fit"
 
 
-class LaneProbeError(RuntimeError):
+class ExecutionLaneProbeError(RuntimeError):
     """A candidate could not be built or measured. Never fatal: the candidate
     drops out of the ranking with its reason recorded."""
 
@@ -238,7 +238,7 @@ def quantize_peak(peak_bytes: int) -> int:
 class Measurement(msgspec.Struct, frozen=True, kw_only=True):
     """One candidate lane, measured on the target card."""
 
-    lane: str
+    execution_lane: str
     ms_per_step: float = 0.0
     peak_bytes: int = 0
     samples_ms: Tuple[float, ...] = ()
@@ -273,9 +273,9 @@ class Verdict(msgspec.Struct, frozen=True, kw_only=True):
     measurements: Tuple[Measurement, ...] = ()
     detail: str = ""
 
-    def measurement(self, lane: str) -> Optional[Measurement]:
+    def measurement(self, execution_lane: str) -> Optional[Measurement]:
         for row in self.measurements:
-            if row.lane == lane:
+            if row.execution_lane == execution_lane:
                 return row
         return None
 
@@ -319,44 +319,44 @@ def select(
     }
     if not usable:
         gaps = "; ".join(
-            f"{r.lane}: {r.unavailable or 'no timing'}" for r in rows)
+            f"{r.execution_lane}: {r.unavailable or 'no timing'}" for r in rows)
         return Verdict(
-            winner=DEFAULT_LANE, binding=BIND_NO_FIT,
+            winner=DEFAULT_EXECUTION_LANE, binding=BIND_NO_FIT,
             detail=f"no candidate measured ({gaps or 'no candidates'})",
             **common)
 
     fitting = tuple(r for r in usable if fits(r, device_total_bytes))
     if not fitting:
-        smallest = min(usable, key=lambda r: (r.peak_bytes, r.lane))
+        smallest = min(usable, key=lambda r: (r.peak_bytes, r.execution_lane))
         return Verdict(
-            winner=smallest.lane, binding=BIND_NO_FIT,
+            winner=smallest.execution_lane, binding=BIND_NO_FIT,
             detail=(
                 f"no candidate fits {device_total_bytes} B with the stated "
-                f"allowance; smallest peak wins ({smallest.lane}, "
+                f"allowance; smallest peak wins ({smallest.execution_lane}, "
                 f"{smallest.peak_bytes} B peak, "
                 f"{smallest.required_bytes()} B required)"),
             **common)
 
-    excluded = tuple(r.lane for r in usable if r not in fitting)
+    excluded = tuple(r.execution_lane for r in usable if r not in fitting)
     if len(fitting) == 1:
         only = fitting[0]
         binding = BIND_FIT if excluded else BIND_SOLE_CANDIDATE
         detail = (
-            f"{only.lane} is the only lane that fits; excluded "
+            f"{only.execution_lane} is the only lane that fits; excluded "
             f"{sorted(excluded)!r}" if excluded
-            else f"{only.lane} is the only candidate")
-        return Verdict(winner=only.lane, binding=binding, detail=detail,
+            else f"{only.execution_lane} is the only candidate")
+        return Verdict(winner=only.execution_lane, binding=binding, detail=detail,
                        **common)
 
-    ranked = sorted(fitting, key=lambda r: (r.ms_per_step, r.lane))
+    ranked = sorted(fitting, key=lambda r: (r.ms_per_step, r.execution_lane))
     best, rival = ranked[0], ranked[1]
     gap = (rival.ms_per_step - best.ms_per_step) / max(best.ms_per_step, 1e-9)
     if gap >= MARGIN_FRACTION:
         return Verdict(
-            winner=best.lane, binding=BIND_SPEED,
+            winner=best.execution_lane, binding=BIND_SPEED,
             detail=(
-                f"{best.lane} {best.ms_per_step:.1f} ms/step beats "
-                f"{rival.lane} {rival.ms_per_step:.1f} by {gap * 100:.1f}% "
+                f"{best.execution_lane} {best.ms_per_step:.1f} ms/step beats "
+                f"{rival.execution_lane} {rival.ms_per_step:.1f} by {gap * 100:.1f}% "
                 f"(margin {MARGIN_FRACTION * 100:.0f}%)"
                 + (f"; excluded on fit {sorted(excluded)!r}" if excluded
                    else "")),
@@ -366,24 +366,24 @@ def select(
         r for r in fitting
         if (r.ms_per_step - best.ms_per_step)
         / max(best.ms_per_step, 1e-9) < MARGIN_FRACTION)
-    winner = min(tied, key=lambda r: (r.peak_bytes, r.lane))
+    winner = min(tied, key=lambda r: (r.peak_bytes, r.execution_lane))
     return Verdict(
-        winner=winner.lane, binding=BIND_VRAM_TIEBREAK,
+        winner=winner.execution_lane, binding=BIND_VRAM_TIEBREAK,
         detail=(
-            f"{[r.lane for r in tied]!r} within {MARGIN_FRACTION * 100:.0f}% "
+            f"{[r.execution_lane for r in tied]!r} within {MARGIN_FRACTION * 100:.0f}% "
             f"({best.ms_per_step:.1f}-{rival.ms_per_step:.1f} ms/step); "
-            f"smaller peak wins ({winner.lane}, {winner.peak_bytes} B)"),
+            f"smaller peak wins ({winner.execution_lane}, {winner.peak_bytes} B)"),
         **common)
 
 
-def sole(lane: str, detail: str) -> Verdict:
+def sole(execution_lane: str, detail: str) -> Verdict:
     """The verdict for a card that can only build ONE lane. No benchmark is
     run: with nothing to compare against, a measurement would buy a compile
     and decide nothing. The cell still records a real, typed verdict rather
     than the absence a serving worker has to guess about."""
     total, name, sm = device_facts()
     return Verdict(
-        winner=lane, binding=BIND_SOLE_CANDIDATE, detail=detail,
+        winner=execution_lane, binding=BIND_SOLE_CANDIDATE, detail=detail,
         device_total_bytes=total, device_name=name, sm=sm,
         measured_at=time.time())
 
@@ -407,7 +407,7 @@ def device_facts() -> Tuple[int, str, str]:
         return 0, "", ""
 
 
-def measure(lane: str, step: Callable[[], Any]) -> Measurement:
+def measure(execution_lane: str, step: Callable[[], Any]) -> Measurement:
     """Time one candidate's representative step and record its device peak.
 
     ``step`` must run ONE forward of the graph in its production posture
@@ -435,10 +435,10 @@ def measure(lane: str, step: Callable[[], Any]) -> Measurement:
     except Exception as exc:  # noqa: BLE001 — a candidate that cannot be
         # measured drops out of the ranking; it never fails the mint.
         return Measurement(
-            lane=lane, unavailable=f"{type(exc).__name__}: {exc}")
+            execution_lane=execution_lane, unavailable=f"{type(exc).__name__}: {exc}")
     ordered = sorted(samples)
     return Measurement(
-        lane=lane, ms_per_step=ordered[len(ordered) // 2], peak_bytes=peak,
+        execution_lane=execution_lane, ms_per_step=ordered[len(ordered) // 2], peak_bytes=peak,
         samples_ms=tuple(samples))
 
 
@@ -460,21 +460,21 @@ def probe(
     if not device_total_bytes and not device_name and not sm:
         device_total_bytes, device_name, sm = device_facts()
     rows = []
-    for lane in candidates:
+    for execution_lane in candidates:
         t0 = time.monotonic()
         try:
-            step = build(lane)
+            step = build(execution_lane)
         except Exception as exc:  # noqa: BLE001
             logger.warning("kernel-lane probe: %s could not be built — %s",
-                           lane, exc)
+                           execution_lane, exc)
             rows.append(Measurement(
-                lane=lane, unavailable=f"build: {type(exc).__name__}: {exc}"))
+                execution_lane=execution_lane, unavailable=f"build: {type(exc).__name__}: {exc}"))
             continue
-        row = measure(lane, step)
+        row = measure(execution_lane, step)
         rows.append(row)
         logger.info(
             "kernel-lane probe: %s -> %s (%.1f s to build+measure)",
-            lane,
+            execution_lane,
             (f"{row.ms_per_step:.1f} ms/step, {row.peak_bytes / 1e9:.1f} GB "
              f"peak" if row.usable else f"UNAVAILABLE {row.unavailable}"),
             time.monotonic() - t0)
@@ -576,7 +576,7 @@ def candidates_here() -> Tuple[str, ...]:
     """
     axes, _gaps = candidate_axes()
     return tuple(
-        lane_of(linear, modulation)
+        execution_lane_of(linear, modulation)
         for linear in axes[AXIS_LINEAR]
         for modulation in axes[AXIS_MODULATION])
 
@@ -602,7 +602,7 @@ def refit_order(
     """
     usable = [r for r in measurements if r.usable]
     ranked: List[str] = []
-    remaining = sorted(usable, key=lambda r: (r.ms_per_step, r.lane))
+    remaining = sorted(usable, key=lambda r: (r.ms_per_step, r.execution_lane))
     while remaining:
         head = remaining[0]
         tie = [
@@ -611,11 +611,11 @@ def refit_order(
             / max(head.ms_per_step, 1e-9) < MARGIN_FRACTION
         ]
         ranked.extend(
-            r.lane for r in sorted(
-                tie, key=lambda r: (quantize_peak(r.peak_bytes), r.lane)))
+            r.execution_lane for r in sorted(
+                tie, key=lambda r: (quantize_peak(r.peak_bytes), r.execution_lane)))
         remaining = [r for r in remaining if r not in tie]
     if winner in ranked:
-        ranked = [winner] + [lane for lane in ranked if lane != winner]
+        ranked = [winner] + [execution_lane for execution_lane in ranked if execution_lane != winner]
     return tuple(ranked)
 
 
@@ -629,8 +629,8 @@ def fit_block(verdict: Verdict) -> Dict[str, Any]:
     verdict), which is the honest signal that the fit cannot be re-applied.
     """
     peaks = {
-        r.lane: quantize_peak(r.peak_bytes)
-        for r in sorted(verdict.measurements, key=lambda r: r.lane)
+        r.execution_lane: quantize_peak(r.peak_bytes)
+        for r in sorted(verdict.measurements, key=lambda r: r.execution_lane)
         if r.usable
     }
     if not peaks:
@@ -663,7 +663,7 @@ def envelope_block(verdict: Verdict) -> Dict[str, Any]:
         "rule": str(verdict.rule),
         "binding": str(verdict.binding),
         "margin_fraction": float(verdict.margin_fraction),
-        "candidates": sorted(r.lane for r in verdict.measurements),
+        "candidates": sorted(r.execution_lane for r in verdict.measurements),
     }
     fit = fit_block(verdict)
     if fit:
@@ -692,7 +692,7 @@ def evidence_block(verdict: Verdict) -> Dict[str, Any]:
         "measured_at": float(verdict.measured_at),
         "candidates": [
             {
-                "lane": r.lane,
+                "lane": r.execution_lane,
                 "ms_per_step": float(r.ms_per_step),
                 "peak_bytes": int(r.peak_bytes),
                 "required_bytes": int(r.required_bytes()),
@@ -710,7 +710,7 @@ def verdict_from_evidence(block: Mapping[str, Any]) -> Verdict:
     round-trip, and how a recorded campaign is replayed against the rule."""
     rows = tuple(
         Measurement(
-            lane=str(c.get("lane") or ""),
+            execution_lane=str(c.get("lane") or ""),
             ms_per_step=float(c.get("ms_per_step") or 0.0),
             peak_bytes=int(c.get("peak_bytes") or 0),
             samples_ms=tuple(float(s) for s in (c.get("samples_ms") or ())),
@@ -719,7 +719,7 @@ def verdict_from_evidence(block: Mapping[str, Any]) -> Verdict:
         for c in (block.get("candidates") or ())
     )
     return Verdict(
-        winner=str(block.get("winner") or DEFAULT_LANE),
+        winner=str(block.get("winner") or DEFAULT_EXECUTION_LANE),
         binding=str(block.get("binding") or ""),
         rule=str(block.get("rule") or "fit_constrained_speed"),
         schema=int(block.get("schema") or SCHEMA),
@@ -741,7 +741,7 @@ def verdict_from_evidence(block: Mapping[str, Any]) -> Verdict:
     )
 
 
-def lane_from_metadata(meta: Mapping[str, Any]) -> Tuple[str, str]:
+def execution_lane_from_metadata(meta: Mapping[str, Any]) -> Tuple[str, str]:
     """``(lane, reason)`` a cell's envelope states.
 
     A cell minted before this mechanism records nothing — that is the
@@ -750,20 +750,20 @@ def lane_from_metadata(meta: Mapping[str, Any]) -> Tuple[str, str]:
     """
     block = meta.get(META_KEY) if isinstance(meta, Mapping) else None
     if block is None:
-        return DEFAULT_LANE, (
+        return DEFAULT_EXECUTION_LANE, (
             f"{REASON_ABSENT}: cell records no kernel-lane verdict "
             f"(pre-pgw#947 cell); serving the declared default "
-            f"{DEFAULT_LANE!r}")
+            f"{DEFAULT_EXECUTION_LANE!r}")
     if not isinstance(block, Mapping):
-        return DEFAULT_LANE, (
+        return DEFAULT_EXECUTION_LANE, (
             f"{REASON_UNREADABLE}: cell's {META_KEY!r} is "
-            f"{type(block).__name__}, not a block; serving {DEFAULT_LANE!r}")
+            f"{type(block).__name__}, not a block; serving {DEFAULT_EXECUTION_LANE!r}")
     winner = str(block.get("winner") or "")
-    if winner not in LANES:
-        return DEFAULT_LANE, (
-            f"{REASON_UNKNOWN_LANE}: cell names lane {winner!r}, which this "
-            f"worker does not implement ({list(LANES)!r}); serving "
-            f"{DEFAULT_LANE!r}")
+    if winner not in EXECUTION_LANES:
+        return DEFAULT_EXECUTION_LANE, (
+            f"{REASON_UNKNOWN_EXECUTION_LANE}: cell names lane {winner!r}, which this "
+            f"worker does not implement ({list(EXECUTION_LANES)!r}); serving "
+            f"{DEFAULT_EXECUTION_LANE!r}")
     return winner, (
         f"{REASON_ADOPTED}: cell verdict {winner!r} "
         f"(binding={block.get('binding') or '?'}, "
@@ -795,30 +795,30 @@ def recorded_fit(
     if isinstance(evidence, Mapping):
         rows = tuple(
             r for r in verdict_from_evidence(evidence).measurements
-            if r.usable and r.lane in LANES)
+            if r.usable and r.execution_lane in EXECUTION_LANES)
         if rows:
             return (
-                {r.lane: r.peak_bytes for r in rows},
+                {r.execution_lane: r.peak_bytes for r in rows},
                 refit_order(rows, winner=str(evidence.get("winner") or "")),
                 rows, EVIDENCE_KEY)
     block = meta.get(META_KEY)
     fit = block.get("fit") if isinstance(block, Mapping) else None
     if isinstance(fit, Mapping):
         peaks = {
-            str(lane): int(peak)
-            for lane, peak in (fit.get("peaks") or {}).items()
-            if str(lane) in LANES and int(peak or 0) > 0
+            str(execution_lane): int(peak)
+            for execution_lane, peak in (fit.get("peaks") or {}).items()
+            if str(execution_lane) in EXECUTION_LANES and int(peak or 0) > 0
         }
         if peaks:
             order = tuple(
-                str(lane) for lane in (fit.get("order") or ())
-                if str(lane) in peaks)
+                str(execution_lane) for execution_lane in (fit.get("order") or ())
+                if str(execution_lane) in peaks)
             return peaks, order or tuple(sorted(peaks)), (), META_KEY
     return {}, (), (), ""
 
 
 def refit(
-    lane: str, reason: str, meta: Mapping[str, Any],
+    execution_lane: str, reason: str, meta: Mapping[str, Any],
 ) -> Tuple[str, str]:
     """Re-apply the fit constraint against THIS card and return the lane to
     pin with the reason it is pinned.
@@ -845,19 +845,19 @@ def refit(
     peaks, order, rows, provenance = recorded_fit(meta)
     device = f"{name or 'this device'} ({sm or 'sm unknown'})"
     if not total:
-        return lane, (
+        return execution_lane, (
             f"{reason}; {REASON_FIT_UNVERIFIED}: this process cannot detect a "
             f"device total, so the cell's fit constraint could not be "
             f"re-applied here")
-    if lane not in peaks:
-        return lane, (
+    if execution_lane not in peaks:
+        return execution_lane, (
             f"{reason}; {REASON_FIT_UNVERIFIED}: the cell records no measured "
-            f"peak for {lane!r}, so its fit could not be re-applied on "
+            f"peak for {execution_lane!r}, so its fit could not be re-applied on "
             f"{device}, {total} B — adopting it unverified across cards "
             f"(cells are keyed on SM, not on card memory)")
-    if fits_bytes(peaks[lane], total):
-        return lane, (
-            f"{reason}; re-checked here: {required_for(peaks[lane])} B "
+    if fits_bytes(peaks[execution_lane], total):
+        return execution_lane, (
+            f"{reason}; re-checked here: {required_for(peaks[execution_lane])} B "
             f"required of {total} B on {device} [{provenance}]")
     if rows:
         # The full record is present: re-run THE rule, not a reduction of it.
@@ -879,8 +879,8 @@ def refit(
                 f"wins ({winner!r}, {required_for(peaks[winner])} B required)")
     tag = REASON_REFIT_LOCAL if binding != BIND_NO_FIT else REASON_REFIT_NO_FIT
     return winner, (
-        f"{tag}: the cell's verdict {lane!r} asks "
-        f"{required_for(peaks[lane])} B and {device} has {total} B, so it "
+        f"{tag}: the cell's verdict {execution_lane!r} asks "
+        f"{required_for(peaks[execution_lane])} B and {device} has {total} B, so it "
         f"does not fit here; re-applied the rule locally -> {winner!r} "
         f"(binding={binding}) — {detail} [{provenance}]")
 
@@ -891,7 +891,7 @@ _PIN: Optional[str] = None
 _PIN_REASON: str = ""
 
 
-def pin(lane: str, reason: str) -> None:
+def pin(execution_lane: str, reason: str) -> None:
     """Pin the lane THIS process loads on, with the reason it is pinned.
 
     Set by the mint (once per candidate while probing, then to the winner)
@@ -900,10 +900,10 @@ def pin(lane: str, reason: str) -> None:
     """
     global _PIN, _PIN_REASON
 
-    if lane not in LANES:
-        raise LaneProbeError(f"unknown kernel lane {lane!r} (have {LANES!r})")
-    _PIN, _PIN_REASON = lane, str(reason or "")
-    logger.info("kernel-lane: pinned %s — %s", lane, _PIN_REASON)
+    if execution_lane not in EXECUTION_LANES:
+        raise ExecutionLaneProbeError(f"unknown kernel lane {execution_lane!r} (have {EXECUTION_LANES!r})")
+    _PIN, _PIN_REASON = execution_lane, str(reason or "")
+    logger.info("kernel-lane: pinned %s — %s", execution_lane, _PIN_REASON)
 
 
 def pinned() -> Tuple[Optional[str], str]:
@@ -932,17 +932,17 @@ def adopt(meta: Optional[Mapping[str, Any]], *, source: str = "") -> str:
     constraint here before the lane is pinned.
     """
     if meta is None:
-        lane, reason = DEFAULT_LANE, (
+        execution_lane, reason = DEFAULT_EXECUTION_LANE, (
             f"{REASON_NO_CELL}: no compiled cell delivered for this load; "
-            f"serving the declared default {DEFAULT_LANE!r}")
+            f"serving the declared default {DEFAULT_EXECUTION_LANE!r}")
     else:
-        lane, reason = lane_from_metadata(meta)
+        execution_lane, reason = execution_lane_from_metadata(meta)
         if reason.startswith(REASON_ADOPTED):
-            lane, reason = refit(lane, reason, meta)
+            execution_lane, reason = refit(execution_lane, reason, meta)
     if source:
         reason = f"{reason} [{source}]"
-    pin(lane, reason)
-    return lane
+    pin(execution_lane, reason)
+    return execution_lane
 
 
 def adopt_from_artifact(artifact: Any, *, source: str = "") -> str:
@@ -967,14 +967,14 @@ def adopt_from_artifact(artifact: Any, *, source: str = "") -> str:
                         break
                     meta = json.loads(fh.read().decode())
                     return adopt(meta, source=source or str(artifact))
-        raise LaneProbeError("artifact has no metadata.json")
+        raise ExecutionLaneProbeError("artifact has no metadata.json")
     except Exception as exc:  # noqa: BLE001 — never fails a load
-        pin(DEFAULT_LANE, (
+        pin(DEFAULT_EXECUTION_LANE, (
             f"{REASON_UNREADABLE}: cannot read the verdict from "
             f"{artifact} ({type(exc).__name__}: {exc}); serving "
-            f"{DEFAULT_LANE!r}"
+            f"{DEFAULT_EXECUTION_LANE!r}"
             + (f" [{source}]" if source else "")))
-        return DEFAULT_LANE
+        return DEFAULT_EXECUTION_LANE
 
 
 __all__ = [
@@ -989,18 +989,18 @@ __all__ = [
     "BIND_SOLE_CANDIDATE",
     "BIND_SPEED",
     "BIND_VRAM_TIEBREAK",
-    "DEFAULT_LANE",
+    "DEFAULT_EXECUTION_LANE",
     "EVIDENCE_KEY",
     "FRAGMENTATION_HEADROOM_BYTES",
     "FUSED_MIN_SM",
-    "LANES",
+    "EXECUTION_LANES",
     "LINEAR_BASELINE",
     "LINEAR_FUSED",
-    "LINEAR_LANES",
+    "LINEAR_EXECUTION_LANES",
     "MARGIN_FRACTION",
     "META_KEY",
     "MOD_DENSE",
-    "MOD_LANES",
+    "MOD_EXECUTION_LANES",
     "MOD_PACKED",
     "PEAK_QUANTUM_BYTES",
     "REASON_ABSENT",
@@ -1009,11 +1009,11 @@ __all__ = [
     "REASON_NO_CELL",
     "REASON_REFIT_LOCAL",
     "REASON_REFIT_NO_FIT",
-    "REASON_UNKNOWN_LANE",
+    "REASON_UNKNOWN_EXECUTION_LANE",
     "REASON_UNREADABLE",
     "SCHEMA",
     "SEP",
-    "LaneProbeError",
+    "ExecutionLaneProbeError",
     "Measurement",
     "Verdict",
     "adopt",
@@ -1028,8 +1028,8 @@ __all__ = [
     "fits",
     "fits_bytes",
     "fused_candidate_gap",
-    "lane_from_metadata",
-    "lane_of",
+    "execution_lane_from_metadata",
+    "execution_lane_of",
     "linear_of",
     "measure",
     "modulation_of",
@@ -1044,6 +1044,6 @@ __all__ = [
     "required_for",
     "select",
     "sole",
-    "split_lane",
+    "split_execution_lane",
     "verdict_from_evidence",
 ]

@@ -217,7 +217,7 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
             family = "sdxl"
 
             @staticmethod
-            def lane_label() -> str:
+            def execution_lane_label() -> str:
                 return "w8a8"
 
         aot_mint._emit_phase_event(_Spec(), table)
@@ -233,7 +233,7 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
                         "seal_publish": 39.2}),
             elapsed_s=615.0)
         mint_delegate._emit_jit_compile(
-            outcome, family="sdxl", lane="w8a8", key="ck1-" + "a" * 64,
+            outcome, family="sdxl", execution_lane="w8a8", key="ck1-" + "a" * 64,
             attempt=1)
 
         aot = _wait_for_phases(
@@ -279,7 +279,7 @@ def test_the_producer_warm_loop_reports_its_per_shape_compile_time() -> None:
         conn = sched.wait_connection(0)
         cc.emit_jit_compile_event(
             {"1024x1024": 41.5, "768x768": 12.25},
-            family="sdxl", lane="w8a8", route="compile_and_warm", n_graphs=6)
+            family="sdxl", execution_lane="w8a8", route="compile_and_warm", n_graphs=6)
         jit = _wait_for_phases(
             conn, activity_mod.KIND_JIT_COMPILE,
             {"minted", "shape:1024x1024", "shape:768x768"})
@@ -308,7 +308,7 @@ def test_a_failed_jit_mint_reports_its_cost_but_not_as_minted() -> None:
                 elapsed_s=602.0, phases={"load": 30.0, "warmup_forward": 572.0}),
             exit_code=1, elapsed_s=605.0)
         mint_delegate._emit_jit_compile(
-            outcome, family="sdxl", lane="w8a8", key="ck1-" + "b" * 64,
+            outcome, family="sdxl", execution_lane="w8a8", key="ck1-" + "b" * 64,
             attempt=2)
         jit = _wait_for_phases(
             conn, activity_mod.KIND_JIT_COMPILE,
@@ -328,7 +328,7 @@ def test_a_child_that_died_before_reporting_still_costs_measured_time() -> None:
         mint_delegate._emit_jit_compile(
             mint_process.MintOutcome(
                 status=mint_process.CRASHED, report=None, elapsed_s=7.5),
-            family="sdxl", lane="", key="ck1-" + "c" * 64, attempt=1)
+            family="sdxl", execution_lane="", key="ck1-" + "c" * 64, attempt=1)
         jit = _wait_for_phases(conn, activity_mod.KIND_JIT_COMPILE, {"aborted"})
 
     assert jit["aborted"].duration_ms == 7_500
@@ -344,11 +344,11 @@ def test_telemetry_never_fails_the_compile_it_measures() -> None:
         family = "sdxl"
 
         @staticmethod
-        def lane_label() -> str:
+        def execution_lane_label() -> str:
             raise RuntimeError("boom")
 
     aot_mint._emit_phase_event(_Exploding(), {"totals": {"total_s": 1.0}})
     cc.emit_jit_compile_event({"a": "not-a-number"}, family="sdxl")  # type: ignore[dict-item]
     mint_delegate._emit_jit_compile(
         mint_process.MintOutcome(status=mint_process.MINTED, report=None),
-        family="sdxl", lane="", key="k", attempt=1)
+        family="sdxl", execution_lane="", key="k", attempt=1)

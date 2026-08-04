@@ -861,7 +861,7 @@ def warm_context(
     spec: "EndpointSpec", *,
     request_id: str,
     local_output_dir: str,
-    lane: str = "",
+    execution_lane: str = "",
     config: Optional[Mapping[str, Any]] = None,
 ) -> Any:
     """The ``RequestContext`` a WARM forward runs under — one construction.
@@ -894,8 +894,8 @@ def warm_context(
         **resolved_slots_kwargs(spec, None),
         boot_warmup=True,
     )
-    if lane:
-        ctx._set_lane(str(lane))
+    if execution_lane:
+        ctx._set_execution_lane(str(execution_lane))
     if config:
         ctx._set_config(dict(config))
     return ctx

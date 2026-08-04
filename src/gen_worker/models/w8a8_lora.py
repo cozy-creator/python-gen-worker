@@ -223,7 +223,7 @@ def route_denoiser_keys(
     return routed
 
 
-def branch_lane(model: Any) -> str:
+def branch_execution_lane(model: Any) -> str:
     """The denoiser's base weight lane for branch policy/stamping:
     ``"w8a8"`` | ``"fp8-hooks"`` | ``""`` (plain resident). Both fp8 GEMM
     dispatch branches (rowwise sm_90+, pertensor sm_89 — gw#564) are the
@@ -260,7 +260,7 @@ def branch_bucket(model: Any) -> int:
     return int(getattr(model, _BUCKET_ATTR, 0) or 0)
 
 
-def lora_lane(bucket: int, sparse: bool = False, base: str = "w8a8") -> str:
+def lora_execution_lane(bucket: int, sparse: bool = False, base: str = "w8a8") -> str:
     # Sparse (eager-only) placement is a different graph per coverage
     # pattern — the "-sparse" suffix can never match a produced cell label.
     # ``base`` is the branchless lane the branch rides on ("w8a8",
@@ -641,7 +641,7 @@ def branches_active(model: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def enable_branch_lanes(pipe: Any, bucket: int) -> Dict[str, Any]:
+def enable_branch_execution_lanes(pipe: Any, bucket: int) -> Dict[str, Any]:
     """Allocate the rank-``bucket`` branch container on EVERY branch-capable
     denoiser (both experts of an MoE — the ``Compile(lora_bucket=)`` arming
     contract). Returns the targets it armed."""
@@ -651,19 +651,19 @@ def enable_branch_lanes(pipe: Any, bucket: int) -> Dict[str, Any]:
     return targets
 
 
-def disable_branch_lanes(pipe: Any) -> None:
+def disable_branch_execution_lanes(pipe: Any) -> None:
     """Drop the branch containers from every denoiser (demote/teardown)."""
     for model in branch_targets(pipe).values():
         disable_lora_branches(model)
 
 
-def clear_branch_lanes(pipe: Any) -> None:
+def clear_branch_execution_lanes(pipe: Any) -> None:
     """Deactivate every denoiser's branch (canonical: zero B; sparse: drop)."""
     for model in branch_targets(pipe).values():
         clear_branch_adapters(model)
 
 
-def branch_lanes_active(pipe: Any) -> bool:
+def branch_execution_lanes_active(pipe: Any) -> bool:
     return any(branches_active(m) for m in branch_targets(pipe).values())
 
 
@@ -1012,7 +1012,7 @@ def apply_branch_adapter_set(
     return stats
 
 
-def effective_base_lane(pipe: Any) -> str:
+def effective_base_execution_lane(pipe: Any) -> str:
     """The branchless base weight lane CELL IDENTITY rides on — the ONE
     resolution :func:`stamp_lane` memoizes: the memoized base, else the
     pipeline's stamped/probed lane, else the denoiser's own lane markers
@@ -1030,15 +1030,15 @@ def effective_base_lane(pipe: Any) -> str:
         return str(base)
     from .loading import pipeline_weight_lane
 
-    lane = pipeline_weight_lane(pipe)
-    if lane:
-        return lane
+    execution_lane = pipeline_weight_lane(pipe)
+    if execution_lane:
+        return execution_lane
     for model in branch_targets(pipe).values():
-        return branch_lane(model)
+        return branch_execution_lane(model)
     return ""
 
 
-def stamp_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None) -> None:
+def stamp_execution_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None) -> None:
     """Keep the compile-cache graph key honest: branch-bearing pipelines are
     a different graph family per (base lane, bucket) — lane_drift guards
     both directions. The branchless base lane is remembered on first stamp
@@ -1057,13 +1057,13 @@ def stamp_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None) -> None:
     if base is None:
         # One brain (pgw#686): the same resolution the advertised requested
         # key uses, so the stamped/published key can never diverge from it.
-        base = effective_base_lane(pipe)
+        base = effective_base_execution_lane(pipe)
         try:
             pipe._cozy_lora_base_lane = base
         except Exception:
             return
     try:
-        pipe._cozy_weight_lane = lora_lane(bucket, sparse, base=base) if bucket else base
+        pipe._cozy_weight_lane = lora_execution_lane(bucket, sparse, base=base) if bucket else base
     except Exception:
         pass
 
@@ -1132,19 +1132,19 @@ __all__ = [
     "apply_branch_adapter_set",
     "apply_branch_adapters",
     "branch_bucket",
-    "branch_lane",
-    "branch_lanes_active",
+    "branch_execution_lane",
+    "branch_execution_lanes_active",
     "branch_modules",
     "branch_targets",
     "branches_active",
     "clear_branch_adapters",
-    "clear_branch_lanes",
+    "clear_branch_execution_lanes",
     "declared_component",
-    "disable_branch_lanes",
+    "disable_branch_execution_lanes",
     "disable_lora_branches",
-    "enable_branch_lanes",
+    "enable_branch_execution_lanes",
     "enable_lora_branches",
-    "lora_lane",
+    "lora_execution_lane",
     "map_adapter",
     "normalize_adapter_state_dict",
     "pipeline_branch_bucket",
@@ -1152,5 +1152,5 @@ __all__ = [
     "require_component_declaration",
     "route_denoiser_keys",
     "split_state_dict",
-    "stamp_lane",
+    "stamp_execution_lane",
 ]
