@@ -36,34 +36,44 @@ name: CI
 #
 # ─── MEASURED, ON THE RUNNER ───────────────────────────────────────────────────
 #
-# Not extrapolated from a laptop. These are the per-step durations of run
-# 30847566437 (the last green run of the old single-job shape, ubuntu-latest, no
-# cache, cold) re-attributed to the two jobs below:
+# Not extrapolated from this 32-core box — a 4-core `ubuntu-latest` behaves
+# nothing like it, which is the trap th#1572's lane fell into by a factor of 40.
+# Left column: run 30847566437, the last green run of the old single-job shape,
+# re-attributed to the two jobs below. Right column: this workflow's OWN PR
+# (#467, head 91c73388) — the shape as it actually ships. Both cold; there is no
+# cache in either.
 #
-#                                          cold
-#   Set up job + checkout                    4s   both jobs
-#   Install uv + Set up Python 3.12          3s   both jobs
-#   uv sync --locked --extra dev            21s   both jobs
-#   ------------------------------------------------ gates
-#   Type check (mypy)                       60s
-#   Lint (ruff)                              0s
-#   HTTP timeout guard                       1s
-#   unreached public surface guard           2s
-#   config reads guard                       2s
-#   Build package                            2s
-#                                        -------
-#   gates TOTAL                          1m 35s
-#   ------------------------------------------------ tests
-#   Install llama-server (pinned, CPU)       1s
-#   Run tests (v1)                      10m 59s
-#   Run tests (v2)                       3m 47s
-#                                        -------
-#   tests TOTAL                         15m 15s
+#                                    old shape   THIS workflow (PR #467)
+#   Set up job + checkout                   4s      3s   both jobs
+#   Install uv + Set up Python 3.12         3s      2s   both jobs
+#   uv sync --locked --extra dev           21s     18s   both jobs
+#   ------------------------------------------------------- gates
+#   Type check (mypy)                      60s     59s
+#   Lint (ruff)                             0s      1s
+#   HTTP timeout guard                      1s      1s
+#   unreached public surface guard          2s      2s
+#   config reads guard                      2s      2s
+#   Build package                           2s      1s
+#                                       -------  ------
+#   gates TOTAL                         1m 35s  1m 29s   observed, green
+#   ------------------------------------------------------- tests
+#   Install llama-server (pinned, CPU)      1s      0s
+#   Run tests (v1)                     10m 59s 10m 17s   3092 passed, 2 failed
+#   Run tests (v2)                      3m 47s      —    (see note)
+#                                       -------  ------
+#   tests TOTAL                        15m 15s ~14m 28s
 #
-# The two jobs run concurrently, so the WALL time of a full run is 15m 15s —
-# slightly FASTER than the 16m 22s the single serial job cost, while also
-# returning the cheap half nine times sooner. The split costs one extra 28s
-# install and buys that.
+# The two jobs run concurrently, so the WALL time of a full run is ~14m 30s —
+# FASTER than the 16m 22s the single serial job cost, while also returning the
+# cheap half TEN times sooner (1m 29s). The split costs one extra 18s install
+# and buys that.
+#
+# The `—` is not a missing measurement, it is a DEFECT this run exposed: with
+# `tests/` red, `tests_v2/` reported `skipped`, because a failing step skips
+# every later step by default. The step's own comment had claimed since pgw#808
+# that the two-step split existed so one suite's failure "must not erase the
+# other's answer" — it never did that. Fixed at the step with `if: !cancelled()`.
+# 3m 47s is that step's last unobstructed measurement, from the left column.
 #
 # NO CACHE STEP, deliberately, and this is the one place the tensorhub precedent
 # (th#1572) does NOT transfer. There, `setup-go`'s cache key was shared across
@@ -251,5 +261,16 @@ jobs:
       # "is the replacement ready"), and a collection error in either must not
       # erase the other's answer. The flip (pgw#808: point CI at `tests_v2/`,
       # `git rm -r tests/`) deletes the step above and this comment with it.
+      #
+      # pgw#952: `if: !cancelled()` is what makes the paragraph above TRUE. It
+      # never was — a failing step skips every later step by default, so a red
+      # `tests/` silently erased the `tests_v2/` answer, which is exactly the
+      # outcome the two-step split was written to prevent. Observed on this
+      # workflow's own PR: `tests/` failed on pgw#949's two guards and
+      # `tests_v2/` reported `skipped`, telling a reader nothing about the
+      # zero-based suite. `!cancelled()` rather than `always()` so a cancelled
+      # run (the concurrency group above cancels superseded pushes) does not
+      # spend four more minutes on a result nobody will read.
       - name: Run tests (v2, zero-based — pgw#808)
+        if: ${{ !cancelled() }}
         run: uv run pytest tests_v2/ -n 4 --dist loadfile

@@ -25,6 +25,14 @@
   file it never opened. `ready_for_review` is now in the trigger types, because
   the jobs skip drafts and it is not a default type — without it a draft marked
   ready gets no run for the head it actually merges.
+- **A red `tests/` silently erased the `tests_v2/` answer (pgw#952).** Since
+  pgw#808 the two suites have run as two steps, with a comment stating the split
+  existed so "a collection error in either must not erase the other's answer".
+  It never did that: a failing step skips every later step by default. Observed
+  on pgw#952's own PR — `tests/` failed on pgw#949's two guards and `tests_v2/`
+  reported `skipped`. The step now carries `if: ${{ !cancelled() }}`, so both
+  suites always report; `!cancelled()` rather than `always()` so a run superseded
+  by the concurrency group does not spend four more minutes on a dead result.
 - **`native-kernels.yml` gained the `dev` trigger; `proto-contract.yml` gained
   `pyproject.toml`/`uv.lock` to its paths (pgw#952).** The latter regenerates
   bindings with `grpc_tools.protoc` and diffs them, so the generator's pinned
