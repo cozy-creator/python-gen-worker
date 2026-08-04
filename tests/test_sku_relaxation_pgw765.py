@@ -19,10 +19,16 @@ What is asserted here:
 2. **Both directions, red-verified** — an l4-minted cell verifies and is a
    candidate on an rtx-4090 runtime; an sm-mismatched cell still refuses by
    name, and so does every other real axis.
-3. **The second tier** — a legacy cell that stamped no ``sm`` axis is ruled
-   on from the ``.pt2``'s own ``AOTI_COMPUTE_CAPABILITY`` before dlopen
-   (``sm_mismatch``), because pgw#698 packs cubins with no PTX fallback and
-   a wrong-arch load must be a named refusal, not a CUDA error.
+3. **The second tier** — a cell whose ``sm`` stamp DISAGREES with its own
+   ``.pt2`` is ruled on from torch's ``AOTI_COMPUTE_CAPABILITY`` before
+   dlopen (``sm_mismatch``), because pgw#698 packs cubins with no PTX
+   fallback and a wrong-arch load must be a named refusal, not a CUDA error.
+
+pgw#950 removed the fourth thing this file used to assert: that a cell
+stamping NO ``sm`` axis was tolerated by ``verify`` and deferred to that
+second tier. It is not tolerated any more. A cell silent on an identity axis
+is refused like any other mismatch, and the miss policy re-mints it — so the
+second tier's remaining job is the lying stamp, which metadata cannot catch.
 """
 
 from __future__ import annotations
@@ -103,12 +109,15 @@ def test_torch_and_cuda_mismatches_still_refuse(on_4090: None) -> None:
         _meta(_key("d"), cuda="12.8"), family=FAMILY)
 
 
-def test_unstamped_sm_defers_to_the_staged_bytes(on_4090: None) -> None:
-    """A pre-pgw#765 cell stamped no capability. Metadata alone cannot rule,
-    so discovery must not over-refuse — the package gate rules instead."""
+def test_unstamped_sm_is_refused_like_every_other_silent_axis(
+    on_4090: None,
+) -> None:
+    """pgw#950: a cell silent on ``sm`` used to be waved through ``verify``
+    and deferred to the staged-bytes tier. Silence is now a refusal — the
+    cell is a cache entry, and refusing it costs one re-mint."""
     meta = _meta(_key("e"))
     meta.pop("sm")
-    assert aot_serve.verify(meta, family=FAMILY) == ""
+    assert aot_serve.verify(meta, family=FAMILY) == "sm '' != runtime 'sm_89'"
 
 
 # ---------------------------------------------------------------------------
@@ -151,18 +160,19 @@ def test_newest_wins_within_the_preferred_sku(on_4090: None) -> None:
     assert _picks(items) == ["ck-new", "ck-old", "ck-l4"]
 
 
-def test_a_stamped_sm_outranks_an_unstamped_cross_sku_cell(
+def test_an_unstamped_sm_cell_is_not_a_candidate_at_all(
     on_4090: None,
 ) -> None:
-    """Between two cross-SKU cells, the one provably this architecture
-    pre-download beats the one whose arch only resolves after the fetch."""
+    """pgw#950: an unstamped cell used to be a LOWER-RANKED candidate that
+    still got downloaded. It is not a candidate now — ``verify`` refuses it
+    from metadata, before any fetch."""
     unstamped = _meta(_key("a"))
     unstamped.pop("sm")
     items = [
         _item("ck-unstamped", "2026-07-30T00:00:00Z", unstamped),
         _item("ck-stamped", "2026-07-20T00:00:00Z", _meta(_key("b"))),
     ]
-    assert _picks(items) == ["ck-stamped", "ck-unstamped"]
+    assert _picks(items) == ["ck-stamped"]
 
 
 def test_sm_mismatched_cell_is_not_a_candidate(on_4090: None) -> None:
@@ -174,15 +184,19 @@ def test_sm_mismatched_cell_is_not_a_candidate(on_4090: None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. the staged-bytes tier — legacy cells, ruled on before dlopen
+# 4. the staged-bytes tier — a LYING stamp, ruled on before dlopen
+#
+# pgw#950: this tier no longer exists to rescue unstamped cells (they are
+# refused from metadata now). Its one remaining job is the case metadata
+# cannot reach — a cell whose stamp and whose bytes disagree.
 # ---------------------------------------------------------------------------
 
 
-def _legacy_artifact(tmp_path: Path, capability: Optional[str], name: str,
-                     **over: Any) -> Path:
-    """A packed cell with NO ``sm`` stamp whose ``.pt2`` carries torch's own
-    ``AOTI_COMPUTE_CAPABILITY`` (the shape ``get_device_information`` writes).
-    """
+def _bytes_artifact(tmp_path: Path, capability: Optional[str], name: str,
+                    **over: Any) -> Path:
+    """A packed, fully-stamped cell whose ``.pt2`` carries torch's own
+    ``AOTI_COMPUTE_CAPABILITY`` (the shape ``get_device_information`` writes),
+    so metadata and bytes can be made to agree or disagree independently."""
     pt2 = tmp_path / f"{name}.pt2"
     row: Dict[str, str] = {"AOTI_MACHINE": "x86_64"}
     if capability is not None:
@@ -195,20 +209,8 @@ def _legacy_artifact(tmp_path: Path, capability: Optional[str], name: str,
     content.mkdir()
     (content / aot_serve.PACKAGE_NAME).write_bytes(pt2.read_bytes())
     meta = _meta(_key("a"))
-    meta.pop("sm")
     meta.update(over)
     return aot_serve.pack(content, tmp_path / f"{name}.tar.gz", meta)
-
-
-def test_legacy_wrong_arch_cell_refused_by_name(
-    tmp_path: Path, on_4090: None,
-) -> None:
-    artifact = _legacy_artifact(tmp_path, "86", "wrong")
-    with pytest.raises(aot_serve.AdoptError) as exc_info:
-        aot_serve.stage_artifact(artifact, FAMILY)
-    assert exc_info.value.reason == "sm_mismatch"
-    assert "sm_86" in str(exc_info.value)
-    assert "pre-pgw#765" in str(exc_info.value)
 
 
 def test_a_lying_sm_stamp_is_caught_by_the_bytes(
@@ -217,18 +219,31 @@ def test_a_lying_sm_stamp_is_caught_by_the_bytes(
     """A cell stamped ``sm_89`` whose ``.pt2`` was built for sm_86 passes the
     metadata check and must still be refused — the stamp is a claim, the
     package's own capability is the fact."""
-    artifact = _legacy_artifact(tmp_path, "86", "liar", sm="sm_89")
+    artifact = _bytes_artifact(tmp_path, "86", "liar")
     with pytest.raises(aot_serve.AdoptError) as exc_info:
         aot_serve.stage_artifact(artifact, FAMILY)
     assert exc_info.value.reason == "sm_mismatch"
-    assert "pre-pgw#765" not in str(exc_info.value)
+    assert "sm_86" in str(exc_info.value)
 
 
-def test_legacy_same_arch_cell_stages(tmp_path: Path, on_4090: None) -> None:
-    """The l4-minted legacy cell on the 4090: torch stamped 89, this runtime
-    is sm_89, so the bytes stage and the arm proceeds."""
+def test_an_unstamped_cell_never_reaches_the_bytes_tier(
+    tmp_path: Path, on_4090: None,
+) -> None:
+    """pgw#950, the deletion proved: a cell with no ``sm`` stamp is refused
+    as a plain ``key_mismatch`` by ``verify``, NOT rescued (or condemned) by
+    the package's capability stamp."""
+    artifact = _bytes_artifact(tmp_path, "89", "unstamped", sm="")
+    with pytest.raises(aot_serve.AdoptError) as exc_info:
+        aot_serve.stage_artifact(artifact, FAMILY)
+    assert exc_info.value.reason == "key_mismatch"
+    assert "sm ''" in str(exc_info.value)
+
+
+def test_cross_sku_same_arch_cell_stages(tmp_path: Path, on_4090: None) -> None:
+    """The l4-minted cell on the 4090: stamped sm_89, torch stamped 89, this
+    runtime is sm_89, so the bytes stage and the arm proceeds."""
     staged = aot_serve.stage_artifact(
-        _legacy_artifact(tmp_path, "89", "right"), FAMILY)
+        _bytes_artifact(tmp_path, "89", "right"), FAMILY)
     try:
         assert staged.metadata["sku"] == "l4"
     finally:
@@ -241,5 +256,5 @@ def test_unreadable_capability_stamp_is_not_read_as_a_mismatch(
     """A package that stamps no capability at all must not be refused on a
     guess — the load path names its own failure."""
     staged = aot_serve.stage_artifact(
-        _legacy_artifact(tmp_path, None, "silent"), FAMILY)
+        _bytes_artifact(tmp_path, None, "silent"), FAMILY)
     staged.close()
