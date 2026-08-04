@@ -32,6 +32,14 @@ The measured answer, at ``gpu_slots=1`` (G == 1, every pod today):
 
 Both facts are pinned below, so a future change to either is a test failure
 rather than a silent regression of a requirement nobody was measuring.
+
+pgw#949: every wait here is progress-gated and every assertion is about a
+property, not about the runner's speed. The observation window is denominated
+in child-status polls the platform actually answered, so a slow machine
+observes the SAME thing more slowly rather than observing less of it; the
+promptness claim is a share of a baseline this same run measured. That is what
+the finding always was — an ordering fact ("the second handler entered only
+once the permit came free"), never a stopwatch reading.
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 
@@ -49,8 +57,23 @@ from gen_worker.api import Resources, endpoint
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
+from harness.progress_wait import Cadence, await_count, await_progress
 
 CHILD_REQUEST_ID = "child-req-pgw943"
+
+#: How much of the child call's OWN progress the observation window spans,
+#: counted in status polls the platform answered. The parent provably cannot
+#: finish during it (the platform reports `completed` only after `release()`),
+#: so this bounds the observation by work the system under test performed
+#: rather than by elapsed time: a slower runner takes longer to reach the same
+#: count and observes exactly the same window of behaviour.
+_OBSERVED_CHILD_POLLS = 100
+
+#: The second handler's entry, once the permit comes free, must be a small
+#: SHARE of how long the same permit had it blocked in this run. #455 measured
+#: 10.7 ms against a multi-second block. Stating it as a ratio keeps it a claim
+#: about WHAT GATED the handler: a slow runner lengthens both sides.
+_PROMPT_ENTRY_SHARE = 0.25
 
 
 class _In(msgspec.Struct):
@@ -204,6 +227,51 @@ def _results(sent: List[pb.WorkerMessage]) -> Dict[str, int]:
     }
 
 
+# --------------------------------------------------------------------------
+# progress-gated waiting, off the loop the executor is running on
+# --------------------------------------------------------------------------
+
+
+async def _progress(
+    observe: Callable[[], Any],
+    settled: Callable[[Any], bool],
+    *,
+    what: str,
+    gone: Optional[Callable[[], Optional[str]]] = None,
+    poll_s: float = 0.02,
+) -> Any:
+    """``harness.progress_wait.await_progress`` on a worker thread.
+
+    The harness wait is synchronous and the executor's job tasks live on THIS
+    event loop, so waiting on the loop would manufacture the very stall the
+    wait exists to observe. Off-loading keeps the loop free, so what the wait
+    sees is the worker's own scheduling and nothing else.
+    """
+    return await asyncio.to_thread(
+        await_progress,
+        observe,
+        settled,
+        what=what,
+        cadence=Cadence(),
+        gone=gone,
+        poll_s=poll_s,
+    )
+
+
+async def _progress_count(
+    observe: Callable[[], int],
+    want: int,
+    *,
+    what: str,
+    gone: Optional[Callable[[], Optional[str]]] = None,
+) -> int:
+    return int(
+        await asyncio.to_thread(
+            await_count, observe, want, what=what, cadence=Cadence(), gone=gone
+        )
+    )
+
+
 class _Measurement(msgspec.Struct):
     """What the two-request run observed."""
 
@@ -217,9 +285,14 @@ class _Measurement(msgspec.Struct):
     #: Was group 0's permit held for the whole observation window? This is
     #: what names the BLOCKING SITE: the semaphore, not intake, not the loop.
     gpu_permit_locked_throughout: bool
-    #: Seconds from the child completing to the second handler entering. Near
-    #: zero means the second request was queued on nothing but that permit.
+    #: Seconds from the child completing to the second handler entering. Only
+    #: ever compared against the baseline below, never against a constant.
     second_handler_latency_after_child_s: Optional[float]
+    #: Seconds the second request spent blocked while the child was in flight —
+    #: the baseline the field above is a share of. Both are measured in the
+    #: same run on the same machine, so their RATIO is a property of what
+    #: gated the handler rather than of how fast the runner is.
+    blocked_while_child_in_flight_s: float
     parent_status: Optional[int]
     second_status: Optional[int]
 
@@ -244,52 +317,89 @@ async def _measure(*, gpu: bool) -> _Measurement:
     with _Platform() as platform:
         ex.file_base_url = platform.base_url
 
+        def _parent_done_early() -> Optional[str]:
+            """Nothing further can be learned once the parent has answered —
+            it was supposed to be suspended on its child. Definitive, and no
+            clock is involved."""
+            if "req-parent" in _results(sent):
+                return "the parent produced a result before its child was released"
+            return None
+
         await ex.handle_run_job(_run_job("req-parent", "parent"))
-        # Wait until the parent is genuinely PARKED in the callout poll: the
-        # platform has answered `in_progress` at least twice, so the handler
-        # is inside CalloutClient.wait and not merely about to enter it.
-        deadline = time.monotonic() + 30.0
-        while platform.polls() < 2 and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
+        # The parent is genuinely PARKED in the callout poll once the platform
+        # has answered `in_progress` twice — it is inside CalloutClient.wait,
+        # not merely about to enter it. Gated on the platform's own answers, so
+        # a parent that never gets there stalls the wait (and says what it saw)
+        # instead of a clock deciding for it.
+        await _progress_count(
+            platform.polls, 2,
+            what="child-status polls before the second dispatch",
+            gone=_parent_done_early,
+        )
         assert platform.submitted.is_set(), "the child call was never submitted"
 
         polls_at_dispatch = platform.polls()
+        blocked_from = time.monotonic()
         await ex.handle_run_job(_run_job("req-second", "second"))
 
-        # Give the second request a generous window to make progress while the
-        # parent is still suspended. The parent cannot finish during it: the
-        # platform only reports `completed` after release(), below.
-        window = time.monotonic() + 5.0
-        permit_locked_throughout = True
-        while time.monotonic() < window and not _second_ran.is_set():
-            permit_locked_throughout &= ex._gpu_permits[0].locked()
-            await asyncio.sleep(0.05)
+        # The observation window: _OBSERVED_CHILD_POLLS of the child call's own
+        # progress, ending early the moment the second handler enters. The
+        # parent cannot finish during it (the platform reports `completed` only
+        # after release(), below), so the window is a quantity of work the
+        # system performed rather than a duration the runner had to keep up
+        # with. Group 0's permit is sampled on every observation.
+        permit_samples: List[bool] = []
+
+        def _observe() -> Tuple[int, bool]:
+            permit_samples.append(ex._gpu_permits[0].locked())
+            return platform.polls(), _second_ran.is_set()
+
+        await _progress(
+            _observe,
+            lambda seen: (seen[1]
+                          or seen[0] - polls_at_dispatch >= _OBSERVED_CHILD_POLLS),
+            what=(
+                f"{_OBSERVED_CHILD_POLLS} child-status polls with the parent "
+                f"suspended, or the second handler entering first"
+            ),
+            gone=_parent_done_early,
+        )
         second_ran_while_waiting = _second_ran.is_set()
+        permit_locked_throughout = all(permit_samples)
         polls_during_window = platform.polls() - polls_at_dispatch
         # The parent is still suspended: it has produced no result, and the
-        # platform has not yet reported its child terminal. Asserted rather
-        # than counting polls, which is a function of machine load.
+        # platform has not yet reported its child terminal.
         parent_in_flight = "req-parent" not in _results(sent)
         assert not platform.released.is_set()
 
+        blocked_s = time.monotonic() - blocked_from
         released_at = time.monotonic()
         platform.release()
         second_latency: Optional[float] = None
         if not second_ran_while_waiting:
-            unblock = time.monotonic() + 30.0
-            while time.monotonic() < unblock and not _second_ran.is_set():
-                await asyncio.sleep(0.005)
-            if _second_ran.is_set():
-                second_latency = time.monotonic() - released_at
+            # It must now enter, and the wait ends on that happening — never on
+            # a deadline. If the permit was NOT what gated it, nothing advances
+            # and the wait fails saying so.
+            await _progress(
+                _second_ran.is_set, lambda entered: entered,
+                what="the second handler entering once the permit is free",
+                poll_s=0.005,
+            )
+            second_latency = time.monotonic() - released_at
 
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            if {"req-parent", "req-second"} <= set(_results(sent)):
-                break
-            await asyncio.sleep(0.05)
-        for job in list(ex.jobs.values()):
-            if job.task is not None and not job.task.done():
-                await asyncio.wait_for(job.task, timeout=30)
+        await _progress(
+            lambda: frozenset(_results(sent)),
+            lambda seen: {"req-parent", "req-second"} <= seen,
+            what="both job results",
+        )
+        tasks = [j.task for j in ex.jobs.values() if j.task is not None]
+        await _progress(
+            lambda: sum(1 for t in tasks if t.done()),
+            lambda done: done == len(tasks),
+            what="every job task to finish",
+        )
+        for task in tasks:
+            await task  # surfaces a handler exception the results hid
 
     statuses = _results(sent)
     return _Measurement(
@@ -300,6 +410,7 @@ async def _measure(*, gpu: bool) -> _Measurement:
         parent_still_in_flight=parent_in_flight,
         gpu_permit_locked_throughout=permit_locked_throughout,
         second_handler_latency_after_child_s=second_latency,
+        blocked_while_child_in_flight_s=blocked_s,
         parent_status=statuses.get("req-parent"),
         second_status=statuses.get("req-second"),
     )
@@ -364,10 +475,19 @@ def test_a_gpu_request_holds_its_permit_across_the_whole_child_call() -> None:
     # the window, and the second handler entered only once the child completed.
     assert m.parent_still_in_flight
     assert m.gpu_permit_locked_throughout
+    # The window really did span the child call's own progress — the permit
+    # samples above are not a handful taken while nothing was happening.
+    assert m.child_polls_while_waiting >= _OBSERVED_CHILD_POLLS
     assert m.second_handler_latency_after_child_s is not None
-    assert m.second_handler_latency_after_child_s < 2.0, (
-        m.second_handler_latency_after_child_s
-    )
+    # THE ORDERING, as a share of a baseline measured in this same run: the
+    # handler entered on the permit coming free, in a small fraction of the
+    # time that same permit had it blocked (#455: 10.7 ms against a
+    # multi-second block). So the permit was the ONLY thing gating it — and a
+    # slow runner lengthens both sides, which is why this is a claim about the
+    # code rather than about the machine.
+    assert m.second_handler_latency_after_child_s < (
+        m.blocked_while_child_in_flight_s * _PROMPT_ENTRY_SHARE
+    ), (m.second_handler_latency_after_child_s, m.blocked_while_child_in_flight_s)
     # It is only parked, not lost: both finish once the child completes.
     assert m.parent_status == pb.JOB_STATUS_OK
     assert m.second_status == pb.JOB_STATUS_OK
