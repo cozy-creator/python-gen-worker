@@ -40,6 +40,17 @@ from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot
 from .families import GenerationDefaults
 from .models.provision import arm_compile
 from .text_pin import TextLengthExceededError, pad_text_sequence
+from .geometry import (
+    FamilyGeometry,
+    FitMode,
+    FitPlan,
+    OutputSize,
+    RestoreResult,
+    fit_to_native,
+    nearest_bucket,
+    restore,
+    set_upscaler,
+)
 from .url_fetch import FetchedUrl, fetch_bytes, fetch_image
 from .view import for_request
 from .api.errors import (
@@ -110,6 +121,16 @@ __all__ = [
     "FetchedUrl",
     "fetch_bytes",
     "fetch_image",
+    # pgw#664/ie#599 fit-to-native geometry: mechanism here, table in the family.
+    "FamilyGeometry",
+    "FitMode",
+    "FitPlan",
+    "OutputSize",
+    "RestoreResult",
+    "fit_to_native",
+    "nearest_bucket",
+    "restore",
+    "set_upscaler",
     "pad_text_sequence",
     "TextLengthExceededError",
     "HF",
