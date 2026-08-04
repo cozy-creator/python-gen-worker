@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **pgw#956: `proc.returncode` can confirm a reap but never deny one, so the
+  pgw#858 reap row now waits on the PROCESS TABLE.** The row asserted
+  `proc.returncode is not None` once after `close()`, and failed under heavy
+  runner load with "the dropped child was never reaped". The child had in fact
+  been reaped. `returncode` is asyncio bookkeeping that the child-watcher thread
+  delivers into the parent's event loop, and `ThreadedChildWatcher._do_waitpid`
+  **drops** that delivery when the loop is already closed (`if loop.is_closed():
+  logger.warning(...)`) — which is exactly what `SplitHarness.close()` races,
+  since `stop()` SIGKILLs the child and the loop then tears down without waiting
+  for the reap. So the field stays `None` permanently on a child the kernel did
+  reap: re-reading it, or polling it, recovers nothing. The row now polls
+  `os.waitid(P_PID, WEXITED|WNOHANG|WNOWAIT)` — `ChildProcessError` means it is
+  no longer our child, i.e. reaped, and `WNOWAIT` leaves the status for the
+  watcher — through `harness.progress_wait.await_progress`, settling on
+  "parent exited AND child reaped" with `returncode` still accepted as the
+  fast-path proof. Liveness plus progress-staleness, no wall clock (gw#666).
+  Measured: 1 natural failure in 12 iterations at load ~31, then reproduced
+  DETERMINISTICALLY by delaying the watcher's delivery past loop close — the old
+  form fails there with the byte-identical CI message and the new form passes
+  3/3, with `returncode` still `None` after 5s of polling.
+
+- **th#1590: `models/w4a4.py` stays contract-UNCLAIMED, on purpose.** Measured
+  against both standing catalogs and the R2 CAS: no artifact of our flat nvfp4
+  layout has ever been published, so no descriptor can be derived from real
+  bytes and the decoder declares no execution lane. The guard comment names the
+  wrong answer explicitly — `bfl.nvfp4-preswizzled@1` is HIGH-nibble with
+  pre-swizzled scales, and te#151 measured that conflation at LPIPS 1.11.
+
 - **th#1582 Phase A: the EXECUTION LANE concept is spelled `execution_lane`.**
   A names-only pass — 1,655 Python identifier tokens across 113 files (`Lane` ->
   `ExecutionLane`, `lane` -> `execution_lane`, `parse_lane_spec` ->

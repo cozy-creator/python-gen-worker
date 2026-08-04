@@ -26,6 +26,11 @@ from gen_worker.api.types import (
     Tensors,
     VideoAsset,
 )
+from gen_worker.discovery.execution_lanes import (
+    derive_execution_lanes,
+    execution_lanes_for_function,
+    manifest_block,
+)
 from gen_worker.discovery.heavy_deps import stub_missing_heavy_deps
 from gen_worker.discovery.names import slugify_name
 from gen_worker.discovery.project import load_project_config
@@ -903,8 +908,27 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             )
         seen_fn[fn_name] = py_name
 
+    # th#1580 A4: the endpoint half of §1.30's intersection, DERIVED from the
+    # decoders this image actually carries — never a hand-maintained list.
+    # Runs inside the same heavy-dep stubbing the endpoint walk used, so a
+    # torch-less manifest build derives the same set an in-image build does.
+    with stub_missing_heavy_deps(cfg.discovery_heavy_deps):
+        derived = derive_execution_lanes()
+    for fn in functions:
+        bucket = int((fn.get("compile") or {}).get("lora_bucket") or 0)
+        lanes, exclusions = execution_lanes_for_function(
+            derived, lora_bucket=bucket
+        )
+        fn["execution_lanes"] = list(lanes)
+        if exclusions:
+            fn["execution_lane_exclusions"] = [
+                {"execution_lane": e.execution_lane, "reason": e.reason}
+                for e in exclusions
+            ]
+
     manifest: Dict[str, Any] = {
         "functions": functions,
+        "execution_lanes": manifest_block(derived),
     }
     return manifest
 

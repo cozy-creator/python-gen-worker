@@ -3032,7 +3032,12 @@ class _GpuSlotLease:
         return True
 
     def reacquire(self) -> None:
-        """Blocking re-acquire from a handler thread."""
+        """Blocking re-acquire from a handler thread.
+
+        Safe because of the pgw#954 order (instance gate -> permit): this
+        runs with the job's gates still held, and no permit acquirer anywhere
+        waits on a gate, so the permit is always reachable.
+        """
         asyncio.run_coroutine_threadsafe(self._sem.acquire(), self._loop).result()
         with self._lock:
             self._held = True
@@ -11336,25 +11341,26 @@ class Executor:
         try:
             stole = await asyncio.to_thread(self._bg_admit, kind, abort_check)
             turn_t0 = time.monotonic()
-            # Same order as the tenant path (permit -> run_lock ->
-            # turn_mutex): a tenant landing on ANOTHER instance mid-seed
-            # waits one bounded seed instead of contending for the device.
-            # pgw#779: the RECORD's group permit. A background turn on group 2
-            # must not consume group 0's slot - with a count it did, so a mint
-            # anywhere stalled a tenant everywhere.
-            permit = self._gpu_permit_for_record(rec)
-            await permit.acquire()
-            try:
-                async with rec.run_lock:
-                    await self._bg_locked(rec.turn_mutex, abort_check)
+            # pgw#954: same order as the tenant path — run_lock -> turn_mutex
+            # -> permit. A turn must never hold the permit while queued on an
+            # instance gate: that is the half of the cycle that wedges a
+            # tenant's mid-handler #382 reacquire.
+            async with rec.run_lock:
+                await self._bg_locked(rec.turn_mutex, abort_check)
+                try:
+                    # pgw#779: the RECORD's group permit. A background turn on
+                    # group 2 must not consume group 0's slot - with a count it
+                    # did, so a mint anywhere stalled a tenant everywhere.
+                    permit = self._gpu_permit_for_record(rec)
+                    await permit.acquire()
                     try:
                         yield stole
                     finally:
-                        rec.turn_mutex.release()
-                        self._bg_charge_debt(
-                            stole, time.monotonic() - turn_t0)
-            finally:
-                permit.release()
+                        permit.release()
+                finally:
+                    rec.turn_mutex.release()
+                    self._bg_charge_debt(
+                        stole, time.monotonic() - turn_t0)
         finally:
             self._bg_unit_mutex.release()
 
@@ -11751,75 +11757,6 @@ class Executor:
         started = time.monotonic()
         alloc_at_start = 0
         try:
-            if needs_gpu:
-                permit_t0 = time.monotonic()
-                # pgw#779: THIS job's group permit, not one of G interchangeable
-                # tickets. The group was stamped from the dispatch before
-                # anything ran, so a permit and a card are the same fact.
-                gpu_permit = self._gpu_permit_for_group(current_device_group())
-                await self._intent_await(
-                    job.intent_id,
-                    gpu_permit.acquire(),
-                    operation=f"GPU permit for request {run.request_id}",
-                    status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
-                    stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
-                    reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
-                )
-                # th#1111: the permit wait was in NO metric — it precedes the
-                # handler window, so runtime_ms never saw it.
-                ctx._stages.record_pre("gpu_permit_wait", time.monotonic() - permit_t0)
-                self._loop = asyncio.get_running_loop()
-                lease = _GpuSlotLease(gpu_permit, self._loop)
-                ctx._gpu_slot_lease = lease
-                # pgw#943: a child-call wait may yield this permit ONLY when
-                # the job holds nothing another permit-holder could block on.
-                # Both permit acquirers (this path and _bg_turn) take the
-                # permit BEFORE the instance gate, so a parked parent still
-                # holding run_lock would wedge its own re-acquire: the
-                # follower/mint holds the permit waiting on run_lock, the
-                # parent waits on the permit — hold-and-wait cycle. And a
-                # follower on a shared pipeline would clobber this request's
-                # per-request adapter state mid-handler. Gate-holding or
-                # adapter-carrying parents therefore keep the permit across
-                # child calls (same-function pipelining is impossible for
-                # them anyway — single-flight per instance, pgw#647).
-                ctx._child_call_slot_yieldable = (
-                    (spec.cls is None or spec.reentrant) and not adapters
-                )
-                # gw#516: the handler thread reports the terminal
-                # decode->finalize slot release so the hub sees the job as
-                # "finalizing" while its encode/upload tail runs slotless.
-                ctx._on_finalize_release = lambda: self._enter_finalize(job)
-                if job.ctx.cancelled:
-                    raise CanceledError("canceled")
-                # pgw#513: reset the CUDA peak-allocator watermark now that
-                # this job exclusively owns gpu_index (jobs serialize under
-                # _gpu_semaphore) — peak_vram_bytes then measures THIS job's
-                # peak, not the process-lifetime high-water mark.
-                if torch is not None and torch.cuda.is_available():
-                    try:
-                        torch.cuda.reset_peak_memory_stats(gpu_index)
-                    except Exception:
-                        pass
-                    # pgw#652: the baseline the peak is measured AGAINST.
-                    # peak - baseline is this request's transient (activation)
-                    # footprint, as opposed to the resident weights that were
-                    # already allocated when it took the GPU.
-                    alloc_at_start = self._vram_allocated()
-            # Last execution fence: no adapter mutation or tenant handler has
-            # run yet. The repeated check catches a replacement between
-            # scheduler assignment/intake and this GPU turn.
-            self._validate_required_compile(spec, run)
-            # pgw#687: past here this job owns the permit/gate — it is no
-            # longer refusable-in-place by the cancel-unwind quarantine.
-            job.executing = True
-            self._intent_transition(
-                job.intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                pb.LIFECYCLE_INTENT_STAGE_READY,
-                detail="executing",
-            )
-            started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Lane refs
             # excluded (gw#551): the ExecutionLaneGate pins the one lane the handler
@@ -11827,18 +11764,22 @@ class Executor:
             # gate's promote against its own job's pins.
             exec_refs = self._job_pin_refs(spec, routed)
             adapter_refs = [a.ref for group in adapters.values() for a in group]
-            # pgw#647: SINGLE-FLIGHT per live instance. Adapter attach and the
-            # handler itself mutate the instance's materialized graph (LoRA
-            # buffers, adapter enable state); two concurrent requests on one
-            # instance corrupt each other — one-job-per-GPU used to mask
-            # this; multi-GPU permits and multi-residency do not. The lock is
-            # per-_ClassRecord, so jobs on DIFFERENT instances (different
-            # picks) still run concurrently; ``reentrant=True`` classes opt
-            # out. Ordering: acquired AFTER the GPU permit and never held
-            # while acquiring one — no cycle.
-            gate_t0 = time.monotonic()
             async with AsyncExitStack() as run_gate:
+                # pgw#954 LOCK ORDER, worker-wide: instance gate -> GPU permit,
+                # so no permit holder ever waits on a gate and the #382 lease's
+                # mid-handler reacquire always finds the permit reachable. The
+                # inverse order killed real jobs (pgw#738: 62922680 + d0cbf910,
+                # one H100, 3h51m silent). Conforming acquirers: `_bg_turn`,
+                # `_bg_turn_threaded` (gate only), `_exclusive_gpu` (permits
+                # under the load-lock family, never an instance gate).
+                #
+                # pgw#647: SINGLE-FLIGHT per live instance — adapter attach and
+                # the handler mutate the instance's materialized graph, so two
+                # concurrent requests on one instance corrupt each other. Jobs
+                # on DIFFERENT instances still run concurrently;
+                # ``reentrant=True`` opts out.
                 if spec.cls is not None and not spec.reentrant:
+                    gate_t0 = time.monotonic()
                     rec_gate = self._classes[spec.instance_key]
                     await run_gate.enter_async_context(rec_gate.run_lock)
                     # pgw#677: exclude the shape-warm thread's compile from
@@ -11853,14 +11794,77 @@ class Executor:
                     if gate_wait >= 0.001:
                         # pgw#677: time queued behind the instance gate
                         # (typically a background mint/compile turn) is NOT
-                        # this request's compute — attribute it as its own
-                        # pre-handler stage and restart the compute clock,
-                        # so runtime_ms stops billing mint contention to
-                        # the tenant (measured: 16.9s reported for 1.95s of
-                        # real work).
+                        # this request's compute — its own pre-handler stage,
+                        # so runtime_ms stops billing mint contention to the
+                        # tenant (measured: 16.9s reported for 1.95s of real
+                        # work). Now measured while holding no permit, so the
+                        # card stays exploitable by other instances for it.
                         ctx._stages.record_pre(
                             "instance_gate_wait", gate_wait)
-                        started = time.monotonic()
+                if needs_gpu:
+                    permit_t0 = time.monotonic()
+                    # pgw#779: THIS job's group permit, not one of G
+                    # interchangeable tickets. The group was stamped from the
+                    # dispatch before anything ran, so a permit and a card are
+                    # the same fact.
+                    gpu_permit = self._gpu_permit_for_group(current_device_group())
+                    await self._intent_await(
+                        job.intent_id,
+                        gpu_permit.acquire(),
+                        operation=f"GPU permit for request {run.request_id}",
+                        status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                        stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
+                        reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
+                    )
+                    # th#1111: the permit wait was in NO metric — it precedes
+                    # the handler window, so runtime_ms never saw it.
+                    ctx._stages.record_pre(
+                        "gpu_permit_wait", time.monotonic() - permit_t0)
+                    self._loop = asyncio.get_running_loop()
+                    lease = _GpuSlotLease(gpu_permit, self._loop)
+                    ctx._gpu_slot_lease = lease
+                    # pgw#954: gate-holding parents may now yield. What still
+                    # cannot is a job carrying per-request adapters — a
+                    # follower on the shared pipeline would deactivate or
+                    # replace this request's adapter state mid-handler, and no
+                    # lock orders that away.
+                    ctx._child_call_slot_yieldable = not adapters
+                    # gw#516: the handler thread reports the terminal
+                    # decode->finalize slot release so the hub sees the job as
+                    # "finalizing" while its encode/upload tail runs slotless.
+                    ctx._on_finalize_release = lambda: self._enter_finalize(job)
+                    if job.ctx.cancelled:
+                        raise CanceledError("canceled")
+                    # pgw#513: reset the CUDA peak-allocator watermark now that
+                    # this job exclusively owns gpu_index (jobs serialize under
+                    # _gpu_semaphore) — peak_vram_bytes then measures THIS
+                    # job's peak, not the process-lifetime high-water mark.
+                    if torch is not None and torch.cuda.is_available():
+                        try:
+                            torch.cuda.reset_peak_memory_stats(gpu_index)
+                        except Exception:
+                            pass
+                        # pgw#652: the baseline the peak is measured AGAINST.
+                        # peak - baseline is this request's transient
+                        # (activation) footprint, as opposed to the resident
+                        # weights already allocated when it took the GPU.
+                        alloc_at_start = self._vram_allocated()
+                # Last execution fence: no adapter mutation or tenant handler
+                # has run yet. The repeated check catches a replacement between
+                # scheduler assignment/intake and this GPU turn.
+                self._validate_required_compile(spec, run)
+                # pgw#687: past here this job owns the permit/gate — it is no
+                # longer refusable-in-place by the cancel-unwind quarantine.
+                job.executing = True
+                self._intent_transition(
+                    job.intent_id,
+                    pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                    pb.LIFECYCLE_INTENT_STAGE_READY,
+                    detail="executing",
+                )
+                # The compute clock starts once BOTH admissions are paid; each
+                # wait is its own `record_pre` stage above.
+                started = time.monotonic()
                 with self.store.residency.executing(*exec_refs, *adapter_refs):
                     active: List[Tuple[str, Any]] = []
                     try:

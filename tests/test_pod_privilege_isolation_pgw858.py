@@ -129,6 +129,7 @@ root_only = pytest.mark.skipif(
 )
 
 from harness.hub_double import is_ready, is_result_for  # noqa: E402
+from harness.progress_wait import Cadence, await_progress  # noqa: E402
 from test_procsplit_pgw763 import (  # noqa: E402,F401 — fixtures come with it
     BOOT_TIMEOUT_S,
     SplitHarness,
@@ -342,6 +343,26 @@ def test_the_dropped_child_can_still_write_the_config_snapshot(dropped):
     )
 
 
+def _reap_state(proc: Any, pid: int) -> str:
+    """``running`` -> ``exited`` -> ``reaped``, read from the process table.
+
+    pgw#956: ``proc.returncode`` is asyncio bookkeeping delivered to the parent's
+    loop by the child-watcher thread, and ``ThreadedChildWatcher._do_waitpid``
+    DROPS that delivery when the loop has already closed. So it can confirm a
+    reap and never deny one — under load it stays None permanently on a child
+    the kernel did reap, which no amount of re-reading recovers.
+    """
+    if proc.returncode is not None:
+        return "reaped"
+    try:
+        # WNOWAIT leaves the status for the watcher thread; ChildProcessError
+        # means it is no longer our child, i.e. somebody in this process reaped.
+        info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return "reaped"
+    return "running" if info is None else "exited"
+
+
 @root_only
 def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     """pgw#845's bounded shutdown across the new uid boundary: root can signal
@@ -350,16 +371,20 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     _probe(dropped, "report-identity")           # a live, serving child
     proc = dropped.pc._proc
     assert proc is not None and proc.returncode is None
-    # gw#666/pgw#795: NO `assert time.monotonic() - started < 120.0` here. That
-    # asserted the RUNNER'S SPEED, and the two assertions below already state
-    # the property it was standing in for — the parent exited and the child was
-    # reaped. A slow runner made the old form fail for being slow; a hung
-    # `close()` makes the new form fail by never reaping, which is the actual
-    # defect. Hang containment belongs to the job timeout, not to a literal in
-    # a correctness assertion.
+    pid = proc.pid
+    # gw#666/pgw#795: NO `assert time.monotonic() - started < 120.0` here, and
+    # (pgw#956) no single read after `close()` either — returning from `close()`
+    # is not proof the reap completed. The property is that the parent exited
+    # and the child was reaped, so wait on THAT advancing; a hang fails by never
+    # reaping, which is the actual defect.
     dropped.close()
-    assert not dropped.alive, "the parent did not exit after SIGTERM"
-    assert proc.returncode is not None, "the dropped child was never reaped"
+    await_progress(
+        lambda: (dropped.alive, _reap_state(proc, pid)),
+        lambda seen: seen == (False, "reaped"),
+        what="the parent to exit after SIGTERM and the dropped child to be reaped",
+        cadence=Cadence(),
+        render=lambda seen: f"parent alive={seen[0]}, child {seen[1]}",
+    )
 
 
 # ---- the pieces, exercised directly --------------------------------------
