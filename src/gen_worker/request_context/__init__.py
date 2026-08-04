@@ -819,23 +819,16 @@ class RequestContext(Generic[D]):
         (#382); the wait itself stays on the handler thread, so heartbeats
         and StateDeltas ride the free event loop exactly as before.
 
-        SCOPED to jobs the executor stamped yieldable, because both permit
-        acquirers (`_run_job` and `_bg_turn`) take the permit BEFORE the
-        instance gate:
-
-        * a job holding its instance gate (non-reentrant class endpoint)
-          must NOT yield — a same-instance follower or background turn
-          would hold the permit while waiting on this job's ``run_lock``,
-          and the re-acquire would wedge (hold-and-wait cycle);
-        * a job with per-request adapters active must NOT yield — a
-          follower on the shared pipeline would deactivate/replace this
-          request's adapter state mid-handler.
-
-        For those jobs the child call keeps the permit (the pre-pgw#943
-        behaviour); same-function pipelining was impossible for them anyway
-        (single-flight per instance, pgw#647). The wait is bracketed as its
-        own stage so the child park shows up as GPU-idle time in the stage
-        map instead of masquerading as compute.
+        Gate-holding class endpoints yield too (pgw#954): every permit
+        acquirer now takes the instance gate FIRST, so a same-instance
+        follower queues on ``run_lock`` holding no permit and the re-acquire
+        cannot wedge. What remains SCOPED out is a job with per-request
+        adapters active — a follower on the shared pipeline would
+        deactivate/replace this request's adapter state mid-handler, which
+        is a data race no lock order fixes. Those jobs keep the permit
+        across the wait. The wait is bracketed as its own stage so the child
+        park shows up as GPU-idle time in the stage map instead of
+        masquerading as compute.
         """
         with self._stages.stage("child_call_wait"):
             if not self._child_call_slot_yieldable:

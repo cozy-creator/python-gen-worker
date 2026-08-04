@@ -16,13 +16,13 @@ trip. The fix routes every child-call wait (``wait=True`` and the
 which yields the #382 GPU-slot lease for the park and re-acquires before
 returning to tenant code.
 
-The yield is SCOPED to jobs that hold no instance gate and no per-request
-adapters, because both permit acquirers (``_run_job`` and ``_bg_turn``) take
-the permit BEFORE the instance gate: a parked parent still holding
-``run_lock`` would wedge its own re-acquire (the follower holds the permit
-waiting on ``run_lock``; the parent waits on the permit — hold-and-wait
-cycle), and a follower on a shared pipeline would clobber per-request
-adapter state mid-handler. That scope is pinned below too.
+pgw#954 then inverted the worker's lock order to instance gate -> permit at
+every acquirer, which deleted the hold-and-wait cycle that had scoped the
+yield away from class endpoints; §4 below pins the widened scope and the
+inversion at its own seam. What stays scoped out is a job carrying
+per-request adapters — a follower on the shared pipeline would clobber this
+request's adapter state mid-handler, which is a data race no lock order
+fixes.
 
 Everything runs on the real executor, over the real ``@endpoint`` ->
 ``RequestContext`` -> ``callout.CalloutClient`` path, with a real HTTP server
@@ -39,7 +39,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
@@ -58,12 +57,6 @@ from harness.progress_wait import Cadence, await_count, await_progress
 #: `completed` only after `release()`), so this bounds the observation by work
 #: the system under test performed rather than by elapsed time.
 _OBSERVED_CHILD_POLLS = 100
-
-#: The second handler's entry, once the permit comes free, must be a small
-#: SHARE of how long the same permit had it blocked in this run. #455 measured
-#: 10.7 ms against a multi-second block. A ratio keeps it a claim about WHAT
-#: GATED the handler: a slow runner lengthens both sides.
-_PROMPT_ENTRY_SHARE = 0.25
 
 
 class _In(msgspec.Struct):
@@ -276,8 +269,9 @@ def _endpoints(probe: _Probe, *, gpu: bool) -> List[Any]:
 
 
 def _gated_endpoints(probe: _Probe) -> List[Any]:
-    """A class-based (non-reentrant) parent: holds its instance gate for the
-    whole handler, so its child calls must NOT yield the permit."""
+    """A class-based (non-reentrant) parent holding its instance gate for the
+    whole handler, plus a sibling function on the SAME instance and a plain
+    function on another — the two follower shapes pgw#954 distinguishes."""
     res = Resources(gpu=True)
 
     @endpoint(kind="inference", child_calls=True, resources=res)
@@ -296,12 +290,28 @@ def _gated_endpoints(probe: _Probe) -> List[Any]:
             probe.parent_result.append(out)
             return _Out(tag="parent-done")
 
+        def gated_sibling(self, ctx: Any, payload: _In) -> _Out:
+            if not payload.tag:
+                return _Out(tag="warmup")
+            probe.second_ran.set()
+            return _Out(tag="sibling-done")
+
     @endpoint(kind="inference", resources=res, name="second")
     def second(ctx: Any, payload: _In) -> _Out:
         probe.second_ran.set()
         return _Out(tag="second-done")
 
     return [GatedParent, second]
+
+
+def _gated_name(which: str) -> str:
+    """The wire name of a ``GatedParent`` method, read off the real specs."""
+    wanted = which.replace("_", "-")
+    for fn in _gated_endpoints(_Probe()):
+        for spec in extract_specs(fn):
+            if spec.cls is not None and spec.name == wanted:
+                return str(spec.name)
+    raise AssertionError(f"no gated spec named {wanted!r}")
 
 
 def _run_job(request_id: str, function_name: str) -> pb.RunJob:
@@ -677,39 +687,68 @@ def test_cancel_mid_yield_leaves_the_permit_free() -> None:
 
 
 # --------------------------------------------------------------------------
-# 4. the scope: a gate-holding parent must KEEP its permit
+# 4. the scope, widened by pgw#954: a gate-holding parent yields too
 # --------------------------------------------------------------------------
 
 
-def test_gate_holding_parent_keeps_the_permit_across_child_calls() -> None:
-    """A non-reentrant CLASS endpoint holds its instance gate (``run_lock``)
-    for the whole handler. Yielding its permit would wedge: both `_run_job`
-    and `_bg_turn` take the permit BEFORE the gate, so a same-instance
-    follower (or mint turn) would hold the permit while waiting on the
-    parked parent's `run_lock`, and the parent's re-acquire would wait on
-    that permit forever — hold-and-wait cycle. So for this shape the child
-    call KEEPS the permit (pre-#943 behaviour), pinned here so widening the
-    yield is a deliberate act (it requires inverting the permit/gate lock
-    order first — see the pgw#943 tracker entry)."""
+def test_gate_holding_parent_yields_its_permit_across_child_calls() -> None:
+    """The pgw#954 widening. A non-reentrant CLASS endpoint holds its
+    instance gate (``run_lock``) for the whole handler, and now yields the
+    permit anyway: with every acquirer taking the gate BEFORE the permit, a
+    job on another instance takes the freed permit and runs to completion
+    while the gated parent is parked. (#943 pinned the opposite and said
+    widening required inverting the order first; the order is inverted.)"""
 
     async def _measure() -> None:
         async with _running(_gated_endpoints) as run:
-            gated_name = next(
-                s.name for fn in _gated_endpoints(_Probe())
-                for s in extract_specs(fn) if s.cls is not None
-            )
-            await run.park_parent(gated_name)
-            polls_at_dispatch = run.platform.polls()
-            blocked_from = time.monotonic()
+            await run.park_parent(_gated_name("gated_parent"))
             await run.ex.handle_run_job(_run_job("req-second", "second"))
-            # The observation window: _OBSERVED_CHILD_POLLS of the child
-            # call's own progress, ending early if the second handler enters
-            # (which would be the fix's scope leaking). Group 0's permit is
-            # sampled on every observation.
-            permit_samples: List[bool] = []
+            await _progress(
+                run.probe.second_ran.is_set, lambda entered: entered,
+                what="the cross-instance follower entering on the freed permit",
+                gone=run.parent_done_early,
+            )
+            await _progress(
+                lambda: "req-second" in _results(run.sent), lambda done: done,
+                what="the cross-instance follower completing while parked",
+                gone=run.parent_done_early,
+            )
+            # The parent really was still suspended on its child throughout.
+            assert not run.probe.parent_resumed.is_set()
+            assert "req-parent" not in _results(run.sent)
+            run.platform.release()
+            statuses = await run.finish()
+            assert statuses.get("req-parent") == pb.JOB_STATUS_OK, statuses
+            assert statuses.get("req-second") == pb.JOB_STATUS_OK, statuses
+
+    asyncio.run(_measure())
+
+
+def test_same_instance_follower_queues_on_the_gate_holding_no_permit() -> None:
+    """THE pgw#954 inversion, at its own seam — the deliberately-held
+    contender is the instance gate itself.
+
+    A second request on the SAME class instance, dispatched while the parent
+    is parked mid-handler with its permit yielded: it must NOT enter (pgw#647
+    single-flight), and while it waits the permit must be FREE. Under the old
+    permit-first order this follower held the permit while queued on
+    ``run_lock``, so the parent's re-acquire never returned and BOTH jobs died
+    silently (pgw#738: 62922680 + d0cbf910). Here the parent resumes and both
+    complete, in order."""
+
+    async def _measure() -> None:
+        async with _running(_gated_endpoints) as run:
+            await run.park_parent(_gated_name("gated_parent"))
+            polls_at_dispatch = run.platform.polls()
+            await run.ex.handle_run_job(
+                _run_job("req-sibling", _gated_name("gated_sibling")))
+            # Observation window denominated in the child call's OWN progress
+            # (status polls the platform answered), ending early if the
+            # follower enters — which would mean the gate leaked.
+            permit_free: List[bool] = []
 
             def _observe() -> Tuple[int, bool]:
-                permit_samples.append(run.ex._gpu_permits[0].locked())
+                permit_free.append(not run.ex._gpu_permits[0].locked())
                 return run.platform.polls(), run.probe.second_ran.is_set()
 
             await _progress(
@@ -719,35 +758,25 @@ def test_gate_holding_parent_keeps_the_permit_across_child_calls() -> None:
                     or seen[0] - polls_at_dispatch >= _OBSERVED_CHILD_POLLS
                 ),
                 what=(
-                    f"{_OBSERVED_CHILD_POLLS} child-status polls with the "
-                    f"gate-holding parent suspended"
+                    f"{_OBSERVED_CHILD_POLLS} child-status polls with a "
+                    f"same-instance follower queued on the gate"
                 ),
                 gone=run.parent_done_early,
             )
             assert not run.probe.second_ran.is_set(), (
-                "a gate-holding parent yielded its permit — that shape wedges "
-                "on re-acquire (see docstring); the scope stamp regressed"
+                "a same-instance follower entered while the parent held "
+                "run_lock — pgw#647 single-flight regressed"
             )
-            assert all(permit_samples)
+            assert all(permit_free), (
+                "the gate-queued follower is holding the GPU permit — the "
+                "pgw#954 order regressed and the parent's re-acquire wedges"
+            )
             assert run.platform.polls() - polls_at_dispatch >= _OBSERVED_CHILD_POLLS
-            blocked_s = time.monotonic() - blocked_from
-            released_at = time.monotonic()
             run.platform.release()
-            await _progress(
-                run.probe.second_ran.is_set, lambda entered: entered,
-                what="the second handler entering once the permit is free",
-                poll_s=0.005,
-            )
-            second_latency = time.monotonic() - released_at
-            # The ordering, as a share of a baseline measured in this same
-            # run: the handler entered on the permit coming free, in a small
-            # fraction of the time that same permit had it blocked. A slow
-            # runner lengthens both sides.
-            assert second_latency < blocked_s * _PROMPT_ENTRY_SHARE, (
-                second_latency, blocked_s,
-            )
             statuses = await run.finish()
+            assert run.probe.parent_resumed.is_set(), (
+                "the parent never re-acquired its permit")
             assert statuses.get("req-parent") == pb.JOB_STATUS_OK, statuses
-            assert statuses.get("req-second") == pb.JOB_STATUS_OK, statuses
+            assert statuses.get("req-sibling") == pb.JOB_STATUS_OK, statuses
 
     asyncio.run(_measure())
