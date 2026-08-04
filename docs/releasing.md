@@ -113,17 +113,26 @@ the logs and blocks nothing. Do not spend cut time on red ruff output.
 tree SHAs, not commit SHAs). Tag a commit CI has already proven, or dispatch CI on the tag and re-run
 publish.
 
-### Why a cut costs hours: chaos accrues CI debt and the cut pays all of it
+### Why a cut used to cost hours — and what pgw#952 changed
 
-`chaos` is a shared branch everyone commits to directly (by design), and **nothing gates a chaos
-commit on being green.** The publish gate is the first thing that ever demands a green run on an
-exact tree — so every red accumulated since the last cut lands on whoever cuts next, who usually
+**Historically:** `chaos` was a shared branch everyone committed to directly, and nothing gated a
+chaos commit on being green. The publish gate was the first thing that ever demanded a green run on
+an exact tree — so every red accumulated since the last cut landed on whoever cut next, who usually
 authored none of it.
 
 Measured on the 0.90.6 cut: three reds, none authored by the cutter — another lane's `mypy` error, a
 stale pgw#849 baseline entry, and **two tests that had never passed CI in their lives** (established
-by `git merge-base --is-ancestor` against the last green run). Budget hours, not minutes, and expect
-to choose between fixing another lane's code and branching around it.
+by `git merge-base --is-ancestor` against the last green run).
+
+**Since pgw#952** the same debt could still accrue on `dev` — `chaos` is retired, but until then
+`ci.yml` was `branches: [master]` and a lane -> `dev` PR ran NO CI AT ALL (PR #466's
+`statusCheckRollup` was literally `[]`). `ci.yml` now runs on `[dev, master]`, so a red is refused
+at the lane PR that introduces it rather than at the cut. Expect this section to shrink; do not
+assume it already has. `dev` was RED on pgw#949's two gw#666 guard tests when the gate was turned
+on, and anything that merged before pgw#952 was never gated.
+
+The rule for whoever cuts is unchanged while any pre-pgw#952 history is in range: budget hours, not
+minutes, and establish by ancestry — never from cut notes — whether a red is yours.
 
 **If the red is a semantics decision inside another lane's work, do not fix it to unblock your tag.**
 Branch the release from a commit that predates it and say so in the CHANGELOG. A cut that launders
