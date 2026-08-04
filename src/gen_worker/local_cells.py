@@ -95,29 +95,25 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
             meta = json.loads(member.read().decode())
     except Exception as exc:  # noqa: BLE001 — any unreadable cell re-mints
         return f"unreadable artifact ({exc})"
-    # th#883/gw#581: ONE compatibility brain — when both sides can state a
-    # cell key (local mints stamp one via artifact_metadata), the verdict is
-    # the exact key comparison fleet workers use; pre-key cells fall back to
-    # the legacy axis-by-axis verify.
-    reason = ""
-    try:
-        from . import cell_key
+    # th#883/gw#581: ONE compatibility brain, and only one. The verdict is the
+    # exact key comparison fleet workers use. A cell that cannot state a key —
+    # and a runtime that cannot compute one — is a refusal, not a fall-through
+    # to a second, weaker axis-by-axis verify: the local store is a cache whose
+    # miss policy is a re-mint, so the fallback bought a stale cell adoption
+    # and nothing else.
+    from . import cell_key
 
-        # pgw#686: the ONE base-lane resolution the mint's stamp uses —
-        # the raw pipeline probe is blind to the w8a8 GEMM mode, so a
-        # store save/lookup pair straddling apply_lora_lane would never
-        # match and every boot would re-mint.
-        want = cell_key.compute(
-            family, cc.cell_base_lane(pipe),
-            int(getattr(cfg, "lora_bucket", 0) or 0),
-            contract=cell_key.contract_digest(cc.declared_contract_facts(cfg)),
-            regional=bool(getattr(cfg, "regional", False)),
-        )
-        reason = cell_key.mismatch(meta, want)
-        if reason and "records no computable key" in reason:
-            reason = cc.verify(meta, family=family)
-    except Exception:
-        reason = cc.verify(meta, family=family)
+    # pgw#686: the ONE base-lane resolution the mint's stamp uses —
+    # the raw pipeline probe is blind to the w8a8 GEMM mode, so a
+    # store save/lookup pair straddling apply_lora_lane would never
+    # match and every boot would re-mint.
+    want = cell_key.compute(
+        family, cc.cell_base_lane(pipe),
+        int(getattr(cfg, "lora_bucket", 0) or 0),
+        contract=cell_key.contract_digest(cc.declared_contract_facts(cfg)),
+        regional=bool(getattr(cfg, "regional", False)),
+    )
+    reason = cell_key.mismatch(meta, want)
     if reason:
         return reason
     reason = cc.mode_drift(meta, pipe) or cc.lane_drift(meta, pipe)

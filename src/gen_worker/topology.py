@@ -206,12 +206,22 @@ KEY_GPUS_PER_GROUP = "gpus_per_execution_group"
 KEY_EXECUTION_GROUPS = "execution_groups"
 KEY_PARALLEL = "parallel"
 
-# th#1375's pre-rename spelling. Accepted here, and emitted alongside the new
-# spelling by ``as_dict``, for exactly one release: the hub and the workers
-# deploy independently and prod pins gen-worker 0.79.0, so no flip day exists on
-# which every reader speaks the new names. Carrying both makes deploy ORDER
-# irrelevant rather than merely survivable. th#1376 deletes them, after which
-# they fall through to ``topology_unknown_field`` by construction.
+# th#1375's pre-rename spelling. NO LONGER EMITTED (pgw#950) — ``as_dict``
+# writes the canonical names only, which every hub already reads: tensorhub's
+# ``reconcileAlias`` treats an absent legacy key as "not written".
+#
+# Still ACCEPTED, and that is the entire remaining transition. It cannot be
+# deleted from this repo alone: the key set below is CLOSED, so an unrecognised
+# key is a hard ``topology_unknown_field`` refusal, and tensorhub's
+# ``internal/orchestrator/topology/topology.go`` STILL EMITS both spellings
+# (``wireValue.LegacyGroupDegree``/``LegacyGroups``). Dropping these two names
+# here before that changes fails EVERY topology decode on EVERY pod.
+#
+# th#1376 is the deletion, and TENSORHUB GOES FIRST: drop the legacy fields
+# from ``wireValue``, collapse it back into ``ExecutionTopology``, delete
+# ``reconcileAlias`` and the ``LegacyKey*`` constants. Once that ships, delete
+# these two names, ``_aliased``, and the two ``_KNOWN_KEYS`` entries — after
+# which they fall through to ``topology_unknown_field`` by construction.
 LEGACY_KEY_GPUS_PER_GROUP = "group_degree"
 LEGACY_KEY_EXECUTION_GROUPS = "groups"
 
@@ -404,12 +414,6 @@ class ExecutionTopology:
             KEY_GPU_COUNT: self.gpu_count,
             KEY_GPUS_PER_GROUP: self.gpus_per_execution_group,
             KEY_EXECUTION_GROUPS: self.execution_groups,
-            # th#1376 removes these two. They are here so this worker's own
-            # produced topology (the parent stamps one per split child, and
-            # ``procsplit`` children may run a different build during a rolling
-            # image swap) is readable by a pre-th#1375 reader.
-            LEGACY_KEY_GPUS_PER_GROUP: self.gpus_per_execution_group,
-            LEGACY_KEY_EXECUTION_GROUPS: self.execution_groups,
         }
         if self.parallel:
             d[KEY_PARALLEL] = self.parallel
