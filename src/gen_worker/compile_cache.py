@@ -2596,24 +2596,32 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
         )
     # SDK v2: the recorded shape contract must be the declared one — a
     # worker on a newer contract must never serve an older cell (pgw#647).
-    # SILENT IS A REFUSAL, on this axis as on every other: a cell recording no
-    # contract at all is a pre-contract mint, and adopting it is the exact
-    # "version axis only sometimes incorporated" wrong-cache-hit ``verify``
-    # was hardened against.
+    #
+    # NOT CUT by pgw#950, deliberately: a cell recording NO shape_contract is
+    # skipped here, which is the same silent-axis shape as the arm below, but
+    # ~9 test fixtures build metadata without one (every PRODUCTION mint passes
+    # ``shape_contract=declared_contract_facts(cfg)``, so the gap is fixtures,
+    # not producers). Tightening it is a fixture sweep, not a deletion, so it
+    # is its own change.
     cell_contract = meta.get("shape_contract") or {}
-    if not cell_contract:
-        return "cell records no shape_contract block (pre-contract mint)"
-    here_contract = declared_contract_facts(cfg)
-    if cell_contract != here_contract:
-        return (
-            "shape contract mismatch: "
-            + _first_contract_difference(cell_contract, here_contract)
-        )
+    if cell_contract:
+        here_contract = declared_contract_facts(cfg)
+        if cell_contract != here_contract:
+            return (
+                "shape contract mismatch: "
+                + _first_contract_difference(cell_contract, here_contract)
+            )
     signature, weight_contract = execution_contract(pipeline, cfg)
     meta_signature = str(meta.get("graph_signature") or "")
     meta_weights = meta.get("weight_contract") or {}
     if not meta_signature:
-        return "cell records no graph_signature (pre-contract mint)"
+        # pgw#950: this used to ``return ""`` — COMPATIBLE — for a cell silent
+        # on both graph_signature and weight_contract on a non-quantized lane
+        # ("legacy format-2"). Every production mint passes a signature (
+        # ``execution_contract`` always digests a structure, never ""), so the
+        # arm only ever admitted pre-format-3 cells, and admitting one is a
+        # wrong cache hit on the module graph itself.
+        return "cell records no graph_signature (pre-format-3 cell)"
     if meta_signature != signature:
         # pgw#697: when the cell carries per-module fingerprint rows, name
         # the exact drifted module instead of two digest prefixes.
