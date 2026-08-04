@@ -244,6 +244,12 @@ def test_compose_mode_fits_references_and_leaves_output_free():
     assert result.size == (1024, 1024) and not result.composited
 
 
+def test_compose_never_inherits_reference_geometry_silently():
+    """ie#600: compose output geometry is the caller's, not references[0]'s."""
+    with pytest.raises(ValidationError, match="owns output geometry"):
+        fit_to_native([_photo(1600, 900)], KLEIN_EDIT, mode=FitMode.COMPOSE)
+
+
 def test_edit_mode_and_compose_mode_disagree_on_purpose():
     refs = [_photo(1600, 900)]
     edit = fit_to_native(refs, KLEIN_EDIT, mode=FitMode.EDIT)

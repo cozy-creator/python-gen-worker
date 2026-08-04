@@ -15,7 +15,7 @@ Two rules that are not negotiable:
   returns the exact framing the user submitted.
 
 Geometry rules differ BY MODE (:class:`FitMode`). ``edit`` treats the user's
-framing as the contract; ``compose`` (multi-reference composition, ie#505)
+framing as the contract; ``compose`` (multi-reference composition, ie#600)
 treats output geometry as a free parameter and only fits the references.
 
 Super-resolution is a DECLARED, PLUGGABLE post-stage (:func:`set_upscaler`).
@@ -289,7 +289,7 @@ def fit_to_native(
 
     if mode is FitMode.COMPOSE:
         # References are fitted to native independently; output geometry is a
-        # free parameter the caller supplies (ie#505's reference-composition
+        # free parameter the caller supplies (ie#600's reference-composition
         # shape). Nothing is cropped back — there is no "user's framing".
         fitted_refs = []
         for image in images:
@@ -297,7 +297,15 @@ def fit_to_native(
             box = _contain_box(image.size, ref_bucket, geometry.multiple_of)
             fitted_refs.append(_edge_pad(image, ref_bucket, box))
         fitted = tuple(fitted_refs)
-        out_bucket = preset or nearest_bucket(source_size[0], source_size[1], geometry)
+        if preset is None:
+            # ie#600: compose output geometry is a FREE parameter the caller
+            # supplies. It must NOT silently inherit references[0]'s aspect —
+            # that inheritance is today's undocumented behaviour, not a design.
+            raise ValidationError(
+                "mode='compose' has no original framing to fit to: the caller "
+                "owns output geometry and must pass an explicit bucket"
+            )
+        out_bucket = preset
         return FitPlan(
             mode=mode,
             output_size=output_size,
