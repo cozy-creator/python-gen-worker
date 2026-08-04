@@ -63,6 +63,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
+from .artifact_contract import (
+    CONTRACT_COZY_SVDQ_NVFP4_LR8,
+    CONTRACT_NUNCHAKU_V1,
+    implements_contract,
+)
 from .nvfp4_quant import BLOCK, pack_e2m1, to_blocked_scales
 
 # deepcompressor MmaWeightPackerBase geometry, bits=4 / warp_n=128
@@ -480,6 +485,22 @@ def _decode_quantized_lowrank(
 # ---------------------------------------------------------------------------
 
 
+@implements_contract(
+    contract=CONTRACT_NUNCHAKU_V1,
+    serves=("svdq-fp4-w4a4",),
+    composes_lora=False,
+    why="pgw#685: this is THE decoder of the nunchaku v1 single-file layout. "
+        "The decoded SvdqLinear has no additive adapter branch (w8a8_lora is "
+        "branch-capable on w8a8 / fp8-storage / plain bf16 only).",
+)
+@implements_contract(
+    contract=CONTRACT_COZY_SVDQ_NVFP4_LR8,
+    serves=("svdq-fp4-w4a4",),
+    composes_lora=False,
+    why="te#148's quantized low-rank branch is a distinct MAJOR and this "
+        "decoder branches on it (`lowrank_quant`), which is what makes the "
+        "claim true rather than inherited from nunchaku.v1@1.",
+)
 def decode_linear(tensors: dict[str, Any], out_features: int,
                   in_features: int, *,
                   lowrank_quant: Optional[str] = None) -> DecodedLinear:
