@@ -131,18 +131,39 @@ minted for and recorded in the cell (`gen_worker/kernel_lane.py`):
   verdict is recorded as its evidence.
 - **Where it lands.** `metadata.json` inside the packed cell carries the
   DISCRETE verdict (`kernel_lane`: winner, rule, binding term, margin,
-  candidates) — no wall clocks, because the #699 double-mint byte-compare
-  requires a reproducible artifact. The measurements ride the published
-  checkpoint metadata as `kernel_lane_evidence`, beside `mint_phases`.
-- **Serving.** The executor reads the verdict off the delivered cell and
-  pins it BEFORE `setup()` runs; each axis then projects its own value out of
-  the pin (`native_kernels.svdq_linear_lane` / `svdq_modulation_lane`). No
-  cell, a pre-pgw#947 cell, or an unreadable envelope is the declared
-  conservative default (`baseline+dense`) with a typed reason
+  candidates) plus a `fit` block — each measured candidate's peak, QUANTIZED
+  up to 256 MiB, and the fallback order. No wall clocks, because the #699
+  double-mint byte-compare requires a reproducible artifact; peak BYTES are
+  admissible precisely because quantizing them makes them reproducible the
+  way the 5% margin makes the winner reproducible. The timings ride the
+  published checkpoint metadata as `kernel_lane_evidence`, beside
+  `mint_phases`.
+- **Serving re-applies the fit rule locally.** Cell keys are keyed on SM and
+  the lane is deliberately NOT a key axis, so one key spans very different
+  cards — a 96 GB RTX PRO 6000 and a 32 GB RTX 5090 are both sm_120. A
+  recorded verdict is therefore EVIDENCE, not an instruction. The executor
+  reads it off the delivered cell and pins it BEFORE `setup()` runs, but only
+  after re-checking the recorded winner's peak against THIS device's honestly
+  detected total: it fits, the verdict stands (`kernel_lane_verdict_adopted`);
+  it does not, the fastest recorded candidate that DOES fit here is pinned
+  (`kernel_lane_refit_local`); nothing fits, the smallest recorded peak is
+  pinned (`kernel_lane_refit_no_fit`) — never the declared default, which
+  carries the larger DENSE modulation and would be the bigger ask. A cell with
+  no recorded peaks is adopted and marked `kernel_lane_fit_unverified`. Each
+  axis then projects its own value out of the pin
+  (`native_kernels.svdq_linear_lane` / `svdq_modulation_lane`). No cell, a
+  pre-pgw#947 cell, or an unreadable envelope is the declared conservative
+  default (`baseline+dense`) with a typed reason
   (`kernel_lane_verdict_absent` / `_unreadable` / `_unknown_lane` /
   `kernel_lane_no_cell`) — never a silent fall-through. An armed axis still
   has to pass its OWN numerics self-check on the box; a gap degrades that
-  axis alone, same artifact, with the reason logged.
+  axis alone, same artifact, with the reason logged. The numerics checks are
+  CORRECTNESS checks and say nothing about memory, which is why the fit has
+  to be re-applied rather than left to them.
+- **Known limitation (speed axis).** The re-fit covers MEMORY only. The
+  ranking itself can also differ inside an SM class (1189 ms/step on a 5090
+  vs 1063 on a PRO 6000 for the same work), and detecting that would need
+  re-benchmarking, which serving must not do. Tracked on pgw#947.
 
 `GEN_WORKER_NATIVE_KERNELS` survives only as the pgw#859 G0 rollout gate and
 kill switch (unset = off, `=0` = forced off). It gates the ROLLOUT and never

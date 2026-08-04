@@ -6591,6 +6591,10 @@ class Executor:
         # No cell (eager boot, self-minting boot, pre-pgw#947 cell) is the
         # declared conservative default WITH a typed reason; there is no SM
         # allowlist and no per-boot probe to fall back on any more.
+        # The verdict is EVIDENCE, not an instruction: cells are keyed on SM
+        # and the lane is not a key axis, so a 96 GB card's winner can reach a
+        # 32 GB card of the same SM. adopt() re-applies the fit constraint
+        # against THIS device before pinning.
         kernel_lane.adopt_from_artifact(
             compile_artifact, source=f"{spec.name} boot")
         # Loads serialize: concurrent setups would cross-contaminate each
